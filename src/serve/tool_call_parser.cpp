@@ -45,6 +45,60 @@ bool starts_with_at(std::string_view text, std::size_t pos, std::string_view pre
     return pos <= text.size() && text.substr(pos, prefix.size()) == prefix;
 }
 
+bool is_tag_close_match(std::string_view text, std::size_t pos, std::string_view tag_name,
+                        std::size_t& tag_end) {
+    if (!starts_with_at(text, pos, tag_name)) { return false; }
+    std::size_t p = pos + tag_name.size();
+    while (p < text.size() && (text[p] == ' ' || text[p] == '\t' || text[p] == '\r' || text[p] == '\n')) {
+        ++p;
+    }
+    if (p < text.size() && text[p] == '>') {
+        tag_end = p + 1;
+        return true;
+    }
+    return false;
+}
+
+std::size_t find_tag_close(std::string_view text, std::size_t pos, std::string_view tag_name,
+                           std::size_t& tag_end) {
+    while (pos < text.size()) {
+        const std::size_t idx = text.find(tag_name, pos);
+        if (idx == std::string_view::npos) { return std::string_view::npos; }
+        if (is_tag_close_match(text, idx, tag_name, tag_end)) {
+            return idx;
+        }
+        pos = idx + tag_name.size();
+    }
+    return std::string_view::npos;
+}
+
+bool is_tag_open_match(std::string_view text, std::size_t pos, std::string_view tag_name,
+                       std::size_t& tag_end) {
+    if (!starts_with_at(text, pos, tag_name)) { return false; }
+    std::size_t p = pos + tag_name.size();
+    while (p < text.size() && (text[p] == ' ' || text[p] == '\t' || text[p] == '\r' || text[p] == '\n')) {
+        ++p;
+    }
+    if (p < text.size() && text[p] == '>') {
+        tag_end = p + 1;
+        return true;
+    }
+    return false;
+}
+
+std::size_t find_tag_open(std::string_view text, std::size_t pos, std::string_view tag_name,
+                          std::size_t& tag_end) {
+    while (pos < text.size()) {
+        const std::size_t idx = text.find(tag_name, pos);
+        if (idx == std::string_view::npos) { return std::string_view::npos; }
+        if (is_tag_open_match(text, idx, tag_name, tag_end)) {
+            return idx;
+        }
+        pos = idx + tag_name.size();
+    }
+    return std::string_view::npos;
+}
+
 std::size_t longest_suffix_prefix(std::string_view text, std::string_view marker) {
     const std::size_t maximum = std::min(text.size(), marker.size() - 1);
     for (std::size_t size = maximum; size != 0; --size) {
@@ -184,30 +238,23 @@ namespace {
 
 bool parse_parameter(std::string_view inner, std::size_t& pos, Json& args,
                      const std::string& tool_name, const ToolParamTypeMap& param_types) {
-    constexpr std::string_view kParamOpen  = "<parameter=";
-    constexpr std::string_view kParamClose = "</parameter>";
+    constexpr std::string_view kParamOpen        = "<parameter=";
+    constexpr std::string_view kParamClosePrefix = "</parameter";
     if (!starts_with_at(inner, pos, kParamOpen)) { return false; }
     const std::size_t name_begin = pos + kParamOpen.size();
     const std::size_t name_end   = inner.find('>', name_begin);
     if (name_end == std::string_view::npos || name_end == name_begin) { return false; }
-    const std::string key       = std::string(inner.substr(name_begin, name_end - name_begin));
+    const std::string key       = trim_ascii(inner.substr(name_begin, name_end - name_begin));
     pos                         = name_end + 1;
-    const std::size_t value_end = inner.find(kParamClose, pos);
-    if (value_end == std::string_view::npos) { return false; }
-    const std::string raw_value = trim_ascii(inner.substr(pos, value_end - pos));
+    std::size_t tag_end         = 0;
+    const std::size_t close_pos = find_tag_close(inner, pos, kParamClosePrefix, tag_end);
+    if (close_pos == std::string_view::npos) { return false; }
+    const std::string raw_value = trim_ascii(inner.substr(pos, close_pos - pos));
     const std::vector<std::string>* declared = param_declared_types(param_types, tool_name, key);
     const bool is_boolean =
         declared != nullptr &&
         std::find(declared->begin(), declared->end(), "boolean") != declared->end();
     if (is_boolean) {
-        // Boolean-declared params: the model may emit Python-style scalars
-        // (True/False, 1/0) that are not valid JSON, so coerce the raw text
-        // instead of adopting a parsed value. The literal null is JSON null:
-        // a valid value for a nullable boolean, and the faithful reading of
-        // the token otherwise (matching the fallthrough for other nullable
-        // types). Any other value stays raw text for the client to validate.
-        // Both comparisons are case-insensitive, matching the model's
-        // Python-style emissions (True/TRUE, Null/NULL).
         std::string lower;
         lower.reserve(raw_value.size());
         for (const char c : raw_value) {
@@ -220,17 +267,13 @@ bool parse_parameter(std::string_view inner, std::size_t& pos, Json& args,
         } else {
             args[key] = Json(raw_value);
         }
-        pos = value_end + kParamClose.size();
+        pos = tag_end;
         return true;
     }
-    // Only adopt the deserialized JSON type when the schema explicitly
-    // permits a non-string type. For string-typed, unknown, or absent
-    // params, keep the raw text so the model's value reaches the client
-    // with its type intact; the client owns the schema and validates.
     Json parsed = Json::parse(raw_value, nullptr, false);
     const bool can_deserialize = declared != nullptr;
     args[key] = (parsed.is_discarded() || !can_deserialize) ? Json(raw_value) : parsed;
-    pos                         = value_end + kParamClose.size();
+    pos       = tag_end;
     return true;
 }
 
@@ -311,15 +354,49 @@ bool parse_json_argument_object(std::string_view inner, std::size_t& pos, Json& 
 bool parse_one_tool_call(std::string_view block, std::size_t max_name_length,
                          const ToolParamTypeMap& param_types, ToolCall& out,
                          std::size_t& consumed) {
-    constexpr std::string_view kFunctionOpen  = "<function=";
-    constexpr std::string_view kFunctionClose = "</function>";
-    std::size_t pos                           = 0;
+    constexpr std::string_view kFunctionOpen        = "<function=";
+    constexpr std::string_view kFunctionClosePrefix = "</function";
+    std::size_t pos                                 = 0;
     skip_ws(block, pos);
+    if (pos < block.size() && block[pos] == '{') {
+        const std::size_t end = json_object_end(block, pos);
+        if (end != std::string_view::npos) {
+            Json root = Json::parse(block.substr(pos, end - pos), nullptr, false);
+            if (!root.is_discarded() && root.is_object() && root.contains("name") &&
+                root["name"].is_string()) {
+                const std::string name = trim_ascii(root["name"].get<std::string>());
+                if (valid_function_name(name, max_name_length)) {
+                    out.id   = new_tool_call_id();
+                    out.name = name;
+                    if (root.contains("arguments")) {
+                        if (root["arguments"].is_string()) {
+                            out.arguments_json = root["arguments"].get<std::string>();
+                        } else if (root["arguments"].is_object()) {
+                            Json args = Json::object();
+                            for (auto it = root["arguments"].begin(); it != root["arguments"].end();
+                                 ++it) {
+                                args[it.key()] =
+                                    typed_json_argument(name, it.key(), it.value(), param_types);
+                            }
+                            out.arguments_json = args.dump();
+                        } else {
+                            out.arguments_json = root["arguments"].dump();
+                        }
+                    } else {
+                        out.arguments_json = "{}";
+                    }
+                    consumed = end;
+                    return true;
+                }
+            }
+        }
+    }
+
     if (!starts_with_at(block, pos, kFunctionOpen)) { return false; }
     const std::size_t name_begin = pos + kFunctionOpen.size();
     const std::size_t name_end   = block.find('>', name_begin);
     if (name_end == std::string_view::npos || name_end == name_begin) { return false; }
-    const std::string name = std::string(block.substr(name_begin, name_end - name_begin));
+    const std::string name = trim_ascii(block.substr(name_begin, name_end - name_begin));
     if (!valid_function_name(name, max_name_length)) { return false; }
     pos = name_end + 1;
 
@@ -328,10 +405,12 @@ bool parse_one_tool_call(std::string_view block, std::size_t max_name_length,
     if (pos < block.size() && block[pos] == '{') {
         if (!parse_json_argument_object(block, pos, args, name, param_types)) { return false; }
         skip_ws(block, pos);
-        if (!starts_with_at(block, pos, kFunctionClose)) { return false; }
-        pos += kFunctionClose.size();
+        std::size_t tag_end = 0;
+        if (!is_tag_close_match(block, pos, kFunctionClosePrefix, tag_end)) { return false; }
+        pos = tag_end;
     } else {
-        const std::size_t function_end = block.find(kFunctionClose, pos);
+        std::size_t tag_end            = 0;
+        const std::size_t function_end = find_tag_close(block, pos, kFunctionClosePrefix, tag_end);
         if (function_end == std::string_view::npos) { return false; }
         const std::string_view params = block.substr(pos, function_end - pos);
         std::size_t param_pos         = 0;
@@ -340,7 +419,7 @@ bool parse_one_tool_call(std::string_view block, std::size_t max_name_length,
             if (param_pos >= params.size()) { break; }
             if (!parse_parameter(params, param_pos, args, name, param_types)) { return false; }
         }
-        pos = function_end + kFunctionClose.size();
+        pos = tag_end;
     }
 
     out.id             = new_tool_call_id();
@@ -352,7 +431,8 @@ bool parse_one_tool_call(std::string_view block, std::size_t max_name_length,
 
 ParsedToolCallOutput fallback(const std::string& text) {
     ParsedToolCallOutput out;
-    out.content = text;
+    out.is_tool_call_response = false;
+    out.content               = text;
     return out;
 }
 
@@ -367,44 +447,44 @@ ParsedToolCallOutput parse_qwen_tool_call_output(const std::string& text,
                                                  std::size_t max_tool_name_length,
                                                  const ToolParamTypeMap& param_types,
                                                  bool tolerant) {
-    constexpr std::string_view kToolOpen  = "<tool_call>";
-    constexpr std::string_view kToolClose = "</tool_call>";
+    constexpr std::string_view kToolOpenPrefix  = "<tool_call";
+    constexpr std::string_view kToolClosePrefix = "</tool_call";
 
-    const std::size_t first = text.find(kToolOpen);
+    std::size_t first_tag_end = 0;
+    const std::size_t first   = find_tag_open(text, 0, kToolOpenPrefix, first_tag_end);
     if (first == std::string::npos) { return fallback(text); }
 
     ParsedToolCallOutput out;
-    // Text before the first <tool_call> is ordinary content and is RETAINED here.
-    // Suppressing it in the parser makes the terminal body shorter than what a
-    // streaming response may already have emitted, which trips the
-    // streamed-vs-terminal invariant and kills the request mid-stream. The caller
-    // suppresses it instead, because only the caller knows how many bytes actually
-    // left the process.
     out.content = rtrim_ascii(std::string_view(text).substr(0, first));
 
     std::size_t pos = first;
     while (pos < text.size()) {
         skip_ws(text, pos);
         if (pos >= text.size()) { break; }
-        if (!starts_with_at(text, pos, kToolOpen)) {
-            if (tolerant && !out.tool_calls.empty()) { break; }
-            return fallback(text);
+        std::size_t tag_end = 0;
+        if (!is_tag_open_match(text, pos, kToolOpenPrefix, tag_end)) {
+            const std::size_t next = find_tag_open(text, pos, kToolOpenPrefix, tag_end);
+            if (next == std::string::npos) {
+                if (!out.tool_calls.empty()) { break; }
+                return fallback(text);
+            }
+            pos = next;
         }
-        const std::size_t inner_begin = pos + kToolOpen.size();
+        const std::size_t inner_begin = tag_end;
         ToolCall call;
         std::size_t consumed = 0;
         if (!parse_one_tool_call(std::string_view(text).substr(inner_begin), max_tool_name_length,
                                  param_types, call, consumed)) {
-            // Once one complete call has been recovered, do not discard it just
-            // because Qwen started a malformed second call or added a suffix.
-            if (tolerant && !out.tool_calls.empty()) { break; }
+            if (!out.tool_calls.empty()) { break; }
             return fallback(text);
         }
         pos = inner_begin + consumed;
         skip_ws(text, pos);
-        if (starts_with_at(text, pos, kToolClose)) {
-            pos += kToolClose.size();
+        std::size_t close_end = 0;
+        if (is_tag_close_match(text, pos, kToolClosePrefix, close_end)) {
+            pos = close_end;
         } else if (!tolerant) {
+            if (!out.tool_calls.empty()) { break; }
             return fallback(text);
         } else {
             out.tool_calls.push_back(std::move(call));

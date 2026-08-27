@@ -122,6 +122,9 @@ public:
                           std::function<bool()> is_cancelled = {});
 
     void warmup();
+    void reset_memory_peaks() noexcept {
+        if (engine_) { engine_->reset_memory_peaks(); }
+    }
 
 private:
     enum class CacheParticipation : std::uint8_t {

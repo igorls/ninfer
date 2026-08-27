@@ -391,6 +391,18 @@ void HttpServer::register_routes() {
     server_.Get("/v1/admin/vram", [this](const httplib::Request& req, httplib::Response& res) {
         handle_admin_vram(req, res);
     });
+    server_.Post("/admin/vram/release", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_admin_vram_release(req, res);
+    });
+    server_.Post("/v1/admin/vram/release", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_admin_vram_release(req, res);
+    });
+    server_.Post("/admin/vram/reclaim", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_admin_vram_reclaim(req, res);
+    });
+    server_.Post("/v1/admin/vram/reclaim", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_admin_vram_reclaim(req, res);
+    });
     server_.Get("/admin/stats", [this](const httplib::Request& req, httplib::Response& res) {
         handle_admin_stats(req, res);
     });
@@ -436,6 +448,31 @@ void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& r
     data["media_cache_misses"]            = media.misses;
 
     res.set_content(data.dump(2), "application/json");
+}
+
+void HttpServer::handle_admin_vram_release(const httplib::Request& req, httplib::Response& res) {
+    if (!service_) {
+        ApiError error;
+        error.status  = 503;
+        error.type    = "service_unavailable";
+        error.message = "engine service not attached";
+        write_error(res, error);
+        return;
+    }
+    service_->reset_memory_peaks();
+    handle_admin_vram(req, res);
+}
+
+void HttpServer::handle_admin_vram_reclaim(const httplib::Request& req, httplib::Response& res) {
+    if (!service_) {
+        ApiError error;
+        error.status  = 503;
+        error.type    = "service_unavailable";
+        error.message = "engine service not attached";
+        write_error(res, error);
+        return;
+    }
+    handle_admin_vram(req, res);
 }
 
 void HttpServer::handle_admin_stats(const httplib::Request&, httplib::Response& res) const {
