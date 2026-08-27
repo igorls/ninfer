@@ -75,6 +75,32 @@ bool parse_parameter(std::string_view inner, std::size_t& pos, Json& args) {
 }
 
 bool parse_one_tool_call(std::string_view block, std::size_t max_name_length, ToolCall& out) {
+    const std::string trimmed = trim_ascii(block);
+    if (trimmed.empty()) { return false; }
+    if (trimmed.front() == '{') {
+        const Json parsed = Json::parse(trimmed, nullptr, false);
+        if (!parsed.is_discarded() && parsed.is_object() && parsed.contains("name")) {
+            const auto& name_val = parsed["name"];
+            if (name_val.is_string()) {
+                const std::string name = name_val.get<std::string>();
+                if (valid_function_name(name, max_name_length)) {
+                    out.id   = new_tool_call_id();
+                    out.name = name;
+                    if (parsed.contains("arguments")) {
+                        const auto& args = parsed["arguments"];
+                        out.arguments_json = args.is_string() ? args.get<std::string>() : args.dump();
+                    } else if (parsed.contains("parameters")) {
+                        const auto& args = parsed["parameters"];
+                        out.arguments_json = args.is_string() ? args.get<std::string>() : args.dump();
+                    } else {
+                        out.arguments_json = "{}";
+                    }
+                    return true;
+                }
+            }
+        }
+    }
+
     constexpr std::string_view kFunctionOpen  = "<function=";
     constexpr std::string_view kFunctionClose = "</function>";
     std::size_t pos                           = 0;

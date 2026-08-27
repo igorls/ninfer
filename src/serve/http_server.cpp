@@ -62,6 +62,7 @@ void write_messages_error(httplib::Response& res, const ApiError& error) {
 }
 
 void write_exception(httplib::Response& res, const std::exception& ex) {
+    write_console_log(ConsoleLogLevel::Error, std::string("unhandled exception: ") + ex.what());
     ApiError error;
     error.status  = 500;
     error.type    = "internal_error";
@@ -375,6 +376,85 @@ void HttpServer::register_routes() {
     server_.Post("/v1/messages", [this](const httplib::Request& req, httplib::Response& res) {
         handle_messages(req, res);
     });
+    server_.Get("/admin/vram", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_admin_vram(req, res);
+    });
+    server_.Get("/v1/admin/vram", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_admin_vram(req, res);
+    });
+    server_.Get("/admin/stats", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_admin_stats(req, res);
+    });
+    server_.Get("/v1/admin/stats", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_admin_stats(req, res);
+    });
+}
+
+void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& res) const {
+    if (!service_) {
+        ApiError error;
+        error.status  = 503;
+        error.type    = "service_unavailable";
+        error.message = "engine service not attached";
+        write_error(res, error);
+        return;
+    }
+    const ninfer::MemorySummary mem       = service_->memory_summary();
+    const ninfer::MediaCacheSummary media = service_->media_cache_summary();
+
+    nlohmann::json data;
+    data["device_id"]                     = mem.device;
+    data["max_context"]                   = mem.max_context;
+    data["kv_capacity_tokens"]            = mem.kv_capacity;
+    data["kv_cache_storage"]              = (mem.kv_cache == ninfer::KvCacheStorage::BFloat16 ? "bf16" : "fp8");
+    data["weights_bytes"]                 = mem.weights.capacity_bytes;
+    data["weights_mb"]                    = static_cast<double>(mem.weights.capacity_bytes) / (1024.0 * 1024.0);
+    data["sequence_bytes"]                = mem.sequence.capacity_bytes;
+    data["sequence_mb"]                   = static_cast<double>(mem.sequence.capacity_bytes) / (1024.0 * 1024.0);
+    data["workspace_bytes"]               = mem.workspace.capacity_bytes;
+    data["workspace_mb"]                  = static_cast<double>(mem.workspace.capacity_bytes) / (1024.0 * 1024.0);
+    data["kv_payload_bytes"]              = mem.kv_payload_bytes;
+    data["kv_payload_mb"]                 = static_cast<double>(mem.kv_payload_bytes) / (1024.0 * 1024.0);
+    data["runtime_reservation_bytes"]     = mem.runtime_reservation_bytes;
+    data["available_after_startup_bytes"] = mem.available_after_startup_bytes;
+    data["host_kv_capacity_bytes"]        = mem.host_kv_capacity_bytes;
+    data["host_kv_occupied_bytes"]        = mem.host_kv_occupied_bytes;
+    data["host_state_capacity_slots"]     = mem.host_state_capacity_slots;
+    data["host_state_occupied_slots"]     = mem.host_state_occupied_slots;
+    data["media_cache_entries"]           = media.entries;
+    data["media_cache_live_bytes"]        = media.live_bytes;
+    data["media_cache_hits"]              = media.hits;
+    data["media_cache_misses"]            = media.misses;
+
+    res.set_content(data.dump(2), "application/json");
+}
+
+void HttpServer::handle_admin_stats(const httplib::Request&, httplib::Response& res) const {
+    if (!service_) {
+        ApiError error;
+        error.status  = 503;
+        error.type    = "service_unavailable";
+        error.message = "engine service not attached";
+        write_error(res, error);
+        return;
+    }
+    const ninfer::RuntimeStats stats = service_->runtime_stats();
+    nlohmann::json data;
+    data["running_requests"]          = stats.running_requests;
+    data["prefilling_requests"]       = stats.prefilling_requests;
+    data["decode_ready_requests"]     = stats.decode_ready_requests;
+    data["waiting_requests"]          = stats.waiting_requests;
+    data["materializing_requests"]    = stats.materializing_requests;
+    data["capture_pending_requests"]  = stats.capture_pending_requests;
+    data["terminal_pending_requests"] = stats.terminal_pending_requests;
+    data["computed_prefill_tokens"]   = stats.computed_prefill_tokens;
+    data["committed_decode_tokens"]   = stats.committed_decode_tokens;
+    data["reused_prompt_tokens"]      = stats.reused_prompt_tokens;
+    data["decode_rounds"]             = stats.decode_rounds;
+    data["decode_row_rounds"]         = stats.decode_row_rounds;
+    data["active_captures_completed"] = stats.active_captures_completed;
+    data["active_captures_aborted"]   = stats.active_captures_aborted;
+    res.set_content(data.dump(2), "application/json");
 }
 
 void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) const {

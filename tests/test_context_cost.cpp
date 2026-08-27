@@ -11,9 +11,13 @@
 #include <iterator>
 #include <limits>
 #include <stdexcept>
-#include <string>
-
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace {
 
@@ -239,9 +243,14 @@ void test_schema_validation() {
 }
 
 void test_resolution_and_atomic_upserts() {
+#if defined(_WIN32)
+    const auto pid = static_cast<long long>(::GetCurrentProcessId());
+#else
+    const auto pid = static_cast<long long>(::getpid());
+#endif
     const std::filesystem::path directory =
         std::filesystem::temp_directory_path() /
-        ("ninfer-context-cost-test-" + std::to_string(static_cast<long long>(::getpid())));
+        ("ninfer-context-cost-test-" + std::to_string(pid));
     std::filesystem::create_directories(directory);
     const std::filesystem::path path = directory / "presets.json";
     try {

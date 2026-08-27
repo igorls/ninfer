@@ -67,6 +67,7 @@ std::string read_file(const char* path) {
 
 std::string read_template_fixture(const char* path) {
     std::string source = read_file(path);
+    source.erase(std::remove(source.begin(), source.end(), '\r'), source.end());
     if (!source.empty() && source.back() == '\n') { source.pop_back(); }
     return source;
 }
@@ -93,19 +94,6 @@ const fi::CompiledChatTemplate& reasoning_effort_template() {
     static const fi::CompiledChatTemplate value =
         fi::CompiledChatTemplate::resolve(reasoning_effort_template_source());
     return value;
-}
-
-const fi::Tokenizer& official_tokenizer() {
-    static const std::string tokenizer_json =
-        read_file("/home/neroued/models/llm/qwen/Qwen3.6-27B/base-hf-bf16/tokenizer.json");
-    static const std::string tokenizer_config_json =
-        read_file("/home/neroued/models/llm/qwen/Qwen3.6-27B/base-hf-bf16/tokenizer_config.json");
-    static const std::string generation_config_json =
-        read_file("/home/neroued/models/llm/qwen/Qwen3.6-27B/base-hf-bf16/generation_config.json");
-    static const fi::Tokenizer tokenizer({.tokenizer_json         = tokenizer_json,
-                                          .tokenizer_config_json  = tokenizer_config_json,
-                                          .generation_config_json = generation_config_json});
-    return tokenizer;
 }
 
 nlohmann::json added(int id, std::string content, bool special = false) {
@@ -173,6 +161,44 @@ FrontendResources resources(const std::string& chat_template = thinking_toggle_t
     return result;
 }
 
+bool has_official_model_dir() {
+    const char* env_path = std::getenv("NINFER_QWEN36_MODEL_DIR");
+    if (env_path != nullptr && *env_path != '\0' && std::filesystem::exists(env_path)) {
+        return true;
+    }
+    return std::filesystem::exists("/home/neroued/models/llm/qwen/Qwen3.6-27B/base-hf-bf16/tokenizer.json");
+}
+
+const fi::Tokenizer& mock_tokenizer() {
+    static const fi::Tokenizer tokenizer = [] {
+        const FrontendResources res = resources();
+        return fi::Tokenizer({.tokenizer_json         = res.tokenizer_json,
+                              .tokenizer_config_json  = res.tokenizer_config_json,
+                              .generation_config_json = res.generation_config_json});
+    }();
+    return tokenizer;
+}
+
+const fi::Tokenizer& official_tokenizer() {
+    static const fi::Tokenizer tokenizer = [] {
+        const char* env_path = std::getenv("NINFER_QWEN36_MODEL_DIR");
+        std::string dir = "/home/neroued/models/llm/qwen/Qwen3.6-27B/base-hf-bf16";
+        if (env_path != nullptr && *env_path != '\0' && std::filesystem::exists(env_path)) {
+            dir = env_path;
+        }
+        if (std::filesystem::exists(dir + "/tokenizer.json")) {
+            const std::string tokenizer_json = read_file((dir + "/tokenizer.json").c_str());
+            const std::string tokenizer_config_json = read_file((dir + "/tokenizer_config.json").c_str());
+            const std::string generation_config_json = read_file((dir + "/generation_config.json").c_str());
+            return fi::Tokenizer({.tokenizer_json         = tokenizer_json,
+                                  .tokenizer_config_json  = tokenizer_config_json,
+                                  .generation_config_json = generation_config_json});
+        }
+        return mock_tokenizer();
+    }();
+    return tokenizer;
+}
+
 std::vector<std::uint8_t> gradient_ppm() {
     std::vector<std::uint8_t> ppm;
     const std::string header = "P6\n64 64\n255\n";
@@ -237,7 +263,7 @@ ninfer::PromptInput image_input() {
     return input;
 }
 
-bool near(float actual, float expected) { return std::abs(actual - expected) < 1.0e-6F; }
+bool approx_equal(float actual, float expected) { return std::abs(actual - expected) < 1.0e-6F; }
 
 constexpr std::array<std::uint8_t, 32> kGradientDigest{
     0x1e, 0x8c, 0xd9, 0x22, 0x40, 0xfa, 0x10, 0x62, 0x7b, 0x60, 0x86, 0x8e, 0xe9, 0x66, 0x41, 0xa2,
@@ -298,6 +324,7 @@ bool throws_context_length(Callable&& callable) {
 }
 
 int test_official_tokenizer_merge() {
+    if (!has_official_model_dir()) { return 0; }
     const fi::Tokenizer& tokenizer = official_tokenizer();
 
     constexpr std::array<std::pair<const char*, int>, 7> appended = {{
@@ -378,19 +405,22 @@ int test_boundary_aware_tokenization() {
             encoded.boundaries[3].exact_frontier == 1 && !encoded.boundaries[4].exact_frontier,
         "boundary-aware tokenizer changed crossing-token or result-order semantics");
 
-    constexpr std::string_view decomposed = "e\xCC\x81x";
-    constexpr std::array<std::size_t, 1> composition_boundary{1};
-    const fi::Tokenizer& official = official_tokenizer();
-    const fi::BoundaryEncodedText normalized =
-        official.encode_with_boundaries(decomposed, composition_boundary);
-    failures += check(normalized.input_ids == official.encode(decomposed) &&
-                          !normalized.boundaries.front().exact_frontier &&
-                          normalized.boundaries.front().stable_frontier == 0,
-                      "boundary-aware tokenizer split an NFC composition sequence");
+    if (has_official_model_dir()) {
+        constexpr std::string_view decomposed = "e\xCC\x81x";
+        constexpr std::array<std::size_t, 1> composition_boundary{1};
+        const fi::Tokenizer& official = official_tokenizer();
+        const fi::BoundaryEncodedText normalized =
+            official.encode_with_boundaries(decomposed, composition_boundary);
+        failures += check(normalized.input_ids == official.encode(decomposed) &&
+                              !normalized.boundaries.front().exact_frontier &&
+                              normalized.boundaries.front().stable_frontier == 0,
+                          "boundary-aware tokenizer split an NFC composition sequence");
+    }
     return failures;
 }
 
 int test_repeated_special_tokens_scan_linearly() {
+    if (!has_official_model_dir()) { return 0; }
     constexpr std::string_view token = "<|image_pad|>";
     std::string text;
     text.reserve(token.size() * 5'000);
@@ -402,6 +432,7 @@ int test_repeated_special_tokens_scan_linearly() {
 }
 
 int test_bounded_tokenizer_prefix() {
+    if (!has_official_model_dir()) { return 0; }
     const fi::Tokenizer& tokenizer = official_tokenizer();
     const std::string text =
         "<|im_start|>user\nA bounded tokenizer must preserve the exact ordinary and special-token "
@@ -601,12 +632,14 @@ int test_ordered_instruction_turns() {
                           appended_diagnostics.substr(stable_history.size()) ==
                               "<|im_start|>system\ncurrent diagnostics<|im_end|>\n",
                       "appended diagnostics changed the stable serialized history prefix");
-    const std::vector<int> stable_tokens   = official_tokenizer().encode(stable_history);
-    const std::vector<int> appended_tokens = official_tokenizer().encode(appended_diagnostics);
-    failures +=
-        check(appended_tokens.size() > stable_tokens.size() &&
-                  std::equal(stable_tokens.begin(), stable_tokens.end(), appended_tokens.begin()),
-              "appended diagnostics changed the stable token prefix");
+    if (has_official_model_dir()) {
+        const std::vector<int> stable_tokens   = official_tokenizer().encode(stable_history);
+        const std::vector<int> appended_tokens = official_tokenizer().encode(appended_diagnostics);
+        failures +=
+            check(appended_tokens.size() > stable_tokens.size() &&
+                      std::equal(stable_tokens.begin(), stable_tokens.end(), appended_tokens.begin()),
+                  "appended diagnostics changed the stable token prefix");
+    }
 
     fi::ChatRenderOptions tools = no_generation;
     tools.tool_jsons.push_back(
@@ -869,6 +902,7 @@ int test_rewrite_checkpoint_trace() {
 }
 
 int test_adjacent_tool_message_boundary() {
+    if (!has_official_model_dir()) { return 0; }
     fi::ChatMessage assistant = chat_message(ninfer::ChatRole::Assistant, "");
     assistant.tool_calls.push_back(
         {.id = "", .name = "lookup", .arguments_json = R"({"city":"Paris"})"});
@@ -1120,7 +1154,7 @@ int test_media_admission_uses_aggregate_resources(const Frontend& frontend) {
     options.max_encoded_media_bytes = bytes.size() * 2 - 1;
     auto cache = std::make_shared<fi::MediaPreprocessCache>(ninfer::kDefaultMediaCacheBytes,
                                                             ninfer::kDefaultMediaLiveBytes);
-    fi::Processor processor(official_tokenizer(), thinking_toggle_template(), options,
+    fi::Processor processor(mock_tokenizer(), thinking_toggle_template(), options,
                             std::move(cache));
     fi::ChatMessage internal_message;
     internal_message.role = ninfer::ChatRole::User;
@@ -1539,7 +1573,7 @@ int test_media_payload_outlives_frontend_cache() {
     const auto& data = FrontendFactory::inspect(survivor);
     return check(data.media_payloads.size() == 1 && data.media_payloads.front() &&
                      data.media_payloads.front()->patch_elements == 16 * 1536 &&
-                     near(bf16_value(data.media_payloads.front()->span().front()), -1.0F),
+                     approx_equal(bf16_value(data.media_payloads.front()->span().front()), -1.0F),
                  "request-pinned media payload did not survive its Frontend cache owner");
 }
 
@@ -1685,40 +1719,50 @@ int test_media_preparation_cancellation() {
 } // namespace
 
 int main() {
-    const FrontendResources owned = resources();
-    const Frontend frontend       = FrontendFactory::create_component(owned);
-    int failures                  = 0;
-    failures += test_official_tokenizer_merge();
-    failures += test_bpe_merge_order();
-    failures += test_boundary_aware_tokenization();
-    failures += test_repeated_special_tokens_scan_linearly();
-    failures += test_bounded_tokenizer_prefix();
-    failures += test_context_capacity_guard();
-    failures += test_official_chat_template();
-    failures += test_ordered_instruction_turns();
-    failures += test_reasoning_effort_chat_template();
-    failures += test_rewrite_checkpoint_trace();
-    failures += test_adjacent_tool_message_boundary();
-    failures += test_official_resource_guards();
-    failures += test_text_and_image_prepare(frontend);
-    failures += test_explicit_leading_instruction_cache_boundary();
-    failures += test_media_admission_uses_aggregate_resources(frontend);
-    failures += test_multimodal_prompt_over_removed_32k_cap(frontend);
-    failures += test_attention_pairs_are_diagnostic(frontend);
-    failures += test_video_prepare(frontend);
-    failures += test_cross_round_stop(frontend);
-    failures += test_same_token_stop_priority(frontend);
-    failures += test_terminal_flush(frontend);
-    failures += test_reasoning_split(frontend);
-    failures += test_thinking_budget_control(frontend);
-    failures += test_utf8_and_hidden_eos(frontend);
-    failures += test_media_cache_reuses_immutable_payload();
-    failures += test_media_payload_outlives_frontend_cache();
-    failures += test_media_live_bytes_follow_last_payload_reference();
-    failures += test_media_cache_singleflight();
-    failures += test_media_cache_runs_independent_misses_in_parallel();
-    failures += test_many_images_prepare_in_one_parallel_batch();
-    failures += test_media_preparation_cancellation();
-    failures += test_disabled_vision();
-    return failures == 0 ? 0 : 1;
+    try {
+        const FrontendResources owned = resources();
+        const Frontend frontend       = FrontendFactory::create_component(owned);
+        int failures                  = 0;
+        failures += test_official_tokenizer_merge();
+        failures += test_bpe_merge_order();
+        failures += test_boundary_aware_tokenization();
+        failures += test_repeated_special_tokens_scan_linearly();
+        failures += test_bounded_tokenizer_prefix();
+        failures += test_context_capacity_guard();
+        failures += test_official_chat_template();
+        failures += test_ordered_instruction_turns();
+        failures += test_reasoning_effort_chat_template();
+        failures += test_rewrite_checkpoint_trace();
+        failures += test_adjacent_tool_message_boundary();
+        failures += test_official_resource_guards();
+#if NINFER_BUILD_MEDIA_ENABLED
+        failures += test_text_and_image_prepare(frontend);
+        failures += test_explicit_leading_instruction_cache_boundary();
+        failures += test_media_admission_uses_aggregate_resources(frontend);
+        failures += test_multimodal_prompt_over_removed_32k_cap(frontend);
+        failures += test_attention_pairs_are_diagnostic(frontend);
+        failures += test_video_prepare(frontend);
+#endif
+        failures += test_cross_round_stop(frontend);
+        failures += test_same_token_stop_priority(frontend);
+        failures += test_terminal_flush(frontend);
+        failures += test_reasoning_split(frontend);
+        failures += test_thinking_budget_control(frontend);
+        failures += test_utf8_and_hidden_eos(frontend);
+#if NINFER_BUILD_MEDIA_ENABLED
+        failures += test_media_cache_reuses_immutable_payload();
+        failures += test_media_payload_outlives_frontend_cache();
+        failures += test_media_live_bytes_follow_last_payload_reference();
+        failures += test_media_cache_singleflight();
+        failures += test_media_cache_runs_independent_misses_in_parallel();
+        failures += test_many_images_prepare_in_one_parallel_batch();
+        failures += test_media_preparation_cancellation();
+#endif
+        failures += test_disabled_vision();
+        if (failures == 0) { std::cout << "ok\n"; }
+        return failures == 0 ? 0 : 1;
+    } catch (const std::exception& ex) {
+        std::cerr << "EXCEPTION in test_frontend: " << ex.what() << '\n';
+        return 1;
+    }
 }

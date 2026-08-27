@@ -12,7 +12,16 @@
 #include <system_error>
 #include <utility>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+#endif
+#else
 #include <unistd.h>
+#endif
 
 namespace ninfer::runtime {
 
@@ -23,7 +32,9 @@ const std::vector<ContextCostMachinePreset>& compiled_context_cost_defaults();
 namespace {
 
 using Json = nlohmann::json;
+#if !defined(_MSC_VER) || defined(__clang__)
 using U128 = unsigned __int128;
+#endif
 
 constexpr std::size_t direction_index(ContextTransferDirection direction) noexcept {
     return static_cast<std::size_t>(direction);
@@ -36,18 +47,34 @@ std::uint64_t saturating_add(std::uint64_t left, std::uint64_t right) noexcept {
 }
 
 std::uint64_t saturating_product(std::uint64_t left, std::uint64_t right) noexcept {
+#if defined(_MSC_VER) && !defined(__clang__)
+    unsigned __int64 high = 0;
+    unsigned __int64 low = _umul128(left, right, &high);
+    return high > 0 ? std::numeric_limits<std::uint64_t>::max() : low;
+#else
     const U128 product = static_cast<U128>(left) * right;
     return product > std::numeric_limits<std::uint64_t>::max()
                ? std::numeric_limits<std::uint64_t>::max()
                : static_cast<std::uint64_t>(product);
+#endif
 }
 
 std::uint64_t q32_product_ns(std::uint64_t coefficient, std::uint64_t units) noexcept {
     if (coefficient == 0 || units == 0) { return 0; }
+#if defined(_MSC_VER) && !defined(__clang__)
+    unsigned __int64 high = 0;
+    unsigned __int64 low = _umul128(coefficient, units, &high);
+    if (high >= (1ULL << 32)) { return std::numeric_limits<std::uint64_t>::max(); }
+    unsigned char carry = _addcarry_u64(0, low, (1ULL << 32) - 1ULL, &low);
+    _addcarry_u64(carry, high, 0, &high);
+    if (high >= (1ULL << 32)) { return std::numeric_limits<std::uint64_t>::max(); }
+    return (high << 32) | (low >> 32);
+#else
     const U128 product        = static_cast<U128>(coefficient) * units;
     const U128 maximum_scaled = static_cast<U128>(std::numeric_limits<std::uint64_t>::max()) << 32U;
     if (product >= maximum_scaled) { return std::numeric_limits<std::uint64_t>::max(); }
     return static_cast<std::uint64_t>((product + kContextCostQ32One - 1U) >> 32U);
+#endif
 }
 
 void require_object(const Json& value, std::string_view context) {
@@ -296,7 +323,12 @@ void write_document_atomic(const std::filesystem::path& path, const Json& docume
     if (!path.parent_path().empty()) { std::filesystem::create_directories(path.parent_path()); }
 
     std::filesystem::path temporary = path;
-    temporary += ".tmp." + std::to_string(static_cast<long long>(::getpid())) + "." +
+#if defined(_WIN32)
+    const auto pid = static_cast<long long>(::GetCurrentProcessId());
+#else
+    const auto pid = static_cast<long long>(::getpid());
+#endif
+    temporary += ".tmp." + std::to_string(pid) + "." +
                  std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
     try {
         {

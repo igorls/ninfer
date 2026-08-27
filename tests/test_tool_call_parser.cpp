@@ -66,6 +66,25 @@ int test_multiple_calls_and_json_values() {
     return failures;
 }
 
+int test_json_tool_call() {
+    const ninfer::serve::ParsedToolCallOutput parsed = ninfer::serve::parse_qwen_tool_call_output(
+        "I'll check the weather.\n"
+        "<tool_call>\n"
+        "{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Tokyo\", \"metric\": true}}\n"
+        "</tool_call>",
+        64);
+
+    int failures = 0;
+    failures += check(parsed.is_tool_call_response, "json call parsed as tool response");
+    failures += check(parsed.content == "I'll check the weather.", "content prefix trimmed");
+    failures += check(parsed.tool_calls.size() == 1, "one parsed call");
+    failures += check(parsed.tool_calls[0].name == "get_weather", "json function name parsed");
+    const Json args = Json::parse(parsed.tool_calls[0].arguments_json);
+    failures += check(args.at("city") == "Tokyo", "json string parameter");
+    failures += check(args.at("metric") == true, "json bool parameter");
+    return failures;
+}
+
 int test_malformed_falls_back_to_text() {
     const std::string text = "<tool_call>\n<function=get_weather>\n";
     const ninfer::serve::ParsedToolCallOutput parsed =
@@ -166,6 +185,7 @@ int main() {
     int failures = 0;
     failures += test_single_call();
     failures += test_multiple_calls_and_json_values();
+    failures += test_json_tool_call();
     failures += test_malformed_falls_back_to_text();
     failures += test_suffix_after_tool_falls_back_to_text();
     failures += test_configured_name_limit();

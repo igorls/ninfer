@@ -13,6 +13,10 @@
 #include <optional>
 #include <span>
 
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+#endif
+
 namespace ninfer::runtime {
 
 using ::ninfer::FinishReason;
@@ -237,15 +241,31 @@ struct PrefillWork {
     result.tokens                       = suffix_tokens;
     result.vision_items                 = vision_items;
     result.vision_patches               = vision_patches;
-    const unsigned __int128 suffix      = suffix_tokens;
-    const unsigned __int128 linear      = static_cast<unsigned __int128>(prefix_tokens) * suffix;
-    const unsigned __int128 triangular  = suffix * (suffix + 1U) / 2U;
+#if defined(_MSC_VER) && !defined(__clang__)
+    unsigned __int64 lin_high = 0;
+    unsigned __int64 linear = _umul128(prefix_tokens, suffix_tokens, &lin_high);
+    unsigned __int64 tri_high = 0;
+    unsigned __int64 tri_low = _umul128(suffix_tokens, suffix_tokens + 1ULL, &tri_high);
+    unsigned __int64 triangular = (tri_high << 63) | (tri_low >> 1);
+    unsigned __int64 tri_h = tri_high >> 1;
+    if (lin_high > 0 || tri_h > 0) {
+        result.attention_pairs = std::numeric_limits<std::uint64_t>::max();
+    } else {
+        result.attention_pairs = linear > std::numeric_limits<std::uint64_t>::max() - triangular
+                                     ? std::numeric_limits<std::uint64_t>::max()
+                                     : linear + triangular;
+    }
+#else
+    const unsigned __int128 suffix_u128 = suffix_tokens;
+    const unsigned __int128 linear      = static_cast<unsigned __int128>(prefix_tokens) * suffix_u128;
+    const unsigned __int128 triangular  = suffix_u128 * (suffix_u128 + 1U) / 2U;
     constexpr unsigned __int128 maximum = ~static_cast<unsigned __int128>(0);
     const unsigned __int128 attention =
         triangular > maximum - linear ? maximum : linear + triangular;
     result.attention_pairs = attention > std::numeric_limits<std::uint64_t>::max()
                                  ? std::numeric_limits<std::uint64_t>::max()
                                  : static_cast<std::uint64_t>(attention);
+#endif
     return result;
 }
 

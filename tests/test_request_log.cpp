@@ -11,9 +11,13 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <vector>
-
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace {
 
@@ -557,9 +561,14 @@ int main() {
                           console_prefix.ends_with("] [info] ninfer-serve: "),
                       "console log prefix mismatch");
 
+#if defined(_WIN32)
+    const auto pid = static_cast<long long>(::GetCurrentProcessId());
+#else
+    const auto pid = static_cast<long long>(::getpid());
+#endif
     const std::filesystem::path log_path =
         std::filesystem::temp_directory_path() /
-        ("ninfer-request-log-test-" + std::to_string(static_cast<long long>(::getpid())) +
+        ("ninfer-request-log-test-" + std::to_string(pid) +
          ".jsonl");
     std::filesystem::remove(log_path);
     {

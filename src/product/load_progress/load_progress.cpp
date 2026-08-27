@@ -1,6 +1,17 @@
 #include "product/load_progress/load_progress.h"
 
+#if defined(_WIN32)
+#include <io.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -60,12 +71,23 @@ std::string format_line(std::string_view phase, std::uint64_t done, std::uint64_
 } // namespace
 
 LoadProgressRendererOptions stderr_load_progress_options() noexcept {
+#if defined(_WIN32)
+    const HANDLE handle = ::GetStdHandle(STD_ERROR_HANDLE);
+    DWORD mode          = 0;
+    if (handle != INVALID_HANDLE_VALUE && ::GetConsoleMode(handle, &mode)) {
+        return LoadProgressRendererOptions{
+            .mode                 = LoadProgressOutputMode::Interactive,
+            .min_refresh_interval = std::chrono::milliseconds(200),
+        };
+    }
+#else
     if (::isatty(STDERR_FILENO) == 1) {
         return LoadProgressRendererOptions{
             .mode                 = LoadProgressOutputMode::Interactive,
             .min_refresh_interval = std::chrono::milliseconds(200),
         };
     }
+#endif
     return LoadProgressRendererOptions{
         .mode                 = LoadProgressOutputMode::Log,
         .min_refresh_interval = std::chrono::seconds(10),
