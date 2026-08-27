@@ -336,6 +336,70 @@ int test_insights_prefix() {
     return f;
 }
 
+int test_insights_prefix_collapse() {
+    using namespace ninfer::supervisor;
+    std::string jsonl =
+        R"({"event":"server_start","server_instance_id":"leaking","timestamp_unix_ms":1,"engine":{"context_cache":{"host_state_slots":2}}})"
+        "\n";
+    for (int sample = 0; sample < 3; ++sample) {
+        jsonl +=
+            "{\"event\":\"throughput\",\"server_instance_id\":\"leaking\","
+            "\"timestamp_unix_ms\":" + std::to_string(1000 + sample * 35000) +
+            ",\"context_cache\":{\"occupancy\":{\"host_state_slots\":2}}}\n";
+    }
+    for (int request = 0; request < 3; ++request) {
+        jsonl +=
+            "{\"event\":\"request_done\",\"server_instance_id\":\"leaking\","
+            "\"timestamp_unix_ms\":" + std::to_string(72000 + request) +
+            ",\"request\":{\"request_id\":" + std::to_string(request + 1) +
+            ",\"message_count\":4},\"result\":{\"prefix_reuse_path\":\"root\","
+            "\"prefix_cache_hit_tokens\":0,\"computed_prefill_tokens\":1000},"
+            "\"timings_seconds\":{}}\n";
+    }
+
+    const auto report = analyze_request_log_jsonl(jsonl, "mem");
+    int f = 0;
+    const nlohmann::json* collapse = nullptr;
+    for (const auto& insight : report.at("insights")) {
+        if (insight.at("id") == "prefix.reuse_collapsed") { collapse = &insight; }
+    }
+    f += check(collapse != nullptr, "saturated Host State plus Root streak is detected");
+    if (collapse != nullptr) {
+        f += check(collapse->at("severity") == "warning", "collapse is a warning");
+        f += check(collapse->at("evidence").at("host_state_slots") == 2,
+                   "collapse carries measured Host State occupancy");
+        f += check(collapse->at("evidence").at("consecutive_multiturn_root_misses") == 3,
+                   "collapse carries the Root miss streak");
+        f += check(collapse->at("evidence").at("recomputed_prefill_tokens") == 3000,
+                   "collapse carries avoidable prefill work");
+    }
+
+    const std::string recovered =
+        jsonl +
+        R"({"event":"request_done","server_instance_id":"leaking","timestamp_unix_ms":73000,"request":{"request_id":4,"message_count":4},"result":{"prefix_reuse_path":"private_turn_closure","prefix_cache_hit_tokens":995,"computed_prefill_tokens":5},"timings_seconds":{}})"
+        "\n";
+    const auto recovered_report = analyze_request_log_jsonl(recovered, "mem");
+    bool false_alarm = false;
+    for (const auto& insight : recovered_report.at("insights")) {
+        false_alarm = false_alarm || insight.at("id") == "prefix.reuse_collapsed";
+    }
+    f += check(!false_alarm, "a later cache hit clears the collapse alarm");
+
+    const std::string restarted =
+        jsonl +
+        R"({"event":"server_start","server_instance_id":"fresh","timestamp_unix_ms":80000,"engine":{"context_cache":{"host_state_slots":2}}})"
+        "\n"
+        R"({"event":"throughput","server_instance_id":"fresh","timestamp_unix_ms":81000,"context_cache":{"occupancy":{"host_state_slots":0}}})"
+        "\n";
+    const auto restarted_report = analyze_request_log_jsonl(restarted, "mem");
+    false_alarm = false;
+    for (const auto& insight : restarted_report.at("insights")) {
+        false_alarm = false_alarm || insight.at("id") == "prefix.reuse_collapsed";
+    }
+    f += check(!false_alarm, "a restarted server does not inherit the previous instance alarm");
+    return f;
+}
+
 int test_jsonl_event_key() {
     using namespace ninfer::supervisor;
     int f = 0;
@@ -412,6 +476,7 @@ int main() {
     failures += test_monitor_only_config();
     failures += test_insights_honesty();
     failures += test_insights_prefix();
+    failures += test_insights_prefix_collapse();
     failures += test_admin_vram_markers();
     failures += test_insights_pinned_tier();
     failures += test_jsonl_event_key();

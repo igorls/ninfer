@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -71,6 +72,9 @@ inline nlohmann::json analyze_request_log_jsonl(std::string_view jsonl, std::str
     };
 
     std::unordered_map<std::string, nlohmann::json> starts;
+    std::unordered_map<std::string, std::uint32_t> host_state_capacities;
+    std::string latest_server_instance;
+    std::int64_t latest_server_start = 0;
     std::vector<nlohmann::json> dones;
     std::vector<nlohmann::json> throughputs;
     std::int64_t tmin = 0;
@@ -91,7 +95,22 @@ inline nlohmann::json analyze_request_log_jsonl(std::string_view jsonl, std::str
         const auto ts = json_i64(j, "timestamp_unix_ms");
         if (tmin == 0 || ts < tmin) { tmin = ts; }
         if (ts > tmax) { tmax = ts; }
-        if (event == "request_start" && j.contains("request")) {
+        if (event == "server_start" && j.contains("engine")) {
+            const std::string instance = j.value("server_instance_id", "");
+            const auto& engine         = j.at("engine");
+            if (!instance.empty() && ts >= latest_server_start) {
+                latest_server_instance = instance;
+                latest_server_start    = ts;
+            }
+            if (!instance.empty() && engine.contains("context_cache")) {
+                const auto capacity = json_i64(engine.at("context_cache"), "host_state_slots");
+                if (capacity > 0 &&
+                    capacity <= static_cast<std::int64_t>(
+                                    std::numeric_limits<std::uint32_t>::max())) {
+                    host_state_capacities[instance] = static_cast<std::uint32_t>(capacity);
+                }
+            }
+        } else if (event == "request_start" && j.contains("request")) {
             const auto rid = json_i64(j.at("request"), "request_id");
             starts[j.value("server_instance_id", "") + ":" + std::to_string(rid)] = j;
         } else if (event == "request_done") {
@@ -264,6 +283,79 @@ inline nlohmann::json analyze_request_log_jsonl(std::string_view jsonl, std::str
                                      {"unpaired_done", b.unpaired},
                                      {"window_s", window_s},
                                      {"throughput_events", throughputs.size()}};
+
+    // A full Host State pool is not itself a fault: pressure can legitimately fill it briefly.
+    // The production failure in #15 is the conjunction of a pool that remains full and later
+    // multi-turn requests that all fall to Root with no cache hit. Keep the two signals joined so
+    // ordinary first-turn Root selections never become a false alarm.
+    for (const auto& [instance, capacity] : host_state_capacities) {
+        if (instance != latest_server_instance) { continue; }
+        std::size_t saturated_samples = 0;
+        std::int64_t saturated_since  = 0;
+        std::int64_t saturated_until  = 0;
+        for (auto it = throughputs.rbegin(); it != throughputs.rend(); ++it) {
+            if (it->value("server_instance_id", "") != instance) { continue; }
+            const auto& cache = it->contains("context_cache") ? it->at("context_cache")
+                                                              : nlohmann::json::object();
+            const auto& occupancy = cache.contains("occupancy") ? cache.at("occupancy")
+                                                                 : nlohmann::json::object();
+            if (json_i64(occupancy, "host_state_slots", -1) != capacity) { break; }
+            const std::int64_t timestamp = json_i64(*it, "timestamp_unix_ms");
+            if (saturated_until == 0) { saturated_until = timestamp; }
+            saturated_since = timestamp;
+            ++saturated_samples;
+        }
+        if (saturated_samples < 3 || saturated_until - saturated_since < 60'000) { continue; }
+
+        std::size_t root_streak = 0;
+        std::uint64_t recomputed_tokens = 0;
+        std::vector<std::int64_t> sample_ids;
+        for (auto it = dones.rbegin(); it != dones.rend(); ++it) {
+            if (it->value("server_instance_id", "") != instance ||
+                json_i64(*it, "timestamp_unix_ms") < saturated_since) {
+                continue;
+            }
+            const auto& request = it->contains("request") ? it->at("request")
+                                                           : nlohmann::json::object();
+            if (json_i64(request, "message_count") < 2) { continue; }
+            const auto& result = it->contains("result") ? it->at("result")
+                                                         : nlohmann::json::object();
+            if (result.value("prefix_reuse_path", "") != "root" ||
+                json_i64(result, "prefix_cache_hit_tokens", -1) != 0) {
+                break;
+            }
+            ++root_streak;
+            recomputed_tokens += static_cast<std::uint64_t>(
+                std::max<std::int64_t>(0, json_i64(result, "computed_prefill_tokens")));
+            if (sample_ids.size() < 8) {
+                sample_ids.push_back(json_i64(request, "request_id"));
+            }
+        }
+        if (root_streak < 3) { continue; }
+
+        std::ostringstream statement;
+        statement << "Host State occupancy remained at " << capacity << "/" << capacity
+                  << " for " << saturated_samples << " consecutive throughput samples over "
+                  << static_cast<double>(saturated_until - saturated_since) / 1000.0
+                  << " s, while the latest " << root_streak
+                  << " multi-turn requests all selected root with zero prefix-cache hits.";
+        insights.push_back(insight_available(
+            "prefix.reuse_collapsed", "warning", "Prefix reuse has collapsed", statement.str(),
+            {{"server_instance_id", instance},
+             {"host_state_slots", capacity},
+             {"saturated_samples", saturated_samples},
+             {"saturated_since_unix_ms", saturated_since},
+             {"saturated_until_unix_ms", saturated_until},
+             {"consecutive_multiturn_root_misses", root_streak},
+             {"recomputed_prefill_tokens", recomputed_tokens},
+             {"sample_request_ids", sample_ids}},
+            "Restart restores reuse temporarily. Preserve the log and investigate Host State "
+            "checkpoint ownership before the pool saturates again.",
+            "measured",
+            {{"requests", root_streak},
+             {"throughput_events", saturated_samples},
+             {"window_s", static_cast<double>(saturated_until - saturated_since) / 1000.0}}));
+    }
 
     const double mean_queue = paired > 0 ? b.queue_wait_sum / paired : 0.0;
     const double mean_prefill =
