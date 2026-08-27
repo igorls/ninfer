@@ -456,7 +456,8 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
         reasoning = trim_ascii_whitespace(reasoning);
 
         const bool keep_thinking = preserve_thinking || (static_cast<long>(i) > last_query_index);
-        if (!preserve_thinking && !rewrite_checkpoint && static_cast<long>(i) > last_query_index) {
+        if (!options.add_generation_prompt && !preserve_thinking && !rewrite_checkpoint &&
+            static_cast<long>(i) > last_query_index) {
             // Closing the current turn may rewrite everything beginning with this assistant
             // segment. Keep the stable history before the opener recoverable; retaining the
             // deterministic opener itself is not worth losing the whole prefix when a caller
@@ -496,13 +497,10 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
         // opener; placing it after the deterministic prologue makes the complete history
         // unrecoverable for the branch case merely to save a handful of prompt tokens.
         const std::size_t generation_begin = rendered.size();
-        if (preserve_thinking) {
-            rewrite_checkpoint = RewriteCheckpointByteSpec{
-                .kind = RewriteCheckpointKind::ResponseReplay, .offset = generation_begin};
-        } else if (!rewrite_checkpoint) {
-            rewrite_checkpoint = RewriteCheckpointByteSpec{
-                .kind = RewriteCheckpointKind::TurnClosure, .offset = generation_begin};
-        }
+        rewrite_checkpoint = RewriteCheckpointByteSpec{
+            .kind = preserve_thinking ? RewriteCheckpointKind::ResponseReplay
+                                      : RewriteCheckpointKind::TurnClosure,
+            .offset = generation_begin};
         rendered += "<|im_start|>assistant\n";
         add_rewrite_execution_boundary();
         if (options.enable_thinking) {

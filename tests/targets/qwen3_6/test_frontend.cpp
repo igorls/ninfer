@@ -813,18 +813,51 @@ int test_rewrite_checkpoint_trace() {
     second.reasoning_content           = "second thought";
     second.parts.front().text          = "second answer";
 
+    // Step 1: User query only
+    const fi::RenderedChat turn1 =
+        render_chat({chat_message(ninfer::ChatRole::User, "question")});
+    const std::size_t turn1_header = turn1.text.rfind(assistant_header);
+    int failures =
+        check(turn1_header != std::string::npos && turn1.rewrite_checkpoint &&
+                  turn1.rewrite_checkpoint->kind ==
+                      ninfer::targets::qwen3_6::RewriteCheckpointKind::TurnClosure &&
+                  turn1.rewrite_checkpoint->offset == turn1_header,
+              "turn 1 did not place checkpoint at generation opener");
+
+    // Step 2: First tool response returned
+    const std::vector<fi::ChatMessage> turn2_messages{
+        chat_message(ninfer::ChatRole::User, "question"), first,
+        chat_message(ninfer::ChatRole::Tool, "result one")};
+    const fi::RenderedChat turn2 = render_chat(turn2_messages);
+    const std::size_t turn2_header = turn2.text.rfind(assistant_header);
+    failures +=
+        check(turn2_header != std::string::npos && turn2.rewrite_checkpoint &&
+                  turn2.rewrite_checkpoint->kind ==
+                      ninfer::targets::qwen3_6::RewriteCheckpointKind::TurnClosure &&
+                  turn2.rewrite_checkpoint->offset == turn2_header &&
+                  turn2_header > turn1_header,
+              "turn 2 did not advance checkpoint beyond turn 1");
+    failures += check(
+        turn2.text.starts_with(turn1.text.substr(0, turn1.rewrite_checkpoint->offset)),
+        "turn 2 did not contain turn 1 checkpoint prefix byte-for-byte");
+
+    // Step 3: Second tool response returned
     const std::vector<fi::ChatMessage> tool_loop{
         chat_message(ninfer::ChatRole::User, "question"), first,
         chat_message(ninfer::ChatRole::Tool, "result one"), second,
         chat_message(ninfer::ChatRole::Tool, "result two")};
     const fi::RenderedChat open    = render_chat(tool_loop);
-    const std::size_t first_header = open.text.find(assistant_header);
-    int failures =
-        check(first_header != std::string::npos && open.rewrite_checkpoint &&
+    const std::size_t final_header = open.text.rfind(assistant_header);
+    failures +=
+        check(final_header != std::string::npos && open.rewrite_checkpoint &&
                   open.rewrite_checkpoint->kind ==
                       ninfer::targets::qwen3_6::RewriteCheckpointKind::TurnClosure &&
-                  open.rewrite_checkpoint->offset == first_header,
-              "tool loop did not retain the stable prefix before its first assistant turn");
+                  open.rewrite_checkpoint->offset == final_header &&
+                  final_header > turn2_header,
+              "tool loop did not advance the stable prefix before its current generation opener");
+    failures += check(
+        open.text.starts_with(turn2.text.substr(0, turn2.rewrite_checkpoint->offset)),
+        "turn 3 did not contain turn 2 checkpoint prefix byte-for-byte");
 
     fi::ChatRenderOptions preserve;
     preserve.preserve_thinking         = true;
@@ -850,14 +883,14 @@ int test_rewrite_checkpoint_trace() {
 
     std::vector<fi::ChatMessage> next_turn = tool_loop;
     next_turn.push_back(chat_message(ninfer::ChatRole::User, "next question"));
-    const fi::RenderedChat next    = render_chat(next_turn);
-    const std::size_t final_header = next.text.rfind(assistant_header);
-    failures += check(final_header != std::string::npos && next.rewrite_checkpoint &&
+    const fi::RenderedChat next        = render_chat(next_turn);
+    const std::size_t next_user_header = next.text.rfind(assistant_header);
+    failures += check(next_user_header != std::string::npos && next.rewrite_checkpoint &&
                           next.rewrite_checkpoint->kind ==
                               ninfer::targets::qwen3_6::RewriteCheckpointKind::TurnClosure &&
-                          next.rewrite_checkpoint->offset == final_header,
-                      "new user turn did not move the rewrite boundary before its generation "
-                      "opener");
+                          next.rewrite_checkpoint->offset == next_user_header &&
+                          next.text.starts_with(turn1.text.substr(0, turn1.rewrite_checkpoint->offset)),
+                      "new user turn did not advance checkpoint and preserve turn 1 base prefix");
 
     const fi::RenderedChat branch =
         render_chat({chat_message(ninfer::ChatRole::User, "question"),
