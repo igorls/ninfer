@@ -1083,13 +1083,16 @@ int test_text_and_image_prepare(const Frontend& frontend) {
 }
 
 int test_explicit_leading_instruction_cache_boundary() {
+    if (!has_official_model_dir()) { return 0; }
+    const char* env_path = std::getenv("NINFER_QWEN36_MODEL_DIR");
+    std::string dir = "/home/neroued/models/llm/qwen/Qwen3.6-27B/base-hf-bf16";
+    if (env_path != nullptr && *env_path != '\0' && std::filesystem::exists(env_path)) {
+        dir = env_path;
+    }
     FrontendResources official = resources();
-    official.tokenizer_json =
-        read_file("/home/neroued/models/llm/qwen/Qwen3.6-27B/base-hf-bf16/tokenizer.json");
-    official.tokenizer_config_json =
-        read_file("/home/neroued/models/llm/qwen/Qwen3.6-27B/base-hf-bf16/tokenizer_config.json");
-    official.generation_config_json =
-        read_file("/home/neroued/models/llm/qwen/Qwen3.6-27B/base-hf-bf16/generation_config.json");
+    official.tokenizer_json = read_file((dir + "/tokenizer.json").c_str());
+    official.tokenizer_config_json = read_file((dir + "/tokenizer_config.json").c_str());
+    official.generation_config_json = read_file((dir + "/generation_config.json").c_str());
     const Frontend frontend           = FrontendFactory::create_component(official, false);
     constexpr std::string_view stable = "stable cache section.";
     ninfer::ChatMessage system;

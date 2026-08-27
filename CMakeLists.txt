@@ -50,13 +50,7 @@ endif()
 # part of the default Windows toolchain, so the text-only build
 # (NINFER_BUILD_MEDIA=OFF) compiles API-compatible stubs instead and rejects
 # vision requests at runtime.
-if(WIN32)
-  set(NINFER_MEDIA_DEFAULT OFF)
-else()
-  set(NINFER_MEDIA_DEFAULT ON)
-endif()
-option(NINFER_BUILD_MEDIA "Build FFMPEG/libcurl media decode and acquisition"
-       ${NINFER_MEDIA_DEFAULT})
+option(NINFER_BUILD_MEDIA "Build FFMPEG/libcurl media decode and acquisition" ON)
 
 # ninfer_serve and prompt_input link ninfer_media_acquire unconditionally, so
 # the target must exist whenever apps/tests build; NINFER_BUILD_MEDIA only
@@ -78,11 +72,56 @@ endif()
 
 find_package(CUDAToolkit REQUIRED)
 if(NINFER_BUILD_MEDIA)
-  find_package(PkgConfig REQUIRED)
-  pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
-    libavformat>=60 libavcodec>=60 libavutil>=58 libswscale>=7)
-  if(NINFER_BUILD_MEDIA_ACQUIRE)
-    pkg_check_modules(LIBCURL REQUIRED IMPORTED_TARGET libcurl>=7.85)
+  find_package(PkgConfig QUIET)
+  if(PKG_CONFIG_FOUND)
+    pkg_check_modules(FFMPEG IMPORTED_TARGET
+      libavformat>=60 libavcodec>=60 libavutil>=58 libswscale>=7)
+    if(NINFER_BUILD_MEDIA_ACQUIRE)
+      pkg_check_modules(LIBCURL IMPORTED_TARGET libcurl>=7.85)
+    endif()
+  endif()
+
+  if(NOT TARGET PkgConfig::FFMPEG)
+    set(FFMPEG_ROOT "P:/third_party/ffmpeg/ffmpeg-master-latest-win64-gpl-shared" CACHE PATH "FFmpeg root directory")
+    find_path(FFMPEG_INCLUDE_DIR NAMES libavformat/avformat.h
+      HINTS ${FFMPEG_ROOT}/include ENV FFMPEG_INCLUDE_DIR)
+    find_library(AVFORMAT_LIBRARY NAMES avformat libavformat
+      HINTS ${FFMPEG_ROOT}/lib ENV AVFORMAT_LIBRARY)
+    find_library(AVCODEC_LIBRARY NAMES avcodec libavcodec
+      HINTS ${FFMPEG_ROOT}/lib ENV AVCODEC_LIBRARY)
+    find_library(AVUTIL_LIBRARY NAMES avutil libavutil
+      HINTS ${FFMPEG_ROOT}/lib ENV AVUTIL_LIBRARY)
+    find_library(SWSCALE_LIBRARY NAMES swscale libswscale
+      HINTS ${FFMPEG_ROOT}/lib ENV SWSCALE_LIBRARY)
+
+    if(FFMPEG_INCLUDE_DIR AND AVFORMAT_LIBRARY AND AVCODEC_LIBRARY AND AVUTIL_LIBRARY AND SWSCALE_LIBRARY)
+      add_library(PkgConfig::FFMPEG INTERFACE IMPORTED)
+      target_include_directories(PkgConfig::FFMPEG INTERFACE ${FFMPEG_INCLUDE_DIR})
+      target_link_libraries(PkgConfig::FFMPEG INTERFACE
+        ${AVFORMAT_LIBRARY} ${AVCODEC_LIBRARY} ${AVUTIL_LIBRARY} ${SWSCALE_LIBRARY})
+      message(STATUS "Found FFmpeg (direct): ${FFMPEG_INCLUDE_DIR}")
+    else()
+      message(FATAL_ERROR "Could NOT find FFmpeg (libavformat, libavcodec, libavutil, libswscale). Set FFMPEG_ROOT or FFMPEG_INCLUDE_DIR.")
+    endif()
+  endif()
+
+  if(NINFER_BUILD_MEDIA_ACQUIRE AND NOT TARGET PkgConfig::LIBCURL)
+    set(CURL_ROOT "P:/third_party/curl-inst" CACHE PATH "libcurl root directory")
+    find_path(CURL_INCLUDE_DIR NAMES curl/curl.h
+      HINTS ${CURL_ROOT}/include ENV CURL_INCLUDE_DIR)
+    find_library(CURL_LIBRARY NAMES libcurl_imp curl libcurl
+      HINTS ${CURL_ROOT}/lib ENV CURL_LIBRARY)
+
+    if(CURL_INCLUDE_DIR AND CURL_LIBRARY)
+      add_library(PkgConfig::LIBCURL INTERFACE IMPORTED)
+      target_include_directories(PkgConfig::LIBCURL INTERFACE ${CURL_INCLUDE_DIR})
+      target_link_libraries(PkgConfig::LIBCURL INTERFACE ${CURL_LIBRARY})
+      message(STATUS "Found libcurl (direct): ${CURL_INCLUDE_DIR} -> ${CURL_LIBRARY}")
+    else()
+      find_package(CURL REQUIRED)
+      add_library(PkgConfig::LIBCURL INTERFACE IMPORTED)
+      target_link_libraries(PkgConfig::LIBCURL INTERFACE CURL::libcurl)
+    endif()
   endif()
 endif()
 find_package(Threads REQUIRED)
