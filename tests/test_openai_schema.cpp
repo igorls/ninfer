@@ -484,6 +484,36 @@ int test_parse_tool_history_messages() {
     return failures;
 }
 
+int test_tool_message_with_media_parts() {
+    int failures = 0;
+    const Json body = {
+        {"model", "m"},
+        {"messages",
+         Json::array(
+             {Json{{"role", "user"}, {"content", "inspect this"}},
+              Json{{"role", "assistant"},
+                   {"content", nullptr},
+                   {"tool_calls",
+                    Json::array({Json{{"id", "call_screenshot"},
+                                      {"type", "function"},
+                                      {"function", Json{{"name", "take_screenshot"},
+                                                        {"arguments", "{}"}}}}})}},
+              Json{{"role", "tool"},
+                   {"tool_call_id", "call_screenshot"},
+                   {"content",
+                    Json::array({Json{{"type", "text"}, {"text", "Screenshot taken:"}},
+                                 Json{{"type", "image_url"},
+                                      {"image_url",
+                                       Json{{"url", "data:image/png;base64,iVBORw0KGgo="}}}}})}}})}};
+    const GenerationRequest req = parse_chat_completion_request(body, default_limits());
+    failures += check(req.messages.size() == 3, "tool message with media parts parsed");
+    failures += check(req.messages[2].role == ninfer::ChatRole::Tool, "tool role preserved");
+    failures += check(req.messages[2].content.size() == 2, "tool content has 2 parts");
+    failures += check(req.messages[2].content[0].kind == ContentKind::Text, "tool part 0 is text");
+    failures += check(req.messages[2].content[1].kind == ContentKind::Image, "tool part 1 is image");
+    return failures;
+}
+
 int test_parse_stop_and_max_tokens() {
     int failures          = 0;
     Json body             = {{"model", "m"},
@@ -724,6 +754,7 @@ int main() {
     failures += test_reject_unsupported();
     failures += test_parse_function_tools_and_choices();
     failures += test_parse_tool_history_messages();
+    failures += test_tool_message_with_media_parts();
     failures += test_parse_stop_and_max_tokens();
     failures += test_parse_sampling_carried();
     failures += test_response_serialization();
