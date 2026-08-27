@@ -48,9 +48,29 @@ struct RequestLimits {
     int default_max_tokens = 8192;
 };
 
+[[nodiscard]] constexpr const char* prefix_reuse_path_name(ninfer::PrefixReusePath path) noexcept {
+    switch (path) {
+    case ninfer::PrefixReusePath::Root:
+        return "root";
+    case ninfer::PrefixReusePath::PrivateEndpoint:
+        return "private_endpoint";
+    case ninfer::PrefixReusePath::PrivateTurnClosure:
+        return "private_turn_closure";
+    case ninfer::PrefixReusePath::PrivateResponseReplay:
+        return "private_response_replay";
+    case ninfer::PrefixReusePath::PrivateLongAnchor:
+        return "private_long_anchor";
+    case ninfer::PrefixReusePath::SharedStablePrefix:
+        return "shared_stable_prefix";
+    }
+    return "unknown";
+}
+
 struct CompletionUsage {
     int prompt_tokens     = 0;
     int completion_tokens = 0;
+    int cached_prompt_tokens = 0;
+    ninfer::PrefixReusePath prefix_reuse_path = ninfer::PrefixReusePath::Root;
 };
 
 enum class ContentKind {

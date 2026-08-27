@@ -190,6 +190,14 @@ ninfer_add_test(ninfer_http_error_handler_test
   LIBRARIES ninfer_serve)
 target_include_directories(ninfer_http_error_handler_test PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib)
+if(WIN32)
+  add_executable(ninfer_supervisor_test test_ninfer_supervisor.cpp)
+  target_include_directories(ninfer_supervisor_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/apps/ninfer-supervisor
+    ${PROJECT_SOURCE_DIR}/third_party)
+  add_test(NAME ninfer_supervisor_test COMMAND ninfer_supervisor_test)
+endif()
 ninfer_add_test(ninfer_bench_support_test
   SOURCES test_ninfer_bench_support.cpp
           ${PROJECT_SOURCE_DIR}/bench/targets/qwen3_6_27b/ninfer_bench_support.cpp

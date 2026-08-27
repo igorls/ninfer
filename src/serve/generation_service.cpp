@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <iostream>
 #include <iterator>
 #include <mutex>
 #include <stdexcept>
@@ -250,6 +251,12 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
     engine_options.media_live_bytes         = options_.media_live_bytes;
     engine_options.media_preprocess_threads = options_.media_preprocess_threads;
     engine_options.load_progress            = std::move(load_progress);
+    engine_options.on_fatal_error           = [](std::exception_ptr, const std::string& message) {
+        write_console_log(ConsoleLogLevel::Error, message);
+        std::cerr.flush();
+        std::cout.flush();
+        std::_Exit(1);
+    };
     engine_              = std::make_unique<ninfer::Engine>(std::move(engine_options));
     prompt_capabilities_ = engine_->prompt_capabilities();
     request_capacity_    = std::make_shared<RequestCapacity>(
@@ -293,6 +300,9 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
     prepared.include_usage        = request.include_usage;
     prepared.tool_capable         = request.uses_tools() || request.has_tool_history();
     prepared.tool_name_max_length = request.tool_name_max_length;
+    if (!request.tools.empty()) {
+        prepared.param_types = build_tool_param_type_map(request.tools);
+    }
     const ResolvedPromptSemantics semantics =
         resolve_prompt_semantics(request, options_, prompt_capabilities_);
     ninfer::RequestOptions request_options = to_request_options(
@@ -433,7 +443,8 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     bool is_tool_call_response = false;
     if (prepared.tool_capable) {
         ParsedToolCallOutput parsed =
-            parse_qwen_tool_call_output(outcome.text, prepared.tool_name_max_length);
+            parse_qwen_tool_call_output(outcome.text, prepared.tool_name_max_length,
+                                        prepared.param_types, options_.tolerant_tool_calls);
         outcome.text          = std::move(parsed.content);
         is_tool_call_response = parsed.is_tool_call_response;
         if (is_tool_call_response) { outcome.tool_calls = std::move(parsed.tool_calls); }

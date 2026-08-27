@@ -292,6 +292,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.enable_thinking = false;
         } else if (arg == "--preserve-thinking") {
             options.preserve_thinking = true;
+        } else if (arg == "--tolerant-tool-calls") {
+            options.tolerant_tool_calls = true;
         } else if (arg == "--cors") {
             options.enable_cors = true;
         } else if (arg == "--temperature") {

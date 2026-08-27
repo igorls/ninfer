@@ -121,6 +121,7 @@ struct EngineOptions {
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
     LoadProgress load_progress;
+    std::function<void(std::exception_ptr, const std::string&)> on_fatal_error;
 };
 
 enum class SamplingMode : std::uint8_t {

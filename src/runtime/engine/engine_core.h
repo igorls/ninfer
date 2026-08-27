@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <deque>
 #include <exception>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -68,7 +69,8 @@ public:
                      options.context_cache.max_shared_prefixes.value(),
                      options.context_cache.enabled,
                      options.context_cache.max_long_anchors_per_continuation.value_or(0),
-                     std::move(context_cost)) {
+                     std::move(context_cost)),
+          on_fatal_error_(options.on_fatal_error) {
         if (max_concurrency_ == 0 || max_concurrency_ > kMaximumConcurrency ||
             options.max_pending_requests == 0 || pending_timeout_.count() <= 0) {
             throw std::invalid_argument("Engine core bounds are invalid");
@@ -1828,6 +1830,7 @@ private:
                 try {
                     publish_runtime_stats();
                 } catch (...) {}
+                handle_fatal_error(error);
                 return;
             }
             execution_lock.unlock();
@@ -1836,12 +1839,37 @@ private:
         }
     }
 
+    void handle_fatal_error(std::exception_ptr error) noexcept {
+        std::string detail = "unknown fatal failure";
+        if (error != nullptr) {
+            try {
+                std::rethrow_exception(error);
+            } catch (const std::exception& e) {
+                detail = std::string(typeid(e).name()) + ": " + e.what();
+            } catch (...) {
+                detail = "non-std exception";
+            }
+        }
+        const std::string message = "fatal executor failure (" + detail + "); terminating process";
+        if (on_fatal_error_) {
+            try {
+                on_fatal_error_(error, message);
+            } catch (...) {}
+            return;
+        }
+        std::cerr << message << '\n';
+        std::cerr.flush();
+        std::cout.flush();
+        std::_Exit(1);
+    }
+
     Instance& instance_;
     const std::uint32_t max_context_;
     const std::uint32_t max_concurrency_;
     const std::size_t max_outstanding_;
     const std::chrono::milliseconds pending_timeout_;
     ResourceManagement resources_;
+    std::function<void(std::exception_ptr, const std::string&)> on_fatal_error_;
 
     mutable std::mutex execution_mutex_;
     mutable std::mutex queue_mutex_;

@@ -131,24 +131,6 @@ const char* proposal_head_name(ninfer::ProposalHead proposal) {
     return proposal == ninfer::ProposalHead::Optimized ? "optimized" : "full";
 }
 
-const char* prefix_reuse_path_name(ninfer::PrefixReusePath path) {
-    switch (path) {
-    case ninfer::PrefixReusePath::Root:
-        return "root";
-    case ninfer::PrefixReusePath::PrivateEndpoint:
-        return "private_endpoint";
-    case ninfer::PrefixReusePath::PrivateTurnClosure:
-        return "private_turn_closure";
-    case ninfer::PrefixReusePath::PrivateResponseReplay:
-        return "private_response_replay";
-    case ninfer::PrefixReusePath::PrivateLongAnchor:
-        return "private_long_anchor";
-    case ninfer::PrefixReusePath::SharedStablePrefix:
-        return "shared_stable_prefix";
-    }
-    return "unknown";
-}
-
 Json event_base(const std::string& server_instance_id, std::uint64_t timestamp, const char* event) {
     return Json{{"artifact_type", kRequestLogArtifactType},
                 {"schema_version", kRequestLogSchemaVersion},
