@@ -18,6 +18,8 @@ add_library(ninfer_qwen3_8_flash_next STATIC
   impl/qsa_attention_kernels.cu
   impl/qsa_indexer.cpp
   impl/qsa_indexer_kernels.cu
+  impl/runtime_plan.cpp
+  impl/runtime_state.cpp
   impl/text_decode.cpp
   impl/text_decode_kernels.cu)
 ninfer_internal_includes(ninfer_qwen3_8_flash_next)

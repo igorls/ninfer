@@ -1,0 +1,82 @@
+#pragma once
+
+#include "core/tensor.h"
+#include "runtime/contract/types.h"
+#include "targets/qwen3_8_flash_next/impl/model_view.h"
+
+#include <cstddef>
+#include <cstdint>
+
+namespace ninfer::targets::qwen3_8_flash_next::detail {
+
+// Page & block tokens for QSA attention and indexer
+inline constexpr std::uint32_t kPageTokens        = 64; // QSA attention page size
+inline constexpr std::uint32_t kBlockTokens       = 4;  // QSA indexer compressed block size
+inline constexpr std::uint32_t kIndexerPageBlocks = 64; // Blocks per indexer page
+inline constexpr std::uint32_t kIndexerPageTokens = kBlockTokens * kIndexerPageBlocks; // 256 tokens
+inline constexpr std::uint32_t kMainPageGroupTokens = 256; // 256-token affine group
+
+// Per 256-token group strides across all 12 QSA layers
+// Attention K + V: 12 layers * 4 pages/group * (256 * 64 * 2 heads * 2 bytes * 2 K/V) = 6,291,456
+// bytes
+inline constexpr std::size_t kAttentionKvBytesPerGroup =
+    12ULL * 4ULL * (256ULL * 64ULL * 2ULL * 2ULL * 2ULL);
+// Indexer block keys: 12 layers * 1 page/group * (128 * 64 * 2 bytes) = 196,608 bytes
+inline constexpr std::size_t kIndexerBlockKeysBytesPerGroup = 12ULL * (128ULL * 64ULL * 2ULL);
+// Total physical stride per 256-token group = 6,488,064 bytes
+inline constexpr std::size_t kPhysicalStrideBytesPerGroup =
+    kAttentionKvBytesPerGroup + kIndexerBlockKeysBytesPerGroup;
+
+// Recurrent state bytes per state slot across all recurrent modules
+// GDN conv (36 layers): 36 * (10240 * 3 * 2) = 2,211,840 bytes
+inline constexpr std::size_t kGdnConvBytesPerSlot = 36ULL * (10'240ULL * 3ULL * 2ULL);
+// GDN SSM (36 layers): 36 * (128 * 128 * 48 * 4) = 113,246,208 bytes
+inline constexpr std::size_t kGdnSsmBytesPerSlot = 36ULL * (128ULL * 128ULL * 48ULL * 4ULL);
+// PLE conv (1 layer): 10240 * 9 * 2 = 184,320 bytes
+inline constexpr std::size_t kPleConvBytesPerSlot = 10'240ULL * 9ULL * 2ULL;
+// QSA raw keys (12 layers): 12 * (128 * 4 * 2) = 12,288 bytes
+inline constexpr std::size_t kQsaRawKeysBytesPerSlot = 12ULL * (128ULL * 4ULL * 2ULL);
+// QSA raw positions (12 layers): 12 * (3 * 4 * 4) = 576 bytes
+inline constexpr std::size_t kQsaRawPositionsBytesPerSlot = 12ULL * (3ULL * 4ULL * 4ULL);
+// Total recurrent state per slot = 115,655,232 bytes
+inline constexpr std::size_t kRecurrentStateBytesPerSlot =
+    kGdnConvBytesPerSlot + kGdnSsmBytesPerSlot + kPleConvBytesPerSlot + kQsaRawKeysBytesPerSlot +
+    kQsaRawPositionsBytesPerSlot;
+
+struct FlashNextRuntimeConfig {
+    std::uint32_t max_concurrency     = 1;    // 1..8
+    std::uint32_t max_context         = 4096; // in tokens: 1..262144
+    std::uint32_t state_slot_capacity = 0;    // 0 -> default 2 * max_concurrency
+};
+
+struct FlashNextRuntimePlan {
+    FlashNextRuntimeConfig config;
+    std::uint32_t main_page_groups         = 0;
+    std::uint32_t resolved_tokens          = 0; // main_page_groups * 256
+    std::uint32_t attention_physical_pages = 0; // 4 * main_page_groups
+    std::uint32_t indexer_physical_pages   = 0; // 1 * main_page_groups
+    std::uint32_t attention_logical_pages  = 0; // ceil(max_context / 64)
+    std::uint32_t indexer_logical_pages    = 0; // ceil(max_context / 256)
+    std::uint32_t state_slots              = 0;
+    std::uint32_t maximum_blocks           = 0; // ceil(max_context / 4)
+
+    // Memory breakdown in bytes
+    std::size_t attention_kv_bytes       = 0;
+    std::size_t indexer_block_keys_bytes = 0;
+    std::size_t block_tables_bytes       = 0;
+    std::size_t recurrent_state_bytes    = 0;
+    std::size_t round_tensors_bytes      = 0;
+    std::size_t workspace_bytes          = 0;
+    std::size_t total_device_bytes       = 0;
+
+    ninfer::runtime::SequenceCapacityCurve capacity_curve;
+};
+
+[[nodiscard]] ninfer::runtime::SequenceCapacityCurve
+flash_next_capacity_curve(const FlashNextRuntimeConfig& config);
+
+[[nodiscard]] FlashNextRuntimePlan
+finalize_flash_next_runtime_plan(const FlashNextRuntimeConfig& config,
+                                 std::uint32_t selected_main_page_groups);
+
+} // namespace ninfer::targets::qwen3_8_flash_next::detail

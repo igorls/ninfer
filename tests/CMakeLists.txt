@@ -226,6 +226,11 @@ ninfer_add_test(ninfer_qwen3_8_flash_next_text_decode_test
   LIBRARIES ninfer_qwen3_8_flash_next)
 set_tests_properties(ninfer_qwen3_8_flash_next_text_decode_test
   PROPERTIES SKIP_RETURN_CODE 77)
+ninfer_add_test(ninfer_qwen3_8_flash_next_runtime_foundation_test
+  SOURCES targets/qwen3_8_flash_next/test_runtime_foundation.cpp
+  LIBRARIES ninfer_qwen3_8_flash_next)
+set_tests_properties(ninfer_qwen3_8_flash_next_runtime_foundation_test
+  PROPERTIES SKIP_RETURN_CODE 77)
 
 # Product protocol contracts.
 ninfer_add_test(ninfer_openai_schema_test
