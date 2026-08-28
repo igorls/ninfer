@@ -37,9 +37,15 @@ constexpr auto make_launchers(std::index_sequence<Offsets...>) {
 using ControlGeometry    = Bf16GemvGeometry<14336, 5120>;
 using OutputGeometry     = Bf16GemvGeometry<5120, 6144>;
 using QsaIndexerGeometry = Bf16GemvGeometry<640, 2560>;
+using PleKeyGeometry     = Bf16GemvGeometry<10240, 2560>;
+using PleValueGeometry   = Bf16GemvGeometry<2560, 2560>;
 
 constexpr auto kQsaIndexerLaunchers =
     make_launchers<QsaIndexerGeometry>(std::make_index_sequence<7>{}); // T=2..8
+constexpr auto kPleKeyLaunchers =
+    make_launchers<PleKeyGeometry>(std::make_index_sequence<7>{}); // T=2..8
+constexpr auto kPleValueLaunchers =
+    make_launchers<PleValueGeometry>(std::make_index_sequence<7>{}); // T=2..8
 constexpr auto kControlLaunchers = make_launchers<ControlGeometry>(
     std::make_index_sequence<kBf16SmallTMaxTokens - kBf16SmallTMinTokens + 1>{});
 constexpr auto kOutputLaunchers = make_launchers<OutputGeometry>(
@@ -51,6 +57,14 @@ void launch_bf16_small_t(const Tensor& x, const Weight& weight, Tensor& out, cud
     const std::size_t index = static_cast<std::size_t>(x.ne[1] - kBf16SmallTMinTokens);
     if (weight.n == QsaIndexerGeometry::kOutputRows && weight.k == QsaIndexerGeometry::kInputRows) {
         kQsaIndexerLaunchers[index](x, weight, out, stream);
+        return;
+    }
+    if (weight.n == PleKeyGeometry::kOutputRows && weight.k == PleKeyGeometry::kInputRows) {
+        kPleKeyLaunchers[index](x, weight, out, stream);
+        return;
+    }
+    if (weight.n == PleValueGeometry::kOutputRows && weight.k == PleValueGeometry::kInputRows) {
+        kPleValueLaunchers[index](x, weight, out, stream);
         return;
     }
     if (weight.n == ControlGeometry::kOutputRows && weight.k == ControlGeometry::kInputRows) {

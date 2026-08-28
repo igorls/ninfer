@@ -62,10 +62,11 @@ enum class LinearPolicy : std::uint8_t {
  * encoding and alignment do not imply arbitrary N/K support. BF16-scale FP8 registers `[N,K]` in
  * `{[14336,5120], [16384,5120], [34816,5120], [248320,5120], [5120,6144], [5120,17408]}`. F32-scale
  * FP8 registers the Flash-Next problems `{[13312,2560], [16384,2560], [2560,6144]}`. Both accept
- * every positive T. BF16_CTRL additionally registers the Flash-Next indexer `[640,2560]` for
- * T=1..8. The current NVFP4 problems register the five non-vocabulary BF16-scale FP8 geometries and
- * accept every positive T. Text and MTP packed-weight problems accept every positive column extent
- * T. Registered Vision problems accept raw-patch P in
+ * every positive T. BF16_CTRL additionally registers the Flash-Next indexer `[640,2560]`, PLE key
+ * projection `[10240,2560]`, and PLE value projection `[2560,2560]` for T=1..8. The current NVFP4
+ * problems register the five non-vocabulary BF16-scale FP8 geometries and accept every positive T.
+ * Text and MTP packed-weight problems accept every positive column extent T. Registered Vision
+ * problems accept raw-patch P in
  * `{4,8,...,131072}` or merged-token V in `[1,32768]`; a matrix column does not inherently
  * represent a text token. FP32_CTRL is unsupported.
  *

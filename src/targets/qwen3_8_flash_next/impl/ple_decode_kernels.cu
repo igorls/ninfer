@@ -1,0 +1,207 @@
+#include "targets/qwen3_8_flash_next/impl/ple_decode_kernels.h"
+
+#include "core/device.h"
+
+#include <cuda_bf16.h>
+#include <cuda_runtime.h>
+
+#include <cmath>
+#include <cstdint>
+
+namespace ninfer::targets::qwen3_8_flash_next::detail {
+
+namespace {
+
+constexpr int kStreamDims    = 2'560;
+constexpr int kTotalDims     = 10'240;
+constexpr int kStreams       = 4;
+constexpr float kInvSqrt2560 = 0.01976423537605237F; // 1.0f / sqrtf(2560.0f)
+
+__device__ __forceinline__ float warp_reduce_sum(float val) {
+#pragma unroll
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(0xFFFFFFFFU, val, offset);
+    }
+    return val;
+}
+
+__device__ __forceinline__ float block_reduce_sum_broadcast(float val, float* shared_mem) {
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    val            = warp_reduce_sum(val);
+    if (lane == 0) { shared_mem[warp] = val; }
+    __syncthreads();
+    if (warp == 0) {
+        float warp_sum = (lane < 8) ? shared_mem[lane] : 0.0F;
+        warp_sum       = warp_reduce_sum(warp_sum);
+        if (lane == 0) { shared_mem[0] = warp_sum; }
+    }
+    __syncthreads();
+    return shared_mem[0];
+}
+
+__global__ void ple_gate_norm_kernel(
+    const __nv_bfloat16* __restrict__ hidden, const __nv_bfloat16* __restrict__ projected_key,
+    const __nv_bfloat16* __restrict__ projected_value, const __nv_bfloat16* __restrict__ query_norm,
+    const __nv_bfloat16* __restrict__ key_norm, const __nv_bfloat16* __restrict__ conv_norm,
+    __nv_bfloat16* __restrict__ gated, __nv_bfloat16* __restrict__ normalized_gated, int batch) {
+    const int stream_idx = blockIdx.x;
+    const int batch_idx  = blockIdx.y;
+    const int tid        = threadIdx.x;
+
+    if (stream_idx >= kStreams || batch_idx >= batch) { return; }
+
+    const int stream_offset = stream_idx * kStreamDims;
+    const int64_t batch_hidden_offset =
+        static_cast<int64_t>(batch_idx) * kTotalDims + stream_offset;
+    const int64_t batch_key_offset   = static_cast<int64_t>(batch_idx) * kTotalDims + stream_offset;
+    const int64_t batch_val_offset   = static_cast<int64_t>(batch_idx) * kStreamDims;
+    const int64_t batch_gated_offset = static_cast<int64_t>(batch_idx) * kTotalDims + stream_offset;
+    const int64_t batch_norm_offset  = static_cast<int64_t>(batch_idx) * kTotalDims + stream_offset;
+
+    __shared__ float s_reduce[8];
+
+    // 1. Compute query and key sum of squares
+    float sq_q = 0.0F;
+    float sq_k = 0.0F;
+    for (int d = tid; d < kStreamDims; d += blockDim.x) {
+        const float q_val = __bfloat162float(hidden[batch_hidden_offset + d]);
+        const float k_val = __bfloat162float(projected_key[batch_key_offset + d]);
+        sq_q += q_val * q_val;
+        sq_k += k_val * k_val;
+    }
+    const float total_sq_q = block_reduce_sum_broadcast(sq_q, s_reduce);
+    const float total_sq_k = block_reduce_sum_broadcast(sq_k, s_reduce);
+    const float r_rms_q    = rsqrtf(total_sq_q / 2560.0F + 1.0e-6F);
+    const float r_rms_k    = rsqrtf(total_sq_k / 2560.0F + 1.0e-6F);
+
+    // 2. Compute normalized query and key dot product with explicit BF16 representation boundary
+    float dot = 0.0F;
+    for (int d = tid; d < kStreamDims; d += blockDim.x) {
+        const float q_val        = __bfloat162float(hidden[batch_hidden_offset + d]);
+        const float k_val        = __bfloat162float(projected_key[batch_key_offset + d]);
+        const float q_norm_scale = 1.0F + __bfloat162float(query_norm[stream_offset + d]);
+        const float k_norm_scale = 1.0F + __bfloat162float(key_norm[stream_offset + d]);
+        const float nq_fp32      = q_val * r_rms_q * q_norm_scale;
+        const float nk_fp32      = k_val * r_rms_k * k_norm_scale;
+        const float nq           = __bfloat162float(__float2bfloat16_rn(nq_fp32));
+        const float nk           = __bfloat162float(__float2bfloat16_rn(nk_fp32));
+        dot += nq * nk;
+    }
+    const float total_dot    = block_reduce_sum_broadcast(dot, s_reduce);
+    const float raw_gate     = total_dot * kInvSqrt2560;
+    const float sign         = (raw_gate > 0.0F) ? 1.0F : ((raw_gate < 0.0F) ? -1.0F : 0.0F);
+    const float gate         = sign * sqrtf(fmaxf(fabsf(raw_gate), 1.0e-6F));
+    const float sigmoid_gate = 1.0F / (1.0F + expf(-gate));
+
+    // 3. Compute gated value and its sum of squares (using represented BF16 gated values)
+    float sq_g = 0.0F;
+    for (int d = tid; d < kStreamDims; d += blockDim.x) {
+        const float val               = __bfloat162float(projected_value[batch_val_offset + d]);
+        const float g                 = sigmoid_gate * val;
+        const auto g_bf16             = __float2bfloat16_rn(g);
+        gated[batch_gated_offset + d] = g_bf16;
+        const float g_rep             = __bfloat162float(g_bf16);
+        sq_g += g_rep * g_rep;
+    }
+    const float total_sq_g = block_reduce_sum_broadcast(sq_g, s_reduce);
+    const float r_rms_g    = rsqrtf(total_sq_g / 2560.0F + 1.0e-6F);
+
+    // 4. Compute normalized gated value
+    for (int d = tid; d < kStreamDims; d += blockDim.x) {
+        const float g_rep           = __bfloat162float(gated[batch_gated_offset + d]);
+        const float conv_norm_scale = 1.0F + __bfloat162float(conv_norm[stream_offset + d]);
+        const float norm_g          = g_rep * r_rms_g * conv_norm_scale;
+        normalized_gated[batch_norm_offset + d] = __float2bfloat16_rn(norm_g);
+    }
+}
+
+__global__ void ple_conv_inject_kernel(
+    const __nv_bfloat16* __restrict__ gated, const __nv_bfloat16* __restrict__ normalized_gated,
+    const __nv_bfloat16* __restrict__ convolution, const int32_t* __restrict__ source_slots,
+    const int32_t* __restrict__ destination_slots, __nv_bfloat16* __restrict__ convolution_states,
+    __nv_bfloat16* __restrict__ output, int state_slots, int batch) {
+    const int channel   = blockIdx.x * blockDim.x + threadIdx.x;
+    const int batch_idx = blockIdx.y;
+
+    if (channel >= kTotalDims || batch_idx >= batch) { return; }
+
+    const int32_t src_slot = source_slots[batch_idx];
+    const int32_t dst_slot = destination_slots[batch_idx];
+
+    if (src_slot < 0 || src_slot >= state_slots || dst_slot < 0 || dst_slot >= state_slots) {
+        return;
+    }
+
+    const int64_t src_base = (static_cast<int64_t>(src_slot) * 9) * kTotalDims + channel;
+    const int64_t dst_base = (static_cast<int64_t>(dst_slot) * 9) * kTotalDims + channel;
+
+    // Read taps: 0 (t-9), 3 (t-6), 6 (t-3), plus current normalized gated
+    const float h0 = __bfloat162float(convolution_states[src_base + 0 * kTotalDims]);
+    const float h1 = __bfloat162float(convolution_states[src_base + 3 * kTotalDims]);
+    const float h2 = __bfloat162float(convolution_states[src_base + 6 * kTotalDims]);
+
+    const int64_t batch_channel = static_cast<int64_t>(batch_idx) * kTotalDims + channel;
+    const auto cur_norm_bf16    = normalized_gated[batch_channel];
+    const float h3              = __bfloat162float(cur_norm_bf16);
+
+    // Convolution weights: [10240, 4]
+    const float w0 = __bfloat162float(convolution[0 * kTotalDims + channel]);
+    const float w1 = __bfloat162float(convolution[1 * kTotalDims + channel]);
+    const float w2 = __bfloat162float(convolution[2 * kTotalDims + channel]);
+    const float w3 = __bfloat162float(convolution[3 * kTotalDims + channel]);
+
+    float conv = fmaf(h0, w0, 0.0F);
+    conv       = fmaf(h1, w1, conv);
+    conv       = fmaf(h2, w2, conv);
+    conv       = fmaf(h3, w3, conv);
+
+    // silu(conv) = conv * sigmoid(conv)
+    const float silu_conv = conv / (1.0F + expf(-conv));
+
+    // Output = gated + silu(conv)
+    const float g_val     = __bfloat162float(gated[batch_channel]);
+    output[batch_channel] = __float2bfloat16_rn(g_val + silu_conv);
+
+    // Write destination history: source[1..8] + current
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        convolution_states[dst_base + i * kTotalDims] =
+            convolution_states[src_base + (i + 1) * kTotalDims];
+    }
+    convolution_states[dst_base + 8 * kTotalDims] = cur_norm_bf16;
+}
+
+} // namespace
+
+void flash_next_ple_launch(const Tensor& hidden, const Tensor& projected_key,
+                           const Tensor& projected_value, const Tensor& query_norm,
+                           const Tensor& key_norm, const Tensor& conv_norm,
+                           const Tensor& convolution, const Tensor& source_slots,
+                           const Tensor& destination_slots, Tensor& convolution_states,
+                           Tensor& gated, Tensor& normalized_gated, Tensor& output, int state_slots,
+                           int batch, cudaStream_t stream) {
+    dim3 grid_gate(kStreams, batch);
+    ple_gate_norm_kernel<<<grid_gate, 256, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(hidden.data),
+        static_cast<const __nv_bfloat16*>(projected_key.data),
+        static_cast<const __nv_bfloat16*>(projected_value.data),
+        static_cast<const __nv_bfloat16*>(query_norm.data),
+        static_cast<const __nv_bfloat16*>(key_norm.data),
+        static_cast<const __nv_bfloat16*>(conv_norm.data), static_cast<__nv_bfloat16*>(gated.data),
+        static_cast<__nv_bfloat16*>(normalized_gated.data), batch);
+    CUDA_CHECK(cudaGetLastError());
+
+    dim3 grid_conv((kTotalDims + 255) / 256, batch);
+    ple_conv_inject_kernel<<<grid_conv, 256, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(gated.data),
+        static_cast<const __nv_bfloat16*>(normalized_gated.data),
+        static_cast<const __nv_bfloat16*>(convolution.data),
+        static_cast<const int32_t*>(source_slots.data),
+        static_cast<const int32_t*>(destination_slots.data),
+        static_cast<__nv_bfloat16*>(convolution_states.data),
+        static_cast<__nv_bfloat16*>(output.data), state_slots, batch);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+} // namespace ninfer::targets::qwen3_8_flash_next::detail
