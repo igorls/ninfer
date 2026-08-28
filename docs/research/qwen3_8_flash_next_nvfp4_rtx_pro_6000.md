@@ -269,7 +269,7 @@ Recommended implementation profile:
 | Can the architecture run on one RTX PRO 6000? | **Yes.** A community publisher reports it operating with ~88.8 GiB GPU-resident backbone plus host PLE on exactly this GPU class. |
 | Can every weight and runtime allocation fit in 96 GB VRAM? | **No**, not for the faithful unpruned model with the released formats. Even experts + smallest published PLE exceed the practical budget before the rest of the model. |
 | Is native Windows the blocker? | **No.** This checkout already has native Windows CUDA binaries and the exact card is live. Windows mmap/page-cache behavior and WDDM/TCC latency are engineering and qualification risks, not an architectural impossibility. |
-| Can current NInfer load one of these HF repositories today? | **No.** The target identity, artifact contract, QSA, MoE, PLE, and state semantics are not implemented. |
+| Can current NInfer load one of these HF repositories today? | **Partially.** The pinned source splice now converts to a native `.ninfer` artifact, and the exact target binder validates and plans all 1,566 objects. The Engine Program and execution leaves are not yet registered, so it cannot generate tokens yet. |
 | Is this mostly a quantization/converter task? | **No.** It is a new model target with several new semantic operators and a heterogeneous-memory execution path. |
 | Is a hyper-optimized native implementation credible? | **Yes**, because Blackwell has the required NVFP4 tensor path, NInfer already owns the relevant native execution machinery, and PLE access is sparse. It is still a substantial target implementation and must be benchmarked rather than projected from AI TOPS. |
 

@@ -60,5 +60,7 @@ Artifact and model references:
 - [Qwen3.6-27B model semantics](maintainer/qwen3.6-27b-model.md)
 - [Qwen3.6-27B artifact contracts, including NVFP4](maintainer/qwen3.6-27b-artifact.md)
 - [Qwen3.8-27B artifact contracts, including the NVFP4 target](maintainer/qwen3.8-27b-artifact.md)
+- [Qwen3.8-Flash-Next model semantics](maintainer/qwen3.8-flash-next-model.md)
+- [Qwen3.8-Flash-Next mixed NVFP4/FP8/INT4 artifact contract](maintainer/qwen3.8-flash-next-artifact.md)
 - [Qwen3.6-35B-A3B model semantics](maintainer/qwen3.6-35b-a3b-model.md)
 - [Qwen3.6-35B-A3B artifact contracts](maintainer/qwen3.6-35b-a3b-artifact.md)

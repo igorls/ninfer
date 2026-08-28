@@ -160,6 +160,20 @@ target_link_libraries(ninfer_qwen3_6_35b_a3b_dflash_load_plan_test PRIVATE CUDA:
 set_tests_properties(ninfer_qwen3_6_35b_a3b_dflash_load_plan_test
   PROPERTIES SKIP_RETURN_CODE 77)
 
+ninfer_add_test(ninfer_qwen3_8_flash_next_load_plan_test
+  SOURCES targets/qwen3_8_flash_next/test_load_plan.cpp
+  LIBRARIES ninfer_qwen3_8_flash_next)
+target_include_directories(ninfer_qwen3_8_flash_next_load_plan_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_8_flash_next)
+set_tests_properties(ninfer_qwen3_8_flash_next_load_plan_test
+  PROPERTIES SKIP_RETURN_CODE 77)
+ninfer_add_test(ninfer_qwen3_8_flash_next_ple_index_test
+  SOURCES targets/qwen3_8_flash_next/test_ple_index.cpp
+  LIBRARIES ninfer_qwen3_8_flash_next)
+ninfer_add_test(ninfer_qwen3_8_flash_next_ple_table_test
+  SOURCES targets/qwen3_8_flash_next/test_ple_table.cpp
+  LIBRARIES ninfer_qwen3_8_flash_next)
+
 # Product protocol contracts.
 ninfer_add_test(ninfer_openai_schema_test
   SOURCES test_openai_schema.cpp

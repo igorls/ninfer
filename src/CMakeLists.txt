@@ -46,6 +46,8 @@ add_library(ninfer_artifact STATIC
 ninfer_internal_includes(ninfer_artifact)
 target_link_libraries(ninfer_artifact PUBLIC ninfer_core)
 
+add_subdirectory(targets/qwen3_8_flash_next)
+
 # The warp-specialized SM120 kernel uses setmaxnreg to transfer registers from its
 # producer warpgroup to its consumer warpgroups. Relocatable device code makes ptxas
 # discard that contract, so this self-contained kernel is intentionally compiled in a
