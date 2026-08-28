@@ -1,0 +1,23 @@
+#pragma once
+
+#include "core/arena.h"
+#include "targets/qwen3_8_flash_next/impl/model_view.h"
+
+#include <cuda_runtime.h>
+
+#include <cstddef>
+#include <cstdint>
+
+namespace ninfer::targets::qwen3_8_flash_next::detail {
+
+[[nodiscard]] std::size_t flash_next_gdn_workspace_capacity_bytes(std::int32_t min_batch,
+                                                                  std::int32_t max_batch);
+
+// One compact decode round over B independent request slots. Convolution and FP32 DeltaNet state
+// both transition from source slots to distinct destination slots transactionally.
+void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
+                           const Tensor& source_slots, const Tensor& destination_slots,
+                           Tensor& convolution_states, Tensor& ssm_states,
+                           WorkspaceArena& workspace, Tensor& output, cudaStream_t stream);
+
+} // namespace ninfer::targets::qwen3_8_flash_next::detail

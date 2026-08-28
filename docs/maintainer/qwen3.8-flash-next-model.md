@@ -81,7 +81,8 @@ o_t = q_t^T S_t
 
 The recurrent matrix state is FP32 `[48,128,128]` per sequence and layer. The convolution state is
 the previous three `[q,k,v]` values `[10240,3]`. The output applies RMSNorm to each 128-wide value
-head, multiplies by `silu(z)` through the gated norm, flattens to 6144, and projects to 2560.
+head, multiplies by its direct ones-initialized gated-norm weight (this weight does not use the
+ordinary Text norm's unit offset), multiplies by `silu(z)`, flattens to 6144, and projects to 2560.
 Prefill may use an equivalent chunked delta-rule evaluation; decode must preserve the same state
 transition.
 
@@ -160,4 +161,3 @@ Vision is the checkpoint's 27-block 1152-wide tower: 3D patch projection, learne
 embedding, non-causal 16-head attention, GELU MLP, and a 2x2 patch merger from 4608 to Text width
 2560. Text uses interleaved three-axis MRoPE with sections `[11,11,10]`; the QSA indexer additionally
 retains full positions for cached raw keys.
-

@@ -1,5 +1,7 @@
 add_library(ninfer_qwen3_8_flash_next STATIC
   impl/expert_bank.cpp
+  impl/gdn.cpp
+  impl/gdn_kernels.cu
   impl/hyper_connection.cpp
   impl/hyper_connection_kernels.cu
   impl/load/bindings.cpp
@@ -13,5 +15,5 @@ add_library(ninfer_qwen3_8_flash_next STATIC
 ninfer_internal_includes(ninfer_qwen3_8_flash_next)
 target_include_directories(ninfer_qwen3_8_flash_next PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(ninfer_qwen3_8_flash_next PUBLIC ninfer_artifact)
+target_link_libraries(ninfer_qwen3_8_flash_next PUBLIC ninfer_artifact ninfer_ops)
 ninfer_cuda_archive(ninfer_qwen3_8_flash_next)
