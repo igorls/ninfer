@@ -1164,9 +1164,63 @@ int test_claude_parser_matrix() {
     return failures;
 }
 
+int test_partial_recovery_three_calls_truncated_third() {
+    const std::string text = "<tool_call>\n"
+                             "<function=tool_one>\n"
+                             "<parameter=path>file1.txt</parameter>\n"
+                             "</function>\n"
+                             "</tool_call>\n"
+                             "<tool_call>\n"
+                             "<function=tool_two>\n"
+                             "<parameter=path>file2.txt</parameter>\n"
+                             "</function>\n"
+                             "</tool_call>\n"
+                             "<tool_call>\n"
+                             "<function=tool_three>\n"
+                             "<parameter=path>file3";
+    int failures = 0;
+    for (const bool tolerant : {false, true}) {
+        const auto parsed = ninfer::serve::parse_qwen_tool_call_output(text, 64, {}, tolerant);
+        failures += check(parsed.is_tool_call_response, "3-call truncated tail parsed as tool response");
+        failures += check(parsed.tool_calls.size() == 2, "exactly 2 complete calls recovered from 3-call output");
+        if (parsed.tool_calls.size() == 2) {
+            failures += check(parsed.tool_calls[0].name == "tool_one", "first call name preserved");
+            failures += check(parsed.tool_calls[1].name == "tool_two", "second call name preserved");
+        }
+    }
+    return failures;
+}
+
+int test_partial_recovery_malformed_second_block_halts() {
+    const std::string text = "<tool_call>\n"
+                             "<function=valid_tool>\n"
+                             "<parameter=status>ok</parameter>\n"
+                             "</function>\n"
+                             "</tool_call>\n"
+                             "<tool_call>\n"
+                             "<function=bad tool with spaces>\n"
+                             "</function>\n"
+                             "</tool_call>\n"
+                             "<tool_call>\n"
+                             "<function=third_valid_tool>\n"
+                             "<parameter=status>ok</parameter>\n"
+                             "</function>\n"
+                             "</tool_call>";
+    const auto parsed = ninfer::serve::parse_qwen_tool_call_output(text, 64, {}, false);
+    int failures = 0;
+    failures += check(parsed.is_tool_call_response, "parsed as tool response up to malformed boundary");
+    failures += check(parsed.tool_calls.size() == 1, "halts at malformed block, does not skip to third call");
+    if (parsed.tool_calls.size() == 1) {
+        failures += check(parsed.tool_calls[0].name == "valid_tool", "only first valid tool retained");
+    }
+    return failures;
+}
+
 int main() {
     int failures = 0;
     failures += test_claude_parser_matrix();
+    failures += test_partial_recovery_three_calls_truncated_third();
+    failures += test_partial_recovery_malformed_second_block_halts();
     failures += test_stream_terminal_consistency();
     failures += test_single_call();
     failures += test_multiple_calls_and_json_values();

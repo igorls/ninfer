@@ -464,7 +464,7 @@ ParsedToolCallOutput parse_qwen_tool_call_output(const std::string& text,
         std::size_t tag_end = 0;
         if (!is_tag_open_match(text, pos, kToolOpenPrefix, tag_end)) {
             const std::size_t next = find_tag_open(text, pos, kToolOpenPrefix, tag_end);
-            if (next == std::string::npos) {
+            if (next == std::string_view::npos) {
                 if (!out.tool_calls.empty()) { break; }
                 return fallback(text);
             }

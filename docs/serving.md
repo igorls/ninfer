@@ -85,8 +85,8 @@ The endpoint supports:
 - non-streaming responses and server-sent event streams;
 - `stream_options.include_usage`;
 - function tools, tool choices, assistant tool-call history, and tool-result messages;
-- the top-level `reasoning_effort` field;
-- the `enable_thinking` extension;
+- top-level `reasoning_effort` and `chat_template_kwargs.reasoning_effort`;
+- top-level `enable_thinking` and `chat_template_kwargs.enable_thinking`;
 - `chat_template_kwargs.preserve_thinking` and the top-level `preserve_thinking` alias.
 
 The request `model` must equal the public model ID: the artifact `identity.model_id` by default, or
@@ -125,11 +125,14 @@ post-close model token, preparation is rejected with HTTP 400 code
 `thinking_budget_capacity_insufficient` rather than partially inserting control. The server does
 not promise that the model will emit nonempty content or a tool call after the marker.
 
-For Chat Completions, `reasoning_effort: "none"` disables thinking. `low`, `medium`, and `xhigh`
-select the corresponding template effort when available. The other OpenAI protocol values
-`minimal`, `high`, and `max` are parsed but rejected when the loaded template does not expose them.
-`enable_thinking` controls the same new-turn thinking switch; a contradictory combination with
-`reasoning_effort` returns `conflicting_template_option`.
+For Chat Completions, top-level `reasoning_effort` and the vLLM-dialect
+`chat_template_kwargs.reasoning_effort` name the same option and must agree when both are present.
+`none` disables thinking. `low`, `medium`, and `xhigh` select the corresponding template effort when
+available. The other OpenAI protocol values `minimal`, `high`, and `max` are parsed but rejected when
+the loaded template does not expose them.
+Top-level `enable_thinking` and the vLLM-dialect `chat_template_kwargs.enable_thinking` control the
+same new-turn thinking switch. The two spellings must agree when both are present; a contradictory
+combination with `reasoning_effort` returns `conflicting_template_option`.
 
 `preserve_thinking` controls whether reasoning from closed assistant turns remains in later
 prompts. It defaults to the server setting, which is off unless `--preserve-thinking` is used. If
@@ -238,6 +241,9 @@ wire response contains typed `output` Items.
 | `top_p` | finite number in `[0,1]` |
 | `metadata` | at most 16 string pairs; keys at most 64 characters and values at most 512 |
 | `reasoning.effort` | `none` disables thinking; `low`, `medium`, or `xhigh` selects an effort exposed by the loaded chat template; `minimal`, `high`, and `max` return `reasoning_effort_not_supported` for the registered templates |
+| `chat_template_kwargs.reasoning_effort` | vLLM-dialect alias for `reasoning.effort`; conflicting values are rejected |
+| `enable_thinking` | optional boolean controlling the new-turn thinking switch |
+| `chat_template_kwargs.enable_thinking` | vLLM-dialect alias for the same option; conflicting values with top-level `enable_thinking` are rejected |
 | `chat_template_kwargs.preserve_thinking` | optional boolean controlling whether closed-turn reasoning remains in reconstructed prompts |
 | `preserve_thinking` | top-level alias for the same option; conflicting values are rejected |
 | `text.format` | omitted or `{"type":"text"}` only |

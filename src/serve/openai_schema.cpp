@@ -478,6 +478,76 @@ std::string sse_event(const Json& payload) { return "data: " + payload.dump() + 
 
 } // namespace
 
+std::optional<bool> parse_openai_template_enable_thinking(const Json& body) {
+    if (!body.contains("chat_template_kwargs")) { return std::nullopt; }
+    const Json& kwargs = body.at("chat_template_kwargs");
+    if (!kwargs.is_object()) {
+        bad_request("chat_template_kwargs must be an object", "chat_template_kwargs");
+    }
+    if (!kwargs.contains("enable_thinking") || kwargs.at("enable_thinking").is_null()) {
+        return std::nullopt;
+    }
+    if (!kwargs.at("enable_thinking").is_boolean()) {
+        bad_request("chat_template_kwargs.enable_thinking must be a boolean or null",
+                    "chat_template_kwargs");
+    }
+    return kwargs.at("enable_thinking").get<bool>();
+}
+
+void apply_openai_enable_thinking(const Json& body, GenerationRequest& out) {
+    std::optional<bool> top_level;
+    if (body.contains("enable_thinking") && !body.at("enable_thinking").is_null()) {
+        top_level = get_bool(body, "enable_thinking", false);
+    }
+    const std::optional<bool> template_value = parse_openai_template_enable_thinking(body);
+    if (top_level && template_value && *top_level != *template_value) {
+        bad_request("conflicting enable_thinking values", "enable_thinking",
+                    "conflicting_template_option");
+    }
+    if (template_value) {
+        out.enable_thinking = *template_value;
+    } else if (top_level) {
+        out.enable_thinking = *top_level;
+    }
+}
+
+std::optional<RequestedReasoningEffort> parse_openai_template_reasoning_effort(const Json& body) {
+    if (!body.contains("chat_template_kwargs")) { return std::nullopt; }
+    const Json& kwargs = body.at("chat_template_kwargs");
+    if (!kwargs.is_object()) {
+        bad_request("chat_template_kwargs must be an object", "chat_template_kwargs");
+    }
+    if (!kwargs.contains("reasoning_effort") || kwargs.at("reasoning_effort").is_null()) {
+        return std::nullopt;
+    }
+    if (!kwargs.at("reasoning_effort").is_string()) {
+        bad_request("chat_template_kwargs.reasoning_effort must be a string or null",
+                    "chat_template_kwargs");
+    }
+    const std::string value = kwargs.at("reasoning_effort").get<std::string>();
+    const std::optional<RequestedReasoningEffort> effort = parse_requested_reasoning_effort(value);
+    if (!effort) {
+        bad_request("chat_template_kwargs.reasoning_effort must be one of none, minimal, low, "
+                    "medium, high, xhigh, or max",
+                    "chat_template_kwargs");
+    }
+    return effort;
+}
+
+void apply_openai_template_reasoning_effort(const Json& body, GenerationRequest& out) {
+    const std::optional<RequestedReasoningEffort> template_value =
+        parse_openai_template_reasoning_effort(body);
+    if (!template_value) { return; }
+    if (out.reasoning_effort && *out.reasoning_effort != *template_value) {
+        bad_request("conflicting reasoning_effort values", out.reasoning_effort_param,
+                    "conflicting_template_option");
+    }
+    if (!out.reasoning_effort) {
+        out.reasoning_effort       = *template_value;
+        out.reasoning_effort_param = "chat_template_kwargs";
+    }
+}
+
 std::optional<bool> parse_openai_preserve_thinking(const Json& body) {
     std::optional<bool> top_level;
     if (body.contains("preserve_thinking") && !body.at("preserve_thinking").is_null()) {
@@ -494,7 +564,8 @@ std::optional<bool> parse_openai_preserve_thinking(const Json& body) {
             bad_request("chat_template_kwargs must be an object", "chat_template_kwargs");
         }
         for (auto it = kwargs.begin(); it != kwargs.end(); ++it) {
-            if (it.key() != "preserve_thinking" && !it.value().is_null()) {
+            if (it.key() != "preserve_thinking" && it.key() != "enable_thinking" &&
+                it.key() != "reasoning_effort" && !it.value().is_null()) {
                 bad_request("chat_template_kwargs." + it.key() + " is not supported",
                             "chat_template_kwargs", "chat_template_option_not_supported");
             }
@@ -552,11 +623,10 @@ GenerationRequest parse_chat_completion_request(const Json& body, const RequestL
     if (body.contains("stream_options") && body.at("stream_options").is_object()) {
         out.include_usage = get_bool(body.at("stream_options"), "include_usage", false);
     }
-    if (body.contains("enable_thinking") && !body.at("enable_thinking").is_null()) {
-        out.enable_thinking = get_bool(body, "enable_thinking", false);
-    }
     parse_openai_reasoning_effort(body, out);
     out.preserve_thinking = parse_openai_preserve_thinking(body);
+    apply_openai_template_reasoning_effort(body, out);
+    apply_openai_enable_thinking(body, out);
 
     std::optional<int> max_tokens = get_int(body, "max_completion_tokens");
     if (!max_tokens) { max_tokens = get_int(body, "max_tokens"); }

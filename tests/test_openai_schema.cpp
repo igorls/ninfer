@@ -13,7 +13,9 @@
 #include <cstddef>
 #include <functional>
 #include <iostream>
+#include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 
 namespace {
@@ -180,6 +182,221 @@ int test_preserve_thinking_options() {
     failures +=
         check(throws_api([&] { (void)parse_chat_completion_request(unknown, default_limits()); }),
               "unknown non-null chat template option accepted");
+    return failures;
+}
+
+int test_enable_thinking_template_kwarg() {
+    const Json base = {
+        {"model", "m"},
+        {"messages", Json::array({Json{{"role", "user"}, {"content", "hello"}}})},
+    };
+    int failures = 0;
+
+    Json kwargs                    = base;
+    kwargs["chat_template_kwargs"] =
+        Json{{"enable_thinking", false}, {"preserve_thinking", true}};
+    const GenerationRequest request = parse_chat_completion_request(kwargs, default_limits());
+    failures += check(request.enable_thinking == false && request.preserve_thinking == true,
+                      "chat_template_kwargs enable_thinking was not parsed");
+    const ResolvedPromptSemantics semantics =
+        resolve_prompt_semantics(request, default_server(), effort_capabilities());
+    failures += check(!semantics.enable_thinking && !semantics.reasoning_effort &&
+                          semantics.preserve_thinking,
+                      "chat_template_kwargs enable_thinking false did not disable thinking");
+
+    Json matching               = kwargs;
+    matching["enable_thinking"] = false;
+    failures += check(
+        parse_chat_completion_request(matching, default_limits()).enable_thinking == false,
+        "matching enable_thinking spellings were rejected");
+
+    Json conflict               = kwargs;
+    conflict["enable_thinking"] = true;
+    failures += check(api_code([&] {
+                          (void)parse_chat_completion_request(conflict, default_limits());
+                      }) == "conflicting_template_option",
+                      "conflicting enable_thinking spellings were accepted");
+
+    Json bad                    = base;
+    bad["chat_template_kwargs"] = Json{{"enable_thinking", "no"}};
+    failures += check(
+        throws_api([&] { (void)parse_chat_completion_request(bad, default_limits()); }),
+        "non-boolean chat_template_kwargs.enable_thinking was accepted");
+
+    Json misspelled                    = base;
+    misspelled["chat_template_kwargs"] = Json{{"enable_thinkng", false}};
+    failures += check(api_code([&] {
+                          (void)parse_chat_completion_request(misspelled, default_limits());
+                      }) == "chat_template_option_not_supported",
+                      "misspelled enable_thinking was not rejected");
+
+    Json effort                    = base;
+    effort["chat_template_kwargs"] = Json{{"reasoning_effort", "none"}};
+    const GenerationRequest effort_request =
+        parse_chat_completion_request(effort, default_limits());
+    const ResolvedPromptSemantics effort_semantics =
+        resolve_prompt_semantics(effort_request, default_server(), effort_capabilities());
+    failures += check(effort_request.reasoning_effort == RequestedReasoningEffort::None &&
+                          !effort_semantics.enable_thinking && !effort_semantics.reasoning_effort,
+                      "chat_template_kwargs reasoning_effort none did not disable thinking");
+
+    Json effort_matching               = effort;
+    effort_matching["reasoning_effort"] = "none";
+    failures += check(parse_chat_completion_request(effort_matching, default_limits())
+                              .reasoning_effort == RequestedReasoningEffort::None,
+                      "matching reasoning_effort spellings were rejected");
+
+    Json effort_conflict               = effort;
+    effort_conflict["reasoning_effort"] = "low";
+    failures += check(api_code([&] {
+                          (void)parse_chat_completion_request(effort_conflict, default_limits());
+                      }) == "conflicting_template_option",
+                      "conflicting reasoning_effort spellings were accepted");
+
+    Json bad_effort                    = base;
+    bad_effort["chat_template_kwargs"] = Json{{"reasoning_effort", 1}};
+    failures += check(
+        throws_api([&] { (void)parse_chat_completion_request(bad_effort, default_limits()); }),
+        "non-string chat_template_kwargs.reasoning_effort was accepted");
+    return failures;
+}
+
+int test_chat_template_compatibility_matrix() {
+    const Json base = {
+        {"model", "m"},
+        {"messages", Json::array({Json{{"role", "user"}, {"content", "hello"}}})},
+    };
+    struct EffortCase {
+        const char* wire;
+        RequestedReasoningEffort requested;
+        std::optional<ninfer::ReasoningEffort> resolved;
+        bool supported;
+    };
+    const std::array efforts{
+        EffortCase{"none", RequestedReasoningEffort::None, std::nullopt, true},
+        EffortCase{"minimal", RequestedReasoningEffort::Minimal, std::nullopt, false},
+        EffortCase{"low", RequestedReasoningEffort::Low, ninfer::ReasoningEffort::Low, true},
+        EffortCase{"medium", RequestedReasoningEffort::Medium, ninfer::ReasoningEffort::Medium,
+                   true},
+        EffortCase{"high", RequestedReasoningEffort::High, std::nullopt, false},
+        EffortCase{"xhigh", RequestedReasoningEffort::XHigh, ninfer::ReasoningEffort::XHigh, true},
+        EffortCase{"max", RequestedReasoningEffort::Max, std::nullopt, false},
+    };
+    int failures = 0;
+
+    for (const EffortCase& effort : efforts) {
+        Json top                 = base;
+        top["reasoning_effort"] = effort.wire;
+        Json nested                    = base;
+        nested["chat_template_kwargs"] = Json{{"reasoning_effort", effort.wire}};
+        Json both                         = top;
+        both["chat_template_kwargs"]      = Json{{"reasoning_effort", effort.wire}};
+        const std::array<std::pair<const char*, Json>, 3> variants{
+            std::pair{"top", top}, std::pair{"nested", nested}, std::pair{"both", both}};
+        for (const auto& [placement, body] : variants) {
+            const GenerationRequest request =
+                parse_chat_completion_request(body, default_limits());
+            const std::string label = std::string(placement) + ' ' + effort.wire;
+            failures += check(request.reasoning_effort == effort.requested,
+                              label + " reasoning effort was not parsed");
+            if (effort.supported) {
+                const ResolvedPromptSemantics semantics =
+                    resolve_prompt_semantics(request, default_server(), effort_capabilities());
+                failures += check(semantics.enable_thinking ==
+                                          (effort.requested != RequestedReasoningEffort::None) &&
+                                      semantics.reasoning_effort == effort.resolved,
+                                  label + " resolved semantics changed");
+            } else {
+                failures += check(api_code([&] {
+                                      (void)resolve_prompt_semantics(
+                                          request, default_server(), effort_capabilities());
+                                  }) == "reasoning_effort_not_supported",
+                                  label + " unsupported effort was accepted");
+            }
+        }
+    }
+
+    for (const bool enable : {false, true}) {
+        for (const bool preserve : {false, true}) {
+            const char* effort = enable ? "low" : "none";
+            Json top                 = base;
+            top["enable_thinking"]   = enable;
+            top["reasoning_effort"]  = effort;
+            top["preserve_thinking"] = preserve;
+            Json nested                    = base;
+            nested["chat_template_kwargs"] = Json{{"enable_thinking", enable},
+                                                    {"reasoning_effort", effort},
+                                                    {"preserve_thinking", preserve}};
+            Json both                         = top;
+            both["chat_template_kwargs"]      = nested["chat_template_kwargs"];
+            const std::array<std::pair<const char*, Json>, 3> variants{
+                std::pair{"top", top}, std::pair{"nested", nested}, std::pair{"both", both}};
+            for (const auto& [placement, body] : variants) {
+                const ResolvedPromptSemantics semantics = resolve_prompt_semantics(
+                    parse_chat_completion_request(body, default_limits()), default_server(),
+                    effort_capabilities());
+                const std::string label = std::string(placement) + " enable=" +
+                                          (enable ? "true" : "false") + " preserve=" +
+                                          (preserve ? "true" : "false");
+                failures += check(semantics.enable_thinking == enable &&
+                                      semantics.preserve_thinking == preserve &&
+                                      semantics.reasoning_effort ==
+                                          (enable ? std::optional{ninfer::ReasoningEffort::Low}
+                                                  : std::nullopt),
+                                  label + " combined semantics changed");
+            }
+        }
+    }
+
+    Json enable_conflict                    = base;
+    enable_conflict["enable_thinking"]      = false;
+    enable_conflict["chat_template_kwargs"] = Json{{"enable_thinking", true}};
+    failures += check(api_code([&] {
+                          (void)parse_chat_completion_request(enable_conflict, default_limits());
+                      }) == "conflicting_template_option",
+                      "conflicting enable_thinking values were accepted");
+
+    Json effort_conflict                    = base;
+    effort_conflict["reasoning_effort"]     = "none";
+    effort_conflict["chat_template_kwargs"] = Json{{"reasoning_effort", "low"}};
+    failures += check(api_code([&] {
+                          (void)parse_chat_completion_request(effort_conflict, default_limits());
+                      }) == "conflicting_template_option",
+                      "conflicting reasoning_effort values were accepted");
+
+    Json preserve_conflict                    = base;
+    preserve_conflict["preserve_thinking"]    = false;
+    preserve_conflict["chat_template_kwargs"] = Json{{"preserve_thinking", true}};
+    failures += check(api_code([&] {
+                          (void)parse_chat_completion_request(preserve_conflict, default_limits());
+                      }) == "conflicting_template_option",
+                      "conflicting preserve_thinking values were accepted");
+
+    Json nulls                    = base;
+    nulls["enable_thinking"]      = nullptr;
+    nulls["reasoning_effort"]     = nullptr;
+    nulls["preserve_thinking"]    = nullptr;
+    nulls["chat_template_kwargs"] = Json{{"enable_thinking", nullptr},
+                                          {"reasoning_effort", nullptr},
+                                          {"preserve_thinking", nullptr}};
+    const GenerationRequest null_request =
+        parse_chat_completion_request(nulls, default_limits());
+    failures += check(!null_request.enable_thinking && !null_request.reasoning_effort &&
+                          !null_request.preserve_thinking,
+                      "null template options did not remain omitted");
+
+    for (const Json& invalid : {Json(true), Json(1), Json::object()}) {
+        Json bad                    = base;
+        bad["chat_template_kwargs"] = Json{{"reasoning_effort", invalid}};
+        failures += check(
+            throws_api([&] { (void)parse_chat_completion_request(bad, default_limits()); }),
+            "invalid nested reasoning_effort type was accepted");
+    }
+    Json invalid_wire                    = base;
+    invalid_wire["chat_template_kwargs"] = Json{{"reasoning_effort", "ultra"}};
+    failures += check(
+        throws_api([&] { (void)parse_chat_completion_request(invalid_wire, default_limits()); }),
+        "unknown nested reasoning_effort was accepted");
     return failures;
 }
 
@@ -747,6 +964,8 @@ int main() {
     int failures = 0;
     failures += test_parse_string_content();
     failures += test_preserve_thinking_options();
+    failures += test_enable_thinking_template_kwarg();
+    failures += test_chat_template_compatibility_matrix();
     failures += test_reasoning_effort();
     failures += test_parse_parts_and_flatten();
     failures += test_instruction_roles_preserved();
