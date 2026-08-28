@@ -211,6 +211,108 @@ int test_ledger_cpu() {
     return 0;
 }
 
+int test_ple_boundary_lifecycle_cpu() {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency     = 2,
+        .max_context         = 512,
+        .state_slot_capacity = 4,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+
+    FlashNextLaneLedger ledger(plan);
+    PleIndexMetadata ple_meta{};
+    ple_meta.multipliers = {1, 2, 3};
+    ple_meta.head_offsets.fill(0);
+    ple_meta.head_vocab_sizes.fill(100);
+
+    // 1. Initial allocation: exact default history (248044, 248044)
+    auto lane = ledger.allocate_lane();
+    const auto& hist0 = ledger.lane_history(lane);
+    if (hist0.previous_token() != kPleBoundaryTokenId ||
+        hist0.second_previous_token() != kPleBoundaryTokenId) {
+        std::cerr << "Initial lane history not seeded with kPleBoundaryTokenId (248044)\n";
+        return 1;
+    }
+
+    // 2. Abort unchanged
+    std::vector<LaneStepRequest> req0 = {
+        {.handle = lane, .token_id = 1234, .token_index = 0, .mrope_positions = {0, 0, 0}},
+    };
+    auto prep0 = ledger.begin_round(req0, ple_meta);
+    ledger.abort_round(prep0.transaction_id);
+    const auto& hist_after_abort = ledger.lane_history(lane);
+    if (hist_after_abort.previous_token() != kPleBoundaryTokenId ||
+        hist_after_abort.second_previous_token() != kPleBoundaryTokenId) {
+        std::cerr << "Lane history changed after abort_round\n";
+        return 1;
+    }
+
+    // 3. Commit token 500 -> (500, 248044)
+    FlashNextRuntimeAllocation dummy_alloc(plan);
+    std::vector<LaneCommitDecision> accept = {{.accept = true}};
+    prep0 = ledger.begin_round(req0, ple_meta);
+    ledger.commit_round(prep0.transaction_id, accept, dummy_alloc, nullptr);
+    const auto& hist1 = ledger.lane_history(lane);
+    if (hist1.previous_token() != 1234 || hist1.second_previous_token() != kPleBoundaryTokenId) {
+        std::cerr << "Lane history mismatch after first commit\n";
+        return 1;
+    }
+
+    // 4. Token 248046: ordinary advance (not reset) -> (248046, 1234)
+    std::vector<LaneStepRequest> req1 = {
+        {.handle = lane, .token_id = 248'046, .token_index = 1, .mrope_positions = {1, 1, 1}},
+    };
+    auto prep1 = ledger.begin_round(req1, ple_meta);
+    ledger.commit_round(prep1.transaction_id, accept, dummy_alloc, nullptr);
+    const auto& hist2 = ledger.lane_history(lane);
+    if (hist2.previous_token() != 248'046 || hist2.second_previous_token() != 1234) {
+        std::cerr << "Token 248046 did not advance history normally\n";
+        return 1;
+    }
+
+    // 5. Token 248044: boundary reset -> (248044, 248044)
+    std::vector<LaneStepRequest> req2 = {
+        {.handle = lane, .token_id = 248'044, .token_index = 2, .mrope_positions = {2, 2, 2}},
+    };
+    auto prep2 = ledger.begin_round(req2, ple_meta);
+    ledger.commit_round(prep2.transaction_id, accept, dummy_alloc, nullptr);
+    const auto& hist3 = ledger.lane_history(lane);
+    if (hist3.previous_token() != kPleBoundaryTokenId ||
+        hist3.second_previous_token() != kPleBoundaryTokenId) {
+        std::cerr << "Token 248044 did not reset boundary history\n";
+        return 1;
+    }
+
+    // 6. Next token 777 after reset -> (777, 248044)
+    std::vector<LaneStepRequest> req3 = {
+        {.handle = lane, .token_id = 777, .token_index = 3, .mrope_positions = {3, 3, 3}},
+    };
+    auto prep3 = ledger.begin_round(req3, ple_meta);
+    ledger.commit_round(prep3.transaction_id, accept, dummy_alloc, nullptr);
+    const auto& hist4 = ledger.lane_history(lane);
+    if (hist4.previous_token() != 777 || hist4.second_previous_token() != kPleBoundaryTokenId) {
+        std::cerr << "Token after boundary reset mismatch\n";
+        return 1;
+    }
+
+    // 7. Release and reallocate reseed -> (248044, 248044)
+    ledger.release_lane(lane);
+    auto reallocated_lane = ledger.allocate_lane();
+    const auto& hist_realloc = ledger.lane_history(reallocated_lane);
+    if (hist_realloc.previous_token() != kPleBoundaryTokenId ||
+        hist_realloc.second_previous_token() != kPleBoundaryTokenId) {
+        std::cerr << "Reallocated lane history not reseeded with kPleBoundaryTokenId\n";
+        return 1;
+    }
+    ledger.release_lane(reallocated_lane);
+
+    std::cout << "PASS: test_ple_boundary_lifecycle_cpu\n";
+    return 0;
+}
+
 int test_cuda_ledger_and_executor(ninfer::DeviceContext& device) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
 
@@ -371,6 +473,7 @@ int test_cuda_ledger_and_executor(ninfer::DeviceContext& device) {
 
 int main() {
     if (test_ledger_cpu() != 0) return 1;
+    if (test_ple_boundary_lifecycle_cpu() != 0) return 1;
 
     int device_count              = 0;
     const cudaError_t count_error = cudaGetDeviceCount(&device_count);

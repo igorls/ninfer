@@ -54,8 +54,7 @@ private:
 class FlashNextTextExecutor {
 public:
     FlashNextTextExecutor(const TextModelView& model, PleIndexMetadata ple_metadata,
-                          DeviceContext& device, FlashNextRuntimeAllocation& allocation,
-                          std::int64_t eos_token = 151643);
+                          DeviceContext& device, FlashNextRuntimeAllocation& allocation);
 
     ~FlashNextTextExecutor() = default;
 
@@ -68,6 +67,9 @@ public:
     void release_lane(LaneHandle handle);
 
     [[nodiscard]] std::int32_t committed_frontier(LaneHandle handle) const;
+    [[nodiscard]] const PleTokenHistory& lane_history(LaneHandle handle) const {
+        return ledger_.lane_history(handle);
+    }
     [[nodiscard]] std::size_t active_lanes_count() const noexcept;
 
     [[nodiscard]] std::size_t available_physical_groups() const noexcept {

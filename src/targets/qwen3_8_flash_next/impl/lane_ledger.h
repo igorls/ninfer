@@ -54,7 +54,7 @@ struct LaneCommitDecision {
 
 class FlashNextLaneLedger {
 public:
-    explicit FlashNextLaneLedger(const FlashNextRuntimePlan& plan, std::int64_t eos_token = 151643);
+    explicit FlashNextLaneLedger(const FlashNextRuntimePlan& plan);
 
     ~FlashNextLaneLedger() = default;
 
@@ -67,6 +67,7 @@ public:
     void release_lane(LaneHandle handle);
 
     [[nodiscard]] std::int32_t committed_frontier(LaneHandle handle) const;
+    [[nodiscard]] const PleTokenHistory& lane_history(LaneHandle handle) const;
     [[nodiscard]] std::size_t active_lanes_count() const noexcept;
 
     [[nodiscard]] std::size_t available_physical_groups() const noexcept {
@@ -131,13 +132,10 @@ private:
         LaneState state                 = LaneState::Free;
         std::uint64_t epoch             = 0;
         std::int32_t committed_frontier = 0;
-        PleTokenHistory history;
-
-        explicit LaneInfo(std::int64_t eos_token) : history(eos_token) {}
+        PleTokenHistory history{};
     };
 
     FlashNextRuntimePlan plan_;
-    std::int64_t eos_token_;
 
     std::vector<LaneInfo> lanes_;
     std::vector<std::vector<std::uint32_t>> lane_physical_groups_;

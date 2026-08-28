@@ -7,12 +7,11 @@
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
-FlashNextLaneLedger::FlashNextLaneLedger(const FlashNextRuntimePlan& plan, std::int64_t eos_token)
-    : plan_(plan), eos_token_(eos_token) {
+FlashNextLaneLedger::FlashNextLaneLedger(const FlashNextRuntimePlan& plan)
+    : plan_(plan) {
     const std::uint32_t concurrency = plan_.config.max_concurrency;
 
-    lanes_.reserve(concurrency);
-    for (std::uint32_t i = 0; i < concurrency; ++i) { lanes_.emplace_back(eos_token_); }
+    lanes_.resize(concurrency);
     lane_physical_groups_.resize(concurrency);
     previous_group_counts_.resize(concurrency, 0);
 
@@ -37,7 +36,7 @@ LaneHandle FlashNextLaneLedger::allocate_lane(const void* owner) {
             lanes_[i].state = LaneState::Active;
             lanes_[i].epoch += 1;
             lanes_[i].committed_frontier = 0;
-            lanes_[i].history            = PleTokenHistory(eos_token_);
+            lanes_[i].history            = PleTokenHistory{};
             lane_physical_groups_[i].clear();
             previous_group_counts_[i] = 0;
 
@@ -59,6 +58,7 @@ void FlashNextLaneLedger::release_lane(LaneHandle handle) {
     lanes_[lane].state = LaneState::Free;
     lanes_[lane].epoch += 1;
     lanes_[lane].committed_frontier = 0;
+    lanes_[lane].history            = PleTokenHistory{};
 
     // Block table indexing: lane * logical_pages + page
     for (std::uint32_t p = 0; p < plan_.attention_logical_pages; ++p) {
@@ -74,6 +74,11 @@ void FlashNextLaneLedger::release_lane(LaneHandle handle) {
 std::int32_t FlashNextLaneLedger::committed_frontier(LaneHandle handle) const {
     validate_handle(handle, LaneState::Active);
     return lanes_[handle.lane_index()].committed_frontier;
+}
+
+const PleTokenHistory& FlashNextLaneLedger::lane_history(LaneHandle handle) const {
+    validate_handle(handle, LaneState::Active);
+    return lanes_[handle.lane_index()].history;
 }
 
 std::size_t FlashNextLaneLedger::active_lanes_count() const noexcept {

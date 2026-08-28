@@ -104,7 +104,7 @@ int test_ple_metadata_observable_behavior() {
     }
 
     // Verify index generation for token
-    PleTokenHistory history(151643);
+    PleTokenHistory history;
     const auto indices0 = ple_indices(kPleIndexMetadata, history, 42);
     for (std::size_t i = 0; i < 16; ++i) {
         const auto offset = kPleIndexMetadata.head_offsets[i];

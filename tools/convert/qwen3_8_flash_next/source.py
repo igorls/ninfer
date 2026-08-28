@@ -204,6 +204,8 @@ def _validate_config(path: Path) -> None:
         "split_ngram_parts": 128,
         "ple_embed_dim": 2560,
         "vocab_size": 248_320,
+        "bos_token_id": 248_044,
+        "eos_token_id": 248_044,
     }
     if config.get("model_type") != "qwen4_exp":
         raise SourceError("mixed config model_type is not qwen4_exp")

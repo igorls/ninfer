@@ -29,9 +29,11 @@ inline constexpr PleIndexMetadata kPleIndexMetadata{
     .head_vocab_sizes = kPleHeadVocabSizes,
 };
 
+inline constexpr std::int64_t kPleBoundaryTokenId = 248'044;
+
 class PleTokenHistory {
 public:
-    explicit PleTokenHistory(std::int64_t eos_token) noexcept;
+    PleTokenHistory() noexcept;
 
     void commit(std::int64_t token) noexcept;
 
@@ -40,7 +42,6 @@ public:
     std::int64_t second_previous_token() const noexcept { return second_previous_; }
 
 private:
-    std::int64_t eos_token_;
     std::int64_t previous_;
     std::int64_t second_previous_;
 };

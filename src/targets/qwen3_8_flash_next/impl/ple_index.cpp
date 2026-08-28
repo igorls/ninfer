@@ -21,13 +21,13 @@ std::int64_t positive_remainder(std::uint64_t bits, std::int64_t divisor) {
 
 } // namespace
 
-PleTokenHistory::PleTokenHistory(std::int64_t eos_token) noexcept
-    : eos_token_(eos_token), previous_(eos_token), second_previous_(eos_token) {}
+PleTokenHistory::PleTokenHistory() noexcept
+    : previous_(kPleBoundaryTokenId), second_previous_(kPleBoundaryTokenId) {}
 
 void PleTokenHistory::commit(std::int64_t token) noexcept {
-    if (token == eos_token_) {
-        previous_        = eos_token_;
-        second_previous_ = eos_token_;
+    if (token == kPleBoundaryTokenId) {
+        previous_        = kPleBoundaryTokenId;
+        second_previous_ = kPleBoundaryTokenId;
         return;
     }
     second_previous_ = previous_;

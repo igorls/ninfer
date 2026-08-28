@@ -84,11 +84,10 @@ void PendingRound::abort() noexcept {
 
 FlashNextTextExecutor::FlashNextTextExecutor(const TextModelView& model,
                                              PleIndexMetadata ple_metadata, DeviceContext& device,
-                                             FlashNextRuntimeAllocation& allocation,
-                                             std::int64_t eos_token)
+                                             FlashNextRuntimeAllocation& allocation)
     : model_(model), ple_metadata_(ple_metadata), device_(device), alloc_(allocation),
       ple_pipeline_(model.ple.table, device, allocation.plan().config.max_concurrency),
-      ledger_(allocation.plan(), eos_token) {
+      ledger_(allocation.plan()) {
     const auto& plan                = alloc_.plan();
     const std::uint32_t concurrency = plan.config.max_concurrency;
 

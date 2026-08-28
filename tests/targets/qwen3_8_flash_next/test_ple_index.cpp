@@ -35,7 +35,12 @@ int main() {
                                      269'724'462, 294'809'720, 302'278'574},
     };
 
-    PleTokenHistory history(248'044);
+    PleTokenHistory history;
+    if (history.previous_token() != 248'044 || history.second_previous_token() != 248'044) {
+        std::cerr << "Default PleTokenHistory not seeded with kPleBoundaryTokenId\n";
+        return 1;
+    }
+
     for (std::size_t index = 0; index < tokens.size(); ++index) {
         const auto actual = ple_indices(metadata, history, tokens[index]);
         if (actual != expected[index]) {
@@ -48,5 +53,20 @@ int main() {
         std::cerr << "PLE EOS-segment history was not reset\n";
         return 1;
     }
+
+    // Test token 248046 is ordinary advance (not boundary reset)
+    history.commit(248'046);
+    if (history.previous_token() != 248'046 || history.second_previous_token() != 99) {
+        std::cerr << "Token 248046 did not advance history normally\n";
+        return 1;
+    }
+
+    // Test token 248044 resets boundary
+    history.commit(248'044);
+    if (history.previous_token() != 248'044 || history.second_previous_token() != 248'044) {
+        std::cerr << "Token 248044 did not reset boundary history\n";
+        return 1;
+    }
+
     return 0;
 }
