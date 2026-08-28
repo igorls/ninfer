@@ -57,18 +57,32 @@ enum class LinearPolicy : std::uint8_t {
  * @par Supported execution domain
  * Registered execution uses RowSplit Q4G64_F16S, Q5G64_F16S, Q6G64_F16S, or W8G32_F16S weights
  * with FP16 scales, block-scaled NVFP4 weights, row-scaled FP8_E4M3FN_ROW_BF16S or
+ *
  * FP8_E4M3FN_ROW_F32S weights, plus registered contiguous BF16_CTRL problems. Each format owns a
+ *
  * finite registry of exact physical weight problems and selects its kernel internally; a valid
+ *
  * encoding and alignment do not imply arbitrary N/K support. BF16-scale FP8 registers `[N,K]` in
- * `{[14336,5120], [16384,5120], [34816,5120], [248320,5120], [5120,6144], [5120,17408]}`. F32-scale
- * FP8 registers the Flash-Next problems `{[13312,2560], [16384,2560], [2560,6144]}`. Both accept
- * every positive T. BF16_CTRL additionally registers the Flash-Next indexer `[640,2560]`, PLE key
- * projection `[10240,2560]`, and PLE value projection `[2560,2560]` for T=1..8. The current NVFP4
- * problems register the five non-vocabulary BF16-scale FP8 geometries and accept every positive T.
- * Text and MTP packed-weight problems accept every positive column extent T. Registered Vision
- * problems accept raw-patch P in
- * `{4,8,...,131072}` or merged-token V in `[1,32768]`; a matrix column does not inherently
- * represent a text token. FP32_CTRL is unsupported.
+ *
+ * `{[14336,5120], [16384,5120], [34816,5120], [248320,5120], [5120,6144], [5120,17408]}`.
+ * F32-scale
+ * FP8 registers the Flash-Next problems `{[13312,2560], [16384,2560], [2560,6144]}`.
+ * Both accept
+ * every positive T. BF16_CTRL additionally registers the Flash-Next indexer
+ * `[640,2560]`, PLE key
+ * projection `[10240,2560]`, and PLE value projection `[2560,2560]` for
+ * T=1..8. It registers the
+ * Vision raw-patch problems `{[1152,1536], [3456,1152], [1152,1152],
+ * [4304,1152],
+ * [1152,4304]}` for P in `{4,8,...,131072}` and the merged-token problems
+ * `{[4608,4608],
+ * [2560,4608]}` for V in `[1,32768]`. The current NVFP4 problems register the
+ * five non-vocabulary
+ * BF16-scale FP8 geometries and accept every positive T. Text and MTP
+ * packed-weight problems accept
+ * every positive column extent T. A matrix column does not
+ * inherently represent a text token.
+ * FP32_CTRL is unsupported.
  *
  * @par Numerical contract
  * Test fixture code materializes the persistent weight as its logical FP32 dequantized matrix.
@@ -89,9 +103,13 @@ enum class LinearPolicy : std::uint8_t {
  * A8 from T=12; `[16384,5120]` to A16 through T=10 and A8 from T=11; `[34816,5120]` to A8 at T=1,
  * A16 at T=2..4, and A8 from T=5; both `[5120,6144]` and `[5120,17408]` resolve T<25 to A16 and
  * T>=25 to A8. FP8 `[248320,5120]` and the three F32-scale Flash-Next problems admit A16Only,
+ *
  * AllowA8, and AllowA4; every policy retains A16 compute at every positive T. NVFP4 admits
+ *
  * A16Only and AllowA4; AllowA4 permits the private resolver to select either a qualified A16 route
- * or activation quantization to NVFP4 at every positive T. The selected route depends only on the
+
+ * * or activation quantization to NVFP4 at every positive T. The selected route depends only on
+ * the
  * registered problem and T.
  *
  * @par Workspace

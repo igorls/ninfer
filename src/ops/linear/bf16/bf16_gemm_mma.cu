@@ -57,6 +57,34 @@ void launch_bf16_mma(const Tensor& x, const Weight& weight, Tensor& out, cudaStr
         launch_geometry<Bf16GemvGeometry<5120, 6144>>(x, weight, out, stream);
         return;
     }
+    if (weight.n == 1152 && weight.k == 1536) {
+        launch_geometry<Bf16GemvGeometry<1152, 1536>>(x, weight, out, stream);
+        return;
+    }
+    if (weight.n == 3456 && weight.k == 1152) {
+        launch_geometry<Bf16GemvGeometry<3456, 1152>>(x, weight, out, stream);
+        return;
+    }
+    if (weight.n == 1152 && weight.k == 1152) {
+        launch_geometry<Bf16GemvGeometry<1152, 1152>>(x, weight, out, stream);
+        return;
+    }
+    if (weight.n == 4304 && weight.k == 1152) {
+        launch_geometry<Bf16GemvGeometry<4304, 1152>>(x, weight, out, stream);
+        return;
+    }
+    if (weight.n == 1152 && weight.k == 4304) {
+        launch_geometry<Bf16GemvGeometry<1152, 4304>>(x, weight, out, stream);
+        return;
+    }
+    if (weight.n == 4608 && weight.k == 4608) {
+        launch_geometry<Bf16GemvGeometry<4608, 4608>>(x, weight, out, stream);
+        return;
+    }
+    if (weight.n == 2560 && weight.k == 4608) {
+        launch_geometry<Bf16GemvGeometry<2560, 4608>>(x, weight, out, stream);
+        return;
+    }
     throw std::invalid_argument("bf16 linear MMA: unsupported exact problem");
 }
 

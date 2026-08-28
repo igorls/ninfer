@@ -65,7 +65,8 @@ struct Bf16MmaSchedule {
     static_assert(kBlockRows > 0 && kBlockCols > 0 && kBlockK > 0);
     static_assert(kBlockRows % kWarpRows == 0 && kBlockCols % kWarpCols == 0);
     static_assert(kWarpRows % 16 == 0 && kWarpCols % 8 == 0);
-    static_assert(kBlockK % 64 == 0);
+    static_assert(kBlockK % 16 == 0);
+    static_assert(kSwizzle == Bf16MmaSwizzle::Plain || (kBlockK % 64 == 0));
     static_assert(kPipelineStages >= 2 && kPipelineStages <= 8);
     static_assert(kMinBlocks >= 1);
     static_assert(kWarps >= 1 && kThreads <= 1024);
@@ -235,7 +236,8 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void bf16
         }
         __syncthreads();
 
-        auto load_fragments = [&](int k_step, unsigned(&a_frag)[MT][4], unsigned(&b_frag)[NT][2]) {
+        auto load_fragments = [&](int k_step, unsigned (&a_frag)[MT][4],
+                                  unsigned (&b_frag)[NT][2]) {
 #pragma unroll
             for (int mi = 0; mi < MT; ++mi) {
                 const int row = wm * WM + mi * 16 + a_row_offset;

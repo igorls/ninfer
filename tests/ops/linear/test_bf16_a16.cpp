@@ -86,7 +86,8 @@ std::vector<std::int32_t> sampled_tokens(std::int32_t tokens) {
     return result;
 }
 
-int run_bf16_linear_case(DeviceWeight& weight, std::int32_t tokens) {
+int run_bf16_linear_case(DeviceWeight& weight, std::int32_t tokens,
+                         bool use_convenience_entry = false) {
     const std::int32_t rows                          = weight.host.n;
     const std::int32_t hidden                        = weight.host.k;
     const std::vector<std::uint16_t> activation_bits = make_activation_bits(hidden, tokens);
@@ -98,8 +99,12 @@ int run_bf16_linear_case(DeviceWeight& weight, std::int32_t tokens) {
 
     Tensor x(device_activation.p, DType::BF16, {hidden, tokens});
     Tensor output(guarded_output.data(), DType::BF16, {rows, tokens});
-    DeviceArena workspace(256);
-    ops::linear(x, weight.view(), output, ops::LinearPolicy::A16Only, workspace, nullptr);
+    if (use_convenience_entry) {
+        ops::linear(x, weight.view(), output, nullptr);
+    } else {
+        DeviceArena workspace(256);
+        ops::linear(x, weight.view(), output, ops::LinearPolicy::A16Only, workspace, nullptr);
+    }
     cuda_synchronize();
 
     const std::string suffix = " T=" + std::to_string(tokens);
@@ -153,6 +158,40 @@ int run_bf16_linear_case(DeviceWeight& weight, std::int32_t tokens) {
     return failures;
 }
 
+int verify_vision_extent_contract(std::int32_t rows, std::int32_t hidden, bool raw_patch) {
+    int failures                = 0;
+    const auto expect_supported = [&](std::int32_t tokens) {
+        try {
+            (void)ops::linear_workspace_capacity_bytes(QType::BF16_CTRL, rows, hidden,
+                                                       ops::LinearPolicy::A16Only, tokens, tokens);
+        } catch (const std::exception& error) {
+            std::cerr << "BF16_A16 Vision [" << rows << ',' << hidden << "] T=" << tokens
+                      << " should be supported: " << error.what() << '\n';
+            ++failures;
+        }
+    };
+    const auto expect_rejected = [&](std::int32_t tokens) {
+        try {
+            (void)ops::linear_workspace_capacity_bytes(QType::BF16_CTRL, rows, hidden,
+                                                       ops::LinearPolicy::A16Only, tokens, tokens);
+            std::cerr << "BF16_A16 Vision [" << rows << ',' << hidden << "] T=" << tokens
+                      << " should be rejected\n";
+            ++failures;
+        } catch (const std::invalid_argument&) {}
+    };
+
+    if (raw_patch) {
+        expect_supported(4);
+        expect_supported(131072);
+        for (const std::int32_t tokens : {1, 3, 5, 131073}) { expect_rejected(tokens); }
+    } else {
+        expect_supported(1);
+        expect_supported(32768);
+        expect_rejected(32769);
+    }
+    return failures;
+}
+
 int run_bf16_linear() {
     int failures = 0;
     DeviceWeight attention_weight(make_patterned(14336, 5120, 401U));
@@ -179,6 +218,41 @@ int run_bf16_linear() {
     for (const std::int32_t tokens : {1, 2, 4, 8}) {
         failures += run_bf16_linear_case(output_head_weight, tokens);
     }
+    DeviceWeight vision_patch_weight(make_patterned(1152, 1536, 431U));
+    for (const std::int32_t tokens : {4, 16, 64, 128, 256, 576, 1024}) {
+        failures += run_bf16_linear_case(vision_patch_weight, tokens, tokens == 4);
+    }
+    failures += verify_vision_extent_contract(1152, 1536, true);
+    DeviceWeight vision_qkv_weight(make_patterned(3456, 1152, 433U));
+    for (const std::int32_t tokens : {4, 16, 64, 128, 256, 576, 1024}) {
+        failures += run_bf16_linear_case(vision_qkv_weight, tokens, tokens == 4);
+    }
+    failures += verify_vision_extent_contract(3456, 1152, true);
+    DeviceWeight vision_proj_weight(make_patterned(1152, 1152, 435U));
+    for (const std::int32_t tokens : {4, 16, 64, 128, 256, 576, 1024}) {
+        failures += run_bf16_linear_case(vision_proj_weight, tokens, tokens == 4);
+    }
+    failures += verify_vision_extent_contract(1152, 1152, true);
+    DeviceWeight vision_fc1_weight(make_patterned(4304, 1152, 437U));
+    for (const std::int32_t tokens : {4, 16, 64, 128, 256, 576, 1024}) {
+        failures += run_bf16_linear_case(vision_fc1_weight, tokens, tokens == 4);
+    }
+    failures += verify_vision_extent_contract(4304, 1152, true);
+    DeviceWeight vision_fc2_weight(make_patterned(1152, 4304, 439U));
+    for (const std::int32_t tokens : {4, 16, 64, 128, 256, 576, 1024}) {
+        failures += run_bf16_linear_case(vision_fc2_weight, tokens, tokens == 4);
+    }
+    failures += verify_vision_extent_contract(1152, 4304, true);
+    DeviceWeight vision_merger_fc1_weight(make_patterned(4608, 4608, 441U));
+    for (const std::int32_t tokens : {1, 4, 16, 64, 128, 256, 576}) {
+        failures += run_bf16_linear_case(vision_merger_fc1_weight, tokens, tokens == 1);
+    }
+    failures += verify_vision_extent_contract(4608, 4608, false);
+    DeviceWeight vision_merger_fc2_weight(make_patterned(2560, 4608, 443U));
+    for (const std::int32_t tokens : {1, 4, 16, 64, 128, 256, 576}) {
+        failures += run_bf16_linear_case(vision_merger_fc2_weight, tokens, tokens == 1);
+    }
+    failures += verify_vision_extent_contract(2560, 4608, false);
     return failures;
 }
 
