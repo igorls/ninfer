@@ -6,11 +6,14 @@ import pytest
 import torch
 
 from tools.artifact.layouts import (
+    block_scale_bank_geometry,
+    decode_nvfp4_bank_words,
     decode_fp8_row_scaled_f32_words,
     decode_packed_u4_g16_words,
     dequantize_fp8_row_scaled_f32,
     dequantize_packed_u4_g16,
     encode_fp8_row_scaled_f32,
+    encode_nvfp4_bank,
     encode_packed_u4_g16,
     encoded_size,
     packed_u4_geometry,
@@ -103,3 +106,31 @@ def test_packed_u4_g16_rejects_bad_shape_and_zero_scale_nonzero_codes():
     packed = torch.zeros((1, 8), dtype=torch.uint8)
     with pytest.raises(ValueError, match="zero group scale"):
         encode_packed_u4_g16(packed, torch.zeros((1, 1), dtype=torch.float16), (1, 16))
+
+
+def test_nvfp4_expert_bank_preserves_each_matrix_divisor_and_scale_swizzle():
+    shape = (2, 128, 64)
+    geometry = block_scale_bank_geometry("NVFP4", shape)
+    assert (
+        geometry.code_plane_bytes,
+        geometry.scale_plane_offset,
+        geometry.scale_plane_bytes,
+        geometry.weight_divisor_offset,
+        geometry.weight_divisor_bytes,
+        geometry.payload_bytes,
+    ) == (8192, 8192, 1024, 9216, 8, 9224)
+    assert encoded_size("expert-blockscale-k16-m128x4-v1", "NVFP4", shape) == 9224
+
+    codes = torch.arange(2 * 128 * 32, dtype=torch.int64).to(torch.uint8).reshape(2, 128, 32)
+    scales = (
+        torch.arange(2 * 128 * 4, dtype=torch.int64)
+        .remainder(0x7F)
+        .to(torch.uint8)
+        .reshape(2, 128, 4)
+    )
+    divisors = torch.tensor([1.5, 2.5], dtype=torch.float32)
+    payload = encode_nvfp4_bank(codes, scales, divisors, shape)
+    decoded_codes, decoded_scales, decoded_divisors = decode_nvfp4_bank_words(payload, shape)
+    assert torch.equal(decoded_codes, codes)
+    assert torch.equal(decoded_scales, scales)
+    assert torch.equal(decoded_divisors, divisors)

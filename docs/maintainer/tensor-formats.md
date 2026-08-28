@@ -294,7 +294,9 @@ serialized.
 `NVFP4` is a block-scaled floating-point weight representation, not a signed-integer
 `QuantFormat`. For a logical matrix `[N,K]`, every K-axis group contains 16 E2M1 code words and one
 E4M3FN scale word. The representation also contains one FP32 serialized weight divisor `d_w` for
-the complete matrix.
+the complete matrix. A registered expert-bank layout may add one leading expert dimension
+`[E,N,K]`; it represents `E` independent matrices and owns one divisor per expert without allowing
+codes, scales, or divisors to cross an expert boundary.
 
 An E2M1 word has sign bit 3, exponent bits 2:1, and mantissa bit 0. Positive code words `0..7`
 decode to:

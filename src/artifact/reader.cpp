@@ -115,6 +115,9 @@ StorageLayout parse_layout(std::string_view name) {
     if (name == "row-scale-v1") { return StorageLayout::RowScaleV1; }
     if (name == "row-scale-f32-v1") { return StorageLayout::RowScaleF32V1; }
     if (name == "packed-u4-g16-v1") { return StorageLayout::PackedU4G16V1; }
+    if (name == "expert-blockscale-k16-m128x4-v1") {
+        return StorageLayout::ExpertBlockScaleK16M128x4V1;
+    }
     throw ArtifactError("unknown tensor layout: " + std::string(name));
 }
 

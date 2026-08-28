@@ -14,6 +14,7 @@ The storage registry contains exactly these identities:
 | `contiguous-le-v1` | tensor layout | `BF16`, `FP32`, `I32` | rank `0..16` | 256 bytes |
 | `row-split-k128-v1` | tensor layout | `Q4G64_F16S`, `Q5G64_F16S`, `Q6G64_F16S`, `W8G32_F16S` | rank 2 `[N,K]` | 256 bytes |
 | `blockscale-k16-m128x4-v1` | tensor layout | `NVFP4` | rank 2 `[N,K]`, `N % 128 == 0`, `K % 64 == 0` | 256 bytes |
+| `expert-blockscale-k16-m128x4-v1` | tensor layout | `NVFP4` | rank 3 `[E,N,K]`, `N % 128 == 0`, `K % 64 == 0` | 256 bytes |
 | `row-scale-v1` | tensor layout | `FP8_E4M3FN_ROW_BF16S` | rank 2 `[N,K]` | 256 bytes |
 | `row-scale-f32-v1` | tensor layout | `FP8_E4M3FN_ROW_F32S` | rank 2 `[N,K]` | 256 bytes |
 | `packed-u4-g16-v1` | tensor layout | `U4Z8G16_F16S` | rank 2 `[N,K]`, `K % 16 == 0` | 256 bytes |
@@ -300,6 +301,26 @@ The scale word's byte offset within the scale plane is:
 Layout decoding must recover the original packed E2M1 words, natural `[N,K/16]` E4M3FN scale-word
 matrix, and exact divisor word. It never decodes and re-encodes either floating-point format.
 
+### 4.1 `expert-blockscale-k16-m128x4-v1`
+
+This layout stores an expert bank `[E,N,K]` as `E` independent NVFP4 matrices while keeping each
+plane contiguous for fused expert kernels. It requires positive dimensions, `N % 128 == 0`, and
+`K % 64 == 0`:
+
+```text
+code_plane_bytes      = E * N * K / 2
+scale_plane_offset    = align_up(code_plane_bytes, 256)
+scale_plane_bytes     = E * N * K / 16
+weight_divisor_offset = scale_plane_offset + scale_plane_bytes
+weight_divisor_bytes  = E * 4
+payload_bytes         = weight_divisor_offset + weight_divisor_bytes
+```
+
+Codes use natural `[E,N,K/2]` expert-major order. Each expert's scale matrix is independently
+swizzled by the Section 4 formula and the resulting byte sequences are concatenated in expert
+order. The divisor plane contains one little-endian positive FP32 divisor per expert. A divisor or
+scale tile never crosses an expert boundary.
+
 ## 5. `row-scale-v1`
 
 `row-scale-v1` stores only rank-two `FP8_E4M3FN_ROW_BF16S` matrices `[N,K]` with positive
@@ -386,6 +407,8 @@ Layout decoding yields only persistent logical words:
   `0..K-1`, discarding physical columns `K..K_pad-1`;
 - `blockscale-k16-m128x4-v1` yields the packed E2M1 words, natural E4M3FN group-scale words, and
   matrix-level FP32 weight divisor;
+- `expert-blockscale-k16-m128x4-v1` yields the same words for each expert and one FP32 divisor per
+  expert matrix;
 - `row-scale-v1` yields the natural row-major E4M3FN code words and one BF16 multiplier per logical
   row;
 - `row-scale-f32-v1` yields the natural row-major E4M3FN code words and one FP32 multiplier per row;

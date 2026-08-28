@@ -86,6 +86,21 @@ class RowScaleGeometry:
 
 
 @dataclass(frozen=True, slots=True)
+class BlockScaleBankGeometry:
+    experts: int
+    n: int
+    k: int
+    groups_per_row: int
+    k_tiles: int
+    code_plane_bytes: int
+    scale_plane_offset: int
+    scale_plane_bytes: int
+    weight_divisor_offset: int
+    weight_divisor_bytes: int
+    payload_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
 class PackedU4Geometry:
     n: int
     k: int
@@ -138,6 +153,11 @@ PACKED_U4_G16_V1 = Layout(
     256,
     frozenset(("U4Z8G16_F16S",)),
 )
+EXPERT_BLOCKSCALE_K16_M128X4_V1 = Layout(
+    "expert-blockscale-k16-m128x4-v1",
+    256,
+    frozenset(("NVFP4",)),
+)
 
 LAYOUTS = MappingProxyType(
     {
@@ -149,6 +169,7 @@ LAYOUTS = MappingProxyType(
             ROW_SCALE_V1,
             ROW_SCALE_F32_V1,
             PACKED_U4_G16_V1,
+            EXPERT_BLOCKSCALE_K16_M128X4_V1,
         )
     }
 )
@@ -293,6 +314,39 @@ def row_scale_geometry(
     )
 
 
+def block_scale_bank_geometry(
+    format: str | Nvfp4Format, shape: Sequence[int]
+) -> BlockScaleBankGeometry:
+    spec = _format(format)
+    if not isinstance(spec, Nvfp4Format):
+        raise ValueError("expert-blockscale-k16-m128x4-v1 requires NVFP4")
+    experts, n, k = _shape(shape, rank=3)
+    if n % 128 or k % 64:
+        raise ValueError(
+            "expert-blockscale-k16-m128x4-v1 requires N divisible by 128 "
+            "and K divisible by 64"
+        )
+    elements = experts * n * k
+    code_plane_bytes = elements // 2
+    scale_plane_offset = align_up(code_plane_bytes, PLANE_ALIGNMENT)
+    scale_plane_bytes = elements // spec.group_size
+    weight_divisor_offset = scale_plane_offset + scale_plane_bytes
+    weight_divisor_bytes = experts * 4
+    return BlockScaleBankGeometry(
+        experts=experts,
+        n=n,
+        k=k,
+        groups_per_row=k // spec.group_size,
+        k_tiles=k // 64,
+        code_plane_bytes=code_plane_bytes,
+        scale_plane_offset=scale_plane_offset,
+        scale_plane_bytes=scale_plane_bytes,
+        weight_divisor_offset=weight_divisor_offset,
+        weight_divisor_bytes=weight_divisor_bytes,
+        payload_bytes=weight_divisor_offset + weight_divisor_bytes,
+    )
+
+
 def packed_u4_geometry(
     format: str | AffineU4Format, shape: Sequence[int]
 ) -> PackedU4Geometry:
@@ -357,6 +411,10 @@ def encoded_size(
         if not isinstance(numeric_spec, AffineU4Format):
             raise ValueError("packed-u4-g16-v1 requires an affine U4 format")
         return packed_u4_geometry(numeric_spec, shape).payload_bytes
+    if layout_spec is EXPERT_BLOCKSCALE_K16_M128X4_V1:
+        if not isinstance(numeric_spec, Nvfp4Format):
+            raise ValueError("expert-blockscale-k16-m128x4-v1 requires NVFP4")
+        return block_scale_bank_geometry(numeric_spec, shape).payload_bytes
     raise ValueError(f"unsupported tensor layout: {layout_spec.name!r}")
 
 
@@ -806,6 +864,110 @@ def decode_nvfp4_words(
         raise ValueError("NVFP4 weight divisor must be finite and positive")
     divisor = torch.frombuffer(bytearray(divisor_bytes), dtype=torch.float32).reshape(())
     return codes, scales, divisor
+
+
+def _swizzle_nvfp4_bank_scales(
+    natural_scales: torch.Tensor, geometry: BlockScaleBankGeometry
+) -> torch.Tensor:
+    return (
+        natural_scales.reshape(
+            geometry.experts,
+            geometry.n // 128,
+            4,
+            32,
+            geometry.k_tiles,
+            4,
+        )
+        .permute(0, 1, 4, 3, 2, 5)
+        .contiguous()
+        .reshape(-1)
+    )
+
+
+def _unswizzle_nvfp4_bank_scales(
+    stored_scales: torch.Tensor, geometry: BlockScaleBankGeometry
+) -> torch.Tensor:
+    return (
+        stored_scales.reshape(
+            geometry.experts,
+            geometry.n // 128,
+            geometry.k_tiles,
+            32,
+            4,
+            4,
+        )
+        .permute(0, 1, 4, 3, 2, 5)
+        .contiguous()
+        .reshape(geometry.experts, geometry.n, geometry.groups_per_row)
+    )
+
+
+def encode_nvfp4_bank(
+    packed_codes: torch.Tensor,
+    natural_scales: torch.Tensor,
+    weight_divisors: torch.Tensor,
+    shape: Sequence[int],
+) -> bytes:
+    """Encode an expert bank with one exact NVFP4 divisor per matrix."""
+
+    geometry = block_scale_bank_geometry("NVFP4", shape)
+    expected_codes = (geometry.experts, geometry.n, geometry.k // 2)
+    expected_scales = (geometry.experts, geometry.n, geometry.groups_per_row)
+    if packed_codes.dtype != torch.uint8 or tuple(packed_codes.shape) != expected_codes:
+        raise TypeError(f"NVFP4 bank packed codes must be uint8 with shape {expected_codes}")
+    if natural_scales.dtype != torch.uint8 or tuple(natural_scales.shape) != expected_scales:
+        raise TypeError(f"NVFP4 bank scales must be uint8 with shape {expected_scales}")
+    if weight_divisors.dtype != torch.float32 or tuple(weight_divisors.shape) != (
+        geometry.experts,
+    ):
+        raise TypeError(
+            f"NVFP4 bank divisors must be FP32 with shape ({geometry.experts},)"
+        )
+    codes = packed_codes.detach().contiguous().cpu()
+    scales = natural_scales.detach().contiguous().cpu()
+    divisors = weight_divisors.detach().contiguous().cpu()
+    if bool((((scales & 0x80) != 0) | (scales == 0x7F)).any()):
+        raise ValueError("NVFP4 bank scales must be nonnegative finite E4M3FN words")
+    if bool((~torch.isfinite(divisors) | (divisors <= 0)).any()):
+        raise ValueError("NVFP4 bank divisors must be finite and positive")
+
+    payload = bytearray(geometry.payload_bytes)
+    payload[: geometry.code_plane_bytes] = codes.numpy().tobytes()
+    scale_begin = geometry.scale_plane_offset
+    payload[scale_begin : scale_begin + geometry.scale_plane_bytes] = (
+        _swizzle_nvfp4_bank_scales(scales, geometry).numpy().tobytes()
+    )
+    payload[geometry.weight_divisor_offset :] = encode_direct(divisors, "FP32")
+    return bytes(payload)
+
+
+def decode_nvfp4_bank_words(
+    payload: Payload, shape: Sequence[int]
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Decode exact expert-bank code, natural scale, and divisor words."""
+
+    geometry = block_scale_bank_geometry("NVFP4", shape)
+    if _payload_length(payload) != geometry.payload_bytes:
+        raise ValueError(
+            f"NVFP4 bank payload has {_payload_length(payload)} bytes, "
+            f"expected {geometry.payload_bytes}"
+        )
+    raw = _payload_tensor(payload, torch.device("cpu"))
+    codes = raw[: geometry.code_plane_bytes].clone().reshape(
+        geometry.experts, geometry.n, geometry.k // 2
+    )
+    stored_scales = raw[
+        geometry.scale_plane_offset :
+        geometry.scale_plane_offset + geometry.scale_plane_bytes
+    ]
+    scales = _unswizzle_nvfp4_bank_scales(stored_scales, geometry)
+    if bool((((scales & 0x80) != 0) | (scales == 0x7F)).any()):
+        raise ValueError("NVFP4 bank scales must be nonnegative finite E4M3FN words")
+    divisor_bytes = raw[geometry.weight_divisor_offset :]
+    divisors = decode_direct(divisor_bytes, "FP32", (geometry.experts,))
+    if bool((~torch.isfinite(divisors) | (divisors <= 0)).any()):
+        raise ValueError("NVFP4 bank divisors must be finite and positive")
+    return codes, scales, divisors
 
 
 def _pack_low_nibbles(codes: torch.Tensor) -> torch.Tensor:
@@ -1292,6 +1454,8 @@ def dequantize_row_split(
 
 __all__ = [
     "BLOCKSCALE_K16_M128X4_V1",
+    "EXPERT_BLOCKSCALE_K16_M128X4_V1",
+    "BlockScaleBankGeometry",
     "BlockScaleGeometry",
     "CONTIGUOUS_LE_V1",
     "K_ALIGNMENT",
@@ -1309,11 +1473,13 @@ __all__ = [
     "align_up",
     "assemble_row_planes",
     "block_scale_geometry",
+    "block_scale_bank_geometry",
     "decode_direct",
     "decode_fp8_row_scaled_words",
     "decode_fp8_row_scaled_f32_words",
     "decode_packed_u4_g16_words",
     "decode_nvfp4_words",
+    "decode_nvfp4_bank_words",
     "decode_row_split_codes",
     "dequantize_fp8_row_scaled",
     "dequantize_fp8_row_scaled_f32",
@@ -1324,6 +1490,7 @@ __all__ = [
     "encode_fp8_row_scaled_f32",
     "encode_packed_u4_g16",
     "encode_nvfp4",
+    "encode_nvfp4_bank",
     "encode_row_split",
     "encoded_size",
     "gather_row_planes",

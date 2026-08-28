@@ -37,6 +37,12 @@ def _small_specs():
             "blockscale-k16-m128x4-v1",
         ),
         TensorSpec(
+            "quant/nvfp4_bank",
+            (2, 128, 64),
+            "NVFP4",
+            "expert-blockscale-k16-m128x4-v1",
+        ),
+        TensorSpec(
             "quant/fp8_row",
             (2, 4),
             "FP8_E4M3FN_ROW_BF16S",
@@ -85,7 +91,7 @@ def test_v2_round_trip_covers_every_registered_storage(tmp_path):
         summary = artifact_summary(artifact)
         assert summary["model_id"] == "test-model"
         assert summary["weights_id"] == "test-weights"
-        assert summary["objects"] == 12
+        assert summary["objects"] == 13
         assert summary["formats"] == {
             "BF16": 1,
             "FP32": 1,
@@ -94,7 +100,7 @@ def test_v2_round_trip_covers_every_registered_storage(tmp_path):
             "Q5G64_F16S": 1,
             "Q6G64_F16S": 1,
             "W8G32_F16S": 1,
-            "NVFP4": 1,
+            "NVFP4": 2,
             "FP8_E4M3FN_ROW_BF16S": 1,
             "FP8_E4M3FN_ROW_F32S": 1,
             "U4Z8G16_F16S": 1,

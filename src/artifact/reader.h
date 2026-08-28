@@ -39,6 +39,7 @@ enum class StorageLayout {
     RowScaleV1,
     RowScaleF32V1,
     PackedU4G16V1,
+    ExpertBlockScaleK16M128x4V1,
 };
 
 enum class ResourceEncoding {
@@ -85,6 +86,23 @@ struct BlockScaleGeometry {
 };
 
 BlockScaleGeometry block_scale_geometry(NumericFormat format, std::span<const std::uint64_t> shape);
+
+struct BlockScaleBankGeometry {
+    std::uint64_t experts               = 0;
+    std::uint64_t rows                  = 0;
+    std::uint64_t columns               = 0;
+    std::uint64_t groups_per_row        = 0;
+    std::uint64_t k_tiles               = 0;
+    std::uint64_t code_plane_bytes      = 0;
+    std::uint64_t scale_plane_offset    = 0;
+    std::uint64_t scale_plane_bytes     = 0;
+    std::uint64_t weight_divisor_offset = 0;
+    std::uint64_t weight_divisor_bytes  = 0;
+    std::uint64_t encoded_bytes         = 0;
+};
+
+BlockScaleBankGeometry block_scale_bank_geometry(NumericFormat format,
+                                                 std::span<const std::uint64_t> shape);
 
 struct RowScaleGeometry {
     std::uint64_t rows               = 0;

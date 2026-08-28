@@ -104,6 +104,8 @@ std::string_view layout_name(StorageLayout layout) noexcept {
         return "row-scale-f32-v1";
     case StorageLayout::PackedU4G16V1:
         return "packed-u4-g16-v1";
+    case StorageLayout::ExpertBlockScaleK16M128x4V1:
+        return "expert-blockscale-k16-m128x4-v1";
     }
     return {};
 }
@@ -157,6 +159,9 @@ std::uint64_t tensor_encoded_size(StorageLayout layout, NumericFormat format,
     }
     if (layout == StorageLayout::PackedU4G16V1) {
         return packed_u4_geometry(format, shape).encoded_bytes;
+    }
+    if (layout == StorageLayout::ExpertBlockScaleK16M128x4V1) {
+        return block_scale_bank_geometry(format, shape).encoded_bytes;
     }
     throw ArtifactError("unknown tensor layout");
 }
@@ -213,6 +218,39 @@ BlockScaleGeometry block_scale_geometry(NumericFormat format,
     out.weight_divisor_offset =
         checked_add(out.scale_plane_offset, out.scale_plane_bytes, "NVFP4 weight divisor offset");
     out.encoded_bytes = checked_add(out.weight_divisor_offset, 4, "NVFP4 tensor encoded size");
+    return out;
+}
+
+BlockScaleBankGeometry block_scale_bank_geometry(NumericFormat format,
+                                                 std::span<const std::uint64_t> shape) {
+    if (format != NumericFormat::NVFP4) {
+        throw ArtifactError("expert-blockscale-k16-m128x4-v1 requires NVFP4");
+    }
+    if (shape.size() != 3 || shape[0] == 0 || shape[1] == 0 || shape[2] == 0) {
+        throw ArtifactError("expert-blockscale-k16-m128x4-v1 requires a positive rank-three shape");
+    }
+    if (shape[1] % 128 != 0 || shape[2] % 64 != 0) {
+        throw ArtifactError(
+            "expert-blockscale-k16-m128x4-v1 requires N divisible by 128 and K divisible by 64");
+    }
+
+    BlockScaleBankGeometry out;
+    out.experts          = shape[0];
+    out.rows             = shape[1];
+    out.columns          = shape[2];
+    out.groups_per_row   = shape[2] / 16;
+    out.k_tiles          = shape[2] / 64;
+    const auto matrices  = checked_mul(out.experts, out.rows, "NVFP4 bank row count");
+    const auto elements  = checked_mul(matrices, out.columns, "NVFP4 bank element count");
+    out.code_plane_bytes = elements / 2;
+    out.scale_plane_offset =
+        align_up(out.code_plane_bytes, kTensorAlignment, "NVFP4 bank scale plane offset");
+    out.scale_plane_bytes     = elements / 16;
+    out.weight_divisor_offset = checked_add(out.scale_plane_offset, out.scale_plane_bytes,
+                                            "NVFP4 bank weight divisor offset");
+    out.weight_divisor_bytes  = checked_mul(out.experts, 4, "NVFP4 bank divisor bytes");
+    out.encoded_bytes         = checked_add(out.weight_divisor_offset, out.weight_divisor_bytes,
+                                            "NVFP4 bank tensor encoded size");
     return out;
 }
 
