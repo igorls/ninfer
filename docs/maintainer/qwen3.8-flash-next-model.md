@@ -106,6 +106,11 @@ The indexer selects up to `2048 / 4 = 512` blocks, expands them back to tokens, 
 tail, and intersects that mask with the causal mask. Raw indexer keys, main keys, main values, and
 full MRoPE positions are persistent per-sequence state.
 
+NInfer stores each completed block's mean-cast, normalized, MRoPE-rotated key once in a paged
+block-key plane, plus the four raw keys and positions of the block currently being formed. This is
+the same represented result because a completed consecutive block is immutable. Selection uses
+FP32 scores and stable descending order; an exact score tie retains the lower block ID.
+
 ## 5. Mixture of experts
 
 The router computes a 512-way FP32 softmax, selects the top 10 probabilities, and does not

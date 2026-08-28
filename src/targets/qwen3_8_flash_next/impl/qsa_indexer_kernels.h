@@ -1,0 +1,23 @@
+#pragma once
+
+#include "targets/qwen3_8_flash_next/impl/qsa_indexer.h"
+#include "targets/qwen3_8_flash_next/impl/qsa_indexer_workspace.h"
+
+#include <cuda_runtime.h>
+
+#include <cstddef>
+
+namespace ninfer::targets::qwen3_8_flash_next::detail {
+
+[[nodiscard]] std::size_t flash_next_qsa_indexer_sort_temp_bytes(std::int32_t maximum_blocks,
+                                                                 std::int32_t batch);
+
+void flash_next_qsa_indexer_launch(const Tensor& token_indices, const Tensor& mrope_positions,
+                                   const Tensor& table_rows, const Tensor& source_state_slots,
+                                   const Tensor& destination_state_slots, const Tensor& query_norm,
+                                   const Tensor& key_norm, QsaIndexerCacheView cache,
+                                   FlashNextQsaIndexerWorkspace& scratch,
+                                   std::int32_t active_blocks, Tensor& selected_blocks,
+                                   Tensor& selected_counts, cudaStream_t stream);
+
+} // namespace ninfer::targets::qwen3_8_flash_next::detail

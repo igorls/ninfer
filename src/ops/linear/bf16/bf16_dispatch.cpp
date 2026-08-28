@@ -9,9 +9,14 @@
 namespace ninfer::ops::detail {
 
 Bf16Launch select_bf16_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
-    const bool supported_problem = (n == 14336 && k == 5120) || (n == 5120 && k == 6144);
+    const bool qsa_indexer = n == 640 && k == 2560;
+    const bool supported_problem =
+        (n == 14336 && k == 5120) || (n == 5120 && k == 6144) || qsa_indexer;
     if (!supported_problem || t <= 0) {
         throw std::invalid_argument("bf16 linear: unsupported shape or T");
+    }
+    if (qsa_indexer && t > 8) {
+        throw std::invalid_argument("bf16 linear: Flash-Next indexer requires T in [1,8]");
     }
     if (t == 1) { return launch_bf16_decode; }
     const std::int32_t small_t_end =

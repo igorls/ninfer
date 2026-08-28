@@ -11,7 +11,9 @@ add_library(ninfer_qwen3_8_flash_next STATIC
   impl/moe_route.cu
   impl/ple_index.cpp
   impl/ple_pipeline.cpp
-  impl/ple_table.cpp)
+  impl/ple_table.cpp
+  impl/qsa_indexer.cpp
+  impl/qsa_indexer_kernels.cu)
 ninfer_internal_includes(ninfer_qwen3_8_flash_next)
 target_include_directories(ninfer_qwen3_8_flash_next PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR})
