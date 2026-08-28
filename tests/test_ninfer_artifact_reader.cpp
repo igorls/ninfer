@@ -260,11 +260,23 @@ void test_common_validation() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     try {
+        if (argc > 2) { throw std::runtime_error("usage: ninfer_artifact_reader_test [artifact]"); }
         test_registered_sizes();
         test_normative_fixture();
         test_common_validation();
+        if (argc == 2) {
+            Reader reader(argv[1]);
+            if (reader.objects().empty()) {
+                throw std::runtime_error("external artifact has an empty object directory");
+            }
+            for (const auto& object : reader.objects()) {
+                if (reader.payload(object).data.size() != ninfer::artifact::object_bytes(object)) {
+                    throw std::runtime_error("external artifact payload span mismatch");
+                }
+            }
+        }
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
