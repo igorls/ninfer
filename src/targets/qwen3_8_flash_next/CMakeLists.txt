@@ -3,6 +3,7 @@ add_library(ninfer_qwen3_8_flash_next STATIC
   impl/load/bindings.cpp
   impl/load/materialized.cpp
   impl/ple_index.cpp
+  impl/ple_pipeline.cpp
   impl/ple_table.cpp)
 ninfer_internal_includes(ninfer_qwen3_8_flash_next)
 target_include_directories(ninfer_qwen3_8_flash_next PUBLIC

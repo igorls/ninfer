@@ -176,6 +176,11 @@ ninfer_add_test(ninfer_qwen3_8_flash_next_ple_table_test
 ninfer_add_test(ninfer_qwen3_8_flash_next_expert_bank_test
   SOURCES targets/qwen3_8_flash_next/test_expert_bank.cpp
   LIBRARIES ninfer_qwen3_8_flash_next)
+ninfer_add_test(ninfer_qwen3_8_flash_next_ple_pipeline_test
+  SOURCES targets/qwen3_8_flash_next/test_ple_pipeline.cpp
+  LIBRARIES ninfer_qwen3_8_flash_next)
+set_tests_properties(ninfer_qwen3_8_flash_next_ple_pipeline_test
+  PROPERTIES SKIP_RETURN_CODE 77)
 
 # Product protocol contracts.
 ninfer_add_test(ninfer_openai_schema_test

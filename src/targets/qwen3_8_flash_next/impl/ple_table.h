@@ -41,4 +41,8 @@ void dequantize_ple_row(const PleShardView& shard, std::uint64_t row, std::span<
 void gather_ple_rows(const PleTableView& table, std::span<const std::int64_t, 16> global_rows,
                      std::span<float> output);
 
+// Runtime gather contract: FP32 dequantization followed by round-to-nearest-even BF16 storage.
+void gather_ple_rows_bf16(const PleTableView& table, std::span<const std::int64_t, 16> global_rows,
+                          std::span<std::uint16_t> output);
+
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

@@ -1,7 +1,8 @@
 #include "targets/qwen3_8_flash_next/impl/ple_table.h"
 
-#include <cmath>
 #include <array>
+#include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -63,6 +64,16 @@ int main() {
                 std::cerr << "PLE sparse gather changed head/row ordering\n";
                 return 1;
             }
+        }
+    }
+
+    std::array<std::uint16_t, 16 * width> gathered_bf16{};
+    gather_ple_rows_bf16(table, indices, gathered_bf16);
+    for (std::size_t index = 0; index < gathered_bf16.size(); ++index) {
+        const std::uint32_t expected_bits = std::bit_cast<std::uint32_t>(gathered[index]);
+        if (gathered_bf16[index] != static_cast<std::uint16_t>(expected_bits >> 16U)) {
+            std::cerr << "PLE BF16 gather changed represented row values\n";
+            return 1;
         }
     }
     return 0;
