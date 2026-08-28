@@ -209,6 +209,21 @@ int test_options_parser_validation() {
         return 1;
     }
 
+    const std::vector<std::string_view> vision_args = {
+        "--model", "model.ninfer", "--materialize-vision", "--max-context", "4096",
+    };
+    try {
+        const auto opts = parse_reference_tool_options(vision_args);
+        if (opts.model_path != "model.ninfer" || opts.mode != "materialize-vision" ||
+            opts.max_context != 4096) {
+            std::cerr << "Parsed options mismatch on materialize-vision args\n";
+            return 1;
+        }
+    } catch (const std::exception& ex) {
+        std::cerr << "Unexpected failure parsing materialize-vision args: " << ex.what() << "\n";
+        return 1;
+    }
+
     // Helper lambda to test that invalid arguments throw std::invalid_argument
     const auto assert_throws = [](std::initializer_list<std::string_view> args,
                                   std::string_view label) -> bool {
@@ -377,6 +392,60 @@ int test_real_artifact_full_binding_if_available() {
     return 0;
 }
 
+int test_real_artifact_text_and_vision_plan_if_available() {
+    const char* env_path = std::getenv("NINFER_QWEN3_8_FLASH_NEXT_WEIGHTS");
+    const std::filesystem::path path =
+        env_path != nullptr && *env_path != '\0'
+            ? std::filesystem::path(env_path)
+            : std::filesystem::path(
+                  R"(C:\models\Qwen3.8-Flash-Next\qwen3_8_flash_next_mixed.ninfer)");
+
+    if (!std::filesystem::is_regular_file(path)) {
+        std::cout << "SKIP: Real artifact text+vision plan (artifact not present at " << path
+                  << ")\n";
+        return 0;
+    }
+
+    const ninfer::artifact::Reader reader(path);
+    validate_identity(reader.identity());
+    ninfer::artifact::Binder binder(reader);
+    const auto tv_plan = bind_artifact(binder, LoadFeatures{.vision = true, .mtp = false});
+
+    std::uint64_t tensor_bytes = 0;
+    for (const auto& object : tv_plan.materialization.device_objects) {
+        tensor_bytes += object.bytes;
+    }
+
+    if (tv_plan.materialization.device_objects.size() != 1'400) {
+        std::cerr << "Text+Vision device_objects count mismatch: expected 1400, got "
+                  << tv_plan.materialization.device_objects.size() << "\n";
+        return 1;
+    }
+    if (tv_plan.materialization.host_objects.size() != 6) {
+        std::cerr << "Text+Vision host_objects count mismatch: expected 6, got "
+                  << tv_plan.materialization.host_objects.size() << "\n";
+        return 1;
+    }
+    if (tv_plan.materialization.mapped_tensor_objects.size() != 131) {
+        std::cerr << "Text+Vision mapped_tensor_objects count mismatch: expected 131, got "
+                  << tv_plan.materialization.mapped_tensor_objects.size() << "\n";
+        return 1;
+    }
+
+    constexpr std::uint64_t kExpectedTvTensorBytes = 76'070'801'632ULL;
+    constexpr std::uint64_t kExpectedTvArenaBytes  = 76'070'815'744ULL;
+    if (tensor_bytes != kExpectedTvTensorBytes ||
+        tv_plan.materialization.device_capacity_bytes != kExpectedTvArenaBytes) {
+        std::cerr << "Text+Vision tensor bytes mismatch: expected " << kExpectedTvTensorBytes
+                  << " bytes (" << kExpectedTvArenaBytes << " arena), got " << tensor_bytes
+                  << " bytes (" << tv_plan.materialization.device_capacity_bytes << " arena)\n";
+        return 1;
+    }
+
+    std::cout << "PASS: test_real_artifact_text_and_vision_plan\n";
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -385,6 +454,7 @@ int main() {
     if (test_preflight_memory_accounting() != 0) return 1;
     if (test_options_parser_validation() != 0) return 1;
     if (test_real_artifact_preflight_if_available() != 0) return 1;
+    if (test_real_artifact_text_and_vision_plan_if_available() != 0) return 1;
     if (test_real_artifact_full_binding_if_available() != 0) return 1;
 
     std::cout << "OK Flash-Next Native Loader Tests\n";

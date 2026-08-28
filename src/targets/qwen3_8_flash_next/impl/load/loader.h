@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <string_view>
 #include <vector>
 
@@ -46,23 +47,34 @@ struct FlashNextPreflightReport {
                                                            const FlashNextRuntimeConfig& config,
                                                            std::uint32_t main_page_groups = 0);
 
-class LoadedTextModel {
+class LoadedModel {
 public:
-    ~LoadedTextModel() = default;
+    ~LoadedModel() = default;
 
-    LoadedTextModel(const LoadedTextModel&)                = delete;
-    LoadedTextModel& operator=(const LoadedTextModel&)     = delete;
-    LoadedTextModel(LoadedTextModel&&) noexcept            = default;
-    LoadedTextModel& operator=(LoadedTextModel&&) noexcept = default;
+    LoadedModel(const LoadedModel&)                = delete;
+    LoadedModel& operator=(const LoadedModel&)     = delete;
+    LoadedModel(LoadedModel&&) noexcept            = default;
+    LoadedModel& operator=(LoadedModel&&) noexcept = default;
 
-    [[nodiscard]] static LoadedTextModel load(const artifact::Reader& reader, DeviceContext& device,
-                                              artifact::LoadProgress* progress = nullptr);
+    [[nodiscard]] static LoadedModel load(const artifact::Reader& reader, DeviceContext& device,
+                                          LoadFeatures features            = {},
+                                          artifact::LoadProgress* progress = nullptr);
 
-    [[nodiscard]] static LoadedTextModel load_from_file(const std::filesystem::path& path,
-                                                        DeviceContext& device,
-                                                        artifact::LoadProgress* progress = nullptr);
+    [[nodiscard]] static LoadedModel load_from_file(const std::filesystem::path& path,
+                                                    DeviceContext& device,
+                                                    LoadFeatures features            = {},
+                                                    artifact::LoadProgress* progress = nullptr);
 
-    [[nodiscard]] const TextModelView& view() const noexcept { return data_->runtime; }
+    [[nodiscard]] const TextModelView& text_view() const noexcept { return data_->text; }
+
+    [[nodiscard]] bool has_vision() const noexcept { return data_->vision.has_value(); }
+
+    [[nodiscard]] const VisionModelView& vision_view() const {
+        if (!data_->vision) {
+            throw std::logic_error("LoadedModel: vision was not materialized for this instance");
+        }
+        return *data_->vision;
+    }
 
     [[nodiscard]] const PleIndexMetadata& ple_metadata() const noexcept { return ple_metadata_; }
 
@@ -79,9 +91,9 @@ public:
     }
 
 private:
-    LoadedTextModel(BindingPlan plan, artifact::MaterializedArtifact materialized);
+    LoadedModel(BindingPlan plan, artifact::MaterializedArtifact materialized);
 
-    std::unique_ptr<LoadedTextModelData> data_;
+    std::unique_ptr<LoadedModelData> data_;
     PleIndexMetadata ple_metadata_{kPleIndexMetadata};
 };
 

@@ -100,41 +100,75 @@ PleWeights load_ple(const PlePlan& plan, const artifact::MaterializedArtifact& b
     return out;
 }
 
+VisionModelView load_vision(const VisionPlan& plan, const artifact::MaterializedArtifact& backing) {
+    VisionModelView out;
+    out.patch_embedding      = bf16_weight(backing, plan.patch_embedding, 1'152, 1'536);
+    out.patch_embedding_bias = bf16_tensor(backing, plan.patch_embedding_bias, {1'152});
+    out.position_embedding   = bf16_tensor(backing, plan.position_embedding, {2'304, 1'152});
+
+    for (std::size_t layer = 0; layer < plan.layers.size(); ++layer) {
+        const auto& src   = plan.layers[layer];
+        out.layers[layer] = {
+            .qkv          = bf16_weight(backing, src.qkv, 3'456, 1'152),
+            .qkv_bias     = bf16_tensor(backing, src.qkv_bias, {3'456}),
+            .output       = bf16_weight(backing, src.output, 1'152, 1'152),
+            .output_bias  = bf16_tensor(backing, src.output_bias, {1'152}),
+            .fc1          = bf16_weight(backing, src.fc1, 4'304, 1'152),
+            .fc1_bias     = bf16_tensor(backing, src.fc1_bias, {4'304}),
+            .fc2          = bf16_weight(backing, src.fc2, 1'152, 4'304),
+            .fc2_bias     = bf16_tensor(backing, src.fc2_bias, {1'152}),
+            .norm1_weight = bf16_tensor(backing, src.norm1_weight, {1'152}),
+            .norm1_bias   = bf16_tensor(backing, src.norm1_bias, {1'152}),
+            .norm2_weight = bf16_tensor(backing, src.norm2_weight, {1'152}),
+            .norm2_bias   = bf16_tensor(backing, src.norm2_bias, {1'152}),
+        };
+    }
+
+    out.merger_fc1         = bf16_weight(backing, plan.merger_fc1, 4'608, 4'608);
+    out.merger_fc1_bias    = bf16_tensor(backing, plan.merger_fc1_bias, {4'608});
+    out.merger_fc2         = bf16_weight(backing, plan.merger_fc2, 2'560, 4'608);
+    out.merger_fc2_bias    = bf16_tensor(backing, plan.merger_fc2_bias, {2'560});
+    out.merger_norm_weight = bf16_tensor(backing, plan.merger_norm_weight, {1'152});
+    out.merger_norm_bias   = bf16_tensor(backing, plan.merger_norm_bias, {1'152});
+    return out;
+}
+
 } // namespace
 
-LoadedTextModelData::LoadedTextModelData(BindingPlan plan,
-                                         artifact::MaterializedArtifact materialized)
+LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifact materialized)
     : backing(std::move(materialized)) {
-    if (plan.features.mtp || plan.features.vision) {
+    if (plan.features.mtp) {
         throw std::invalid_argument(
-            "text-only Flash-Next materialization received optional weights");
+            "MTP materialization is not yet supported in Flash-Next runtime");
     }
     for (std::size_t index = 0; index < frontend.size(); ++index) {
         frontend[index] = backing.take_resource_bytes(plan.frontend.resources[index]);
     }
 
-    runtime.weights_arena   = &backing.device_arena();
-    runtime.token_embedding = bf16_weight(backing, plan.token_embedding, 248'320, 2'560);
-    std::size_t full_index  = 0;
-    std::size_t gdn_index   = 0;
+    text.weights_arena     = &backing.device_arena();
+    text.token_embedding   = bf16_weight(backing, plan.token_embedding, 248'320, 2'560);
+    std::size_t full_index = 0;
+    std::size_t gdn_index  = 0;
     for (std::size_t layer = 0; layer < plan.text_layers.size(); ++layer) {
         const TextLayerPlan& source = plan.text_layers[layer];
-        TextLayerWeights& target    = runtime.layers[layer];
+        TextLayerWeights& target    = text.layers[layer];
         target.attention_hyper      = load_hyper(source.attention_hyper, backing);
         target.moe                  = load_moe(source.moe, backing);
         target.mlp_hyper            = load_hyper(source.mlp_hyper, backing);
         if (source.is_full_attention) {
-            runtime.full_attention.at(full_index++) = load_attention(source.attention, backing);
+            text.full_attention.at(full_index++) = load_attention(source.attention, backing);
         } else {
-            runtime.gdn.at(gdn_index++) = load_gdn(source.gdn, backing);
+            text.gdn.at(gdn_index++) = load_gdn(source.gdn, backing);
         }
     }
-    if (full_index != runtime.full_attention.size() || gdn_index != runtime.gdn.size()) {
+    if (full_index != text.full_attention.size() || gdn_index != text.gdn.size()) {
         throw std::logic_error("Flash-Next Text topology materialization is incomplete");
     }
-    runtime.ple         = load_ple(plan.ple, backing);
-    runtime.output_head = bf16_weight(backing, plan.output_head, 248'320, 2'560);
-    runtime.final_mixer = load_mixer(plan.final_mixer, backing);
+    text.ple         = load_ple(plan.ple, backing);
+    text.output_head = bf16_weight(backing, plan.output_head, 248'320, 2'560);
+    text.final_mixer = load_mixer(plan.final_mixer, backing);
+
+    if (plan.features.vision) { vision = load_vision(plan.vision, backing); }
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

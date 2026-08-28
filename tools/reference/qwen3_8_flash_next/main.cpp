@@ -1,6 +1,7 @@
 #include "artifact/binder.h"
 #include "artifact/materializer.h"
 #include "artifact/reader.h"
+#include "core/arena.h"
 #include "core/device.h"
 #include "targets/qwen3_8_flash_next/impl/load/bindings.h"
 #include "targets/qwen3_8_flash_next/impl/load/loader.h"
@@ -157,7 +158,7 @@ int run_execute_token(const ReferenceToolOptions& opts) {
     } else {
         std::cerr << "Loading and materializing model artifact: " << opts.model_path << " ...\n";
     }
-    auto model = LoadedTextModel::load_from_file(opts.model_path, device);
+    auto model = LoadedModel::load_from_file(opts.model_path, device);
 
     if (!opts.json_output) {
         std::cout << "Allocating runtime buffers ("
@@ -166,7 +167,7 @@ int run_execute_token(const ReferenceToolOptions& opts) {
     FlashNextRuntimeAllocation alloc(runtime_plan);
     alloc.initialize(device.stream);
 
-    FlashNextTextExecutor executor(model.view(), model.ple_metadata(), device, alloc);
+    FlashNextTextExecutor executor(model.text_view(), model.ple_metadata(), device, alloc);
 
     auto lane = executor.allocate_lane();
 
@@ -373,6 +374,165 @@ int run_materialize_full(const ReferenceToolOptions& opts) {
     return 0;
 }
 
+int run_materialize_vision(const ReferenceToolOptions& opts) {
+    int device_count = 0;
+    const auto err   = cudaGetDeviceCount(&device_count);
+    if (err != cudaSuccess || device_count == 0) {
+        std::cerr << "Error: No usable CUDA device available for materialize-vision mode\n";
+        return 1;
+    }
+
+    std::size_t free_before  = 0;
+    std::size_t total_before = 0;
+    CUDA_CHECK(cudaMemGetInfo(&free_before, &total_before));
+
+    ninfer::DeviceContext device(0);
+
+    if (!opts.json_output) {
+        std::cout << "Loading and materializing Text + Vision model: " << opts.model_path
+                  << " ...\n";
+    } else {
+        std::cerr << "Loading and materializing Text + Vision model: " << opts.model_path
+                  << " ...\n";
+    }
+
+    auto model = LoadedModel::load_from_file(opts.model_path, device,
+                                             LoadFeatures{.vision = true, .mtp = false});
+    device.synchronize();
+
+    if (!model.has_vision()) {
+        throw std::logic_error(
+            "LoadedModel reports has_vision() is false after requesting vision load");
+    }
+
+    const auto& vision = model.vision_view();
+    const auto& text   = model.text_view();
+
+    if (text.weights_arena == nullptr) {
+        throw std::logic_error("Text weights_arena pointer is null");
+    }
+    const auto arena_begin      = reinterpret_cast<std::uintptr_t>(text.weights_arena->base());
+    const auto arena_end        = arena_begin + text.weights_arena->capacity();
+    const auto in_weights_arena = [arena_begin, arena_end](const void* data, std::size_t bytes) {
+        const auto begin = reinterpret_cast<std::uintptr_t>(data);
+        return data != nullptr && begin >= arena_begin && begin <= arena_end &&
+               bytes <= arena_end - begin;
+    };
+    const auto valid_bf16_weight = [&in_weights_arena](const ninfer::Weight& weight,
+                                                       std::int32_t rows, std::int32_t columns) {
+        return weight.qtype == ninfer::QType::BF16_CTRL &&
+               in_weights_arena(weight.payload, weight.payload_bytes) && weight.ndim == 2 &&
+               weight.shape[0] == rows && weight.shape[1] == columns && weight.shape[2] == 1 &&
+               weight.shape[3] == 1;
+    };
+    const auto valid_bf16_tensor = [&in_weights_arena](const ninfer::Tensor& tensor,
+                                                       std::initializer_list<std::int32_t> shape) {
+        if (tensor.dtype != ninfer::DType::BF16 || !tensor.is_contiguous() ||
+            !in_weights_arena(tensor.data, tensor.bytes()) || shape.size() > 4) {
+            return false;
+        }
+        std::array<std::int32_t, 4> expected{1, 1, 1, 1};
+        std::copy(shape.begin(), shape.end(), expected.begin());
+        return std::equal(expected.begin(), expected.end(), std::begin(tensor.ne));
+    };
+
+    if (!valid_bf16_weight(text.token_embedding, 248'320, 2'560)) {
+        throw std::logic_error("Text token_embedding is not BF16 storage in the model arena");
+    }
+
+    if (!valid_bf16_weight(vision.patch_embedding, 1'152, 1'536)) {
+        throw std::logic_error("Vision patch_embedding invalid");
+    }
+    if (!valid_bf16_tensor(vision.patch_embedding_bias, {1'152})) {
+        throw std::logic_error("Vision patch_embedding_bias invalid");
+    }
+    if (!valid_bf16_tensor(vision.position_embedding, {2'304, 1'152})) {
+        throw std::logic_error("Vision position_embedding invalid");
+    }
+
+    for (std::size_t l = 0; l < vision.layers.size(); ++l) {
+        const auto& layer = vision.layers[l];
+        if (!valid_bf16_weight(layer.qkv, 3'456, 1'152) ||
+            !valid_bf16_tensor(layer.qkv_bias, {3'456}) ||
+            !valid_bf16_weight(layer.output, 1'152, 1'152) ||
+            !valid_bf16_tensor(layer.output_bias, {1'152}) ||
+            !valid_bf16_weight(layer.fc1, 4'304, 1'152) ||
+            !valid_bf16_tensor(layer.fc1_bias, {4'304}) ||
+            !valid_bf16_weight(layer.fc2, 1'152, 4'304) ||
+            !valid_bf16_tensor(layer.fc2_bias, {1'152}) ||
+            !valid_bf16_tensor(layer.norm1_weight, {1'152}) ||
+            !valid_bf16_tensor(layer.norm1_bias, {1'152}) ||
+            !valid_bf16_tensor(layer.norm2_weight, {1'152}) ||
+            !valid_bf16_tensor(layer.norm2_bias, {1'152})) {
+            throw std::logic_error("Vision layer " + std::to_string(l) + " tensor view invalid");
+        }
+    }
+
+    if (!valid_bf16_weight(vision.merger_fc1, 4'608, 4'608) ||
+        !valid_bf16_tensor(vision.merger_fc1_bias, {4'608}) ||
+        !valid_bf16_weight(vision.merger_fc2, 2'560, 4'608) ||
+        !valid_bf16_tensor(vision.merger_fc2_bias, {2'560}) ||
+        !valid_bf16_tensor(vision.merger_norm_weight, {1'152}) ||
+        !valid_bf16_tensor(vision.merger_norm_bias, {1'152})) {
+        throw std::logic_error("Vision merger tensor view invalid");
+    }
+
+    std::size_t free_resident  = 0;
+    std::size_t total_resident = 0;
+    CUDA_CHECK(cudaMemGetInfo(&free_resident, &total_resident));
+
+    constexpr std::uint64_t kExpectedDeviceWeightsBytes = 76'070'801'632ULL;
+    constexpr std::uint64_t kExpectedDeviceArenaBytes   = 76'070'815'744ULL;
+    constexpr std::size_t kExpectedDeviceTensors        = 1400;
+    constexpr std::size_t kExpectedRetainedResources    = 6;
+
+    const auto& stats              = model.stats();
+    const auto device_tensor_count = stats.tensor_count - stats.mapped_tensor_count;
+    if (stats.h2d_bytes != kExpectedDeviceWeightsBytes ||
+        stats.device_capacity_bytes != kExpectedDeviceArenaBytes ||
+        text.weights_arena->capacity() != kExpectedDeviceArenaBytes ||
+        device_tensor_count != kExpectedDeviceTensors ||
+        stats.resource_count != kExpectedRetainedResources ||
+        model.frontend_resources().size() != kExpectedRetainedResources) {
+        throw std::logic_error("Text + Vision materialization statistics violate the exact plan");
+    }
+
+    if (opts.json_output) {
+        std::cout << "{\n"
+                  << "  \"mode\": \"materialize-vision\",\n"
+                  << "  \"model_id\": \"" << kExpectedModelId << "\",\n"
+                  << "  \"weights_id\": \"" << kExpectedWeightsId << "\",\n"
+                  << "  \"planned_device_tensor_bytes\": " << kExpectedDeviceWeightsBytes << ",\n"
+                  << "  \"planned_device_arena_bytes\": " << kExpectedDeviceArenaBytes << ",\n"
+                  << "  \"planned_device_tensors\": " << kExpectedDeviceTensors << ",\n"
+                  << "  \"planned_retained_resources\": " << kExpectedRetainedResources << ",\n"
+                  << "  \"cuda_free_bytes_before\": " << free_before << ",\n"
+                  << "  \"cuda_total_bytes_before\": " << total_before << ",\n"
+                  << "  \"cuda_free_bytes_resident\": " << free_resident << ",\n"
+                  << "  \"cuda_total_bytes_resident\": " << total_resident << ",\n"
+                  << "  \"status\": \"OK\"\n"
+                  << "}\n";
+    } else {
+        std::cout << "\n=== Text + Vision GPU Materialization Report ===\n"
+                  << "Identity:                     " << kExpectedIdentity << "\n"
+                  << "Device Tensor Payloads:       "
+                  << (kExpectedDeviceWeightsBytes / (1024.0 * 1024.0 * 1024.0)) << " GiB ("
+                  << kExpectedDeviceWeightsBytes << " bytes)\n"
+                  << "Device Weights Arena:         "
+                  << (kExpectedDeviceArenaBytes / (1024.0 * 1024.0 * 1024.0)) << " GiB ("
+                  << kExpectedDeviceArenaBytes << " bytes)\n"
+                  << "Device Tensors:               " << kExpectedDeviceTensors
+                  << " (1067 text + 333 vision)\n"
+                  << "Retained Resources:           " << kExpectedRetainedResources << "\n"
+                  << "CUDA Free (Before Load):      " << (free_before / (1024.0 * 1024.0))
+                  << " MiB / " << (total_before / (1024.0 * 1024.0)) << " MiB\n"
+                  << "CUDA Free (Fully Resident):   " << (free_resident / (1024.0 * 1024.0))
+                  << " MiB / " << (total_resident / (1024.0 * 1024.0)) << " MiB\n"
+                  << "Materialization Status:       OK\n";
+    }
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -384,6 +544,8 @@ int main(int argc, char** argv) {
             return run_execute_token(opts);
         } else if (opts.mode == "materialize-full") {
             return run_materialize_full(opts);
+        } else if (opts.mode == "materialize-vision") {
+            return run_materialize_vision(opts);
         }
     } catch (const std::exception& ex) {
         std::cerr << "Error: " << ex.what() << "\n";

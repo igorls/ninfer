@@ -86,4 +86,32 @@ struct TextModelView {
     HyperMixerWeights final_mixer;
 };
 
+struct VisionLayerWeights {
+    Weight qkv;
+    Tensor qkv_bias;
+    Weight output;
+    Tensor output_bias;
+    Weight fc1;
+    Tensor fc1_bias;
+    Weight fc2;
+    Tensor fc2_bias;
+    Tensor norm1_weight;
+    Tensor norm1_bias;
+    Tensor norm2_weight;
+    Tensor norm2_bias;
+};
+
+struct VisionModelView {
+    Weight patch_embedding;
+    Tensor patch_embedding_bias;
+    Tensor position_embedding;
+    std::array<VisionLayerWeights, 27> layers;
+    Weight merger_fc1;
+    Tensor merger_fc1_bias;
+    Weight merger_fc2;
+    Tensor merger_fc2_bias;
+    Tensor merger_norm_weight;
+    Tensor merger_norm_bias;
+};
+
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

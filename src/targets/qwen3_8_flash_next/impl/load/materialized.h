@@ -6,22 +6,24 @@
 
 #include <array>
 #include <cstddef>
+#include <optional>
 #include <vector>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
-class LoadedTextModelData {
+class LoadedModelData {
 public:
-    LoadedTextModelData(BindingPlan plan, artifact::MaterializedArtifact materialized);
+    LoadedModelData(BindingPlan plan, artifact::MaterializedArtifact materialized);
 
-    LoadedTextModelData(const LoadedTextModelData&)            = delete;
-    LoadedTextModelData& operator=(const LoadedTextModelData&) = delete;
-    LoadedTextModelData(LoadedTextModelData&&)                 = delete;
-    LoadedTextModelData& operator=(LoadedTextModelData&&)      = delete;
+    LoadedModelData(const LoadedModelData&)            = delete;
+    LoadedModelData& operator=(const LoadedModelData&) = delete;
+    LoadedModelData(LoadedModelData&&)                 = delete;
+    LoadedModelData& operator=(LoadedModelData&&)      = delete;
 
     artifact::MaterializedArtifact backing;
     std::array<std::vector<std::byte>, 6> frontend;
-    TextModelView runtime;
+    TextModelView text;
+    std::optional<VisionModelView> vision;
 };
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

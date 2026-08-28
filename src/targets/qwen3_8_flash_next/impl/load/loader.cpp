@@ -54,25 +54,28 @@ FlashNextPreflightReport preflight_text_file(const std::filesystem::path& path,
     return preflight_text_artifact(reader, config, main_page_groups);
 }
 
-LoadedTextModel::LoadedTextModel(BindingPlan plan, artifact::MaterializedArtifact materialized)
-    : data_(std::make_unique<LoadedTextModelData>(std::move(plan), std::move(materialized))) {}
+LoadedModel::LoadedModel(BindingPlan plan, artifact::MaterializedArtifact materialized)
+    : data_(std::make_unique<LoadedModelData>(std::move(plan), std::move(materialized))) {}
 
-LoadedTextModel LoadedTextModel::load(const artifact::Reader& reader, DeviceContext& device,
-                                      artifact::LoadProgress* progress) {
+LoadedModel LoadedModel::load(const artifact::Reader& reader, DeviceContext& device,
+                              LoadFeatures features, artifact::LoadProgress* progress) {
     validate_identity(reader.identity());
+    if (features.mtp) {
+        throw std::invalid_argument(
+            "MTP materialization is not yet supported in Flash-Next runtime");
+    }
 
     artifact::Binder binder(reader);
-    auto load_plan    = bind_artifact(binder, LoadFeatures{.vision = false, .mtp = false});
+    auto load_plan    = bind_artifact(binder, features);
     auto materialized = artifact::materialize(reader, load_plan.materialization, device, progress);
 
-    return LoadedTextModel(std::move(load_plan.bindings), std::move(materialized));
+    return LoadedModel(std::move(load_plan.bindings), std::move(materialized));
 }
 
-LoadedTextModel LoadedTextModel::load_from_file(const std::filesystem::path& path,
-                                                DeviceContext& device,
-                                                artifact::LoadProgress* progress) {
+LoadedModel LoadedModel::load_from_file(const std::filesystem::path& path, DeviceContext& device,
+                                        LoadFeatures features, artifact::LoadProgress* progress) {
     const artifact::Reader reader(path);
-    return load(reader, device, progress);
+    return load(reader, device, features, progress);
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail
