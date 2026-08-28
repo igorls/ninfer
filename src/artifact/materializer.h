@@ -23,8 +23,10 @@ struct MaterializationStats {
     std::uint64_t h2d_bytes               = 0;
     std::uint64_t device_capacity_bytes   = 0;
     std::uint64_t retained_resource_bytes = 0;
+    std::uint64_t mapped_tensor_bytes     = 0;
     std::uint64_t peak_staging_bytes      = 0;
     std::size_t tensor_count              = 0;
+    std::size_t mapped_tensor_count       = 0;
     std::size_t resource_count            = 0;
     double upload_seconds                 = 0.0;
 };
@@ -40,6 +42,7 @@ public:
 
     void* device_data(ObjectHandle handle) const;
     std::span<const std::byte> resource_bytes(ObjectHandle handle) const;
+    std::span<const std::byte> mapped_tensor_bytes(ObjectHandle handle) const;
     std::vector<std::byte> take_resource_bytes(ObjectHandle handle);
 
     const MaterializationStats& stats() const noexcept { return stats_; }
@@ -53,9 +56,11 @@ private:
     struct ObjectStorage {
         void* device = nullptr;
         std::vector<std::byte> resource;
+        std::span<const std::byte> mapped;
     };
 
     std::unique_ptr<DeviceArena> device_arena_;
+    std::shared_ptr<const void> mapping_lease_;
     std::vector<ObjectStorage> objects_;
     MaterializationStats stats_;
 };

@@ -30,11 +30,16 @@ struct HostMaterialization {
     ObjectHandle object;
 };
 
+struct MappedTensorMaterialization {
+    ObjectHandle object;
+};
+
 struct MaterializationPlan {
     std::size_t object_count            = 0;
     std::uint64_t device_capacity_bytes = 0;
     std::vector<DeviceMaterialization> device_objects;
     std::vector<HostMaterialization> host_objects;
+    std::vector<MappedTensorMaterialization> mapped_tensor_objects;
 };
 
 class Binder {
@@ -49,6 +54,7 @@ public:
     PayloadSpan payload(ObjectHandle handle) const;
     void materialize_on_device(ObjectHandle handle);
     void retain_on_host(ObjectHandle handle);
+    void retain_mapped_tensor(ObjectHandle handle);
     void validate_only(ObjectHandle handle);
     MaterializationPlan finish();
 

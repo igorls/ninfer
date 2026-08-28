@@ -436,7 +436,7 @@ struct Reader::Impl {
     std::uint64_t payload_start = 0;
 };
 
-Reader::Reader(const std::filesystem::path& path) : impl_(std::make_unique<Impl>(path)) {}
+Reader::Reader(const std::filesystem::path& path) : impl_(std::make_shared<Impl>(path)) {}
 
 Reader::~Reader()                            = default;
 Reader::Reader(Reader&&) noexcept            = default;
@@ -476,6 +476,10 @@ PayloadSpan Reader::payload(std::string_view name) const {
 std::size_t Reader::read_direct(std::uint64_t absolute_offset,
                                 std::span<std::byte> destination) const {
     return impl_->file.read_direct(absolute_offset, destination);
+}
+
+std::shared_ptr<const void> Reader::mapping_lease() const noexcept {
+    return std::static_pointer_cast<const void>(impl_);
 }
 
 } // namespace ninfer::artifact

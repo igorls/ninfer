@@ -31,8 +31,14 @@ constexpr std::array<std::byte, 8> kSecondTensor = {
     std::byte{3}, std::byte{3}, std::byte{3}, std::byte{3},
     std::byte{3}, std::byte{3}, std::byte{3}, std::byte{3},
 };
+constexpr std::array<std::byte, 4> kMappedTensor = {
+    std::byte{5},
+    std::byte{5},
+    std::byte{5},
+    std::byte{5},
+};
 constexpr std::size_t kFp8TensorBytes = 260;
-constexpr std::size_t kTailReadBytes  = 256 + kFp8TensorBytes;
+constexpr std::size_t kTailReadBytes  = 772;
 
 ninfer::test::artifact_fixture::TemporaryArtifact write_fixture() {
     using Json = ninfer::test::artifact_fixture::Json;
@@ -66,6 +72,13 @@ ninfer::test::artifact_fixture::TemporaryArtifact write_fixture() {
                              {"layout", "row-scale-v1"},
                              {"offset", 8448},
                              {"bytes", kFp8TensorBytes}},
+                            {{"name", "weights/mapped"},
+                             {"kind", "tensor"},
+                             {"shape", {2}},
+                             {"format", "BF16"},
+                             {"layout", "contiguous-le-v1"},
+                             {"offset", 8960},
+                             {"bytes", kMappedTensor.size()}},
                         })},
         },
         "materialization");
@@ -77,6 +90,40 @@ bool cuda_unavailable(cudaError_t error) {
 
 void require(bool condition, const char* message) {
     if (!condition) { throw std::runtime_error(message); }
+}
+
+struct MappedResult {
+    ninfer::artifact::MaterializedArtifact artifact;
+    ninfer::artifact::ObjectHandle handle;
+};
+
+MappedResult materialize_mapped_tensor(const std::filesystem::path& path,
+                                       ninfer::DeviceContext& device) {
+    ninfer::artifact::Reader reader(path);
+    ninfer::artifact::Binder binder(reader);
+    const auto resource = binder.require_resource("frontend/test.json",
+                                                  ninfer::artifact::ResourceEncoding::RawBytesV1);
+    binder.retain_on_host(resource);
+    constexpr std::array<std::uint64_t, 1> tensor_shape = {2};
+    const auto tensor =
+        binder.require_tensor("weights/test", ninfer::artifact::NumericFormat::BF16,
+                              ninfer::artifact::StorageLayout::ContiguousLeV1, tensor_shape);
+    binder.materialize_on_device(tensor);
+    constexpr std::array<std::uint64_t, 1> second_shape = {4};
+    const auto second =
+        binder.require_tensor("weights/second", ninfer::artifact::NumericFormat::BF16,
+                              ninfer::artifact::StorageLayout::ContiguousLeV1, second_shape);
+    binder.validate_only(second);
+    constexpr std::array<std::uint64_t, 2> fp8_shape = {2, 4};
+    const auto fp8 =
+        binder.require_tensor("weights/fp8", ninfer::artifact::NumericFormat::FP8_E4M3FN_ROW_BF16S,
+                              ninfer::artifact::StorageLayout::RowScaleV1, fp8_shape);
+    binder.validate_only(fp8);
+    const auto mapped =
+        binder.require_tensor("weights/mapped", ninfer::artifact::NumericFormat::BF16,
+                              ninfer::artifact::StorageLayout::ContiguousLeV1, tensor_shape);
+    binder.retain_mapped_tensor(mapped);
+    return {ninfer::artifact::materialize(reader, binder.finish(), device), mapped};
 }
 
 } // namespace
@@ -104,8 +151,13 @@ int main() {
             "weights/fp8", ninfer::artifact::NumericFormat::FP8_E4M3FN_ROW_BF16S,
             ninfer::artifact::StorageLayout::RowScaleV1, fp8_shape);
         validation_binder.validate_only(validated_fp8);
+        const auto validated_mapped = validation_binder.require_tensor(
+            "weights/mapped", ninfer::artifact::NumericFormat::BF16,
+            ninfer::artifact::StorageLayout::ContiguousLeV1, validated_shape);
+        validation_binder.retain_mapped_tensor(validated_mapped);
         const auto validation_plan = validation_binder.finish();
-        require(validation_plan.object_count == 4 && validation_plan.host_objects.size() == 1 &&
+        require(validation_plan.object_count == 5 && validation_plan.host_objects.size() == 1 &&
+                    validation_plan.mapped_tensor_objects.size() == 1 &&
                     validation_plan.device_objects.size() == 1 &&
                     validation_plan.device_capacity_bytes == kSecondTensor.size(),
                 "validate-only tensor was included in the materialization plan");
@@ -145,10 +197,15 @@ int main() {
             "weights/fp8", ninfer::artifact::NumericFormat::FP8_E4M3FN_ROW_BF16S,
             ninfer::artifact::StorageLayout::RowScaleV1, fp8_shape);
         binder.materialize_on_device(fp8);
+        const auto mapped =
+            binder.require_tensor("weights/mapped", ninfer::artifact::NumericFormat::BF16,
+                                  ninfer::artifact::StorageLayout::ContiguousLeV1, tensor_shape);
+        binder.retain_mapped_tensor(mapped);
 
         const ninfer::artifact::MaterializationPlan plan = binder.finish();
-        require(plan.object_count == 4 && plan.host_objects.size() == 1 &&
-                    plan.device_objects.size() == 3 && plan.device_capacity_bytes == 772,
+        require(plan.object_count == 5 && plan.host_objects.size() == 1 &&
+                    plan.mapped_tensor_objects.size() == 1 && plan.device_objects.size() == 3 &&
+                    plan.device_capacity_bytes == 772,
                 "binder produced the wrong materialization plan");
 
         ninfer::DeviceContext device(0);
@@ -185,8 +242,22 @@ int main() {
         require(std::equal(retained.begin(), retained.end(), kResource.begin(), kResource.end()),
                 "retained resource payload differs from the artifact");
 
+        const auto mapped_bytes = materialized.mapped_tensor_bytes(mapped);
+        require(std::equal(mapped_bytes.begin(), mapped_bytes.end(), kMappedTensor.begin(),
+                           kMappedTensor.end()),
+                "mapped tensor payload differs from the artifact");
+
+        // The returned materialization must retain the file mapping independently of Reader.
+        MappedResult lifetime     = materialize_mapped_tensor(fixture.path, device);
+        const auto lifetime_bytes = lifetime.artifact.mapped_tensor_bytes(lifetime.handle);
+        require(std::equal(lifetime_bytes.begin(), lifetime_bytes.end(), kMappedTensor.begin(),
+                           kMappedTensor.end()),
+                "mapped tensor lifetime ended with the source Reader");
+
         const auto& stats = materialized.stats();
-        require(stats.tensor_count == 3 && stats.resource_count == 1 &&
+        require(stats.tensor_count == 4 && stats.mapped_tensor_count == 1 &&
+                    stats.mapped_tensor_bytes == kMappedTensor.size() &&
+                    stats.resource_count == 1 &&
                     stats.h2d_bytes == kTensor.size() + kSecondTensor.size() + kFp8TensorBytes &&
                     stats.retained_resource_bytes == kResource.size() &&
                     stats.file_bytes == kResource.size() +
