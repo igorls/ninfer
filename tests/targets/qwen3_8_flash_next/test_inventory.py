@@ -11,7 +11,7 @@ def test_inventory_is_closed_and_uses_bank_objects():
     assert len(inventory.OBJECT_SPECS) == 1_566
     assert inventory.FORMAT_COUNTS == {
         "BF16": 1_237,
-        "I32": 3,
+        "I64": 3,
         "NVFP4": 96,
         "FP8_E4M3FN_ROW_F32S": 96,
         "U4Z8G16_F16S": 128,

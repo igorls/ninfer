@@ -268,7 +268,7 @@ def _build_recipes() -> tuple[
         pp + "ple_embedding.layer_multipliers",
         (3,),
         dtype="I64",
-        transform="i64-to-i32",
+        transform="copy",
     )
     _direct(
         direct,
@@ -276,7 +276,7 @@ def _build_recipes() -> tuple[
         pp + "ple_embedding.ngram_heads_offsets",
         (16,),
         dtype="I64",
-        transform="i64-to-i32",
+        transform="copy",
     )
     _direct(
         direct,
@@ -284,7 +284,7 @@ def _build_recipes() -> tuple[
         pp + "ple_embedding.ngram_heads_vocab_sizes",
         (16,),
         dtype="I64",
-        transform="i64-to-i32",
+        transform="copy",
     )
     ple.extend(
         PleRecipe(po + f"embedding/shards/{shard}", shard) for shard in range(128)

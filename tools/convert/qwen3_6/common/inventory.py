@@ -17,13 +17,14 @@ RESOURCE_ENCODING = "raw-bytes-v1"
 BF16 = "BF16"
 FP32 = "FP32"
 I32 = "I32"
+I64 = "I64"
 Q4 = "Q4G64_F16S"
 Q5 = "Q5G64_F16S"
 Q6 = "Q6G64_F16S"
 W8 = "W8G32_F16S"
 
-DIRECT_FORMATS = frozenset((BF16, FP32, I32))
-FORMAT_NAMES = (BF16, FP32, I32, Q4, Q5, Q6, W8)
+DIRECT_FORMATS = frozenset((BF16, FP32, I32, I64))
+FORMAT_NAMES = (BF16, FP32, I32, I64, Q4, Q5, Q6, W8)
 LAYOUT_NAMES = (CONTIGUOUS_LAYOUT, ROW_SPLIT_LAYOUT)
 
 VISION_LAYERS = tuple(range(27))
@@ -148,6 +149,7 @@ __all__ = [
     "FORMAT_NAMES",
     "FP32",
     "I32",
+    "I64",
     "LAYOUT_NAMES",
     "LogicalAliasSpec",
     "LogicalRowViewSpec",

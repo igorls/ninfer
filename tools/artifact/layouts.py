@@ -126,7 +126,7 @@ class RowPlanes:
 
 
 CONTIGUOUS_LE_V1 = Layout(
-    "contiguous-le-v1", 256, frozenset(("BF16", "FP32", "I32"))
+    "contiguous-le-v1", 256, frozenset(("BF16", "FP32", "I32", "I64"))
 )
 ROW_SPLIT_K128_V1 = Layout(
     "row-split-k128-v1",
@@ -422,6 +422,7 @@ _DIRECT_DTYPES = {
     "BF16": torch.bfloat16,
     "FP32": torch.float32,
     "I32": torch.int32,
+    "I64": torch.int64,
 }
 
 

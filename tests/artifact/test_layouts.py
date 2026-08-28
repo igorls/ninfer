@@ -60,6 +60,13 @@ def _signed_word(word: int, bits: int) -> int:
             "i",
             torch.int32,
         ),
+        (
+            "I64",
+            torch.tensor((0, -1, -(1 << 63), (1 << 63) - 1), dtype=torch.int64),
+            (0, -1, -(1 << 63), (1 << 63) - 1),
+            "q",
+            torch.int64,
+        ),
     ],
 )
 def test_direct_layout_preserves_exact_little_endian_words(

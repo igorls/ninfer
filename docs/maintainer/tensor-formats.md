@@ -16,6 +16,7 @@ Direct scalar formats preserve one logical scalar word per tensor element:
 | `BF16` | direct floating point | 16 | bfloat16 bit encoding |
 | `FP32` | direct floating point | 32 | IEEE-754 binary32 |
 | `I32` | direct signed integer | 32 | 32-bit two's-complement integer |
+| `I64` | direct signed integer | 64 | 64-bit two's-complement integer |
 
 Grouped quantized-weight formats preserve signed codes plus one scale per logical group:
 
@@ -87,7 +88,7 @@ identify a tensor's model role, physical byte layout, or supported consumer.
 
 A **direct scalar format** assigns one fixed-width logical word to every logical tensor coordinate.
 It defines the value of that word without a group, scale, zero point, or reconstruction step. `BF16`,
-`FP32`, and `I32` are direct scalar formats.
+`FP32`, `I32`, and `I64` are direct scalar formats.
 
 The adjective “direct” does not require a particular physical layout or prohibit a registered
 lossless storage transformation. It means only that layout decoding recovers the original logical
@@ -231,21 +232,23 @@ All 2^32 logical words are valid at the format layer. As with BF16, signed zeros
 NaN payloads remain distinct persistent words. Tensor-specific restrictions on non-finite values
 belong to the checkpoint recipe, while compute-time propagation belongs to the compute profile.
 
-#### I32
+#### I32 and I64
 
-`I32` is a 32-bit two's-complement signed integer. For an abstract unsigned logical word `u`:
+`I32` and `I64` are two's-complement signed integers of their named width. For an abstract unsigned
+logical word `u` and word width `w`:
 
 ```text
-value = u                         if u < 2^31
-value = u - 2^32                  otherwise
+value = u                         if u < 2^(w-1)
+value = u - 2^w                   otherwise
 ```
 
-Every 32-bit word is valid, and the value interval is `[-2147483648, 2147483647]`. `I32` has no
+Every word is valid. `I32` has interval `[-2147483648, 2147483647]`; `I64` has interval
+`[-9223372036854775808, 9223372036854775807]`. Neither format has
 scale, zero point, saturation behavior, sentinel convention, or dependency on the host C++ `int`
 type. Requirements such as nonnegativity, vocabulary bounds, or the meaning of `-1` belong to the
 specific tensor role.
 
-The canonical identifier is `I32`; “INT32” is explanatory prose, not a second accepted name or a
+The canonical identifiers are `I32` and `I64`; “INT32” and “INT64” are explanatory prose, not second accepted names or
 compatibility alias.
 
 #### Common direct-format rules
@@ -257,14 +260,15 @@ Byte order is likewise a layout property and must never be inferred from host-na
 
 Persistence from the same source type is bitwise identity at the logical-word boundary. A conversion
 between different source and target types is not implicit. The checkpoint recipe must define it,
-including rounding for FP32-to-BF16 and range/integrality checks for any conversion to I32. A
+including rounding for FP32-to-BF16 and range/integrality checks for any conversion to I32 or I64. A
 producer must not silently wrap, truncate, or saturate a value merely because the destination word
 has a fixed width.
 
 The direct format does not encode a model role. `BF16_CTRL`, `FP32_CTRL`, and `I32_CTRL` are internal
 execution `QType` names, not persistent NInfer format identities, and receive no aliases in the
-artifact registry. Control parameters, ordinary weights, norms, indexes, and maps use a direct
-format plus a separate model-assignment role.
+artifact registry. `I64` currently has no device `QType`; it is retained as an exact mapped artifact
+tensor. Control parameters, ordinary weights, norms, indexes, and maps use a direct format plus a
+separate model-assignment role.
 
 ### 3.2 Grouped signed-integer weight identities
 
@@ -790,7 +794,7 @@ current execution platform.
 
 The registry contains no implicit or reserved support for:
 
-- other direct scalar types, including `FP16`, `FP64`, signed widths other than `I32`, and unsigned
+- other direct scalar types, including `FP16`, `FP64`, signed widths other than `I32` and `I64`, and unsigned
   integers;
 - other integer widths, including Q2 and Q3;
 - alternate group sizes outside the five explicitly registered integer schemes;
@@ -911,7 +915,7 @@ questions open:
 
 - persistent quantized weights use the four grouped signed-integer identities, exact `NVFP4`, the
   two exact row-scaled FP8 identities, or exact `U4Z8G16_F16S`; no spelling constructs another scheme;
-- direct persistent tensors use only `BF16`, `FP32`, and `I32`, with the exact logical words in
+- direct persistent tensors use only `BF16`, `FP32`, `I32`, and `I64`, with the exact logical words in
   Section 3.1;
 - quantization groups run along the final logical dimension and never cross a leading coordinate;
 - the four grouped signed-integer formats use one finite nonnegative binary16 multiplier per group,

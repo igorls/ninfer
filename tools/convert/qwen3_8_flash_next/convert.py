@@ -151,14 +151,6 @@ def _iter_direct_payload(
         words = np.frombuffer(raw, dtype="<u2").reshape(channels, 1, width)
         yield words[:, 0, :].transpose(1, 0).copy().tobytes()
         return
-    if selected.transform == "i64-to-i32":
-        raw = reader.read_tensor(resolve(selected.sources[0].name))
-        values = np.frombuffer(raw, dtype="<i8")
-        info = np.iinfo(np.int32)
-        if np.any(values < info.min) or np.any(values > info.max):
-            raise ValueError(f"{selected.object_name}: I64 value is outside the I32 artifact contract")
-        yield values.astype("<i4").tobytes()
-        return
     raise ValueError(f"{selected.object_name}: unknown direct transform {selected.transform}")
 
 

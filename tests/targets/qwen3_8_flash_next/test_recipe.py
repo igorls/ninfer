@@ -40,6 +40,13 @@ def test_fused_recipes_preserve_semantic_source_order():
     assert isinstance(gate_up, recipe.ExpertBankRecipe)
     assert gate_up.projections == ("gate_proj", "up_proj")
 
+    multipliers = recipe.RECIPES_BY_OBJECT[
+        "text/layers/1/ple/embedding/layer_multipliers"
+    ]
+    assert isinstance(multipliers, recipe.DirectRecipe)
+    assert multipliers.sources[0].dtype == "I64"
+    assert multipliers.transform == "copy"
+
 
 def test_real_pinned_bundle_matches_recipe_when_available():
     mixed = recipe.DEFAULT_MIXED_DIR

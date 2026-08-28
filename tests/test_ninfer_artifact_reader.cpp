@@ -109,6 +109,13 @@ Json normative_directory() {
                          {"layout", "expert-blockscale-k16-m128x4-v1"},
                          {"offset", 5120},
                          {"bytes", 9224}},
+                        {{"name", "i64"},
+                         {"kind", "tensor"},
+                         {"shape", {2}},
+                         {"format", "I64"},
+                         {"layout", "contiguous-le-v1"},
+                         {"offset", 14592},
+                         {"bytes", 16}},
                     })},
     };
 }
@@ -143,6 +150,7 @@ void test_registered_sizes() {
     if (tensor_encoded_size(direct, NumericFormat::BF16, shape_2x3) != 12 ||
         tensor_encoded_size(direct, NumericFormat::FP32, {}) != 4 ||
         tensor_encoded_size(direct, NumericFormat::I32, shape_2) != 8 ||
+        tensor_encoded_size(direct, NumericFormat::I64, shape_2) != 16 ||
         tensor_encoded_size(rows, NumericFormat::Q4G64_F16S, q4_shape) != 260 ||
         tensor_encoded_size(rows, NumericFormat::Q5G64_F16S, q5_shape) != 528 ||
         tensor_encoded_size(rows, NumericFormat::Q6G64_F16S, q6_shape) != 516 ||
@@ -170,14 +178,14 @@ void test_normative_fixture() {
     auto fixture = write_fixture(normative_directory(), "valid");
     Reader reader(fixture.path);
     if (reader.identity().model_id != "fixture-model" ||
-        reader.identity().weights_id != "fixture-weights" || reader.objects().size() != 12 ||
+        reader.identity().weights_id != "fixture-weights" || reader.objects().size() != 13 ||
         reader.payload_offset() != 4096) {
         throw std::runtime_error("fixture root descriptor mismatch");
     }
 
-    const std::array<std::string_view, 12> expected_names = {
+    const std::array<std::string_view, 13> expected_names = {
         "resource", "bf16", "fp32_scalar", "i32",         "q4",     "q5",
-        "q6",       "w8",   "fp8_row",     "fp8_row_f32", "ple_u4", "nvfp4_bank",
+        "q6",       "w8",   "fp8_row",     "fp8_row_f32", "ple_u4", "nvfp4_bank", "i64",
     };
     for (std::size_t i = 0; i < expected_names.size(); ++i) {
         const auto& object = reader.objects()[i];

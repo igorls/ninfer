@@ -10,7 +10,7 @@ from __future__ import annotations
 from tools.convert.qwen3_6.common.inventory import (
     BF16,
     CONTIGUOUS_LAYOUT,
-    I32,
+    I64,
     RESOURCE_SPECS,
     ResourceSpec,
     StoredObjectSpec,
@@ -34,7 +34,7 @@ GDN_LAYERS = tuple(layer for layer in range(48) if layer not in FULL_ATTENTION_L
 
 
 def tensor_spec(name: str, shape: tuple[int, ...], numeric_format: str) -> TensorSpec:
-    if numeric_format in (BF16, I32):
+    if numeric_format in (BF16, I64):
         layout = CONTIGUOUS_LAYOUT
     elif numeric_format == FP8:
         layout = FP8_LAYOUT
@@ -129,9 +129,9 @@ def _build_ple_specs() -> tuple[TensorSpec, ...]:
         tensor_spec(prefix + "key_norm", (10_240,), BF16),
         tensor_spec(prefix + "query_norm", (10_240,), BF16),
         tensor_spec(prefix + "value_projection", (2_560, 2_560), BF16),
-        tensor_spec(prefix + "embedding/layer_multipliers", (3,), I32),
-        tensor_spec(prefix + "embedding/ngram_head_offsets", (16,), I32),
-        tensor_spec(prefix + "embedding/ngram_head_vocab_sizes", (16,), I32),
+        tensor_spec(prefix + "embedding/layer_multipliers", (3,), I64),
+        tensor_spec(prefix + "embedding/ngram_head_offsets", (16,), I64),
+        tensor_spec(prefix + "embedding/ngram_head_vocab_sizes", (16,), I64),
     ]
     specs.extend(
         tensor_spec(prefix + f"embedding/shards/{shard}", (2_500_012, 160), PLE_U4)
@@ -228,7 +228,7 @@ TENSOR_SPECS = (
 )
 OBJECT_SPECS: tuple[StoredObjectSpec, ...] = RESOURCE_SPECS + TENSOR_SPECS
 
-FORMAT_NAMES = (BF16, I32, NVFP4, FP8, PLE_U4)
+FORMAT_NAMES = (BF16, I64, NVFP4, FP8, PLE_U4)
 LAYOUT_NAMES = (
     CONTIGUOUS_LAYOUT,
     EXPERT_NVFP4_LAYOUT,
@@ -261,7 +261,7 @@ def validate_inventory() -> None:
         raise ValueError("Flash-Next persistent inventory is incomplete")
     if FORMAT_COUNTS != {
         BF16: 1_237,
-        I32: 3,
+        I64: 3,
         NVFP4: 96,
         FP8: 96,
         PLE_U4: 128,
@@ -288,7 +288,7 @@ __all__ = [
     "FULL_ATTENTION_LAYERS",
     "GDN_LAYERS",
     "GLOBAL_TENSOR_SPECS",
-    "I32",
+    "I64",
     "LAYOUT_COUNTS",
     "MODEL_ID",
     "MTP_TENSOR_SPECS",

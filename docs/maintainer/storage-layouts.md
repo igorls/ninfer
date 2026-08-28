@@ -11,7 +11,7 @@ The storage registry contains exactly these identities:
 
 | Identity | Kind | Compatible numeric formats | Logical shape | Object alignment |
 |---|---|---|---|---:|
-| `contiguous-le-v1` | tensor layout | `BF16`, `FP32`, `I32` | rank `0..16` | 256 bytes |
+| `contiguous-le-v1` | tensor layout | `BF16`, `FP32`, `I32`, `I64` | rank `0..16` | 256 bytes |
 | `row-split-k128-v1` | tensor layout | `Q4G64_F16S`, `Q5G64_F16S`, `Q6G64_F16S`, `W8G32_F16S` | rank 2 `[N,K]` | 256 bytes |
 | `blockscale-k16-m128x4-v1` | tensor layout | `NVFP4` | rank 2 `[N,K]`, `N % 128 == 0`, `K % 64 == 0` | 256 bytes |
 | `expert-blockscale-k16-m128x4-v1` | tensor layout | `NVFP4` | rank 3 `[E,N,K]`, `N % 128 == 0`, `K % 64 == 0` | 256 bytes |
@@ -69,6 +69,7 @@ Words are serialized least-significant byte first:
 | `BF16` | 2 | the exact 16-bit bfloat16 logical word, little-endian |
 | `FP32` | 4 | the exact 32-bit IEEE-754 binary32 logical word, little-endian |
 | `I32` | 4 | the exact 32-bit two's-complement logical word, little-endian |
+| `I64` | 8 | the exact 64-bit two's-complement logical word, little-endian |
 
 Signed zero, subnormal, infinity, NaN payload, and integer-word behavior are determined by the
 numeric-format contract. The layout only preserves the word bits.
@@ -402,7 +403,7 @@ bytes; the common encoding does not infer that meaning from the name.
 
 Layout decoding yields only persistent logical words:
 
-- `contiguous-le-v1` yields the direct BF16, FP32, or I32 words in logical coordinate order;
+- `contiguous-le-v1` yields the direct BF16, FP32, I32, or I64 words in logical coordinate order;
 - `row-split-k128-v1` yields the grouped signed codes and binary16 scales for logical columns
   `0..K-1`, discarding physical columns `K..K_pad-1`;
 - `blockscale-k16-m128x4-v1` yields the packed E2M1 words, natural E4M3FN group-scale words, and

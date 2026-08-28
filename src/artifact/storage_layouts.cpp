@@ -55,8 +55,10 @@ std::uint64_t direct_word_bytes(NumericFormat format) {
     case NumericFormat::FP32:
     case NumericFormat::I32:
         return 4;
+    case NumericFormat::I64:
+        return 8;
     default:
-        throw ArtifactError("contiguous-le-v1 requires BF16, FP32, or I32");
+        throw ArtifactError("contiguous-le-v1 requires BF16, FP32, I32, or I64");
     }
 }
 
@@ -70,6 +72,8 @@ std::string_view format_name(NumericFormat format) noexcept {
         return "FP32";
     case NumericFormat::I32:
         return "I32";
+    case NumericFormat::I64:
+        return "I64";
     case NumericFormat::Q4G64_F16S:
         return "Q4G64_F16S";
     case NumericFormat::Q5G64_F16S:
