@@ -2,6 +2,7 @@
 
 #include "ops/linear/bf16/bf16_config.h"
 #include "ops/linear/bf16/bf16_dispatch.h"
+#include "ops/linear/fp8/fp8_config.h"
 #include "ops/linear/fp8/fp8_dispatch.h"
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_dispatch.h"
@@ -97,6 +98,7 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
         detail::nvfp4_dispatch(x, w, out, policy, workspace, stream);
         return;
     case QType::FP8_E4M3FN_ROW_BF16S:
+    case QType::FP8_E4M3FN_ROW_F32S:
         detail::fp8_dispatch(x, w, out, policy, workspace, stream);
         return;
     case QType::FP32_CTRL:
@@ -147,6 +149,11 @@ std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_row
     case QType::FP8_E4M3FN_ROW_BF16S:
         return detail::fp8_linear_workspace_capacity_bytes(output_rows, input_rows, policy,
                                                            min_tokens, max_tokens);
+    case QType::FP8_E4M3FN_ROW_F32S:
+        if (!detail::is_fp8_f32_linear_problem(output_rows, input_rows)) {
+            throw std::invalid_argument("linear workspace: unsupported FP8/F32 profile");
+        }
+        return 0;
     case QType::FP32_CTRL:
     case QType::I32_CTRL:
         break;

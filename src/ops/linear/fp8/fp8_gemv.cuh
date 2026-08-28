@@ -71,6 +71,12 @@ __device__ __forceinline__ float2 decode_fp8_e4m3x2(std::uint16_t storage) {
     return static_cast<float2>(value);
 }
 
+__device__ __forceinline__ float fp8_row_scale(float value) { return value; }
+
+__device__ __forceinline__ float fp8_row_scale(__nv_bfloat16 value) {
+    return __bfloat162float(value);
+}
+
 template <int Values, int Rows, int AccumulatorChains>
 __device__ __forceinline__ void accumulate_rows(const Fp8CodePack<Values> (&codes)[Rows],
                                                 const std::uint32_t* activation_pairs,
@@ -93,10 +99,10 @@ __device__ __forceinline__ void accumulate_rows(const Fp8CodePack<Values> (&code
 }
 
 template <class Geometry, class Schedule, class Output, class RowPolicy = Fp8GemvIdentityRows,
-          bool PairRows = false, class Epilogue = Fp8IdentityEpilogue>
+          bool PairRows = false, class Epilogue = Fp8IdentityEpilogue, class Scale = __nv_bfloat16>
 __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_gemv_kernel(
     const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ weight_codes,
-    const __nv_bfloat16* __restrict__ row_scales, Output output, RowPolicy row_policy = {},
+    const Scale* __restrict__ row_scales, Output output, RowPolicy row_policy = {},
     Epilogue epilogue = {}) {
     constexpr int kValuesPerPhase = kWarpSize * Schedule::kValuesPerLane;
     static_assert((Geometry::kInputRows % kValuesPerPhase) == 0);
@@ -146,10 +152,10 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void
                 const int gate_row = row_policy.weight_row(row_begin, local_row);
                 const int up_row = row_policy.weight_row(row_begin, kStoredRowsPerWarp + local_row);
                 const float gate = epilogue.apply(
-                    gate_row, 0, totals[local_row] * __bfloat162float(row_scales[gate_row]));
+                    gate_row, 0, totals[local_row] * fp8_row_scale(row_scales[gate_row]));
                 const float up = epilogue.apply(up_row, 0,
                                                 totals[kStoredRowsPerWarp + local_row] *
-                                                    __bfloat162float(row_scales[up_row]));
+                                                    fp8_row_scale(row_scales[up_row]));
                 output.store_pair(row_begin + local_row, 0, gate, up);
             }
         }
@@ -165,7 +171,7 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void
             if (lane == 0) {
                 const int parent_row = row_policy.weight_row(row_begin, local_row);
                 const float value =
-                    epilogue.apply(parent_row, 0, total * __bfloat162float(row_scales[parent_row]));
+                    epilogue.apply(parent_row, 0, total * fp8_row_scale(row_scales[parent_row]));
                 output.store(parent_row, 0, value);
             }
         }
