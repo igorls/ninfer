@@ -43,6 +43,11 @@ tools/freq_corpus/fixtures/*
 .DS_Store
 profiles/
 .chatgpt/
+.impeccable/
+
+# Local production supervisor state (configuration may contain credentials)
+/supervisor.prod.json
+/supervisor-logs/
 
 # Claude Code personal/local settings (may contain API tokens)
 .claude/settings.local.json
