@@ -194,6 +194,21 @@ int test_options_parser_validation() {
         return 1;
     }
 
+    const std::vector<std::string_view> full_args = {
+        "--model", "model.ninfer", "--materialize-full", "--max-context", "4096",
+    };
+    try {
+        const auto opts = parse_reference_tool_options(full_args);
+        if (opts.model_path != "model.ninfer" || opts.mode != "materialize-full" ||
+            opts.max_context != 4096) {
+            std::cerr << "Parsed options mismatch on materialize-full args\n";
+            return 1;
+        }
+    } catch (const std::exception& ex) {
+        std::cerr << "Unexpected failure parsing materialize-full args: " << ex.what() << "\n";
+        return 1;
+    }
+
     // Helper lambda to test that invalid arguments throw std::invalid_argument
     const auto assert_throws = [](std::initializer_list<std::string_view> args,
                                   std::string_view label) -> bool {
@@ -326,6 +341,42 @@ int test_real_artifact_preflight_if_available() {
     return 0;
 }
 
+int test_real_artifact_full_binding_if_available() {
+    const char* env_path = std::getenv("NINFER_QWEN3_8_FLASH_NEXT_WEIGHTS");
+    const std::filesystem::path path =
+        env_path != nullptr && *env_path != '\0'
+            ? std::filesystem::path(env_path)
+            : std::filesystem::path(
+                  R"(C:\models\Qwen3.8-Flash-Next\qwen3_8_flash_next_mixed.ninfer)");
+
+    if (!std::filesystem::is_regular_file(path)) {
+        std::cout << "SKIP: Real artifact full binding (artifact not present at " << path << ")\n";
+        return 0;
+    }
+
+    const ninfer::artifact::Reader reader(path);
+    validate_identity(reader.identity());
+    ninfer::artifact::Binder binder(reader);
+    const auto full_plan = bind_artifact(binder, LoadFeatures{.vision = true, .mtp = true});
+
+    std::uint64_t tensor_bytes = 0;
+    for (const auto& object : full_plan.materialization.device_objects) {
+        tensor_bytes += object.bytes;
+    }
+
+    if (tensor_bytes != 81'285'103'328ULL ||
+        full_plan.materialization.device_capacity_bytes != 81'285'117'440ULL ||
+        full_plan.materialization.device_objects.size() != 1'429 ||
+        full_plan.materialization.host_objects.size() != 6 ||
+        full_plan.materialization.mapped_tensor_objects.size() != 131) {
+        std::cerr << "Full artifact binding inventory mismatch\n";
+        return 1;
+    }
+
+    std::cout << "PASS: test_real_artifact_full_binding\n";
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -334,6 +385,7 @@ int main() {
     if (test_preflight_memory_accounting() != 0) return 1;
     if (test_options_parser_validation() != 0) return 1;
     if (test_real_artifact_preflight_if_available() != 0) return 1;
+    if (test_real_artifact_full_binding_if_available() != 0) return 1;
 
     std::cout << "OK Flash-Next Native Loader Tests\n";
     return 0;

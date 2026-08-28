@@ -1,4 +1,8 @@
+#include "artifact/binder.h"
+#include "artifact/materializer.h"
+#include "artifact/reader.h"
 #include "core/device.h"
+#include "targets/qwen3_8_flash_next/impl/load/bindings.h"
 #include "targets/qwen3_8_flash_next/impl/load/loader.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_state.h"
@@ -239,6 +243,136 @@ int run_execute_token(const ReferenceToolOptions& opts) {
     return 0;
 }
 
+int run_materialize_full(const ReferenceToolOptions& opts) {
+    int device_count = 0;
+    const auto err   = cudaGetDeviceCount(&device_count);
+    if (err != cudaSuccess || device_count == 0) {
+        std::cerr << "Error: No usable CUDA device available for materialize-full mode\n";
+        return 1;
+    }
+
+    std::size_t free_before  = 0;
+    std::size_t total_before = 0;
+    CUDA_CHECK(cudaMemGetInfo(&free_before, &total_before));
+
+    ninfer::DeviceContext device(0);
+    const ninfer::artifact::Reader reader(opts.model_path);
+    validate_identity(reader.identity());
+
+    ninfer::artifact::Binder binder(reader);
+    const auto load_plan = bind_artifact(binder, LoadFeatures{.vision = true, .mtp = true});
+
+    const std::uint64_t file_bytes = reader.file_bytes();
+    const std::uint64_t planned_device_weights_bytes =
+        load_plan.materialization.device_capacity_bytes;
+    const std::size_t planned_device_tensors     = load_plan.materialization.device_objects.size();
+    const std::size_t planned_retained_resources = load_plan.materialization.host_objects.size();
+    const std::size_t planned_mapped_tensors =
+        load_plan.materialization.mapped_tensor_objects.size();
+
+    std::uint64_t planned_device_tensor_bytes = 0;
+    for (const auto& object : load_plan.materialization.device_objects) {
+        planned_device_tensor_bytes += object.bytes;
+    }
+
+    constexpr std::uint64_t kExpectedFullDeviceTensorBytes = 81'285'103'328ULL;
+    constexpr std::uint64_t kExpectedFullDeviceArenaBytes  = 81'285'117'440ULL;
+    constexpr std::size_t kExpectedFullDeviceTensors       = 1'429;
+    constexpr std::size_t kExpectedRetainedResources       = 6;
+    constexpr std::size_t kExpectedMappedTensors           = 131;
+
+    if (planned_device_tensor_bytes != kExpectedFullDeviceTensorBytes ||
+        planned_device_weights_bytes != kExpectedFullDeviceArenaBytes ||
+        planned_device_tensors != kExpectedFullDeviceTensors ||
+        planned_retained_resources != kExpectedRetainedResources ||
+        planned_mapped_tensors != kExpectedMappedTensors) {
+        throw std::runtime_error(
+            "Full inventory validation failed: got tensor_bytes=" +
+            std::to_string(planned_device_tensor_bytes) +
+            " arena_bytes=" + std::to_string(planned_device_weights_bytes) +
+            " device_tensors=" + std::to_string(planned_device_tensors) +
+            " retained_resources=" + std::to_string(planned_retained_resources) +
+            " mapped_tensors=" + std::to_string(planned_mapped_tensors));
+    }
+
+    if (!opts.json_output) {
+        std::cout << "Materializing full model artifact (Text + MTP + Vision: "
+                  << (planned_device_weights_bytes / (1024.0 * 1024.0 * 1024.0)) << " GiB) ...\n";
+    } else {
+        std::cerr << "Materializing full model artifact: " << opts.model_path << " ...\n";
+    }
+    auto materialized = ninfer::artifact::materialize(reader, load_plan.materialization, device);
+    device.synchronize();
+
+    FlashNextRuntimeConfig config{
+        .max_concurrency     = opts.max_concurrency,
+        .max_context         = opts.max_context,
+        .state_slot_capacity = opts.state_slots,
+    };
+    const auto curve = flash_next_capacity_curve(config);
+    const std::uint32_t resolved_groups =
+        opts.page_groups == 0 ? curve.maximum_main_page_groups : opts.page_groups;
+    auto runtime_plan = finalize_flash_next_runtime_plan(config, resolved_groups);
+
+    if (!opts.json_output) {
+        std::cout << "Allocating text runtime buffers ("
+                  << (runtime_plan.total_device_bytes / (1024.0 * 1024.0)) << " MiB) ...\n";
+    }
+    FlashNextRuntimeAllocation allocation(runtime_plan);
+    allocation.initialize(device.stream);
+    device.synchronize();
+
+    std::size_t free_resident  = 0;
+    std::size_t total_resident = 0;
+    CUDA_CHECK(cudaMemGetInfo(&free_resident, &total_resident));
+    (void)materialized;
+
+    if (opts.json_output) {
+        std::cout << "{\n"
+                  << "  \"mode\": \"materialize-full\",\n"
+                  << "  \"model_id\": \"" << reader.identity().model_id << "\",\n"
+                  << "  \"weights_id\": \"" << reader.identity().weights_id << "\",\n"
+                  << "  \"file_bytes\": " << file_bytes << ",\n"
+                  << "  \"planned_device_tensor_bytes\": " << planned_device_tensor_bytes << ",\n"
+                  << "  \"planned_device_weights_bytes\": " << planned_device_weights_bytes << ",\n"
+                  << "  \"planned_device_tensors\": " << planned_device_tensors << ",\n"
+                  << "  \"planned_retained_resources\": " << planned_retained_resources << ",\n"
+                  << "  \"planned_mapped_tensors\": " << planned_mapped_tensors << ",\n"
+                  << "  \"text_runtime_device_bytes\": " << runtime_plan.total_device_bytes << ",\n"
+                  << "  \"cuda_free_bytes_before\": " << free_before << ",\n"
+                  << "  \"cuda_total_bytes_before\": " << total_before << ",\n"
+                  << "  \"cuda_free_bytes_resident\": " << free_resident << ",\n"
+                  << "  \"cuda_total_bytes_resident\": " << total_resident << ",\n"
+                  << "  \"status\": \"OK\"\n"
+                  << "}\n";
+    } else {
+        std::cout << "\n=== Full Artifact GPU Residency Report ===\n"
+                  << "Identity:                     " << reader.identity().model_id << " / "
+                  << reader.identity().weights_id << "\n"
+                  << "Artifact File Size:           " << (file_bytes / (1024.0 * 1024.0 * 1024.0))
+                  << " GiB (" << file_bytes << " bytes)\n"
+                  << "Full Device Tensor Payloads:  "
+                  << (planned_device_tensor_bytes / (1024.0 * 1024.0 * 1024.0)) << " GiB ("
+                  << planned_device_tensor_bytes << " bytes)\n"
+                  << "Full Device Weights Arena:    "
+                  << (planned_device_weights_bytes / (1024.0 * 1024.0 * 1024.0)) << " GiB ("
+                  << planned_device_weights_bytes << " bytes)\n"
+                  << "Full Device Tensors:          " << planned_device_tensors << "\n"
+                  << "Retained Resources:           " << planned_retained_resources << "\n"
+                  << "Mapped PLE Tensors:           " << planned_mapped_tensors << "\n"
+                  << "Text Runtime Device Memory:   "
+                  << (runtime_plan.total_device_bytes / (1024.0 * 1024.0)) << " MiB ("
+                  << runtime_plan.total_device_bytes << " bytes)\n"
+                  << "CUDA Free (Before Load):      " << (free_before / (1024.0 * 1024.0))
+                  << " MiB / " << (total_before / (1024.0 * 1024.0)) << " MiB\n"
+                  << "CUDA Free (Fully Resident):   " << (free_resident / (1024.0 * 1024.0))
+                  << " MiB / " << (total_resident / (1024.0 * 1024.0)) << " MiB\n"
+                  << "Residency Status:             OK\n";
+    }
+
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -248,6 +382,8 @@ int main(int argc, char** argv) {
             return run_preflight(opts);
         } else if (opts.mode == "execute-token") {
             return run_execute_token(opts);
+        } else if (opts.mode == "materialize-full") {
+            return run_materialize_full(opts);
         }
     } catch (const std::exception& ex) {
         std::cerr << "Error: " << ex.what() << "\n";

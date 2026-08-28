@@ -48,9 +48,11 @@ void print_reference_tool_usage(std::string_view prog) {
            "artifacts.\n\n"
         << "Options:\n"
         << "  --model, -m <path>         Path to .ninfer artifact (required)\n"
-        << "  --mode <mode>              Execution mode: 'preflight' (default) or 'execute-token'\n"
+        << "  --mode <mode>              Execution mode: 'preflight' (default), "
+           "'execute-token', or 'materialize-full'\n"
         << "  --preflight                Shortcut for --mode preflight\n"
         << "  --execute-token            Shortcut for --mode execute-token\n"
+        << "  --materialize-full         Shortcut for --mode materialize-full\n"
         << "  --max-context <tokens>     Maximum context length in tokens (default: 4096, max: "
            "262144)\n"
         << "  --max-concurrency <B>      Maximum concurrent decode requests (default: 1, range: "
@@ -86,6 +88,8 @@ ReferenceToolOptions parse_reference_tool_options(std::span<const std::string_vi
             opts.mode = "preflight";
         } else if (arg == "--execute-token") {
             opts.mode = "execute-token";
+        } else if (arg == "--materialize-full") {
+            opts.mode = "materialize-full";
         } else if (arg == "--max-context") {
             if (++i >= args.size())
                 throw std::invalid_argument("Missing argument for --max-context");
@@ -117,8 +121,10 @@ ReferenceToolOptions parse_reference_tool_options(std::span<const std::string_vi
     }
 
     if (opts.model_path.empty()) { throw std::invalid_argument("--model <path> is required"); }
-    if (opts.mode != "preflight" && opts.mode != "execute-token") {
-        throw std::invalid_argument("Invalid --mode: must be 'preflight' or 'execute-token'");
+    if (opts.mode != "preflight" && opts.mode != "execute-token" &&
+        opts.mode != "materialize-full") {
+        throw std::invalid_argument(
+            "Invalid --mode: must be 'preflight', 'execute-token', or 'materialize-full'");
     }
     if (opts.max_concurrency < 1 || opts.max_concurrency > 8) {
         throw std::invalid_argument("--max-concurrency must be between 1 and 8");
