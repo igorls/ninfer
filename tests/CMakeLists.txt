@@ -173,6 +173,9 @@ ninfer_add_test(ninfer_qwen3_8_flash_next_ple_index_test
 ninfer_add_test(ninfer_qwen3_8_flash_next_ple_table_test
   SOURCES targets/qwen3_8_flash_next/test_ple_table.cpp
   LIBRARIES ninfer_qwen3_8_flash_next)
+ninfer_add_test(ninfer_qwen3_8_flash_next_expert_bank_test
+  SOURCES targets/qwen3_8_flash_next/test_expert_bank.cpp
+  LIBRARIES ninfer_qwen3_8_flash_next)
 
 # Product protocol contracts.
 ninfer_add_test(ninfer_openai_schema_test
