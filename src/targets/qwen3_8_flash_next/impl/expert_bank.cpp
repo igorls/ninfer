@@ -1,5 +1,6 @@
 #include "targets/qwen3_8_flash_next/impl/expert_bank.h"
 
+#include "artifact/materializer.h"
 #include "artifact/reader.h"
 
 #include <array>
@@ -47,6 +48,22 @@ Nvfp4ExpertBankView make_nvfp4_expert_bank_view(const void* payload, std::uint64
         .code_bytes_per_expert  = geometry.code_plane_bytes / static_cast<std::uint64_t>(experts),
         .scale_bytes_per_expert = geometry.scale_plane_bytes / static_cast<std::uint64_t>(experts),
     };
+}
+
+Nvfp4ExpertBankView
+materialized_nvfp4_expert_bank_view(const artifact::MaterializedArtifact& materialized,
+                                    artifact::ObjectHandle handle, std::int32_t experts,
+                                    std::int32_t rows, std::int32_t columns) {
+    if (experts <= 0 || rows <= 0 || columns <= 0) {
+        throw std::invalid_argument("NVFP4 expert bank has invalid shape");
+    }
+    const std::array<std::uint64_t, 3> shape = {static_cast<std::uint64_t>(experts),
+                                                static_cast<std::uint64_t>(rows),
+                                                static_cast<std::uint64_t>(columns)};
+    const artifact::BlockScaleBankGeometry geometry =
+        artifact::block_scale_bank_geometry(artifact::NumericFormat::NVFP4, shape);
+    return make_nvfp4_expert_bank_view(materialized.device_data(handle), geometry.encoded_bytes,
+                                       experts, rows, columns);
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

@@ -3,6 +3,11 @@
 #include <cstddef>
 #include <cstdint>
 
+namespace ninfer::artifact {
+class MaterializedArtifact;
+struct ObjectHandle;
+} // namespace ninfer::artifact
+
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
 struct Nvfp4ExpertMatrixView {
@@ -30,5 +35,10 @@ struct Nvfp4ExpertBankView {
 [[nodiscard]] Nvfp4ExpertBankView
 make_nvfp4_expert_bank_view(const void* payload, std::uint64_t payload_bytes, std::int32_t experts,
                             std::int32_t rows, std::int32_t columns);
+
+[[nodiscard]] Nvfp4ExpertBankView
+materialized_nvfp4_expert_bank_view(const artifact::MaterializedArtifact& materialized,
+                                    artifact::ObjectHandle handle, std::int32_t experts,
+                                    std::int32_t rows, std::int32_t columns);
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

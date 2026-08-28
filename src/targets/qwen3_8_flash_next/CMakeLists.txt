@@ -1,6 +1,7 @@
 add_library(ninfer_qwen3_8_flash_next STATIC
   impl/expert_bank.cpp
   impl/load/bindings.cpp
+  impl/load/materialized.cpp
   impl/ple_index.cpp
   impl/ple_table.cpp)
 ninfer_internal_includes(ninfer_qwen3_8_flash_next)
