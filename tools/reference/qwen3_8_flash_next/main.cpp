@@ -1,0 +1,257 @@
+#include "core/device.h"
+#include "targets/qwen3_8_flash_next/impl/load/loader.h"
+#include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
+#include "targets/qwen3_8_flash_next/impl/runtime_state.h"
+#include "targets/qwen3_8_flash_next/impl/text_executor.h"
+#include "options.h"
+
+#include <cuda_runtime.h>
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <iomanip>
+#include <iostream>
+#include <string>
+#include <vector>
+
+namespace {
+
+using namespace ninfer::targets::qwen3_8_flash_next::detail;
+
+float bf16_to_float(std::uint16_t val) {
+    const std::uint32_t bits = static_cast<std::uint32_t>(val) << 16U;
+    float f                  = 0.0f;
+    std::memcpy(&f, &bits, sizeof(float));
+    return f;
+}
+
+std::uint64_t fnv1a_64(const void* data, std::size_t size) {
+    const auto* bytes             = static_cast<const std::uint8_t*>(data);
+    std::uint64_t hash            = 0xcbf29ce484222325ULL;
+    constexpr std::uint64_t prime = 0x100000001b3ULL;
+    for (std::size_t i = 0; i < size; ++i) {
+        hash ^= bytes[i];
+        hash *= prime;
+    }
+    return hash;
+}
+
+int run_preflight(const ReferenceToolOptions& opts) {
+    FlashNextRuntimeConfig config{
+        .max_concurrency     = opts.max_concurrency,
+        .max_context         = opts.max_context,
+        .state_slot_capacity = opts.state_slots,
+    };
+
+    const auto report = preflight_text_file(opts.model_path, config, opts.page_groups);
+
+    if (opts.json_output) {
+        std::cout
+            << "{\n"
+            << "  \"model_id\": \"" << report.identity.model_id << "\",\n"
+            << "  \"weights_id\": \"" << report.identity.weights_id << "\",\n"
+            << "  \"file_bytes\": " << report.file_bytes << ",\n"
+            << "  \"planned_device_weights_bytes\": " << report.planned_device_weights_bytes
+            << ",\n"
+            << "  \"planned_device_tensors\": " << report.planned_device_tensors_count << ",\n"
+            << "  \"planned_retained_resources\": " << report.planned_retained_resources_count
+            << ",\n"
+            << "  \"planned_mapped_tensors\": " << report.planned_mapped_tensors_count << ",\n"
+            << "  \"runtime\": {\n"
+            << "    \"max_concurrency\": " << report.runtime_plan.config.max_concurrency << ",\n"
+            << "    \"max_context\": " << report.runtime_plan.config.max_context << ",\n"
+            << "    \"main_page_groups\": " << report.runtime_plan.main_page_groups << ",\n"
+            << "    \"resolved_tokens\": " << report.runtime_plan.resolved_tokens << ",\n"
+            << "    \"attention_physical_pages\": " << report.runtime_plan.attention_physical_pages
+            << ",\n"
+            << "    \"indexer_physical_pages\": " << report.runtime_plan.indexer_physical_pages
+            << ",\n"
+            << "    \"attention_logical_pages\": " << report.runtime_plan.attention_logical_pages
+            << ",\n"
+            << "    \"indexer_logical_pages\": " << report.runtime_plan.indexer_logical_pages
+            << ",\n"
+            << "    \"state_slots\": " << report.runtime_plan.state_slots << ",\n"
+            << "    \"attention_kv_bytes\": " << report.runtime_plan.attention_kv_bytes << ",\n"
+            << "    \"indexer_block_keys_bytes\": " << report.runtime_plan.indexer_block_keys_bytes
+            << ",\n"
+            << "    \"recurrent_state_bytes\": " << report.runtime_plan.recurrent_state_bytes
+            << ",\n"
+            << "    \"workspace_bytes\": " << report.runtime_plan.workspace_bytes << ",\n"
+            << "    \"total_device_bytes\": " << report.runtime_plan.total_device_bytes << "\n"
+            << "  }\n"
+            << "}\n";
+    } else {
+        std::cout
+            << "=== Qwen3.8-Flash-Next Preflight Report ===\n"
+            << "Identity:                     " << report.identity.model_id << " / "
+            << report.identity.weights_id << "\n"
+            << "Artifact File Size:           " << (report.file_bytes / (1024.0 * 1024.0 * 1024.0))
+            << " GiB (" << report.file_bytes << " bytes)\n"
+            << "Planned Device Weights:       "
+            << (report.planned_device_weights_bytes / (1024.0 * 1024.0 * 1024.0)) << " GiB ("
+            << report.planned_device_weights_bytes << " bytes)\n"
+            << "Planned Device Tensors:       " << report.planned_device_tensors_count << "\n"
+            << "Planned Retained Resources:   " << report.planned_retained_resources_count << "\n"
+            << "Planned Mapped PLE Shards:    " << report.planned_mapped_tensors_count << "\n\n"
+            << "--- Runtime Capacity Plan ---\n"
+            << "Max Concurrency:              " << report.runtime_plan.config.max_concurrency
+            << "\n"
+            << "Max Context Tokens:           " << report.runtime_plan.config.max_context << "\n"
+            << "Main Page Groups (256 tok):   " << report.runtime_plan.main_page_groups << "\n"
+            << "Resolved Capacity Tokens:     " << report.runtime_plan.resolved_tokens << "\n"
+            << "Attention Physical Pages:     " << report.runtime_plan.attention_physical_pages
+            << " (64 tok/page)\n"
+            << "Indexer Physical Pages:       " << report.runtime_plan.indexer_physical_pages
+            << " (256 tok/page)\n"
+            << "Attention Logical Pages:      " << report.runtime_plan.attention_logical_pages
+            << "\n"
+            << "Indexer Logical Pages:        " << report.runtime_plan.indexer_logical_pages << "\n"
+            << "State Slots:                  " << report.runtime_plan.state_slots << "\n"
+            << "Attention KV Size:            "
+            << (report.runtime_plan.attention_kv_bytes / (1024.0 * 1024.0)) << " MiB\n"
+            << "Indexer Block Keys:           "
+            << (report.runtime_plan.indexer_block_keys_bytes / (1024.0 * 1024.0)) << " MiB\n"
+            << "Recurrent State Size:         "
+            << (report.runtime_plan.recurrent_state_bytes / (1024.0 * 1024.0)) << " MiB\n"
+            << "Runtime Workspace Size:       "
+            << (report.runtime_plan.workspace_bytes / (1024.0 * 1024.0)) << " MiB\n"
+            << "Total Runtime Device Memory:  "
+            << (report.runtime_plan.total_device_bytes / (1024.0 * 1024.0)) << " MiB ("
+            << report.runtime_plan.total_device_bytes << " bytes)\n"
+            << "Preflight Status:             OK\n";
+    }
+    return 0;
+}
+
+int run_execute_token(const ReferenceToolOptions& opts) {
+    int device_count = 0;
+    const auto err   = cudaGetDeviceCount(&device_count);
+    if (err != cudaSuccess || device_count == 0) {
+        std::cerr << "Error: No usable CUDA device available for execute-token mode\n";
+        return 1;
+    }
+
+    ninfer::DeviceContext device(0);
+
+    FlashNextRuntimeConfig config{
+        .max_concurrency     = opts.max_concurrency,
+        .max_context         = opts.max_context,
+        .state_slot_capacity = opts.state_slots,
+    };
+
+    const auto curve = flash_next_capacity_curve(config);
+    const std::uint32_t resolved_groups =
+        opts.page_groups == 0 ? curve.maximum_main_page_groups : opts.page_groups;
+    auto runtime_plan = finalize_flash_next_runtime_plan(config, resolved_groups);
+
+    if (!opts.json_output) {
+        std::cout << "Loading and materializing model artifact: " << opts.model_path << " ...\n";
+    } else {
+        std::cerr << "Loading and materializing model artifact: " << opts.model_path << " ...\n";
+    }
+    auto model = LoadedTextModel::load_from_file(opts.model_path, device);
+
+    if (!opts.json_output) {
+        std::cout << "Allocating runtime buffers ("
+                  << (runtime_plan.total_device_bytes / (1024.0 * 1024.0)) << " MiB) ...\n";
+    }
+    FlashNextRuntimeAllocation alloc(runtime_plan);
+    alloc.initialize(device.stream);
+
+    FlashNextTextExecutor executor(model.view(), model.ple_metadata(), device, alloc);
+
+    auto lane = executor.allocate_lane();
+
+    LaneStepRequest req{
+        .handle          = lane,
+        .token_id        = opts.token_id,
+        .token_index     = 0,
+        .mrope_positions = {0, 0, 0},
+    };
+
+    std::array<LaneStepRequest, 1> reqs{req};
+    if (!opts.json_output) {
+        std::cout << "Executing token round for token_id=" << opts.token_id
+                  << " at position=0 ...\n";
+    }
+    auto round = executor.execute_round(reqs);
+    device.synchronize();
+
+    constexpr std::size_t kVocabSize = 248'320;
+    std::vector<std::uint16_t> host_logits_bf16(kVocabSize);
+    CUDA_CHECK(cudaMemcpy(host_logits_bf16.data(), round.logits().data,
+                          kVocabSize * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+
+    std::int32_t best_token = 0;
+    float best_logit        = -1e30f;
+    double logit_sum        = 0.0;
+
+    for (std::size_t i = 0; i < kVocabSize; ++i) {
+        const float val = bf16_to_float(host_logits_bf16[i]);
+        logit_sum += val;
+        if (val > best_logit) {
+            best_logit = val;
+            best_token = static_cast<std::int32_t>(i);
+        }
+    }
+
+    const std::uint64_t checksum =
+        fnv1a_64(host_logits_bf16.data(), host_logits_bf16.size() * sizeof(std::uint16_t));
+
+    if (opts.do_commit) {
+        std::vector<LaneCommitDecision> decisions = {{.accept = true}};
+        round.commit(decisions);
+        if (!opts.json_output) { std::cout << "Transaction: committed (frontier advanced to 1)\n"; }
+    } else {
+        round.abort();
+        if (!opts.json_output) { std::cout << "Transaction: aborted (frontier remains 0)\n"; }
+    }
+
+    executor.release_lane(lane);
+
+    if (opts.json_output) {
+        std::cout << "{\n"
+                  << "  \"token_id\": " << opts.token_id << ",\n"
+                  << "  \"vocab_size\": " << kVocabSize << ",\n"
+                  << "  \"argmax_token\": " << best_token << ",\n"
+                  << "  \"argmax_logit\": " << best_logit << ",\n"
+                  << "  \"logits_sum\": " << logit_sum << ",\n"
+                  << "  \"logits_checksum\": \"" << std::hex << checksum << std::dec << "\",\n"
+                  << "  \"committed\": " << (opts.do_commit ? "true" : "false") << ",\n"
+                  << "  \"status\": \"OK\"\n"
+                  << "}\n";
+    } else {
+        std::cout << "\n=== Execution Results ===\n"
+                  << "Token ID:                     " << opts.token_id << "\n"
+                  << "Vocab Size:                   " << kVocabSize << "\n"
+                  << "Argmax Token:                 " << best_token << "\n"
+                  << "Argmax Logit Value:           " << std::fixed << std::setprecision(4)
+                  << best_logit << "\n"
+                  << "Logits Sum:                   " << logit_sum << "\n"
+                  << "Logits FNV-1a Checksum:       0x" << std::hex << checksum << std::dec << "\n"
+                  << "Execution Status:             OK\n";
+    }
+
+    return 0;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    try {
+        const auto opts = parse_reference_tool_options(argc, argv);
+        if (opts.mode == "preflight") {
+            return run_preflight(opts);
+        } else if (opts.mode == "execute-token") {
+            return run_execute_token(opts);
+        }
+    } catch (const std::exception& ex) {
+        std::cerr << "Error: " << ex.what() << "\n";
+        return 1;
+    }
+    return 0;
+}

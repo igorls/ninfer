@@ -1,4 +1,5 @@
 #include "targets/qwen3_8_flash_next/impl/load/bindings.h"
+#include "targets/qwen3_8_flash_next/impl/ple_index.h"
 
 #include <array>
 #include <bit>
@@ -195,19 +196,10 @@ PlePlan bind_ple(artifact::Binder& binder) {
             bind_mapped(binder, prefix + "embedding/shards/" + std::to_string(shard),
                         NumericFormat::U4Z8G16_F16S, kPleLayout, {2'500'012, 160});
     }
-    constexpr std::array<std::int64_t, 3> multipliers = {23'703'573'157'769LL, 20'109'073'645'365LL,
-                                                         8'052'911'324'071LL};
-    constexpr std::array<std::int64_t, 16> offsets    = {
-        0,           20'000'003,  40'000'026,  60'000'059,  80'000'106,  100'000'165,
-        120'000'228, 140'000'297, 160'000'374, 180'000'455, 200'000'548, 220'000'655,
-        240'000'802, 260'000'955, 280'001'114, 300'001'275};
-    constexpr std::array<std::int64_t, 16> vocab_sizes = {
-        20'000'003, 20'000'023, 20'000'033, 20'000'047, 20'000'059, 20'000'063,
-        20'000'069, 20'000'077, 20'000'081, 20'000'093, 20'000'107, 20'000'147,
-        20'000'153, 20'000'159, 20'000'161, 20'000'171};
-    require_i64_values(binder, out.layer_multipliers, multipliers, "PLE multipliers");
-    require_i64_values(binder, out.ngram_head_offsets, offsets, "PLE head offsets");
-    require_i64_values(binder, out.ngram_head_vocab_sizes, vocab_sizes, "PLE head vocabularies");
+    require_i64_values(binder, out.layer_multipliers, kPleLayerMultipliers, "PLE multipliers");
+    require_i64_values(binder, out.ngram_head_offsets, kPleHeadOffsets, "PLE head offsets");
+    require_i64_values(binder, out.ngram_head_vocab_sizes, kPleHeadVocabSizes,
+                       "PLE head vocabularies");
     return out;
 }
 

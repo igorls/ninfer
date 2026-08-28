@@ -6,6 +6,7 @@ add_library(ninfer_qwen3_8_flash_next STATIC
   impl/hyper_connection_kernels.cu
   impl/lane_ledger.cpp
   impl/load/bindings.cpp
+  impl/load/loader.cpp
   impl/load/materialized.cpp
   impl/moe.cpp
   impl/moe_kernels.cu
