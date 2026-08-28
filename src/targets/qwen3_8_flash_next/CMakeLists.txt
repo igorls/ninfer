@@ -1,5 +1,7 @@
 add_library(ninfer_qwen3_8_flash_next STATIC
   impl/expert_bank.cpp
+  impl/hyper_connection.cpp
+  impl/hyper_connection_kernels.cu
   impl/load/bindings.cpp
   impl/load/materialized.cpp
   impl/moe.cpp
