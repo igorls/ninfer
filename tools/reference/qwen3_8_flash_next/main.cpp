@@ -7,6 +7,10 @@
 #include "targets/qwen3_8_flash_next/impl/load/loader.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_state.h"
+#include "ninfer/ops/sampling.h"
+#include "ninfer/targets/qwen3_6/frontend.h"
+#include "ninfer/targets/qwen3_6/frontend_resources.h"
+#include "ninfer/targets/qwen3_6/prepared_prompt.h"
 #include "targets/qwen3_8_flash_next/impl/text_executor.h"
 #include "options.h"
 
@@ -533,6 +537,253 @@ int run_materialize_vision(const ReferenceToolOptions& opts) {
     return 0;
 }
 
+int run_chat_diagnostic(const ReferenceToolOptions& opts) {
+    ninfer::DeviceContext device(0);
+
+    // 1. Load model with Text features
+    auto loaded = LoadedModel::load_from_file(
+        opts.model_path, device, LoadFeatures{.vision = false, .mtp = false});
+
+    // 2. Build Frontend from 6 retained resources
+    auto bytes_to_str = [](const std::vector<std::byte>& b) {
+        return std::string(reinterpret_cast<const char*>(b.data()), b.size());
+    };
+    const auto resources_span = loaded.frontend_resources();
+    ninfer::targets::qwen3_6::FrontendResources resources{
+        .tokenizer_json                 = bytes_to_str(resources_span[0]),
+        .tokenizer_config_json          = bytes_to_str(resources_span[1]),
+        .chat_template_jinja           = bytes_to_str(resources_span[2]),
+        .generation_config_json         = bytes_to_str(resources_span[3]),
+        .preprocessor_config_json       = bytes_to_str(resources_span[4]),
+        .video_preprocessor_config_json = bytes_to_str(resources_span[5]),
+    };
+    auto frontend = ninfer::targets::qwen3_6::make_frontend(
+        resources,
+        ninfer::targets::qwen3_6::FrontendOptions{
+            .vision_enabled = false,
+            .max_context    = opts.max_context,
+        });
+
+    // 3. Prepare prompt
+    std::vector<ninfer::ChatMessage> messages;
+    if (!opts.system_prompt.empty()) {
+        ninfer::ChatMessage sys_msg;
+        sys_msg.role = ninfer::ChatRole::System;
+        sys_msg.parts.push_back(ninfer::MessagePart{
+            .kind = ninfer::MessagePartKind::Text,
+            .text = opts.system_prompt,
+        });
+        messages.push_back(std::move(sys_msg));
+    }
+    const std::string prompt_text = opts.prompt.empty()
+                                        ? "Hello! Tell me who you are in one concise sentence."
+                                        : opts.prompt;
+    ninfer::ChatMessage user_msg;
+    user_msg.role = ninfer::ChatRole::User;
+    user_msg.parts.push_back(ninfer::MessagePart{
+        .kind = ninfer::MessagePartKind::Text,
+        .text = prompt_text,
+    });
+    messages.push_back(std::move(user_msg));
+
+    ninfer::PromptInput input{
+        .messages = std::move(messages),
+    };
+    if (opts.reasoning_effort == "low") {
+        input.options.reasoning_effort = ninfer::ReasoningEffort::Low;
+    } else if (opts.reasoning_effort == "high" || opts.reasoning_effort == "xhigh") {
+        input.options.reasoning_effort = ninfer::ReasoningEffort::XHigh;
+    } else if (opts.reasoning_effort == "none") {
+        input.options.enable_thinking = false;
+    } else {
+        input.options.reasoning_effort = ninfer::ReasoningEffort::Medium;
+    }
+
+    auto prepared = frontend.prepare(std::move(input));
+    const auto& prepared_data =
+        ninfer::targets::qwen3_6::PreparedPromptAccess::view(prepared);
+    const auto& prompt_tokens = prepared_data.token_ids;
+    if (prompt_tokens.empty()) {
+        throw std::runtime_error("Prepared prompt contains zero tokens");
+    }
+    const auto pos0 = prepared_data.position_axis(0);
+    const auto pos1 = prepared_data.position_axis(1);
+    const auto pos2 = prepared_data.position_axis(2);
+
+    // 4. Runtime & Text Executor
+    FlashNextRuntimeConfig config{
+        .max_concurrency     = 1,
+        .max_context         = opts.max_context,
+        .state_slot_capacity = opts.state_slots,
+    };
+    const auto curve = flash_next_capacity_curve(config);
+    const std::uint32_t resolved_groups =
+        opts.page_groups == 0 ? curve.maximum_main_page_groups : opts.page_groups;
+    const auto plan = finalize_flash_next_runtime_plan(config, resolved_groups);
+    FlashNextRuntimeAllocation alloc(plan);
+    alloc.initialize(device.stream);
+    FlashNextTextExecutor executor(loaded.text_view(), kPleIndexMetadata, device, alloc);
+    auto lane = executor.allocate_lane();
+
+    // 5. Sampling Setup
+    constexpr std::int32_t kSemanticTokenDomain = 248'077;
+    const std::size_t ws_bytes =
+        ninfer::ops::sampling_workspace_capacity_bytes(kSemanticTokenDomain, 1, 1);
+    ninfer::WorkspaceArena workspace(std::max<std::size_t>(256, ws_bytes));
+
+    ninfer::ops::SamplingConfig sampling_cfg{
+        .temperature = opts.temperature,
+        .top_k       = opts.top_k,
+        .top_p       = opts.top_p,
+        .seed        = opts.seed,
+    };
+
+    ninfer::DeviceBuffer device_configs(sizeof(ninfer::ops::SamplingConfig));
+    device_configs.copy_from_host(&sampling_cfg, sizeof(ninfer::ops::SamplingConfig));
+
+    ninfer::DeviceBuffer device_positions(sizeof(std::int32_t));
+    ninfer::DeviceBuffer device_out(sizeof(std::int32_t));
+
+    ninfer::Tensor out_tensor(device_out.p, ninfer::DType::I32, {1});
+    ninfer::Tensor positions_tensor(device_positions.p, ninfer::DType::I32, {1});
+
+    // 6. Output Session
+    ninfer::StopPolicy stop_policy;
+    stop_policy.token_ids = {248'046, 248'044};
+    auto output_session   = frontend.make_output_session(
+        prepared, stop_policy, ninfer::OutputOptions{});
+
+    // 7. Prefill Prompt
+    const std::size_t prompt_len = prompt_tokens.size();
+    for (std::size_t i = 0; i + 1 < prompt_len; ++i) {
+        LaneStepRequest req{
+            .handle          = lane,
+            .token_id        = prompt_tokens[i],
+            .token_index     = static_cast<std::int32_t>(i),
+            .mrope_positions = {pos0[i], pos1[i], pos2[i]},
+        };
+        auto round = executor.execute_round(std::span<const LaneStepRequest>(&req, 1));
+        std::vector<LaneCommitDecision> decision = {{.accept = true}};
+        round.commit(decision);
+    }
+
+    LaneStepRequest last_prompt_req{
+        .handle          = lane,
+        .token_id        = prompt_tokens[prompt_len - 1],
+        .token_index     = static_cast<std::int32_t>(prompt_len - 1),
+        .mrope_positions = {pos0[prompt_len - 1], pos1[prompt_len - 1], pos2[prompt_len - 1]},
+    };
+    auto round = executor.execute_round(std::span<const LaneStepRequest>(&last_prompt_req, 1));
+
+    // 8. Generation Loop
+    std::uint32_t generated_tokens   = 0;
+    std::int32_t current_pos         = pos0[prompt_len - 1];
+    std::int32_t current_token_index = static_cast<std::int32_t>(prompt_len - 1);
+    std::string accumulated_reasoning;
+    std::string accumulated_content;
+
+    if (!opts.json_output) {
+        std::cout << "\n=== Qwen3.8-Flash-Next Chat Diagnostic ===\n"
+                  << "Prompt tokens: " << prompt_len << "\n"
+                  << "Temperature:   " << opts.temperature << " (greedy: "
+                  << (opts.temperature <= 0.0f ? "true" : "false") << ")\n"
+                  << "Top-k:         " << opts.top_k << "\n"
+                  << "Top-p:         " << opts.top_p << "\n"
+                  << "Seed:          " << opts.seed << "\n"
+                  << "Max tokens:    " << opts.max_tokens << "\n"
+                  << "Effort:        " << opts.reasoning_effort << "\n\n"
+                  << "--- Output ---\n";
+    }
+
+    while (true) {
+        device_positions.copy_from_host(&current_pos, sizeof(std::int32_t));
+        ninfer::ops::sample(
+            round.logits(), out_tensor, kSemanticTokenDomain,
+            static_cast<const ninfer::ops::SamplingConfig*>(device_configs.p),
+            positions_tensor, ninfer::ops::kSamplePurposeDecode, workspace, device.stream);
+        std::int32_t sampled_token = 0;
+        device_out.copy_to_host(&sampled_token, sizeof(std::int32_t));
+        device.synchronize();
+
+        std::vector<LaneCommitDecision> decision = {{.accept = true}};
+        round.commit(decision);
+
+        ++generated_tokens;
+
+        const ninfer::TokenId tok_id = static_cast<ninfer::TokenId>(sampled_token);
+        const std::uint32_t remaining_budget =
+            opts.max_tokens >= (generated_tokens - 1) ? opts.max_tokens - (generated_tokens - 1) : 0;
+        const auto dec = output_session.preview_model(
+            std::span<const ninfer::TokenId>(&tok_id, 1),
+            remaining_budget,
+            ninfer::FinishReason::OutputLimit);
+
+        auto published = output_session.commit_preview();
+        for (const auto& delta : published) {
+            if (!opts.json_output) {
+                if (delta.channel == ninfer::OutputChannel::Reasoning) {
+                    std::cout << delta.text;
+                    std::cout.flush();
+                } else if (delta.channel == ninfer::OutputChannel::Content) {
+                    std::cout << delta.text;
+                    std::cout.flush();
+                }
+            }
+            if (delta.channel == ninfer::OutputChannel::Reasoning) {
+                accumulated_reasoning += delta.text;
+            } else if (delta.channel == ninfer::OutputChannel::Content) {
+                accumulated_content += delta.text;
+            }
+        }
+
+        if (dec.finished() || generated_tokens >= opts.max_tokens) { break; }
+
+        ++current_pos;
+        ++current_token_index;
+        LaneStepRequest next_req{
+            .handle          = lane,
+            .token_id        = sampled_token,
+            .token_index     = current_token_index,
+            .mrope_positions = {current_pos, current_pos, current_pos},
+        };
+        round = executor.execute_round(std::span<const LaneStepRequest>(&next_req, 1));
+    }
+
+    executor.release_lane(lane);
+
+    if (opts.json_output) {
+        auto json_escape = [](std::string_view s) {
+            std::string out;
+            for (char c : s) {
+                if (c == '"')
+                    out += "\\\"";
+                else if (c == '\\')
+                    out += "\\\\";
+                else if (c == '\n')
+                    out += "\\n";
+                else if (c == '\r')
+                    out += "\\r";
+                else if (c == '\t')
+                    out += "\\t";
+                else
+                    out += c;
+            }
+            return out;
+        };
+        std::cout << "{\n"
+                  << "  \"mode\": \"chat-diagnostic\",\n"
+                  << "  \"prompt_tokens\": " << prompt_len << ",\n"
+                  << "  \"generated_tokens\": " << generated_tokens << ",\n"
+                  << "  \"reasoning_content\": \"" << json_escape(accumulated_reasoning) << "\",\n"
+                  << "  \"content\": \"" << json_escape(accumulated_content) << "\",\n"
+                  << "  \"status\": \"OK\"\n"
+                  << "}\n";
+    } else {
+        std::cout << "\n\n--- Done (" << generated_tokens << " generated tokens) ---\n";
+    }
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -546,6 +797,8 @@ int main(int argc, char** argv) {
             return run_materialize_full(opts);
         } else if (opts.mode == "materialize-vision") {
             return run_materialize_vision(opts);
+        } else if (opts.mode == "chat-diagnostic") {
+            return run_chat_diagnostic(opts);
         }
     } catch (const std::exception& ex) {
         std::cerr << "Error: " << ex.what() << "\n";

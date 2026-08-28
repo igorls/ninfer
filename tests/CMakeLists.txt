@@ -26,6 +26,10 @@ function(ninfer_add_test name)
       NINFER_PYTHON_EXECUTABLE="${Python3_EXECUTABLE}")
   endif()
   add_test(NAME ${name} COMMAND ${name})
+  if(WIN32)
+    set_tests_properties(${name} PROPERTIES
+      ENVIRONMENT "PATH=P:/third_party/ffmpeg/ffmpeg-master-latest-win64-gpl-shared/bin;P:/third_party/curl-inst/bin;C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.3/bin;$ENV{PATH}")
+  endif()
 endfunction()
 
 function(ninfer_add_op_test name)
@@ -244,6 +248,20 @@ ninfer_add_test(ninfer_qwen3_8_flash_next_loader_test
 target_include_directories(ninfer_qwen3_8_flash_next_loader_test PRIVATE
   ${PROJECT_SOURCE_DIR})
 set_tests_properties(ninfer_qwen3_8_flash_next_loader_test
+  PROPERTIES SKIP_RETURN_CODE 77)
+
+ninfer_add_test(ninfer_qwen3_8_flash_next_chat_diagnostic_test
+  SOURCES
+    targets/qwen3_8_flash_next/test_chat_diagnostic.cpp
+    ${PROJECT_SOURCE_DIR}/tools/reference/qwen3_8_flash_next/options.cpp
+  LIBRARIES
+    ninfer_qwen3_8_flash_next
+    ninfer_engine
+    CUDA::cudart)
+target_include_directories(ninfer_qwen3_8_flash_next_chat_diagnostic_test PRIVATE
+  ${PROJECT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
+set_tests_properties(ninfer_qwen3_8_flash_next_chat_diagnostic_test
   PROPERTIES SKIP_RETURN_CODE 77)
 
 # Product protocol contracts.

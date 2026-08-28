@@ -39,6 +39,42 @@ std::int32_t parse_strict_i32(std::string_view str, std::string_view option_name
     return val;
 }
 
+std::uint64_t parse_strict_u64(std::string_view str, std::string_view option_name) {
+    if (str.empty()) { throw std::invalid_argument(std::string(option_name) + ": empty value"); }
+    if (str.front() == '+' || str.front() == '-') {
+        throw std::invalid_argument(std::string(option_name) + ": invalid unsigned integer '" +
+                                    std::string(str) + "'");
+    }
+    std::uint64_t val    = 0;
+    const auto [ptr, ec] = std::from_chars(str.data(), str.data() + str.size(), val);
+    if (ec != std::errc{} || ptr != str.data() + str.size()) {
+        throw std::invalid_argument(std::string(option_name) +
+                                    ": invalid unsigned integer or trailing characters in '" +
+                                    std::string(str) + "'");
+    }
+    return val;
+}
+
+float parse_strict_f32(std::string_view str, std::string_view option_name) {
+    if (str.empty()) { throw std::invalid_argument(std::string(option_name) + ": empty value"); }
+    try {
+        std::size_t pos = 0;
+        const std::string s(str);
+        const float val = std::stof(s, &pos);
+        if (pos != str.size()) {
+            throw std::invalid_argument(std::string(option_name) + ": trailing characters in '" +
+                                        s + "'");
+        }
+        return val;
+    } catch (const std::invalid_argument&) {
+        throw std::invalid_argument(std::string(option_name) + ": invalid float '" +
+                                    std::string(str) + "'");
+    } catch (const std::out_of_range&) {
+        throw std::invalid_argument(std::string(option_name) + ": float out of range '" +
+                                    std::string(str) + "'");
+    }
+}
+
 } // namespace
 
 void print_reference_tool_usage(std::string_view prog) {
@@ -49,11 +85,22 @@ void print_reference_tool_usage(std::string_view prog) {
         << "Options:\n"
         << "  --model, -m <path>         Path to .ninfer artifact (required)\n"
         << "  --mode <mode>              Execution mode: 'preflight' (default), 'execute-token', "
-           "'materialize-full', or 'materialize-vision'\n"
+           "'materialize-full', 'materialize-vision', or 'chat-diagnostic'\n"
         << "  --preflight                Shortcut for --mode preflight\n"
         << "  --execute-token            Shortcut for --mode execute-token\n"
         << "  --materialize-full         Shortcut for --mode materialize-full\n"
         << "  --materialize-vision       Shortcut for --mode materialize-vision\n"
+        << "  --chat-diagnostic          Shortcut for --mode chat-diagnostic\n"
+        << "  --prompt <string>          User prompt text for chat-diagnostic\n"
+        << "  --system <string>          Optional system prompt for chat-diagnostic\n"
+        << "  --temperature <float>      Sampling temperature (default: 1.0, 0 = greedy)\n"
+        << "  --top-k <N>                Sampling top-k (default: 20)\n"
+        << "  --top-p <float>            Sampling top-p (default: 0.95)\n"
+        << "  --seed <N>                 Sampling seed (default: 0)\n"
+        << "  --greedy                   Shortcut for deterministic greedy sampling (--temperature 0)\n"
+        << "  --max-tokens, -n <N>       Maximum generated tokens (default: 512)\n"
+        << "  --thinking-budget <N>      Thinking token budget forcing (not supported)\n"
+        << "  --reasoning-effort <effort> Reasoning effort: 'low', 'medium' (default), 'high', 'none'\n"
         << "  --max-context <tokens>     Maximum context length in tokens (default: 4096, max: "
            "262144)\n"
         << "  --max-concurrency <B>      Maximum concurrent decode requests (default: 1, range: "
@@ -93,6 +140,41 @@ ReferenceToolOptions parse_reference_tool_options(std::span<const std::string_vi
             opts.mode = "materialize-full";
         } else if (arg == "--materialize-vision") {
             opts.mode = "materialize-vision";
+        } else if (arg == "--chat-diagnostic") {
+            opts.mode = "chat-diagnostic";
+        } else if (arg == "--prompt") {
+            if (++i >= args.size()) throw std::invalid_argument("Missing argument for --prompt");
+            opts.prompt = std::string(args[i]);
+        } else if (arg == "--system") {
+            if (++i >= args.size()) throw std::invalid_argument("Missing argument for --system");
+            opts.system_prompt = std::string(args[i]);
+        } else if (arg == "--temperature") {
+            if (++i >= args.size())
+                throw std::invalid_argument("Missing argument for --temperature");
+            opts.temperature = parse_strict_f32(args[i], "--temperature");
+        } else if (arg == "--top-k") {
+            if (++i >= args.size()) throw std::invalid_argument("Missing argument for --top-k");
+            opts.top_k = parse_strict_i32(args[i], "--top-k");
+        } else if (arg == "--top-p") {
+            if (++i >= args.size()) throw std::invalid_argument("Missing argument for --top-p");
+            opts.top_p = parse_strict_f32(args[i], "--top-p");
+        } else if (arg == "--seed") {
+            if (++i >= args.size()) throw std::invalid_argument("Missing argument for --seed");
+            opts.seed = parse_strict_u64(args[i], "--seed");
+        } else if (arg == "--greedy") {
+            opts.temperature = 0.0f;
+        } else if (arg == "--max-tokens" || arg == "-n") {
+            if (++i >= args.size())
+                throw std::invalid_argument("Missing argument for --max-tokens");
+            opts.max_tokens = parse_strict_u32(args[i], "--max-tokens");
+        } else if (arg == "--thinking-budget") {
+            if (++i >= args.size())
+                throw std::invalid_argument("Missing argument for --thinking-budget");
+            opts.thinking_budget = parse_strict_u32(args[i], "--thinking-budget");
+        } else if (arg == "--reasoning-effort") {
+            if (++i >= args.size())
+                throw std::invalid_argument("Missing argument for --reasoning-effort");
+            opts.reasoning_effort = std::string(args[i]);
         } else if (arg == "--max-context") {
             if (++i >= args.size())
                 throw std::invalid_argument("Missing argument for --max-context");
@@ -125,10 +207,24 @@ ReferenceToolOptions parse_reference_tool_options(std::span<const std::string_vi
 
     if (opts.model_path.empty()) { throw std::invalid_argument("--model <path> is required"); }
     if (opts.mode != "preflight" && opts.mode != "execute-token" &&
-        opts.mode != "materialize-full" && opts.mode != "materialize-vision") {
+        opts.mode != "materialize-full" && opts.mode != "materialize-vision" &&
+        opts.mode != "chat-diagnostic") {
         throw std::invalid_argument(
-            "Invalid --mode: must be 'preflight', 'execute-token', 'materialize-full', or "
-            "'materialize-vision'");
+            "Invalid --mode: must be 'preflight', 'execute-token', 'materialize-full', "
+            "'materialize-vision', or 'chat-diagnostic'");
+    }
+    if (opts.thinking_budget > 0) {
+        throw std::invalid_argument(
+            "--thinking-budget is not supported: thinking budget forcing is not yet implemented");
+    }
+    if (opts.temperature < 0.0f) {
+        throw std::invalid_argument("--temperature must be non-negative");
+    }
+    if (opts.top_p <= 0.0f || opts.top_p > 1.0f) {
+        throw std::invalid_argument("--top-p must be in range (0.0, 1.0]");
+    }
+    if (opts.max_tokens == 0) {
+        throw std::invalid_argument("--max-tokens must be positive");
     }
     if (opts.max_concurrency < 1 || opts.max_concurrency > 8) {
         throw std::invalid_argument("--max-concurrency must be between 1 and 8");
