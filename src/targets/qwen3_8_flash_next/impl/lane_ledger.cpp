@@ -1,0 +1,303 @@
+#include "targets/qwen3_8_flash_next/impl/lane_ledger.h"
+
+#include <algorithm>
+#include <limits>
+#include <stdexcept>
+#include <utility>
+
+namespace ninfer::targets::qwen3_8_flash_next::detail {
+
+FlashNextLaneLedger::FlashNextLaneLedger(const FlashNextRuntimePlan& plan, std::int64_t eos_token)
+    : plan_(plan), eos_token_(eos_token) {
+    const std::uint32_t concurrency = plan_.config.max_concurrency;
+
+    lanes_.reserve(concurrency);
+    for (std::uint32_t i = 0; i < concurrency; ++i) { lanes_.emplace_back(eos_token_); }
+    lane_physical_groups_.resize(concurrency);
+    previous_group_counts_.resize(concurrency, 0);
+
+    free_physical_groups_.reserve(plan_.main_page_groups);
+    for (std::uint32_t g = plan_.main_page_groups; g > 0; --g) {
+        free_physical_groups_.push_back(g - 1U);
+    }
+
+    host_attention_table_.resize(
+        static_cast<std::size_t>(plan_.attention_logical_pages) * concurrency, -1);
+    host_indexer_table_.resize(static_cast<std::size_t>(plan_.indexer_logical_pages) * concurrency,
+                               -1);
+}
+
+LaneHandle FlashNextLaneLedger::allocate_lane(const void* owner) {
+    const std::uint32_t concurrency = plan_.config.max_concurrency;
+    const void* actual_owner        = owner != nullptr ? owner : this;
+
+    for (std::uint32_t i = 0; i < concurrency; ++i) {
+        if (lanes_[i].state == LaneState::Free) {
+            lanes_[i].owner = actual_owner;
+            lanes_[i].state = LaneState::Active;
+            lanes_[i].epoch += 1;
+            lanes_[i].committed_frontier = 0;
+            lanes_[i].history            = PleTokenHistory(eos_token_);
+            lane_physical_groups_[i].clear();
+            previous_group_counts_[i] = 0;
+
+            return LaneHandle{actual_owner, i, lanes_[i].epoch};
+        }
+    }
+    throw std::runtime_error("FlashNextLaneLedger: no free lanes available");
+}
+
+void FlashNextLaneLedger::release_lane(LaneHandle handle) {
+    validate_handle(handle, LaneState::Active);
+    const std::uint32_t lane = handle.lane_index();
+
+    for (const auto g : lane_physical_groups_[lane]) { free_physical_groups_.push_back(g); }
+    lane_physical_groups_[lane].clear();
+    previous_group_counts_[lane] = 0;
+
+    lanes_[lane].owner = nullptr;
+    lanes_[lane].state = LaneState::Free;
+    lanes_[lane].epoch += 1;
+    lanes_[lane].committed_frontier = 0;
+
+    // Block table indexing: lane * logical_pages + page
+    for (std::uint32_t p = 0; p < plan_.attention_logical_pages; ++p) {
+        host_attention_table_[static_cast<std::size_t>(lane) * plan_.attention_logical_pages + p] =
+            -1;
+    }
+    for (std::uint32_t p = 0; p < plan_.indexer_logical_pages; ++p) {
+        host_indexer_table_[static_cast<std::size_t>(lane) * plan_.indexer_logical_pages + p] = -1;
+    }
+    block_tables_dirty_ = true;
+}
+
+std::int32_t FlashNextLaneLedger::committed_frontier(LaneHandle handle) const {
+    validate_handle(handle, LaneState::Active);
+    return lanes_[handle.lane_index()].committed_frontier;
+}
+
+std::size_t FlashNextLaneLedger::active_lanes_count() const noexcept {
+    std::size_t count = 0;
+    for (const auto& lane : lanes_) {
+        if (lane.state != LaneState::Free) { ++count; }
+    }
+    return count;
+}
+
+void FlashNextLaneLedger::validate_handle(LaneHandle handle, LaneState expected_state) const {
+    const std::uint32_t concurrency = plan_.config.max_concurrency;
+    if (handle.lane_index() >= concurrency) {
+        throw std::invalid_argument("FlashNextLaneLedger: invalid lane index in handle");
+    }
+    const auto& lane = lanes_[handle.lane_index()];
+    if (lane.owner != handle.owner()) {
+        throw std::invalid_argument("FlashNextLaneLedger: cross-executor or invalid owner handle");
+    }
+    if (lane.epoch != handle.epoch()) {
+        throw std::invalid_argument("FlashNextLaneLedger: stale lane handle epoch");
+    }
+    if (lane.state != expected_state) {
+        throw std::invalid_argument("FlashNextLaneLedger: unexpected lane state");
+    }
+}
+
+FlashNextLaneLedger::PreparedRound
+FlashNextLaneLedger::begin_round(std::span<const LaneStepRequest> requests,
+                                 const PleIndexMetadata& ple_meta) {
+    if (has_pending_batch_) {
+        throw std::logic_error("FlashNextLaneLedger: cannot begin round with pending batch");
+    }
+    const std::uint32_t concurrency = plan_.config.max_concurrency;
+    const auto batch_size           = static_cast<std::uint32_t>(requests.size());
+
+    if (batch_size < 1 || batch_size > concurrency) {
+        throw std::invalid_argument(
+            "FlashNextLaneLedger: requests batch size must be in [1, max_concurrency]");
+    }
+    if (current_transaction_id_ == std::numeric_limits<std::uint64_t>::max()) {
+        throw std::overflow_error("FlashNextLaneLedger: transaction id overflow");
+    }
+
+    // Phase 1: Dry-run validation (check all handles, frontiers, duplicates, PLE rows, and
+    // capacity)
+    std::uint32_t lane_mask         = 0;
+    std::int32_t max_active_blocks  = 0;
+    std::size_t total_groups_needed = 0;
+    std::vector<std::size_t> required_groups_per_lane(batch_size);
+    std::vector<std::array<std::int64_t, 16>> ple_indices_vec(batch_size);
+
+    for (std::uint32_t i = 0; i < batch_size; ++i) {
+        const auto& req = requests[i];
+        validate_handle(req.handle, LaneState::Active);
+
+        const std::uint32_t lane = req.handle.lane_index();
+        if ((lane_mask & (1U << lane)) != 0) {
+            throw std::invalid_argument("FlashNextLaneLedger: duplicate lane index in batch");
+        }
+        lane_mask |= (1U << lane);
+
+        if (req.token_index != lanes_[lane].committed_frontier) {
+            throw std::invalid_argument(
+                "FlashNextLaneLedger: token_index must match committed frontier");
+        }
+        if (req.token_index < 0 ||
+            static_cast<std::uint32_t>(req.token_index) >= plan_.config.max_context) {
+            throw std::out_of_range("FlashNextLaneLedger: token_index exceeds max_context");
+        }
+
+        // Dry-run compute PLE indices before any mutation
+        ple_indices_vec[i] = ple_indices(ple_meta, lanes_[lane].history, req.token_id);
+
+        const std::size_t req_groups =
+            static_cast<std::size_t>(req.token_index /
+                                     static_cast<std::int32_t>(kMainPageGroupTokens)) +
+            1U;
+        required_groups_per_lane[i] = req_groups;
+
+        const auto current_owned = lane_physical_groups_[lane].size();
+        if (req_groups > current_owned) { total_groups_needed += (req_groups - current_owned); }
+        max_active_blocks = std::max(max_active_blocks, (req.token_index + 1) / 4);
+    }
+
+    if (total_groups_needed > free_physical_groups_.size()) {
+        throw std::runtime_error("FlashNextLaneLedger: physical page group capacity exhausted");
+    }
+
+    // Phase 2: Capacity assignment and shadow table updates
+    for (std::uint32_t i = 0; i < batch_size; ++i) {
+        const std::uint32_t lane     = requests[i].handle.lane_index();
+        const std::size_t req_groups = required_groups_per_lane[i];
+        auto& owned_groups           = lane_physical_groups_[lane];
+        previous_group_counts_[lane] = owned_groups.size();
+
+        while (owned_groups.size() < req_groups) {
+            const auto phys_group = free_physical_groups_.back();
+            free_physical_groups_.pop_back();
+
+            const auto log_group = static_cast<std::uint32_t>(owned_groups.size());
+            owned_groups.push_back(phys_group);
+
+            for (std::uint32_t s = 0; s < 4U; ++s) {
+                const auto log_att_page = log_group * 4U + s;
+                if (log_att_page < plan_.attention_logical_pages) {
+                    host_attention_table_[static_cast<std::size_t>(lane) *
+                                              plan_.attention_logical_pages +
+                                          log_att_page] =
+                        static_cast<std::int32_t>(phys_group * 4U + s);
+                }
+            }
+            if (log_group < plan_.indexer_logical_pages) {
+                host_indexer_table_[static_cast<std::size_t>(lane) * plan_.indexer_logical_pages +
+                                    log_group] = static_cast<std::int32_t>(phys_group);
+            }
+            block_tables_dirty_ = true;
+        }
+    }
+
+    current_transaction_id_ += 1;
+    pending_requests_.assign(requests.begin(), requests.end());
+    pending_lane_indices_.resize(batch_size);
+    for (std::uint32_t i = 0; i < batch_size; ++i) {
+        const auto lane          = requests[i].handle.lane_index();
+        lanes_[lane].state       = LaneState::Pending;
+        pending_lane_indices_[i] = lane;
+    }
+    has_pending_batch_ = true;
+
+    return PreparedRound{current_transaction_id_, max_active_blocks, std::move(ple_indices_vec)};
+}
+
+void FlashNextLaneLedger::rollback_prepared_round(std::uint64_t tx_id) {
+    if (!has_pending_batch_ || tx_id != current_transaction_id_) { return; }
+
+    for (const auto lane : pending_lane_indices_) {
+        lanes_[lane].state    = LaneState::Active;
+        const auto prev_count = previous_group_counts_[lane];
+        auto& owned           = lane_physical_groups_[lane];
+        while (owned.size() > prev_count) {
+            const auto log_group = static_cast<std::uint32_t>(owned.size() - 1U);
+            for (std::uint32_t s = 0; s < 4U; ++s) {
+                const auto log_att = log_group * 4U + s;
+                if (log_att < plan_.attention_logical_pages) {
+                    host_attention_table_[static_cast<std::size_t>(lane) *
+                                              plan_.attention_logical_pages +
+                                          log_att] = -1;
+                }
+            }
+            if (log_group < plan_.indexer_logical_pages) {
+                host_indexer_table_[static_cast<std::size_t>(lane) * plan_.indexer_logical_pages +
+                                    log_group] = -1;
+            }
+            free_physical_groups_.push_back(owned.back());
+            owned.pop_back();
+            block_tables_dirty_ = true;
+        }
+    }
+
+    has_pending_batch_ = false;
+    pending_requests_.clear();
+    pending_lane_indices_.clear();
+}
+
+void FlashNextLaneLedger::commit_round(std::uint64_t tx_id,
+                                       std::span<const LaneCommitDecision> decisions,
+                                       FlashNextRuntimeAllocation& alloc, cudaStream_t stream) {
+    if (!has_pending_batch_ || tx_id != current_transaction_id_) {
+        throw std::logic_error("FlashNextLaneLedger: invalid or stale transaction commit");
+    }
+    if (decisions.size() != pending_requests_.size()) {
+        throw std::invalid_argument(
+            "FlashNextLaneLedger: decisions count does not match pending batch size");
+    }
+
+    const auto batch_size = static_cast<std::uint32_t>(decisions.size());
+    std::vector<std::uint32_t> accepted_lanes;
+    accepted_lanes.reserve(batch_size);
+
+    for (std::uint32_t i = 0; i < batch_size; ++i) {
+        if (decisions[i].accept) { accepted_lanes.push_back(pending_lane_indices_[i]); }
+    }
+
+    // Commit slots before mutating ledger history and frontier
+    if (!accepted_lanes.empty()) { alloc.commit_slots(accepted_lanes, stream); }
+
+    for (std::uint32_t i = 0; i < batch_size; ++i) {
+        const auto lane = pending_lane_indices_[i];
+        const auto& req = pending_requests_[i];
+
+        if (decisions[i].accept) {
+            lanes_[lane].history.commit(req.token_id);
+            lanes_[lane].committed_frontier += 1;
+        }
+        lanes_[lane].state = LaneState::Active;
+    }
+
+    has_pending_batch_ = false;
+    pending_requests_.clear();
+    pending_lane_indices_.clear();
+}
+
+void FlashNextLaneLedger::abort_round(std::uint64_t tx_id) noexcept {
+    if (!has_pending_batch_ || tx_id != current_transaction_id_) { return; }
+    for (const auto lane : pending_lane_indices_) { lanes_[lane].state = LaneState::Active; }
+    has_pending_batch_ = false;
+    pending_requests_.clear();
+    pending_lane_indices_.clear();
+}
+
+void FlashNextLaneLedger::sync_tables_if_dirty(FlashNextRuntimeAllocation& alloc,
+                                               cudaStream_t stream) {
+    if (!block_tables_dirty_) { return; }
+    auto& att_tensor = alloc.state_view().qsa_attention_caches[0].block_tables;
+    auto& idx_tensor = alloc.state_view().qsa_indexer_caches[0].block_tables;
+
+    CUDA_CHECK(cudaMemcpyAsync(att_tensor.data, host_attention_table_.data(),
+                               host_attention_table_.size() * sizeof(std::int32_t),
+                               cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(idx_tensor.data, host_indexer_table_.data(),
+                               host_indexer_table_.size() * sizeof(std::int32_t),
+                               cudaMemcpyHostToDevice, stream));
+    block_tables_dirty_ = false;
+}
+
+} // namespace ninfer::targets::qwen3_8_flash_next::detail

@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
@@ -58,7 +59,12 @@ public:
     // Transactional state slot mechanics:
     // Swaps active (source) and standby (destination) slot for row b in [0, max_concurrency).
     void commit_row_slot(std::uint32_t row_index, cudaStream_t stream);
+    void commit_slots(std::span<const std::uint32_t> accepted_lanes, cudaStream_t stream);
     void sync_slots_to_device(cudaStream_t stream);
+
+    // Recurrent state zeroing for assigned lane slots
+    void zero_slot(std::uint32_t slot_index, cudaStream_t stream);
+    void zero_lane_slots(std::uint32_t lane_index, cudaStream_t stream);
 
     [[nodiscard]] std::int32_t current_source_slot(std::uint32_t row_index) const;
     [[nodiscard]] std::int32_t current_destination_slot(std::uint32_t row_index) const;

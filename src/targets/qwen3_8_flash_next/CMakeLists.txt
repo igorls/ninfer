@@ -4,6 +4,7 @@ add_library(ninfer_qwen3_8_flash_next STATIC
   impl/gdn_kernels.cu
   impl/hyper_connection.cpp
   impl/hyper_connection_kernels.cu
+  impl/lane_ledger.cpp
   impl/load/bindings.cpp
   impl/load/materialized.cpp
   impl/moe.cpp
@@ -21,7 +22,8 @@ add_library(ninfer_qwen3_8_flash_next STATIC
   impl/runtime_plan.cpp
   impl/runtime_state.cpp
   impl/text_decode.cpp
-  impl/text_decode_kernels.cu)
+  impl/text_decode_kernels.cu
+  impl/text_executor.cpp)
 ninfer_internal_includes(ninfer_qwen3_8_flash_next)
 target_include_directories(ninfer_qwen3_8_flash_next PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR})

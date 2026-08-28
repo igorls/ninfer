@@ -213,6 +213,65 @@ void FlashNextRuntimeAllocation::commit_row_slot(std::uint32_t row_index, cudaSt
     sync_slots_to_device(stream);
 }
 
+void FlashNextRuntimeAllocation::commit_slots(std::span<const std::uint32_t> accepted_lanes,
+                                              cudaStream_t stream) {
+    // Prevalidate: range and uniqueness before any mutation
+    std::uint32_t seen_mask = 0;
+    for (const auto lane : accepted_lanes) {
+        if (lane >= plan_.config.max_concurrency) {
+            throw std::out_of_range("commit_slots: lane index exceeds max_concurrency");
+        }
+        if ((seen_mask & (1U << lane)) != 0) {
+            throw std::invalid_argument("commit_slots: duplicate lane index");
+        }
+        seen_mask |= (1U << lane);
+    }
+    // All validated — perform swaps
+    for (const auto lane : accepted_lanes) {
+        std::swap(host_active_slots_[lane], host_standby_slots_[lane]);
+    }
+    sync_slots_to_device(stream);
+}
+
+void FlashNextRuntimeAllocation::zero_slot(std::uint32_t slot_index, cudaStream_t stream) {
+    if (slot_index >= plan_.state_slots) {
+        throw std::out_of_range("slot_index exceeds state_slots");
+    }
+    // Zero out recurrent state slices for this slot
+    for (std::size_t i = 0; i < kGdnLayers; ++i) {
+        auto* conv_p = static_cast<std::byte*>(state_view_.gdn_convolution_states[i].data) +
+                       slot_index * 10'240ULL * 3ULL * sizeof(std::uint16_t);
+        CUDA_CHECK(cudaMemsetAsync(conv_p, 0, 10'240ULL * 3ULL * sizeof(std::uint16_t), stream));
+
+        auto* ssm_p = static_cast<std::byte*>(state_view_.gdn_ssm_states[i].data) +
+                      slot_index * 128ULL * 128ULL * 48ULL * sizeof(float);
+        CUDA_CHECK(cudaMemsetAsync(ssm_p, 0, 128ULL * 128ULL * 48ULL * sizeof(float), stream));
+    }
+
+    auto* ple_p = static_cast<std::byte*>(state_view_.ple_convolution_states.data) +
+                  slot_index * 10'240ULL * 9ULL * sizeof(std::uint16_t);
+    CUDA_CHECK(cudaMemsetAsync(ple_p, 0, 10'240ULL * 9ULL * sizeof(std::uint16_t), stream));
+
+    for (std::size_t i = 0; i < kFullAttentionLayers; ++i) {
+        auto* key_p = static_cast<std::byte*>(state_view_.qsa_indexer_caches[i].raw_keys.data) +
+                      slot_index * 128ULL * 4ULL * sizeof(std::uint16_t);
+        CUDA_CHECK(cudaMemsetAsync(key_p, 0, 128ULL * 4ULL * sizeof(std::uint16_t), stream));
+
+        auto* pos_p =
+            static_cast<std::byte*>(state_view_.qsa_indexer_caches[i].raw_positions.data) +
+            slot_index * 3ULL * 4ULL * sizeof(std::int32_t);
+        CUDA_CHECK(cudaMemsetAsync(pos_p, 0, 3ULL * 4ULL * sizeof(std::int32_t), stream));
+    }
+}
+
+void FlashNextRuntimeAllocation::zero_lane_slots(std::uint32_t lane_index, cudaStream_t stream) {
+    if (lane_index >= plan_.config.max_concurrency) {
+        throw std::out_of_range("lane_index exceeds max_concurrency");
+    }
+    zero_slot(static_cast<std::uint32_t>(host_active_slots_[lane_index]), stream);
+    zero_slot(static_cast<std::uint32_t>(host_standby_slots_[lane_index]), stream);
+}
+
 void FlashNextRuntimeAllocation::sync_slots_to_device(cudaStream_t stream) {
     const std::size_t bytes = plan_.config.max_concurrency * sizeof(std::int32_t);
     CUDA_CHECK(cudaMemcpyAsync(round_tensors_.source_slots.data, host_active_slots_.data(), bytes,
