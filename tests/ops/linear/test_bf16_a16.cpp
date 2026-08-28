@@ -175,6 +175,10 @@ int run_bf16_linear() {
     for (const std::int32_t tokens : {1, 2, 4, 8}) {
         failures += run_bf16_linear_case(qsa_indexer_weight, tokens);
     }
+    DeviceWeight output_head_weight(make_patterned(248320, 2560, 425U));
+    for (const std::int32_t tokens : {1, 2, 4, 8}) {
+        failures += run_bf16_linear_case(output_head_weight, tokens);
+    }
     return failures;
 }
 

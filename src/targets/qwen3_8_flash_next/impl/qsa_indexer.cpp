@@ -54,7 +54,7 @@ void flash_next_qsa_indexer_decode(const Tensor& input, const AttentionWeights& 
                                    Tensor& selected_counts, cudaStream_t stream) {
     const std::int32_t batch         = input.ne[1];
     const std::int32_t logical_pages = cache.block_tables.ne[0];
-    if (maximum_blocks <= 0 || maximum_blocks > 65'536 || active_blocks <= 0 ||
+    if (maximum_blocks <= 0 || maximum_blocks > 65'536 || active_blocks < 0 ||
         active_blocks > maximum_blocks || logical_pages < (maximum_blocks + 63) / 64 ||
         !exact_tensor(input, DType::BF16, 2'560, batch) || batch < 1 || batch > 8 ||
         !exact_bf16_weight(weights.indexer_query_key, 640, 2'560) ||

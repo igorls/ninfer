@@ -37,6 +37,10 @@ void launch_bf16_decode(const Tensor& x, const Weight& weight, Tensor& out, cuda
         launch_geometry<Bf16GemvGeometry<2560, 2560>>(x, weight, out, stream);
         return;
     }
+    if (weight.n == 248320 && weight.k == 2560) {
+        launch_geometry<Bf16GemvGeometry<248320, 2560>>(x, weight, out, stream);
+        return;
+    }
     if (weight.n == 14336 && weight.k == 5120) {
         launch_geometry<Bf16GemvGeometry<14336, 5120>>(x, weight, out, stream);
         return;

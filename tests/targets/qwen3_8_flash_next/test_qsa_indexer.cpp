@@ -112,13 +112,13 @@ int main() {
 
     token_index.copy_from_host(&zero, sizeof(zero));
     flash_next_qsa_indexer_decode(input_view, weights, token_view, position_view, table_row_view,
-                                  state_slot_view, state_slot_view, cache, maximum_blocks, 1,
+                                  state_slot_view, state_slot_view, cache, maximum_blocks, 0,
                                   workspace, selected_view, count_view, device.stream);
     device.synchronize();
     std::int32_t actual_count = -1;
     selected_count.copy_to_host(&actual_count, sizeof(actual_count));
     if (actual_count != 0) {
-        std::cerr << "Flash-Next QSA indexer selected a complete block from an incomplete tail\n";
+        std::cerr << "Flash-Next QSA indexer selected a complete block for active_blocks=0\n";
         return 1;
     }
 

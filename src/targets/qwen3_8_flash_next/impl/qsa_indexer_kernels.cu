@@ -258,6 +258,12 @@ void flash_next_qsa_indexer_launch(const Tensor& token_indices, const Tensor& mr
         static_cast<std::int32_t*>(cache.raw_positions.data), batch);
     CUDA_CHECK(cudaGetLastError());
 
+    if (active_blocks == 0) {
+        CUDA_CHECK(cudaMemsetAsync(selected_counts.data, 0,
+                                   static_cast<std::size_t>(batch) * sizeof(std::int32_t), stream));
+        return;
+    }
+
     constexpr int threads = 256;
     const int items       = active_blocks * batch;
     initialize_sort_kernel<<<(items + threads - 1) / threads, threads, 0, stream>>>(

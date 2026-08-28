@@ -12,7 +12,8 @@ Bf16Launch select_bf16_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t
     const bool qsa_indexer       = n == 640 && k == 2560;
     const bool ple_key           = n == 10240 && k == 2560;
     const bool ple_value         = n == 2560 && k == 2560;
-    const bool flash_next_target = qsa_indexer || ple_key || ple_value;
+    const bool output_head       = n == 248320 && k == 2560;
+    const bool flash_next_target = qsa_indexer || ple_key || ple_value || output_head;
     const bool supported_problem =
         (n == 14336 && k == 5120) || (n == 5120 && k == 6144) || flash_next_target;
     if (!supported_problem || t <= 0) {
