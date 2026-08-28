@@ -12,6 +12,8 @@ add_library(ninfer_qwen3_8_flash_next STATIC
   impl/ple_index.cpp
   impl/ple_pipeline.cpp
   impl/ple_table.cpp
+  impl/qsa_attention.cpp
+  impl/qsa_attention_kernels.cu
   impl/qsa_indexer.cpp
   impl/qsa_indexer_kernels.cu)
 ninfer_internal_includes(ninfer_qwen3_8_flash_next)
