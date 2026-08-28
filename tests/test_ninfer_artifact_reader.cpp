@@ -88,6 +88,20 @@ Json normative_directory() {
                          {"layout", "row-scale-v1"},
                          {"offset", 3584},
                          {"bytes", 260}},
+                        {{"name", "fp8_row_f32"},
+                         {"kind", "tensor"},
+                         {"shape", {2, 4}},
+                         {"format", "FP8_E4M3FN_ROW_F32S"},
+                         {"layout", "row-scale-f32-v1"},
+                         {"offset", 4096},
+                         {"bytes", 264}},
+                        {{"name", "ple_u4"},
+                         {"kind", "tensor"},
+                         {"shape", {2, 32}},
+                         {"format", "U4Z8G16_F16S"},
+                         {"layout", "packed-u4-g16-v1"},
+                         {"offset", 4608},
+                         {"bytes", 264}},
                     })},
     };
 }
@@ -102,9 +116,11 @@ void expect_artifact_error(Function&& function, std::string_view label) {
 
 void test_registered_sizes() {
     using ninfer::artifact::tensor_encoded_size;
-    constexpr StorageLayout direct   = StorageLayout::ContiguousLeV1;
-    constexpr StorageLayout rows     = StorageLayout::RowSplitK128V1;
-    constexpr StorageLayout fp8_rows = StorageLayout::RowScaleV1;
+    constexpr StorageLayout direct       = StorageLayout::ContiguousLeV1;
+    constexpr StorageLayout rows         = StorageLayout::RowSplitK128V1;
+    constexpr StorageLayout fp8_rows     = StorageLayout::RowScaleV1;
+    constexpr StorageLayout fp8_rows_f32 = StorageLayout::RowScaleF32V1;
+    constexpr StorageLayout packed_u4    = StorageLayout::PackedU4G16V1;
 
     const std::array<std::uint64_t, 2> shape_2x3 = {2, 3};
     const std::array<std::uint64_t, 1> shape_2   = {2};
@@ -113,6 +129,7 @@ void test_registered_sizes() {
     const std::array<std::uint64_t, 2> q6_shape  = {1, 64};
     const std::array<std::uint64_t, 2> w8_shape  = {1, 33};
     const std::array<std::uint64_t, 2> fp8_shape = {2, 4};
+    const std::array<std::uint64_t, 2> ple_shape = {2, 32};
 
     if (tensor_encoded_size(direct, NumericFormat::BF16, shape_2x3) != 12 ||
         tensor_encoded_size(direct, NumericFormat::FP32, {}) != 4 ||
@@ -121,7 +138,9 @@ void test_registered_sizes() {
         tensor_encoded_size(rows, NumericFormat::Q5G64_F16S, q5_shape) != 528 ||
         tensor_encoded_size(rows, NumericFormat::Q6G64_F16S, q6_shape) != 516 ||
         tensor_encoded_size(rows, NumericFormat::W8G32_F16S, w8_shape) != 264 ||
-        tensor_encoded_size(fp8_rows, NumericFormat::FP8_E4M3FN_ROW_BF16S, fp8_shape) != 260) {
+        tensor_encoded_size(fp8_rows, NumericFormat::FP8_E4M3FN_ROW_BF16S, fp8_shape) != 260 ||
+        tensor_encoded_size(fp8_rows_f32, NumericFormat::FP8_E4M3FN_ROW_F32S, fp8_shape) != 264 ||
+        tensor_encoded_size(packed_u4, NumericFormat::U4Z8G16_F16S, ple_shape) != 264) {
         throw std::runtime_error("registered encoded-size calculation is wrong");
     }
     expect_artifact_error([&] { tensor_encoded_size(fp8_rows, NumericFormat::NVFP4, fp8_shape); },
@@ -129,19 +148,26 @@ void test_registered_sizes() {
     expect_artifact_error(
         [&] { tensor_encoded_size(fp8_rows, NumericFormat::FP8_E4M3FN_ROW_BF16S, shape_2); },
         "row-scale rank mismatch");
+    expect_artifact_error(
+        [&] { tensor_encoded_size(fp8_rows_f32, NumericFormat::FP8_E4M3FN_ROW_BF16S, fp8_shape); },
+        "row-scale-f32 format mismatch");
+    expect_artifact_error(
+        [&] { tensor_encoded_size(packed_u4, NumericFormat::U4Z8G16_F16S, fp8_shape); },
+        "packed-u4 group mismatch");
 }
 
 void test_normative_fixture() {
     auto fixture = write_fixture(normative_directory(), "valid");
     Reader reader(fixture.path);
     if (reader.identity().model_id != "fixture-model" ||
-        reader.identity().weights_id != "fixture-weights" || reader.objects().size() != 9 ||
+        reader.identity().weights_id != "fixture-weights" || reader.objects().size() != 11 ||
         reader.payload_offset() != 4096) {
         throw std::runtime_error("fixture root descriptor mismatch");
     }
 
-    const std::array<std::string_view, 9> expected_names = {
-        "resource", "bf16", "fp32_scalar", "i32", "q4", "q5", "q6", "w8", "fp8_row",
+    const std::array<std::string_view, 11> expected_names = {
+        "resource", "bf16", "fp32_scalar", "i32",         "q4",     "q5",
+        "q6",       "w8",   "fp8_row",     "fp8_row_f32", "ple_u4",
     };
     for (std::size_t i = 0; i < expected_names.size(); ++i) {
         const auto& object = reader.objects()[i];
@@ -164,11 +190,17 @@ void test_normative_fixture() {
     const auto* resource = std::get_if<ResourceDescriptor>(&reader.objects().front());
     const auto* q5       = std::get_if<TensorDescriptor>(reader.find("q5"));
     const auto* fp8      = std::get_if<TensorDescriptor>(reader.find("fp8_row"));
+    const auto* fp8_f32  = std::get_if<TensorDescriptor>(reader.find("fp8_row_f32"));
+    const auto* ple_u4   = std::get_if<TensorDescriptor>(reader.find("ple_u4"));
     if (resource == nullptr || q5 == nullptr || q5->shape != std::vector<std::uint64_t>({2, 130}) ||
         q5->format != NumericFormat::Q5G64_F16S || q5->layout != StorageLayout::RowSplitK128V1 ||
         fp8 == nullptr || fp8->shape != std::vector<std::uint64_t>({2, 4}) ||
         fp8->format != NumericFormat::FP8_E4M3FN_ROW_BF16S ||
-        fp8->layout != StorageLayout::RowScaleV1) {
+        fp8->layout != StorageLayout::RowScaleV1 || fp8_f32 == nullptr ||
+        fp8_f32->format != NumericFormat::FP8_E4M3FN_ROW_F32S ||
+        fp8_f32->layout != StorageLayout::RowScaleF32V1 || ple_u4 == nullptr ||
+        ple_u4->format != NumericFormat::U4Z8G16_F16S ||
+        ple_u4->layout != StorageLayout::PackedU4G16V1) {
         throw std::runtime_error("fixture object signature mismatch");
     }
 }

@@ -19,6 +19,7 @@ from typing import Sequence, TypeAlias
 import torch
 
 from .numeric import (
+    AffineU4Format,
     DirectFormat,
     Fp8RowFormat,
     Nvfp4Format,
@@ -84,6 +85,17 @@ class RowScaleGeometry:
     payload_bytes: int
 
 
+@dataclass(frozen=True, slots=True)
+class PackedU4Geometry:
+    n: int
+    k: int
+    groups_per_row: int
+    code_plane_bytes: int
+    scale_plane_offset: int
+    scale_plane_bytes: int
+    payload_bytes: int
+
+
 Plane: TypeAlias = bytes | bytearray | memoryview | torch.Tensor
 Payload: TypeAlias = bytes | bytearray | memoryview | torch.Tensor
 
@@ -116,6 +128,16 @@ ROW_SCALE_V1 = Layout(
     256,
     frozenset(("FP8_E4M3FN_ROW_BF16S",)),
 )
+ROW_SCALE_F32_V1 = Layout(
+    "row-scale-f32-v1",
+    256,
+    frozenset(("FP8_E4M3FN_ROW_F32S",)),
+)
+PACKED_U4_G16_V1 = Layout(
+    "packed-u4-g16-v1",
+    256,
+    frozenset(("U4Z8G16_F16S",)),
+)
 
 LAYOUTS = MappingProxyType(
     {
@@ -125,6 +147,8 @@ LAYOUTS = MappingProxyType(
             ROW_SPLIT_K128_V1,
             BLOCKSCALE_K16_M128X4_V1,
             ROW_SCALE_V1,
+            ROW_SCALE_F32_V1,
+            PACKED_U4_G16_V1,
         )
     }
 )
@@ -258,10 +282,36 @@ def row_scale_geometry(
     n, k = _shape(shape, rank=2)
     code_plane_bytes = n * k
     scale_plane_offset = align_up(code_plane_bytes, PLANE_ALIGNMENT)
-    scale_plane_bytes = n * 2
+    scale_plane_bytes = n * spec.scale_word_bytes
     return RowScaleGeometry(
         n=n,
         k=k,
+        code_plane_bytes=code_plane_bytes,
+        scale_plane_offset=scale_plane_offset,
+        scale_plane_bytes=scale_plane_bytes,
+        payload_bytes=scale_plane_offset + scale_plane_bytes,
+    )
+
+
+def packed_u4_geometry(
+    format: str | AffineU4Format, shape: Sequence[int]
+) -> PackedU4Geometry:
+    spec = _format(format)
+    if not isinstance(spec, AffineU4Format):
+        raise ValueError("packed-u4-g16-v1 requires an affine U4 format")
+    n, k = _shape(shape, rank=2)
+    if k % spec.group_size:
+        raise ValueError(
+            f"packed-u4-g16-v1 requires K divisible by {spec.group_size}"
+        )
+    groups_per_row = k // spec.group_size
+    code_plane_bytes = n * k // 2
+    scale_plane_offset = align_up(code_plane_bytes, PLANE_ALIGNMENT)
+    scale_plane_bytes = n * groups_per_row * 2
+    return PackedU4Geometry(
+        n=n,
+        k=k,
+        groups_per_row=groups_per_row,
         code_plane_bytes=code_plane_bytes,
         scale_plane_offset=scale_plane_offset,
         scale_plane_bytes=scale_plane_bytes,
@@ -299,6 +349,14 @@ def encoded_size(
         if not isinstance(numeric_spec, Fp8RowFormat):
             raise ValueError("row-scale-v1 requires a row-scaled FP8 format")
         return row_scale_geometry(numeric_spec, shape).payload_bytes
+    if layout_spec is ROW_SCALE_F32_V1:
+        if not isinstance(numeric_spec, Fp8RowFormat):
+            raise ValueError("row-scale-f32-v1 requires a row-scaled FP8 format")
+        return row_scale_geometry(numeric_spec, shape).payload_bytes
+    if layout_spec is PACKED_U4_G16_V1:
+        if not isinstance(numeric_spec, AffineU4Format):
+            raise ValueError("packed-u4-g16-v1 requires an affine U4 format")
+        return packed_u4_geometry(numeric_spec, shape).payload_bytes
     raise ValueError(f"unsupported tensor layout: {layout_spec.name!r}")
 
 
@@ -461,6 +519,169 @@ def dequantize_fp8_row_scaled(
     return (codes.view(torch.float8_e4m3fn).float() * scales.float().unsqueeze(1)).to(
         dtype
     )
+
+
+def _exact_fp32_vector(tensor: torch.Tensor, length: int, label: str) -> torch.Tensor:
+    if tensor.dtype != torch.float32 or tuple(tensor.shape) != (length,):
+        raise TypeError(f"{label} must be FP32 with shape ({length},)")
+    return tensor.detach().contiguous().cpu()
+
+
+def _validate_fp8_f32_row_words(codes: torch.Tensor, scales: torch.Tensor) -> None:
+    if bool(((codes & 0x7F) == 0x7F).any()):
+        raise ValueError("row-scaled FP8 codes must be finite E4M3FN words")
+    if bool((~torch.isfinite(scales) | torch.signbit(scales)).any()):
+        raise ValueError("row-scaled FP8 scales must be nonnegative finite FP32 words")
+    zero_scale = scales == 0
+    nonzero_code = (codes & 0x7F) != 0
+    if bool((zero_scale.unsqueeze(1) & nonzero_code).any()):
+        raise ValueError("a zero row scale requires only signed-zero FP8 codes")
+
+
+def encode_fp8_row_scaled_f32(
+    code_words: torch.Tensor,
+    row_scales: torch.Tensor,
+    shape: Sequence[int],
+) -> bytes:
+    """Encode exact E4M3FN code words and FP32 row multipliers."""
+
+    geometry = row_scale_geometry("FP8_E4M3FN_ROW_F32S", shape)
+    codes = _exact_uint8_matrix(
+        code_words, (geometry.n, geometry.k), "row-scaled FP8 codes"
+    )
+    scales = _exact_fp32_vector(row_scales, geometry.n, "row-scaled FP8 scales")
+    _validate_fp8_f32_row_words(codes, scales)
+    payload = bytearray(geometry.payload_bytes)
+    payload[: geometry.code_plane_bytes] = codes.numpy().tobytes()
+    scale_begin = geometry.scale_plane_offset
+    payload[scale_begin : scale_begin + geometry.scale_plane_bytes] = encode_direct(
+        scales, "FP32"
+    )
+    return bytes(payload)
+
+
+def decode_fp8_row_scaled_f32_words(
+    payload: Payload, shape: Sequence[int]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Decode exact E4M3FN code words and FP32 row multipliers."""
+
+    geometry = row_scale_geometry("FP8_E4M3FN_ROW_F32S", shape)
+    if _payload_length(payload) != geometry.payload_bytes:
+        raise ValueError(
+            f"row-scaled FP8 payload has {_payload_length(payload)} bytes, "
+            f"expected {geometry.payload_bytes}"
+        )
+    raw = _payload_tensor(payload, torch.device("cpu"))
+    codes = raw[: geometry.code_plane_bytes].clone().reshape(geometry.n, geometry.k)
+    scale_begin = geometry.scale_plane_offset
+    scale_bytes = raw[scale_begin : scale_begin + geometry.scale_plane_bytes]
+    scales = decode_direct(scale_bytes, "FP32", (geometry.n,))
+    _validate_fp8_f32_row_words(codes, scales)
+    return codes, scales
+
+
+def dequantize_fp8_row_scaled_f32(
+    payload: Payload,
+    shape: Sequence[int],
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Reconstruct an FP32-row-scaled FP8 matrix from its stored words."""
+
+    codes, scales = decode_fp8_row_scaled_f32_words(payload, shape)
+    return (codes.view(torch.float8_e4m3fn).float() * scales.unsqueeze(1)).to(dtype)
+
+
+def _exact_fp16_matrix(
+    tensor: torch.Tensor, shape: tuple[int, int], label: str
+) -> torch.Tensor:
+    if tensor.dtype != torch.float16 or tuple(tensor.shape) != shape:
+        raise TypeError(f"{label} must be FP16 with shape {shape}")
+    return tensor.detach().contiguous().cpu()
+
+
+def _unpack_u4_words(packed: torch.Tensor, n: int, k: int) -> torch.Tensor:
+    codes = torch.empty((n, k), dtype=torch.uint8)
+    codes[:, 0::2] = packed & 0x0F
+    codes[:, 1::2] = packed >> 4
+    return codes
+
+
+def _validate_packed_u4_words(
+    packed: torch.Tensor, scales: torch.Tensor, geometry: PackedU4Geometry
+) -> None:
+    if bool((~torch.isfinite(scales) | torch.signbit(scales)).any()):
+        raise ValueError("packed U4 scales must be nonnegative finite FP16 words")
+    zero_groups = scales == 0
+    if bool(zero_groups.any()):
+        codes = _unpack_u4_words(packed, geometry.n, geometry.k)
+        codes = codes.reshape(geometry.n, geometry.groups_per_row, 16)
+        if bool((zero_groups.unsqueeze(-1) & (codes != 8)).any()):
+            raise ValueError("a zero group scale requires only zero-point U4 codes")
+
+
+def encode_packed_u4_g16(
+    packed_codes: torch.Tensor,
+    group_scales: torch.Tensor,
+    shape: Sequence[int],
+) -> bytes:
+    """Encode low-nibble-first U4Z8 codes and FP16 G16 multipliers."""
+
+    geometry = packed_u4_geometry("U4Z8G16_F16S", shape)
+    packed = _exact_uint8_matrix(
+        packed_codes, (geometry.n, geometry.k // 2), "packed U4 codes"
+    )
+    scales = _exact_fp16_matrix(
+        group_scales,
+        (geometry.n, geometry.groups_per_row),
+        "packed U4 scales",
+    )
+    _validate_packed_u4_words(packed, scales, geometry)
+    payload = bytearray(geometry.payload_bytes)
+    payload[: geometry.code_plane_bytes] = packed.numpy().tobytes()
+    scale_words = scales.view(torch.uint8).reshape(-1, 2)
+    if sys.byteorder != "little":
+        scale_words = scale_words.flip(1)
+    scale_begin = geometry.scale_plane_offset
+    payload[scale_begin : scale_begin + geometry.scale_plane_bytes] = (
+        scale_words.reshape(-1).numpy().tobytes()
+    )
+    return bytes(payload)
+
+
+def decode_packed_u4_g16_words(
+    payload: Payload, shape: Sequence[int]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Decode exact packed U4 words and FP16 group multipliers."""
+
+    geometry = packed_u4_geometry("U4Z8G16_F16S", shape)
+    if _payload_length(payload) != geometry.payload_bytes:
+        raise ValueError(
+            f"packed U4 payload has {_payload_length(payload)} bytes, "
+            f"expected {geometry.payload_bytes}"
+        )
+    raw = _payload_tensor(payload, torch.device("cpu"))
+    packed = raw[: geometry.code_plane_bytes].clone().reshape(geometry.n, geometry.k // 2)
+    scale_begin = geometry.scale_plane_offset
+    scale_words = raw[scale_begin : scale_begin + geometry.scale_plane_bytes].clone()
+    if sys.byteorder != "little":
+        scale_words = scale_words.reshape(-1, 2).flip(1).contiguous().reshape(-1)
+    scales = scale_words.view(torch.float16).reshape(geometry.n, geometry.groups_per_row)
+    _validate_packed_u4_words(packed, scales, geometry)
+    return packed, scales
+
+
+def dequantize_packed_u4_g16(
+    payload: Payload,
+    shape: Sequence[int],
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Reconstruct U4Z8 G16 values from packed words and group scales."""
+
+    geometry = packed_u4_geometry("U4Z8G16_F16S", shape)
+    packed, scales = decode_packed_u4_g16_words(payload, shape)
+    codes = _unpack_u4_words(packed, geometry.n, geometry.k).to(torch.float32) - 8.0
+    values = codes.reshape(geometry.n, geometry.groups_per_row, 16)
+    return (values * scales.float().unsqueeze(-1)).reshape(geometry.n, geometry.k).to(dtype)
 
 
 def swizzle_nvfp4_scales(
@@ -1076,9 +1297,12 @@ __all__ = [
     "K_ALIGNMENT",
     "LAYOUTS",
     "Layout",
+    "PACKED_U4_G16_V1",
+    "PackedU4Geometry",
     "PLANE_ALIGNMENT",
     "ROW_SPLIT_K128_V1",
     "ROW_SCALE_V1",
+    "ROW_SCALE_F32_V1",
     "RowPlanes",
     "RowScaleGeometry",
     "RowSplitGeometry",
@@ -1087,17 +1311,24 @@ __all__ = [
     "block_scale_geometry",
     "decode_direct",
     "decode_fp8_row_scaled_words",
+    "decode_fp8_row_scaled_f32_words",
+    "decode_packed_u4_g16_words",
     "decode_nvfp4_words",
     "decode_row_split_codes",
     "dequantize_fp8_row_scaled",
+    "dequantize_fp8_row_scaled_f32",
+    "dequantize_packed_u4_g16",
     "dequantize_row_split",
     "encode_direct",
     "encode_fp8_row_scaled",
+    "encode_fp8_row_scaled_f32",
+    "encode_packed_u4_g16",
     "encode_nvfp4",
     "encode_row_split",
     "encoded_size",
     "gather_row_planes",
     "get_layout",
+    "packed_u4_geometry",
     "row_scale_geometry",
     "row_split_geometry",
     "split_row_planes",

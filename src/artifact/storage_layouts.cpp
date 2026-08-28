@@ -82,6 +82,10 @@ std::string_view format_name(NumericFormat format) noexcept {
         return "NVFP4";
     case NumericFormat::FP8_E4M3FN_ROW_BF16S:
         return "FP8_E4M3FN_ROW_BF16S";
+    case NumericFormat::FP8_E4M3FN_ROW_F32S:
+        return "FP8_E4M3FN_ROW_F32S";
+    case NumericFormat::U4Z8G16_F16S:
+        return "U4Z8G16_F16S";
     }
     return {};
 }
@@ -96,6 +100,10 @@ std::string_view layout_name(StorageLayout layout) noexcept {
         return "blockscale-k16-m128x4-v1";
     case StorageLayout::RowScaleV1:
         return "row-scale-v1";
+    case StorageLayout::RowScaleF32V1:
+        return "row-scale-f32-v1";
+    case StorageLayout::PackedU4G16V1:
+        return "packed-u4-g16-v1";
     }
     return {};
 }
@@ -136,7 +144,19 @@ std::uint64_t tensor_encoded_size(StorageLayout layout, NumericFormat format,
         return block_scale_geometry(format, shape).encoded_bytes;
     }
     if (layout == StorageLayout::RowScaleV1) {
+        if (format != NumericFormat::FP8_E4M3FN_ROW_BF16S) {
+            throw ArtifactError("row-scale-v1 requires FP8_E4M3FN_ROW_BF16S");
+        }
         return row_scale_geometry(format, shape).encoded_bytes;
+    }
+    if (layout == StorageLayout::RowScaleF32V1) {
+        if (format != NumericFormat::FP8_E4M3FN_ROW_F32S) {
+            throw ArtifactError("row-scale-f32-v1 requires FP8_E4M3FN_ROW_F32S");
+        }
+        return row_scale_geometry(format, shape).encoded_bytes;
+    }
+    if (layout == StorageLayout::PackedU4G16V1) {
+        return packed_u4_geometry(format, shape).encoded_bytes;
     }
     throw ArtifactError("unknown tensor layout");
 }
@@ -197,8 +217,16 @@ BlockScaleGeometry block_scale_geometry(NumericFormat format,
 }
 
 RowScaleGeometry row_scale_geometry(NumericFormat format, std::span<const std::uint64_t> shape) {
-    if (format != NumericFormat::FP8_E4M3FN_ROW_BF16S) {
-        throw ArtifactError("row-scale-v1 requires FP8_E4M3FN_ROW_BF16S");
+    std::uint64_t scale_word_bytes = 0;
+    switch (format) {
+    case NumericFormat::FP8_E4M3FN_ROW_BF16S:
+        scale_word_bytes = 2;
+        break;
+    case NumericFormat::FP8_E4M3FN_ROW_F32S:
+        scale_word_bytes = 4;
+        break;
+    default:
+        throw ArtifactError("row-scaled layout requires a row-scaled FP8 format");
     }
     if (shape.size() != 2 || shape[0] == 0 || shape[1] == 0) {
         throw ArtifactError("row-scale-v1 requires a positive rank-two shape");
@@ -210,9 +238,33 @@ RowScaleGeometry row_scale_geometry(NumericFormat format, std::span<const std::u
     out.code_plane_bytes = checked_mul(out.rows, out.columns, "FP8 element count");
     out.scale_plane_offset =
         align_up(out.code_plane_bytes, kTensorAlignment, "FP8 scale plane offset");
-    out.scale_plane_bytes = checked_mul(out.rows, 2, "FP8 scale plane bytes");
+    out.scale_plane_bytes = checked_mul(out.rows, scale_word_bytes, "FP8 scale plane bytes");
     out.encoded_bytes =
         checked_add(out.scale_plane_offset, out.scale_plane_bytes, "FP8 tensor encoded size");
+    return out;
+}
+
+PackedU4Geometry packed_u4_geometry(NumericFormat format, std::span<const std::uint64_t> shape) {
+    if (format != NumericFormat::U4Z8G16_F16S) {
+        throw ArtifactError("packed-u4-g16-v1 requires U4Z8G16_F16S");
+    }
+    if (shape.size() != 2 || shape[0] == 0 || shape[1] == 0 || shape[1] % 16 != 0) {
+        throw ArtifactError(
+            "packed-u4-g16-v1 requires a positive rank-two shape with K divisible by 16");
+    }
+
+    PackedU4Geometry out;
+    out.rows             = shape[0];
+    out.columns          = shape[1];
+    out.groups_per_row   = shape[1] / 16;
+    const auto elements  = checked_mul(out.rows, out.columns, "U4 element count");
+    out.code_plane_bytes = elements / 2;
+    out.scale_plane_offset =
+        align_up(out.code_plane_bytes, kTensorAlignment, "U4 scale plane offset");
+    out.scale_plane_bytes = checked_mul(checked_mul(out.rows, out.groups_per_row, "U4 group count"),
+                                        2, "U4 scale plane bytes");
+    out.encoded_bytes =
+        checked_add(out.scale_plane_offset, out.scale_plane_bytes, "U4 tensor encoded size");
     return out;
 }
 

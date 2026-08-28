@@ -42,6 +42,18 @@ def _small_specs():
             "FP8_E4M3FN_ROW_BF16S",
             "row-scale-v1",
         ),
+        TensorSpec(
+            "quant/fp8_row_f32",
+            (2, 4),
+            "FP8_E4M3FN_ROW_F32S",
+            "row-scale-f32-v1",
+        ),
+        TensorSpec(
+            "quant/ple_u4",
+            (2, 32),
+            "U4Z8G16_F16S",
+            "packed-u4-g16-v1",
+        ),
     ]
 
 
@@ -73,7 +85,7 @@ def test_v2_round_trip_covers_every_registered_storage(tmp_path):
         summary = artifact_summary(artifact)
         assert summary["model_id"] == "test-model"
         assert summary["weights_id"] == "test-weights"
-        assert summary["objects"] == 10
+        assert summary["objects"] == 12
         assert summary["formats"] == {
             "BF16": 1,
             "FP32": 1,
@@ -84,6 +96,8 @@ def test_v2_round_trip_covers_every_registered_storage(tmp_path):
             "W8G32_F16S": 1,
             "NVFP4": 1,
             "FP8_E4M3FN_ROW_BF16S": 1,
+            "FP8_E4M3FN_ROW_F32S": 1,
+            "U4Z8G16_F16S": 1,
         }
 
 

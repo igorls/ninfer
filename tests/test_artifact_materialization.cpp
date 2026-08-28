@@ -37,8 +37,9 @@ constexpr std::array<std::byte, 4> kMappedTensor = {
     std::byte{5},
     std::byte{5},
 };
-constexpr std::size_t kFp8TensorBytes = 260;
-constexpr std::size_t kTailReadBytes  = 772;
+constexpr std::size_t kFp8TensorBytes    = 260;
+constexpr std::size_t kFp8F32TensorBytes = 264;
+constexpr std::size_t kTailReadBytes     = 1288;
 
 ninfer::test::artifact_fixture::TemporaryArtifact write_fixture() {
     using Json = ninfer::test::artifact_fixture::Json;
@@ -79,6 +80,13 @@ ninfer::test::artifact_fixture::TemporaryArtifact write_fixture() {
                              {"layout", "contiguous-le-v1"},
                              {"offset", 8960},
                              {"bytes", kMappedTensor.size()}},
+                            {{"name", "weights/fp8_f32"},
+                             {"kind", "tensor"},
+                             {"shape", {2, 4}},
+                             {"format", "FP8_E4M3FN_ROW_F32S"},
+                             {"layout", "row-scale-f32-v1"},
+                             {"offset", 9216},
+                             {"bytes", kFp8F32TensorBytes}},
                         })},
         },
         "materialization");
@@ -123,6 +131,10 @@ MappedResult materialize_mapped_tensor(const std::filesystem::path& path,
         binder.require_tensor("weights/mapped", ninfer::artifact::NumericFormat::BF16,
                               ninfer::artifact::StorageLayout::ContiguousLeV1, tensor_shape);
     binder.retain_mapped_tensor(mapped);
+    const auto fp8_f32 = binder.require_tensor(
+        "weights/fp8_f32", ninfer::artifact::NumericFormat::FP8_E4M3FN_ROW_F32S,
+        ninfer::artifact::StorageLayout::RowScaleF32V1, fp8_shape);
+    binder.validate_only(fp8_f32);
     return {ninfer::artifact::materialize(reader, binder.finish(), device), mapped};
 }
 
@@ -155,8 +167,12 @@ int main() {
             "weights/mapped", ninfer::artifact::NumericFormat::BF16,
             ninfer::artifact::StorageLayout::ContiguousLeV1, validated_shape);
         validation_binder.retain_mapped_tensor(validated_mapped);
+        const auto validated_fp8_f32 = validation_binder.require_tensor(
+            "weights/fp8_f32", ninfer::artifact::NumericFormat::FP8_E4M3FN_ROW_F32S,
+            ninfer::artifact::StorageLayout::RowScaleF32V1, fp8_shape);
+        validation_binder.validate_only(validated_fp8_f32);
         const auto validation_plan = validation_binder.finish();
-        require(validation_plan.object_count == 5 && validation_plan.host_objects.size() == 1 &&
+        require(validation_plan.object_count == 6 && validation_plan.host_objects.size() == 1 &&
                     validation_plan.mapped_tensor_objects.size() == 1 &&
                     validation_plan.device_objects.size() == 1 &&
                     validation_plan.device_capacity_bytes == kSecondTensor.size(),
@@ -201,11 +217,15 @@ int main() {
             binder.require_tensor("weights/mapped", ninfer::artifact::NumericFormat::BF16,
                                   ninfer::artifact::StorageLayout::ContiguousLeV1, tensor_shape);
         binder.retain_mapped_tensor(mapped);
+        const auto fp8_f32 = binder.require_tensor(
+            "weights/fp8_f32", ninfer::artifact::NumericFormat::FP8_E4M3FN_ROW_F32S,
+            ninfer::artifact::StorageLayout::RowScaleF32V1, fp8_shape);
+        binder.materialize_on_device(fp8_f32);
 
         const ninfer::artifact::MaterializationPlan plan = binder.finish();
-        require(plan.object_count == 5 && plan.host_objects.size() == 1 &&
-                    plan.mapped_tensor_objects.size() == 1 && plan.device_objects.size() == 3 &&
-                    plan.device_capacity_bytes == 772,
+        require(plan.object_count == 6 && plan.host_objects.size() == 1 &&
+                    plan.mapped_tensor_objects.size() == 1 && plan.device_objects.size() == 4 &&
+                    plan.device_capacity_bytes == 1288,
                 "binder produced the wrong materialization plan");
 
         ninfer::DeviceContext device(0);
@@ -237,6 +257,16 @@ int main() {
                     fp8_weight.scales == static_cast<const std::byte*>(fp8_weight.payload) + 256 &&
                     fp8_weight.payload_bytes == kFp8TensorBytes,
                 "materialized FP8 Weight metadata is incomplete");
+        const ninfer::Weight fp8_f32_weight = ninfer::artifact::materialized_weight(
+            materialized, fp8_f32, ninfer::artifact::NumericFormat::FP8_E4M3FN_ROW_F32S, 2, 4);
+        require(fp8_f32_weight.qtype == ninfer::QType::FP8_E4M3FN_ROW_F32S &&
+                    fp8_f32_weight.layout == ninfer::QuantLayout::RowScale &&
+                    fp8_f32_weight.scale_dtype == ninfer::DType::FP32 &&
+                    fp8_f32_weight.scales ==
+                        static_cast<const std::byte*>(fp8_f32_weight.payload) + 256 &&
+                    fp8_f32_weight.scale_nb[0] == 4 && fp8_f32_weight.scale_nb[1] == 8 &&
+                    fp8_f32_weight.payload_bytes == kFp8F32TensorBytes,
+                "materialized FP8/FP32 Weight metadata is incomplete");
 
         const auto retained = materialized.resource_bytes(resource);
         require(std::equal(retained.begin(), retained.end(), kResource.begin(), kResource.end()),
@@ -255,10 +285,11 @@ int main() {
                 "mapped tensor lifetime ended with the source Reader");
 
         const auto& stats = materialized.stats();
-        require(stats.tensor_count == 4 && stats.mapped_tensor_count == 1 &&
+        require(stats.tensor_count == 5 && stats.mapped_tensor_count == 1 &&
                     stats.mapped_tensor_bytes == kMappedTensor.size() &&
                     stats.resource_count == 1 &&
-                    stats.h2d_bytes == kTensor.size() + kSecondTensor.size() + kFp8TensorBytes &&
+                    stats.h2d_bytes == kTensor.size() + kSecondTensor.size() + kFp8TensorBytes +
+                                           kFp8F32TensorBytes &&
                     stats.retained_resource_bytes == kResource.size() &&
                     stats.file_bytes == kResource.size() +
                                             ninfer::artifact::Reader::direct_io_alignment +

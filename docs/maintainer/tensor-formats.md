@@ -1,13 +1,13 @@
 # NInfer Persistent Tensor Numeric Formats
 
-This reference defines the nine persistent numeric tensor formats accepted by current `.ninfer`
+This reference defines the eleven persistent numeric tensor formats accepted by current `.ninfer`
 artifacts: their logical words, quantization semantics, canonical reference encoders where
 applicable, and conformance boundaries. Container framing, physical byte layouts, checkpoint
 assignment, kernels, and runtime-state codecs are defined separately.
 
 ## 1. Registered formats
 
-NInfer has exactly nine persistent numeric tensor formats in four categories.
+NInfer has exactly eleven persistent numeric tensor formats in five categories.
 
 Direct scalar formats preserve one logical scalar word per tensor element:
 
@@ -37,6 +37,13 @@ The row-scaled floating-point weight format is:
 | Canonical name | Code | Scale granularity | Scale |
 |---|---|---|---|
 | `FP8_E4M3FN_ROW_BF16S` | E4M3FN, 8 bits/weight | one multiplier per logical row | BF16 |
+| `FP8_E4M3FN_ROW_F32S` | E4M3FN, 8 bits/weight | one multiplier per logical row | FP32 |
+
+The affine packed weight format selected for the Qwen3.8-Flash-Next PLE table is:
+
+| Canonical name | Stored code | Zero point | Group size | Scale |
+|---|---|---:|---:|---|
+| `U4Z8G16_F16S` | unsigned 4-bit `u` | 8 | 16 | one binary16 multiplier/group |
 
 This is a closed registry, not a template from which arbitrary scalar types, bit widths, and group
 sizes may be constructed. In particular, `FP16`, bare `FP8_E4M3FN`, `I64`, `Q4G32_F16S`,
@@ -72,7 +79,8 @@ The registry keeps the following concerns separate.
 
 A **persistent numeric format** defines the logical words needed to recover a numeric tensor from
 an artifact. The closed registry contains direct scalar formats, grouped signed-integer formats,
-the block-scaled `NVFP4` format, and the row-scaled `FP8_E4M3FN_ROW_BF16S` format. It does not
+the block-scaled `NVFP4` format, the two row-scaled FP8 formats, and the affine
+`U4Z8G16_F16S` format. It does not
 identify a tensor's model role, physical byte layout, or supported consumer.
 
 ### 2.2 Direct scalar format
@@ -95,7 +103,7 @@ A **quantization scheme** defines only the persistent logical representation of 
 - the validity rules for codes and scales;
 - the mathematical reconstruction of each represented weight.
 
-The six quantized names above identify schemes in this sense. Their meanings are immutable: a
+The eight quantized names above identify schemes in this sense. Their meanings are immutable: a
 consumer must not infer a different zero point, scale geometry, code range, or reconstruction rule
 from context.
 
@@ -116,10 +124,14 @@ encoder. Its current checkpoint recipe copies already selected E2M1, E4M3FN, and
 from its fixed source and validates them without requantization. Encoder provenance must not be
 confused with decoder semantics.
 
-`FP8_E4M3FN_ROW_BF16S` likewise has an exact decode contract but no format-wide canonical encoder.
-A checkpoint recipe may copy valid E4M3FN code words and BF16 row multipliers from a fixed source,
+The two row-scaled FP8 formats likewise have exact decode contracts but no format-wide canonical
+encoder. A checkpoint recipe may copy valid E4M3FN code words and row multipliers from a fixed source,
 or name a separate source-to-format encoder. Scale selection and FP8 rounding belong to that recipe
-or encoder profile and do not change the represented values defined in Section 3.4.
+or encoder profile and do not change the represented values defined in Sections 3.4 and 3.5.
+
+`U4Z8G16_F16S` has an exact decode contract but no NInfer-owned source quantizer. Its current
+checkpoint recipe preserves already selected packed nibbles and FP16 group multipliers from the
+revision-pinned PLE source.
 
 Direct formats also separate representation from conversion. For example, the `BF16` format does
 not decide whether an FP32 source is rounded, truncated, or rejected. Any conversion from a source
@@ -152,9 +164,10 @@ among other things:
 One format may have more than one deliberately supported layout, but every layout must decode to
 exactly the same direct words or logical codes and scales. The currently registered layouts are
 `contiguous-le-v1` for direct words, `row-split-k128-v1` for grouped signed-integer formats, and
-`blockscale-k16-m128x4-v1` for `NVFP4`, and `row-scale-v1` for
-`FP8_E4M3FN_ROW_BF16S`. Their byte order, plane packing, padding, swizzle, divisor placement, and
-alignment rules belong to the layout registry, not to these nine numeric formats.
+`blockscale-k16-m128x4-v1` for `NVFP4`, `row-scale-v1` and `row-scale-f32-v1` for the corresponding
+row-scaled FP8 formats, and `packed-u4-g16-v1` for `U4Z8G16_F16S`. Their byte order, plane packing,
+padding, swizzle, divisor placement, and alignment rules belong to the layout registry, not to
+these eleven numeric formats.
 
 ### 2.7 Compute profile and kernel support
 
@@ -351,6 +364,44 @@ The format does not define how a floating-point source is assigned a scale or ro
 A checkpoint recipe either preserves already selected code and scale words exactly or names its
 encoder profile. Activation quantization and activation scales are separate compute or runtime-state
 concerns and are not persistent fields of this format.
+
+### 3.5 `FP8_E4M3FN_ROW_F32S`
+
+`FP8_E4M3FN_ROW_F32S` has the same positive rank-two `[N,K]` geometry and finite E4M3FN code
+domain as Section 3.4, but every row multiplier is an IEEE-754 binary32 word rather than BF16. A
+valid multiplier is nonnegative and finite, including positive zero and positive subnormals;
+negative values, negative zero, infinity, and NaN are invalid. A positive-zero multiplier admits
+only signed-zero E4M3FN codes in its row.
+
+For code `c[n,k]` and multiplier `s[n]`, the exact represented value is:
+
+```text
+c32        = exact_e4m3fn_to_binary32(c[n,k])
+w_hat[n,k] = binary32(c32 * s[n])
+```
+
+The FP32 word is preserved exactly by the checkpoint recipe. Converting it to BF16 would select a
+different represented weight and is not an artifact-layout operation.
+
+### 3.6 `U4Z8G16_F16S`
+
+`U4Z8G16_F16S` is a positive rank-two matrix `[N,K]` with `K` divisible by 16. Every logical
+coordinate owns one unsigned four-bit word `u` in `[0,15]`; each consecutive K-axis group of 16
+owns one IEEE-754 binary16 multiplier. A valid multiplier is nonnegative and finite, including
+positive zero and positive subnormals. Negative values, negative zero, infinity, and NaN are
+invalid. A positive-zero multiplier admits only zero-point code `u=8` in that group.
+
+For `g=floor(k/16)`, the exact represented value is:
+
+```text
+q[n,k]     = integer(u[n,k]) - 8
+s32        = exact_binary16_to_binary32(s[n,g])
+w_hat[n,k] = binary32(binary32(q[n,k]) * s32)
+```
+
+This is an affine unsigned-code contract, not the G64 signed two's-complement Q4 format. The fixed
+zero point is part of the identity; no per-group zero-point field exists. The current recipe copies
+the selected packed code and FP16 scale words without requantization.
 
 ## 4. Grouped signed-integer tensor model
 
@@ -628,6 +679,10 @@ A conforming producer must:
   positive FP32 weight divisor under Section 3.3;
 - for `FP8_E4M3FN_ROW_BF16S`, emit only finite E4M3FN code words and valid BF16 row multipliers,
   with signed-zero codes as the only legal codes in a positive-zero-scale row under Section 3.4;
+- for `FP8_E4M3FN_ROW_F32S`, preserve valid FP32 row multipliers and enforce the corresponding
+  signed-zero rule under Section 3.5;
+- for `U4Z8G16_F16S`, preserve unsigned nibble words and valid FP16 group multipliers, with code 8
+  as the only legal code in a positive-zero-scale group under Section 3.6;
 - record enough checkpoint-recipe provenance for the artifact producer to identify how the values
   were derived;
 - when an encoder converts floating-point source values, fail rather than silently quantize
@@ -656,6 +711,9 @@ The `.ninfer` container and each registered storage layout must:
   divisor under Section 3.3;
 - for `FP8_E4M3FN_ROW_BF16S`, reconstruct every E4M3FN code word and its owning BF16 row multiplier
   under Section 3.4;
+- for `FP8_E4M3FN_ROW_F32S`, reconstruct every E4M3FN code word and its owning FP32 row multiplier
+  under Section 3.5;
+- for `U4Z8G16_F16S`, reconstruct every unsigned nibble and FP16 group multiplier under Section 3.6;
 - define its canonical physical-padding contents and producer responsibilities, if it materializes
   padding;
 - reject unknown formats and unsupported format/layout combinations;
@@ -670,7 +728,8 @@ that representation belongs to the container contract.
 Project-owned producers establish the applicable value invariants while writing the artifact:
 direct-word preservation under Section 3.1, legal grouped signed-integer identities, codes, and
 scales under Section 3.2 and Sections 4 through 7, and legal `NVFP4` words and divisor under
-Section 3.3, and legal row-scaled FP8 words under Section 3.4. Section 7 governs only a producer
+Section 3.3, legal row-scaled FP8 words under Sections 3.4 and 3.5, and legal affine U4 words under
+Section 3.6. Section 7 governs only a producer
 claiming the canonical grouped signed-integer encoder profile. The layout codec
 preserves those already selected words and owns canonical physical padding. The offline checkpoint
 verifier checks the complete target inventory and representative source-to-artifact values.
@@ -688,8 +747,9 @@ codec and operator tests independently protect the representation and numerical 
 
 A consuming kernel or model component must interpret direct logical words according to Section 3.1,
 grouped signed-integer identities, codes, and scales according to Section 3.2 and Sections 5 and 6,
-`NVFP4` words and divisor according to Section 3.3, and row-scaled FP8 words according to Section
-3.4. It may choose its private fusion, reduction, staging, and intermediate precision; the
+`NVFP4` words and divisor according to Section 3.3, row-scaled FP8 words according to Sections 3.4
+and 3.5, and affine U4 words according to Section 3.6. It may choose its private fusion, reduction,
+staging, and intermediate precision; the
 observable Op result is qualified against the independent oracle with the Op's named criterion for
 that implementation profile. Kernel implementation details do not alter the persistent format and
 must not be needed to decode an artifact independently.
@@ -702,7 +762,7 @@ meanings defined here.
 
 ## 9. Checkpoint and model boundary
 
-This registry does not say where any of the nine formats are used. A checkpoint numeric-format
+This registry does not say where any of the eleven formats are used. A checkpoint numeric-format
 document must separately define, for every persisted source tensor or derived tensor:
 
 - its source checkpoint identity and source tensor or derivation;
@@ -731,14 +791,16 @@ The registry contains no implicit or reserved support for:
 - other direct scalar types, including `FP16`, `FP64`, signed widths other than `I32`, and unsigned
   integers;
 - other integer widths, including Q2 and Q3;
-- alternate group sizes for the four accepted code widths;
-- asymmetric or affine quantization with zero points;
+- alternate group sizes outside the five explicitly registered integer schemes;
+- asymmetric or affine quantization with zero points other than the exact registered
+  `U4Z8G16_F16S` contract;
 - per-channel schemes disguised as an arbitrary group size;
 - codebook formats such as NF4;
 - GGUF K-quant, I-quant, or block layouts as scheme aliases;
 - GPTQ or AWQ serialization dialects as scheme aliases;
 - any other persistent FP8, FP4, microscaling, or shared-exponent format;
-  `FP8_E4M3FN_ROW_BF16S` and `NVFP4` register only the exact contracts in Sections 3.4 and 3.3;
+  the two row-scaled FP8 identities and `NVFP4` register only the exact contracts in Sections
+  3.4, 3.5, and 3.3;
 - activation, KV-cache, or recurrent-state quantization.
 
 These are exclusions, not judgments that the methods are poor. They have materially different
@@ -812,6 +874,9 @@ enum spellings or private kernel layout. The retained codec and encoder evidence
 - finite E4M3FN weight-code validity, BF16 row-scale validity, signed-zero rows, exact code/scale
   plane round trips, and the row-multiplier reconstruction equation for
   `FP8_E4M3FN_ROW_BF16S`;
+- FP32 row-scale word validity and exact reconstruction for `FP8_E4M3FN_ROW_F32S`;
+- low-nibble-first U4 word order, fixed zero point 8, FP16 G16 scales, zero-scale groups, and exact
+  reconstruction for `U4Z8G16_F16S`;
 - canonical binary16 scale rounding, reciprocal-multiply rather than direct division, positive and
   negative ties-to-even, minimum-subnormal rescue, and rejection of non-finite or overflowing source
   groups;
@@ -833,6 +898,8 @@ input/output formats, output tolerance, and real target shapes. The
 3.4; a producer that copies an upstream quantized tensor is protected by exact source-word
 comparison, while any source-to-FP8 encoder is protected under its own named profile. Private
 activation quantization, staging, and accumulation remain implementation choices.
+`FP8_E4M3FN_ROW_F32S` follows the E4M3FN/FP32 reconstruction in Section 3.5, and
+`U4Z8G16_F16S` follows the affine-nibble/FP16 reconstruction in Section 3.6.
 
 ## 13. Integration summary
 
@@ -840,8 +907,8 @@ This decision leaves directory, metadata encoding, integrity, sharding, and phys
 to the container and layout contracts. This numeric-format decision does not leave the following
 questions open:
 
-- persistent quantized weights use the four grouped signed-integer identities, the exact `NVFP4`
-  identity, or the exact `FP8_E4M3FN_ROW_BF16S` identity; no spelling constructs another scheme;
+- persistent quantized weights use the four grouped signed-integer identities, exact `NVFP4`, the
+  two exact row-scaled FP8 identities, or exact `U4Z8G16_F16S`; no spelling constructs another scheme;
 - direct persistent tensors use only `BF16`, `FP32`, and `I32`, with the exact logical words in
   Section 3.1;
 - quantization groups run along the final logical dimension and never cross a leading coordinate;
@@ -851,6 +918,10 @@ questions open:
   divisor under Section 3.3;
 - `FP8_E4M3FN_ROW_BF16S` uses finite E4M3FN codes and one nonnegative finite BF16 multiplier per
   logical matrix row under Section 3.4;
+- `FP8_E4M3FN_ROW_F32S` uses the same codes with one nonnegative finite FP32 multiplier per row
+  under Section 3.5;
+- `U4Z8G16_F16S` uses unsigned nibbles, fixed zero point 8, and one nonnegative finite FP16
+  multiplier per K-axis group of 16 under Section 3.6;
 - the canonical `MAXABS_F16_RECIP_RNE_V1` encoder applies only to the four grouped signed-integer
   formats and uses FP16-rounded scale followed by binary32 reciprocal-multiply;
 - the container, checkpoint recipe, compute profile, and runtime-state codecs remain separate

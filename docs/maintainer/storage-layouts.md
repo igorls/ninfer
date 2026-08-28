@@ -15,13 +15,16 @@ The storage registry contains exactly these identities:
 | `row-split-k128-v1` | tensor layout | `Q4G64_F16S`, `Q5G64_F16S`, `Q6G64_F16S`, `W8G32_F16S` | rank 2 `[N,K]` | 256 bytes |
 | `blockscale-k16-m128x4-v1` | tensor layout | `NVFP4` | rank 2 `[N,K]`, `N % 128 == 0`, `K % 64 == 0` | 256 bytes |
 | `row-scale-v1` | tensor layout | `FP8_E4M3FN_ROW_BF16S` | rank 2 `[N,K]` | 256 bytes |
+| `row-scale-f32-v1` | tensor layout | `FP8_E4M3FN_ROW_F32S` | rank 2 `[N,K]` | 256 bytes |
+| `packed-u4-g16-v1` | tensor layout | `U4Z8G16_F16S` | rank 2 `[N,K]`, `K % 16 == 0` | 256 bytes |
 | `raw-bytes-v1` | resource encoding | not applicable | nonempty byte string | 1 byte |
 
 These are closed identities, not templates. A format/layout combination not present in the table is
 unsupported. In particular, a direct format cannot use a quantized layout, grouped
 signed-integer formats cannot use `contiguous-le-v1`, and `NVFP4` cannot use
-`row-split-k128-v1`. `FP8_E4M3FN_ROW_BF16S` can use only `row-scale-v1`; a bare E4M3FN code plane
-is not a compatible direct tensor.
+`row-split-k128-v1`. The two row-scaled FP8 formats use only their scale-width-specific layouts;
+a bare E4M3FN code plane is not a compatible direct tensor. `U4Z8G16_F16S` uses only
+`packed-u4-g16-v1`.
 
 Object alignment applies to the object's payload-relative `offset` in the `.ninfer` JSON. Internal
 plane offsets and padding belong to the selected layout. Inter-object padding belongs to the
@@ -324,7 +327,42 @@ encoded by concatenating the selected code rows, recomputing the scale-plane ali
 row count, and appending the selected scale words in the same row order. It does not decode or
 requantize either plane.
 
-## 6. `raw-bytes-v1`
+## 6. `row-scale-f32-v1`
+
+`row-scale-f32-v1` stores rank-two `FP8_E4M3FN_ROW_F32S` matrices `[N,K]`. Its code plane and
+256-byte alignment are identical to Section 5, but the scale plane contains one little-endian FP32
+word per row:
+
+```text
+code_plane_bytes   = N * K
+scale_plane_offset = align_up(code_plane_bytes, 256)
+scale_plane_bytes  = N * 4
+payload_bytes      = scale_plane_offset + scale_plane_bytes
+```
+
+No FP32-to-BF16 conversion is permitted. A row view consists of its `K` code bytes and one FP32
+word; a standalone gather recomputes the scale-plane alignment.
+
+## 7. `packed-u4-g16-v1`
+
+`packed-u4-g16-v1` stores positive rank-two `U4Z8G16_F16S` matrices `[N,K]` with `K` divisible by
+16. It has a row-major packed-code plane, zero padding to a 256-byte boundary, and a row-major FP16
+scale plane:
+
+```text
+groups_per_row     = K / 16
+code_plane_bytes   = N * K / 2
+scale_plane_offset = align_up(code_plane_bytes, 256)
+scale_plane_bytes  = N * groups_per_row * 2
+payload_bytes      = scale_plane_offset + scale_plane_bytes
+```
+
+For each adjacent coordinate pair `(k,k+1)`, the smaller K coordinate occupies the low nibble and
+the next coordinate occupies the high nibble. Scale word `(n,g)` is the little-endian FP16 word at
+`scale_plane_offset + 2 * (n * groups_per_row + g)`. The layout preserves unsigned nibble words;
+subtracting zero point 8 is part of the numeric decode, not the layout.
+
+## 8. `raw-bytes-v1`
 
 `raw-bytes-v1` is a required-resource encoding, not a tensor layout. Its enclosing object payload is
 the resource byte string itself:
@@ -339,7 +377,7 @@ trailing padding. The resource object's JSON `bytes` is its exact nonzero length
 returns the complete span unchanged. A model contract assigns a resource name and interprets those
 bytes; the common encoding does not infer that meaning from the name.
 
-## 7. Decode boundary
+## 9. Decode boundary
 
 Layout decoding yields only persistent logical words:
 
@@ -350,6 +388,9 @@ Layout decoding yields only persistent logical words:
   matrix-level FP32 weight divisor;
 - `row-scale-v1` yields the natural row-major E4M3FN code words and one BF16 multiplier per logical
   row;
+- `row-scale-f32-v1` yields the natural row-major E4M3FN code words and one FP32 multiplier per row;
+- `packed-u4-g16-v1` yields low-nibble-first unsigned code words and one FP16 multiplier per K-axis
+  group of 16;
 - `raw-bytes-v1` yields the enclosing resource bytes.
 
 Dequantized values follow the reconstruction rule in `tensor-formats.md`. This document does
