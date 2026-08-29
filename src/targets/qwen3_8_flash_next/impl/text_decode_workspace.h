@@ -15,7 +15,6 @@
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
 struct FlashNextTextDecodeWorkspace {
-    Tensor embedding;       // BF16 [2560, batch]
     Tensor hyper_hidden;    // BF16 [10240, batch]
     Tensor block_input;     // BF16 [2560, batch]
     Tensor block_output;    // BF16 [2560, batch]
@@ -29,7 +28,6 @@ template <class Arena>
 FlashNextTextDecodeWorkspace allocate_flash_next_text_decode_workspace(Arena& arena,
                                                                        std::int32_t batch) {
     FlashNextTextDecodeWorkspace ws{};
-    ws.embedding       = arena.alloc(DType::BF16, {2'560, batch}, 256);
     ws.hyper_hidden    = arena.alloc(DType::BF16, {10'240, batch}, 256);
     ws.block_input     = arena.alloc(DType::BF16, {2'560, batch}, 256);
     ws.block_output    = arena.alloc(DType::BF16, {2'560, batch}, 256);

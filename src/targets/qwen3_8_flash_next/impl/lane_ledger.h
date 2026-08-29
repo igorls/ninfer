@@ -46,6 +46,7 @@ struct LaneStepRequest {
     std::int32_t token_id                       = 0;
     std::int32_t token_index                    = 0;
     std::array<std::int32_t, 3> mrope_positions = {0, 0, 0};
+    const Tensor* custom_embedding              = nullptr;
 };
 
 struct LaneCommitDecision {

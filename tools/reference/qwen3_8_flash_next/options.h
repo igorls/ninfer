@@ -10,7 +10,7 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 struct ReferenceToolOptions {
     std::string model_path;
     std::string mode =
-        "preflight"; // "preflight", "execute-token", "materialize-full", "materialize-vision", or "chat-diagnostic"
+        "preflight"; // "preflight", "execute-token", "materialize-full", "materialize-vision", "chat-diagnostic", or "execute-vision"
     std::uint32_t max_context     = 4096;
     std::uint32_t max_concurrency = 1;
     std::uint32_t page_groups     = 0;

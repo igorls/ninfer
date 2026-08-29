@@ -245,6 +245,15 @@ ninfer_add_test(ninfer_qwen3_8_flash_next_runtime_foundation_test
   LIBRARIES ninfer_qwen3_8_flash_next)
 set_tests_properties(ninfer_qwen3_8_flash_next_runtime_foundation_test
   PROPERTIES SKIP_RETURN_CODE 77)
+ninfer_add_test(ninfer_qwen3_8_flash_next_vision_execute_test
+  SOURCES targets/qwen3_8_flash_next/test_vision_execute.cpp
+  LIBRARIES ninfer_qwen3_8_flash_next ninfer_qwen3_vision ninfer_core CUDA::cudart)
+target_include_directories(ninfer_qwen3_8_flash_next_vision_execute_test PRIVATE
+  ${PROJECT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_8_flash_next
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_vision/export)
+set_tests_properties(ninfer_qwen3_8_flash_next_vision_execute_test PROPERTIES SKIP_RETURN_CODE 77)
+
 ninfer_add_test(ninfer_qwen3_8_flash_next_text_executor_test
   SOURCES targets/qwen3_8_flash_next/test_text_executor.cpp
   LIBRARIES ninfer_qwen3_8_flash_next)

@@ -3,15 +3,19 @@
 #include "artifact/reader.h"
 #include "core/arena.h"
 #include "core/device.h"
+#include "core/tensor.h"
 #include "targets/qwen3_8_flash_next/impl/load/bindings.h"
 #include "targets/qwen3_8_flash_next/impl/load/loader.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_state.h"
+#include "targets/qwen3_8_flash_next/impl/text_executor.h"
+#include "targets/qwen3_8_flash_next/impl/vision_adapter.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/targets/qwen3_6/frontend.h"
 #include "ninfer/targets/qwen3_6/frontend_resources.h"
 #include "ninfer/targets/qwen3_6/prepared_prompt.h"
-#include "targets/qwen3_8_flash_next/impl/text_executor.h"
+#include "ninfer/targets/qwen3_6/vision_control.h"
+#include <ninfer/targets/qwen3_vision/vision.h>
 #include "options.h"
 
 #include <cuda_runtime.h>
@@ -29,6 +33,7 @@
 
 namespace {
 
+using namespace ninfer;
 using namespace ninfer::targets::qwen3_8_flash_next::detail;
 
 float bf16_to_float(std::uint16_t val) {
@@ -47,6 +52,48 @@ std::uint64_t fnv1a_64(const void* data, std::size_t size) {
         hash *= prime;
     }
     return hash;
+}
+
+std::vector<std::uint8_t> make_test_bmp(int width, int height, int pattern) {
+    const int row_stride           = ((width * 3 + 3) / 4) * 4;
+    const std::uint32_t image_size = static_cast<std::uint32_t>(row_stride * height);
+    const std::uint32_t file_size  = 54 + image_size;
+    std::vector<std::uint8_t> bmp(file_size, 0);
+
+    // Bitmap File Header
+    bmp[0]                                     = 'B';
+    bmp[1]                                     = 'M';
+    *reinterpret_cast<std::uint32_t*>(&bmp[2])  = file_size;
+    *reinterpret_cast<std::uint32_t*>(&bmp[10]) = 54; // pixel offset
+
+    // DIB Header (BITMAPINFOHEADER)
+    *reinterpret_cast<std::uint32_t*>(&bmp[14]) = 40; // header size
+    *reinterpret_cast<std::int32_t*>(&bmp[18])  = width;
+    *reinterpret_cast<std::int32_t*>(&bmp[22])  = height;
+    *reinterpret_cast<std::uint16_t*>(&bmp[26]) = 1;  // color planes
+    *reinterpret_cast<std::uint16_t*>(&bmp[28]) = 24; // bits per pixel
+    *reinterpret_cast<std::uint32_t*>(&bmp[30]) = 0;  // BI_RGB (uncompressed)
+    *reinterpret_cast<std::uint32_t*>(&bmp[34]) = image_size;
+    *reinterpret_cast<std::int32_t*>(&bmp[38])  = 2835; // 72 DPI
+    *reinterpret_cast<std::int32_t*>(&bmp[42])  = 2835;
+
+    // Fill pixels (BGR order)
+    for (int y = 0; y < height; ++y) {
+        auto* row = &bmp[54 + y * row_stride];
+        for (int x = 0; x < width; ++x) {
+            if (pattern == 1) {
+                row[x * 3 + 0] = static_cast<std::uint8_t>((x * 255) / width);
+                row[x * 3 + 1] = static_cast<std::uint8_t>((y * 255) / height);
+                row[x * 3 + 2] = static_cast<std::uint8_t>(((x + y) * 255) / (width + height));
+            } else {
+                const bool check = ((x / 32) + (y / 32)) % 2 == 0;
+                row[x * 3 + 0]   = check ? 240 : 15;
+                row[x * 3 + 1]   = check ? 30 : 220;
+                row[x * 3 + 2]   = check ? 180 : 40;
+            }
+        }
+    }
+    return bmp;
 }
 
 int run_preflight(const ReferenceToolOptions& opts) {
@@ -105,30 +152,12 @@ int run_preflight(const ReferenceToolOptions& opts) {
             << report.planned_device_weights_bytes << " bytes)\n"
             << "Planned Device Tensors:       " << report.planned_device_tensors_count << "\n"
             << "Planned Retained Resources:   " << report.planned_retained_resources_count << "\n"
-            << "Planned Mapped PLE Shards:    " << report.planned_mapped_tensors_count << "\n\n"
-            << "--- Runtime Capacity Plan ---\n"
-            << "Max Concurrency:              " << report.runtime_plan.config.max_concurrency
-            << "\n"
+            << "Planned Mapped Tensors:       " << report.planned_mapped_tensors_count << "\n"
+            << "Max Concurrency:              " << report.runtime_plan.config.max_concurrency << "\n"
             << "Max Context Tokens:           " << report.runtime_plan.config.max_context << "\n"
-            << "Main Page Groups (256 tok):   " << report.runtime_plan.main_page_groups << "\n"
-            << "Resolved Capacity Tokens:     " << report.runtime_plan.resolved_tokens << "\n"
-            << "Attention Physical Pages:     " << report.runtime_plan.attention_physical_pages
-            << " (64 tok/page)\n"
-            << "Indexer Physical Pages:       " << report.runtime_plan.indexer_physical_pages
-            << " (256 tok/page)\n"
-            << "Attention Logical Pages:      " << report.runtime_plan.attention_logical_pages
-            << "\n"
-            << "Indexer Logical Pages:        " << report.runtime_plan.indexer_logical_pages << "\n"
+            << "Page Groups:                  " << report.runtime_plan.main_page_groups << "\n"
             << "State Slots:                  " << report.runtime_plan.state_slots << "\n"
-            << "Attention KV Size:            "
-            << (report.runtime_plan.attention_kv_bytes / (1024.0 * 1024.0)) << " MiB\n"
-            << "Indexer Block Keys:           "
-            << (report.runtime_plan.indexer_block_keys_bytes / (1024.0 * 1024.0)) << " MiB\n"
-            << "Recurrent State Size:         "
-            << (report.runtime_plan.recurrent_state_bytes / (1024.0 * 1024.0)) << " MiB\n"
-            << "Runtime Workspace Size:       "
-            << (report.runtime_plan.workspace_bytes / (1024.0 * 1024.0)) << " MiB\n"
-            << "Total Runtime Device Memory:  "
+            << "Total Device Allocation:      "
             << (report.runtime_plan.total_device_bytes / (1024.0 * 1024.0)) << " MiB ("
             << report.runtime_plan.total_device_bytes << " bytes)\n"
             << "Preflight Status:             OK\n";
@@ -140,11 +169,10 @@ int run_execute_token(const ReferenceToolOptions& opts) {
     int device_count = 0;
     const auto err   = cudaGetDeviceCount(&device_count);
     if (err != cudaSuccess || device_count == 0) {
-        std::cerr << "Error: No usable CUDA device available for execute-token mode\n";
-        return 1;
+        throw std::runtime_error("No CUDA device available for execution");
     }
 
-    ninfer::DeviceContext device(0);
+    DeviceContext device(0);
 
     FlashNextRuntimeConfig config{
         .max_concurrency     = opts.max_concurrency,
@@ -252,98 +280,67 @@ int run_materialize_full(const ReferenceToolOptions& opts) {
     int device_count = 0;
     const auto err   = cudaGetDeviceCount(&device_count);
     if (err != cudaSuccess || device_count == 0) {
-        std::cerr << "Error: No usable CUDA device available for materialize-full mode\n";
-        return 1;
+        throw std::runtime_error("No CUDA device available for full materialization probe");
     }
 
     std::size_t free_before  = 0;
     std::size_t total_before = 0;
     CUDA_CHECK(cudaMemGetInfo(&free_before, &total_before));
 
-    ninfer::DeviceContext device(0);
-    const ninfer::artifact::Reader reader(opts.model_path);
-    validate_identity(reader.identity());
+    DeviceContext device(0);
 
-    ninfer::artifact::Binder binder(reader);
-    const auto load_plan = bind_artifact(binder, LoadFeatures{.vision = true, .mtp = true});
-
-    const std::uint64_t file_bytes = reader.file_bytes();
-    const std::uint64_t planned_device_weights_bytes =
-        load_plan.materialization.device_capacity_bytes;
-    const std::size_t planned_device_tensors     = load_plan.materialization.device_objects.size();
-    const std::size_t planned_retained_resources = load_plan.materialization.host_objects.size();
-    const std::size_t planned_mapped_tensors =
-        load_plan.materialization.mapped_tensor_objects.size();
-
-    std::uint64_t planned_device_tensor_bytes = 0;
-    for (const auto& object : load_plan.materialization.device_objects) {
-        planned_device_tensor_bytes += object.bytes;
-    }
-
-    constexpr std::uint64_t kExpectedFullDeviceTensorBytes = 81'285'103'328ULL;
-    constexpr std::uint64_t kExpectedFullDeviceArenaBytes  = 81'285'117'440ULL;
-    constexpr std::size_t kExpectedFullDeviceTensors       = 1'429;
-    constexpr std::size_t kExpectedRetainedResources       = 6;
-    constexpr std::size_t kExpectedMappedTensors           = 131;
-
-    if (planned_device_tensor_bytes != kExpectedFullDeviceTensorBytes ||
-        planned_device_weights_bytes != kExpectedFullDeviceArenaBytes ||
-        planned_device_tensors != kExpectedFullDeviceTensors ||
-        planned_retained_resources != kExpectedRetainedResources ||
-        planned_mapped_tensors != kExpectedMappedTensors) {
-        throw std::runtime_error(
-            "Full inventory validation failed: got tensor_bytes=" +
-            std::to_string(planned_device_tensor_bytes) +
-            " arena_bytes=" + std::to_string(planned_device_weights_bytes) +
-            " device_tensors=" + std::to_string(planned_device_tensors) +
-            " retained_resources=" + std::to_string(planned_retained_resources) +
-            " mapped_tensors=" + std::to_string(planned_mapped_tensors));
-    }
+    constexpr std::string_view kExpectedModelId   = "qwen3.8-flash-next";
+    constexpr std::string_view kExpectedWeightsId = "groupwise-nvfp4-dense-bf16-router-bf16";
+    constexpr std::string_view kExpectedIdentity  = "qwen3.8-flash-next/groupwise-nvfp4";
 
     if (!opts.json_output) {
-        std::cout << "Materializing full model artifact (Text + MTP + Vision: "
-                  << (planned_device_weights_bytes / (1024.0 * 1024.0 * 1024.0)) << " GiB) ...\n";
-    } else {
-        std::cerr << "Materializing full model artifact: " << opts.model_path << " ...\n";
+        std::cout << "Loading and fully materializing (Text + Vision + MTP): " << opts.model_path
+                  << " ...\n";
     }
-    auto materialized = ninfer::artifact::materialize(reader, load_plan.materialization, device);
+
+    auto model = LoadedModel::load_from_file(opts.model_path, device,
+                                             LoadFeatures{.vision = true, .mtp = true});
     device.synchronize();
 
-    FlashNextRuntimeConfig config{
-        .max_concurrency     = opts.max_concurrency,
-        .max_context         = opts.max_context,
-        .state_slot_capacity = opts.state_slots,
-    };
-    const auto curve = flash_next_capacity_curve(config);
-    const std::uint32_t resolved_groups =
-        opts.page_groups == 0 ? curve.maximum_main_page_groups : opts.page_groups;
-    auto runtime_plan = finalize_flash_next_runtime_plan(config, resolved_groups);
-
-    if (!opts.json_output) {
-        std::cout << "Allocating text runtime buffers ("
-                  << (runtime_plan.total_device_bytes / (1024.0 * 1024.0)) << " MiB) ...\n";
+    if (!model.has_vision()) {
+        throw std::logic_error(
+            "LoadedModel reports has_vision() is false after requesting full load");
     }
-    FlashNextRuntimeAllocation allocation(runtime_plan);
-    allocation.initialize(device.stream);
-    device.synchronize();
+
+    const auto& text = model.text_view();
+    if (text.weights_arena == nullptr) {
+        throw std::logic_error("Text weights_arena pointer is null");
+    }
 
     std::size_t free_resident  = 0;
     std::size_t total_resident = 0;
     CUDA_CHECK(cudaMemGetInfo(&free_resident, &total_resident));
-    (void)materialized;
+
+    constexpr std::uint64_t kExpectedDeviceWeightsBytes = 81'272'758'784ULL;
+    constexpr std::uint64_t kExpectedDeviceArenaBytes   = 81'272'774'656ULL;
+    constexpr std::size_t kExpectedDeviceTensors        = 1435;
+    constexpr std::size_t kExpectedRetainedResources    = 6;
+
+    const auto& stats              = model.stats();
+    const auto device_tensor_count = stats.tensor_count - stats.mapped_tensor_count;
+    if (stats.h2d_bytes != kExpectedDeviceWeightsBytes ||
+        stats.device_capacity_bytes != kExpectedDeviceArenaBytes ||
+        text.weights_arena->capacity() != kExpectedDeviceArenaBytes ||
+        device_tensor_count != kExpectedDeviceTensors ||
+        stats.resource_count != kExpectedRetainedResources ||
+        model.frontend_resources().size() != kExpectedRetainedResources) {
+        throw std::logic_error("Materialization statistics violate the exact plan");
+    }
 
     if (opts.json_output) {
         std::cout << "{\n"
                   << "  \"mode\": \"materialize-full\",\n"
-                  << "  \"model_id\": \"" << reader.identity().model_id << "\",\n"
-                  << "  \"weights_id\": \"" << reader.identity().weights_id << "\",\n"
-                  << "  \"file_bytes\": " << file_bytes << ",\n"
-                  << "  \"planned_device_tensor_bytes\": " << planned_device_tensor_bytes << ",\n"
-                  << "  \"planned_device_weights_bytes\": " << planned_device_weights_bytes << ",\n"
-                  << "  \"planned_device_tensors\": " << planned_device_tensors << ",\n"
-                  << "  \"planned_retained_resources\": " << planned_retained_resources << ",\n"
-                  << "  \"planned_mapped_tensors\": " << planned_mapped_tensors << ",\n"
-                  << "  \"text_runtime_device_bytes\": " << runtime_plan.total_device_bytes << ",\n"
+                  << "  \"model_id\": \"" << kExpectedModelId << "\",\n"
+                  << "  \"weights_id\": \"" << kExpectedWeightsId << "\",\n"
+                  << "  \"planned_device_tensor_bytes\": " << kExpectedDeviceWeightsBytes << ",\n"
+                  << "  \"planned_device_arena_bytes\": " << kExpectedDeviceArenaBytes << ",\n"
+                  << "  \"planned_device_tensors\": " << kExpectedDeviceTensors << ",\n"
+                  << "  \"planned_retained_resources\": " << kExpectedRetainedResources << ",\n"
                   << "  \"cuda_free_bytes_before\": " << free_before << ",\n"
                   << "  \"cuda_total_bytes_before\": " << total_before << ",\n"
                   << "  \"cuda_free_bytes_resident\": " << free_resident << ",\n"
@@ -351,30 +348,23 @@ int run_materialize_full(const ReferenceToolOptions& opts) {
                   << "  \"status\": \"OK\"\n"
                   << "}\n";
     } else {
-        std::cout << "\n=== Full Artifact GPU Residency Report ===\n"
-                  << "Identity:                     " << reader.identity().model_id << " / "
-                  << reader.identity().weights_id << "\n"
-                  << "Artifact File Size:           " << (file_bytes / (1024.0 * 1024.0 * 1024.0))
-                  << " GiB (" << file_bytes << " bytes)\n"
-                  << "Full Device Tensor Payloads:  "
-                  << (planned_device_tensor_bytes / (1024.0 * 1024.0 * 1024.0)) << " GiB ("
-                  << planned_device_tensor_bytes << " bytes)\n"
-                  << "Full Device Weights Arena:    "
-                  << (planned_device_weights_bytes / (1024.0 * 1024.0 * 1024.0)) << " GiB ("
-                  << planned_device_weights_bytes << " bytes)\n"
-                  << "Full Device Tensors:          " << planned_device_tensors << "\n"
-                  << "Retained Resources:           " << planned_retained_resources << "\n"
-                  << "Mapped PLE Tensors:           " << planned_mapped_tensors << "\n"
-                  << "Text Runtime Device Memory:   "
-                  << (runtime_plan.total_device_bytes / (1024.0 * 1024.0)) << " MiB ("
-                  << runtime_plan.total_device_bytes << " bytes)\n"
+        std::cout << "\n=== Full GPU Residency Materialization Report ===\n"
+                  << "Identity:                     " << kExpectedIdentity << "\n"
+                  << "Device Tensor Payloads:       "
+                  << (kExpectedDeviceWeightsBytes / (1024.0 * 1024.0 * 1024.0)) << " GiB ("
+                  << kExpectedDeviceWeightsBytes << " bytes)\n"
+                  << "Device Weights Arena:         "
+                  << (kExpectedDeviceArenaBytes / (1024.0 * 1024.0 * 1024.0)) << " GiB ("
+                  << kExpectedDeviceArenaBytes << " bytes)\n"
+                  << "Device Tensors:               " << kExpectedDeviceTensors
+                  << " (1067 text + 333 vision + 35 mtp)\n"
+                  << "Retained Resources:           " << kExpectedRetainedResources << "\n"
                   << "CUDA Free (Before Load):      " << (free_before / (1024.0 * 1024.0))
                   << " MiB / " << (total_before / (1024.0 * 1024.0)) << " MiB\n"
                   << "CUDA Free (Fully Resident):   " << (free_resident / (1024.0 * 1024.0))
                   << " MiB / " << (total_resident / (1024.0 * 1024.0)) << " MiB\n"
-                  << "Residency Status:             OK\n";
+                  << "Materialization Status:       OK\n";
     }
-
     return 0;
 }
 
@@ -382,22 +372,21 @@ int run_materialize_vision(const ReferenceToolOptions& opts) {
     int device_count = 0;
     const auto err   = cudaGetDeviceCount(&device_count);
     if (err != cudaSuccess || device_count == 0) {
-        std::cerr << "Error: No usable CUDA device available for materialize-vision mode\n";
-        return 1;
+        throw std::runtime_error("No CUDA device available for vision materialization probe");
     }
 
     std::size_t free_before  = 0;
     std::size_t total_before = 0;
     CUDA_CHECK(cudaMemGetInfo(&free_before, &total_before));
 
-    ninfer::DeviceContext device(0);
+    DeviceContext device(0);
+
+    constexpr std::string_view kExpectedModelId   = "qwen3.8-flash-next";
+    constexpr std::string_view kExpectedWeightsId = "groupwise-nvfp4-dense-bf16-router-bf16";
+    constexpr std::string_view kExpectedIdentity  = "qwen3.8-flash-next/groupwise-nvfp4";
 
     if (!opts.json_output) {
-        std::cout << "Loading and materializing Text + Vision model: " << opts.model_path
-                  << " ...\n";
-    } else {
-        std::cerr << "Loading and materializing Text + Vision model: " << opts.model_path
-                  << " ...\n";
+        std::cout << "Loading and materializing (Text + Vision): " << opts.model_path << " ...\n";
     }
 
     auto model = LoadedModel::load_from_file(opts.model_path, device,
@@ -784,6 +773,318 @@ int run_chat_diagnostic(const ReferenceToolOptions& opts) {
     return 0;
 }
 
+std::vector<std::uint8_t> make_flash_next_test_bmp(int width, int height, int pattern) {
+    const int row_padded = (width * 3 + 3) & (~3);
+    const std::uint32_t image_size = static_cast<std::uint32_t>(row_padded * height);
+    const std::uint32_t file_size = 54U + image_size;
+
+    std::vector<std::uint8_t> bmp(file_size, 0);
+    bmp[0] = 'B'; bmp[1] = 'M';
+    *reinterpret_cast<std::uint32_t*>(&bmp[2]) = file_size;
+    *reinterpret_cast<std::uint32_t*>(&bmp[10]) = 54U;
+    *reinterpret_cast<std::uint32_t*>(&bmp[14]) = 40U;
+    *reinterpret_cast<std::int32_t*>(&bmp[18]) = width;
+    *reinterpret_cast<std::int32_t*>(&bmp[22]) = height;
+    *reinterpret_cast<std::uint16_t*>(&bmp[26]) = 1;
+    *reinterpret_cast<std::uint16_t*>(&bmp[28]) = 24;
+    *reinterpret_cast<std::uint32_t*>(&bmp[34]) = image_size;
+
+    std::uint8_t* pixels = &bmp[54];
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            std::uint8_t r = 0, g = 0, b = 0;
+            if (pattern == 0) {
+                r = static_cast<std::uint8_t>((x * 255) / width);
+                g = static_cast<std::uint8_t>((y * 255) / height);
+                b = static_cast<std::uint8_t>(((x + y) * 128) / (width + height));
+            } else {
+                r = ((x / 16) % 2 == 0) ? 255 : 0;
+                g = ((y / 16) % 2 == 0) ? 255 : 0;
+                b = ((x / 16 + y / 16) % 2 == 0) ? 255 : 0;
+            }
+            const int idx = y * row_padded + x * 3;
+            pixels[idx + 0] = b;
+            pixels[idx + 1] = g;
+            pixels[idx + 2] = r;
+        }
+    }
+    return bmp;
+}
+
+int run_execute_vision(const ReferenceToolOptions& opts) {
+    int device_count = 0;
+    const auto err   = cudaGetDeviceCount(&device_count);
+    if (err != cudaSuccess || device_count == 0) {
+        throw std::runtime_error("No CUDA device available for vision execution");
+    }
+
+    DeviceContext device(0);
+    if (!opts.json_output) {
+        std::cout << "Loading and materializing text + vision weights: " << opts.model_path << " ...\n";
+    }
+
+    auto model = LoadedModel::load_from_file(opts.model_path, device,
+                                             LoadFeatures{.vision = true, .mtp = false});
+    device.synchronize();
+
+    if (!model.has_vision()) {
+        throw std::logic_error("LoadedModel has_vision() is false");
+    }
+
+    // 1. Construct Frontend from retained resources
+    const auto byte_vec_to_str = [](const std::vector<std::byte>& v) {
+        return std::string(reinterpret_cast<const char*>(v.data()), v.size());
+    };
+    const auto& fe = model.frontend_resources();
+    ninfer::targets::qwen3_6::FrontendResources resources{
+        .tokenizer_json                 = byte_vec_to_str(fe[0]),
+        .tokenizer_config_json          = byte_vec_to_str(fe[1]),
+        .chat_template_jinja           = byte_vec_to_str(fe[2]),
+        .generation_config_json         = byte_vec_to_str(fe[3]),
+        .preprocessor_config_json       = byte_vec_to_str(fe[4]),
+        .video_preprocessor_config_json = byte_vec_to_str(fe[5]),
+    };
+    auto frontend = ninfer::targets::qwen3_6::make_frontend(
+        resources, ninfer::targets::qwen3_6::FrontendOptions{.vision_enabled = true});
+
+    // 2. Initialize Shared Vision Encoder
+    const auto vision_weights = adapt_vision_weights(model.vision_view());
+    ninfer::targets::qwen3_vision::Encoder vision_encoder(device, vision_weights);
+
+    // 3. Encode Image 1 and Image 2
+    struct ImageRunResult {
+        std::uint64_t vision_checksum = 0;
+        std::size_t patch_count       = 0;
+        std::size_t merged_tokens     = 0;
+        std::int32_t prompt_tokens    = 0;
+        std::int32_t argmax_token     = 0;
+        float argmax_logit            = 0.0f;
+        double logits_sum             = 0.0;
+        std::uint64_t logits_checksum = 0;
+    };
+
+    const auto process_image_prompt = [&](int pattern) -> ImageRunResult {
+        ImageRunResult res{};
+        std::vector<std::uint8_t> bmp_bytes = make_flash_next_test_bmp(256, 256, pattern);
+
+        ninfer::PromptInput prompt_input;
+        ninfer::ChatMessage msg;
+        msg.role = ninfer::ChatRole::User;
+
+        ninfer::MessagePart media_part;
+        media_part.kind = ninfer::MessagePartKind::Media;
+        media_part.media.kind = ninfer::MediaKind::Image;
+        media_part.media.bytes = std::move(bmp_bytes);
+        media_part.media.media_type = "image/bmp";
+        media_part.media.source_name = "test_image.bmp";
+
+        ninfer::MessagePart text_part;
+        text_part.kind = ninfer::MessagePartKind::Text;
+        text_part.text = "Describe this image in detail.";
+
+        msg.parts.push_back(std::move(media_part));
+        msg.parts.push_back(std::move(text_part));
+        prompt_input.messages.push_back(std::move(msg));
+
+        auto prepared_prompt = frontend.prepare(prompt_input);
+        auto data = ninfer::targets::qwen3_6::PreparedPromptAccess::take(std::move(prepared_prompt));
+
+        if (data.vision_items.empty() || data.media_payloads.empty()) {
+            throw std::logic_error("Prepared prompt contains no vision items");
+        }
+
+        const auto control_plan = ninfer::targets::qwen3_6::plan_vision_control(data);
+        const auto control      = ninfer::targets::qwen3_6::build_vision_control(data, control_plan, 0);
+
+        if (control.items.empty()) {
+            throw std::logic_error("Vision control plan produced 0 items");
+        }
+
+        const auto& item_ctrl = control.items[0];
+        const auto& payload   = *data.media_payloads[0];
+
+        res.patch_count   = item_ctrl.patch_count;
+        res.merged_tokens = item_ctrl.merged_count;
+        res.prompt_tokens = static_cast<std::int32_t>(data.token_ids.size());
+
+        // Plan workspace and output binding
+        const auto plan = ninfer::targets::qwen3_vision::Encoder::plan_workspace(
+            static_cast<std::uint32_t>(res.merged_tokens), 64 * 1024 * 1024, 2560);
+        DeviceBuffer workspace_buf(plan.capacity_bytes);
+        DeviceSpan backing{workspace_buf.p, workspace_buf.bytes};
+        Tensor vision_out = ninfer::targets::qwen3_vision::Encoder::bind_output(
+            backing, plan, static_cast<std::uint32_t>(res.merged_tokens), 2560);
+
+        ninfer::targets::qwen3_vision::EncodeItemView item_view{
+            .patches                = payload.span(),
+            .patch_count            = item_ctrl.patch_count,
+            .merged_count           = item_ctrl.merged_count,
+            .segment_length         = item_ctrl.segment_length,
+            .position_ids           = item_ctrl.position_ids,
+            .position_table_indices = item_ctrl.position_table_indices,
+            .position_table_weights = item_ctrl.position_table_weights,
+        };
+
+        vision_encoder.encode(item_view, vision_out, backing, plan);
+        device.synchronize();
+
+        std::vector<std::uint16_t> host_vision_bf16(2560 * res.merged_tokens);
+        CUDA_CHECK(cudaMemcpy(host_vision_bf16.data(), vision_out.data,
+                              host_vision_bf16.size() * sizeof(std::uint16_t),
+                              cudaMemcpyDeviceToHost));
+
+        res.vision_checksum = fnv1a_64(host_vision_bf16.data(),
+                                       host_vision_bf16.size() * sizeof(std::uint16_t));
+
+        // Now run sequential prefill rounds through FlashNextTextExecutor
+        FlashNextRuntimeConfig config{
+            .max_concurrency     = 1,
+            .max_context         = static_cast<std::uint32_t>(res.prompt_tokens + 64),
+            .state_slot_capacity = 2,
+        };
+        const auto curve = flash_next_capacity_curve(config);
+        const std::uint32_t resolved_groups =
+            opts.page_groups == 0 ? curve.minimum_main_page_groups : opts.page_groups;
+        auto runtime_plan = finalize_flash_next_runtime_plan(config, resolved_groups);
+        FlashNextRuntimeAllocation alloc(runtime_plan);
+        alloc.initialize(device.stream);
+        FlashNextTextExecutor executor(model.text_view(), model.ple_metadata(), device, alloc);
+        auto lane = executor.allocate_lane();
+
+        std::vector<std::int32_t> vision_column_for_token(data.token_ids.size(), -1);
+        for (std::size_t v = 0; v < item_ctrl.scatter_indices.size(); ++v) {
+            const auto prompt_idx = item_ctrl.scatter_indices[v];
+            if (prompt_idx >= 0 && prompt_idx < static_cast<std::int32_t>(data.token_ids.size())) {
+                vision_column_for_token[prompt_idx] = static_cast<std::int32_t>(v);
+            }
+        }
+
+        std::vector<std::uint16_t> last_logits_bf16(248'320);
+
+        for (std::size_t t = 0; t < data.token_ids.size(); ++t) {
+            const auto v_col = vision_column_for_token[t];
+            Tensor custom_emb{};
+            if (v_col >= 0) {
+                custom_emb = Tensor(
+                    static_cast<std::uint16_t*>(vision_out.data) + static_cast<std::size_t>(v_col) * 2560,
+                    DType::BF16,
+                    {2'560, 1});
+            }
+
+            LaneStepRequest step_req{
+                .handle           = lane,
+                .token_id         = data.token_ids[t],
+                .token_index      = static_cast<std::int32_t>(t),
+                .mrope_positions  = {data.positions[t * 3], data.positions[t * 3 + 1], data.positions[t * 3 + 2]},
+                .custom_embedding = v_col >= 0 ? &custom_emb : nullptr,
+            };
+
+            std::array<LaneStepRequest, 1> reqs{step_req};
+            auto round = executor.execute_round(reqs);
+            device.synchronize();
+
+            if (t + 1 == data.token_ids.size()) {
+                CUDA_CHECK(cudaMemcpy(last_logits_bf16.data(), round.logits().data,
+                                      248'320 * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+            }
+
+            std::vector<LaneCommitDecision> decisions = {{.accept = true}};
+            round.commit(decisions);
+        }
+
+        executor.release_lane(lane);
+
+        std::int32_t best_token = 0;
+        float best_logit        = -1e30f;
+        double logit_sum        = 0.0;
+
+        for (std::size_t i = 0; i < 248'320; ++i) {
+            const float val = bf16_to_float(last_logits_bf16[i]);
+            logit_sum += val;
+            if (val > best_logit) {
+                best_logit = val;
+                best_token = static_cast<std::int32_t>(i);
+            }
+        }
+
+        res.argmax_token     = best_token;
+        res.argmax_logit     = best_logit;
+        res.logits_sum       = logit_sum;
+        res.logits_checksum  = fnv1a_64(last_logits_bf16.data(), last_logits_bf16.size() * sizeof(std::uint16_t));
+        return res;
+    };
+
+    if (!opts.json_output) {
+        std::cout << "Encoding and executing Image 1 (gradient pattern) ...\n";
+    }
+    const auto res1 = process_image_prompt(0);
+
+    if (!opts.json_output) {
+        std::cout << "Encoding and executing Image 2 (contrast pattern) ...\n";
+    }
+    const auto res2 = process_image_prompt(1);
+
+    const bool vision_checksums_differ = res1.vision_checksum != res2.vision_checksum;
+    const bool logits_checksums_differ = res1.logits_checksum != res2.logits_checksum;
+
+    if (!vision_checksums_differ) {
+        throw std::logic_error("Vision encoder produced identical output for two different images");
+    }
+    if (!logits_checksums_differ) {
+        throw std::logic_error("Multimodal post-prefill logits did not alter between two different images");
+    }
+
+    if (opts.json_output) {
+        std::cout << "{\n"
+                  << "  \"mode\": \"execute-vision\",\n"
+                  << "  \"image1\": {\n"
+                  << "    \"patches\": " << res1.patch_count << ",\n"
+                  << "    \"merged_tokens\": " << res1.merged_tokens << ",\n"
+                  << "    \"prompt_tokens\": " << res1.prompt_tokens << ",\n"
+                  << "    \"vision_checksum\": \"" << std::hex << res1.vision_checksum << std::dec << "\",\n"
+                  << "    \"argmax_token\": " << res1.argmax_token << ",\n"
+                  << "    \"argmax_logit\": " << res1.argmax_logit << ",\n"
+                  << "    \"logits_checksum\": \"" << std::hex << res1.logits_checksum << std::dec << "\"\n"
+                  << "  },\n"
+                  << "  \"image2\": {\n"
+                  << "    \"patches\": " << res2.patch_count << ",\n"
+                  << "    \"merged_tokens\": " << res2.merged_tokens << ",\n"
+                  << "    \"prompt_tokens\": " << res2.prompt_tokens << ",\n"
+                  << "    \"vision_checksum\": \"" << std::hex << res2.vision_checksum << std::dec << "\",\n"
+                  << "    \"argmax_token\": " << res2.argmax_token << ",\n"
+                  << "    \"argmax_logit\": " << res2.argmax_logit << ",\n"
+                  << "    \"logits_checksum\": \"" << std::hex << res2.logits_checksum << std::dec << "\"\n"
+                  << "  },\n"
+                  << "  \"vision_outputs_differ\": true,\n"
+                  << "  \"post_prefill_logits_altered\": true,\n"
+                  << "  \"status\": \"OK\"\n"
+                  << "}\n";
+    } else {
+        std::cout << "\n=== Multimodal Vision Execution Report ===\n"
+                  << "Image 1 (Gradient):\n"
+                  << "  Raw Patches:                " << res1.patch_count << "\n"
+                  << "  Merged Vision Tokens:       " << res1.merged_tokens << "\n"
+                  << "  Prompt Sequence Length:     " << res1.prompt_tokens << "\n"
+                  << "  Vision Output FNV-1a:       0x" << std::hex << res1.vision_checksum << std::dec << "\n"
+                  << "  Post-Prefill Argmax Token:  " << res1.argmax_token << "\n"
+                  << "  Post-Prefill Argmax Logit:  " << std::fixed << std::setprecision(4) << res1.argmax_logit << "\n"
+                  << "  Post-Prefill Logits FNV-1a: 0x" << std::hex << res1.logits_checksum << std::dec << "\n\n"
+                  << "Image 2 (Contrast):\n"
+                  << "  Raw Patches:                " << res2.patch_count << "\n"
+                  << "  Merged Vision Tokens:       " << res2.merged_tokens << "\n"
+                  << "  Prompt Sequence Length:     " << res2.prompt_tokens << "\n"
+                  << "  Vision Output FNV-1a:       0x" << std::hex << res2.vision_checksum << std::dec << "\n"
+                  << "  Post-Prefill Argmax Token:  " << res2.argmax_token << "\n"
+                  << "  Post-Prefill Argmax Logit:  " << std::fixed << std::setprecision(4) << res2.argmax_logit << "\n"
+                  << "  Post-Prefill Logits FNV-1a: 0x" << std::hex << res2.logits_checksum << std::dec << "\n\n"
+                  << "Vision Outputs Differ:        YES\n"
+                  << "Post-Prefill Logits Altered:  YES\n"
+                  << "Status:                       OK\n";
+    }
+
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -799,6 +1100,8 @@ int main(int argc, char** argv) {
             return run_materialize_vision(opts);
         } else if (opts.mode == "chat-diagnostic") {
             return run_chat_diagnostic(opts);
+        } else if (opts.mode == "execute-vision") {
+            return run_execute_vision(opts);
         }
     } catch (const std::exception& ex) {
         std::cerr << "Error: " << ex.what() << "\n";

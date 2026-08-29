@@ -93,6 +93,7 @@ std::size_t flash_next_text_decode_workspace_capacity_bytes(std::int32_t maximum
         throw std::invalid_argument("Flash-Next text decode received an invalid envelope");
     }
     WorkspaceLayoutBuilder layout;
+    layout.alloc(DType::BF16, {2'560, batch}, 256);
     (void)allocate_flash_next_text_decode_workspace(layout, batch);
     const std::size_t sort_temp = flash_next_qsa_indexer_sort_temp_bytes(maximum_blocks, batch);
     {
@@ -118,18 +119,19 @@ std::size_t flash_next_text_decode_workspace_capacity_bytes(std::int32_t maximum
     return layout.peak_bytes(256);
 }
 
-void flash_next_text_decode(const TextModelView& model, const Tensor& token_ids,
-                            const Tensor& token_indices, const Tensor& mrope_positions,
-                            const Tensor& table_rows, const Tensor& source_slots,
-                            const Tensor& destination_slots, const Tensor& gathered_ple_embedding,
-                            std::int32_t maximum_blocks, std::int32_t active_blocks,
-                            FlashNextDecodeStateView state, WorkspaceArena& workspace,
-                            Tensor& final_hidden, Tensor& logits, cudaStream_t stream) {
-    const std::int32_t batch       = token_ids.ne[0];
+void flash_next_text_decode_core(const TextModelView& model, const Tensor& embedding,
+                                 const Tensor& token_indices, const Tensor& mrope_positions,
+                                 const Tensor& table_rows, const Tensor& source_slots,
+                                 const Tensor& destination_slots,
+                                 const Tensor& gathered_ple_embedding, std::int32_t maximum_blocks,
+                                 std::int32_t active_blocks, FlashNextDecodeStateView state,
+                                 WorkspaceArena& workspace, Tensor& final_hidden, Tensor& logits,
+                                 cudaStream_t stream) {
+    const std::int32_t batch       = embedding.ne[1];
     const std::int32_t state_slots = state.ple_convolution_states.ne[2];
     if (batch <= 0 || batch > 8 || maximum_blocks <= 0 || maximum_blocks > 65'536 ||
         active_blocks < 0 || active_blocks > maximum_blocks ||
-        !exact_tensor(token_ids, DType::I32, batch) ||
+        !exact_tensor(embedding, DType::BF16, 2'560, batch) ||
         !exact_tensor(token_indices, DType::I32, batch) ||
         !exact_tensor(mrope_positions, DType::I32, batch, 3) ||
         !exact_tensor(table_rows, DType::I32, batch) ||
@@ -138,9 +140,8 @@ void flash_next_text_decode(const TextModelView& model, const Tensor& token_ids,
         !exact_tensor(gathered_ple_embedding, DType::BF16, 2'560, batch) ||
         !exact_tensor(final_hidden, DType::BF16, 2'560, batch) ||
         !exact_tensor(logits, DType::BF16, 248'320, batch) ||
-        !exact_bf16_weight(model.token_embedding, 248'320, 2'560) ||
         !exact_bf16_weight(model.output_head, 248'320, 2'560) || stream == nullptr) {
-        throw std::invalid_argument("Flash-Next text decode received an invalid input view");
+        throw std::invalid_argument("Flash-Next text decode core received an invalid input view");
     }
     validate_flash_next_decode_state(state, state_slots);
 
@@ -148,9 +149,8 @@ void flash_next_text_decode(const TextModelView& model, const Tensor& token_ids,
     FlashNextTextDecodeWorkspace round_ws =
         allocate_flash_next_text_decode_workspace(workspace, batch);
 
-    // 1. Embedding + repeat into 4 hyperconnection streams
-    ops::embedding(token_ids, model.token_embedding, round_ws.embedding, stream);
-    repeat_embedding_to_hyper_streams(round_ws.embedding, round_ws.hyper_hidden, stream);
+    // 1. Repeat embedding into 4 hyperconnection streams
+    repeat_embedding_to_hyper_streams(embedding, round_ws.hyper_hidden, stream);
 
     // 2. 48-layer execution loop
     for (std::size_t layer = 0; layer < 48; ++layer) {
@@ -210,6 +210,27 @@ void flash_next_text_decode(const TextModelView& model, const Tensor& token_ids,
     // 4. Output head linear projection -> logits [248320, B]
     ops::linear(final_hidden, model.output_head, logits, ops::LinearPolicy::A16Only, workspace,
                 stream);
+}
+
+void flash_next_text_decode(const TextModelView& model, const Tensor& token_ids,
+                            const Tensor& token_indices, const Tensor& mrope_positions,
+                            const Tensor& table_rows, const Tensor& source_slots,
+                            const Tensor& destination_slots, const Tensor& gathered_ple_embedding,
+                            std::int32_t maximum_blocks, std::int32_t active_blocks,
+                            FlashNextDecodeStateView state, WorkspaceArena& workspace,
+                            Tensor& final_hidden, Tensor& logits, cudaStream_t stream) {
+    const std::int32_t batch = token_ids.ne[0];
+    if (batch <= 0 || batch > 8 || !exact_tensor(token_ids, DType::I32, batch) ||
+        !exact_bf16_weight(model.token_embedding, 248'320, 2'560)) {
+        throw std::invalid_argument("Flash-Next text decode token embedding input is invalid");
+    }
+    const auto round_scope = workspace.scope();
+    Tensor embedding       = workspace.alloc(DType::BF16, {2'560, batch}, 256);
+    ops::embedding(token_ids, model.token_embedding, embedding, stream);
+    flash_next_text_decode_core(model, embedding, token_indices, mrope_positions, table_rows,
+                                source_slots, destination_slots, gathered_ple_embedding,
+                                maximum_blocks, active_blocks, state, workspace, final_hidden,
+                                logits, stream);
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

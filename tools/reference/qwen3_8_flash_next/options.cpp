@@ -12,7 +12,6 @@ namespace {
 
 std::uint32_t parse_strict_u32(std::string_view str, std::string_view option_name) {
     if (str.empty()) { throw std::invalid_argument(std::string(option_name) + ": empty value"); }
-    // Reject leading +/- signs for unsigned integers
     if (str.front() == '+' || str.front() == '-') {
         throw std::invalid_argument(std::string(option_name) + ": invalid unsigned integer '" +
                                     std::string(str) + "'");
@@ -85,12 +84,13 @@ void print_reference_tool_usage(std::string_view prog) {
         << "Options:\n"
         << "  --model, -m <path>         Path to .ninfer artifact (required)\n"
         << "  --mode <mode>              Execution mode: 'preflight' (default), 'execute-token', "
-           "'materialize-full', 'materialize-vision', or 'chat-diagnostic'\n"
+           "'materialize-full', 'materialize-vision', 'chat-diagnostic', or 'execute-vision'\n"
         << "  --preflight                Shortcut for --mode preflight\n"
         << "  --execute-token            Shortcut for --mode execute-token\n"
         << "  --materialize-full         Shortcut for --mode materialize-full\n"
         << "  --materialize-vision       Shortcut for --mode materialize-vision\n"
         << "  --chat-diagnostic          Shortcut for --mode chat-diagnostic\n"
+        << "  --execute-vision           Shortcut for --mode execute-vision\n"
         << "  --prompt <string>          User prompt text for chat-diagnostic\n"
         << "  --system <string>          Optional system prompt for chat-diagnostic\n"
         << "  --temperature <float>      Sampling temperature (default: 1.0, 0 = greedy)\n"
@@ -104,8 +104,7 @@ void print_reference_tool_usage(std::string_view prog) {
         << "  --max-context <tokens>     Maximum context length in tokens (default: 4096, max: "
            "262144)\n"
         << "  --max-concurrency <B>      Maximum concurrent decode requests (default: 1, range: "
-           "[1, "
-           "8])\n"
+           "[1, 8])\n"
         << "  --page-groups <N>          Exact physical page group count (default: 0 = max for "
            "context)\n"
         << "  --state-slots <N>          State slot capacity (default: 2 * concurrency, range: [2 "
@@ -124,7 +123,7 @@ ReferenceToolOptions parse_reference_tool_options(std::span<const std::string_vi
         const std::string_view arg = args[i];
         if (arg == "--help" || arg == "-h") {
             print_reference_tool_usage(args.empty() ? "ninfer_qwen3_8_flash_next_reference"
-                                                    : args[0]);
+                                                     : args[0]);
             std::exit(0);
         } else if (arg == "--model" || arg == "-m") {
             if (++i >= args.size()) throw std::invalid_argument("Missing argument for --model");
@@ -175,6 +174,8 @@ ReferenceToolOptions parse_reference_tool_options(std::span<const std::string_vi
             if (++i >= args.size())
                 throw std::invalid_argument("Missing argument for --reasoning-effort");
             opts.reasoning_effort = std::string(args[i]);
+        } else if (arg == "--execute-vision") {
+            opts.mode = "execute-vision";
         } else if (arg == "--max-context") {
             if (++i >= args.size())
                 throw std::invalid_argument("Missing argument for --max-context");
@@ -208,10 +209,10 @@ ReferenceToolOptions parse_reference_tool_options(std::span<const std::string_vi
     if (opts.model_path.empty()) { throw std::invalid_argument("--model <path> is required"); }
     if (opts.mode != "preflight" && opts.mode != "execute-token" &&
         opts.mode != "materialize-full" && opts.mode != "materialize-vision" &&
-        opts.mode != "chat-diagnostic") {
+        opts.mode != "chat-diagnostic" && opts.mode != "execute-vision") {
         throw std::invalid_argument(
             "Invalid --mode: must be 'preflight', 'execute-token', 'materialize-full', "
-            "'materialize-vision', or 'chat-diagnostic'");
+            "'materialize-vision', 'chat-diagnostic', or 'execute-vision'");
     }
     if (opts.thinking_budget > 0) {
         throw std::invalid_argument(

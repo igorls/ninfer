@@ -1,6 +1,7 @@
 #include "targets/qwen3_8_flash_next/impl/text_executor.h"
 
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
+#include "ninfer/ops/embedding.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -61,7 +62,6 @@ void PendingRound::commit(std::span<const LaneCommitDecision> decisions) {
     if (!valid()) { throw std::logic_error("PendingRound: cannot commit invalid transaction"); }
     auto* owner      = owner_;
     const auto tx_id = transaction_id_;
-    // Execute commit before invalidating local transaction handle
     owner->commit_transaction(tx_id, decisions);
     owner_          = nullptr;
     transaction_id_ = 0;
@@ -142,6 +142,8 @@ PendingRound FlashNextTextExecutor::execute_round(std::span<const LaneStepReques
     auto prepared         = ledger_.begin_round(requests, ple_metadata_);
 
     try {
+        alloc_.workspace().reset();
+
         // Sync dirty tables to device
         ledger_.sync_tables_if_dirty(alloc_, device_.stream);
 
@@ -201,12 +203,32 @@ PendingRound FlashNextTextExecutor::execute_round(std::span<const LaneStepReques
         Tensor logits(alloc_.round_tensors().logits.data, DType::BF16,
                       {248'320, static_cast<std::int32_t>(batch_size)});
 
-        // Launch full target decode without bypass
-        flash_next_text_decode(model_, token_ids, token_indices, mrope_positions, table_rows,
-                               source_slots, destination_slots, gathered_ple,
-                               static_cast<std::int32_t>(alloc_.plan().maximum_blocks),
-                               prepared.max_active_blocks, alloc_.state_view(), alloc_.workspace(),
-                               final_hidden, logits, device_.stream);
+        // Allocate embedding buffer in workspace
+        Tensor embedding = alloc_.workspace().alloc(DType::BF16, {2'560, static_cast<std::int32_t>(batch_size)}, 256);
+        ops::embedding(token_ids, model_.token_embedding, embedding, device_.stream);
+
+        // Replace custom embeddings if specified (multimodal vision tokens)
+        for (std::uint32_t i = 0; i < batch_size; ++i) {
+            if (requests[i].custom_embedding != nullptr) {
+                const auto& custom = *requests[i].custom_embedding;
+                if (custom.dtype != DType::BF16 || custom.ne[0] != 2'560 || !custom.is_contiguous() || custom.data == nullptr) {
+                    throw std::invalid_argument("LaneStepRequest custom_embedding tensor view is invalid");
+                }
+                CUDA_CHECK(cudaMemcpyAsync(
+                    static_cast<std::uint16_t*>(embedding.data) + static_cast<std::size_t>(i) * 2'560,
+                    custom.data,
+                    2'560 * sizeof(std::uint16_t),
+                    cudaMemcpyDeviceToDevice,
+                    device_.stream));
+            }
+        }
+
+        // Launch full target decode core
+        flash_next_text_decode_core(model_, embedding, token_indices, mrope_positions, table_rows,
+                                    source_slots, destination_slots, gathered_ple,
+                                    static_cast<std::int32_t>(alloc_.plan().maximum_blocks),
+                                    prepared.max_active_blocks, alloc_.state_view(), alloc_.workspace(),
+                                    final_hidden, logits, device_.stream);
 
         return PendingRound(this, prepared.transaction_id, batch_size, logits, final_hidden);
     } catch (...) {
