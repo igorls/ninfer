@@ -81,7 +81,8 @@ ninfer_add_test(ninfer_sampling_defaults_test
 target_include_directories(ninfer_sampling_defaults_test PRIVATE
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_27b/export
-  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_35b_a3b/export)
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_35b_a3b/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_8_flash_next/export)
 ninfer_add_test(ninfer_cli_options_test
   SOURCES test_cli_options.cpp ${PROJECT_SOURCE_DIR}/apps/cli/options.cpp)
 target_include_directories(ninfer_cli_options_test PRIVATE ${PROJECT_SOURCE_DIR}/apps/cli)
@@ -263,9 +264,10 @@ ninfer_add_test(ninfer_qwen3_8_flash_next_loader_test
   SOURCES
     targets/qwen3_8_flash_next/test_loader.cpp
     ${PROJECT_SOURCE_DIR}/tools/reference/qwen3_8_flash_next/options.cpp
-  LIBRARIES ninfer_qwen3_8_flash_next)
+  LIBRARIES ninfer_qwen3_8_flash_next ninfer_engine)
 target_include_directories(ninfer_qwen3_8_flash_next_loader_test PRIVATE
-  ${PROJECT_SOURCE_DIR})
+  ${PROJECT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
 set_tests_properties(ninfer_qwen3_8_flash_next_loader_test
   PROPERTIES SKIP_RETURN_CODE 77)
 
@@ -282,6 +284,24 @@ target_include_directories(ninfer_qwen3_8_flash_next_chat_diagnostic_test PRIVAT
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
 set_tests_properties(ninfer_qwen3_8_flash_next_chat_diagnostic_test
   PROPERTIES SKIP_RETURN_CODE 77)
+
+ninfer_add_test(ninfer_qwen3_8_flash_next_sequence_plan_test
+  SOURCES targets/qwen3_8_flash_next/test_sequence_plan.cpp
+  LIBRARIES ninfer_qwen3_8_flash_next ninfer_engine)
+target_include_directories(ninfer_qwen3_8_flash_next_sequence_plan_test PRIVATE
+  ${PROJECT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_8_flash_next/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
+
+ninfer_add_test(ninfer_qwen3_8_flash_next_registry_test
+  SOURCES targets/qwen3_8_flash_next/test_registry.cpp
+  LIBRARIES ninfer_qwen3_8_flash_next ninfer_engine ninfer_artifact)
+target_include_directories(ninfer_qwen3_8_flash_next_registry_test PRIVATE
+  ${PROJECT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_8_flash_next/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_27b/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_35b_a3b/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
 
 # Product protocol contracts.
 ninfer_add_test(ninfer_openai_schema_test

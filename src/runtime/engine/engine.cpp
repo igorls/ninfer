@@ -192,7 +192,9 @@ class Engine::Impl {
 public:
     using Core27 = runtime::EngineCore<targets::Qwen3_6_27BInstance>;
     using Core35 = runtime::EngineCore<targets::Qwen3_6_35BA3BInstance>;
-    using Core   = std::variant<std::monostate, std::unique_ptr<Core27>, std::unique_ptr<Core35>>;
+    using CoreFN = runtime::EngineCore<targets::Qwen3_8FlashNextInstance>;
+    using Core   = std::variant<std::monostate, std::unique_ptr<Core27>, std::unique_ptr<Core35>,
+                              std::unique_ptr<CoreFN>>;
 
     explicit Impl(EngineOptions engine_options)
         : options(normalize_engine_options(std::move(engine_options))), device(options.device) {
@@ -207,8 +209,11 @@ public:
                 if constexpr (std::is_same_v<Instance, targets::Qwen3_6_27BInstance>) {
                     return std::make_unique<Core27>(*target_ptr, options,
                                                                  std::move(constructed.context_cost));
-                } else {
+                } else if constexpr (std::is_same_v<Instance, targets::Qwen3_6_35BA3BInstance>) {
                     return std::make_unique<Core35>(*target_ptr, options,
+                                                                 std::move(constructed.context_cost));
+                } else {
+                    return std::make_unique<CoreFN>(*target_ptr, options,
                                                                  std::move(constructed.context_cost));
                 }
             },

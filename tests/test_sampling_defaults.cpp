@@ -2,6 +2,7 @@
 
 #include <ninfer/targets/qwen3_6_27b/package.h>
 #include <ninfer/targets/qwen3_6_35b_a3b/package.h>
+#include <ninfer/targets/qwen3_8_flash_next/package.h>
 
 #include <cmath>
 #include <iostream>
@@ -40,8 +41,9 @@ bool throws_runtime(const auto& operation) {
 } // namespace
 
 int main() {
-    using Dense27 = ninfer::targets::qwen3_6_27b::Package;
-    using Moe35   = ninfer::targets::qwen3_6_35b_a3b::Package;
+    using Dense27   = ninfer::targets::qwen3_6_27b::Package;
+    using Moe35     = ninfer::targets::qwen3_6_35b_a3b::Package;
+    using FlashNext = ninfer::targets::qwen3_8_flash_next::Package;
 
     int failures = 0;
 
@@ -49,6 +51,8 @@ int main() {
     const ninfer::ModelSamplingDefaults qwen3_8 =
         Dense27::sampling_defaults(Dense27::qwen3_8_model_id);
     const ninfer::ModelSamplingDefaults qwen3_6_35 = Moe35::sampling_defaults(Moe35::model_id);
+    const ninfer::ModelSamplingDefaults flash_next =
+        FlashNext::sampling_defaults(FlashNext::model_id);
 
     const ninfer::SamplingPreset dense_thinking{
         .temperature = 1.0F, .top_k = 20, .top_p = 0.95F, .min_p = 0.0F};
@@ -77,8 +81,13 @@ int main() {
     failures += check(same_preset(qwen3_6_35.thinking, moe_thinking) &&
                           same_preset(qwen3_6_35.non_thinking, dense_non_thinking),
                       "Qwen3.6-35B-A3B defaults mismatch");
+    failures += check(same_preset(flash_next.thinking, dense_thinking) &&
+                          same_preset(flash_next.non_thinking, dense_non_thinking),
+                      "Qwen3.8-Flash-Next defaults mismatch");
     failures += check(throws_runtime([] { (void)Dense27::sampling_defaults("unknown"); }),
                       "unknown model received dense-27B sampling defaults");
+    failures += check(throws_runtime([] { (void)FlashNext::sampling_defaults("unknown"); }),
+                      "unknown model received flash-next sampling defaults");
 
     const ninfer::ResolvedSamplingParameters thinking = ninfer::runtime::resolve_sampling(
         qwen3_8, ninfer::SamplingMode::Thinking, ninfer::SamplingOverrides{});

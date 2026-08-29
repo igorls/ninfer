@@ -12,6 +12,7 @@ add_library(ninfer_qwen3_8_flash_next STATIC
   impl/moe.cpp
   impl/moe_kernels.cu
   impl/moe_route.cu
+  impl/package.cpp
   impl/ple_decode.cpp
   impl/ple_decode_kernels.cu
   impl/ple_index.cpp
@@ -29,6 +30,7 @@ add_library(ninfer_qwen3_8_flash_next STATIC
 ninfer_internal_includes(ninfer_qwen3_8_flash_next)
 target_include_directories(ninfer_qwen3_8_flash_next PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/export
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
 target_link_libraries(ninfer_qwen3_8_flash_next PUBLIC ninfer_artifact ninfer_ops ninfer_qwen3_vision)
 ninfer_cuda_archive(ninfer_qwen3_8_flash_next)

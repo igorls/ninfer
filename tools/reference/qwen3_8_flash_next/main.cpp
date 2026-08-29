@@ -40,6 +40,7 @@ namespace {
 
 using namespace ninfer;
 using namespace ninfer::targets::qwen3_8_flash_next::detail;
+using LoadedModel = StandaloneLoadedModel;
 
 const char* dtype_to_string(DType dt) {
     switch (dt) {

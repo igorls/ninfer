@@ -17,6 +17,7 @@
 namespace {
 
 using namespace ninfer::targets::qwen3_8_flash_next::detail;
+using LoadedModel = StandaloneLoadedModel;
 
 int test_identity_validation() {
     using ninfer::artifact::ArtifactError;

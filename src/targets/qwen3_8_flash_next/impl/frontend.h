@@ -5,7 +5,7 @@
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
-[[nodiscard]] qwen3_6::Frontend make_frontend(const LoadedModel& model,
+[[nodiscard]] qwen3_6::Frontend make_frontend(const StandaloneLoadedModel& model,
                                               const qwen3_6::FrontendOptions& options);
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

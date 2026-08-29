@@ -48,23 +48,24 @@ struct FlashNextPreflightReport {
                                                            const FlashNextRuntimeConfig& config,
                                                            std::uint32_t main_page_groups = 0);
 
-class LoadedModel {
+class StandaloneLoadedModel {
 public:
-    ~LoadedModel() = default;
+    ~StandaloneLoadedModel() = default;
 
-    LoadedModel(const LoadedModel&)                = delete;
-    LoadedModel& operator=(const LoadedModel&)     = delete;
-    LoadedModel(LoadedModel&&) noexcept            = default;
-    LoadedModel& operator=(LoadedModel&&) noexcept = default;
+    StandaloneLoadedModel(const StandaloneLoadedModel&)                = delete;
+    StandaloneLoadedModel& operator=(const StandaloneLoadedModel&)     = delete;
+    StandaloneLoadedModel(StandaloneLoadedModel&&) noexcept            = default;
+    StandaloneLoadedModel& operator=(StandaloneLoadedModel&&) noexcept = default;
 
-    [[nodiscard]] static LoadedModel load(const artifact::Reader& reader, DeviceContext& device,
-                                          LoadFeatures features            = {},
-                                          artifact::LoadProgress* progress = nullptr);
-
-    [[nodiscard]] static LoadedModel load_from_file(const std::filesystem::path& path,
+    [[nodiscard]] static StandaloneLoadedModel load(const artifact::Reader& reader,
                                                     DeviceContext& device,
                                                     LoadFeatures features            = {},
                                                     artifact::LoadProgress* progress = nullptr);
+
+    [[nodiscard]] static StandaloneLoadedModel
+    load_from_file(const std::filesystem::path& path, DeviceContext& device,
+                   LoadFeatures features            = {},
+                   artifact::LoadProgress* progress = nullptr);
 
     [[nodiscard]] const TextModelView& text_view() const noexcept { return data_->text; }
 
@@ -72,7 +73,8 @@ public:
 
     [[nodiscard]] const VisionModelView& vision_view() const {
         if (!data_->vision) {
-            throw std::logic_error("LoadedModel: vision was not materialized for this instance");
+            throw std::logic_error(
+                "StandaloneLoadedModel: vision was not materialized for this instance");
         }
         return *data_->vision;
     }
@@ -92,7 +94,7 @@ public:
     }
 
 private:
-    LoadedModel(BindingPlan plan, artifact::MaterializedArtifact materialized);
+    StandaloneLoadedModel(BindingPlan plan, artifact::MaterializedArtifact materialized);
 
     std::unique_ptr<LoadedModelData> data_;
     PleIndexMetadata ple_metadata_{kPleIndexMetadata};

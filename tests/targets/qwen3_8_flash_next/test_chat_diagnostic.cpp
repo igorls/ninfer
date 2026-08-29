@@ -25,6 +25,7 @@
 namespace {
 
 using namespace ninfer::targets::qwen3_8_flash_next::detail;
+using LoadedModel = StandaloneLoadedModel;
 
 int test_chat_diagnostic_options_parsing() {
     // 1. Valid full options

@@ -54,11 +54,11 @@ FlashNextPreflightReport preflight_text_file(const std::filesystem::path& path,
     return preflight_text_artifact(reader, config, main_page_groups);
 }
 
-LoadedModel::LoadedModel(BindingPlan plan, artifact::MaterializedArtifact materialized)
+StandaloneLoadedModel::StandaloneLoadedModel(BindingPlan plan, artifact::MaterializedArtifact materialized)
     : data_(std::make_unique<LoadedModelData>(std::move(plan), std::move(materialized))) {}
 
-LoadedModel LoadedModel::load(const artifact::Reader& reader, DeviceContext& device,
-                              LoadFeatures features, artifact::LoadProgress* progress) {
+StandaloneLoadedModel StandaloneLoadedModel::load(const artifact::Reader& reader, DeviceContext& device,
+                                                  LoadFeatures features, artifact::LoadProgress* progress) {
     validate_identity(reader.identity());
     if (features.mtp) {
         throw std::invalid_argument(
@@ -69,11 +69,11 @@ LoadedModel LoadedModel::load(const artifact::Reader& reader, DeviceContext& dev
     auto load_plan    = bind_artifact(binder, features);
     auto materialized = artifact::materialize(reader, load_plan.materialization, device, progress);
 
-    return LoadedModel(std::move(load_plan.bindings), std::move(materialized));
+    return StandaloneLoadedModel(std::move(load_plan.bindings), std::move(materialized));
 }
 
-LoadedModel LoadedModel::load_from_file(const std::filesystem::path& path, DeviceContext& device,
-                                        LoadFeatures features, artifact::LoadProgress* progress) {
+StandaloneLoadedModel StandaloneLoadedModel::load_from_file(const std::filesystem::path& path, DeviceContext& device,
+                                                            LoadFeatures features, artifact::LoadProgress* progress) {
     const artifact::Reader reader(path);
     return load(reader, device, features, progress);
 }

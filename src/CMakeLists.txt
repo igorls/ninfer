@@ -339,6 +339,7 @@ add_subdirectory(targets/qwen3_6_35b_a3b)
 target_link_libraries(ninfer_engine
   PRIVATE
     ninfer_qwen3_vision
+    ninfer_qwen3_8_flash_next
     ninfer_artifact
     ninfer_core
     ninfer_ops
