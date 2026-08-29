@@ -303,6 +303,18 @@ target_include_directories(ninfer_qwen3_8_flash_next_registry_test PRIVATE
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_35b_a3b/export
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
 
+ninfer_add_test(ninfer_qwen3_8_flash_next_program_cold_path_test
+  SOURCES targets/qwen3_8_flash_next/test_program_cold_path.cpp
+  LIBRARIES ninfer_qwen3_8_flash_next ninfer_engine)
+target_include_directories(ninfer_qwen3_8_flash_next_program_cold_path_test PRIVATE
+  ${PROJECT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_8_flash_next/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
+set_tests_properties(ninfer_qwen3_8_flash_next_program_cold_path_test
+  PROPERTIES SKIP_RETURN_CODE 77)
+
+
 # Product protocol contracts.
 ninfer_add_test(ninfer_openai_schema_test
   SOURCES test_openai_schema.cpp

@@ -210,6 +210,8 @@ public:
     [[nodiscard]] std::uint32_t row_stride() const noexcept { return row_stride_; }
     [[nodiscard]] runtime::ExecutionTiming execution_timing() const noexcept { return timing_; }
 
+    friend class ContractAccess;
+
 private:
     const void* owner_         = nullptr;
     std::uint64_t transaction_ = 0;
@@ -274,6 +276,8 @@ public:
 public:
     ResourcePlan(AdmissionCandidate&& admission, std::uint64_t revision,
                  bool needs_transfer) noexcept;
+
+    friend class ContractAccess;
 
 private:
     AdmissionCandidate admission_;
@@ -556,6 +560,59 @@ public:
 public:
     explicit Program(std::unique_ptr<detail::ProgramImpl> impl) noexcept;
     std::unique_ptr<detail::ProgramImpl> impl_;
+};
+
+class ContractAccess {
+public:
+    [[nodiscard]] static PendingBatch
+    make_pending(const void* owner, std::uint64_t transaction,
+                 std::span<const SequenceHandle> rows, std::span<const TokenId> tokens,
+                 std::span<const std::int32_t> row_counts, std::uint32_t row_stride,
+                 runtime::ExecutionTiming timing) {
+        PendingBatch out;
+        out.owner_       = owner;
+        out.transaction_ = transaction;
+        out.row_count_   = rows.size();
+        for (std::size_t i = 0; i < rows.size(); ++i) { out.rows_[i] = rows[i]; }
+        out.tokens_     = tokens;
+        out.row_counts_ = row_counts;
+        out.row_stride_ = row_stride;
+        out.timing_     = timing;
+        return out;
+    }
+
+    [[nodiscard]] static const void* owner(const PendingBatch& pending) noexcept {
+        return pending.owner_;
+    }
+
+    [[nodiscard]] static std::uint64_t transaction(const PendingBatch& pending) noexcept {
+        return pending.transaction_;
+    }
+
+    [[nodiscard]] static std::span<const SequenceHandle>
+    rows(const PendingBatch& pending) noexcept {
+        return {pending.rows_.data(), pending.row_count_};
+    }
+
+    static void consume(PendingBatch& pending) noexcept {
+        pending.owner_       = nullptr;
+        pending.transaction_ = 0;
+        pending.row_count_   = 0;
+        pending.tokens_      = {};
+        pending.row_counts_  = {};
+        pending.row_stride_  = 0;
+        pending.timing_      = {};
+    }
+
+    [[nodiscard]] static AdmissionCandidate
+    take_admission(ResourcePlan& plan) noexcept {
+        return std::move(plan.admission_);
+    }
+
+    [[nodiscard]] static const AdmissionCandidate&
+    admission(const ResourcePlan& plan) noexcept {
+        return plan.admission_;
+    }
 };
 
 } // namespace ninfer::targets::qwen3_8_flash_next

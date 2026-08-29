@@ -13,6 +13,7 @@ add_library(ninfer_qwen3_8_flash_next STATIC
   impl/moe_kernels.cu
   impl/moe_route.cu
   impl/package.cpp
+  impl/program.cpp
   impl/ple_decode.cpp
   impl/ple_decode_kernels.cu
   impl/ple_index.cpp
