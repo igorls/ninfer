@@ -172,6 +172,7 @@ int main() {
     // Exercise the complete nonzero boundary. Each projection row reads input column zero with
     // exact FP8 1.0; the causal current tap is BF16 1.0. The resulting represented q/k/v is
     // BF16 SiLU(1), so the independently evaluated first state element is beta*v*k_normalized.
+    // The z rows use FP8 2.0 (E4M3 0x40) to strictly discriminate sigmoid(2) ~= 0.8808 from silu(2) ~= 1.7616.
     std::array<std::uint16_t, 2'560> nonzero_input{};
     nonzero_input.front() = 0x3F80U;
     input.copy_from_host(nonzero_input.data(), sizeof(nonzero_input));
@@ -186,8 +187,11 @@ int main() {
     convolution.copy_from_host(convolution_values.data(),
                                convolution_values.size() * sizeof(std::uint16_t));
     std::vector<std::uint8_t> qkvz_codes(16'384ULL * 2'560, 0);
-    for (std::int32_t row = 0; row < 16'384; ++row) {
+    for (std::int32_t row = 0; row < 10'240; ++row) {
         qkvz_codes[static_cast<std::size_t>(row) * 2'560] = 0x38U; // E4M3 1.0
+    }
+    for (std::int32_t row = 10'240; row < 16'384; ++row) {
+        qkvz_codes[static_cast<std::size_t>(row) * 2'560] = 0x40U; // E4M3 2.0 (z = 2.0)
     }
     qkvz.copy_from_host(qkvz_codes.data(), qkvz_codes.size());
     std::vector<std::uint8_t> output_codes(2'560ULL * 6'144, 0);
@@ -214,12 +218,13 @@ int main() {
     }
 
     output.copy_to_host(actual_output.data(), sizeof(actual_output));
-    const float first_output = bf16_to_float(actual_output.front());
-    if (first_output < 0.70F || first_output > 0.75F ||
+    const float first_output    = bf16_to_float(actual_output.front());
+    const float expected_output = 1.0F / (1.0F + std::exp(-2.0F)); // sigmoid(2.0) ~= 0.8808F
+    if (std::abs(first_output - expected_output) > 4.0e-3F ||
         !std::all_of(actual_output.begin(), actual_output.end(),
                      [&](std::uint16_t value) { return value == actual_output.front(); })) {
         std::cerr << "Flash-Next nonzero GDN output was outside its represented gated-norm range: "
-                  << first_output << '\n';
+                  << first_output << " vs expected " << expected_output << '\n';
         return 1;
     }
     return 0;

@@ -465,6 +465,32 @@ int test_cuda_ledger_and_executor(ninfer::DeviceContext& device) {
     executor.release_lane(reallocated);
     executor.release_lane(elane1);
 
+    // 5. B=2 planar MRoPE positions layout on device
+    auto plane0 = executor.allocate_lane();
+    auto plane1 = executor.allocate_lane();
+    std::vector<LaneStepRequest> b2_reqs = {
+        {.handle = plane0, .token_id = 10, .token_index = 0, .mrope_positions = {100, 101, 102}},
+        {.handle = plane1, .token_id = 20, .token_index = 0, .mrope_positions = {200, 201, 202}},
+    };
+    try {
+        auto round = executor.execute_round(b2_reqs);
+        round.abort();
+    } catch (...) {}
+    device.synchronize();
+
+    std::vector<std::int32_t> dev_mrope(6);
+    CUDA_CHECK(cudaMemcpy(dev_mrope.data(), alloc.round_tensors().mrope_positions.data,
+                          6 * sizeof(std::int32_t), cudaMemcpyDeviceToHost));
+    const std::vector<std::int32_t> expected_planar_mrope = {100, 200, 101, 201, 102, 202};
+    if (dev_mrope != expected_planar_mrope) {
+        std::cerr << "Device MRoPE positions did not match expected planar layout for B=2: got [";
+        for (auto v : dev_mrope) std::cerr << v << ", ";
+        std::cerr << "]\n";
+        return 1;
+    }
+    executor.release_lane(plane0);
+    executor.release_lane(plane1);
+
     std::cout << "PASS: test_cuda_ledger_and_executor\n";
     return 0;
 }

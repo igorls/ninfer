@@ -156,15 +156,15 @@ PendingRound FlashNextTextExecutor::execute_round(std::span<const LaneStepReques
 
         // Populate and upload host round buffers
         for (std::uint32_t i = 0; i < batch_size; ++i) {
-            const auto lane                  = requests[i].handle.lane_index();
-            host_token_ids_[i]               = requests[i].token_id;
-            host_token_indices_[i]           = requests[i].token_index;
-            host_mrope_positions_[i * 3]     = requests[i].mrope_positions[0];
-            host_mrope_positions_[i * 3 + 1] = requests[i].mrope_positions[1];
-            host_mrope_positions_[i * 3 + 2] = requests[i].mrope_positions[2];
-            host_table_rows_[i]              = static_cast<std::int32_t>(lane);
-            host_source_slots_[i]            = alloc_.current_source_slot(lane);
-            host_destination_slots_[i]       = alloc_.current_destination_slot(lane);
+            const auto lane            = requests[i].handle.lane_index();
+            host_token_ids_[i]         = requests[i].token_id;
+            host_token_indices_[i]     = requests[i].token_index;
+            for (std::uint32_t d = 0; d < 3; ++d) {
+                host_mrope_positions_[d * batch_size + i] = requests[i].mrope_positions[d];
+            }
+            host_table_rows_[i]        = static_cast<std::int32_t>(lane);
+            host_source_slots_[i]      = alloc_.current_source_slot(lane);
+            host_destination_slots_[i] = alloc_.current_destination_slot(lane);
         }
 
         Tensor token_ids(alloc_.round_tensors().token_ids.data, DType::I32,
