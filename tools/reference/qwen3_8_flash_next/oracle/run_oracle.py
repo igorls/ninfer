@@ -121,6 +121,10 @@ class LazyExperts(nn.Module):
             current_hidden_states = current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
             final_hidden_states.index_add_(0, token_idx, current_hidden_states.to(final_hidden_states.dtype))
 
+        # Each expert is used at most once per forward; a persistent FP32 cache (~20 MB per
+        # expert) exhausts host memory on multi-token prompts.
+        self.cache_gate_up.clear()
+        self.cache_down.clear()
         return final_hidden_states
 
 def build_oracle(model_dir: str, ple_dir: str):

@@ -46,7 +46,7 @@ E:\NInfer\venv-qwen4exp\Scripts\python.exe run_oracle.py `
 For multi-token sequence:
 ```powershell
 E:\NInfer\venv-qwen4exp\Scripts\python.exe run_oracle.py `
-  --tokens "248045,151644,872,198" `
+  --ids "248045,846,198,20206" `
   --dump-states P:\dumps\oracle_seq
 ```
 

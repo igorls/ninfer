@@ -130,6 +130,8 @@ def main():
 
             if name == "logits":
                 # Compute argmax and top-5
+                arr_a = np.asarray(arr_a, dtype=np.float64).reshape(-1)
+                arr_b = np.asarray(arr_b, dtype=np.float64).reshape(-1)
                 top5_a_idx = np.argsort(arr_a)[-5:][::-1]
                 top5_b_idx = np.argsort(arr_b)[-5:][::-1]
 
