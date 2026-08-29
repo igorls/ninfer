@@ -858,8 +858,11 @@ int run_chat_diagnostic(const ReferenceToolOptions& opts) {
             static_cast<const ninfer::ops::SamplingConfig*>(device_configs.p),
             positions_tensor, ninfer::ops::kSamplePurposeDecode, workspace, device.stream);
         std::int32_t sampled_token = 0;
-        device_out.copy_to_host(&sampled_token, sizeof(std::int32_t));
+        // copy_to_host is a legacy-default-stream cudaMemcpy, which does not order against the
+        // cudaStreamNonBlocking compute stream that ran the sampler: synchronize first or the
+        // copy can observe the previous round's token.
         device.synchronize();
+        device_out.copy_to_host(&sampled_token, sizeof(std::int32_t));
 
         std::vector<LaneCommitDecision> decision = {{.accept = true}};
         round.commit(decision);
