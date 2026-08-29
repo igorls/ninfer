@@ -50,14 +50,6 @@ __device__ __forceinline__ float warp_sum(float value) {
     return __shfl_sync(0xFFFF'FFFFU, value, 0);
 }
 
-__device__ __forceinline__ float warp_max(float value) {
-#pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        value = fmaxf(value, __shfl_down_sync(0xFFFF'FFFFU, value, offset));
-    }
-    return __shfl_sync(0xFFFF'FFFFU, value, 0);
-}
-
 template <int Tokens>
 __global__ void route_kernel(const float* __restrict__ scores, std::int32_t* __restrict__ ids,
                              float* __restrict__ alpha, float* __restrict__ shared_scale) {
@@ -97,17 +89,12 @@ __global__ void route_kernel(const float* __restrict__ scores, std::int32_t* __r
         if (lane == winner.origin) { ++cursor; }
         __syncwarp();
     }
-
-    float local_max = -CUDART_INF_F;
-    float local_sum = 0.0F;
-#pragma unroll
-    for (int item = 0; item < 16; ++item) { local_max = fmaxf(local_max, local[item].value); }
-    const float maximum = warp_max(local_max);
-#pragma unroll
-    for (int item = 0; item < 16; ++item) { local_sum += expf(local[item].value - maximum); }
-    const float denominator = warp_sum(local_sum);
+    const float top_0 = selected_logits[token][0];
+    const float weight =
+        lane < kTopK ? expf(selected_logits[token][lane] - top_0) : 0.0F;
+    const float denominator = warp_sum(weight);
     if (lane < kTopK) {
-        alpha[token * kTopK + lane] = expf(selected_logits[token][lane] - maximum) / denominator;
+        alpha[token * kTopK + lane] = weight / denominator;
     }
     if (lane == 0) {
         const float gate    = token_scores[kExperts];

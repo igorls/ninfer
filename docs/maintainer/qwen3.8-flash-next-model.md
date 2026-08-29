@@ -113,8 +113,9 @@ FP32 scores and stable descending order; an exact score tie retains the lower bl
 
 ## 5. Mixture of experts
 
-The router computes a 512-way FP32 softmax, selects the top 10 probabilities, and does not
-renormalize them (`norm_topk_prob=false`). For selected expert `e`,
+The router computes a 512-way FP32 softmax, selects the top 10 probabilities and renormalizes them
+to sum to one (`norm_topk_prob=true`, the transformers Qwen4ExpConfig default; the official
+config.json omits the key). For selected expert `e`,
 
 ```text
 expert_e(x) = down_e(silu(gate_e(x)) * up_e(x))

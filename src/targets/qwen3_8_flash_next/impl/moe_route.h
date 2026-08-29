@@ -6,8 +6,8 @@
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
-// Selects deterministic top-10 routes from the exact 512-way full softmax. scores additionally
-// carries the independent shared-expert gate in row 512.
+// Selects deterministic top-10 routes with top-10 renormalized probabilities (norm_topk_prob=true
+// per transformers Qwen4ExpTextTopKRouter). scores carries the shared-expert gate in row 512.
 void flash_next_route_scores(const Tensor& scores, Tensor& ids, Tensor& alpha, Tensor& shared_scale,
                              cudaStream_t stream);
 

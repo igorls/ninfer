@@ -80,18 +80,60 @@ int main() {
     alpha_device.copy_to_host(alpha.data(), sizeof(alpha));
     shared_device.copy_to_host(shared.data(), sizeof(shared));
 
-    float denominator = 502.0F;
-    for (int logit = 1; logit <= 10; ++logit) {
-        denominator += std::exp(static_cast<float>(logit));
-    }
-    for (int rank = 0; rank < 10; ++rank) {
-        if (ids[rank] != 19 - rank ||
-            std::abs(alpha[rank] - std::exp(static_cast<float>(10 - rank)) / denominator) > 2e-6F) {
-            std::cerr << "Flash-Next route changed full-softmax top-10 semantics\n";
-            return 1;
+    for (int t = 0; t < tokens; ++t) {
+        std::vector<double> p(512, 0.0);
+        double max_score = -1e30;
+        for (int i = 0; i < 512; ++i) {
+            max_score = std::max(max_score, static_cast<double>(scores[t * 513 + i]));
         }
-        if (ids[10 + rank] != rank || std::abs(alpha[10 + rank] - 1.0F / 512.0F) > 1e-7F) {
-            std::cerr << "Flash-Next route changed deterministic tie semantics\n";
+        double sum_exp = 0.0;
+        for (int i = 0; i < 512; ++i) {
+            p[i] = std::exp(static_cast<double>(scores[t * 513 + i]) - max_score);
+            sum_exp += p[i];
+        }
+        for (int i = 0; i < 512; ++i) {
+            p[i] /= sum_exp;
+        }
+
+        std::vector<int> expected_ids(10);
+        std::vector<bool> used(512, false);
+        for (int rank = 0; rank < 10; ++rank) {
+            int best_id = -1;
+            for (int i = 0; i < 512; ++i) {
+                if (used[i]) continue;
+                if (best_id == -1 || p[i] > p[best_id] || (p[i] == p[best_id] && i < best_id)) {
+                    best_id = i;
+                }
+            }
+            expected_ids[rank] = best_id;
+            used[best_id] = true;
+        }
+
+        double selected_sum = 0.0;
+        for (int rank = 0; rank < 10; ++rank) {
+            selected_sum += p[expected_ids[rank]];
+        }
+
+        float sum_alpha = 0.0F;
+        for (int rank = 0; rank < 10; ++rank) {
+            const int id = ids[t * 10 + rank];
+            const float val = alpha[t * 10 + rank];
+            sum_alpha += val;
+            const float expected_alpha = static_cast<float>(p[expected_ids[rank]] / selected_sum);
+            if (id != expected_ids[rank]) {
+                std::cerr << "Flash-Next route selected id " << id << " expected " << expected_ids[rank]
+                          << " at token " << t << " rank " << rank << "\n";
+                return 1;
+            }
+            if (std::abs(val - expected_alpha) > 2e-6F) {
+                std::cerr << "Flash-Next route alpha " << val << " expected " << expected_alpha
+                          << " at token " << t << " rank " << rank << "\n";
+                return 1;
+            }
+        }
+        if (std::abs(sum_alpha - 1.0F) > 1e-5F) {
+            std::cerr << "Flash-Next route top-10 alpha sum " << sum_alpha << " != 1.0 at token "
+                      << t << "\n";
             return 1;
         }
     }
