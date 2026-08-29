@@ -82,7 +82,7 @@ o_t = q_t^T S_t
 The recurrent matrix state is FP32 `[48,128,128]` per sequence and layer. The convolution state is
 the previous three `[q,k,v]` values `[10240,3]`. The output applies RMSNorm to each 128-wide value
 head, multiplies by its direct ones-initialized gated-norm weight (this weight does not use the
-ordinary Text norm's unit offset), multiplies by `silu(z)`, flattens to 6144, and projects to 2560.
+ordinary Text norm's unit offset), multiplies by `sigmoid(z)` (`output_gate_type=sigmoid` in the checkpoint config; Qwen3-Next used `silu`), flattens to 6144, and projects to 2560.
 Prefill may use an equivalent chunked delta-rule evaluation; decode must preserve the same state
 transition.
 

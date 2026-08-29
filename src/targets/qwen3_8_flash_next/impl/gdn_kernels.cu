@@ -107,7 +107,7 @@ __global__ void output_gate_kernel(const __nv_bfloat16* __restrict__ recurrent,
     const float sum        = squares[0] + squares[1] + squares[2] + squares[3];
     const float normalized = x * rsqrtf(sum / 128.0F + 1.0e-6F) * __bfloat162float(norm[dim]);
     gated[base + dim] =
-        __float2bfloat16_rn(normalized * ops::silu(__bfloat162float(z[base + dim])));
+        __float2bfloat16_rn(normalized * ops::sigmoid(__bfloat162float(z[base + dim])));
 }
 
 } // namespace
