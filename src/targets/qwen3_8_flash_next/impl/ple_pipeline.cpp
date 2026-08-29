@@ -20,10 +20,16 @@ enum class SlotState : std::uint8_t { Idle, Gathering, Copying };
 } // namespace
 
 struct PleGatherPipeline::Slot {
-    Slot(DeviceContext& device, std::size_t bytes) : buffer(bytes), completion(device) {}
+    Slot(DeviceContext& device, std::size_t bytes)
+        : buffer(bytes), completion(device), ordering(device) {}
 
     PinnedHostBuffer buffer;
     CudaCompletionEvent completion;
+    // Orders the H2D copy after everything already enqueued on the compute stream: the startup
+    // zero-fill of the round tensors and the previous round's consumers of `output`. Without it
+    // the transfer-stream copy can land before an in-flight memset (WAW) or before the previous
+    // PLE layer has read the buffer (WAR).
+    CudaCompletionEvent ordering;
     std::vector<std::future<void>> work;
     std::uint64_t generation = 0;
     SlotState state          = SlotState::Idle;
@@ -139,6 +145,8 @@ void PleGatherPipeline::enqueue_copy(Ticket&& ticket, Tensor& output) {
     }
     slot.work.clear();
     const std::size_t bytes = ticket.tokens_ * kPleTokenBytes;
+    slot.ordering.record(device_.stream);
+    slot.ordering.wait(device_.transfer_stream);
     CUDA_CHECK(cudaMemcpyAsync(output.data, slot.buffer.data(), bytes, cudaMemcpyHostToDevice,
                                device_.transfer_stream));
     slot.completion.record(device_.transfer_stream);
