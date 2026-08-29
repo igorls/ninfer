@@ -283,7 +283,8 @@ Program::plan_request(const qwen3_6::PreparedPrompt& prompt,
     base->summary.publish_continuation = false;
 
     const runtime::PrefillWork prefill_work =
-        runtime::make_prefill_work(0, base->summary.prompt_tokens, 0, 0, 1);
+        runtime::make_prefill_work(0, base->summary.prompt_tokens, 0, 0,
+                                   impl_->plan_.config.prefill_chunk);
     base->summary.service_work_quanta =
         prefill_work.tokens + base->summary.effective_output_tokens;
 
@@ -487,49 +488,46 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
         throw std::logic_error("prefill is already completed for this sequence");
     }
 
-    // Sequence 5c will replace token-by-token loop with chunked prefill kernels
-    const std::size_t N        = st.prompt_tokens.size();
+    const std::size_t N         = st.prompt_tokens.size();
     const std::uint32_t start_i = st.prompt_tokens_processed;
-    const std::uint32_t end_i   = std::min(static_cast<std::uint32_t>(N), start_i + 16U);
+    const std::uint32_t chunk_size =
+        std::min<std::uint32_t>(impl_->plan_.config.prefill_chunk,
+                                static_cast<std::uint32_t>(N - start_i));
+    const std::uint32_t end_i   = start_i + chunk_size;
 
-    for (std::uint32_t i = start_i; i < end_i; ++i) {
-        if (i + 1 < N) {
-            detail::LaneStepRequest req{
-                .handle          = st.lane_handle,
-                .token_id        = st.prompt_tokens[i],
-                .token_index     = static_cast<std::int32_t>(i),
-                .mrope_positions = {st.mrope_pos0[i], st.mrope_pos1[i], st.mrope_pos2[i]},
-            };
-            auto round = impl_->executor_.execute_round(std::span(&req, 1));
-            std::array<detail::LaneCommitDecision, 1> decision = {{{.accept = true}}};
-            round.commit(decision);
-            st.last_token_id    = req.token_id;
-            st.last_token_pos   = req.mrope_positions[0];
-            st.last_token_index = req.token_index;
-        } else {
-            // Final prompt token (i == N - 1)
-            detail::LaneStepRequest req{
-                .handle          = st.lane_handle,
-                .token_id        = st.prompt_tokens[i],
-                .token_index     = static_cast<std::int32_t>(i),
-                .mrope_positions = {st.mrope_pos0[i], st.mrope_pos1[i], st.mrope_pos2[i]},
-            };
-            impl_->pending_round_ = impl_->executor_.execute_round(std::span(&req, 1));
-            st.last_token_id      = req.token_id;
-            st.last_token_pos     = req.mrope_positions[0];
-            st.last_token_index   = req.token_index;
+    std::span<const std::int32_t> chunk_token_ids(st.prompt_tokens.data() + start_i, chunk_size);
+    std::vector<std::array<std::int32_t, 3>> chunk_positions(chunk_size);
+    for (std::uint32_t i = 0; i < chunk_size; ++i) {
+        chunk_positions[i] = {st.mrope_pos0[start_i + i], st.mrope_pos1[start_i + i],
+                              st.mrope_pos2[start_i + i]};
+    }
 
-            // Sample the first output token from logits
-            impl_->sample_tokens(impl_->pending_round_.logits(), std::span(&lane_idx, 1),
-                                 std::span(impl_->host_sampled_tokens_.data(), 1));
+    if (end_i < N) {
+        auto round = impl_->executor_.execute_prefill_chunk(
+            st.lane_handle, chunk_token_ids, chunk_positions, static_cast<std::int32_t>(start_i));
+        std::array<detail::LaneCommitDecision, 1> decision = {{{.accept = true}}};
+        round.commit(decision);
+        st.last_token_id    = chunk_token_ids.back();
+        st.last_token_pos   = chunk_positions.back()[0];
+        st.last_token_index = static_cast<std::int32_t>(end_i - 1);
+    } else {
+        // Final prefill chunk ending at N - 1
+        impl_->pending_round_ = impl_->executor_.execute_prefill_chunk(
+            st.lane_handle, chunk_token_ids, chunk_positions, static_cast<std::int32_t>(start_i));
+        st.last_token_id    = chunk_token_ids.back();
+        st.last_token_pos   = chunk_positions.back()[0];
+        st.last_token_index = static_cast<std::int32_t>(end_i - 1);
 
-            impl_->pending_batch_tokens_.resize(1);
-            impl_->pending_batch_row_counts_.resize(1);
-            impl_->pending_batch_tokens_[0]     = static_cast<TokenId>(impl_->host_sampled_tokens_[0]);
-            impl_->pending_batch_row_counts_[0] = 1;
+        // Sample the first output token from logits
+        impl_->sample_tokens(impl_->pending_round_.logits(), std::span(&lane_idx, 1),
+                             std::span(impl_->host_sampled_tokens_.data(), 1));
 
-            st.prefill_completed = true;
-        }
+        impl_->pending_batch_tokens_.resize(1);
+        impl_->pending_batch_row_counts_.resize(1);
+        impl_->pending_batch_tokens_[0]     = static_cast<TokenId>(impl_->host_sampled_tokens_[0]);
+        impl_->pending_batch_row_counts_[0] = 1;
+
+        st.prefill_completed = true;
     }
     st.prompt_tokens_processed = end_i;
 

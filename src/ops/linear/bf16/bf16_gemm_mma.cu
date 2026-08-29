@@ -23,7 +23,7 @@ void launch_variant(const Tensor& x, const Weight& weight, Tensor& out, cudaStre
     const Bf16MmaContiguousOutput output{static_cast<__nv_bfloat16*>(out.data),
                                          Geometry::kOutputRows};
 
-    if constexpr (Schedule::kSharedBytes > 48 * 1024) {
+    if constexpr (Schedule::kSharedBytes > 0) {
         static const cudaError_t attr = cudaFuncSetAttribute(
             bf16_gemm_mma_kernel<Geometry, Schedule, FullTokens, Bf16MmaContiguousOutput>,
             cudaFuncAttributeMaxDynamicSharedMemorySize, Schedule::kSharedBytes);
@@ -83,6 +83,22 @@ void launch_bf16_mma(const Tensor& x, const Weight& weight, Tensor& out, cudaStr
     }
     if (weight.n == 2560 && weight.k == 4608) {
         launch_geometry<Bf16GemvGeometry<2560, 4608>>(x, weight, out, stream);
+        return;
+    }
+    if (weight.n == 640 && weight.k == 2560) {
+        launch_geometry<Bf16GemvGeometry<640, 2560>>(x, weight, out, stream);
+        return;
+    }
+    if (weight.n == 10240 && weight.k == 2560) {
+        launch_geometry<Bf16GemvGeometry<10240, 2560>>(x, weight, out, stream);
+        return;
+    }
+    if (weight.n == 2560 && weight.k == 2560) {
+        launch_geometry<Bf16GemvGeometry<2560, 2560>>(x, weight, out, stream);
+        return;
+    }
+    if (weight.n == 2560 && weight.k == 640) {
+        launch_geometry<Bf16GemvGeometry<2560, 640>>(x, weight, out, stream);
         return;
     }
     throw std::invalid_argument("bf16 linear MMA: unsupported exact problem");

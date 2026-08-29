@@ -41,6 +41,13 @@ void validate_config_invariants(const FlashNextRuntimeConfig& config,
     if (config.max_context < 1 || config.max_context > 262'144) {
         throw std::invalid_argument("Flash-Next max_context must be in [1, 262144]");
     }
+    if (config.prefill_chunk == 0 || config.prefill_chunk % kPrefillChunkAlignment != 0 ||
+        config.prefill_chunk > config.max_context) {
+        throw std::invalid_argument(
+            "Flash-Next prefill_chunk must be a nonzero multiple of " +
+            std::to_string(kPrefillChunkAlignment) + " and <= max_context (" +
+            std::to_string(config.max_context) + ")");
+    }
 
     resolved_state_slots = config.state_slot_capacity;
     if (resolved_state_slots == 0) {
@@ -105,9 +112,12 @@ compute_fixed_base_bytes(const FlashNextRuntimeConfig& config, std::uint32_t res
                                     checked_align_up_256(248'320ULL * config.max_concurrency *
                                                          sizeof(std::uint16_t))))))))));
 
-    // 4. Text decode workspace peak
-    workspace_bytes =
+    // 4. Text decode and prefill workspace peak
+    const std::size_t decode_workspace =
         flash_next_text_decode_workspace_capacity_bytes(maximum_blocks, config.max_concurrency);
+    const std::size_t prefill_workspace =
+        flash_next_text_prefill_workspace_capacity_bytes(maximum_blocks, config.prefill_chunk);
+    workspace_bytes = std::max(decode_workspace, prefill_workspace);
 
     return checked_add(
         block_tables_bytes,

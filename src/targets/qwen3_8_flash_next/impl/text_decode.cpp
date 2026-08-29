@@ -122,6 +122,38 @@ std::size_t flash_next_text_decode_workspace_capacity_bytes(std::int32_t maximum
     return layout.peak_bytes(256);
 }
 
+std::size_t flash_next_text_prefill_workspace_capacity_bytes(std::int32_t maximum_blocks,
+                                                             std::int32_t tokens) {
+    if (maximum_blocks <= 0 || maximum_blocks > 65'536 || tokens <= 0) {
+        throw std::invalid_argument("Flash-Next text prefill received an invalid envelope");
+    }
+    WorkspaceLayoutBuilder layout;
+    layout.alloc(DType::BF16, {2'560, tokens}, 256);
+    (void)allocate_flash_next_text_decode_workspace(layout, tokens);
+    const std::size_t sort_temp = flash_next_qsa_indexer_sort_temp_bytes(maximum_blocks, tokens);
+    {
+        auto scope = layout.scope();
+        (void)allocate_flash_next_ple_workspace(layout, tokens);
+    }
+    {
+        auto scope = layout.scope();
+        (void)allocate_flash_next_gdn_workspace(layout, tokens);
+    }
+    {
+        auto scope = layout.scope();
+        (void)allocate_flash_next_qsa_indexer_workspace(layout, maximum_blocks, tokens, sort_temp);
+    }
+    {
+        auto scope = layout.scope();
+        (void)allocate_flash_next_qsa_attention_workspace(layout, tokens);
+    }
+    {
+        auto scope = layout.scope();
+        (void)allocate_flash_next_moe_workspace(layout, tokens);
+    }
+    return layout.peak_bytes(256);
+}
+
 void flash_next_text_decode_core(const TextModelView& model, const Tensor& embedding,
                                  const Tensor& token_indices, const Tensor& mrope_positions,
                                  const Tensor& table_rows, const Tensor& source_slots,
@@ -173,6 +205,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
 
         // At layer 1: evaluate PLE neural injection and add residual
         if (layer == 1) {
+            emit_state("ple_gathered", gathered_ple_embedding);
             flash_next_ple_decode(round_ws.hyper_hidden, gathered_ple_embedding, model.ple,
                                   source_slots, destination_slots, state.ple_convolution_states,
                                   workspace, round_ws.ple_injection, stream);

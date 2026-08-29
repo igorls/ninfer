@@ -140,6 +140,7 @@ Package::SequencePlanner Package::make_sequence_planner(DeviceContext& device,
         .max_concurrency     = max_concurrency,
         .max_context         = options.max_context,
         .state_slot_capacity = std::min(64u, std::max(floor_slots, requested_slots)),
+        .prefill_chunk       = options.prefill_chunk,
     };
     return SequencePlanner(std::make_unique<detail::SequencePlannerImpl>(config));
 }

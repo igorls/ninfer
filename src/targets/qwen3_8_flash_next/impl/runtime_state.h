@@ -60,6 +60,8 @@ public:
     // Swaps active (source) and standby (destination) slot for row b in [0, max_concurrency).
     void commit_row_slot(std::uint32_t row_index, cudaStream_t stream);
     void commit_slots(std::span<const std::uint32_t> accepted_lanes, cudaStream_t stream);
+    void restore_lane_slots(std::uint32_t lane_index, std::int32_t active_slot,
+                            std::int32_t standby_slot, cudaStream_t stream);
     void sync_slots_to_device(cudaStream_t stream);
 
     // Recurrent state zeroing for assigned lane slots

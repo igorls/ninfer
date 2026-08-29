@@ -92,6 +92,12 @@ public:
     [[nodiscard]] PendingRound execute_round(std::span<const LaneStepRequest> requests,
                                              const FlashNextDecodeStateSink* sink = nullptr);
 
+    [[nodiscard]] PendingRound
+    execute_prefill_chunk(LaneHandle handle, std::span<const std::int32_t> token_ids,
+                          std::span<const std::array<std::int32_t, 3>> positions,
+                          std::int32_t first_token_index,
+                          const FlashNextDecodeStateSink* sink = nullptr);
+
     [[nodiscard]] const FlashNextLaneLedger& ledger() const noexcept { return ledger_; }
 
     [[nodiscard]] FlashNextLaneLedger& ledger() noexcept { return ledger_; }
@@ -114,6 +120,11 @@ private:
     std::vector<std::int32_t> host_table_rows_;
     std::vector<std::int32_t> host_source_slots_;
     std::vector<std::int32_t> host_destination_slots_;
+
+    bool pending_is_prefill_chunk_                     = false;
+    std::uint32_t pending_prefill_lane_                = 0;
+    std::int32_t pending_prefill_initial_active_slot_  = 0;
+    std::int32_t pending_prefill_initial_standby_slot_ = 0;
 
     void commit_transaction(std::uint64_t tx_id, std::span<const LaneCommitDecision> decisions);
     void abort_transaction(std::uint64_t tx_id) noexcept;

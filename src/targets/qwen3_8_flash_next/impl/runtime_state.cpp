@@ -233,6 +233,18 @@ void FlashNextRuntimeAllocation::commit_slots(std::span<const std::uint32_t> acc
     sync_slots_to_device(stream);
 }
 
+void FlashNextRuntimeAllocation::restore_lane_slots(std::uint32_t lane_index,
+                                                    std::int32_t active_slot,
+                                                    std::int32_t standby_slot,
+                                                    cudaStream_t stream) {
+    if (lane_index >= plan_.config.max_concurrency) {
+        throw std::out_of_range("restore_lane_slots: lane_index exceeds max_concurrency");
+    }
+    host_active_slots_[lane_index]  = active_slot;
+    host_standby_slots_[lane_index] = standby_slot;
+    sync_slots_to_device(stream);
+}
+
 void FlashNextRuntimeAllocation::zero_slot(std::uint32_t slot_index, cudaStream_t stream) {
     if (slot_index >= plan_.state_slots) {
         throw std::out_of_range("slot_index exceeds state_slots");

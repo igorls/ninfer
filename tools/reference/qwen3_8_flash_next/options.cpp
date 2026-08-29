@@ -199,6 +199,10 @@ ReferenceToolOptions parse_reference_tool_options(std::span<const std::string_vi
         } else if (arg == "--token-id") {
             if (++i >= args.size()) throw std::invalid_argument("Missing argument for --token-id");
             opts.token_id = parse_strict_i32(args[i], "--token-id");
+        } else if (arg == "--prefill-chunk") {
+            if (++i >= args.size())
+                throw std::invalid_argument("Missing argument for --prefill-chunk");
+            opts.prefill_chunk = parse_strict_u32(args[i], "--prefill-chunk");
         } else if (arg == "--commit") {
             opts.do_commit = true;
         } else if (arg == "--abort") {

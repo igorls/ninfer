@@ -83,6 +83,7 @@ int test_program_lifecycle(ninfer::DeviceContext& device) {
         .max_concurrency     = 2,
         .max_context         = 512,
         .state_slot_capacity = 0,
+        .prefill_chunk       = 512,
     };
     const auto curve = flash_next_capacity_curve(cfg);
     auto plan        = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
@@ -231,6 +232,7 @@ int test_plan_request_validations() {
         .max_concurrency     = 2,
         .max_context         = 128,
         .state_slot_capacity = 0,
+        .prefill_chunk       = 128,
     };
     const auto curve = flash_next_capacity_curve(cfg);
     auto plan        = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);

@@ -203,16 +203,20 @@ int run_bf16_linear() {
         failures += run_bf16_linear_case(output_weight, tokens);
     }
     DeviceWeight ple_key_weight(make_patterned(10240, 2560, 419U));
-    for (const std::int32_t tokens : {1, 2, 4, 8}) {
+    for (const std::int32_t tokens : {1, 2, 4, 8, 9, 128, 1024}) {
         failures += run_bf16_linear_case(ple_key_weight, tokens);
     }
     DeviceWeight ple_value_weight(make_patterned(2560, 2560, 421U));
-    for (const std::int32_t tokens : {1, 2, 4, 8}) {
+    for (const std::int32_t tokens : {1, 2, 4, 8, 9, 128, 1024}) {
         failures += run_bf16_linear_case(ple_value_weight, tokens);
     }
     DeviceWeight qsa_indexer_weight(make_patterned(640, 2560, 423U));
-    for (const std::int32_t tokens : {1, 2, 4, 8}) {
+    for (const std::int32_t tokens : {1, 2, 4, 8, 9, 128, 1024}) {
         failures += run_bf16_linear_case(qsa_indexer_weight, tokens);
+    }
+    DeviceWeight shared_down_weight(make_patterned(2560, 640, 424U));
+    for (const std::int32_t tokens : {1, 2, 4, 8, 9, 128, 1024}) {
+        failures += run_bf16_linear_case(shared_down_weight, tokens);
     }
     DeviceWeight output_head_weight(make_patterned(248320, 2560, 425U));
     for (const std::int32_t tokens : {1, 2, 4, 8}) {

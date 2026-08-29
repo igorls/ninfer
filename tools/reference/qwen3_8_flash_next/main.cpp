@@ -83,14 +83,15 @@ public:
         const std::filesystem::path pos_dir = std::filesystem::path(dump_dir_) / pos_str;
         std::filesystem::create_directories(pos_dir);
 
+        const std::size_t pos_idx = positions_.size();
         auto& pos_rec = positions_.emplace_back();
         pos_rec.position = position;
         pos_rec.token_id = token_id;
         pos_rec.mrope_position = mrope_pos;
 
         return FlashNextDecodeStateSink{
-            .on_state = [this, &pos_rec, pos_str, pos_dir](std::string_view name,
-                                                           const Tensor& tensor) {
+            .on_state = [this, pos_idx, pos_str, pos_dir](std::string_view name,
+                                                          const Tensor& tensor) {
                 const std::string filename = std::string(name) + ".bin";
                 const std::filesystem::path file_path = pos_dir / filename;
 
@@ -119,7 +120,73 @@ public:
                 }
                 rec.file  = pos_str + "/" + filename;
                 rec.bytes = tensor.bytes();
+                positions_[pos_idx].tensors.push_back(std::move(rec));
+            },
+        };
+    }
+
+    FlashNextDecodeStateSink
+    make_chunk_sink(std::int32_t first_position, std::span<const std::int32_t> token_ids,
+                    std::span<const std::array<std::int32_t, 3>> mrope_positions) {
+        const std::size_t count     = token_ids.size();
+        const std::size_t first_idx = positions_.size();
+        for (std::size_t i = 0; i < count; ++i) {
+            char pos_buf[32];
+            std::snprintf(pos_buf, sizeof(pos_buf), "pos%04d",
+                          first_position + static_cast<std::int32_t>(i));
+            const std::string pos_str           = pos_buf;
+            const std::filesystem::path pos_dir = std::filesystem::path(dump_dir_) / pos_str;
+            std::filesystem::create_directories(pos_dir);
+
+            auto& pos_rec          = positions_.emplace_back();
+            pos_rec.position       = first_position + static_cast<std::int32_t>(i);
+            pos_rec.token_id       = token_ids[i];
+            pos_rec.mrope_position = mrope_positions[i];
+        }
+
+        auto current_step = std::make_shared<std::size_t>(0);
+
+        return FlashNextDecodeStateSink{
+            .on_state = [this, first_idx, count, current_step](std::string_view name,
+                                                               const Tensor& tensor) {
+                const std::size_t step = *current_step;
+                if (step >= count) { return; }
+                auto& pos_rec = positions_[first_idx + step];
+                char pos_buf[32];
+                std::snprintf(pos_buf, sizeof(pos_buf), "pos%04d", pos_rec.position);
+                const std::string pos_str           = pos_buf;
+                const std::filesystem::path pos_dir = std::filesystem::path(dump_dir_) / pos_str;
+                const std::string filename          = std::string(name) + ".bin";
+                const std::filesystem::path file_path = pos_dir / filename;
+
+                std::vector<std::uint8_t> host_bytes(tensor.bytes());
+                CUDA_CHECK(cudaMemcpy(host_bytes.data(), tensor.data, tensor.bytes(),
+                                      cudaMemcpyDeviceToHost));
+
+                std::ofstream ofs(file_path, std::ios::binary);
+                if (!ofs) {
+                    throw std::runtime_error("Failed to open file for writing: " +
+                                             file_path.string());
+                }
+                ofs.write(reinterpret_cast<const char*>(host_bytes.data()), host_bytes.size());
+
+                TensorDumpRecord rec;
+                rec.name  = std::string(name);
+                rec.dtype = dtype_to_string(tensor.dtype);
+                if (tensor.ne[3] > 1) {
+                    rec.shape = {tensor.ne[0], tensor.ne[1], tensor.ne[2], tensor.ne[3]};
+                } else if (tensor.ne[2] > 1) {
+                    rec.shape = {tensor.ne[0], tensor.ne[1], tensor.ne[2]};
+                } else if (tensor.ne[1] > 1 || tensor.ne[0] > 1) {
+                    rec.shape = {tensor.ne[0], tensor.ne[1]};
+                } else {
+                    rec.shape = {tensor.ne[0]};
+                }
+                rec.file  = pos_str + "/" + filename;
+                rec.bytes = tensor.bytes();
                 pos_rec.tensors.push_back(std::move(rec));
+
+                if (name == "logits") { *current_step += 1; }
             },
         };
     }
@@ -742,6 +809,7 @@ int run_chat_diagnostic(const ReferenceToolOptions& opts) {
         .max_concurrency     = 1,
         .max_context         = opts.max_context,
         .state_slot_capacity = opts.state_slots,
+        .prefill_chunk       = opts.prefill_chunk > 0 ? opts.prefill_chunk : 1024,
     };
     const auto curve = flash_next_capacity_curve(config);
     const std::uint32_t resolved_groups =
@@ -787,39 +855,77 @@ int run_chat_diagnostic(const ReferenceToolOptions& opts) {
     }
 
     const std::size_t prompt_len = prompt_tokens.size();
-    for (std::size_t i = 0; i + 1 < prompt_len; ++i) {
-        LaneStepRequest req{
-            .handle          = lane,
-            .token_id        = prompt_tokens[i],
-            .token_index     = static_cast<std::int32_t>(i),
-            .mrope_positions = {pos0[i], pos1[i], pos2[i]},
-        };
-        std::optional<FlashNextDecodeStateSink> sink;
-        if (dumper) {
-            sink = dumper->make_sink(static_cast<std::int32_t>(i), prompt_tokens[i],
-                                     {pos0[i], pos1[i], pos2[i]});
-        }
-        auto round = executor.execute_round(std::span<const LaneStepRequest>(&req, 1),
+    PendingRound round;
+
+    if (opts.prefill_chunk == 0) {
+        for (std::size_t i = 0; i + 1 < prompt_len; ++i) {
+            LaneStepRequest req{
+                .handle          = lane,
+                .token_id        = prompt_tokens[i],
+                .token_index     = static_cast<std::int32_t>(i),
+                .mrope_positions = {pos0[i], pos1[i], pos2[i]},
+            };
+            std::optional<FlashNextDecodeStateSink> sink;
+            if (dumper) {
+                sink = dumper->make_sink(static_cast<std::int32_t>(i), prompt_tokens[i],
+                                         {pos0[i], pos1[i], pos2[i]});
+            }
+            auto r = executor.execute_round(std::span<const LaneStepRequest>(&req, 1),
                                             sink ? &*sink : nullptr);
-        std::vector<LaneCommitDecision> decision = {{.accept = true}};
-        round.commit(decision);
+            std::vector<LaneCommitDecision> decision = {{.accept = true}};
+            r.commit(decision);
+        }
+
+        LaneStepRequest last_prompt_req{
+            .handle          = lane,
+            .token_id        = prompt_tokens[prompt_len - 1],
+            .token_index     = static_cast<std::int32_t>(prompt_len - 1),
+            .mrope_positions = {pos0[prompt_len - 1], pos1[prompt_len - 1], pos2[prompt_len - 1]},
+        };
+        std::optional<FlashNextDecodeStateSink> last_sink;
+        if (dumper) {
+            last_sink = dumper->make_sink(static_cast<std::int32_t>(prompt_len - 1),
+                                          prompt_tokens[prompt_len - 1],
+                                          {pos0[prompt_len - 1], pos1[prompt_len - 1],
+                                           pos2[prompt_len - 1]});
+        }
+        round = executor.execute_round(std::span<const LaneStepRequest>(&last_prompt_req, 1),
+                                       last_sink ? &*last_sink : nullptr);
+    } else {
+        const std::uint32_t chunk_cfg = opts.prefill_chunk;
+        std::uint32_t start_i = 0;
+        while (start_i < prompt_len) {
+            const std::uint32_t current_chunk =
+                std::min<std::uint32_t>(chunk_cfg, static_cast<std::uint32_t>(prompt_len - start_i));
+            const std::uint32_t end_i = start_i + current_chunk;
+
+            std::span<const std::int32_t> chunk_token_ids(prompt_tokens.data() + start_i, current_chunk);
+            std::vector<std::array<std::int32_t, 3>> chunk_positions(current_chunk);
+            for (std::uint32_t c = 0; c < current_chunk; ++c) {
+                chunk_positions[c] = {pos0[start_i + c], pos1[start_i + c], pos2[start_i + c]};
+            }
+
+            std::optional<FlashNextDecodeStateSink> chunk_sink;
+            if (dumper) {
+                chunk_sink = dumper->make_chunk_sink(static_cast<std::int32_t>(start_i),
+                                                     chunk_token_ids, chunk_positions);
+            }
+
+            if (end_i < prompt_len) {
+                auto chunk_round = executor.execute_prefill_chunk(
+                    lane, chunk_token_ids, chunk_positions, static_cast<std::int32_t>(start_i),
+                    chunk_sink ? &*chunk_sink : nullptr);
+                std::vector<LaneCommitDecision> decision = {{.accept = true}};
+                chunk_round.commit(decision);
+            } else {
+                round = executor.execute_prefill_chunk(
+                    lane, chunk_token_ids, chunk_positions, static_cast<std::int32_t>(start_i),
+                    chunk_sink ? &*chunk_sink : nullptr);
+            }
+            start_i = end_i;
+        }
     }
 
-    LaneStepRequest last_prompt_req{
-        .handle          = lane,
-        .token_id        = prompt_tokens[prompt_len - 1],
-        .token_index     = static_cast<std::int32_t>(prompt_len - 1),
-        .mrope_positions = {pos0[prompt_len - 1], pos1[prompt_len - 1], pos2[prompt_len - 1]},
-    };
-    std::optional<FlashNextDecodeStateSink> last_sink;
-    if (dumper) {
-        last_sink = dumper->make_sink(static_cast<std::int32_t>(prompt_len - 1),
-                                      prompt_tokens[prompt_len - 1],
-                                      {pos0[prompt_len - 1], pos1[prompt_len - 1],
-                                       pos2[prompt_len - 1]});
-    }
-    auto round = executor.execute_round(std::span<const LaneStepRequest>(&last_prompt_req, 1),
-                                        last_sink ? &*last_sink : nullptr);
     if (dumper) {
         dumper->write_manifest();
         if (!opts.json_output) {

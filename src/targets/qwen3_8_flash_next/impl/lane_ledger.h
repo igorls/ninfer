@@ -96,18 +96,27 @@ public:
     [[nodiscard]] PreparedRound begin_round(std::span<const LaneStepRequest> requests,
                                             const PleIndexMetadata& ple_meta);
 
+    [[nodiscard]] PreparedRound begin_prefill_chunk(LaneHandle handle,
+                                                    std::span<const std::int32_t> token_ids,
+                                                    std::int32_t first_token_index,
+                                                    const PleIndexMetadata& ple_meta);
+
     // Rollback if subsequent launch staging fails before completion.
     void rollback_prepared_round(std::uint64_t tx_id);
+    void rollback_prepared_prefill_chunk(std::uint64_t tx_id);
 
     // Commits per-row decisions, swaps accepted recurrent slots in alloc, and updates committed
     // frontier/history.
     void commit_round(std::uint64_t tx_id, std::span<const LaneCommitDecision> decisions,
                       FlashNextRuntimeAllocation& alloc, cudaStream_t stream);
+    void commit_prefill_chunk(std::uint64_t tx_id, FlashNextRuntimeAllocation& alloc,
+                              cudaStream_t stream);
 
     // Aborts transaction: prevents frontier advancement, history commit, and slot publication.
     // Decode may have already written standby recurrent state; abort does not undo those writes.
     // Assigned page groups are retained by their lanes (capacity is not reclaimed).
     void abort_round(std::uint64_t tx_id) noexcept;
+    void abort_prefill_chunk(std::uint64_t tx_id) noexcept;
 
     // Synchronizes dirty host block tables to device memory.
     void sync_tables_if_dirty(FlashNextRuntimeAllocation& alloc, cudaStream_t stream);
@@ -152,9 +161,15 @@ private:
     // Transaction state
     std::uint64_t current_transaction_id_ = 0;
     bool has_pending_batch_               = false;
+    bool is_pending_prefill_chunk_        = false;
     std::vector<LaneStepRequest> pending_requests_;
     std::vector<std::uint32_t> pending_lane_indices_;
     std::vector<std::size_t> previous_group_counts_;
+
+    // Pending prefill chunk state
+    std::uint32_t pending_prefill_lane_             = 0;
+    std::vector<std::int32_t> pending_prefill_tokens_;
+    std::int32_t pending_prefill_first_token_index_ = 0;
 
     void validate_handle(LaneHandle handle, LaneState expected_state) const;
 };

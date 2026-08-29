@@ -20,6 +20,9 @@ struct FlashNextDecodeStateSink {
 [[nodiscard]] std::size_t
 flash_next_text_decode_workspace_capacity_bytes(std::int32_t maximum_blocks, std::int32_t batch);
 
+[[nodiscard]] std::size_t
+flash_next_text_prefill_workspace_capacity_bytes(std::int32_t maximum_blocks, std::int32_t tokens);
+
 void flash_next_text_decode_core(const TextModelView& model, const Tensor& embedding,
                                  const Tensor& token_indices, const Tensor& mrope_positions,
                                  const Tensor& table_rows, const Tensor& source_slots,

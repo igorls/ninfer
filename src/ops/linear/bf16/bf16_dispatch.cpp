@@ -12,8 +12,9 @@ Bf16Launch select_bf16_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t
     const bool qsa_indexer       = n == 640 && k == 2560;
     const bool ple_key           = n == 10240 && k == 2560;
     const bool ple_value         = n == 2560 && k == 2560;
+    const bool shared_down       = n == 2560 && k == 640;
     const bool output_head       = n == 248320 && k == 2560;
-    const bool flash_next_text   = qsa_indexer || ple_key || ple_value || output_head;
+    const bool flash_next_text   = qsa_indexer || ple_key || ple_value || shared_down || output_head;
     const bool vision_patch      = n == 1152 && k == 1536;
     const bool vision_qkv        = n == 3456 && k == 1152;
     const bool vision_proj       = n == 1152 && k == 1152;
@@ -29,7 +30,7 @@ Bf16Launch select_bf16_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t
     if (!supported_problem || t <= 0) {
         throw std::invalid_argument("bf16 linear: unsupported shape or T");
     }
-    if (flash_next_text && t > 8) {
+    if (output_head && t > 8) {
         throw std::invalid_argument("bf16 linear: Flash-Next target requires T in [1,8]");
     }
     if (vision_raw && (t > 131072 || (t % 4) != 0)) {
@@ -41,9 +42,10 @@ Bf16Launch select_bf16_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t
             "bf16 linear: Vision merged-token problems require T in [1,32768]");
     }
     if (flash_next_vision) { return launch_bf16_mma; }
+    if (shared_down) { return launch_bf16_mma; }
     if (t == 1) { return launch_bf16_decode; }
     const std::int32_t small_t_end =
-        n == 5120 ? kBf16SmallTMaxTokens : kBf16LinearSmallTDispatchEnd;
+        flash_next_text ? 8 : (n == 5120 ? kBf16SmallTMaxTokens : kBf16LinearSmallTDispatchEnd);
     if (t <= small_t_end) { return launch_bf16_small_t; }
     return launch_bf16_mma;
 }

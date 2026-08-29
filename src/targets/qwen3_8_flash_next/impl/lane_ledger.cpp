@@ -77,8 +77,21 @@ std::int32_t FlashNextLaneLedger::committed_frontier(LaneHandle handle) const {
 }
 
 const PleTokenHistory& FlashNextLaneLedger::lane_history(LaneHandle handle) const {
-    validate_handle(handle, LaneState::Active);
-    return lanes_[handle.lane_index()].history;
+    const std::uint32_t concurrency = plan_.config.max_concurrency;
+    if (handle.lane_index() >= concurrency) {
+        throw std::invalid_argument("FlashNextLaneLedger: invalid lane index in handle");
+    }
+    const auto& lane = lanes_[handle.lane_index()];
+    if (lane.owner != handle.owner()) {
+        throw std::invalid_argument("FlashNextLaneLedger: cross-executor or invalid owner handle");
+    }
+    if (lane.epoch != handle.epoch()) {
+        throw std::invalid_argument("FlashNextLaneLedger: stale lane handle epoch");
+    }
+    if (lane.state == LaneState::Free) {
+        throw std::logic_error("FlashNextLaneLedger: lane is free");
+    }
+    return lane.history;
 }
 
 std::size_t FlashNextLaneLedger::active_lanes_count() const noexcept {
@@ -212,8 +225,153 @@ FlashNextLaneLedger::begin_round(std::span<const LaneStepRequest> requests,
     return PreparedRound{current_transaction_id_, max_active_blocks, std::move(ple_indices_vec)};
 }
 
+FlashNextLaneLedger::PreparedRound
+FlashNextLaneLedger::begin_prefill_chunk(LaneHandle handle,
+                                         std::span<const std::int32_t> token_ids,
+                                         std::int32_t first_token_index,
+                                         const PleIndexMetadata& ple_meta) {
+    (void)ple_meta;
+    if (has_pending_batch_) {
+        throw std::logic_error(
+            "FlashNextLaneLedger: cannot begin prefill chunk with pending transaction");
+    }
+    validate_handle(handle, LaneState::Active);
+
+    const auto num_tokens = static_cast<std::uint32_t>(token_ids.size());
+    if (num_tokens == 0) {
+        throw std::invalid_argument(
+            "FlashNextLaneLedger: prefill chunk token_ids must not be empty");
+    }
+    const std::uint32_t lane = handle.lane_index();
+    if (first_token_index != lanes_[lane].committed_frontier) {
+        throw std::invalid_argument(
+            "FlashNextLaneLedger: first_token_index must match committed frontier");
+    }
+    if (first_token_index < 0 ||
+        static_cast<std::uint64_t>(first_token_index) + num_tokens > plan_.config.max_context) {
+        throw std::out_of_range("FlashNextLaneLedger: prefill chunk exceeds max_context");
+    }
+    if (current_transaction_id_ == std::numeric_limits<std::uint64_t>::max()) {
+        throw std::overflow_error("FlashNextLaneLedger: transaction id overflow");
+    }
+
+    const std::int32_t last_token_index =
+        first_token_index + static_cast<std::int32_t>(num_tokens) - 1;
+    const std::size_t req_groups =
+        static_cast<std::size_t>(last_token_index /
+                                 static_cast<std::int32_t>(kMainPageGroupTokens)) +
+        1U;
+    auto& owned_groups           = lane_physical_groups_[lane];
+    previous_group_counts_[lane] = owned_groups.size();
+
+    if (req_groups > owned_groups.size()) {
+        const std::size_t total_needed = req_groups - owned_groups.size();
+        if (total_needed > free_physical_groups_.size()) {
+            throw std::runtime_error("FlashNextLaneLedger: physical page group capacity exhausted");
+        }
+        while (owned_groups.size() < req_groups) {
+            const auto phys_group = free_physical_groups_.back();
+            free_physical_groups_.pop_back();
+
+            const auto log_group = static_cast<std::uint32_t>(owned_groups.size());
+            owned_groups.push_back(phys_group);
+
+            for (std::uint32_t s = 0; s < 4U; ++s) {
+                const auto log_att_page = log_group * 4U + s;
+                if (log_att_page < plan_.attention_logical_pages) {
+                    host_attention_table_[static_cast<std::size_t>(lane) *
+                                              plan_.attention_logical_pages +
+                                          log_att_page] =
+                        static_cast<std::int32_t>(phys_group * 4U + s);
+                }
+            }
+            if (log_group < plan_.indexer_logical_pages) {
+                host_indexer_table_[static_cast<std::size_t>(lane) * plan_.indexer_logical_pages +
+                                    log_group] = static_cast<std::int32_t>(phys_group);
+            }
+            block_tables_dirty_ = true;
+        }
+    }
+
+    const std::int32_t max_active_blocks = (last_token_index + 1) / 4;
+    current_transaction_id_ += 1;
+    has_pending_batch_                 = true;
+    is_pending_prefill_chunk_          = true;
+    pending_prefill_lane_              = lane;
+    pending_prefill_tokens_.assign(token_ids.begin(), token_ids.end());
+    pending_prefill_first_token_index_ = first_token_index;
+    lanes_[lane].state                 = LaneState::Pending;
+
+    return PreparedRound{current_transaction_id_, max_active_blocks, {}};
+}
+
+void FlashNextLaneLedger::rollback_prepared_prefill_chunk(std::uint64_t tx_id) {
+    if (!has_pending_batch_ || !is_pending_prefill_chunk_ || tx_id != current_transaction_id_) {
+        return;
+    }
+    const auto lane    = pending_prefill_lane_;
+    lanes_[lane].state = LaneState::Active;
+    const auto prev_count = previous_group_counts_[lane];
+    auto& owned           = lane_physical_groups_[lane];
+    while (owned.size() > prev_count) {
+        const auto log_group = static_cast<std::uint32_t>(owned.size() - 1U);
+        for (std::uint32_t s = 0; s < 4U; ++s) {
+            const auto log_att = log_group * 4U + s;
+            if (log_att < plan_.attention_logical_pages) {
+                host_attention_table_[static_cast<std::size_t>(lane) *
+                                          plan_.attention_logical_pages +
+                                      log_att] = -1;
+            }
+        }
+        if (log_group < plan_.indexer_logical_pages) {
+            host_indexer_table_[static_cast<std::size_t>(lane) * plan_.indexer_logical_pages +
+                                log_group] = -1;
+        }
+        free_physical_groups_.push_back(owned.back());
+        owned.pop_back();
+        block_tables_dirty_ = true;
+    }
+
+    has_pending_batch_        = false;
+    is_pending_prefill_chunk_ = false;
+    pending_prefill_tokens_.clear();
+}
+
+void FlashNextLaneLedger::commit_prefill_chunk(std::uint64_t tx_id,
+                                               FlashNextRuntimeAllocation& alloc,
+                                               cudaStream_t stream) {
+    (void)alloc;
+    (void)stream;
+    if (!has_pending_batch_ || !is_pending_prefill_chunk_ || tx_id != current_transaction_id_) {
+        throw std::logic_error(
+            "FlashNextLaneLedger: invalid or stale prefill chunk transaction commit");
+    }
+    const auto lane = pending_prefill_lane_;
+    for (const auto tok : pending_prefill_tokens_) { lanes_[lane].history.commit(tok); }
+    lanes_[lane].committed_frontier += static_cast<std::int32_t>(pending_prefill_tokens_.size());
+    lanes_[lane].state = LaneState::Active;
+
+    has_pending_batch_        = false;
+    is_pending_prefill_chunk_ = false;
+    pending_prefill_tokens_.clear();
+}
+
+void FlashNextLaneLedger::abort_prefill_chunk(std::uint64_t tx_id) noexcept {
+    if (!has_pending_batch_ || !is_pending_prefill_chunk_ || tx_id != current_transaction_id_) {
+        return;
+    }
+    lanes_[pending_prefill_lane_].state = LaneState::Active;
+    has_pending_batch_                  = false;
+    is_pending_prefill_chunk_           = false;
+    pending_prefill_tokens_.clear();
+}
+
 void FlashNextLaneLedger::rollback_prepared_round(std::uint64_t tx_id) {
     if (!has_pending_batch_ || tx_id != current_transaction_id_) { return; }
+    if (is_pending_prefill_chunk_) {
+        rollback_prepared_prefill_chunk(tx_id);
+        return;
+    }
 
     for (const auto lane : pending_lane_indices_) {
         lanes_[lane].state    = LaneState::Active;
@@ -250,6 +408,18 @@ void FlashNextLaneLedger::commit_round(std::uint64_t tx_id,
     if (!has_pending_batch_ || tx_id != current_transaction_id_) {
         throw std::logic_error("FlashNextLaneLedger: invalid or stale transaction commit");
     }
+    if (is_pending_prefill_chunk_) {
+        if (decisions.size() != 1) {
+            throw std::invalid_argument(
+                "FlashNextLaneLedger: decisions count must be 1 for prefill chunk");
+        }
+        if (decisions[0].accept) {
+            commit_prefill_chunk(tx_id, alloc, stream);
+        } else {
+            abort_prefill_chunk(tx_id);
+        }
+        return;
+    }
     if (decisions.size() != pending_requests_.size()) {
         throw std::invalid_argument(
             "FlashNextLaneLedger: decisions count does not match pending batch size");
@@ -284,6 +454,10 @@ void FlashNextLaneLedger::commit_round(std::uint64_t tx_id,
 
 void FlashNextLaneLedger::abort_round(std::uint64_t tx_id) noexcept {
     if (!has_pending_batch_ || tx_id != current_transaction_id_) { return; }
+    if (is_pending_prefill_chunk_) {
+        abort_prefill_chunk(tx_id);
+        return;
+    }
     for (const auto lane : pending_lane_indices_) { lanes_[lane].state = LaneState::Active; }
     has_pending_batch_ = false;
     pending_requests_.clear();

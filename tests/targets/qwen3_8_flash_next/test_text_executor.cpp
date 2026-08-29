@@ -30,6 +30,7 @@ int test_ledger_cpu() {
         .max_concurrency     = 2,
         .max_context         = 512,
         .state_slot_capacity = 4,
+        .prefill_chunk       = 512,
     };
     const auto curve = flash_next_capacity_curve(cfg);
     auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
@@ -218,6 +219,7 @@ int test_ple_boundary_lifecycle_cpu() {
         .max_concurrency     = 2,
         .max_context         = 512,
         .state_slot_capacity = 4,
+        .prefill_chunk       = 512,
     };
     const auto curve = flash_next_capacity_curve(cfg);
     auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
@@ -345,6 +347,7 @@ int test_cuda_ledger_and_executor(ninfer::DeviceContext& device) {
         .max_concurrency     = 2,
         .max_context         = 512,
         .state_slot_capacity = 4,
+        .prefill_chunk       = 512,
     };
     const auto curve = flash_next_capacity_curve(cfg);
     auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
@@ -495,10 +498,420 @@ int test_cuda_ledger_and_executor(ninfer::DeviceContext& device) {
     return 0;
 }
 
+int test_ledger_prefill_chunk_cpu() {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency     = 2,
+        .max_context         = 512,
+        .state_slot_capacity = 4,
+        .prefill_chunk       = 512,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+
+    FlashNextLaneLedger ledger(plan);
+    PleIndexMetadata ple_meta{};
+    ple_meta.multipliers = {1, 2, 3};
+    ple_meta.head_offsets.fill(0);
+    ple_meta.head_vocab_sizes.fill(100);
+
+    auto lane0 = ledger.allocate_lane();
+
+    // 1. Validation: empty, invalid frontier, out-of-range
+    std::vector<std::int32_t> empty_tokens;
+    try {
+        (void)ledger.begin_prefill_chunk(lane0, empty_tokens, 0, ple_meta);
+        std::cerr << "Failed to reject empty prefill chunk\n";
+        return 1;
+    } catch (const std::invalid_argument&) {}
+
+    std::vector<std::int32_t> chunk4 = {10, 11, 12, 13};
+    try {
+        (void)ledger.begin_prefill_chunk(lane0, chunk4, 2, ple_meta); // expected frontier 0
+        std::cerr << "Failed to reject frontier mismatch in prefill chunk\n";
+        return 1;
+    } catch (const std::invalid_argument&) {}
+
+    // 2. Abort transaction: leaves frontier and history unchanged
+    auto prep0 = ledger.begin_prefill_chunk(lane0, chunk4, 0, ple_meta);
+    if (!ledger.has_pending_transaction()) {
+        std::cerr << "Pending transaction not flagged after begin_prefill_chunk\n";
+        return 1;
+    }
+    ledger.abort_round(prep0.transaction_id);
+    if (ledger.has_pending_transaction()) {
+        std::cerr << "Pending transaction still active after abort_round\n";
+        return 1;
+    }
+    if (ledger.committed_frontier(lane0) != 0) {
+        std::cerr << "Frontier modified after aborted prefill chunk\n";
+        return 1;
+    }
+    const auto& hist0 = ledger.lane_history(lane0);
+    if (hist0.previous_token() != kPleBoundaryTokenId ||
+        hist0.second_previous_token() != kPleBoundaryTokenId) {
+        std::cerr << "History modified after aborted prefill chunk\n";
+        return 1;
+    }
+
+    // 3. Rollback prepared prefill chunk: restores groups and clears tables
+    const auto groups_before = ledger.available_physical_groups();
+    auto prep1 = ledger.begin_prefill_chunk(lane0, chunk4, 0, ple_meta);
+    ledger.rollback_prepared_round(prep1.transaction_id);
+    if (ledger.available_physical_groups() != groups_before) {
+        std::cerr << "Groups not restored after rollback_prepared_round\n";
+        return 1;
+    }
+
+    // 4. Commit prefill chunk (T=4): advances frontier by 4, commits all 4 tokens to history
+    FlashNextRuntimeAllocation dummy_alloc(plan);
+    prep1 = ledger.begin_prefill_chunk(lane0, chunk4, 0, ple_meta);
+    std::vector<LaneCommitDecision> accept = {{.accept = true}};
+    ledger.commit_round(prep1.transaction_id, accept, dummy_alloc, nullptr);
+
+    if (ledger.committed_frontier(lane0) != 4) {
+        std::cerr << "Committed frontier expected 4, got " << ledger.committed_frontier(lane0) << "\n";
+        return 1;
+    }
+    const auto& hist1 = ledger.lane_history(lane0);
+    if (hist1.previous_token() != 13 || hist1.second_previous_token() != 12) {
+        std::cerr << "History after T=4 prefill chunk commit mismatch: got ("
+                  << hist1.previous_token() << ", " << hist1.second_previous_token() << ")\n";
+        return 1;
+    }
+
+    // 5. Subsequent chunk (T=3): from index 4 -> 7
+    std::vector<std::int32_t> chunk3 = {20, 21, 22};
+    auto prep2 = ledger.begin_prefill_chunk(lane0, chunk3, 4, ple_meta);
+    ledger.commit_round(prep2.transaction_id, accept, dummy_alloc, nullptr);
+    if (ledger.committed_frontier(lane0) != 7) {
+        std::cerr << "Committed frontier expected 7, got " << ledger.committed_frontier(lane0) << "\n";
+        return 1;
+    }
+    const auto& hist2 = ledger.lane_history(lane0);
+    if (hist2.previous_token() != 22 || hist2.second_previous_token() != 21) {
+        std::cerr << "History after second chunk commit mismatch\n";
+        return 1;
+    }
+
+    ledger.release_lane(lane0);
+    std::cout << "PASS: test_ledger_prefill_chunk_cpu\n";
+    return 0;
+}
+
+struct SyntheticFlashNextModel {
+    ninfer::DeviceBuffer big_bf16_buf;
+    ninfer::DeviceBuffer big_fp8_buf;
+    ninfer::DeviceBuffer big_nvfp4_gate_codes_buf;
+    ninfer::DeviceBuffer big_nvfp4_gate_scales_buf;
+    ninfer::DeviceBuffer big_nvfp4_down_codes_buf;
+    ninfer::DeviceBuffer big_nvfp4_down_scales_buf;
+    ninfer::DeviceBuffer big_divisors_buf;
+    std::vector<std::byte> ple_table_data;
+    ninfer::targets::qwen3_8_flash_next::detail::TextModelView view;
+};
+
+SyntheticFlashNextModel make_synthetic_model(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    SyntheticFlashNextModel model;
+    constexpr std::uint64_t kOutputHeadBytes = 248'320ULL * 2'560 * 2;
+    model.big_bf16_buf = ninfer::DeviceBuffer(kOutputHeadBytes);
+    model.big_bf16_buf.fill(0);
+
+    constexpr std::uint64_t kFp8Codes = 16'384ULL * 2'560;
+    constexpr std::uint64_t kFp8Bytes = ((kFp8Codes + 255U) & ~255ULL) + 16'384ULL * 4;
+    model.big_fp8_buf = ninfer::DeviceBuffer(kFp8Bytes);
+    model.big_fp8_buf.fill(0);
+    std::vector<float> fp8_scales(16'384, 1.0f);
+    model.big_fp8_buf.copy_from_host(fp8_scales.data(), fp8_scales.size() * sizeof(float), ((kFp8Codes + 255U) & ~255ULL));
+
+    constexpr std::uint64_t gate_code_bytes_per_expert  = 1'280ULL * 2'560 / 2;
+    constexpr std::uint64_t gate_scale_bytes_per_expert = 1'280ULL * 2'560 / 16;
+    constexpr std::uint64_t down_code_bytes_per_expert  = 2'560ULL * 640 / 2;
+    constexpr std::uint64_t down_scale_bytes_per_expert = 2'560ULL * 640 / 16;
+
+    model.big_nvfp4_gate_codes_buf  = ninfer::DeviceBuffer(512 * gate_code_bytes_per_expert);
+    model.big_nvfp4_gate_scales_buf = ninfer::DeviceBuffer(512 * gate_scale_bytes_per_expert);
+    model.big_nvfp4_down_codes_buf  = ninfer::DeviceBuffer(512 * down_code_bytes_per_expert);
+    model.big_nvfp4_down_scales_buf = ninfer::DeviceBuffer(512 * down_scale_bytes_per_expert);
+    model.big_divisors_buf          = ninfer::DeviceBuffer(512 * sizeof(float));
+
+    model.big_nvfp4_gate_codes_buf.fill(0x22);
+    model.big_nvfp4_gate_scales_buf.fill(0x38);
+    model.big_nvfp4_down_codes_buf.fill(0x22);
+    model.big_nvfp4_down_scales_buf.fill(0x38);
+
+    std::vector<float> divisors(512, 1.0f);
+    model.big_divisors_buf.copy_from_host(divisors.data(), sizeof(divisors));
+
+    constexpr std::uint64_t rows         = 1;
+    constexpr std::uint64_t width        = 160;
+    constexpr std::uint64_t scale_offset = 256;
+    model.ple_table_data = std::vector<std::byte>(scale_offset + (width / 16) * 2, std::byte{0});
+    std::fill_n(model.ple_table_data.begin(), width / 2, std::byte{0x88});
+    for (std::uint8_t index = 0; index < 8; ++index) {
+        model.ple_table_data[index] = static_cast<std::byte>(index * 2 | ((index * 2 + 1) << 4));
+    }
+    constexpr std::uint16_t half_point_five = 0x3800;
+    for (std::size_t offset = scale_offset; offset < model.ple_table_data.size(); offset += 2) {
+        std::memcpy(model.ple_table_data.data() + offset, &half_point_five, sizeof(half_point_five));
+    }
+    for (PleShardView& shard : model.view.ple.table.shards) {
+        shard = make_ple_shard_view(model.ple_table_data, rows, width);
+    }
+
+    auto make_bf16_weight = [&](std::int32_t rows, std::int32_t cols) {
+        ninfer::Weight w{};
+        w.payload         = model.big_bf16_buf.p;
+        w.payload_bytes   = static_cast<std::uint64_t>(rows) * cols * 2;
+        w.qdata           = model.big_bf16_buf.p;
+        w.qtype           = ninfer::QType::BF16_CTRL;
+        w.layout          = ninfer::QuantLayout::Contiguous;
+        w.n               = rows;
+        w.k               = cols;
+        w.ndim            = 2;
+        w.shape[0]        = rows;
+        w.shape[1]        = cols;
+        w.padded_shape[0] = rows;
+        w.padded_shape[1] = cols;
+        return w;
+    };
+
+    auto make_fp8_weight = [&](std::int32_t rows, std::int32_t cols) {
+        const std::uint64_t codes = static_cast<std::uint64_t>(rows) * cols;
+        const std::uint64_t scale_off = (codes + 255U) & ~255ULL;
+        ninfer::Weight w{};
+        w.payload           = model.big_fp8_buf.p;
+        w.payload_bytes     = model.big_fp8_buf.bytes;
+        w.qdata             = model.big_fp8_buf.p;
+        w.scales            = static_cast<const std::byte*>(model.big_fp8_buf.p) + scale_off;
+        w.qtype             = ninfer::QType::FP8_E4M3FN_ROW_F32S;
+        w.layout            = ninfer::QuantLayout::RowScale;
+        w.scale_dtype       = ninfer::DType::FP32;
+        w.group_size        = cols;
+        w.group             = cols;
+        w.n                 = rows;
+        w.k                 = cols;
+        w.ndim              = 2;
+        w.shape[0]          = rows;
+        w.shape[1]          = cols;
+        w.shape[2]          = 1;
+        w.shape[3]          = 1;
+        w.padded_shape[0]   = rows;
+        w.padded_shape[1]   = cols;
+        w.padded_shape[2]   = 1;
+        w.padded_shape[3]   = 1;
+        w.scale_ne[0]       = rows;
+        w.scale_ne[1]       = 1;
+        w.scale_ne[2]       = 1;
+        w.scale_ne[3]       = 1;
+        w.scale_nb[0]       = 4;
+        w.scale_nb[1]       = static_cast<std::int64_t>(rows) * 4;
+        w.scale_nb[2]       = static_cast<std::int64_t>(rows) * 4;
+        w.scale_nb[3]       = static_cast<std::int64_t>(rows) * 4;
+        return w;
+    };
+
+    auto make_tensor = [&](ninfer::DType dt, std::initializer_list<std::int32_t> dims) {
+        if (dt == ninfer::DType::BF16) {
+            return ninfer::Tensor(model.big_bf16_buf.p, dt, dims);
+        } else {
+            return ninfer::Tensor(model.big_fp8_buf.p, dt, dims);
+        }
+    };
+
+    model.view.token_embedding = make_bf16_weight(248'320, 2'560);
+    model.view.output_head     = make_bf16_weight(248'320, 2'560);
+
+    model.view.ple.convolution      = make_tensor(ninfer::DType::BF16, {10'240, 4});
+    model.view.ple.key_projection   = make_bf16_weight(10'240, 2'560);
+    model.view.ple.conv_norm        = make_tensor(ninfer::DType::BF16, {10'240});
+    model.view.ple.key_norm         = make_tensor(ninfer::DType::BF16, {10'240});
+    model.view.ple.query_norm       = make_tensor(ninfer::DType::BF16, {10'240});
+    model.view.ple.value_projection = make_bf16_weight(2'560, 2'560);
+
+    model.view.final_mixer.norm           = make_tensor(ninfer::DType::BF16, {10'240});
+    model.view.final_mixer.input_mix_down = make_bf16_weight(320, 10'240);
+    model.view.final_mixer.input_mix_up   = make_bf16_weight(10'240, 320);
+
+    for (std::size_t l = 0; l < 48; ++l) {
+        auto& layer = model.view.layers[l];
+        layer.attention_hyper.block_inject   = make_bf16_weight(4, 10'240);
+        layer.attention_hyper.norm           = make_tensor(ninfer::DType::BF16, {10'240});
+        layer.attention_hyper.input_mix_down = make_bf16_weight(320, 10'240);
+        layer.attention_hyper.input_mix_up   = make_bf16_weight(10'240, 320);
+
+        layer.mlp_hyper.block_inject   = make_bf16_weight(4, 10'240);
+        layer.mlp_hyper.norm           = make_tensor(ninfer::DType::BF16, {10'240});
+        layer.mlp_hyper.input_mix_down = make_bf16_weight(320, 10'240);
+        layer.mlp_hyper.input_mix_up   = make_bf16_weight(10'240, 320);
+
+        layer.moe.router             = make_bf16_weight(512, 2'560);
+        layer.moe.shared_down        = make_bf16_weight(2'560, 640);
+        layer.moe.shared_gate        = make_bf16_weight(640, 2'560);
+        layer.moe.shared_up          = make_bf16_weight(640, 2'560);
+        layer.moe.shared_gate_weight = make_bf16_weight(1, 2'560);
+        layer.moe.expert_gate_up     = Nvfp4ExpertBankView{
+            .codes                  = static_cast<const std::byte*>(model.big_nvfp4_gate_codes_buf.p),
+            .scales                 = static_cast<const std::byte*>(model.big_nvfp4_gate_scales_buf.p),
+            .weight_scale_divisors  = static_cast<const float*>(model.big_divisors_buf.p),
+            .experts                = 512,
+            .rows                   = 1'280,
+            .columns                = 2'560,
+            .code_bytes_per_expert  = gate_code_bytes_per_expert,
+            .scale_bytes_per_expert = gate_scale_bytes_per_expert,
+        };
+        layer.moe.expert_down        = Nvfp4ExpertBankView{
+            .codes                  = static_cast<const std::byte*>(model.big_nvfp4_down_codes_buf.p),
+            .scales                 = static_cast<const std::byte*>(model.big_nvfp4_down_scales_buf.p),
+            .weight_scale_divisors  = static_cast<const float*>(model.big_divisors_buf.p),
+            .experts                = 512,
+            .rows                   = 2'560,
+            .columns                = 640,
+            .code_bytes_per_expert  = down_code_bytes_per_expert,
+            .scale_bytes_per_expert = down_scale_bytes_per_expert,
+        };
+    }
+
+    for (std::size_t i = 0; i < kGdnLayers; ++i) {
+        auto& gdn = model.view.gdn[i];
+        gdn.a_log             = make_tensor(ninfer::DType::BF16, {48});
+        gdn.convolution       = make_tensor(ninfer::DType::BF16, {10'240, 4});
+        gdn.dt_bias           = make_tensor(ninfer::DType::BF16, {48});
+        gdn.a_b_projection    = make_bf16_weight(96, 2'560);
+        gdn.norm              = make_tensor(ninfer::DType::BF16, {128});
+        gdn.query_key_value_z = make_fp8_weight(16'384, 2'560);
+        gdn.output            = make_fp8_weight(2'560, 6'144);
+    }
+
+    for (std::size_t i = 0; i < kFullAttentionLayers; ++i) {
+        auto& att = model.view.full_attention[i];
+        att.indexer_query_key    = make_bf16_weight(640, 2'560);
+        att.indexer_key_norm     = make_tensor(ninfer::DType::BF16, {128});
+        att.indexer_query_norm   = make_tensor(ninfer::DType::BF16, {128});
+        att.key_norm             = make_tensor(ninfer::DType::BF16, {256});
+        att.query_norm           = make_tensor(ninfer::DType::BF16, {256});
+        att.query_gate_key_value = make_fp8_weight(13'312, 2'560);
+        att.output               = make_fp8_weight(2'560, 6'144);
+    }
+
+    return model;
+}
+
+int test_prefill_chunk_executor(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+
+        auto synthetic_model = make_synthetic_model(device);
+
+        FlashNextRuntimeConfig cfg{
+            .max_concurrency     = 2,
+            .max_context         = 512,
+            .state_slot_capacity = 4,
+            .prefill_chunk       = 512,
+        };
+        const auto curve = flash_next_capacity_curve(cfg);
+        auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+
+        // 1. Sequential execution of 4 tokens on allocation 1
+        FlashNextRuntimeAllocation alloc_seq(plan);
+        alloc_seq.initialize(device.stream);
+        FlashNextTextExecutor exec_seq(synthetic_model.view, ple_meta, device, alloc_seq);
+        auto lane_seq = exec_seq.allocate_lane();
+
+        const std::vector<std::int32_t> tokens = {100, 101, 102, 103};
+        const std::vector<std::array<std::int32_t, 3>> positions = {
+            {0, 0, 0}, {1, 1, 1}, {2, 2, 2}, {3, 3, 3}};
+
+        for (std::size_t t = 0; t < 4; ++t) {
+            LaneStepRequest req{
+                .handle          = lane_seq,
+                .token_id        = tokens[t],
+                .token_index     = static_cast<std::int32_t>(t),
+                .mrope_positions = positions[t],
+            };
+            auto round = exec_seq.execute_round(std::span(&req, 1));
+            std::vector<LaneCommitDecision> decision = {{.accept = true}};
+            round.commit(decision);
+        }
+        device.synchronize();
+
+        const std::size_t persistent_bytes = plan.total_device_bytes - plan.workspace_bytes;
+        std::vector<std::uint8_t> seq_storage(persistent_bytes);
+        CUDA_CHECK(cudaMemcpy(seq_storage.data(), alloc_seq.state_view().qsa_attention_caches[0].key_pages.data,
+                              persistent_bytes, cudaMemcpyDeviceToHost));
+
+        std::vector<std::uint16_t> seq_logits(248'320);
+        CUDA_CHECK(cudaMemcpy(seq_logits.data(), alloc_seq.round_tensors().logits.data,
+                              seq_logits.size() * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+
+        std::vector<std::uint16_t> seq_hidden(2'560);
+        CUDA_CHECK(cudaMemcpy(seq_hidden.data(), alloc_seq.round_tensors().final_hidden.data,
+                              seq_hidden.size() * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+
+        // 2. Chunked execution of T=4 tokens on allocation 2
+        FlashNextRuntimeAllocation alloc_chunk(plan);
+        alloc_chunk.initialize(device.stream);
+        FlashNextTextExecutor exec_chunk(synthetic_model.view, ple_meta, device, alloc_chunk);
+        auto lane_chunk = exec_chunk.allocate_lane();
+
+        auto chunk_round = exec_chunk.execute_prefill_chunk(lane_chunk, tokens, positions, 0);
+        std::vector<LaneCommitDecision> decision = {{.accept = true}};
+        chunk_round.commit(decision);
+        device.synchronize();
+
+        std::vector<std::uint8_t> chunk_storage(persistent_bytes);
+        CUDA_CHECK(cudaMemcpy(chunk_storage.data(), alloc_chunk.state_view().qsa_attention_caches[0].key_pages.data,
+                              persistent_bytes, cudaMemcpyDeviceToHost));
+
+        std::vector<std::uint16_t> chunk_logits(248'320);
+        CUDA_CHECK(cudaMemcpy(chunk_logits.data(), alloc_chunk.round_tensors().logits.data,
+                              chunk_logits.size() * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+
+        std::vector<std::uint16_t> chunk_hidden(2'560);
+        CUDA_CHECK(cudaMemcpy(chunk_hidden.data(), alloc_chunk.round_tensors().final_hidden.data,
+                              chunk_hidden.size() * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+
+        // 3. Compare state storage equality
+        if (std::memcmp(seq_storage.data(), chunk_storage.data(), persistent_bytes) != 0) {
+            std::cerr << "Persistent state storage mismatch between sequential and chunked prefill\n";
+            return 1;
+        }
+
+        // 4. Compare final hidden and logits equality
+        if (seq_hidden != chunk_hidden) {
+            std::cerr << "Final hidden mismatch between sequential and chunked prefill\n";
+            return 1;
+        }
+        if (seq_logits != chunk_logits) {
+            std::cerr << "Logits mismatch between sequential and chunked prefill\n";
+            return 1;
+        }
+
+        exec_seq.release_lane(lane_seq);
+        exec_chunk.release_lane(lane_chunk);
+
+        std::cout << "PASS: test_prefill_chunk_executor\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_prefill_chunk_executor exception: " << e.what() << "\n";
+        return 1;
+    } catch (...) {
+        std::cerr << "test_prefill_chunk_executor unknown exception\n";
+        return 1;
+    }
+}
+
 } // namespace
 
 int main() {
     if (test_ledger_cpu() != 0) return 1;
+    if (test_ledger_prefill_chunk_cpu() != 0) return 1;
     if (test_ple_boundary_lifecycle_cpu() != 0) return 1;
 
     int device_count              = 0;
@@ -512,6 +925,7 @@ int main() {
     ninfer::DeviceContext device(0);
 
     if (test_cuda_ledger_and_executor(device) != 0) return 1;
+    if (test_prefill_chunk_executor(device) != 0) return 1;
 
     std::cout << "OK Flash-Next Text Executor\n";
     return 0;

@@ -43,10 +43,13 @@ inline constexpr std::size_t kRecurrentStateBytesPerSlot =
     kGdnConvBytesPerSlot + kGdnSsmBytesPerSlot + kPleConvBytesPerSlot + kQsaRawKeysBytesPerSlot +
     kQsaRawPositionsBytesPerSlot;
 
+inline constexpr std::uint32_t kPrefillChunkAlignment = 128;
+
 struct FlashNextRuntimeConfig {
     std::uint32_t max_concurrency     = 1;    // 1..8
     std::uint32_t max_context         = 4096; // in tokens: 1..262144
     std::uint32_t state_slot_capacity = 0;    // 0 -> default 2 * max_concurrency
+    std::uint32_t prefill_chunk       = 1024; // nonzero multiple of 128, <= max_context
 };
 
 struct FlashNextRuntimePlan {

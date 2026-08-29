@@ -16,6 +16,7 @@ struct ReferenceToolOptions {
     std::uint32_t page_groups     = 0;
     std::uint32_t state_slots     = 0;
     std::int32_t token_id         = 0;
+    std::uint32_t prefill_chunk   = 0;
     bool do_commit                = true;
     bool json_output              = false;
 

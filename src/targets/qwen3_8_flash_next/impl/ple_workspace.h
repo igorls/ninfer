@@ -15,12 +15,12 @@ struct FlashNextPleWorkspace {
 };
 
 template <class Arena>
-FlashNextPleWorkspace allocate_flash_next_ple_workspace(Arena& arena, std::int32_t batch) {
+FlashNextPleWorkspace allocate_flash_next_ple_workspace(Arena& arena, std::int32_t tokens) {
     return {
-        .projected_key    = arena.alloc(DType::BF16, {10'240, batch}, 256),
-        .projected_value  = arena.alloc(DType::BF16, {2'560, batch}, 256),
-        .gated            = arena.alloc(DType::BF16, {10'240, batch}, 256),
-        .normalized_gated = arena.alloc(DType::BF16, {10'240, batch}, 256),
+        .projected_key    = arena.alloc(DType::BF16, {10'240, tokens}, 256),
+        .projected_value  = arena.alloc(DType::BF16, {2'560, tokens}, 256),
+        .gated            = arena.alloc(DType::BF16, {10'240, tokens}, 256),
+        .normalized_gated = arena.alloc(DType::BF16, {10'240, tokens}, 256),
     };
 }
 

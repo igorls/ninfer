@@ -70,11 +70,12 @@ int test_constants_and_math() {
 int test_capacity_curve_and_finalize() {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
 
-    // 1. Boundary: context 1 -> 1 group per sequence
+    // 1. Boundary: context 128 -> 1 group per sequence
     FlashNextRuntimeConfig cfg1{
         .max_concurrency     = 1,
-        .max_context         = 1,
+        .max_context         = 128,
         .state_slot_capacity = 0,
+        .prefill_chunk       = 128,
     };
     auto curve1 = flash_next_capacity_curve(cfg1);
     if (curve1.minimum_main_page_groups != 1 || curve1.maximum_main_page_groups != 1 ||
@@ -86,10 +87,10 @@ int test_capacity_curve_and_finalize() {
 
     auto plan1 = finalize_flash_next_runtime_plan(cfg1, 1);
     if (plan1.main_page_groups != 1 || plan1.attention_physical_pages != 4 ||
-        plan1.indexer_physical_pages != 1 || plan1.attention_logical_pages != 1 ||
+        plan1.indexer_physical_pages != 1 || plan1.attention_logical_pages != 2 ||
         plan1.indexer_logical_pages != 1 || plan1.state_slots != 2 ||
         plan1.resolved_tokens != 256) {
-        std::cerr << "plan1 (context 1) mismatch\n";
+        std::cerr << "plan1 (context 128) mismatch\n";
         return 1;
     }
 
@@ -98,6 +99,7 @@ int test_capacity_curve_and_finalize() {
         .max_concurrency     = 1,
         .max_context         = 262'144,
         .state_slot_capacity = 0,
+        .prefill_chunk       = 1024,
     };
     auto curve_max = flash_next_capacity_curve(cfg_max);
     if (curve_max.minimum_main_page_groups != 1024 || curve_max.maximum_main_page_groups != 1024) {
@@ -119,6 +121,7 @@ int test_capacity_curve_and_finalize() {
         .max_concurrency     = 8,
         .max_context         = 2048,
         .state_slot_capacity = 0,
+        .prefill_chunk       = 1024,
     };
     auto curve8 = flash_next_capacity_curve(cfg8);
     if (curve8.minimum_main_page_groups != 8 || curve8.maximum_main_page_groups != 64) {
@@ -151,28 +154,40 @@ int test_capacity_curve_and_finalize() {
         } catch (const std::invalid_argument&) { return true; }
     };
 
-    if (!reject_curve({.max_concurrency = 0, .max_context = 256, .state_slot_capacity = 0})) {
+    if (!reject_curve({.max_concurrency = 0, .max_context = 256, .state_slot_capacity = 0, .prefill_chunk = 128})) {
         std::cerr << "Failed to reject max_concurrency = 0\n";
         return 1;
     }
-    if (!reject_curve({.max_concurrency = 9, .max_context = 256, .state_slot_capacity = 0})) {
+    if (!reject_curve({.max_concurrency = 9, .max_context = 256, .state_slot_capacity = 0, .prefill_chunk = 128})) {
         std::cerr << "Failed to reject max_concurrency = 9\n";
         return 1;
     }
-    if (!reject_curve({.max_concurrency = 1, .max_context = 0, .state_slot_capacity = 0})) {
+    if (!reject_curve({.max_concurrency = 1, .max_context = 0, .state_slot_capacity = 0, .prefill_chunk = 128})) {
         std::cerr << "Failed to reject max_context = 0\n";
         return 1;
     }
-    if (!reject_curve({.max_concurrency = 1, .max_context = 262'145, .state_slot_capacity = 0})) {
+    if (!reject_curve({.max_concurrency = 1, .max_context = 262'145, .state_slot_capacity = 0, .prefill_chunk = 128})) {
         std::cerr << "Failed to reject max_context > 262144\n";
         return 1;
     }
-    if (!reject_curve({.max_concurrency = 4, .max_context = 256, .state_slot_capacity = 7})) {
+    if (!reject_curve({.max_concurrency = 4, .max_context = 256, .state_slot_capacity = 7, .prefill_chunk = 128})) {
         std::cerr << "Failed to reject state_slot_capacity < 2 * max_concurrency\n";
         return 1;
     }
-    if (!reject_curve({.max_concurrency = 4, .max_context = 256, .state_slot_capacity = 65})) {
+    if (!reject_curve({.max_concurrency = 4, .max_context = 256, .state_slot_capacity = 65, .prefill_chunk = 128})) {
         std::cerr << "Failed to reject state_slot_capacity > 64\n";
+        return 1;
+    }
+    if (!reject_curve({.max_concurrency = 1, .max_context = 256, .state_slot_capacity = 0, .prefill_chunk = 0})) {
+        std::cerr << "Failed to reject prefill_chunk = 0\n";
+        return 1;
+    }
+    if (!reject_curve({.max_concurrency = 1, .max_context = 256, .state_slot_capacity = 0, .prefill_chunk = 64})) {
+        std::cerr << "Failed to reject prefill_chunk not aligned to 128\n";
+        return 1;
+    }
+    if (!reject_curve({.max_concurrency = 1, .max_context = 256, .state_slot_capacity = 0, .prefill_chunk = 512})) {
+        std::cerr << "Failed to reject prefill_chunk > max_context\n";
         return 1;
     }
 
@@ -200,6 +215,7 @@ int test_runtime_allocation_and_slots(ninfer::DeviceContext& device) {
         .max_concurrency     = 2,
         .max_context         = 256,
         .state_slot_capacity = 4,
+        .prefill_chunk       = 128,
     };
     const auto curve = flash_next_capacity_curve(cfg);
     auto plan        = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
