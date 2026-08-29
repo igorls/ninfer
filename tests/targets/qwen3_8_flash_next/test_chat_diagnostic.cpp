@@ -5,6 +5,7 @@
 #include "ninfer/targets/qwen3_6/frontend.h"
 #include "ninfer/targets/qwen3_6/frontend_resources.h"
 #include "ninfer/targets/qwen3_6/prepared_prompt.h"
+#include "targets/qwen3_8_flash_next/impl/frontend.h"
 #include "targets/qwen3_8_flash_next/impl/load/loader.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_state.h"
@@ -188,30 +189,66 @@ int test_frontend_parity_with_embedded_resources_if_available() {
     auto loaded = LoadedModel::load_from_file(
         path.string(), device, LoadFeatures{.vision = false, .mtp = false});
 
-    auto bytes_to_str = [](const std::vector<std::byte>& b) {
-        return std::string(reinterpret_cast<const char*>(b.data()), b.size());
-    };
-    const auto resources_span = loaded.frontend_resources();
-    if (resources_span.size() != 6) {
-        std::cerr << "Expected 6 frontend resources, got " << resources_span.size() << "\n";
+    const auto& fe = loaded.frontend_resources();
+    if (fe.tokenizer_json.empty() || fe.tokenizer_config_json.empty() ||
+        fe.chat_template_jinja.empty() || fe.generation_config_json.empty() ||
+        fe.preprocessor_config_json.empty() || fe.video_preprocessor_config_json.empty()) {
+        std::cerr << "Expected non-empty frontend resources\n";
         return 1;
     }
 
-    ninfer::targets::qwen3_6::FrontendResources resources{
-        .tokenizer_json                 = bytes_to_str(resources_span[0]),
-        .tokenizer_config_json          = bytes_to_str(resources_span[1]),
-        .chat_template_jinja           = bytes_to_str(resources_span[2]),
-        .generation_config_json         = bytes_to_str(resources_span[3]),
-        .preprocessor_config_json       = bytes_to_str(resources_span[4]),
-        .video_preprocessor_config_json = bytes_to_str(resources_span[5]),
+    // Prove exact byte identity of all six frontend resources against the artifact
+    ninfer::artifact::Reader reader(path);
+    const auto check_resource = [&](std::string_view name, const std::string& loaded_str) -> bool {
+        const auto raw = reader.payload(name);
+        return std::string_view(reinterpret_cast<const char*>(raw.data.data()), raw.data.size()) ==
+               loaded_str;
     };
+    if (!check_resource("frontend/tokenizer.json", fe.tokenizer_json) ||
+        !check_resource("frontend/tokenizer_config.json", fe.tokenizer_config_json) ||
+        !check_resource("frontend/chat_template.jinja", fe.chat_template_jinja) ||
+        !check_resource("frontend/generation_config.json", fe.generation_config_json) ||
+        !check_resource("frontend/preprocessor_config.json", fe.preprocessor_config_json) ||
+        !check_resource("frontend/video_preprocessor_config.json",
+                        fe.video_preprocessor_config_json)) {
+        std::cerr << "Frontend resources byte identity check against artifact failed\n";
+        return 1;
+    }
 
-    auto frontend = ninfer::targets::qwen3_6::make_frontend(
-        resources,
+    auto frontend = make_frontend(
+        loaded,
         ninfer::targets::qwen3_6::FrontendOptions{
             .vision_enabled = false,
             .max_context    = 4096,
         });
+
+    // 1. Verify canary prompt renders exact 23 tokens
+    {
+        ninfer::PromptInput canary_input;
+        canary_input.options.reasoning_effort = ninfer::ReasoningEffort::Medium;
+        ninfer::ChatMessage user_msg;
+        user_msg.role = ninfer::ChatRole::User;
+        user_msg.parts.push_back(ninfer::MessagePart{
+            .kind = ninfer::MessagePartKind::Text,
+            .text = "Reply in one short sentence: what makes a good inference engine?",
+        });
+        canary_input.messages.push_back(std::move(user_msg));
+
+        auto prepared = frontend.prepare(std::move(canary_input));
+        const auto& prepared_data =
+            ninfer::targets::qwen3_6::PreparedPromptAccess::view(prepared);
+        const auto& prompt_tokens = prepared_data.token_ids;
+        const std::vector<ninfer::TokenId> expected_canary_tokens = {
+            248045, 846, 198, 20206, 303, 799, 2716, 11316, 25, 1092, 3520, 264,
+            1603, 42903, 4560, 30, 248046, 198, 248045, 74455, 198, 248068, 198
+        };
+        if (std::vector<ninfer::TokenId>(prompt_tokens.begin(), prompt_tokens.end()) !=
+            expected_canary_tokens) {
+            std::cerr << "Canary prompt tokens mismatch! Expected 23 tokens, got "
+                      << prompt_tokens.size() << "\n";
+            return 1;
+        }
+    }
 
     ninfer::PromptInput input;
     ninfer::ChatMessage user_msg;
@@ -270,20 +307,8 @@ int test_real_artifact_chat_diagnostic_smoke_if_available() {
     auto loaded = LoadedModel::load_from_file(
         path.string(), device, LoadFeatures{.vision = false, .mtp = false});
 
-    auto bytes_to_str = [](const std::vector<std::byte>& b) {
-        return std::string(reinterpret_cast<const char*>(b.data()), b.size());
-    };
-    const auto resources_span = loaded.frontend_resources();
-    ninfer::targets::qwen3_6::FrontendResources resources{
-        .tokenizer_json                 = bytes_to_str(resources_span[0]),
-        .tokenizer_config_json          = bytes_to_str(resources_span[1]),
-        .chat_template_jinja           = bytes_to_str(resources_span[2]),
-        .generation_config_json         = bytes_to_str(resources_span[3]),
-        .preprocessor_config_json       = bytes_to_str(resources_span[4]),
-        .video_preprocessor_config_json = bytes_to_str(resources_span[5]),
-    };
-    auto frontend = ninfer::targets::qwen3_6::make_frontend(
-        resources,
+    auto frontend = make_frontend(
+        loaded,
         ninfer::targets::qwen3_6::FrontendOptions{
             .vision_enabled = false,
             .max_context    = 4096,

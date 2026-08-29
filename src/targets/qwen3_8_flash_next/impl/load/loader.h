@@ -4,6 +4,7 @@
 #include "artifact/materializer.h"
 #include "artifact/reader.h"
 #include "core/device.h"
+#include <ninfer/targets/qwen3_6/frontend_resources.h>
 #include "targets/qwen3_8_flash_next/impl/load/bindings.h"
 #include "targets/qwen3_8_flash_next/impl/load/materialized.h"
 #include "targets/qwen3_8_flash_next/impl/model_view.h"
@@ -78,7 +79,7 @@ public:
 
     [[nodiscard]] const PleIndexMetadata& ple_metadata() const noexcept { return ple_metadata_; }
 
-    [[nodiscard]] std::span<const std::vector<std::byte>, 6> frontend_resources() const noexcept {
+    [[nodiscard]] const qwen3_6::FrontendResources& frontend_resources() const noexcept {
         return data_->frontend;
     }
 

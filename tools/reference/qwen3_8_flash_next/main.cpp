@@ -4,6 +4,7 @@
 #include "core/arena.h"
 #include "core/device.h"
 #include "core/tensor.h"
+#include "targets/qwen3_8_flash_next/impl/frontend.h"
 #include "targets/qwen3_8_flash_next/impl/load/bindings.h"
 #include "targets/qwen3_8_flash_next/impl/load/loader.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
@@ -465,12 +466,15 @@ int run_materialize_full(const ReferenceToolOptions& opts) {
 
     const auto& stats              = model.stats();
     const auto device_tensor_count = stats.tensor_count - stats.mapped_tensor_count;
+    const auto& fe                 = model.frontend_resources();
     if (stats.h2d_bytes != kExpectedDeviceWeightsBytes ||
         stats.device_capacity_bytes != kExpectedDeviceArenaBytes ||
         text.weights_arena->capacity() != kExpectedDeviceArenaBytes ||
         device_tensor_count != kExpectedDeviceTensors ||
         stats.resource_count != kExpectedRetainedResources ||
-        model.frontend_resources().size() != kExpectedRetainedResources) {
+        fe.tokenizer_json.empty() || fe.tokenizer_config_json.empty() ||
+        fe.chat_template_jinja.empty() || fe.generation_config_json.empty() ||
+        fe.preprocessor_config_json.empty() || fe.video_preprocessor_config_json.empty()) {
         throw std::logic_error("Materialization statistics violate the exact plan");
     }
 
@@ -623,12 +627,15 @@ int run_materialize_vision(const ReferenceToolOptions& opts) {
 
     const auto& stats              = model.stats();
     const auto device_tensor_count = stats.tensor_count - stats.mapped_tensor_count;
+    const auto& fe                 = model.frontend_resources();
     if (stats.h2d_bytes != kExpectedDeviceWeightsBytes ||
         stats.device_capacity_bytes != kExpectedDeviceArenaBytes ||
         text.weights_arena->capacity() != kExpectedDeviceArenaBytes ||
         device_tensor_count != kExpectedDeviceTensors ||
         stats.resource_count != kExpectedRetainedResources ||
-        model.frontend_resources().size() != kExpectedRetainedResources) {
+        fe.tokenizer_json.empty() || fe.tokenizer_config_json.empty() ||
+        fe.chat_template_jinja.empty() || fe.generation_config_json.empty() ||
+        fe.preprocessor_config_json.empty() || fe.video_preprocessor_config_json.empty()) {
         throw std::logic_error("Text + Vision materialization statistics violate the exact plan");
     }
 
@@ -675,21 +682,9 @@ int run_chat_diagnostic(const ReferenceToolOptions& opts) {
     auto loaded = LoadedModel::load_from_file(
         opts.model_path, device, LoadFeatures{.vision = false, .mtp = false});
 
-    // 2. Build Frontend from 6 retained resources
-    auto bytes_to_str = [](const std::vector<std::byte>& b) {
-        return std::string(reinterpret_cast<const char*>(b.data()), b.size());
-    };
-    const auto resources_span = loaded.frontend_resources();
-    ninfer::targets::qwen3_6::FrontendResources resources{
-        .tokenizer_json                 = bytes_to_str(resources_span[0]),
-        .tokenizer_config_json          = bytes_to_str(resources_span[1]),
-        .chat_template_jinja           = bytes_to_str(resources_span[2]),
-        .generation_config_json         = bytes_to_str(resources_span[3]),
-        .preprocessor_config_json       = bytes_to_str(resources_span[4]),
-        .video_preprocessor_config_json = bytes_to_str(resources_span[5]),
-    };
-    auto frontend = ninfer::targets::qwen3_6::make_frontend(
-        resources,
+    // 2. Build Frontend
+    auto frontend = make_frontend(
+        loaded,
         ninfer::targets::qwen3_6::FrontendOptions{
             .vision_enabled = false,
             .max_context    = opts.max_context,
@@ -1001,21 +996,9 @@ int run_execute_vision(const ReferenceToolOptions& opts) {
         throw std::logic_error("LoadedModel has_vision() is false");
     }
 
-    // 1. Construct Frontend from retained resources
-    const auto byte_vec_to_str = [](const std::vector<std::byte>& v) {
-        return std::string(reinterpret_cast<const char*>(v.data()), v.size());
-    };
-    const auto& fe = model.frontend_resources();
-    ninfer::targets::qwen3_6::FrontendResources resources{
-        .tokenizer_json                 = byte_vec_to_str(fe[0]),
-        .tokenizer_config_json          = byte_vec_to_str(fe[1]),
-        .chat_template_jinja           = byte_vec_to_str(fe[2]),
-        .generation_config_json         = byte_vec_to_str(fe[3]),
-        .preprocessor_config_json       = byte_vec_to_str(fe[4]),
-        .video_preprocessor_config_json = byte_vec_to_str(fe[5]),
-    };
-    auto frontend = ninfer::targets::qwen3_6::make_frontend(
-        resources, ninfer::targets::qwen3_6::FrontendOptions{.vision_enabled = true});
+    // 1. Construct Frontend
+    auto frontend = make_frontend(
+        model, ninfer::targets::qwen3_6::FrontendOptions{.vision_enabled = true});
 
     // 2. Initialize Shared Vision Encoder
     const auto vision_weights = adapt_vision_weights(model.vision_view());

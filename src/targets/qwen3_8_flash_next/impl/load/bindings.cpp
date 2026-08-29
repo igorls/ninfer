@@ -67,20 +67,6 @@ void require_i64_values(const artifact::Binder& binder, ObjectHandle handle,
     }
 }
 
-FrontendPlan bind_frontend(artifact::Binder& binder) {
-    constexpr std::array names = {
-        "frontend/tokenizer.json",           "frontend/tokenizer_config.json",
-        "frontend/chat_template.jinja",      "frontend/generation_config.json",
-        "frontend/preprocessor_config.json", "frontend/video_preprocessor_config.json",
-    };
-    FrontendPlan out;
-    for (std::size_t index = 0; index < names.size(); ++index) {
-        out.resources[index] =
-            binder.require_resource(names[index], artifact::ResourceEncoding::RawBytesV1);
-        binder.retain_on_host(out.resources[index]);
-    }
-    return out;
-}
 
 HyperConnectionPlan bind_hyper(artifact::Binder& binder, const std::string& prefix,
                                bool enabled = true) {
@@ -262,7 +248,7 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, LoadFeatures features) 
     ArtifactLoadPlan out;
     BindingPlan& plan    = out.bindings;
     plan.features        = features;
-    plan.frontend        = bind_frontend(binder);
+    plan.frontend        = qwen3_6::bind_frontend_resources(binder);
     plan.token_embedding = bind_device(binder, "text/token_embedding", NumericFormat::BF16,
                                        kBf16Layout, {248'320, 2'560});
 

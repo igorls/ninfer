@@ -1,6 +1,7 @@
 #pragma once
 
 #include "artifact/binder.h"
+#include <ninfer/targets/qwen3_6/frontend_resources.h>
 
 #include <array>
 #include <cstddef>
@@ -14,10 +15,6 @@ inline constexpr std::size_t kVisionLayers = 27;
 struct LoadFeatures {
     bool vision = false;
     bool mtp    = false;
-};
-
-struct FrontendPlan {
-    std::array<artifact::ObjectHandle, 6> resources;
 };
 
 struct HyperConnectionPlan {
@@ -127,7 +124,7 @@ struct VisionPlan {
 
 struct BindingPlan {
     LoadFeatures features;
-    FrontendPlan frontend;
+    qwen3_6::FrontendResourcePlan frontend;
     artifact::ObjectHandle token_embedding;
     std::array<TextLayerPlan, kTextLayers> text_layers;
     PlePlan ple;

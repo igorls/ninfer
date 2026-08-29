@@ -1,5 +1,6 @@
 add_library(ninfer_qwen3_8_flash_next STATIC
   impl/expert_bank.cpp
+  impl/frontend.cpp
   impl/gdn.cpp
   impl/gdn_kernels.cu
   impl/hyper_connection.cpp
@@ -27,6 +28,7 @@ add_library(ninfer_qwen3_8_flash_next STATIC
   impl/text_executor.cpp)
 ninfer_internal_includes(ninfer_qwen3_8_flash_next)
 target_include_directories(ninfer_qwen3_8_flash_next PUBLIC
-  ${CMAKE_CURRENT_SOURCE_DIR})
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
 target_link_libraries(ninfer_qwen3_8_flash_next PUBLIC ninfer_artifact ninfer_ops ninfer_qwen3_vision)
 ninfer_cuda_archive(ninfer_qwen3_8_flash_next)

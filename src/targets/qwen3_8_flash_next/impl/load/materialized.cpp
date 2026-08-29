@@ -141,9 +141,7 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
         throw std::invalid_argument(
             "MTP materialization is not yet supported in Flash-Next runtime");
     }
-    for (std::size_t index = 0; index < frontend.size(); ++index) {
-        frontend[index] = backing.take_resource_bytes(plan.frontend.resources[index]);
-    }
+    frontend = qwen3_6::take_frontend_resources(backing, plan.frontend);
 
     text.weights_arena     = &backing.device_arena();
     text.token_embedding   = bf16_weight(backing, plan.token_embedding, 248'320, 2'560);

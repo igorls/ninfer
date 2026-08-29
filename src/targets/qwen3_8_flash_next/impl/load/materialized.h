@@ -21,7 +21,7 @@ public:
     LoadedModelData& operator=(LoadedModelData&&)      = delete;
 
     artifact::MaterializedArtifact backing;
-    std::array<std::vector<std::byte>, 6> frontend;
+    qwen3_6::FrontendResources frontend;
     TextModelView text;
     std::optional<VisionModelView> vision;
 };
