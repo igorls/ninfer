@@ -130,7 +130,8 @@ std::size_t FlashNextTextExecutor::active_lanes_count() const noexcept {
     return ledger_.active_lanes_count();
 }
 
-PendingRound FlashNextTextExecutor::execute_round(std::span<const LaneStepRequest> requests) {
+PendingRound FlashNextTextExecutor::execute_round(std::span<const LaneStepRequest> requests,
+                                                   const FlashNextDecodeStateSink* sink) {
     for (const auto& req : requests) {
         if (req.handle.owner() != this) {
             throw std::invalid_argument(
@@ -228,7 +229,7 @@ PendingRound FlashNextTextExecutor::execute_round(std::span<const LaneStepReques
                                     source_slots, destination_slots, gathered_ple,
                                     static_cast<std::int32_t>(alloc_.plan().maximum_blocks),
                                     prepared.max_active_blocks, alloc_.state_view(), alloc_.workspace(),
-                                    final_hidden, logits, device_.stream);
+                                    final_hidden, logits, device_.stream, sink);
 
         return PendingRound(this, prepared.transaction_id, batch_size, logits, final_hidden);
     } catch (...) {

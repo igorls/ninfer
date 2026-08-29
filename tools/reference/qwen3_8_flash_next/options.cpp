@@ -93,6 +93,7 @@ void print_reference_tool_usage(std::string_view prog) {
         << "  --execute-vision           Shortcut for --mode execute-vision\n"
         << "  --prompt <string>          User prompt text for chat-diagnostic\n"
         << "  --system <string>          Optional system prompt for chat-diagnostic\n"
+        << "  --dump-states <dir>        Directory to dump raw state tensors for oracle comparison\n"
         << "  --temperature <float>      Sampling temperature (default: 1.0, 0 = greedy)\n"
         << "  --top-k <N>                Sampling top-k (default: 20)\n"
         << "  --top-p <float>            Sampling top-p (default: 0.95)\n"
@@ -147,6 +148,9 @@ ReferenceToolOptions parse_reference_tool_options(std::span<const std::string_vi
         } else if (arg == "--system") {
             if (++i >= args.size()) throw std::invalid_argument("Missing argument for --system");
             opts.system_prompt = std::string(args[i]);
+        } else if (arg == "--dump-states") {
+            if (++i >= args.size()) throw std::invalid_argument("Missing argument for --dump-states");
+            opts.dump_states = std::string(args[i]);
         } else if (arg == "--temperature") {
             if (++i >= args.size())
                 throw std::invalid_argument("Missing argument for --temperature");
@@ -240,6 +244,11 @@ ReferenceToolOptions parse_reference_tool_options(std::span<const std::string_vi
     }
     if (opts.token_id < 0 || opts.token_id >= 248'320) {
         throw std::invalid_argument("--token-id must be in range [0, 248320)");
+    }
+    if (!opts.dump_states.empty() && opts.mode != "execute-token" &&
+        opts.mode != "chat-diagnostic") {
+        throw std::invalid_argument(
+            "--dump-states is only valid with --execute-token or --chat-diagnostic");
     }
 
     return opts;

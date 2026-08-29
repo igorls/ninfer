@@ -22,6 +22,7 @@ struct ReferenceToolOptions {
     // Chat diagnostic options
     std::string prompt;
     std::string system_prompt;
+    std::string dump_states;
     float temperature             = 1.0f;
     std::int32_t top_k            = 20;
     float top_p                   = 0.95f;

@@ -18,6 +18,9 @@
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
+struct FlashNextDecodeStateSink;
+class FlashNextTextExecutor;
+
 class PendingRound {
 public:
     PendingRound() noexcept = default;
@@ -86,7 +89,8 @@ public:
 
     // Executes one compact decode round for a batch of 1..max_concurrency requests on
     // device_.stream. Returns an owner-bound PendingRound transaction.
-    [[nodiscard]] PendingRound execute_round(std::span<const LaneStepRequest> requests);
+    [[nodiscard]] PendingRound execute_round(std::span<const LaneStepRequest> requests,
+                                             const FlashNextDecodeStateSink* sink = nullptr);
 
     [[nodiscard]] const FlashNextLaneLedger& ledger() const noexcept { return ledger_; }
 

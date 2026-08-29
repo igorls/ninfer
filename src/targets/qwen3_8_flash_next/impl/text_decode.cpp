@@ -1,5 +1,6 @@
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
 
+#include "core/device.h"
 #include "ninfer/ops/embedding.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/residual_add.h"
@@ -17,7 +18,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <stdexcept>
+#include <string>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 namespace {
@@ -126,7 +129,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                                  const Tensor& gathered_ple_embedding, std::int32_t maximum_blocks,
                                  std::int32_t active_blocks, FlashNextDecodeStateView state,
                                  WorkspaceArena& workspace, Tensor& final_hidden, Tensor& logits,
-                                 cudaStream_t stream) {
+                                 cudaStream_t stream, const FlashNextDecodeStateSink* sink) {
     const std::int32_t batch       = embedding.ne[1];
     const std::int32_t state_slots = state.ple_convolution_states.ne[2];
     if (batch <= 0 || batch > 8 || maximum_blocks <= 0 || maximum_blocks > 65'536 ||
@@ -145,26 +148,43 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
     }
     validate_flash_next_decode_state(state, state_slots);
 
+    auto emit_state = [&](std::string_view name, const Tensor& tensor) {
+        if (sink && sink->on_state) {
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            sink->on_state(name, tensor);
+        }
+    };
+
+    emit_state("embedding", embedding);
+
     const auto round_scope = workspace.scope();
     FlashNextTextDecodeWorkspace round_ws =
         allocate_flash_next_text_decode_workspace(workspace, batch);
 
     // 1. Repeat embedding into 4 hyperconnection streams
     repeat_embedding_to_hyper_streams(embedding, round_ws.hyper_hidden, stream);
+    emit_state("hyper_init", round_ws.hyper_hidden);
 
     // 2. 48-layer execution loop
     for (std::size_t layer = 0; layer < 48; ++layer) {
+        char prefix_buf[32];
+        std::snprintf(prefix_buf, sizeof(prefix_buf), "L%02zu_", layer);
+        const std::string prefix(prefix_buf);
+
         // At layer 1: evaluate PLE neural injection and add residual
         if (layer == 1) {
             flash_next_ple_decode(round_ws.hyper_hidden, gathered_ple_embedding, model.ple,
                                   source_slots, destination_slots, state.ple_convolution_states,
                                   workspace, round_ws.ple_injection, stream);
+            emit_state("ple_injection", round_ws.ple_injection);
             ops::residual_add(round_ws.ple_injection, round_ws.hyper_hidden, stream);
+            emit_state("hyper_after_ple", round_ws.hyper_hidden);
         }
 
         // Attention hyper prepare -> block_input [2560, B]
         flash_next_hyper_prepare(round_ws.hyper_hidden, model.layers[layer].attention_hyper,
                                  round_ws.hyper_scratch, round_ws.block_input, stream);
+        emit_state(prefix + "attn_block_input", round_ws.block_input);
 
         // Execute QSA or GDN attention
         if (is_qsa_layer(layer)) {
@@ -174,6 +194,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                 table_rows, source_slots, destination_slots, state.qsa_indexer_caches[qsa_idx],
                 maximum_blocks, active_blocks, workspace, round_ws.selected_blocks,
                 round_ws.selected_counts, stream);
+            emit_state(prefix + "selected_counts", round_ws.selected_counts);
             flash_next_qsa_attention_decode(
                 round_ws.block_input, model.full_attention[qsa_idx], token_indices, mrope_positions,
                 table_rows, round_ws.selected_blocks, round_ws.selected_counts,
@@ -185,31 +206,38 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                                   state.gdn_ssm_states[gdn_idx], workspace, round_ws.block_output,
                                   stream);
         }
+        emit_state(prefix + "attn_block_output", round_ws.block_output);
 
         // Attention hyper inject
         flash_next_hyper_inject(round_ws.block_output, round_ws.hyper_scratch.injection,
                                 round_ws.hyper_hidden, stream);
+        emit_state(prefix + "hyper_after_attn", round_ws.hyper_hidden);
 
         // MLP hyper prepare -> block_input [2560, B]
         flash_next_hyper_prepare(round_ws.hyper_hidden, model.layers[layer].mlp_hyper,
                                  round_ws.hyper_scratch, round_ws.block_input, stream);
+        emit_state(prefix + "mlp_block_input", round_ws.block_input);
 
         // MoE
         flash_next_moe(round_ws.block_input, model.layers[layer].moe, round_ws.block_output,
                        workspace, stream);
+        emit_state(prefix + "mlp_block_output", round_ws.block_output);
 
         // MLP hyper inject
         flash_next_hyper_inject(round_ws.block_output, round_ws.hyper_scratch.injection,
                                 round_ws.hyper_hidden, stream);
+        emit_state(prefix + "hyper_after_mlp", round_ws.hyper_hidden);
     }
 
     // 3. Final hyper mixer -> final_hidden [2560, B]
     flash_next_hyper_mix(round_ws.hyper_hidden, model.final_mixer, round_ws.hyper_scratch,
                          final_hidden, stream);
+    emit_state("final_hidden", final_hidden);
 
     // 4. Output head linear projection -> logits [248320, B]
     ops::linear(final_hidden, model.output_head, logits, ops::LinearPolicy::A16Only, workspace,
                 stream);
+    emit_state("logits", logits);
 }
 
 void flash_next_text_decode(const TextModelView& model, const Tensor& token_ids,
@@ -218,7 +246,8 @@ void flash_next_text_decode(const TextModelView& model, const Tensor& token_ids,
                             const Tensor& destination_slots, const Tensor& gathered_ple_embedding,
                             std::int32_t maximum_blocks, std::int32_t active_blocks,
                             FlashNextDecodeStateView state, WorkspaceArena& workspace,
-                            Tensor& final_hidden, Tensor& logits, cudaStream_t stream) {
+                            Tensor& final_hidden, Tensor& logits, cudaStream_t stream,
+                            const FlashNextDecodeStateSink* sink) {
     const std::int32_t batch = token_ids.ne[0];
     if (batch <= 0 || batch > 8 || !exact_tensor(token_ids, DType::I32, batch) ||
         !exact_bf16_weight(model.token_embedding, 248'320, 2'560)) {
@@ -230,7 +259,7 @@ void flash_next_text_decode(const TextModelView& model, const Tensor& token_ids,
     flash_next_text_decode_core(model, embedding, token_indices, mrope_positions, table_rows,
                                 source_slots, destination_slots, gathered_ple_embedding,
                                 maximum_blocks, active_blocks, state, workspace, final_hidden,
-                                logits, stream);
+                                logits, stream, sink);
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail
