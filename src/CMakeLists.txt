@@ -322,6 +322,7 @@ endif()
 
 # One cold closed registry plus the opaque public product Engine. Family and exact-target
 # directories contribute their sources directly to this single compile owner below.
+add_subdirectory(targets/qwen3_vision)
 add_subdirectory(targets/qwen3_8_flash_next)
 
 add_library(ninfer_engine STATIC
@@ -337,6 +338,7 @@ add_subdirectory(targets/qwen3_6_35b_a3b)
 
 target_link_libraries(ninfer_engine
   PRIVATE
+    ninfer_qwen3_vision
     ninfer_artifact
     ninfer_core
     ninfer_ops

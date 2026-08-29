@@ -10,6 +10,7 @@
 #include <ninfer/targets/qwen3_6/vision_control.h>
 #include "targets/qwen3_6/impl/runtime/layouts.h"
 #include "targets/qwen3_6/impl/runtime/vision_prefill.h"
+#include <ninfer/targets/qwen3_vision/vision.h>
 
 #include <array>
 #include <cstddef>
@@ -57,36 +58,7 @@ public:
                 const VisionWorkspacePlan& plan) const;
 
 private:
-    struct BlockW {
-        const Tensor* norm1_weight    = nullptr;
-        const Tensor* norm1_bias      = nullptr;
-        const Weight* qkv             = nullptr;
-        const Tensor* qkv_bias        = nullptr;
-        const Weight* projection      = nullptr;
-        const Tensor* projection_bias = nullptr;
-        const Tensor* norm2_weight    = nullptr;
-        const Tensor* norm2_bias      = nullptr;
-        const Weight* fc1             = nullptr;
-        const Tensor* fc1_bias        = nullptr;
-        const Weight* fc2             = nullptr;
-        const Tensor* fc2_bias        = nullptr;
-    };
-
-    struct MergerW {
-        const Tensor* norm_weight = nullptr;
-        const Tensor* norm_bias   = nullptr;
-        const Weight* fc1         = nullptr;
-        const Tensor* fc1_bias    = nullptr;
-        const Weight* fc2         = nullptr;
-        const Tensor* fc2_bias    = nullptr;
-    };
-
-    DeviceContext& ctx_;
-    const Weight* patch_embed_      = nullptr;
-    const Tensor* patch_embed_bias_ = nullptr;
-    const Tensor* position_embed_   = nullptr;
-    std::array<BlockW, VisionScheduleConfig::layers> blocks_{};
-    MergerW merger_{};
+    ::ninfer::targets::qwen3_vision::Encoder encoder_;
 };
 
 struct VisionChunk {

@@ -4,14 +4,7 @@
 #include "core/device.h"
 #include "core/layout.h"
 #include <ninfer/targets/qwen3_6/vision_control.h>
-#include "ninfer/ops/add_bias.h"
-#include "ninfer/ops/gelu.h"
-#include "ninfer/ops/layer_norm.h"
-#include "ninfer/ops/linear.h"
-#include "ninfer/ops/residual_add.h"
-#include "ninfer/ops/rope.h"
-#include "ninfer/ops/softmax_attention.h"
-#include "ninfer/ops/vision_pos_embed.h"
+#include <ninfer/targets/qwen3_vision/vision.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -25,6 +18,41 @@
 namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS::schedule {
 namespace {
 
+::ninfer::targets::qwen3_vision::Weights adapt_vision_weights(const LoadedModelData& weights) {
+    if (!weights.vision) {
+        throw std::invalid_argument("Vision execution was requested without materialized weights");
+    }
+    const auto& vision = *weights.vision;
+    ::ninfer::targets::qwen3_vision::Weights out;
+    out.patch_embed      = &vision.common.patch_embedding;
+    out.patch_embed_bias = &vision.common.patch_embedding_bias;
+    out.position_embed   = &vision.common.position_embedding;
+    for (std::size_t i = 0; i < out.layers.size(); ++i) {
+        const auto& src     = vision.common.layers[i];
+        auto& dst           = out.layers[i];
+        dst.norm1_weight    = &src.norm1_weight;
+        dst.norm1_bias      = &src.norm1_bias;
+        dst.qkv             = &src.qkv;
+        dst.qkv_bias        = &src.qkv_bias;
+        dst.projection      = &src.output;
+        dst.projection_bias = &src.output_bias;
+        dst.norm2_weight    = &src.norm2_weight;
+        dst.norm2_bias      = &src.norm2_bias;
+        dst.fc1             = &src.fc1;
+        dst.fc1_bias        = &src.fc1_bias;
+        dst.fc2             = &src.fc2;
+        dst.fc2_bias        = &src.fc2_bias;
+    }
+    out.merger.norm_weight = &vision.common.merger_norm_weight;
+    out.merger.norm_bias   = &vision.common.merger_norm_bias;
+    out.merger.fc1         = &vision.common.merger_fc1;
+    out.merger.fc1_bias    = &vision.common.merger_fc1_bias;
+    out.merger.fc2         = &vision.merger_fc2;
+    out.merger.fc2_bias    = &vision.merger_fc2_bias;
+    out.output_hidden      = VisionConfig::output_hidden;
+    return out;
+}
+
 std::size_t checked_mul(std::size_t a, std::size_t b, const char* label) {
     if (b != 0 && a > std::numeric_limits<std::size_t>::max() / b) {
         throw std::overflow_error(std::string("Vision ") + label + " overflows size_t");
@@ -32,343 +60,45 @@ std::size_t checked_mul(std::size_t a, std::size_t b, const char* label) {
     return a * b;
 }
 
-std::size_t checked_add(std::size_t a, std::size_t b, const char* label) {
-    if (b > std::numeric_limits<std::size_t>::max() - a) {
-        throw std::overflow_error(std::string("Vision ") + label + " overflows size_t");
-    }
-    return a + b;
-}
-
-std::size_t align_up(std::size_t value, std::size_t alignment, const char* label) {
-    if (alignment == 0 || (alignment & (alignment - 1)) != 0) {
-        throw std::invalid_argument(std::string("Vision ") + label +
-                                    " alignment must be a power of two");
-    }
-    return checked_add(value, alignment - 1, label) & ~(alignment - 1);
-}
-
-constexpr std::size_t kWorkspaceAlignment = 256;
-
-struct VisionWorkspaceLayout {
-    TensorRegion position_ids;
-    TensorRegion pos_indices;
-    TensorRegion pos_weights;
-    TensorRegion x;
-    TensorRegion patch_bf16;
-    TensorRegion attended;
-    TensorRegion qkv;
-    TensorRegion attention_norm;
-    TensorRegion projected;
-    TensorRegion mlp_down;
-    TensorRegion mlp_up;
-    TensorRegion mlp_norm;
-    TensorRegion normalized;
-    TensorRegion merger_hidden;
-    std::size_t bytes = 0;
-};
-
-TensorRegion alias_tensor(const TensorRegion& storage, DType dtype,
-                          std::initializer_list<std::int32_t> shape, const char* label) {
-    Tensor tensor(nullptr, dtype, shape);
-    if (tensor.bytes() > storage.region.bytes) {
-        throw std::logic_error(std::string("Vision ") + label +
-                               " does not fit its aliased storage");
-    }
-    TensorRegion out;
-    out.region = LayoutRegion{storage.region.offset, tensor.bytes(), storage.region.alignment};
-    out.dtype  = dtype;
-    std::copy(shape.begin(), shape.end(), out.shape.begin());
-    return out;
-}
-
-VisionWorkspaceLayout build_workspace_layout(std::size_t patches64, std::size_t tokens64) {
-    if (patches64 == 0 || tokens64 == 0 ||
-        patches64 !=
-            checked_mul(tokens64, VisionScheduleConfig::merge_unit, "patch/token relation")) {
-        throw std::invalid_argument("Vision workspace requires P=4V>0");
-    }
-    if (patches64 > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()) ||
-        tokens64 > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
-        throw std::overflow_error("Vision request dimensions exceed int32");
-    }
-    const auto patches = static_cast<std::int32_t>(patches64);
-    const auto tokens  = static_cast<std::int32_t>(tokens64);
-
-    LayoutBuilder builder;
-    VisionWorkspaceLayout out;
-    const auto add = [&](DType dtype, std::initializer_list<std::int32_t> shape,
-                         const char* label) {
-        return builder.add_tensor(dtype, shape, kWorkspaceAlignment, label);
-    };
-    out.x = add(DType::BF16, {VisionScheduleConfig::hidden, patches}, "vision residual");
-    {
-        auto position_lifetime = builder.scope();
-        out.position_ids       = add(DType::I32, {patches, 2}, "vision position ids");
-        {
-            auto patch_scope = builder.scope();
-            out.patch_bf16 =
-                add(DType::BF16, {VisionScheduleConfig::patch_dim, patches}, "vision BF16 patches");
-        }
-        {
-            auto position_scope = builder.scope();
-            out.pos_indices     = add(DType::I32, {4, patches}, "vision position indices");
-            out.pos_weights     = add(DType::FP32, {4, patches}, "vision position weights");
-        }
-        {
-            auto attention_scope = builder.scope();
-            out.qkv = add(DType::BF16, {3 * VisionScheduleConfig::hidden, patches}, "vision QKV");
-            out.attention_norm = add(DType::BF16, {VisionScheduleConfig::hidden, patches},
-                                     "vision attention norm/attended");
-            out.attended       = out.attention_norm;
-            out.projected =
-                alias_tensor(out.qkv, DType::BF16, {VisionScheduleConfig::hidden, patches},
-                             "attention projection output");
-        }
-        {
-            auto mlp_scope = builder.scope();
-            out.mlp_up =
-                add(DType::BF16, {VisionScheduleConfig::intermediate, patches}, "vision MLP up");
-            out.mlp_norm =
-                add(DType::BF16, {VisionScheduleConfig::hidden, patches}, "vision MLP norm/down");
-            out.mlp_down = out.mlp_norm;
-        }
-    }
-    {
-        auto merger_scope = builder.scope();
-        out.normalized =
-            add(DType::BF16, {VisionScheduleConfig::hidden, patches}, "vision merger norm");
-        out.merger_hidden = alias_tensor(
-            out.x, DType::BF16, {VisionScheduleConfig::merger_hidden, tokens}, "merger hidden");
-    }
-    out.bytes = builder.finish(1, "vision workspace");
-    return out;
-}
-
-std::size_t output_handoff_bytes(std::size_t merged_tokens) {
-    if (merged_tokens == 0 ||
-        merged_tokens > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
-        throw std::invalid_argument("Vision output handoff extent must fit positive int32");
-    }
-    LayoutBuilder layout;
-    (void)layout.add_tensor(
-        DType::BF16, {VisionScheduleConfig::out_hidden, static_cast<std::int32_t>(merged_tokens)},
-        kWorkspaceAlignment, "Vision item output handoff");
-    return layout.finish(kWorkspaceAlignment, "Vision item output handoff layout");
-}
-
-std::size_t merger_hidden_bytes(std::size_t merged_tokens) {
-    if (merged_tokens == 0 ||
-        merged_tokens > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
-        throw std::invalid_argument("Vision merger hidden extent must fit positive int32");
-    }
-    Tensor tensor(nullptr, DType::BF16,
-                  {VisionScheduleConfig::merger_hidden, static_cast<std::int32_t>(merged_tokens)});
-    return tensor.bytes();
-}
-
-void copy_host(const void* src, Tensor& dst, cudaStream_t stream) {
-    if (dst.bytes() == 0) { return; }
-    CUDA_CHECK(cudaMemcpyAsync(dst.data, src, dst.bytes(), cudaMemcpyHostToDevice, stream));
-}
-
 } // namespace
 
-VisionContext::VisionContext(DeviceContext& ctx, const LoadedModelData& weights) : ctx_(ctx) {
-    if (!weights.vision) {
-        throw std::invalid_argument("Vision execution was requested without materialized weights");
-    }
-    const auto& vision = *weights.vision;
-    patch_embed_       = &vision.common.patch_embedding;
-    patch_embed_bias_  = &vision.common.patch_embedding_bias;
-    position_embed_    = &vision.common.position_embedding;
-    for (std::uint32_t layer = 0; layer < blocks_.size(); ++layer) {
-        const auto& source  = vision.common.layers[layer];
-        BlockW& out         = blocks_[layer];
-        out.norm1_weight    = &source.norm1_weight;
-        out.norm1_bias      = &source.norm1_bias;
-        out.qkv             = &source.qkv;
-        out.qkv_bias        = &source.qkv_bias;
-        out.projection      = &source.output;
-        out.projection_bias = &source.output_bias;
-        out.norm2_weight    = &source.norm2_weight;
-        out.norm2_bias      = &source.norm2_bias;
-        out.fc1             = &source.fc1;
-        out.fc1_bias        = &source.fc1_bias;
-        out.fc2             = &source.fc2;
-        out.fc2_bias        = &source.fc2_bias;
-    }
-    merger_.norm_weight = &vision.common.merger_norm_weight;
-    merger_.norm_bias   = &vision.common.merger_norm_bias;
-    merger_.fc1         = &vision.common.merger_fc1;
-    merger_.fc1_bias    = &vision.common.merger_fc1_bias;
-    merger_.fc2         = &vision.merger_fc2;
-    merger_.fc2_bias    = &vision.merger_fc2_bias;
-}
+VisionContext::VisionContext(DeviceContext& ctx, const LoadedModelData& weights)
+    : encoder_(ctx, adapt_vision_weights(weights)) {}
 
 std::size_t VisionContext::workspace_bytes(const qwen3_6::VisionItemControl& item) {
-    return workspace_bytes(item.patch_count, item.merged_count);
+    return ::ninfer::targets::qwen3_vision::Encoder::workspace_bytes(item.patch_count, item.merged_count);
 }
 
 std::size_t VisionContext::workspace_bytes(std::size_t patches, std::size_t merged_tokens) {
-    return build_workspace_layout(patches, merged_tokens).bytes;
+    return ::ninfer::targets::qwen3_vision::Encoder::workspace_bytes(patches, merged_tokens);
 }
 
 VisionWorkspacePlan VisionContext::plan_workspace(std::uint32_t max_merged_tokens,
                                                   std::size_t general_capacity_bytes) {
-    if (max_merged_tokens == 0) {
-        throw std::invalid_argument("Vision workspace capacity bound must be positive");
-    }
-    if (general_capacity_bytes == 0) {
-        throw std::invalid_argument("Vision general workspace capacity must be positive");
-    }
-    VisionWorkspacePlan out;
-    out.max_merged_tokens      = max_merged_tokens;
-    out.general_capacity_bytes = general_capacity_bytes;
-    out.encode_peak_bytes =
-        build_workspace_layout(checked_mul(max_merged_tokens, VisionScheduleConfig::merge_unit,
-                                           "capacity patch count"),
-                               max_merged_tokens)
-            .bytes;
-    out.handoff_offset_bytes =
-        align_up(std::max(general_capacity_bytes, merger_hidden_bytes(max_merged_tokens)),
-                 kWorkspaceAlignment, "handoff offset");
-    out.handoff_capacity_bytes = output_handoff_bytes(max_merged_tokens);
-    out.capacity_bytes         = std::max(
-        out.encode_peak_bytes,
-        checked_add(out.handoff_offset_bytes, out.handoff_capacity_bytes, "workspace capacity"));
-    return out;
+    return ::ninfer::targets::qwen3_vision::Encoder::plan_workspace(max_merged_tokens, general_capacity_bytes,
+                                                                   VisionConfig::output_hidden);
 }
 
 Tensor VisionContext::bind_output(DeviceSpan backing, const VisionWorkspacePlan& plan,
                                   std::size_t merged_tokens) {
-    if (backing.data == nullptr || backing.bytes < plan.capacity_bytes || merged_tokens == 0 ||
-        merged_tokens > plan.max_merged_tokens) {
-        throw std::invalid_argument("Vision output binding exceeds its workspace plan");
-    }
-    const std::size_t bytes = output_handoff_bytes(merged_tokens);
-    if (bytes > plan.handoff_capacity_bytes) {
-        throw std::logic_error("Vision output binding exceeds its handoff region");
-    }
-    TensorRegion region;
-    region.region = LayoutRegion{plan.handoff_offset_bytes, bytes, kWorkspaceAlignment};
-    region.dtype  = DType::BF16;
-    region.shape  = {VisionScheduleConfig::out_hidden, static_cast<std::int32_t>(merged_tokens), 1,
-                     1};
-    return region.bind(backing);
+    return ::ninfer::targets::qwen3_vision::Encoder::bind_output(backing, plan, merged_tokens,
+                                                                VisionConfig::output_hidden);
 }
 
 void VisionContext::encode(const VisionItemView& item, Tensor& output, DeviceSpan backing,
                            const VisionWorkspacePlan& plan) const {
     if (item.control == nullptr) { throw std::invalid_argument("Vision item control is null"); }
     const qwen3_6::VisionItemControl& control = *item.control;
-    const auto patches64                      = control.patch_count;
-    const auto tokens64                       = control.merged_count;
-    if (item.patches.size() !=
-        checked_mul(patches64, VisionScheduleConfig::patch_dim, "patch elements")) {
-        throw std::invalid_argument("Vision processor patch buffer has invalid shape");
-    }
-    if (output.dtype != DType::BF16 || output.ne[0] != VisionScheduleConfig::out_hidden ||
-        output.ne[1] != static_cast<std::int32_t>(tokens64) || output.ne[2] != 1 ||
-        output.ne[3] != 1 || !output.is_contiguous() || output.data == nullptr) {
-        throw std::invalid_argument("Vision output must be contiguous BF16 [H,V]");
-    }
-    const Tensor planned_output = bind_output(backing, plan, tokens64);
-    if (output.data != planned_output.data || output.bytes() != planned_output.bytes()) {
-        throw std::invalid_argument("Vision output does not name the planned handoff region");
-    }
-    const VisionWorkspaceLayout layout = build_workspace_layout(patches64, tokens64);
-    if (layout.bytes > plan.encode_peak_bytes || backing.bytes < plan.capacity_bytes) {
-        throw std::invalid_argument("Vision workspace capacity is too small for request");
-    }
-    const auto patches  = static_cast<std::int32_t>(patches64);
-    const auto tokens   = static_cast<std::int32_t>(tokens64);
-    cudaStream_t stream = ctx_.stream;
-
-    Tensor position_ids = layout.position_ids.bind(backing);
-    copy_host(control.position_ids.data(), position_ids, stream);
-
-    Tensor x          = layout.x.bind(backing);
-    Tensor patch_bf16 = layout.patch_bf16.bind(backing);
-    copy_host(item.patches.data(), patch_bf16, stream);
-    ops::linear(patch_bf16, *patch_embed_, x, stream);
-    ops::add_bias(*patch_embed_bias_, x, stream);
-    // The artifact records the source table shape [rows,hidden], while Tensor's
-    // contiguous matrix convention is [inner,columns]. The payload is already
-    // row-major, so this is a zero-copy [hidden,rows] view, not a transpose.
-    Tensor pos_indices = layout.pos_indices.bind(backing);
-    Tensor pos_weights = layout.pos_weights.bind(backing);
-    copy_host(control.position_table_indices.data(), pos_indices, stream);
-    copy_host(control.position_table_weights.data(), pos_weights, stream);
-    Tensor position_table = position_embed_->reshape(
-        {VisionScheduleConfig::hidden, VisionScheduleConfig::position_embeddings});
-    ops::vision_pos_embed_add(position_table, pos_indices, pos_weights, x, stream);
-    for (std::size_t layer = 0; layer < blocks_.size(); ++layer) {
-        const BlockW& block = blocks_[layer];
-        {
-            Tensor attended = layout.attended.bind(backing);
-            {
-                Tensor qkv = layout.qkv.bind(backing);
-                {
-                    Tensor h = layout.attention_norm.bind(backing);
-                    ops::layer_norm(x, *block.norm1_weight, *block.norm1_bias,
-                                    VisionScheduleConfig::norm_eps, h, stream);
-                    ops::linear(h, *block.qkv, qkv, stream);
-                }
-                ops::add_bias(*block.qkv_bias, qkv, stream);
-                const std::int32_t plane      = VisionScheduleConfig::hidden;
-                const std::size_t plane_bytes = static_cast<std::size_t>(plane) * 2;
-                Tensor q(qkv.data, DType::BF16,
-                         {VisionScheduleConfig::head_dim, VisionScheduleConfig::heads, patches});
-                Tensor k(static_cast<unsigned char*>(qkv.data) + plane_bytes, DType::BF16,
-                         {VisionScheduleConfig::head_dim, VisionScheduleConfig::heads, patches});
-                Tensor v(static_cast<unsigned char*>(qkv.data) + 2 * plane_bytes, DType::BF16,
-                         {VisionScheduleConfig::head_dim, VisionScheduleConfig::heads, patches});
-                q.nb[2] = qkv.nb[1];
-                k.nb[2] = qkv.nb[1];
-                v.nb[2] = qkv.nb[1];
-                ops::rope(position_ids, VisionScheduleConfig::rotary_dim,
-                          VisionScheduleConfig::rope_theta, q, k, stream);
-                Tensor attended_heads = attended.view(
-                    {VisionScheduleConfig::head_dim, VisionScheduleConfig::heads, patches});
-                ops::packed_softmax_attention(q, k, v,
-                                              {VisionScheduleConfig::head_dim,
-                                               VisionScheduleConfig::heads,
-                                               VisionScheduleConfig::heads},
-                                              VisionScheduleConfig::attention_scale,
-                                              control.segment_length, attended_heads, stream);
-            }
-            Tensor projected = layout.projected.bind(backing);
-            ops::linear(attended, *block.projection, projected, stream);
-            ops::add_bias(*block.projection_bias, projected, stream);
-            ops::residual_add(projected, x, stream);
-        }
-        {
-            Tensor down = layout.mlp_down.bind(backing);
-            Tensor up   = layout.mlp_up.bind(backing);
-            {
-                Tensor h = layout.mlp_norm.bind(backing);
-                ops::layer_norm(x, *block.norm2_weight, *block.norm2_bias,
-                                VisionScheduleConfig::norm_eps, h, stream);
-                ops::linear(h, *block.fc1, up, stream);
-            }
-            ops::add_bias(*block.fc1_bias, up, stream);
-            ops::gelu(up, ops::GeluMode::Tanh, stream);
-            ops::linear(up, *block.fc2, down, stream);
-            ops::add_bias(*block.fc2_bias, down, stream);
-            ops::residual_add(down, x, stream);
-        }
-    }
-
-    Tensor normalized = layout.normalized.bind(backing);
-    ops::layer_norm(x, *merger_.norm_weight, *merger_.norm_bias, VisionScheduleConfig::norm_eps,
-                    normalized, stream);
-    Tensor merged = normalized.view({VisionScheduleConfig::merger_hidden, tokens});
-    Tensor hidden = layout.merger_hidden.bind(backing);
-    ops::linear(merged, *merger_.fc1, hidden, stream);
-    ops::add_bias(*merger_.fc1_bias, hidden, stream);
-    ops::gelu(hidden, ops::GeluMode::Exact, stream);
-    ops::linear(hidden, *merger_.fc2, output, stream);
-    ops::add_bias(*merger_.fc2_bias, output, stream);
+    const ::ninfer::targets::qwen3_vision::EncodeItemView item_view{
+        .patches                = item.patches,
+        .patch_count            = control.patch_count,
+        .merged_count           = control.merged_count,
+        .segment_length         = control.segment_length,
+        .position_ids           = control.position_ids,
+        .position_table_indices = control.position_table_indices,
+        .position_table_weights = control.position_table_weights,
+    };
+    encoder_.encode(item_view, output, backing, plan);
 }
 
 VisionPrefillSession::VisionPrefillSession(DeviceContext& device, const LoadedModelData& model,

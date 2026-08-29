@@ -102,6 +102,16 @@ set_tests_properties(
   ninfer_kv_cache_test
   ninfer_state_store_test
   PROPERTIES SKIP_RETURN_CODE 77)
+
+# Shared Qwen3 Vision Encoder test.
+ninfer_add_test(ninfer_qwen3_vision_encoder_test
+  SOURCES targets/qwen3_vision/test_vision_encoder.cpp
+  LIBRARIES ninfer_qwen3_vision ninfer_core CUDA::cudart)
+target_include_directories(ninfer_qwen3_vision_encoder_test PRIVATE
+  ${PROJECT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_vision/export)
+set_tests_properties(ninfer_qwen3_vision_encoder_test PROPERTIES SKIP_RETURN_CODE 77)
+
 # Family frontend and one opt-in real-artifact prefix/MTP integration test.
 ninfer_add_test(ninfer_qwen3_6_frontend_test
   SOURCES targets/qwen3_6/test_frontend.cpp

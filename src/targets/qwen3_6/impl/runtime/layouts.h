@@ -11,6 +11,7 @@
 #include <ninfer/targets/qwen3_6/round_state.h>
 #include <ninfer/targets/qwen3_6/state_image.h>
 #include <ninfer/targets/qwen3_6/startup_features.h>
+#include <ninfer/targets/qwen3_vision/vision.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -43,14 +44,7 @@ struct PersistentLayout {
     std::size_t kv_payload_bytes = 0;
 };
 
-struct VisionWorkspacePlan {
-    std::uint32_t max_merged_tokens    = 0;
-    std::size_t general_capacity_bytes = 0;
-    std::size_t encode_peak_bytes      = 0;
-    std::size_t handoff_offset_bytes   = 0;
-    std::size_t handoff_capacity_bytes = 0;
-    std::size_t capacity_bytes         = 0;
-};
+using VisionWorkspacePlan = ::ninfer::targets::qwen3_vision::WorkspacePlan;
 
 struct WorkspacePlan {
     std::size_t text_prefill     = 0;
