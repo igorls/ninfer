@@ -51,6 +51,7 @@ struct FlashNextPrefillChunkStaging {
     Tensor token_indices;   // I32 [tokens]
     Tensor mrope_positions; // I32 [tokens, 3] (planar: axis-major, token fastest)
     Tensor embedding;       // BF16 [2560, tokens]
+    Tensor visual_indices;  // I32 [tokens]
 };
 
 template <class Arena>
@@ -62,6 +63,7 @@ FlashNextPrefillChunkStaging allocate_flash_next_prefill_chunk_staging(Arena& ar
     staging.token_indices   = arena.alloc(DType::I32, {tokens}, 256);
     staging.mrope_positions = arena.alloc(DType::I32, {tokens, 3}, 256);
     staging.embedding       = arena.alloc(DType::BF16, {2'560, tokens}, 256);
+    staging.visual_indices  = arena.alloc(DType::I32, {tokens}, 256);
     return staging;
 }
 

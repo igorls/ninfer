@@ -27,7 +27,8 @@ add_library(ninfer_qwen3_8_flash_next STATIC
   impl/runtime_state.cpp
   impl/text_decode.cpp
   impl/text_decode_kernels.cu
-  impl/text_executor.cpp)
+  impl/text_executor.cpp
+  impl/vision_execute.cpp)
 ninfer_internal_includes(ninfer_qwen3_8_flash_next)
 target_include_directories(ninfer_qwen3_8_flash_next PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}

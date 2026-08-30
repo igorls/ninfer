@@ -52,7 +52,7 @@ void validate_config_invariants(const FlashNextRuntimeConfig& config,
 
     resolved_state_slots = config.state_slot_capacity;
     if (resolved_state_slots == 0) {
-        resolved_state_slots = 2U * config.max_concurrency;
+        resolved_state_slots = 2U * config.max_concurrency + config.continuation_capacity;
     } else if (resolved_state_slots < 2U * config.max_concurrency || resolved_state_slots > 64) {
         throw std::invalid_argument(
             "Flash-Next state_slot_capacity must be in [2 * max_concurrency, 64]");
@@ -108,7 +108,16 @@ compute_fixed_base_bytes(const FlashNextRuntimeConfig& config, std::uint32_t res
         flash_next_text_decode_workspace_capacity_bytes(maximum_blocks, config.max_concurrency);
     const std::size_t prefill_workspace =
         flash_next_text_prefill_workspace_capacity_bytes(maximum_blocks, config.prefill_chunk);
-    workspace_bytes = std::max(decode_workspace, prefill_workspace);
+    const std::size_t general_workspace = std::max(decode_workspace, prefill_workspace);
+    workspace_bytes                     = general_workspace;
+
+    if (config.vision_enabled) {
+        const std::uint32_t merged =
+            config.max_vision_tokens > 0 ? config.max_vision_tokens : 4096U;
+        const auto vision_plan =
+            qwen3_vision::Encoder::plan_workspace(merged, general_workspace, 2560);
+        workspace_bytes = std::max(general_workspace, vision_plan.capacity_bytes);
+    }
 
     return checked_add(
         block_tables_bytes,
@@ -185,6 +194,7 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
     plan.indexer_logical_pages =
         (config.max_context + kIndexerPageTokens - 1U) / kIndexerPageTokens;
     plan.state_slots = resolved_state_slots;
+    plan.continuation_slots = config.continuation_capacity;
     plan.maximum_blocks =
         std::min<std::uint32_t>(65'536U, (config.max_context + kBlockTokens - 1U) / kBlockTokens);
 
@@ -210,6 +220,18 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
         checked_add(plan.attention_kv_bytes, plan.indexer_block_keys_bytes),
         checked_add(fixed_base_bytes, graph_allowance));
     plan.capacity_curve = curve;
+
+    if (config.vision_enabled) {
+        const std::size_t decode_workspace =
+            flash_next_text_decode_workspace_capacity_bytes(plan.maximum_blocks, config.max_concurrency);
+        const std::size_t prefill_workspace =
+            flash_next_text_prefill_workspace_capacity_bytes(plan.maximum_blocks, config.prefill_chunk);
+        const std::size_t general_workspace = std::max(decode_workspace, prefill_workspace);
+        const std::uint32_t merged =
+            config.max_vision_tokens > 0 ? config.max_vision_tokens : 4096U;
+        plan.vision_workspace =
+            qwen3_vision::Encoder::plan_workspace(merged, general_workspace, 2560);
+    }
 
     return plan;
 }

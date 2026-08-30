@@ -9,6 +9,9 @@
 #include <cstddef>
 #include <cstdint>
 
+#include <ninfer/targets/qwen3_vision/vision.h>
+#include <optional>
+
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
 // Page & block tokens for QSA attention and indexer
@@ -66,9 +69,12 @@ struct FlashNextDecodeEgress {
 struct FlashNextRuntimeConfig {
     std::uint32_t max_concurrency     = 1;    // 1..8
     std::uint32_t max_context         = 4096; // in tokens: 1..262144
-    std::uint32_t state_slot_capacity = 0;    // 0 -> default 2 * max_concurrency
+    std::uint32_t state_slot_capacity = 0;    // 0 -> default 2 * max_concurrency + continuation_capacity
+    std::uint32_t continuation_capacity = 0;  // Checkpoint cache slot capacity
     std::uint32_t prefill_chunk       = 1024; // nonzero multiple of 128, <= max_context
     bool use_cuda_graph               = true;
+    bool vision_enabled               = false;
+    std::uint32_t max_vision_tokens   = 4096;
 };
 
 struct FlashNextRuntimePlan {
@@ -80,6 +86,7 @@ struct FlashNextRuntimePlan {
     std::uint32_t attention_logical_pages  = 0; // ceil(max_context / 64)
     std::uint32_t indexer_logical_pages    = 0; // ceil(max_context / 256)
     std::uint32_t state_slots              = 0;
+    std::uint32_t continuation_slots       = 0;
     std::uint32_t maximum_blocks           = 0; // ceil(max_context / 4)
 
     // Memory breakdown in bytes
@@ -92,6 +99,7 @@ struct FlashNextRuntimePlan {
     std::size_t cuda_graph_allowance_bytes = 0;
     std::size_t total_device_bytes         = 0;
 
+    std::optional<qwen3_vision::WorkspacePlan> vision_workspace;
     ninfer::runtime::SequenceCapacityCurve capacity_curve;
 };
 

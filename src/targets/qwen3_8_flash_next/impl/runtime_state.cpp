@@ -20,6 +20,7 @@ void validate_plan_match(const FlashNextRuntimePlan& actual) {
         actual.attention_logical_pages != expected.attention_logical_pages ||
         actual.indexer_logical_pages != expected.indexer_logical_pages ||
         actual.state_slots != expected.state_slots ||
+        actual.continuation_slots != expected.continuation_slots ||
         actual.maximum_blocks != expected.maximum_blocks ||
         actual.attention_kv_bytes != expected.attention_kv_bytes ||
         actual.indexer_block_keys_bytes != expected.indexer_block_keys_bytes ||
@@ -303,6 +304,58 @@ void FlashNextRuntimeAllocation::zero_lane_slots(std::uint32_t lane_index, cudaS
     }
     zero_slot(static_cast<std::uint32_t>(host_active_slots_[lane_index]), stream);
     zero_slot(static_cast<std::uint32_t>(host_standby_slots_[lane_index]), stream);
+}
+
+void FlashNextRuntimeAllocation::copy_state_slot(std::uint32_t src_slot, std::uint32_t dst_slot,
+                                                 cudaStream_t stream) {
+    if (src_slot >= plan_.state_slots || dst_slot >= plan_.state_slots) {
+        throw std::out_of_range("copy_state_slot: slot index exceeds state_slots");
+    }
+    if (src_slot == dst_slot) { return; }
+
+    // 1. GDN Conv & SSM states
+    for (std::size_t i = 0; i < kGdnLayers; ++i) {
+        const auto* src_conv_p = static_cast<const std::byte*>(state_view_.gdn_convolution_states[i].data) +
+                                 src_slot * 10'240ULL * 3ULL * sizeof(std::uint16_t);
+        auto* dst_conv_p = static_cast<std::byte*>(state_view_.gdn_convolution_states[i].data) +
+                           dst_slot * 10'240ULL * 3ULL * sizeof(std::uint16_t);
+        CUDA_CHECK(cudaMemcpyAsync(dst_conv_p, src_conv_p, 10'240ULL * 3ULL * sizeof(std::uint16_t),
+                                   cudaMemcpyDeviceToDevice, stream));
+
+        const auto* src_ssm_p = static_cast<const std::byte*>(state_view_.gdn_ssm_states[i].data) +
+                                src_slot * 128ULL * 128ULL * 48ULL * sizeof(float);
+        auto* dst_ssm_p = static_cast<std::byte*>(state_view_.gdn_ssm_states[i].data) +
+                          dst_slot * 128ULL * 128ULL * 48ULL * sizeof(float);
+        CUDA_CHECK(cudaMemcpyAsync(dst_ssm_p, src_ssm_p, 128ULL * 128ULL * 48ULL * sizeof(float),
+                                   cudaMemcpyDeviceToDevice, stream));
+    }
+
+    // 2. PLE Conv states
+    const auto* src_ple_p = static_cast<const std::byte*>(state_view_.ple_convolution_states.data) +
+                            src_slot * 10'240ULL * 9ULL * sizeof(std::uint16_t);
+    auto* dst_ple_p = static_cast<std::byte*>(state_view_.ple_convolution_states.data) +
+                      dst_slot * 10'240ULL * 9ULL * sizeof(std::uint16_t);
+    CUDA_CHECK(cudaMemcpyAsync(dst_ple_p, src_ple_p, 10'240ULL * 9ULL * sizeof(std::uint16_t),
+                               cudaMemcpyDeviceToDevice, stream));
+
+    // 3. QSA Raw Keys & Positions
+    for (std::size_t i = 0; i < kFullAttentionLayers; ++i) {
+        const auto* src_key_p = static_cast<const std::byte*>(state_view_.qsa_indexer_caches[i].raw_keys.data) +
+                                src_slot * 128ULL * 4ULL * sizeof(std::uint16_t);
+        auto* dst_key_p = static_cast<std::byte*>(state_view_.qsa_indexer_caches[i].raw_keys.data) +
+                          dst_slot * 128ULL * 4ULL * sizeof(std::uint16_t);
+        CUDA_CHECK(cudaMemcpyAsync(dst_key_p, src_key_p, 128ULL * 4ULL * sizeof(std::uint16_t),
+                                   cudaMemcpyDeviceToDevice, stream));
+
+        const auto* src_pos_p =
+            static_cast<const std::byte*>(state_view_.qsa_indexer_caches[i].raw_positions.data) +
+            src_slot * 3ULL * 4ULL * sizeof(std::int32_t);
+        auto* dst_pos_p =
+            static_cast<std::byte*>(state_view_.qsa_indexer_caches[i].raw_positions.data) +
+            dst_slot * 3ULL * 4ULL * sizeof(std::int32_t);
+        CUDA_CHECK(cudaMemcpyAsync(dst_pos_p, src_pos_p, 3ULL * 4ULL * sizeof(std::int32_t),
+                                   cudaMemcpyDeviceToDevice, stream));
+    }
 }
 
 void FlashNextRuntimeAllocation::sync_slots_to_device(cudaStream_t stream) {

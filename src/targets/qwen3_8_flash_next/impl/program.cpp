@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -12,9 +13,14 @@
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
 ProgramImpl::ProgramImpl(const LoadedModelData* model_data, FlashNextRuntimePlan plan_in,
-                         DeviceContext& dev, TextModelView text_override)
-    : model_data_(model_data), plan_(std::move(plan_in)), device_(dev), allocation_(plan_),
-      executor_(model_data_ != nullptr ? model_data_->text : text_override, kPleIndexMetadata,
+                         DeviceContext& dev, TextModelView text_override,
+                         std::optional<VisionModelView> vision_override,
+                         PleIndexMetadata ple_override)
+    : model_data_(model_data), text_override_(std::move(text_override)),
+      vision_override_(std::move(vision_override)),
+      plan_(std::move(plan_in)), device_(dev), allocation_(plan_),
+      executor_(model_data_ != nullptr ? model_data_->text : text_override_,
+                model_data_ != nullptr ? kPleIndexMetadata : ple_override,
                 device_, allocation_),
       lane_states_(plan_.config.max_concurrency),
       sampling_workspace_(std::max<std::size_t>(
@@ -28,6 +34,16 @@ ProgramImpl::ProgramImpl(const LoadedModelData* model_data, FlashNextRuntimePlan
       host_sampling_configs_(plan_.config.max_concurrency),
       host_sampling_positions_(plan_.config.max_concurrency, 0) {
     allocation_.initialize(device_.stream);
+    const std::uint32_t cont_cap = plan_.config.continuation_capacity;
+    continuation_slots_.resize(cont_cap);
+    for (std::uint32_t c = 0; c < cont_cap; ++c) {
+        continuation_slots_[c].cache_slot = 2U * plan_.config.max_concurrency + c;
+    }
+    if (model_data_ != nullptr && model_data_->vision.has_value() && plan_.config.vision_enabled) {
+        vision_session_.emplace(*model_data_->vision, device_, plan_.config.max_vision_tokens);
+    } else if (vision_override_.has_value() && plan_.config.vision_enabled) {
+        vision_session_.emplace(*vision_override_, device_, plan_.config.max_vision_tokens);
+    }
 }
 
 void ProgramImpl::sample_tokens(const Tensor& logits,
@@ -91,8 +107,15 @@ const qwen3_6::PreparedContextCache& RequestBasePlan::context_cache() const noex
 }
 
 std::optional<PrefixShortlistKey>
-RequestBasePlan::prefix_shortlist_key(std::uint32_t /*frontier*/) const noexcept {
-    return std::nullopt;
+RequestBasePlan::prefix_shortlist_key(std::uint32_t frontier) const noexcept {
+    if (impl_ == nullptr || frontier == 0 || frontier > impl_->prefix_digests.size()) {
+        return std::nullopt;
+    }
+    return PrefixShortlistKey{
+        .digest       = impl_->prefix_digests.at(frontier),
+        .frontier     = frontier,
+        .identity_tag = impl_->prefix_identity_tag,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -241,7 +264,10 @@ Program::plan_request(const qwen3_6::PreparedPrompt& prompt,
         throw std::invalid_argument("prompt must contain tokens");
     }
     if (prompt_data.has_media()) {
-        throw std::invalid_argument("Vision requests are not supported in Flash-Next cold path");
+        if (!impl_->vision_session_.has_value() &&
+            (impl_->model_data_ == nullptr || !impl_->model_data_->vision.has_value())) {
+            throw std::invalid_argument("Vision requests require vision features enabled in model");
+        }
     }
     if (prompt_data.token_ids.size() > impl_->plan_.resolved_tokens) {
         throw std::invalid_argument("prompt exceeds configured context capacity");
@@ -280,7 +306,9 @@ Program::plan_request(const qwen3_6::PreparedPrompt& prompt,
             ? FinishReason::OutputLimit
             : FinishReason::ContextCapacity;
     base->summary.prefix_reuse_path    = PrefixReusePath::Root;
-    base->summary.publish_continuation = false;
+    base->summary.publish_continuation =
+        options.allow_prefix_reuse && prompt_data.identity.reusable &&
+        (impl_->plan_.config.continuation_capacity > 0);
 
     const runtime::PrefillWork prefill_work =
         runtime::make_prefill_work(0, base->summary.prompt_tokens, 0, 0,
@@ -292,6 +320,8 @@ Program::plan_request(const qwen3_6::PreparedPrompt& prompt,
     base->effective_output_tokens = base->summary.effective_output_tokens;
     base->allow_prefix_reuse      = options.allow_prefix_reuse;
     base->thinking                = options.thinking;
+    base->prefix_digests.assign(prompt_data);
+    base->prefix_identity_tag     = 0;
 
     base->sampling_config.temperature       = options.sampling.temperature;
     base->sampling_config.top_k             = options.sampling.top_k;
@@ -302,22 +332,68 @@ Program::plan_request(const qwen3_6::PreparedPrompt& prompt,
     base->sampling_config.seed              = options.sampling.seed;
     base->sampling_config.token_counts      = nullptr;
 
+    if (prompt_data.has_media()) {
+        auto control_plan         = qwen3_6::plan_vision_control(prompt_data);
+        auto control              = qwen3_6::build_vision_control(prompt_data, control_plan, 0);
+        base->vision_control_plan = std::move(control_plan);
+        base->vision_control      = std::move(control);
+    }
+
     return RequestBasePlan(std::move(base));
 }
 
 std::optional<AdmissionCandidate>
-Program::inspect_admission(const qwen3_6::PreparedPrompt& /*prompt*/, const RequestBasePlan& base,
-                          runtime::LaneId destination, const ContinuationHandle* /*source*/,
-                          const SharedPrefixHandle* /*shared_source*/,
+Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestBasePlan& base,
+                          runtime::LaneId destination, const ContinuationHandle* source,
+                          const SharedPrefixHandle* shared_source,
                           std::optional<runtime::CheckpointRef> /*checkpoint*/,
-                          bool /*must_retain_private_source*/,
+                          bool must_retain_private_source,
                           const runtime::ContextMachineCostModel& /*machine_cost*/) {
     if (impl_ == nullptr) { throw std::logic_error("Program: instance is empty"); }
 
+    const auto& prompt_data = qwen3_6::PreparedPromptAccess::view(prompt);
     const std::uint32_t prompt_tokens = base.summary().prompt_tokens;
     const std::uint32_t effective_out = base.summary().effective_output_tokens;
-    const std::uint32_t total_tokens  = prompt_tokens + (effective_out > 0 ? effective_out - 1U : 0U);
-    const std::uint32_t required_groups = (total_tokens + 255U) / 256U;
+
+    std::uint32_t reusable_tokens = 0;
+    const detail::ContinuationSlot* cont_slot = nullptr;
+
+    if (shared_source != nullptr) {
+        return std::nullopt;
+    }
+
+    if (source != nullptr) {
+        if (source->owner() != this) {
+            return std::nullopt;
+        }
+        const std::uint32_t c_idx = source->index();
+        const std::uint64_t gen   = source->generation();
+        if (c_idx >= impl_->continuation_slots_.size()) {
+            return std::nullopt;
+        }
+        const auto& c = impl_->continuation_slots_[c_idx];
+        if (c.role != detail::ContinuationSlotRole::Catalogued || c.generation != gen) {
+            return std::nullopt;
+        }
+        const std::size_t K = static_cast<std::size_t>(c.committed_frontier);
+        if (K == 0 || K > prompt_data.token_ids.size() || K > c.committed_tokens.size()) {
+            return std::nullopt;
+        }
+        for (std::size_t i = 0; i < K; ++i) {
+            if (prompt_data.token_ids[i] != c.committed_tokens[i]) {
+                return std::nullopt;
+            }
+        }
+        reusable_tokens = static_cast<std::uint32_t>(K);
+        cont_slot       = &c;
+    }
+
+    const std::uint32_t total_tokens = prompt_tokens + (effective_out > 0 ? effective_out - 1U : 0U);
+    const std::uint32_t total_required_groups = (total_tokens + 255U) / 256U;
+    const std::uint32_t cont_groups =
+        cont_slot != nullptr ? static_cast<std::uint32_t>(cont_slot->physical_groups.size()) : 0U;
+    const std::uint32_t additional_groups_needed =
+        total_required_groups > cont_groups ? (total_required_groups - cont_groups) : 0U;
 
     bool lane_available = false;
     if (destination.value < impl_->plan_.config.max_concurrency) {
@@ -326,20 +402,43 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& /*prompt*/, const Requ
         lane_available = (impl_->executor_.active_lanes_count() < impl_->plan_.config.max_concurrency);
     }
 
-    const bool groups_available = (impl_->executor_.available_physical_groups() >= required_groups);
+    std::uint32_t evictable_groups = 0;
+    for (const auto& c : impl_->continuation_slots_) {
+        if (c.role == detail::ContinuationSlotRole::Catalogued && &c != cont_slot) {
+            evictable_groups += static_cast<std::uint32_t>(c.physical_groups.size());
+        }
+    }
+    const std::uint32_t total_freeable_groups =
+        static_cast<std::uint32_t>(impl_->executor_.available_physical_groups()) + evictable_groups;
+    const bool groups_available = (total_freeable_groups >= additional_groups_needed);
     const bool feasible = (total_tokens <= impl_->plan_.resolved_tokens) && lane_available && groups_available;
 
     const runtime::PrefillWork prefill_work =
-        runtime::make_prefill_work(0, prompt_tokens, 0, 0, 1);
+        runtime::make_prefill_work(reusable_tokens, prompt_tokens, 0, 0, impl_->plan_.config.prefill_chunk);
 
     auto cand_impl                              = std::make_unique<detail::AdmissionCandidateImpl>();
     cand_impl->summary                          = base.summary();
-    cand_impl->assessment.physical_status       = feasible ? runtime::MaterializationPhysicalStatus::Feasible
-                                                           : runtime::MaterializationPhysicalStatus::Infeasible;
-    cand_impl->assessment.source_disposition    = runtime::ClaimDisposition::ConsumedToActive;
+    cand_impl->summary.reusable_prompt_tokens   = reusable_tokens;
+    cand_impl->summary.prefix_reuse_path        = reusable_tokens > 0 ? PrefixReusePath::PrivateEndpoint : PrefixReusePath::Root;
+    cand_impl->assessment.physical_status = feasible ? runtime::MaterializationPhysicalStatus::Feasible
+                                                   : runtime::MaterializationPhysicalStatus::Infeasible;
+    cand_impl->assessment.source_disposition =
+        (source != nullptr && must_retain_private_source)
+            ? runtime::ClaimDisposition::Retained
+            : runtime::ClaimDisposition::ConsumedToActive;
+    cand_impl->assessment.expandable                     = false;
+    cand_impl->assessment.projection_work                = 1;
     cand_impl->assessment.machine.remaining_prefill_work = prefill_work;
-    cand_impl->assessment.machine.reused_prompt_tokens   = 0;
+    cand_impl->assessment.machine.reused_prompt_tokens   = reusable_tokens;
+    const std::uint64_t est_ns                           = static_cast<std::uint64_t>(prefill_work.tokens) * 1000ULL;
+    cand_impl->assessment.machine.immediate_ns           = est_ns;
+    cand_impl->assessment.machine.minimum_request_ns     = est_ns;
     cand_impl->base_plan                        = std::make_unique<detail::RequestBasePlanImpl>(*base.impl_);
+    cand_impl->reusable_tokens                  = reusable_tokens;
+    if (source != nullptr) {
+        cand_impl->source_continuation_index      = source->index();
+        cand_impl->source_continuation_generation = source->generation();
+    }
 
     return AdmissionCandidate(std::move(cand_impl));
 }
@@ -374,6 +473,49 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
         throw std::logic_error("Program: a context transaction is already in progress");
     }
 
+    const runtime::RequestPlanSummary summary = plan.summary();
+    auto adm = ContractAccess::take_admission(plan);
+    const std::uint32_t prompt_tokens = summary.prompt_tokens;
+    const std::uint32_t effective_out  = summary.effective_output_tokens;
+    const std::uint32_t total_tokens   = prompt_tokens + (effective_out > 0 ? effective_out - 1U : 0U);
+    const std::uint32_t total_req_groups = (total_tokens + 255U) / 256U;
+    const std::uint32_t cont_groups =
+        (adm.impl_ != nullptr && adm.impl_->reusable_tokens > 0 &&
+         adm.impl_->source_continuation_index < impl_->continuation_slots_.size())
+            ? static_cast<std::uint32_t>(
+                  impl_->continuation_slots_[adm.impl_->source_continuation_index].physical_groups.size())
+            : 0U;
+    const std::uint32_t additional_needed =
+        total_req_groups > cont_groups ? (total_req_groups - cont_groups) : 0U;
+
+    while (impl_->executor_.available_physical_groups() < additional_needed) {
+        std::uint32_t oldest_idx = impl_->plan_.config.continuation_capacity;
+        std::uint64_t oldest_epoch = std::numeric_limits<std::uint64_t>::max();
+        for (std::uint32_t c = 0; c < impl_->plan_.config.continuation_capacity; ++c) {
+            auto& slot = impl_->continuation_slots_[c];
+            if (slot.role == detail::ContinuationSlotRole::Catalogued) {
+                if (adm.impl_ != nullptr && adm.impl_->reusable_tokens > 0 &&
+                    c == adm.impl_->source_continuation_index) {
+                    continue;
+                }
+                if (slot.last_used_epoch < oldest_epoch) {
+                    oldest_epoch = slot.last_used_epoch;
+                    oldest_idx = c;
+                }
+            }
+        }
+        if (oldest_idx == impl_->plan_.config.continuation_capacity) {
+            break;
+        }
+        auto& victim = impl_->continuation_slots_[oldest_idx];
+        impl_->executor_.release_physical_groups(victim.physical_groups);
+        victim.physical_groups.clear();
+        victim.committed_tokens.clear();
+        victim.committed_frontier = 0;
+        victim.role = detail::ContinuationSlotRole::Vacant;
+        victim.generation++;
+    }
+
     detail::LaneHandle handle;
     try {
         handle = impl_->executor_.allocate_lane();
@@ -387,22 +529,59 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
     st.epoch                     = handle.epoch();
     st.lane_handle               = handle;
 
-    const auto& prompt_data = qwen3_6::PreparedPromptAccess::view(prompt);
-    st.prompt_tokens        = prompt_data.token_ids;
+    auto prompt_data        = qwen3_6::PreparedPromptAccess::take(std::move(prompt));
     st.mrope_pos0.assign(prompt_data.position_axis(0).begin(), prompt_data.position_axis(0).end());
     st.mrope_pos1.assign(prompt_data.position_axis(1).begin(), prompt_data.position_axis(1).end());
     st.mrope_pos2.assign(prompt_data.position_axis(2).begin(), prompt_data.position_axis(2).end());
+    st.prefix_digests.assign(prompt_data);
+    st.prompt_tokens        = std::move(prompt_data.token_ids);
+    st.media_payloads       = std::move(prompt_data.media_payloads);
+    st.vision_items         = std::move(prompt_data.vision_items);
+    st.encoded_item_index   = std::nullopt;
     st.prompt_tokens_processed = 0;
+    st.reused_prompt_tokens    = 0;
+    st.committed_frontier      = 0;
     st.last_token_id           = 0;
     st.last_token_pos          = 0;
     st.last_token_index        = 0;
     st.total_generated_tokens  = 0;
-    st.requested_output_tokens = plan.summary().requested_output_tokens;
-    st.effective_output_tokens = plan.summary().effective_output_tokens;
+    st.requested_output_tokens = summary.requested_output_tokens;
+    st.effective_output_tokens = summary.effective_output_tokens;
+    st.publish_continuation    = summary.publish_continuation;
 
-    auto adm = ContractAccess::take_admission(plan);
     if (adm.impl_ != nullptr && adm.impl_->base_plan != nullptr) {
         st.sampling_config = adm.impl_->base_plan->sampling_config;
+        st.vision_control  = std::move(adm.impl_->base_plan->vision_control);
+    }
+
+    if (adm.impl_ != nullptr && adm.impl_->reusable_tokens > 0) {
+        const std::uint32_t c_idx = adm.impl_->source_continuation_index;
+        const std::uint64_t gen   = adm.impl_->source_continuation_generation;
+        if (c_idx < impl_->continuation_slots_.size()) {
+            auto& c_slot = impl_->continuation_slots_[c_idx];
+            if (c_slot.role == detail::ContinuationSlotRole::Catalogued && c_slot.generation == gen) {
+                // Attach physical groups
+                impl_->executor_.attach_physical_groups(
+                    handle, c_slot.physical_groups, c_slot.committed_frontier, c_slot.history);
+
+                // Copy-on-Resume recurrent state from cache slot to active lane slot
+                const std::int32_t active_slot = impl_->executor_.allocation().current_source_slot(lane_idx);
+                impl_->executor_.copy_state_slot(c_slot.cache_slot, static_cast<std::uint32_t>(active_slot));
+
+                st.prompt_tokens_processed = adm.impl_->reusable_tokens;
+                st.reused_prompt_tokens    = adm.impl_->reusable_tokens;
+                st.last_token_pos          = static_cast<std::int32_t>(adm.impl_->reusable_tokens) - 1;
+                st.last_token_index        = static_cast<std::int32_t>(adm.impl_->reusable_tokens) - 1;
+                st.committed_frontier      = static_cast<std::int32_t>(adm.impl_->reusable_tokens);
+
+                // Consumed to active: release continuation cache entry (page groups transferred to active lane)
+                c_slot.physical_groups.clear();
+                c_slot.committed_tokens.clear();
+                c_slot.committed_frontier = 0;
+                c_slot.role = detail::ContinuationSlotRole::Vacant;
+                c_slot.generation++;
+            }
+        }
     }
 
     st.prefill_completed = false;
@@ -411,6 +590,9 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
     impl_->has_context_transaction_ = true;
     impl_->transaction_lane_        = runtime::LaneId(lane_idx);
     impl_->transaction_epoch_       = handle.epoch();
+    impl_->transaction_has_source_  = (adm.impl_ != nullptr && adm.impl_->reusable_tokens > 0);
+    impl_->transaction_source_disposition_ =
+        adm.impl_ != nullptr ? adm.impl_->assessment.source_disposition : runtime::ClaimDisposition::ConsumedToActive;
     ++impl_->resource_revision_;
 
     return runtime::ContextTransactionReserveStatus::Reserved;
@@ -442,6 +624,7 @@ Program::progress_context_transaction(runtime::CancellationFlagView cancellation
         impl_->has_context_transaction_ = false;
         impl_->transaction_lane_.reset();
         impl_->transaction_epoch_.reset();
+        impl_->transaction_has_source_ = false;
         MaterializationResult res;
         res.status = runtime::ContextTransactionStatus::Aborted;
         return res;
@@ -453,6 +636,11 @@ Program::progress_context_transaction(runtime::CancellationFlagView cancellation
         .sequence = SequenceHandle(this, impl_->transaction_lane_.value(),
                                    impl_->transaction_epoch_.value()),
     };
+    if (impl_->transaction_has_source_) {
+        res.source.emplace(qwen3_6::MaterializationSourceResult{
+            .disposition = impl_->transaction_source_disposition_,
+        });
+    }
     return res;
 }
 
@@ -461,6 +649,7 @@ void Program::finalize_context_transaction() noexcept {
         impl_->has_context_transaction_ = false;
         impl_->transaction_lane_.reset();
         impl_->transaction_epoch_.reset();
+        impl_->transaction_has_source_ = false;
     }
 }
 
@@ -490,11 +679,33 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
 
     const std::size_t N         = st.prompt_tokens.size();
     const std::uint32_t start_i = st.prompt_tokens_processed;
-    const std::uint32_t chunk_size =
-        std::min<std::uint32_t>(impl_->plan_.config.prefill_chunk,
-                                static_cast<std::uint32_t>(N - start_i));
-    const std::uint32_t end_i   = start_i + chunk_size;
+    std::uint32_t end_i =
+        std::min<std::uint32_t>(start_i + impl_->plan_.config.prefill_chunk,
+                                static_cast<std::uint32_t>(N));
 
+    // Chunk clipping for vision items: a chunk never crosses into a new vision item
+    if (st.vision_control.has_value() && !st.vision_control->items.empty()) {
+        for (std::size_t k = 0; k < st.vision_control->items.size(); ++k) {
+            const auto& item = st.vision_control->items[k];
+            if (item.scatter_indices.empty()) { continue; }
+            const std::uint32_t item_begin = static_cast<std::uint32_t>(item.scatter_indices.front());
+            const std::uint32_t item_end   = static_cast<std::uint32_t>(item.scatter_indices.back() + 1);
+
+            if (item_end <= start_i) {
+                continue;
+            }
+            if (start_i < item_begin && item_begin < end_i) {
+                end_i = item_begin;
+                break;
+            }
+            if (item_begin <= start_i && start_i < item_end) {
+                end_i = std::min(end_i, item_end);
+                break;
+            }
+        }
+    }
+
+    const std::uint32_t chunk_size = end_i - start_i;
     std::span<const std::int32_t> chunk_token_ids(st.prompt_tokens.data() + start_i, chunk_size);
     std::vector<std::array<std::int32_t, 3>> chunk_positions(chunk_size);
     for (std::uint32_t i = 0; i < chunk_size; ++i) {
@@ -502,9 +713,47 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
                               st.mrope_pos2[start_i + i]};
     }
 
+    const Tensor* visual_embeddings = nullptr;
+    std::vector<std::int32_t> local_scatter_indices;
+    Tensor chunk_visual_tensor;
+
+    if (st.vision_control.has_value() && !st.vision_control->items.empty()) {
+        for (std::size_t k = 0; k < st.vision_control->items.size(); ++k) {
+            const auto& item = st.vision_control->items[k];
+            if (item.scatter_indices.empty()) { continue; }
+            const auto& scatter = item.scatter_indices;
+            auto begin_it = std::lower_bound(scatter.begin(), scatter.end(), static_cast<std::int32_t>(start_i));
+            auto end_it   = std::lower_bound(begin_it, scatter.end(), static_cast<std::int32_t>(end_i));
+
+            if (begin_it < end_it) {
+                if (!st.encoded_item_index.has_value() || *st.encoded_item_index != k) {
+                    if (!impl_->vision_session_.has_value()) {
+                        throw std::logic_error("Vision item in prefill but vision session not initialized");
+                    }
+                    if (k >= st.media_payloads.size() || !st.media_payloads[k]) {
+                        throw std::logic_error("Missing media payload for vision item");
+                    }
+                    impl_->vision_session_->encode(item, st.media_payloads[k]->span(), impl_->device_.stream);
+                    st.encoded_item_index = k;
+                }
+                const std::size_t visual_begin = begin_it - scatter.begin();
+                const std::size_t visual_count = end_it - begin_it;
+                local_scatter_indices.resize(visual_count);
+                for (std::size_t i = 0; i < visual_count; ++i) {
+                    local_scatter_indices[i] = begin_it[i] - static_cast<std::int32_t>(start_i);
+                }
+                chunk_visual_tensor = impl_->vision_session_->output_tensor().slice(
+                    1, static_cast<std::int32_t>(visual_begin), static_cast<std::int32_t>(visual_count));
+                visual_embeddings = &chunk_visual_tensor;
+                break;
+            }
+        }
+    }
+
     if (end_i < N) {
         auto round = impl_->executor_.execute_prefill_chunk(
-            st.lane_handle, chunk_token_ids, chunk_positions, static_cast<std::int32_t>(start_i));
+            st.lane_handle, chunk_token_ids, chunk_positions, static_cast<std::int32_t>(start_i),
+            nullptr, visual_embeddings, local_scatter_indices);
         std::array<detail::LaneCommitDecision, 1> decision = {{{.accept = true}}};
         round.commit(decision);
         st.last_token_id    = chunk_token_ids.back();
@@ -513,7 +762,8 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
     } else {
         // Final prefill chunk ending at N - 1
         impl_->pending_round_ = impl_->executor_.execute_prefill_chunk(
-            st.lane_handle, chunk_token_ids, chunk_positions, static_cast<std::int32_t>(start_i));
+            st.lane_handle, chunk_token_ids, chunk_positions, static_cast<std::int32_t>(start_i),
+            nullptr, visual_embeddings, local_scatter_indices);
         st.last_token_id    = chunk_token_ids.back();
         st.last_token_pos   = chunk_positions.back()[0];
         st.last_token_index = static_cast<std::int32_t>(end_i - 1);
@@ -528,13 +778,19 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
         impl_->pending_batch_row_counts_[0] = 1;
 
         st.prefill_completed = true;
+        st.committed_frontier = static_cast<std::int32_t>(N);
+        st.media_payloads.clear();
+        if (impl_->vision_session_.has_value()) {
+            impl_->vision_session_->retire_handoff();
+        }
     }
     st.prompt_tokens_processed = end_i;
 
     PrefillProgress progress;
     progress.summary.prompt_tokens        = static_cast<std::uint32_t>(N);
-    progress.summary.reused_prompt_tokens = 0;
-    progress.summary.prefix_reuse_path    = PrefixReusePath::Root;
+    progress.summary.reused_prompt_tokens = st.reused_prompt_tokens;
+    progress.summary.prefix_reuse_path =
+        st.reused_prompt_tokens > 0 ? PrefixReusePath::PrivateEndpoint : PrefixReusePath::Root;
     progress.processed_prompt_tokens      = end_i - start_i;
     progress.complete                     = (end_i == N);
     progress.timing                       = timing.finish();
@@ -715,16 +971,15 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
 
         if (dec.accepted_tokens > 0) {
             const TokenId sampled = pending.tokens()[b];
+            st.prompt_tokens.push_back(sampled);
+            st.prefix_digests.append_generated(std::span(&sampled, 1), 0);
+            st.committed_frontier += 1;
             st.last_token_id      = static_cast<std::int32_t>(sampled);
             st.last_token_pos += 1;
             st.last_token_index += 1;
             ++st.total_generated_tokens;
 
             if (dec.terminal) {
-                impl_->executor_.release_lane(st.lane_handle);
-                st.active   = false;
-                st.finished = true;
-                ++impl_->resource_revision_;
                 result.rows[b].disposition = runtime::CommitDisposition::Finishable;
             } else {
                 result.rows[b].disposition = runtime::CommitDisposition::Active;
@@ -756,16 +1011,103 @@ DiscardResult Program::abort_pending(PendingBatch&& pending) noexcept {
 
 FinishResult Program::finish(SequenceHandle sequence) noexcept {
     if (impl_ != nullptr) {
-        const std::uint32_t lane_idx = sequence.lane().value;
-        if (lane_idx < impl_->plan_.config.max_concurrency) {
-            auto& st = impl_->lane_states_[lane_idx];
-            if (st.active && st.epoch == sequence.epoch()) {
+        try {
+            if (impl_->pending_round_.valid()) {
+                impl_->pending_round_.abort();
+            }
+            const std::uint32_t lane_idx = sequence.lane().value;
+            if (lane_idx < impl_->plan_.config.max_concurrency) {
+                auto& st = impl_->lane_states_[lane_idx];
+                if (st.active && st.epoch == sequence.epoch()) {
+                    const bool should_catalogue =
+                        st.publish_continuation && (impl_->plan_.config.continuation_capacity > 0) &&
+                        (st.committed_frontier > 0);
+
+                if (should_catalogue) {
+                    std::uint32_t target_c_idx = impl_->plan_.config.continuation_capacity;
+                    for (std::uint32_t c = 0; c < impl_->plan_.config.continuation_capacity; ++c) {
+                        if (impl_->continuation_slots_[c].role == detail::ContinuationSlotRole::Vacant) {
+                            target_c_idx = c;
+                            break;
+                        }
+                    }
+                    if (target_c_idx == impl_->plan_.config.continuation_capacity) {
+                        // Evict oldest (LRU)
+                        std::uint64_t oldest_epoch = std::numeric_limits<std::uint64_t>::max();
+                        for (std::uint32_t c = 0; c < impl_->plan_.config.continuation_capacity; ++c) {
+                            if (impl_->continuation_slots_[c].last_used_epoch < oldest_epoch) {
+                                oldest_epoch = impl_->continuation_slots_[c].last_used_epoch;
+                                target_c_idx = c;
+                            }
+                        }
+                        if (target_c_idx < impl_->plan_.config.continuation_capacity) {
+                            impl_->executor_.release_physical_groups(
+                                impl_->continuation_slots_[target_c_idx].physical_groups);
+                            impl_->continuation_slots_[target_c_idx].physical_groups.clear();
+                            impl_->continuation_slots_[target_c_idx].generation++;
+                        }
+                    }
+
+                    if (target_c_idx < impl_->plan_.config.continuation_capacity) {
+                        auto& c_slot = impl_->continuation_slots_[target_c_idx];
+                        c_slot.role = detail::ContinuationSlotRole::Catalogued;
+                        c_slot.last_used_epoch = ++impl_->continuation_epoch_;
+                        c_slot.committed_frontier = st.committed_frontier;
+                        c_slot.committed_tokens = st.prompt_tokens;
+                        c_slot.history = impl_->executor_.lane_history(st.lane_handle);
+                        c_slot.physical_groups = impl_->executor_.take_lane_physical_groups(st.lane_handle);
+
+                        const std::int32_t active_slot = impl_->executor_.allocation().current_source_slot(lane_idx);
+                        impl_->executor_.copy_state_slot(static_cast<std::uint32_t>(active_slot), c_slot.cache_slot);
+
+                        const std::uint64_t digest = st.prefix_digests.at(st.committed_frontier);
+                        c_slot.prefix_digest = digest;
+
+                        FinishResult out;
+                        CheckpointSummary cp;
+                        cp.ref = runtime::CheckpointRef{
+                            .frontier = static_cast<std::uint32_t>(st.committed_frontier),
+                            .ordinal  = 0,
+                        };
+                        cp.shortlist_key = PrefixShortlistKey{
+                            .digest       = digest,
+                            .frontier     = static_cast<std::uint32_t>(st.committed_frontier),
+                            .identity_tag = 0,
+                        };
+                        cp.state_residency = runtime::ReplicaResidency::DeviceOnly;
+                        cp.required_kv = TargetKVRequirement{
+                            .main_frontier    = static_cast<std::uint32_t>(st.committed_frontier),
+                            .backend_frontier = 0,
+                            .main_pages       = static_cast<std::uint32_t>(c_slot.physical_groups.size() * 4),
+                            .backend_pages    = 0,
+                        };
+                        cp.rebuild_work = runtime::make_prefill_work(
+                            0, static_cast<std::uint32_t>(st.committed_frontier), 0, 0,
+                            impl_->plan_.config.prefill_chunk);
+
+                        out.summary.endpoint          = cp;
+                        out.summary.active_references = 0;
+
+                        out.continuation.emplace(ContinuationHandle(
+                            this, target_c_idx, c_slot.generation));
+                        out.disposition = runtime::FinishDisposition::Catalogued;
+                        out.status      = runtime::ConsumeStatus::Consumed;
+
+                        impl_->executor_.release_lane(st.lane_handle);
+                        st.active   = false;
+                        st.finished = true;
+                        ++impl_->resource_revision_;
+                        return out;
+                    }
+                }
+
                 impl_->executor_.release_lane(st.lane_handle);
                 st.active   = false;
                 st.finished = true;
                 ++impl_->resource_revision_;
             }
         }
+        } catch (...) {}
     }
     return FinishResult{
         .status      = runtime::ConsumeStatus::Consumed,
@@ -791,10 +1133,27 @@ AbortResult Program::abort(SequenceHandle sequence) noexcept {
     };
 }
 
-ReleaseResult Program::release_continuation(ContinuationHandle&& /*continuation*/) noexcept {
-    return ReleaseResult{
-        .status = runtime::ConsumeStatus::Consumed,
-    };
+ReleaseResult Program::release_continuation(ContinuationHandle&& continuation) noexcept {
+    ReleaseResult out{ .status = runtime::ConsumeStatus::Consumed };
+    if (impl_ == nullptr) { return out; }
+    if (continuation.owner() != this) { return out; }
+
+    const std::uint32_t c_idx = continuation.index();
+    const std::uint64_t gen   = continuation.generation();
+
+    if (c_idx < impl_->continuation_slots_.size()) {
+        auto& c_slot = impl_->continuation_slots_[c_idx];
+        if (c_slot.role == detail::ContinuationSlotRole::Catalogued && c_slot.generation == gen) {
+            impl_->executor_.release_physical_groups(c_slot.physical_groups);
+            c_slot.physical_groups.clear();
+            c_slot.committed_tokens.clear();
+            c_slot.committed_frontier = 0;
+            c_slot.role = detail::ContinuationSlotRole::Vacant;
+            c_slot.generation++;
+            ++impl_->resource_revision_;
+        }
+    }
+    return out;
 }
 
 ReleaseResult Program::release_shared_prefix(SharedPrefixHandle&& /*shared*/) noexcept {
@@ -814,6 +1173,16 @@ void Program::fail_all_cleanup() noexcept {
             impl_->executor_.release_lane(st.lane_handle);
             st.active   = false;
             st.finished = true;
+        }
+    }
+    for (auto& c_slot : impl_->continuation_slots_) {
+        if (c_slot.role == detail::ContinuationSlotRole::Catalogued) {
+            impl_->executor_.release_physical_groups(c_slot.physical_groups);
+            c_slot.physical_groups.clear();
+            c_slot.committed_tokens.clear();
+            c_slot.committed_frontier = 0;
+            c_slot.role = detail::ContinuationSlotRole::Vacant;
+            c_slot.generation++;
         }
     }
     impl_->has_context_transaction_ = false;
@@ -838,9 +1207,15 @@ std::uint64_t Program::resource_revision() const noexcept {
 
 PhysicalUsageSnapshot Program::physical_usage() const noexcept {
     if (impl_ == nullptr) { return {}; }
+    std::uint32_t catalogued_slots = 0;
+    for (const auto& c : impl_->continuation_slots_) {
+        if (c.role == detail::ContinuationSlotRole::Catalogued) {
+            ++catalogued_slots;
+        }
+    }
     return PhysicalUsageSnapshot{
         .resource_revision       = impl_->resource_revision_,
-        .device_state_slots      = static_cast<std::uint32_t>(impl_->executor_.active_lanes_count()),
+        .device_state_slots      = static_cast<std::uint32_t>(impl_->executor_.active_lanes_count()) + catalogued_slots,
         .host_state_slots        = 0,
         .device_main_kv_pages    = static_cast<std::uint32_t>(
             (impl_->plan_.main_page_groups - impl_->executor_.available_physical_groups()) * 4),
@@ -870,6 +1245,20 @@ MemorySummary Program::memory_summary() const noexcept {
                            impl_->plan_.total_device_bytes - impl_->plan_.workspace_bytes};
     out.workspace = ArenaMemorySummary{impl_->plan_.workspace_bytes, 0, 0};
     out.cuda_graph_allowance_bytes = impl_->plan_.cuda_graph_allowance_bytes;
+    if (impl_->vision_session_.has_value()) {
+        out.vision_workspace = impl_->vision_session_->memory_summary(impl_->plan_.config.max_context);
+    } else if (impl_->plan_.vision_workspace.has_value()) {
+        out.vision_workspace = VisionWorkspaceMemorySummary{
+            .aggregate_prompt_tokens = impl_->plan_.config.max_context,
+            .max_item_tokens         = impl_->plan_.vision_workspace->max_merged_tokens,
+            .general_capacity_bytes  = impl_->plan_.vision_workspace->general_capacity_bytes,
+            .encode_peak_bytes       = impl_->plan_.vision_workspace->encode_peak_bytes,
+            .handoff_offset_bytes    = impl_->plan_.vision_workspace->handoff_offset_bytes,
+            .handoff_capacity_bytes  = impl_->plan_.vision_workspace->handoff_capacity_bytes,
+            .handoff_active_bytes    = 0,
+            .handoff_peak_bytes      = 0,
+        };
+    }
     return out;
 }
 

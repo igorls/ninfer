@@ -129,19 +129,22 @@ Package::SequencePlanner Package::make_sequence_planner(DeviceContext& device,
     (void)weights_profile;
     const std::uint32_t max_concurrency = std::clamp(options.max_concurrency, 1u, 8u);
     // Every active lane needs a source and a destination recurrent-state slot, so the plan's
-    // floor is 2 * max_concurrency. Context-cache continuation capacity only ever adds slots on
-    // top of that floor; with the cache disabled it must not pull the count below it.
+    // floor is 2 * max_concurrency. Context-cache continuation capacity adds slots on top of that floor.
     const std::uint32_t floor_slots = 2u * max_concurrency;
-    const std::uint32_t requested_slots =
+    const std::uint32_t cont_cap =
         options.context_cache.enabled && options.context_cache.max_private_continuations
             ? *options.context_cache.max_private_continuations
             : 0u;
+    const std::uint32_t total_state_slots = floor_slots + cont_cap;
     detail::FlashNextRuntimeConfig config{
-        .max_concurrency     = max_concurrency,
-        .max_context         = options.max_context,
-        .state_slot_capacity = std::min(64u, std::max(floor_slots, requested_slots)),
-        .prefill_chunk       = options.prefill_chunk,
-        .use_cuda_graph      = options.use_cuda_graph,
+        .max_concurrency       = max_concurrency,
+        .max_context           = options.max_context,
+        .state_slot_capacity   = std::min(64u, total_state_slots),
+        .continuation_capacity = cont_cap,
+        .prefill_chunk         = options.prefill_chunk,
+        .use_cuda_graph        = options.use_cuda_graph,
+        .vision_enabled        = options.enable_vision,
+        .max_vision_tokens     = 4096,
     };
     return SequencePlanner(std::make_unique<detail::SequencePlannerImpl>(config));
 }

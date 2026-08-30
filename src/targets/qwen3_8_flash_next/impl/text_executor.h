@@ -104,6 +104,30 @@ public:
         return ledger_.available_physical_groups();
     }
 
+    [[nodiscard]] std::span<const std::uint32_t> lane_physical_groups(LaneHandle handle) const {
+        return ledger_.lane_physical_groups(handle);
+    }
+
+    std::vector<std::uint32_t> take_lane_physical_groups(LaneHandle handle) {
+        return ledger_.take_lane_physical_groups(handle);
+    }
+
+    void release_physical_groups(std::span<const std::uint32_t> groups) {
+        ledger_.release_physical_groups(groups);
+    }
+
+    void attach_physical_groups(LaneHandle handle, std::span<const std::uint32_t> groups,
+                                std::int32_t committed_frontier, const PleTokenHistory& history) {
+        ledger_.attach_physical_groups(handle, groups, committed_frontier, history);
+    }
+
+    void copy_state_slot(std::uint32_t src_slot, std::uint32_t dst_slot) {
+        alloc_.copy_state_slot(src_slot, dst_slot, device_.stream);
+    }
+
+    [[nodiscard]] const FlashNextRuntimeAllocation& allocation() const noexcept { return alloc_; }
+    [[nodiscard]] FlashNextRuntimeAllocation& allocation() noexcept { return alloc_; }
+
     [[nodiscard]] bool has_pending_round() const noexcept {
         return ledger_.has_pending_transaction();
     }
@@ -121,7 +145,9 @@ public:
     execute_prefill_chunk(LaneHandle handle, std::span<const std::int32_t> token_ids,
                           std::span<const std::array<std::int32_t, 3>> positions,
                           std::int32_t first_token_index,
-                          const FlashNextDecodeStateSink* sink = nullptr);
+                          const FlashNextDecodeStateSink* sink                     = nullptr,
+                          const Tensor* visual_embeddings                          = nullptr,
+                          std::span<const std::int32_t> chunk_local_scatter_indices = {});
 
     [[nodiscard]] const FlashNextLaneLedger& ledger() const noexcept { return ledger_; }
 
@@ -150,6 +176,8 @@ private:
     WorkspaceArena sampling_workspace_;
     CudaCompletionEvent round_completion_;
     bool round_in_flight_ = false;
+    // Eager-only: custom embedding columns for the round being built (never captured).
+    std::vector<const Tensor*> pending_custom_embeddings_;
 
     bool pending_is_prefill_chunk_                     = false;
     std::uint32_t pending_prefill_lane_                = 0;

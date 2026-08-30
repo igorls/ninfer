@@ -1268,8 +1268,9 @@ int run_execute_vision(const ReferenceToolOptions& opts) {
         // Now run sequential prefill rounds through FlashNextTextExecutor
         FlashNextRuntimeConfig config{
             .max_concurrency     = 1,
-            .max_context         = static_cast<std::uint32_t>(res.prompt_tokens + 64),
+            .max_context         = ((static_cast<std::uint32_t>(res.prompt_tokens + 64) + 127U) / 128U) * 128U,
             .state_slot_capacity = 2,
+            .prefill_chunk       = 128, // must be a multiple of 128 and <= max_context (5c-1)
         };
         const auto curve = flash_next_capacity_curve(config);
         const std::uint32_t resolved_groups =

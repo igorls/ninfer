@@ -94,6 +94,57 @@ const PleTokenHistory& FlashNextLaneLedger::lane_history(LaneHandle handle) cons
     return lane.history;
 }
 
+std::span<const std::uint32_t> FlashNextLaneLedger::lane_physical_groups(LaneHandle handle) const {
+    validate_handle(handle, LaneState::Active);
+    return lane_physical_groups_[handle.lane_index()];
+}
+
+std::vector<std::uint32_t> FlashNextLaneLedger::take_lane_physical_groups(LaneHandle handle) {
+    validate_handle(handle, LaneState::Active);
+    const std::uint32_t lane = handle.lane_index();
+    std::vector<std::uint32_t> groups = std::move(lane_physical_groups_[lane]);
+    lane_physical_groups_[lane].clear();
+    previous_group_counts_[lane] = 0;
+    return groups;
+}
+
+void FlashNextLaneLedger::release_physical_groups(std::span<const std::uint32_t> groups) {
+    for (const auto g : groups) {
+        free_physical_groups_.push_back(g);
+    }
+}
+
+void FlashNextLaneLedger::attach_physical_groups(
+    LaneHandle handle, std::span<const std::uint32_t> groups,
+    std::int32_t committed_frontier, const PleTokenHistory& history) {
+    validate_handle(handle, LaneState::Active);
+    const std::uint32_t lane = handle.lane_index();
+
+    lane_physical_groups_[lane].assign(groups.begin(), groups.end());
+    previous_group_counts_[lane] = groups.size();
+    lanes_[lane].committed_frontier = committed_frontier;
+    lanes_[lane].history = history;
+
+    // Populate block tables for the attached groups
+    for (std::size_t g_idx = 0; g_idx < groups.size(); ++g_idx) {
+        const std::uint32_t g = groups[g_idx];
+        // 4 attention pages per group
+        for (std::uint32_t p = 0; p < 4; ++p) {
+            const std::size_t log_page = g_idx * 4 + p;
+            if (log_page < plan_.attention_logical_pages) {
+                host_attention_table_[static_cast<std::size_t>(lane) * plan_.attention_logical_pages + log_page] =
+                    static_cast<std::int32_t>(g * 4 + p);
+            }
+        }
+        // 1 indexer page per group
+        if (g_idx < plan_.indexer_logical_pages) {
+            host_indexer_table_[static_cast<std::size_t>(lane) * plan_.indexer_logical_pages + g_idx] =
+                static_cast<std::int32_t>(g);
+        }
+    }
+    block_tables_dirty_ = true;
+}
+
 std::size_t FlashNextLaneLedger::active_lanes_count() const noexcept {
     std::size_t count = 0;
     for (const auto& lane : lanes_) {

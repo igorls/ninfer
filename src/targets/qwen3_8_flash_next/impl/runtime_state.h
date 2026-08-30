@@ -93,9 +93,10 @@ public:
                             std::int32_t standby_slot, cudaStream_t stream);
     void sync_slots_to_device(cudaStream_t stream);
 
-    // Recurrent state zeroing for assigned lane slots
+    // Recurrent state zeroing and copying for assigned lane and cache slots
     void zero_slot(std::uint32_t slot_index, cudaStream_t stream);
     void zero_lane_slots(std::uint32_t lane_index, cudaStream_t stream);
+    void copy_state_slot(std::uint32_t src_slot, std::uint32_t dst_slot, cudaStream_t stream);
 
     [[nodiscard]] std::int32_t current_source_slot(std::uint32_t row_index) const;
     [[nodiscard]] std::int32_t current_destination_slot(std::uint32_t row_index) const;

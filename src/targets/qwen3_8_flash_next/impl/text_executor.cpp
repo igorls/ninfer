@@ -4,6 +4,7 @@
 #include "targets/qwen3_8_flash_next/impl/text_decode_workspace.h"
 #include "ninfer/ops/embedding.h"
 #include "ninfer/ops/sampling.h"
+#include "ninfer/ops/scatter.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -132,6 +133,7 @@ void FlashNextTextExecutor::instantiate_graphs() {
     std::memset(const_cast<void*>(ple_pipeline_.fixed_host_buffer()), 0,
                 max_concurrency * 2'560 * sizeof(std::uint16_t));
 
+    pending_custom_embeddings_.clear();
     for (std::uint32_t B = 1; B <= max_concurrency; ++B) {
         // 1. Eager warm round for module materialization
         execute_round_body(B, nullptr);
@@ -220,6 +222,14 @@ void FlashNextTextExecutor::execute_round_body(std::uint32_t batch_size,
     Tensor embedding =
         alloc_.workspace().alloc(DType::BF16, {2'560, static_cast<std::int32_t>(batch_size)}, 256);
     ops::embedding(token_ids, model_.token_embedding, embedding, device_.stream);
+    for (std::uint32_t i = 0; i < batch_size && i < pending_custom_embeddings_.size(); ++i) {
+        const Tensor* custom = pending_custom_embeddings_[i];
+        if (custom == nullptr) { continue; }
+        CUDA_CHECK(cudaMemcpyAsync(static_cast<std::byte*>(embedding.data) +
+                                       static_cast<std::size_t>(i) * 2'560 * sizeof(std::uint16_t),
+                                   custom->data, 2'560 * sizeof(std::uint16_t),
+                                   cudaMemcpyDeviceToDevice, device_.stream));
+    }
 
     // 4. Target decode core
     Tensor token_indices =
@@ -264,9 +274,11 @@ PendingRound FlashNextTextExecutor::execute_round(std::span<const LaneStepReques
             throw std::invalid_argument(
                 "FlashNextTextExecutor: cross-executor or invalid owner handle");
         }
-        if (req.custom_embedding != nullptr) {
+        if (req.custom_embedding != nullptr &&
+            (req.custom_embedding->dtype != DType::BF16 || req.custom_embedding->ne[0] != 2'560 ||
+             !req.custom_embedding->is_contiguous())) {
             throw std::invalid_argument(
-                "FlashNextTextExecutor: decode rounds never carry custom embeddings");
+                "FlashNextTextExecutor: custom embedding must be a contiguous BF16 [2560] column");
         }
     }
 
@@ -307,8 +319,16 @@ PendingRound FlashNextTextExecutor::execute_round(std::span<const LaneStepReques
 
         // 4. Launch either CUDA graph replay or eager decode body. A state sink needs the eager
         //    body: replay cannot emit per-stage states, and silently ignoring the sink would
-        //    break the teacher-forced dump harness.
-        if (use_cuda_graph_ && sink == nullptr && !decode_graphs_.topologies.empty()) {
+        //    break the teacher-forced dump harness. Rounds carrying custom embeddings (the
+        //    reference tool's per-token vision path) also run eagerly: their columns are copied
+        //    after the token embedding, which a captured graph cannot do.
+        pending_custom_embeddings_.assign(batch_size, nullptr);
+        bool has_custom = false;
+        for (std::uint32_t i = 0; i < batch_size; ++i) {
+            pending_custom_embeddings_[i] = requests[i].custom_embedding;
+            has_custom = has_custom || requests[i].custom_embedding != nullptr;
+        }
+        if (use_cuda_graph_ && sink == nullptr && !has_custom && !decode_graphs_.topologies.empty()) {
             if (batch_size - 1 >= decode_graphs_.topologies.size()) {
                 throw std::logic_error(
                     "FlashNextTextExecutor: graph topology not available for batch size");
@@ -348,7 +368,8 @@ PendingRound FlashNextTextExecutor::execute_round(std::span<const LaneStepReques
 PendingRound FlashNextTextExecutor::execute_prefill_chunk(
     LaneHandle handle, std::span<const std::int32_t> token_ids,
     std::span<const std::array<std::int32_t, 3>> positions, std::int32_t first_token_index,
-    const FlashNextDecodeStateSink* sink) {
+    const FlashNextDecodeStateSink* sink, const Tensor* visual_embeddings,
+    std::span<const std::int32_t> chunk_local_scatter_indices) {
     if (handle.owner() != this) {
         throw std::invalid_argument(
             "FlashNextTextExecutor: cross-executor or invalid owner handle");
@@ -422,6 +443,17 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
 
         // 3. Compute embedding [2560, T]
         ops::embedding(dev_token_ids, model_.token_embedding, embedding, device_.stream);
+
+        // 3b. Scatter visual embeddings if provided
+        if (visual_embeddings != nullptr && !chunk_local_scatter_indices.empty()) {
+            const auto count = static_cast<std::int32_t>(chunk_local_scatter_indices.size());
+            CUDA_CHECK(cudaMemcpyAsync(staging.visual_indices.data,
+                                       chunk_local_scatter_indices.data(),
+                                       count * sizeof(std::int32_t), cudaMemcpyHostToDevice,
+                                       device_.stream));
+            Tensor indices_slice = staging.visual_indices.slice(0, 0, count);
+            ops::scatter(*visual_embeddings, indices_slice, embedding, device_.stream);
+        }
 
         // 4. Output tensors
         Tensor logits(alloc_.round_tensors().logits.data, DType::BF16, {248'320, 1});

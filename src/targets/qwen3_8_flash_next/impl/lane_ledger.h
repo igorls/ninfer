@@ -71,11 +71,18 @@ public:
 
     [[nodiscard]] std::int32_t committed_frontier(LaneHandle handle) const;
     [[nodiscard]] const PleTokenHistory& lane_history(LaneHandle handle) const;
-    [[nodiscard]] std::size_t active_lanes_count() const noexcept;
 
+    // Physical group and capacity introspection
     [[nodiscard]] std::size_t available_physical_groups() const noexcept {
         return free_physical_groups_.size();
     }
+    [[nodiscard]] std::span<const std::uint32_t> lane_physical_groups(LaneHandle handle) const;
+    std::vector<std::uint32_t> take_lane_physical_groups(LaneHandle handle);
+    void release_physical_groups(std::span<const std::uint32_t> groups);
+    void attach_physical_groups(LaneHandle handle, std::span<const std::uint32_t> groups,
+                                std::int32_t committed_frontier, const PleTokenHistory& history);
+
+    [[nodiscard]] std::size_t active_lanes_count() const noexcept;
 
     [[nodiscard]] bool has_pending_transaction() const noexcept { return has_pending_batch_; }
 
