@@ -333,11 +333,29 @@ RequestBasePlan::prefix_shortlist_key(std::uint32_t frontier) const noexcept {
     if (impl_ == nullptr || frontier == 0 || frontier > impl_->prefix_digests.size()) {
         return std::nullopt;
     }
+    const auto lookup_digests = impl_->prefix_digests.at(frontier);
+    if (std::getenv("NINFER_FLASH_NEXT_TRACE_KEYS") != nullptr) {
+        std::fprintf(stderr, "[fnkey] lookup f=%u tag=%u d0=%016llx d1=%016llx\n", frontier,
+                     impl_->prefix_identity_tag,
+                     static_cast<unsigned long long>(lookup_digests[0]),
+                     static_cast<unsigned long long>(lookup_digests[1]));
+    }
     return PrefixShortlistKey{
-        .digests      = impl_->prefix_digests.at(frontier),
+        .digests      = lookup_digests,
         .frontier     = frontier,
         .identity_tag = impl_->prefix_identity_tag,
     };
+}
+
+std::optional<runtime::PrefillWork>
+RequestBasePlan::shared_candidate_rebuild_work(std::uint32_t frontier) const noexcept {
+    if (impl_ == nullptr || frontier == 0 || frontier > impl_->prefix_digests.size()) {
+        return std::nullopt;
+    }
+    // Flash-Next publishes no shared prefixes, but the Engine still prepares shared
+    // candidates from declared or repeated boundaries and requires their canonical
+    // rebuild cost. Same formula as the checkpoint summaries.
+    return runtime::make_prefill_work(0, frontier, 0, 0, impl_->prefill_chunk);
 }
 
 // ---------------------------------------------------------------------------
@@ -956,6 +974,7 @@ Program::plan_request(const qwen3_6::PreparedPrompt& prompt,
 
     auto base                   = std::make_unique<detail::RequestBasePlanImpl>();
     base->context_cache         = prompt_data.context_cache;
+    base->prefill_chunk         = impl_->plan_.config.prefill_chunk;
     base->summary.prompt_tokens = static_cast<std::uint32_t>(prompt_data.token_ids.size());
     base->summary.reusable_prompt_tokens = 0;
     base->summary.requested_output_tokens = options.requested_output_tokens;
@@ -1027,6 +1046,10 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestB
         return std::nullopt;
     }
 
+    if (std::getenv("NINFER_FLASH_NEXT_TRACE_KEYS") != nullptr) {
+        std::fprintf(stderr, "[fnkey] inspect_admission source=%d prompt_tokens=%u\n",
+                     source != nullptr ? 1 : 0, prompt_tokens);
+    }
     std::uint32_t matched_slot_index = 0;
     if (source != nullptr) {
         if (source->owner() != this) {
@@ -1724,6 +1747,17 @@ Program::inspect_capture(const CaptureOffer& offer,
         .frontier     = N,
         .identity_tag = 0,
     };
+    // The merged Engine reserves a private capture only when the assessment is physically
+    // feasible (resource_manager.h gates on publishes_private && physically_feasible). For
+    // Flash-Next feasibility means a vacant continuation slot: the reserve copies the
+    // recurrent state into that slot's cache slot and refcounts the lane's existing page
+    // groups, so nothing else is consumed.
+    for (const auto& slot : impl_->continuation_slots_) {
+        if (slot.role == detail::ContinuationSlotRole::Vacant) {
+            assessment.physically_feasible = true;
+            break;
+        }
+    }
     return assessment;
 }
 
@@ -1799,6 +1833,11 @@ Program::reserve_active_capture(CaptureOffer&& offer,
                                    st.prompt_tokens.begin() + capture_frontier);
     c_slot.committed_frontier = capture_frontier;
     c_slot.prefix_digests     = st.prefix_digests.at(capture_frontier);
+    if (std::getenv("NINFER_FLASH_NEXT_TRACE_KEYS") != nullptr) {
+        std::fprintf(stderr, "[fnkey] capture publish f=%d d0=%016llx d1=%016llx\n", capture_frontier,
+                     static_cast<unsigned long long>(c_slot.prefix_digests[0]),
+                     static_cast<unsigned long long>(c_slot.prefix_digests[1]));
+    }
     c_slot.last_used_epoch    = ++impl_->continuation_epoch_;
     c_slot.kind               = runtime::CheckpointKind::TurnClosure;
     const auto groups         = impl_->executor_.lane_physical_groups(st.lane_handle);
@@ -2099,6 +2138,12 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
 
                             const auto digests = st.prefix_digests.at(st.committed_frontier);
                             c_slot.prefix_digests = digests;
+                            if (std::getenv("NINFER_FLASH_NEXT_TRACE_KEYS") != nullptr) {
+                                std::fprintf(stderr, "[fnkey] finish endpoint f=%d d0=%016llx d1=%016llx\n",
+                                             st.committed_frontier,
+                                             static_cast<unsigned long long>(digests[0]),
+                                             static_cast<unsigned long long>(digests[1]));
+                            }
 
                             FinishResult out;
                             CheckpointSummary cp;
@@ -2136,6 +2181,12 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
                                             .frontier = static_cast<std::uint32_t>(turn_slot.committed_frontier),
                                             .ordinal  = 0,
                                         };
+                                        if (std::getenv("NINFER_FLASH_NEXT_TRACE_KEYS") != nullptr) {
+                                            std::fprintf(stderr, "[fnkey] finish rewrite f=%d d0=%016llx d1=%016llx\n",
+                                                         turn_slot.committed_frontier,
+                                                         static_cast<unsigned long long>(turn_slot.prefix_digests[0]),
+                                                         static_cast<unsigned long long>(turn_slot.prefix_digests[1]));
+                                        }
                                         rw.shortlist_key = PrefixShortlistKey{
                                             .digests      = turn_slot.prefix_digests,
                                             .frontier     = static_cast<std::uint32_t>(turn_slot.committed_frontier),

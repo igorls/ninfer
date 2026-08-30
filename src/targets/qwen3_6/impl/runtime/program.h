@@ -309,9 +309,6 @@ struct AdmissionCandidateImpl<NINFER_QWEN36_VARIANT> {
 
 namespace ninfer::targets::qwen3_6 {
 
-inline CaptureAssessment::CaptureAssessment()
-    : implementation(std::make_shared<detail::CaptureAssessmentImpl>()) {}
-
 template <>
 AdmissionCandidate<NINFER_QWEN36_VARIANT>::AdmissionCandidate(
     std::unique_ptr<detail::AdmissionCandidateImpl<NINFER_QWEN36_VARIANT>> impl) noexcept

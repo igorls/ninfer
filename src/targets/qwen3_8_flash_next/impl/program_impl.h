@@ -35,6 +35,7 @@ public:
     std::optional<qwen3_6::VisionControl> vision_control;
     qwen3_6::detail::PrefixShortlistDigests prefix_digests;
     std::uint32_t prefix_identity_tag = 0;
+    std::uint32_t prefill_chunk       = 0;
 };
 
 class AdmissionCandidateImpl {

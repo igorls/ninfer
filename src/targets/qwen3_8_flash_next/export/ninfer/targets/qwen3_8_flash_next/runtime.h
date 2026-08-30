@@ -237,9 +237,7 @@ public:
     [[nodiscard]] std::optional<PrefixShortlistKey>
     prefix_shortlist_key(std::uint32_t frontier) const noexcept;
     [[nodiscard]] std::optional<runtime::PrefillWork>
-    shared_candidate_rebuild_work(std::uint32_t /*frontier*/) const noexcept {
-        return std::nullopt;
-    }
+    shared_candidate_rebuild_work(std::uint32_t frontier) const noexcept;
 
 public:
     explicit RequestBasePlan(std::unique_ptr<detail::RequestBasePlanImpl> impl) noexcept;
