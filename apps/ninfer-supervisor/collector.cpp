@@ -9,6 +9,8 @@
 #define CPPHTTPLIB_NO_EXCEPTIONS
 #include <httplib.h>
 
+#include <windows.h>
+
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -18,6 +20,56 @@
 
 namespace ninfer::supervisor {
 namespace {
+
+// Runs a console command with no visible window and captures its stdout. The supervisor is a
+// windowless process, so `_popen` (which goes through cmd.exe) flashed a console on every poll.
+bool run_hidden_capture(const std::string& command_line, std::string& output, int& exit_code) {
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength        = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+
+    HANDLE out_r = nullptr;
+    HANDLE out_w = nullptr;
+    if (!CreatePipe(&out_r, &out_w, &sa, 0)) { return false; }
+    SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si{};
+    si.cb         = sizeof(si);
+    si.dwFlags    = STARTF_USESTDHANDLES;
+    si.hStdOutput = out_w;
+    si.hStdError  = out_w;
+    si.hStdInput  = nullptr;
+
+    // The command line is ASCII (a fixed nvidia-smi invocation); widen it byte by byte.
+    std::vector<wchar_t> cmd_buf;
+    cmd_buf.reserve(command_line.size() + 1);
+    for (const char c : command_line) {
+        cmd_buf.push_back(static_cast<wchar_t>(static_cast<unsigned char>(c)));
+    }
+    cmd_buf.push_back(L'\0');
+
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, cmd_buf.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
+                        nullptr, &si, &pi)) {
+        CloseHandle(out_r);
+        CloseHandle(out_w);
+        return false;
+    }
+    CloseHandle(out_w);
+    CloseHandle(pi.hThread);
+
+    char buf[512];
+    DWORD got = 0;
+    while (ReadFile(out_r, buf, sizeof(buf), &got, nullptr) && got > 0) { output.append(buf, got); }
+    CloseHandle(out_r);
+
+    WaitForSingleObject(pi.hProcess, 10'000);
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    exit_code = static_cast<int>(code);
+    return true;
+}
 
 std::string load_key(const std::string& path) {
     try {
@@ -69,18 +121,14 @@ void Collector::poll_admin(Collected& out) {
 }
 
 void Collector::poll_nvidia_smi(Collected& out) {
-    FILE* pipe = _popen(
-        "nvidia-smi --query-gpu=index,memory.used,memory.total "
-        "--format=csv,noheader,nounits",
-        "rt");
-    if (pipe == nullptr) {
+    std::string csv;
+    int rc = 0;
+    if (!run_hidden_capture("nvidia-smi --query-gpu=index,memory.used,memory.total "
+                            "--format=csv,noheader,nounits",
+                            csv, rc)) {
         out.nvidia.error = "nvidia-smi not found";
         return;
     }
-    std::string csv;
-    char buf[512];
-    while (fgets(buf, sizeof(buf), pipe) != nullptr) { csv += buf; }
-    const int rc = _pclose(pipe);
     if (rc != 0 && csv.empty()) {
         out.nvidia.error = "nvidia-smi exited " + std::to_string(rc);
         return;
