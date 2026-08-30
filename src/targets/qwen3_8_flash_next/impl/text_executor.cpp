@@ -1,6 +1,7 @@
 #include "targets/qwen3_8_flash_next/impl/text_executor.h"
 
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
+#include "targets/qwen3_8_flash_next/impl/text_decode_workspace.h"
 #include "ninfer/ops/embedding.h"
 
 #include <algorithm>
@@ -281,17 +282,17 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
             temp_history.commit(token_ids[t]);
         }
         auto ticket = ple_pipeline_.prepare(std::span(chunk_ple_indices));
-        Tensor gathered_ple = alloc_.workspace().alloc(
-            DType::BF16, {2'560, static_cast<std::int32_t>(num_tokens)}, 256);
+        // Staging comes from the workspace through the same layout the capacity estimate uses.
+        FlashNextPrefillChunkStaging staging = allocate_flash_next_prefill_chunk_staging(
+            alloc_.workspace(), static_cast<std::int32_t>(num_tokens));
+        Tensor& gathered_ple        = staging.gathered_ple;
+        Tensor& dev_token_ids       = staging.token_ids;
+        Tensor& dev_token_indices   = staging.token_indices;
+        Tensor& dev_mrope_positions = staging.mrope_positions;
+        Tensor& embedding           = staging.embedding;
         ple_pipeline_.enqueue_copy(std::move(ticket), gathered_ple);
 
-        // 2. Upload chunk input metadata to workspace
-        Tensor dev_token_ids = alloc_.workspace().alloc(
-            DType::I32, {static_cast<std::int32_t>(num_tokens)}, 256);
-        Tensor dev_token_indices = alloc_.workspace().alloc(
-            DType::I32, {static_cast<std::int32_t>(num_tokens)}, 256);
-        Tensor dev_mrope_positions = alloc_.workspace().alloc(
-            DType::I32, {3, static_cast<std::int32_t>(num_tokens)}, 256);
+        // 2. Upload chunk input metadata to the staging tensors
 
         std::vector<std::int32_t> host_indices(num_tokens);
         std::vector<std::int32_t> host_flat_positions(3 * num_tokens);
@@ -313,8 +314,6 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
                                    device_.stream));
 
         // 3. Compute embedding [2560, T]
-        Tensor embedding = alloc_.workspace().alloc(
-            DType::BF16, {2'560, static_cast<std::int32_t>(num_tokens)}, 256);
         ops::embedding(dev_token_ids, model_.token_embedding, embedding, device_.stream);
 
         // 4. Output tensors

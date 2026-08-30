@@ -54,4 +54,29 @@ FlashNextTextDecodeWorkspace allocate_flash_next_text_decode_workspace(Arena& ar
     return ws;
 }
 
+// Per-chunk staging tensors the executor carves from the workspace before the prefill core runs.
+// Decode keeps these in persistent round tensors (sized by max_concurrency); a chunk can be far
+// wider, so they come from the arena. The estimate in
+// flash_next_text_prefill_workspace_capacity_bytes must allocate exactly this layout, which is
+// why both sides call this helper instead of listing the tensors twice.
+struct FlashNextPrefillChunkStaging {
+    Tensor gathered_ple;    // BF16 [2560, tokens]
+    Tensor token_ids;       // I32 [tokens]
+    Tensor token_indices;   // I32 [tokens]
+    Tensor mrope_positions; // I32 [3, tokens]
+    Tensor embedding;       // BF16 [2560, tokens]
+};
+
+template <class Arena>
+FlashNextPrefillChunkStaging allocate_flash_next_prefill_chunk_staging(Arena& arena,
+                                                                       std::int32_t tokens) {
+    FlashNextPrefillChunkStaging staging{};
+    staging.gathered_ple    = arena.alloc(DType::BF16, {2'560, tokens}, 256);
+    staging.token_ids       = arena.alloc(DType::I32, {tokens}, 256);
+    staging.token_indices   = arena.alloc(DType::I32, {tokens}, 256);
+    staging.mrope_positions = arena.alloc(DType::I32, {3, tokens}, 256);
+    staging.embedding       = arena.alloc(DType::BF16, {2'560, tokens}, 256);
+    return staging;
+}
+
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

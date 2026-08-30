@@ -929,6 +929,70 @@ int test_prefill_chunk_executor(ninfer::DeviceContext& device) {
     }
 }
 
+int test_prefill_chunk_workspace_envelope(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    // Regression: a full prefill_chunk-wide chunk exhausted the workspace arena (std::bad_alloc
+    // from DeviceArena::alloc inside layer 0's GDN block) because the capacity estimate did not
+    // include the executor's staging tensors. max_concurrency=1 keeps the decode estimate small so
+    // it cannot mask a prefill under-estimate; two chunks cover the non-zero frontier as well.
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+
+        auto synthetic_model = make_synthetic_model(device);
+
+        constexpr std::int32_t kChunk = 128;
+        FlashNextRuntimeConfig cfg{
+            .max_concurrency     = 1,
+            .max_context         = 512,
+            .state_slot_capacity = 2,
+            .prefill_chunk       = kChunk,
+        };
+        const auto curve = flash_next_capacity_curve(cfg);
+        auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+
+        FlashNextRuntimeAllocation alloc(plan);
+        alloc.initialize(device.stream);
+        FlashNextTextExecutor exec(synthetic_model.view, ple_meta, device, alloc);
+        auto lane = exec.allocate_lane();
+
+        for (std::int32_t chunk = 0; chunk < 2; ++chunk) {
+            std::vector<std::int32_t> tokens(kChunk);
+            std::vector<std::array<std::int32_t, 3>> positions(kChunk);
+            for (std::int32_t t = 0; t < kChunk; ++t) {
+                const std::int32_t index = chunk * kChunk + t;
+                tokens[t]                = 100 + index;
+                positions[t]             = {index, index, index};
+            }
+            auto round = exec.execute_prefill_chunk(lane, tokens, positions, chunk * kChunk);
+            std::vector<LaneCommitDecision> decision = {{.accept = true}};
+            round.commit(decision);
+        }
+        device.synchronize();
+
+        const std::size_t peak     = alloc.workspace().peak_used();
+        const std::size_t capacity = alloc.workspace().capacity();
+        std::cout << "prefill chunk T=" << kChunk << " workspace peak " << peak << " / capacity "
+                  << capacity << " bytes\n";
+        if (peak > capacity) {
+            std::cerr << "Workspace peak exceeds capacity\n";
+            return 1;
+        }
+
+        exec.release_lane(lane);
+        std::cout << "PASS: test_prefill_chunk_workspace_envelope\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_prefill_chunk_workspace_envelope exception: " << e.what() << "\n";
+        return 1;
+    } catch (...) {
+        std::cerr << "test_prefill_chunk_workspace_envelope unknown exception\n";
+        return 1;
+    }
+}
+
 } // namespace
 
 int main() {
@@ -948,6 +1012,7 @@ int main() {
 
     if (test_cuda_ledger_and_executor(device) != 0) return 1;
     if (test_prefill_chunk_executor(device) != 0) return 1;
+    if (test_prefill_chunk_workspace_envelope(device) != 0) return 1;
 
     std::cout << "OK Flash-Next Text Executor\n";
     return 0;

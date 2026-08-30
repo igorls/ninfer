@@ -129,7 +129,7 @@ std::size_t flash_next_text_prefill_workspace_capacity_bytes(std::int32_t maximu
         throw std::invalid_argument("Flash-Next text prefill received an invalid envelope");
     }
     WorkspaceLayoutBuilder layout;
-    layout.alloc(DType::BF16, {2'560, tokens}, 256);
+    (void)allocate_flash_next_prefill_chunk_staging(layout, tokens);
     (void)allocate_flash_next_text_decode_workspace(layout, tokens);
     const std::size_t sort_temp = flash_next_qsa_indexer_sort_temp_bytes(maximum_blocks, 1);
     {
