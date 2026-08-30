@@ -421,13 +421,13 @@ int test_prefix_shortlist_key(ninfer::DeviceContext& device) {
     failures += check(key4.has_value(), "Frontier 4 must have a shortlist key");
     if (key4.has_value()) {
         failures += check(key4->frontier == 4, "Key frontier must be 4");
-        failures += check(key4->digest != 0, "Key digest must be non-zero");
+        failures += check(key4->digests != std::array<std::uint64_t, 2>{}, "Key digests must be non-zero");
     }
 
     auto key8 = base_plan.prefix_shortlist_key(8);
     failures += check(key8.has_value(), "Frontier 8 must have a shortlist key");
     if (key4.has_value() && key8.has_value()) {
-        failures += check(key4->digest != key8->digest, "Digests for different frontiers must differ");
+        failures += check(key4->digests != key8->digests, "Digests for different frontiers must differ");
     }
 
     auto key9 = base_plan.prefix_shortlist_key(9);

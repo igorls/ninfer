@@ -113,12 +113,11 @@ Package::Frontend Package::make_frontend(const LoadedModel& model, const EngineO
     return qwen3_6::make_frontend(
         model.impl_->data.frontend,
         qwen3_6::FrontendOptions{
-            .vision_enabled                = model.impl_->data.vision.has_value(),
-            .max_context                   = options.max_context,
-            .media_cache_bytes             = options.media_cache_bytes,
-            .media_live_bytes              = options.media_live_bytes,
-            .media_preprocess_threads      = options.media_preprocess_threads,
-            .max_cache_markers_per_request = options.context_cache.max_cache_markers_per_request.value_or(0),
+            .vision_enabled           = model.impl_->data.vision.has_value(),
+            .max_context              = options.max_context,
+            .media_cache_bytes        = options.media_cache_bytes,
+            .media_live_bytes         = options.media_live_bytes,
+            .media_preprocess_threads = options.media_preprocess_threads,
         });
 }
 

@@ -236,6 +236,10 @@ public:
     [[nodiscard]] const qwen3_6::PreparedContextCache& context_cache() const noexcept;
     [[nodiscard]] std::optional<PrefixShortlistKey>
     prefix_shortlist_key(std::uint32_t frontier) const noexcept;
+    [[nodiscard]] std::optional<runtime::PrefillWork>
+    shared_candidate_rebuild_work(std::uint32_t /*frontier*/) const noexcept {
+        return std::nullopt;
+    }
 
 public:
     explicit RequestBasePlan(std::unique_ptr<detail::RequestBasePlanImpl> impl) noexcept;
@@ -338,6 +342,28 @@ struct PressureExpansionView {
     std::uint32_t new_canonical_count = 0;
 };
 
+class CapturePressurePlan {
+public:
+    CapturePressurePlan(CapturePressurePlan&&) noexcept            = default;
+    CapturePressurePlan& operator=(CapturePressurePlan&&) noexcept = default;
+    ~CapturePressurePlan()                                         = default;
+
+    CapturePressurePlan(const CapturePressurePlan&)            = delete;
+    CapturePressurePlan& operator=(const CapturePressurePlan&) = delete;
+
+    [[nodiscard]] std::uint64_t resource_revision() const noexcept { return revision_; }
+
+private:
+    CapturePressurePlan(AdmissionCandidate&& pressure, std::uint64_t revision) noexcept
+        : pressure_(std::move(pressure)), revision_(revision) {}
+
+    AdmissionCandidate pressure_;
+    std::uint64_t revision_ = 0;
+
+    friend class Program;
+    friend class PressurePlanningSession;
+};
+
 class PressurePlanningSession {
 public:
     PressurePlanningSession(PressurePlanningSession&&) noexcept;
@@ -358,6 +384,10 @@ public:
     void discard_expansion(PreparedPressureExpansion&& prepared) noexcept;
     [[nodiscard]] std::optional<ResourcePlan> seal(PressureTargetHandle target,
                                                   const qwen3_6::PreparedPrompt& prompt);
+    [[nodiscard]] std::optional<CapturePressurePlan> seal_capture(PressureTargetHandle target) {
+        (void)target;
+        return std::nullopt;
+    }
 
 public:
     explicit PressurePlanningSession(
@@ -384,6 +414,8 @@ struct ActiveCaptureResult {
     bool capacity_preparation_committed      = false;
     ContinuationSummary active_summary;
     std::optional<SharedPrefixPublication> shared;
+    std::vector<qwen3_6::MaterializationVictimResult> victims;
+    std::vector<qwen3_6::MaterializationSharedVictimResult> shared_victims;
     std::vector<runtime::ContextTransferObservation> transfer_observations;
     runtime::ContextOperationCounts operations;
 };
@@ -516,11 +548,41 @@ public:
     [[nodiscard]] PrefillProgress
     advance_prefill(SequenceHandle sequence,
                     runtime::ExecutionTiming* failed_timing = nullptr);
+    void select_shared_captures(ResourcePlan& /*plan*/, const qwen3_6::PreparedPrompt& /*prompt*/,
+                                std::span<const std::uint32_t> /*frontiers*/) {}
+    [[nodiscard]] std::uint64_t
+    shared_capture_split_cost_ns(const ResourcePlan& /*plan*/, const qwen3_6::PreparedPrompt& /*prompt*/,
+                                 std::span<const std::uint32_t> /*frontiers*/,
+                                 const runtime::ContextMachineCostModel& /*machine_cost*/) {
+        return 0;
+    }
     [[nodiscard]] CaptureAssessment
     inspect_capture(const CaptureOffer& offer,
                     const SharedPrefixHandle* exact_shared,
                     const SharedPrefixHandle* replacement,
-                    std::optional<runtime::CheckpointRef> private_replacement) const;
+                    std::optional<runtime::CheckpointRef> private_replacement,
+                    bool permit_shared_publication,
+                    const runtime::ContextMachineCostModel& machine_cost) const;
+    [[nodiscard]] CaptureAssessment
+    inspect_capture(const CaptureOffer& offer,
+                    const SharedPrefixHandle* exact_shared = nullptr,
+                    const SharedPrefixHandle* replacement = nullptr,
+                    std::optional<runtime::CheckpointRef> private_replacement = std::nullopt) const;
+    [[nodiscard]] std::uint64_t
+    checkpoint_recovery_ns(const ContinuationHandle& /*owner*/,
+                           runtime::CheckpointRef /*checkpoint*/,
+                           const runtime::ContextMachineCostModel& /*machine_cost*/) const {
+        return 0;
+    }
+    [[nodiscard]] std::uint64_t
+    checkpoint_recovery_ns(const SharedPrefixHandle& /*owner*/,
+                           runtime::CheckpointRef /*checkpoint*/,
+                           const runtime::ContextMachineCostModel& /*machine_cost*/) const {
+        return 0;
+    }
+    [[nodiscard]] AdmissionCandidate
+    make_capture_pressure_candidate(const CaptureAssessment& assessment,
+                                    const runtime::ContextMachineCostModel& machine_cost) const;
     [[nodiscard]] bool shared_capture_matches(const CaptureOffer& offer,
                                               const SharedPrefixHandle& shared) const;
     void skip_capture(CaptureOffer&& offer);
@@ -529,7 +591,26 @@ public:
                            const SharedPrefixHandle* exact_shared,
                            const SharedPrefixHandle* replacement,
                            std::optional<runtime::CheckpointRef> private_replacement,
+                           bool permit_shared_publication,
+                           const runtime::ContextMachineCostModel& machine_cost,
                            runtime::CancellationFlagView cancellation);
+    [[nodiscard]] runtime::ContextTransactionReserveStatus
+    reserve_active_capture(CaptureOffer&& offer,
+                           const SharedPrefixHandle* exact_shared,
+                           const SharedPrefixHandle* replacement,
+                           std::optional<runtime::CheckpointRef> private_replacement,
+                           runtime::CancellationFlagView cancellation);
+    [[nodiscard]] runtime::ContextTransactionReserveStatus reserve_active_capture_with_pressure(
+        CaptureOffer&& offer, const SharedPrefixHandle* exact_shared,
+        const SharedPrefixHandle* replacement,
+        std::optional<runtime::CheckpointRef> private_replacement, bool permit_shared_publication,
+        CapturePressurePlan&& /*pressure*/,
+        const runtime::ContextMachineCostModel& machine_cost,
+        runtime::CancellationFlagView cancellation) {
+        return reserve_active_capture(std::move(offer), exact_shared, replacement,
+                                      private_replacement, permit_shared_publication,
+                                      machine_cost, cancellation);
+    }
     [[nodiscard]] PendingBatch decode(std::span<const SequenceHandle> sequences,
                                       std::span<const runtime::RoundBudget> budgets,
                                       runtime::ExecutionTiming* failed_timing = nullptr);

@@ -19,7 +19,9 @@ public:
 
     [[nodiscard]] bool valid() const noexcept { return owner_ != nullptr; }
 
-    [[nodiscard]] friend bool operator==(StateImageHandle, StateImageHandle) noexcept = default;
+    [[nodiscard]] friend bool operator==(StateImageHandle a, StateImageHandle b) noexcept {
+        return a.owner_ == b.owner_ && a.index_ == b.index_ && a.generation_ == b.generation_;
+    }
 
 private:
     StateImageHandle(const StateImageStore* owner, std::uint32_t index,

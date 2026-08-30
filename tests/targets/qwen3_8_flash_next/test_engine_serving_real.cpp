@@ -23,7 +23,6 @@ int main() {
         options.context_cache.max_private_continuations = 4;
         options.context_cache.max_shared_prefixes       = 2;
         options.context_cache.max_long_anchors_per_continuation = 2;
-        options.context_cache.max_cache_markers_per_request     = 4;
 
         std::cout << "Creating Engine..." << std::endl;
         ninfer::Engine engine(options);

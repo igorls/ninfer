@@ -88,6 +88,7 @@ struct Package {
     using SharedPrefixSummary        = qwen3_6::SharedPrefixSummary;
     using PressurePlanningSession    = qwen3_8_flash_next::PressurePlanningSession;
     using PressureTargetHandle       = qwen3_6::PressureTargetHandle;
+    using CapturePressurePlan        = qwen3_8_flash_next::CapturePressurePlan;
     using MaterializationResult      = qwen3_8_flash_next::MaterializationResult;
     using ContextTransactionProgress = qwen3_8_flash_next::ContextTransactionProgress;
     using CaptureAssessment          = qwen3_6::CaptureAssessment;

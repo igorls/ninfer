@@ -1,5 +1,6 @@
 #include "targets/qwen3_8_flash_next/impl/program_impl.h"
 #include <ninfer/targets/qwen3_8_flash_next/package.h>
+#include "runtime/engine/context_cost.h"
 
 #include "targets/qwen3_8_flash_next/impl/load/materialized.h"
 
@@ -333,7 +334,7 @@ RequestBasePlan::prefix_shortlist_key(std::uint32_t frontier) const noexcept {
         return std::nullopt;
     }
     return PrefixShortlistKey{
-        .digest       = impl_->prefix_digests.at(frontier),
+        .digests      = impl_->prefix_digests.at(frontier),
         .frontier     = frontier,
         .identity_tag = impl_->prefix_identity_tag,
     };
@@ -1695,7 +1696,9 @@ CaptureAssessment
 Program::inspect_capture(const CaptureOffer& offer,
                          const SharedPrefixHandle* /*exact_shared*/,
                          const SharedPrefixHandle* /*replacement*/,
-                         std::optional<runtime::CheckpointRef> /*private_replacement*/) const {
+                         std::optional<runtime::CheckpointRef> /*private_replacement*/,
+                         bool /*permit_shared_publication*/,
+                         const runtime::ContextMachineCostModel& /*machine_cost*/) const {
     if (impl_ == nullptr || offer.owner() != this) {
         return CaptureAssessment{};
     }
@@ -1717,11 +1720,25 @@ Program::inspect_capture(const CaptureOffer& offer,
     assessment.publishes_private = st.publish_continuation && (impl_->plan_.config.continuation_capacity > 0);
     assessment.publishes_shared  = false;
     assessment.shortlist_key     = PrefixShortlistKey{
-        .digest       = st.prefix_digests.at(N),
+        .digests      = st.prefix_digests.at(N),
         .frontier     = N,
         .identity_tag = 0,
     };
     return assessment;
+}
+
+CaptureAssessment
+Program::inspect_capture(const CaptureOffer& offer,
+                         const SharedPrefixHandle* exact_shared,
+                         const SharedPrefixHandle* replacement,
+                         std::optional<runtime::CheckpointRef> private_replacement) const {
+    return inspect_capture(offer, exact_shared, replacement, private_replacement, false, {});
+}
+
+AdmissionCandidate Program::make_capture_pressure_candidate(
+    const CaptureAssessment& /*assessment*/,
+    const runtime::ContextMachineCostModel& /*machine_cost*/) const {
+    throw std::logic_error("FlashNext does not support capture pressure planning");
 }
 
 bool Program::shared_capture_matches(const CaptureOffer& /*offer*/,
@@ -1743,6 +1760,8 @@ Program::reserve_active_capture(CaptureOffer&& offer,
                                 const SharedPrefixHandle* /*exact_shared*/,
                                 const SharedPrefixHandle* /*replacement*/,
                                 std::optional<runtime::CheckpointRef> /*private_replacement*/,
+                                bool /*permit_shared_publication*/,
+                                const runtime::ContextMachineCostModel& /*machine_cost*/,
                                 runtime::CancellationFlagView cancellation) {
     if (impl_ == nullptr || offer.owner() != this) {
         return runtime::ContextTransactionReserveStatus::Aborted;
@@ -1779,7 +1798,7 @@ Program::reserve_active_capture(CaptureOffer&& offer,
     c_slot.committed_tokens.assign(st.prompt_tokens.begin(),
                                    st.prompt_tokens.begin() + capture_frontier);
     c_slot.committed_frontier = capture_frontier;
-    c_slot.prefix_digest      = st.prefix_digests.at(capture_frontier);
+    c_slot.prefix_digests     = st.prefix_digests.at(capture_frontier);
     c_slot.last_used_epoch    = ++impl_->continuation_epoch_;
     c_slot.kind               = runtime::CheckpointKind::TurnClosure;
     const auto groups         = impl_->executor_.lane_physical_groups(st.lane_handle);
@@ -1808,7 +1827,7 @@ Program::reserve_active_capture(CaptureOffer&& offer,
             .ordinal  = 0,
         },
         .shortlist_key = PrefixShortlistKey{
-            .digest       = c_slot.prefix_digest,
+            .digests      = c_slot.prefix_digests,
             .frontier     = static_cast<std::uint32_t>(capture_frontier),
             .identity_tag = 0,
         },
@@ -1826,6 +1845,16 @@ Program::reserve_active_capture(CaptureOffer&& offer,
     impl_->pending_capture_result_ = std::move(capture_res);
 
     return runtime::ContextTransactionReserveStatus::Reserved;
+}
+
+runtime::ContextTransactionReserveStatus
+Program::reserve_active_capture(CaptureOffer&& offer,
+                                const SharedPrefixHandle* exact_shared,
+                                const SharedPrefixHandle* replacement,
+                                std::optional<runtime::CheckpointRef> private_replacement,
+                                runtime::CancellationFlagView cancellation) {
+    return reserve_active_capture(std::move(offer), exact_shared, replacement,
+                                  private_replacement, false, {}, cancellation);
 }
 
 PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
@@ -2068,8 +2097,8 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
                             const std::int32_t active_slot = impl_->executor_.allocation().current_source_slot(lane_idx);
                             impl_->executor_.copy_state_slot(static_cast<std::uint32_t>(active_slot), c_slot.cache_slot);
 
-                            const std::uint64_t digest = st.prefix_digests.at(st.committed_frontier);
-                            c_slot.prefix_digest = digest;
+                            const auto digests = st.prefix_digests.at(st.committed_frontier);
+                            c_slot.prefix_digests = digests;
 
                             FinishResult out;
                             CheckpointSummary cp;
@@ -2078,7 +2107,7 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
                                 .ordinal  = 0,
                             };
                             cp.shortlist_key = PrefixShortlistKey{
-                                .digest       = digest,
+                                .digests      = digests,
                                 .frontier     = static_cast<std::uint32_t>(st.committed_frontier),
                                 .identity_tag = 0,
                             };
@@ -2108,7 +2137,7 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
                                             .ordinal  = 0,
                                         };
                                         rw.shortlist_key = PrefixShortlistKey{
-                                            .digest       = turn_slot.prefix_digest,
+                                            .digests      = turn_slot.prefix_digests,
                                             .frontier     = static_cast<std::uint32_t>(turn_slot.committed_frontier),
                                             .identity_tag = 0,
                                         };

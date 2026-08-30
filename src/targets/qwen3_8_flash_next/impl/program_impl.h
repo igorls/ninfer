@@ -135,7 +135,7 @@ struct ContinuationSlot {
     std::vector<TokenId> committed_tokens;
     std::vector<std::uint32_t> physical_groups;
     std::int32_t committed_frontier = 0;
-    std::uint64_t prefix_digest = 0;
+    std::array<std::uint64_t, 2> prefix_digests{};
     PleTokenHistory history{};
     std::uint64_t last_used_epoch = 0;
     runtime::CheckpointKind kind = runtime::CheckpointKind::SessionEndpoint;
