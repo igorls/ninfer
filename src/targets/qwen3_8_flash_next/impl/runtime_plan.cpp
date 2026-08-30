@@ -50,12 +50,14 @@ void validate_config_invariants(const FlashNextRuntimeConfig& config,
             std::to_string(config.max_context) + ")");
     }
 
+    const std::uint32_t min_state_slots = 2U * config.max_concurrency + config.continuation_capacity;
     resolved_state_slots = config.state_slot_capacity;
     if (resolved_state_slots == 0) {
-        resolved_state_slots = 2U * config.max_concurrency + config.continuation_capacity;
-    } else if (resolved_state_slots < 2U * config.max_concurrency || resolved_state_slots > 64) {
+        resolved_state_slots = min_state_slots;
+    } else if (resolved_state_slots < min_state_slots || resolved_state_slots > 64) {
         throw std::invalid_argument(
-            "Flash-Next state_slot_capacity must be in [2 * max_concurrency, 64]");
+            "Flash-Next state_slot_capacity must be in [2 * max_concurrency + continuation_capacity (" +
+            std::to_string(min_state_slots) + "), 64]");
     }
 }
 

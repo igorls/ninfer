@@ -170,8 +170,12 @@ int test_capacity_curve_and_finalize() {
         std::cerr << "Failed to reject max_context > 262144\n";
         return 1;
     }
-    if (!reject_curve({.max_concurrency = 4, .max_context = 256, .state_slot_capacity = 7, .prefill_chunk = 128})) {
+    if (!reject_curve({.max_concurrency = 4, .max_context = 256, .state_slot_capacity = 7, .continuation_capacity = 0, .prefill_chunk = 128})) {
         std::cerr << "Failed to reject state_slot_capacity < 2 * max_concurrency\n";
+        return 1;
+    }
+    if (!reject_curve({.max_concurrency = 2, .max_context = 256, .state_slot_capacity = 10, .continuation_capacity = 8, .prefill_chunk = 128})) {
+        std::cerr << "Failed to reject state_slot_capacity < 2 * max_concurrency + continuation_capacity\n";
         return 1;
     }
     if (!reject_curve({.max_concurrency = 4, .max_context = 256, .state_slot_capacity = 65, .prefill_chunk = 128})) {

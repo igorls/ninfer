@@ -1522,6 +1522,179 @@ int test_turn2_resumed_vs_scratch_divergence(ninfer::DeviceContext& device) {
     return failures;
 }
 
+int test_state_slot_capacity_saturation_and_eviction(ninfer::DeviceContext& device) {
+    std::printf("[TEST] test_state_slot_capacity_saturation_and_eviction\n");
+    int failures = 0;
+
+    auto model    = make_synthetic_model(device);
+    auto ple_meta = make_synthetic_ple_meta();
+
+    // 2 lanes (active+standby = 4 slots: 0..3) + 4 continuation slots (cache slots 4..7) = 8 total state slots
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency       = 2,
+        .max_context           = 512,
+        .state_slot_capacity   = 8,
+        .continuation_capacity = 4,
+        .prefill_chunk         = 256,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+
+    failures += check(plan.state_slots == 8, "Plan state_slots must be exactly 8");
+
+    auto program_impl = std::make_unique<ProgramImpl>(nullptr, plan, device, model.view, std::nullopt, ple_meta);
+    Program program(std::move(program_impl));
+
+    ninfer::runtime::ResolvedExecutionOptions exec_options{};
+    exec_options.requested_output_tokens = 8;
+    ninfer::runtime::ContextMachineCostModel cost_model{};
+    std::atomic<bool> flag{false};
+    ninfer::runtime::CancellationFlagView cancellation{&flag};
+
+    std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = false}}};
+
+    // 1. Request 1 on Lane 0: 20 tokens, F1 = 12 -> creates TurnClosure (slot 0, cache_slot 4) & SessionEndpoint (slot 1, cache_slot 5)
+    std::vector<ninfer::TokenId> r1_tokens(20);
+    for (std::size_t i = 0; i < 20; ++i) { r1_tokens[i] = static_cast<ninfer::TokenId>(100 + i); }
+    const auto prompt1 = make_prompt(r1_tokens, true, 12);
+    auto base1 = program.plan_request(prompt1, exec_options);
+    auto cand1 = program.inspect_admission(prompt1, base1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand1.has_value(), "R1 admission must succeed");
+    auto res1 = program.seal_identity(*cand1, prompt1);
+    (void)program.start_resource_transaction(std::move(*res1), make_prompt(r1_tokens, true, 12), cancellation);
+    auto prog1 = program.progress_context_transaction(cancellation);
+    SequenceHandle seq1 = std::get_if<MaterializationResult>(&prog1)->published->sequence;
+    program.finalize_context_transaction();
+
+    auto p1_step1 = program.advance_prefill(seq1);
+    failures += check(p1_step1.capture.has_value(), "R1 step 1 must offer capture at 12");
+    auto cap1 = program.reserve_active_capture(std::move(*p1_step1.capture), nullptr, nullptr, std::nullopt, cancellation);
+    failures += check(cap1 == ninfer::runtime::ContextTransactionReserveStatus::Reserved, "R1 capture must reserve");
+    (void)program.progress_context_transaction(cancellation);
+    program.finalize_context_transaction();
+
+    auto p1_step2 = program.advance_prefill(seq1);
+    failures += check(p1_step2.complete, "R1 step 2 must complete");
+    if (p1_step2.pending.has_value()) {
+        (void)program.commit(std::move(*p1_step2.pending), commit_dec);
+    }
+    FinishResult fin1 = program.finish(seq1);
+    failures += check(fin1.continuation.has_value(), "R1 finish must yield continuation");
+
+    // 2. Request 2 on Lane 1: 24 tokens, F2 = 16 -> creates TurnClosure (slot 2, cache_slot 6) & SessionEndpoint (slot 3, cache_slot 7)
+    std::vector<ninfer::TokenId> r2_tokens(24);
+    for (std::size_t i = 0; i < 24; ++i) { r2_tokens[i] = static_cast<ninfer::TokenId>(200 + i); }
+    const auto prompt2 = make_prompt(r2_tokens, true, 16);
+    auto base2 = program.plan_request(prompt2, exec_options);
+    auto cand2 = program.inspect_admission(prompt2, base2, ninfer::runtime::LaneId(1), nullptr, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand2.has_value(), "R2 admission must succeed on Lane 1");
+    auto res2 = program.seal_identity(*cand2, prompt2);
+    (void)program.start_resource_transaction(std::move(*res2), make_prompt(r2_tokens, true, 16), cancellation);
+    auto prog2 = program.progress_context_transaction(cancellation);
+    SequenceHandle seq2 = std::get_if<MaterializationResult>(&prog2)->published->sequence;
+    program.finalize_context_transaction();
+
+    auto p2_step1 = program.advance_prefill(seq2);
+    failures += check(p2_step1.capture.has_value(), "R2 step 1 must offer capture at 16");
+    auto cap2 = program.reserve_active_capture(std::move(*p2_step1.capture), nullptr, nullptr, std::nullopt, cancellation);
+    failures += check(cap2 == ninfer::runtime::ContextTransactionReserveStatus::Reserved, "R2 capture must reserve");
+    (void)program.progress_context_transaction(cancellation);
+    program.finalize_context_transaction();
+
+    auto p2_step2 = program.advance_prefill(seq2);
+    failures += check(p2_step2.complete, "R2 step 2 must complete");
+    if (p2_step2.pending.has_value()) {
+        (void)program.commit(std::move(*p2_step2.pending), commit_dec);
+    }
+    FinishResult fin2 = program.finish(seq2);
+    failures += check(fin2.continuation.has_value(), "R2 finish must yield continuation");
+
+    // Verify all 4 continuation slots are catalogued with cache_slots in [4, 7]
+    for (std::size_t c = 0; c < 4; ++c) {
+        const auto& c_slot = program.impl_->continuation_slots_[c];
+        failures += check(c_slot.role == detail::ContinuationSlotRole::Catalogued,
+                          "Continuation slot must be catalogued");
+        failures += check(c_slot.cache_slot >= 4 && c_slot.cache_slot < 8,
+                          "Cache slot index must be within [4, 7]");
+    }
+
+    // 3. Request 3 on Lane 0: 30 tokens, F3 = 20 -> triggers LRU eviction and reuse of slot 0 and slot 1
+    std::vector<ninfer::TokenId> r3_tokens(30);
+    for (std::size_t i = 0; i < 30; ++i) { r3_tokens[i] = static_cast<ninfer::TokenId>(300 + i); }
+    const auto prompt3 = make_prompt(r3_tokens, true, 20);
+    auto base3 = program.plan_request(prompt3, exec_options);
+    auto cand3 = program.inspect_admission(prompt3, base3, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand3.has_value(), "R3 admission must succeed");
+    auto res3 = program.seal_identity(*cand3, prompt3);
+    (void)program.start_resource_transaction(std::move(*res3), make_prompt(r3_tokens, true, 20), cancellation);
+    auto prog3 = program.progress_context_transaction(cancellation);
+    SequenceHandle seq3 = std::get_if<MaterializationResult>(&prog3)->published->sequence;
+    program.finalize_context_transaction();
+
+    auto p3_step1 = program.advance_prefill(seq3);
+    failures += check(p3_step1.capture.has_value(), "R3 step 1 must offer capture at 20");
+    auto cap3 = program.reserve_active_capture(std::move(*p3_step1.capture), nullptr, nullptr, std::nullopt, cancellation);
+    failures += check(cap3 == ninfer::runtime::ContextTransactionReserveStatus::Reserved, "R3 capture must reserve (eviction)");
+    (void)program.progress_context_transaction(cancellation);
+    program.finalize_context_transaction();
+
+    auto p3_step2 = program.advance_prefill(seq3);
+    failures += check(p3_step2.complete, "R3 step 2 must complete");
+    if (p3_step2.pending.has_value()) {
+        (void)program.commit(std::move(*p3_step2.pending), commit_dec);
+    }
+    FinishResult fin3 = program.finish(seq3);
+    failures += check(fin3.continuation.has_value(), "R3 finish must yield continuation");
+
+    // 4. Request 4 on Lane 1: 40 tokens (resumed from R3's TurnClosure) -> evicts slot 2 and slot 3
+    std::vector<ninfer::TokenId> r4_tokens(40);
+    for (std::size_t i = 0; i < 20; ++i) { r4_tokens[i] = r3_tokens[i]; }
+    for (std::size_t i = 20; i < 40; ++i) { r4_tokens[i] = static_cast<ninfer::TokenId>(400 + i); }
+    const auto prompt4 = make_prompt(r4_tokens, true, 30);
+    auto base4 = program.plan_request(prompt4, exec_options);
+    auto cand4 = program.inspect_admission(prompt4, base4, ninfer::runtime::LaneId(1), &*fin3.continuation, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand4.has_value(), "R4 admission must succeed");
+    auto res4 = program.seal_identity(*cand4, prompt4);
+    (void)program.start_resource_transaction(std::move(*res4), make_prompt(r4_tokens, true, 30), cancellation);
+    auto prog4 = program.progress_context_transaction(cancellation);
+    SequenceHandle seq4 = std::get_if<MaterializationResult>(&prog4)->published->sequence;
+    program.finalize_context_transaction();
+
+    auto p4_step1 = program.advance_prefill(seq4);
+    failures += check(p4_step1.capture.has_value(), "R4 step 1 must offer capture at 30");
+    auto cap4 = program.reserve_active_capture(std::move(*p4_step1.capture), nullptr, nullptr, std::nullopt, cancellation);
+    failures += check(cap4 == ninfer::runtime::ContextTransactionReserveStatus::Reserved, "R4 capture must reserve");
+    (void)program.progress_context_transaction(cancellation);
+    program.finalize_context_transaction();
+
+    auto p4_step2 = program.advance_prefill(seq4);
+    failures += check(p4_step2.complete, "R4 step 2 must complete");
+    if (p4_step2.pending.has_value()) {
+        (void)program.commit(std::move(*p4_step2.pending), commit_dec);
+    }
+    FinishResult fin4 = program.finish(seq4);
+    failures += check(fin4.continuation.has_value(), "R4 finish must yield continuation");
+
+    // Release all continuations
+    for (std::size_t c = 0; c < program.impl_->continuation_slots_.size(); ++c) {
+        auto& c_slot = program.impl_->continuation_slots_[c];
+        if (c_slot.role == detail::ContinuationSlotRole::Catalogued) {
+            (void)program.release_continuation(
+                ContinuationHandle(&program, static_cast<std::uint32_t>(c), c_slot.generation));
+        }
+    }
+
+    const auto usage_after = program.physical_usage();
+    failures += check(usage_after.device_state_slots == 0,
+                      "All device state slots must be reclaimed (0)");
+    failures += check(usage_after.device_main_kv_pages == 0,
+                      "All physical page groups must be returned to free list (0 used pages)");
+
+    std::printf("[DONE] test_state_slot_capacity_saturation_and_eviction, failures: %d\n", failures);
+    std::fflush(stdout);
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -1545,6 +1718,7 @@ int main() {
         failures += test_turn_closure_checkpoint_and_multi_turn_reuse(device);
         failures += test_turn_closure_chain_retention(device);
         failures += test_turn2_resumed_vs_scratch_divergence(device);
+        failures += test_state_slot_capacity_saturation_and_eviction(device);
 
         if (failures == 0) {
             std::printf("ALL FLASH-NEXT CONTINUATION LIFECYCLE TESTS PASSED\n");

@@ -1449,10 +1449,9 @@ int run_continuation_check(const ReferenceToolOptions& opts) {
     FlashNextRuntimeConfig config{
         .max_concurrency       = 1,
         .max_context           = opts.max_context,
-        // Lane slots plus catalog slots. 2*mc + capacity was not enough on the real artifact
-        // (copy_state_slot: slot index exceeds state_slots) while 40 works: the Program's cache
-        // slot numbering needs auditing (sequence 6f); keep a generous default meanwhile.
-        .state_slot_capacity   = opts.state_slots > 0 ? opts.state_slots : 40u,
+        // options.cpp normalises --state-slots 0 to 2 * max_concurrency (lane slots only); the
+        // continuation catalog needs 2 * max_concurrency + continuation_capacity on top of that.
+        .state_slot_capacity   = std::max<std::uint32_t>(opts.state_slots, 2U * 1U + 16U),
         .continuation_capacity = 16,
         .prefill_chunk         = opts.prefill_chunk > 0 ? opts.prefill_chunk : 1024,
         .use_cuda_graph        = opts.use_cuda_graph,
@@ -1467,7 +1466,53 @@ int run_continuation_check(const ReferenceToolOptions& opts) {
 
     std::atomic<bool> flag{false};
     ninfer::runtime::CancellationFlagView cancellation{&flag};
-    std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = false}}};
+
+    struct RoundAnalysis {
+        std::vector<float> logits;
+        std::vector<std::uint16_t> logits_raw;
+        std::int32_t top1_token = 0;
+        float top1_logit = 0.0f;
+        std::int32_t top2_token = 0;
+        float top2_logit = 0.0f;
+        float margin = 0.0f;
+    };
+
+    auto analyze_round_logits = [](const Tensor& logits_tensor) -> RoundAnalysis {
+        RoundAnalysis a;
+        a.logits_raw.resize(logits_tensor.numel());
+        CHECK_CUDA(cudaMemcpy(a.logits_raw.data(), logits_tensor.data,
+                              a.logits_raw.size() * sizeof(std::uint16_t),
+                              cudaMemcpyDeviceToHost));
+        a.logits.resize(a.logits_raw.size());
+        for (std::size_t i = 0; i < a.logits_raw.size(); ++i) {
+            std::uint32_t u = static_cast<std::uint32_t>(a.logits_raw[i]) << 16;
+            float f;
+            std::memcpy(&f, &u, sizeof(float));
+            a.logits[i] = f;
+        }
+        float best1 = -std::numeric_limits<float>::infinity();
+        float best2 = -std::numeric_limits<float>::infinity();
+        std::int32_t idx1 = 0;
+        std::int32_t idx2 = 0;
+        for (std::size_t i = 0; i < a.logits.size(); ++i) {
+            float val = a.logits[i];
+            if (val > best1) {
+                best2 = best1;
+                idx2 = idx1;
+                best1 = val;
+                idx1 = static_cast<std::int32_t>(i);
+            } else if (val > best2) {
+                best2 = val;
+                idx2 = static_cast<std::int32_t>(i);
+            }
+        }
+        a.top1_token = idx1;
+        a.top1_logit = best1;
+        a.top2_token = idx2;
+        a.top2_logit = best2;
+        a.margin = best1 - best2;
+        return a;
+    };
 
     // 4. Prepare Turn 1 Prompt
     std::vector<ninfer::ChatMessage> messages_t1;
@@ -1526,6 +1571,7 @@ int run_continuation_check(const ReferenceToolOptions& opts) {
             }
         }
         if (pref_t1.pending.has_value()) {
+            std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = false}}};
             (void)program.commit(std::move(*pref_t1.pending), commit_dec);
         }
         if (pref_t1.complete) {
@@ -1576,7 +1622,9 @@ int run_continuation_check(const ReferenceToolOptions& opts) {
     auto prepared_t2_resumed = frontend.prepare(PromptInput(input_t2));
     const std::size_t t2_prompt_tokens = ninfer::targets::qwen3_6::PreparedPromptAccess::view(prepared_t2_resumed).token_ids.size();
 
-    // 7. Execute Turn 2 Resumed
+    const std::uint32_t max_gen_rounds = opts.max_tokens > 0 ? opts.max_tokens : 32;
+
+    // 7. Execute Turn 2 Resumed (Prefill + N Decode Rounds)
     auto base_t2_res = program.plan_request(prepared_t2_resumed, exec_options);
     auto cand_t2_res = program.inspect_admission(prepared_t2_resumed, base_t2_res, ninfer::runtime::LaneId(0), &cont_t1, nullptr, std::nullopt, false, cost_model);
     if (!cand_t2_res) { throw std::runtime_error("Turn 2 resumed admission failed"); }
@@ -1587,35 +1635,42 @@ int run_continuation_check(const ReferenceToolOptions& opts) {
     SequenceHandle seq_t2 = std::get_if<MaterializationResult>(&prog_t2)->published->sequence;
     program.finalize_context_transaction();
 
-    std::vector<float> logits_resumed;
-    std::vector<std::uint16_t> logits_resumed_raw;
+    std::vector<RoundAnalysis> resumed_rounds;
     while (true) {
         auto pref_t2 = program.advance_prefill(seq_t2);
         if (pref_t2.capture.has_value()) {
             program.skip_capture(std::move(*pref_t2.capture));
         }
         if (pref_t2.pending.has_value()) {
-            const auto& l_tensor = program.impl_->allocation_.round_tensors().logits;
-            logits_resumed_raw.resize(l_tensor.numel());
-            CHECK_CUDA(cudaMemcpy(logits_resumed_raw.data(), l_tensor.data,
-                                  logits_resumed_raw.size() * sizeof(std::uint16_t),
-                                  cudaMemcpyDeviceToHost));
-            logits_resumed.resize(logits_resumed_raw.size());
-            for (std::size_t i = 0; i < logits_resumed_raw.size(); ++i) {
-                std::uint32_t u = static_cast<std::uint32_t>(logits_resumed_raw[i]) << 16;
-                float f;
-                std::memcpy(&f, &u, sizeof(float));
-                logits_resumed[i] = f;
-            }
-            (void)program.commit(std::move(*pref_t2.pending), commit_dec);
+            auto analysis = analyze_round_logits(program.impl_->allocation_.round_tensors().logits);
+            const bool is_eos = (analysis.top1_token == 248046 || analysis.top1_token == 248044);
+            resumed_rounds.push_back(std::move(analysis));
+            std::array<ninfer::runtime::CommitDecision, 1> dec = {{{.accepted_tokens = 1, .terminal = is_eos}}};
+            (void)program.commit(std::move(*pref_t2.pending), dec);
+            if (is_eos) { break; }
         }
         if (pref_t2.complete) {
             break;
         }
     }
+
+    while (resumed_rounds.size() < max_gen_rounds) {
+        const auto last_tok = resumed_rounds.back().top1_token;
+        if (last_tok == 248046 || last_tok == 248044) {
+            break;
+        }
+        runtime::RoundBudget budget{.generated_tokens_remaining = 1};
+        auto pending = program.decode(std::span(&seq_t2, 1), std::span(&budget, 1));
+        auto analysis = analyze_round_logits(program.impl_->allocation_.round_tensors().logits);
+        const bool is_eos = (analysis.top1_token == 248046 || analysis.top1_token == 248044);
+        resumed_rounds.push_back(std::move(analysis));
+        std::array<ninfer::runtime::CommitDecision, 1> dec = {{{.accepted_tokens = 1, .terminal = is_eos}}};
+        (void)program.commit(std::move(pending), dec);
+        if (is_eos) { break; }
+    }
     (void)program.finish(seq_t2);
 
-    // 8. Execute Turn 2 From Scratch
+    // 8. Execute Turn 2 From Scratch (Prefill + N Decode Rounds)
     auto prepared_t2_scratch = frontend.prepare(std::move(input_t2));
     auto base_t2_scr = program.plan_request(prepared_t2_scratch, exec_options);
     auto cand_t2_scr = program.inspect_admission(prepared_t2_scratch, base_t2_scr, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
@@ -1626,68 +1681,97 @@ int run_continuation_check(const ReferenceToolOptions& opts) {
     SequenceHandle seq_t2_scr = std::get_if<MaterializationResult>(&prog_t2_scr)->published->sequence;
     program.finalize_context_transaction();
 
-    std::vector<float> logits_scratch;
-    std::vector<std::uint16_t> logits_scratch_raw;
+    std::vector<RoundAnalysis> scratch_rounds;
     while (true) {
         auto pref_scr = program.advance_prefill(seq_t2_scr);
         if (pref_scr.capture.has_value()) {
             program.skip_capture(std::move(*pref_scr.capture));
         }
         if (pref_scr.pending.has_value()) {
-            const auto& l_tensor = program.impl_->allocation_.round_tensors().logits;
-            logits_scratch_raw.resize(l_tensor.numel());
-            CHECK_CUDA(cudaMemcpy(logits_scratch_raw.data(), l_tensor.data,
-                                  logits_scratch_raw.size() * sizeof(std::uint16_t),
-                                  cudaMemcpyDeviceToHost));
-            logits_scratch.resize(logits_scratch_raw.size());
-            for (std::size_t i = 0; i < logits_scratch_raw.size(); ++i) {
-                std::uint32_t u = static_cast<std::uint32_t>(logits_scratch_raw[i]) << 16;
-                float f;
-                std::memcpy(&f, &u, sizeof(float));
-                logits_scratch[i] = f;
-            }
-            (void)program.commit(std::move(*pref_scr.pending), commit_dec);
+            auto analysis = analyze_round_logits(program.impl_->allocation_.round_tensors().logits);
+            const bool is_eos = (analysis.top1_token == 248046 || analysis.top1_token == 248044);
+            scratch_rounds.push_back(std::move(analysis));
+            std::array<ninfer::runtime::CommitDecision, 1> dec = {{{.accepted_tokens = 1, .terminal = is_eos}}};
+            (void)program.commit(std::move(*pref_scr.pending), dec);
+            if (is_eos) { break; }
         }
         if (pref_scr.complete) {
             break;
         }
     }
+
+    while (scratch_rounds.size() < max_gen_rounds) {
+        const auto last_tok = scratch_rounds.back().top1_token;
+        if (last_tok == 248046 || last_tok == 248044) {
+            break;
+        }
+        runtime::RoundBudget budget{.generated_tokens_remaining = 1};
+        auto pending = program.decode(std::span(&seq_t2_scr, 1), std::span(&budget, 1));
+        auto analysis = analyze_round_logits(program.impl_->allocation_.round_tensors().logits);
+        const bool is_eos = (analysis.top1_token == 248046 || analysis.top1_token == 248044);
+        scratch_rounds.push_back(std::move(analysis));
+        std::array<ninfer::runtime::CommitDecision, 1> dec = {{{.accepted_tokens = 1, .terminal = is_eos}}};
+        (void)program.commit(std::move(pending), dec);
+        if (is_eos) { break; }
+    }
     (void)program.finish(seq_t2_scr);
 
-    // 9. Compute Metrics & Output
-    if (logits_resumed.empty() || logits_scratch.empty() || logits_resumed.size() != logits_scratch.size()) {
-        throw std::runtime_error("Empty or mismatched logits size between resumed and scratch prefill");
-    }
-
-    double diff_norm_sq = 0.0;
-    double ref_norm_sq = 0.0;
-    for (std::size_t i = 0; i < logits_resumed.size(); ++i) {
-        double d = static_cast<double>(logits_resumed[i]) - static_cast<double>(logits_scratch[i]);
-        double r = static_cast<double>(logits_scratch[i]);
-        diff_norm_sq += d * d;
-        ref_norm_sq += r * r;
-    }
-    const double rel_l2 = (ref_norm_sq > 0.0) ? std::sqrt(diff_norm_sq / ref_norm_sq) : 0.0;
-
-    const auto max_it_res = std::max_element(logits_resumed.begin(), logits_resumed.end());
-    const std::int32_t argmax_res = static_cast<std::int32_t>(std::distance(logits_resumed.begin(), max_it_res));
-    const float logit_res = *max_it_res;
-
-    const auto max_it_scr = std::max_element(logits_scratch.begin(), logits_scratch.end());
-    const std::int32_t argmax_scr = static_cast<std::int32_t>(std::distance(logits_scratch.begin(), max_it_scr));
-    const float logit_scr = *max_it_scr;
-
-    const bool argmax_match = (argmax_res == argmax_scr);
-
-    // Dump raw logits if requested
+    // 9. Dump raw logits if requested
     if (!opts.dump_gen_logits.empty()) {
         std::filesystem::create_directories(opts.dump_gen_logits);
-        const std::string res_path = opts.dump_gen_logits + "/gen_000_resumed.bin";
-        const std::string scr_path = opts.dump_gen_logits + "/gen_000_scratch.bin";
-        std::ofstream f_res(res_path, std::ios::binary);
-        if (f_res) { f_res.write(reinterpret_cast<const char*>(logits_resumed_raw.data()), logits_resumed_raw.size() * sizeof(std::uint16_t)); }
-        std::ofstream f_scr(scr_path, std::ios::binary);
-        if (f_scr) { f_scr.write(reinterpret_cast<const char*>(logits_scratch_raw.data()), logits_scratch_raw.size() * sizeof(std::uint16_t)); }
+        for (std::size_t r = 0; r < resumed_rounds.size(); ++r) {
+            char name[64];
+            std::snprintf(name, sizeof(name), "gen_%03zu_resumed.bin", r);
+            std::ofstream f(std::filesystem::path(opts.dump_gen_logits) / name, std::ios::binary);
+            if (f) {
+                f.write(reinterpret_cast<const char*>(resumed_rounds[r].logits_raw.data()),
+                        static_cast<std::streamsize>(resumed_rounds[r].logits_raw.size() * sizeof(std::uint16_t)));
+            }
+        }
+        for (std::size_t r = 0; r < scratch_rounds.size(); ++r) {
+            char name[64];
+            std::snprintf(name, sizeof(name), "gen_%03zu_scratch.bin", r);
+            std::ofstream f(std::filesystem::path(opts.dump_gen_logits) / name, std::ios::binary);
+            if (f) {
+                f.write(reinterpret_cast<const char*>(scratch_rounds[r].logits_raw.data()),
+                        static_cast<std::streamsize>(scratch_rounds[r].logits_raw.size() * sizeof(std::uint16_t)));
+            }
+        }
+    }
+
+    // 10. Multi-Round Metrics & Comparison
+    const std::size_t num_compare_rounds = std::min(resumed_rounds.size(), scratch_rounds.size());
+    if (num_compare_rounds == 0) {
+        throw std::runtime_error("No generation rounds were executed");
+    }
+
+    auto compute_rel_l2 = [](const std::vector<float>& res, const std::vector<float>& scr) -> double {
+        double diff_norm_sq = 0.0;
+        double ref_norm_sq  = 0.0;
+        const std::size_t n = std::min(res.size(), scr.size());
+        for (std::size_t i = 0; i < n; ++i) {
+            double d = static_cast<double>(res[i]) - static_cast<double>(scr[i]);
+            double r = static_cast<double>(scr[i]);
+            diff_norm_sq += d * d;
+            ref_norm_sq  += r * r;
+        }
+        return (ref_norm_sq > 0.0) ? std::sqrt(diff_norm_sq / ref_norm_sq) : 0.0;
+    };
+
+    std::vector<double> round_rel_l2(num_compare_rounds, 0.0);
+    std::int32_t first_divergence_round = -1;
+    double max_rel_l2 = 0.0;
+    std::size_t max_rel_l2_round = 0;
+
+    for (std::size_t r = 0; r < num_compare_rounds; ++r) {
+        round_rel_l2[r] = compute_rel_l2(resumed_rounds[r].logits, scratch_rounds[r].logits);
+        if (round_rel_l2[r] > max_rel_l2) {
+            max_rel_l2 = round_rel_l2[r];
+            max_rel_l2_round = r;
+        }
+        if (resumed_rounds[r].top1_token != scratch_rounds[r].top1_token && first_divergence_round < 0) {
+            first_divergence_round = static_cast<std::int32_t>(r);
+        }
     }
 
     if (opts.json_output) {
@@ -1697,28 +1781,76 @@ int run_continuation_check(const ReferenceToolOptions& opts) {
                   << "  \"turn1_capture_frontier\": " << t1_capture_frontier << ",\n"
                   << "  \"turn2_prompt_tokens\": " << t2_prompt_tokens << ",\n"
                   << "  \"turn2_reused_tokens\": " << reused_tokens << ",\n"
-                  << "  \"argmax_resumed\": " << argmax_res << ",\n"
-                  << "  \"logit_resumed\": " << logit_res << ",\n"
-                  << "  \"argmax_scratch\": " << argmax_scr << ",\n"
-                  << "  \"logit_scratch\": " << logit_scr << ",\n"
-                  << "  \"argmax_match\": " << (argmax_match ? "true" : "false") << ",\n"
-                  << "  \"rel_l2\": " << rel_l2 << ",\n"
-                  << "  \"status\": \"" << (argmax_match && rel_l2 <= 0.1 ? "OK" : "MISMATCH") << "\"\n"
+                  << "  \"rounds_resumed\": " << resumed_rounds.size() << ",\n"
+                  << "  \"rounds_scratch\": " << scratch_rounds.size() << ",\n"
+                  << "  \"first_gen_rel_l2\": " << round_rel_l2[0] << ",\n"
+                  << "  \"first_gen_argmax_match\": " << (resumed_rounds[0].top1_token == scratch_rounds[0].top1_token ? "true" : "false") << ",\n"
+                  << "  \"first_divergence_round\": " << first_divergence_round << ",\n";
+        if (first_divergence_round >= 0) {
+            const auto& r_res = resumed_rounds[first_divergence_round];
+            const auto& r_scr = scratch_rounds[first_divergence_round];
+            std::cout << "  \"divergence\": {\n"
+                      << "    \"round\": " << first_divergence_round << ",\n"
+                      << "    \"token_resumed\": " << r_res.top1_token << ",\n"
+                      << "    \"token_scratch\": " << r_scr.top1_token << ",\n"
+                      << "    \"margin_resumed\": " << r_res.margin << ",\n"
+                      << "    \"margin_scratch\": " << r_scr.margin << ",\n"
+                      << "    \"rel_l2\": " << round_rel_l2[first_divergence_round] << "\n"
+                      << "  },\n";
+        }
+        std::cout << "  \"rounds\": [\n";
+        for (std::size_t r = 0; r < num_compare_rounds; ++r) {
+            const auto& r_res = resumed_rounds[r];
+            const auto& r_scr = scratch_rounds[r];
+            std::cout << "    {\n"
+                      << "      \"round\": " << r << ",\n"
+                      << "      \"token_resumed\": " << r_res.top1_token << ",\n"
+                      << "      \"token_scratch\": " << r_scr.top1_token << ",\n"
+                      << "      \"match\": " << (r_res.top1_token == r_scr.top1_token ? "true" : "false") << ",\n"
+                      << "      \"rel_l2\": " << round_rel_l2[r] << ",\n"
+                      << "      \"margin_resumed\": " << r_res.margin << ",\n"
+                      << "      \"margin_scratch\": " << r_scr.margin << "\n"
+                      << "    }" << (r + 1 < num_compare_rounds ? "," : "") << "\n";
+        }
+        std::cout << "  ],\n"
+                  << "  \"status\": \"" << (first_divergence_round < 0 ? "OK" : "DIVERGED") << "\"\n"
                   << "}\n";
     } else {
-        std::cout << "\n=== Continuation Check Report ===\n"
+        std::cout << "\n=== Continuation Check Multi-Round Report ===\n"
                   << "Turn 1 Prompt Tokens:        " << t1_prompt_tokens << "\n"
                   << "Turn 1 Capture Frontier (F): " << t1_capture_frontier << "\n"
                   << "Turn 2 Prompt Tokens:        " << t2_prompt_tokens << "\n"
                   << "Turn 2 Reused Prompt Tokens: " << reused_tokens << "\n"
-                  << "Resumed First-Gen Argmax:    " << argmax_res << " (logit: " << std::fixed << std::setprecision(4) << logit_res << ")\n"
-                  << "Scratch First-Gen Argmax:    " << argmax_scr << " (logit: " << std::fixed << std::setprecision(4) << logit_scr << ")\n"
-                  << "Argmax Match:                " << (argmax_match ? "YES" : "NO") << "\n"
-                  << "Relative L2 Error:           " << std::scientific << std::setprecision(6) << rel_l2 << "\n"
-                  << "Status:                      " << (argmax_match && rel_l2 <= 0.1 ? "OK" : "DIVERGENCE_MISMATCH") << "\n";
+                  << "Rounds Executed (Resumed):   " << resumed_rounds.size() << "\n"
+                  << "Rounds Executed (Scratch):   " << scratch_rounds.size() << "\n\n"
+                  << "Per-Round Logits Comparison:\n"
+                  << "Round | Res Token | Scr Token | Match | Rel-L2        | Top-2 Margin (Res) | Top-2 Margin (Scr)\n"
+                  << "------+-----------+-----------+-------+---------------+--------------------+--------------------\n";
+        for (std::size_t r = 0; r < num_compare_rounds; ++r) {
+            const auto& r_res = resumed_rounds[r];
+            const auto& r_scr = scratch_rounds[r];
+            const bool match = (r_res.top1_token == r_scr.top1_token);
+            std::printf("%03zu   | %-9d | %-9d | %-5s | %.6e | %-18.4f | %-18.4f\n",
+                        r, r_res.top1_token, r_scr.top1_token, match ? "YES" : "NO",
+                        round_rel_l2[r], r_res.margin, r_scr.margin);
+        }
+        std::cout << "\n--- Summary ---\n"
+                  << "First-Gen (gen_000) Rel-L2:  " << std::scientific << std::setprecision(6) << round_rel_l2[0] << "\n"
+                  << "Max Rel-L2 Across Rounds:    " << max_rel_l2 << " (Round " << max_rel_l2_round << ")\n";
+        if (first_divergence_round >= 0) {
+            const auto& r_res = resumed_rounds[first_divergence_round];
+            const auto& r_scr = scratch_rounds[first_divergence_round];
+            std::cout << "First Divergence Round:      Round " << first_divergence_round
+                      << " (Res: " << r_res.top1_token << " [margin " << std::fixed << std::setprecision(4) << r_res.margin << "], "
+                      << "Scr: " << r_scr.top1_token << " [margin " << r_scr.margin << "], rel-L2 " << std::scientific << round_rel_l2[first_divergence_round] << ")\n"
+                      << "Status:                      DIVERGED_AT_ROUND_" << first_divergence_round << "\n";
+        } else {
+            std::cout << "First Divergence Round:      None (all " << num_compare_rounds << " rounds matched)\n"
+                      << "Status:                      OK\n";
+        }
     }
 
-    return (argmax_match && rel_l2 <= 0.1) ? 0 : 1;
+    return (first_divergence_round < 0 || round_rel_l2[0] <= 0.1) ? 0 : 1;
 }
 
 } // namespace
