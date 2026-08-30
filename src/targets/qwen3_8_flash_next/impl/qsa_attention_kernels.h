@@ -13,4 +13,10 @@ void flash_next_qsa_attention_launch(const Tensor& token_indices, const Tensor& 
                                      const Tensor& key_norm, QsaAttentionCacheView cache,
                                      FlashNextQsaAttentionWorkspace& scratch, cudaStream_t stream);
 
+void flash_next_qsa_attention_prefill_launch(
+    const Tensor& token_indices, const Tensor& mrope_positions, std::int32_t table_row,
+    const Tensor& selected_blocks, const Tensor& selected_counts, const Tensor& query_norm,
+    const Tensor& key_norm, QsaAttentionCacheView cache, FlashNextQsaAttentionWorkspace& scratch,
+    cudaStream_t stream);
+
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

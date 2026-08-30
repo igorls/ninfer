@@ -297,10 +297,10 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
         std::vector<std::int32_t> host_indices(num_tokens);
         std::vector<std::int32_t> host_flat_positions(3 * num_tokens);
         for (std::uint32_t t = 0; t < num_tokens; ++t) {
-            host_indices[t]                = first_token_index + static_cast<std::int32_t>(t);
-            host_flat_positions[t * 3 + 0] = positions[t][0];
-            host_flat_positions[t * 3 + 1] = positions[t][1];
-            host_flat_positions[t * 3 + 2] = positions[t][2];
+            host_indices[t]                         = first_token_index + static_cast<std::int32_t>(t);
+            host_flat_positions[0 * num_tokens + t] = positions[t][0];
+            host_flat_positions[1 * num_tokens + t] = positions[t][1];
+            host_flat_positions[2 * num_tokens + t] = positions[t][2];
         }
 
         CUDA_CHECK(cudaMemcpyAsync(dev_token_ids.data, token_ids.data(),

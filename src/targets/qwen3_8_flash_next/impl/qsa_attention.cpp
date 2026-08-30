@@ -48,8 +48,8 @@ bool exact_fp8_f32_weight(const Weight& weight, std::int32_t rows, std::int32_t 
 } // namespace
 
 std::size_t flash_next_qsa_attention_workspace_capacity_bytes(std::int32_t batch) {
-    if (batch <= 0 || batch > 8) {
-        throw std::invalid_argument("Flash-Next QSA attention requires B in [1,8]");
+    if (batch <= 0 || batch > 262'144) {
+        throw std::invalid_argument("Flash-Next QSA attention received an invalid batch/tokens size");
     }
     WorkspaceLayoutBuilder layout;
     (void)allocate_flash_next_qsa_attention_workspace(layout, batch);
@@ -96,6 +96,48 @@ void flash_next_qsa_attention_decode(const Tensor& input, const AttentionWeights
     flash_next_qsa_attention_launch(token_indices, mrope_positions, table_rows, selected_blocks,
                                     selected_counts, weights.query_norm, weights.key_norm, cache,
                                     scratch, stream);
+    ops::linear(scratch.gated, weights.output, output, ops::LinearPolicy::A16Only, workspace,
+                stream);
+}
+
+void flash_next_qsa_attention_prefill_chunk(
+    const Tensor& input, const AttentionWeights& weights, const Tensor& token_indices,
+    const Tensor& mrope_positions, std::int32_t table_row, const Tensor& selected_blocks,
+    const Tensor& selected_counts, QsaAttentionCacheView cache, WorkspaceArena& workspace,
+    Tensor& output, cudaStream_t stream) {
+    const std::int32_t tokens = input.ne[1];
+    if (tokens <= 0 || !exact_tensor(input, DType::BF16, 2'560, tokens) ||
+        !exact_tensor(output, DType::BF16, 2'560, tokens) ||
+        !exact_tensor(weights.query_norm, DType::BF16, 256) ||
+        !exact_tensor(weights.key_norm, DType::BF16, 256) ||
+        !exact_fp8_f32_weight(weights.query_gate_key_value, 13'312, 2'560) ||
+        !exact_fp8_f32_weight(weights.output, 2'560, 6'144) ||
+        !exact_tensor(token_indices, DType::I32, tokens) ||
+        table_row < 0 || table_row >= cache.block_tables.ne[1] ||
+        !exact_tensor(selected_blocks, DType::I32, 512, tokens) ||
+        !exact_tensor(selected_counts, DType::I32, tokens) || cache.key_pages.dtype != DType::BF16 ||
+        cache.key_pages.ne[0] != 256 || cache.key_pages.ne[1] != 64 || cache.key_pages.ne[2] != 2 ||
+        cache.key_pages.ne[3] <= 0 || !cache.key_pages.is_contiguous() ||
+        !aligned_to(cache.key_pages.data, 16) || cache.value_pages.dtype != DType::BF16 ||
+        cache.value_pages.ne[0] != 256 || cache.value_pages.ne[1] != 64 ||
+        cache.value_pages.ne[2] != 2 || cache.value_pages.ne[3] != cache.key_pages.ne[3] ||
+        !cache.value_pages.is_contiguous() || !aligned_to(cache.value_pages.data, 16) ||
+        cache.block_tables.dtype != DType::I32 || cache.block_tables.ne[0] <= 0 ||
+        cache.block_tables.ne[1] <= 0 || cache.block_tables.ne[2] != 1 ||
+        cache.block_tables.ne[3] != 1 || !cache.block_tables.is_contiguous() ||
+        !aligned_to(cache.block_tables.data, 16) || stream == nullptr) {
+        throw std::invalid_argument(
+            "Flash-Next QSA attention prefill chunk received an invalid exact target view");
+    }
+
+    const auto scope = workspace.scope();
+    FlashNextQsaAttentionWorkspace scratch =
+        allocate_flash_next_qsa_attention_workspace(workspace, tokens);
+    ops::linear(input, weights.query_gate_key_value, scratch.projected, ops::LinearPolicy::A16Only,
+                workspace, stream);
+    flash_next_qsa_attention_prefill_launch(token_indices, mrope_positions, table_row, selected_blocks,
+                                            selected_counts, weights.query_norm, weights.key_norm,
+                                            cache, scratch, stream);
     ops::linear(scratch.gated, weights.output, output, ops::LinearPolicy::A16Only, workspace,
                 stream);
 }

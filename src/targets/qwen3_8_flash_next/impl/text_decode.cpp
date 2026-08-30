@@ -131,7 +131,6 @@ std::size_t flash_next_text_prefill_workspace_capacity_bytes(std::int32_t maximu
     WorkspaceLayoutBuilder layout;
     (void)allocate_flash_next_prefill_chunk_staging(layout, tokens);
     (void)allocate_flash_next_text_decode_workspace(layout, tokens);
-    const std::size_t sort_temp = flash_next_qsa_indexer_sort_temp_bytes(maximum_blocks, 1);
     {
         auto scope = layout.scope();
         (void)allocate_flash_next_ple_workspace(layout, tokens);
@@ -144,12 +143,16 @@ std::size_t flash_next_text_prefill_workspace_capacity_bytes(std::int32_t maximu
         layout.alloc_bytes(gdn_op_ws, 256);
     }
     {
-        auto scope = layout.scope();
-        (void)allocate_flash_next_qsa_indexer_workspace(layout, maximum_blocks, 1, sort_temp);
+        auto scope                   = layout.scope();
+        const std::int32_t tile_size = flash_next_qsa_indexer_tile_size(maximum_blocks, tokens);
+        const std::size_t sort_temp =
+            flash_next_qsa_indexer_sort_temp_bytes(maximum_blocks, tile_size);
+        (void)allocate_flash_next_qsa_indexer_workspace(layout, maximum_blocks, tokens, tile_size,
+                                                        sort_temp);
     }
     {
         auto scope = layout.scope();
-        (void)allocate_flash_next_qsa_attention_workspace(layout, 1);
+        (void)allocate_flash_next_qsa_attention_workspace(layout, tokens);
     }
     {
         auto scope = layout.scope();
@@ -370,33 +373,17 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
         // Execute QSA or GDN attention
         if (is_qsa_layer(layer)) {
             const std::size_t qsa_idx = qsa_ordinal(layer);
-            for (std::int32_t t = 0; t < tokens; ++t) {
-                const std::int32_t qsa_src = (t == 0) ? source_slot : destination_slot;
-                const std::int32_t qsa_dst = destination_slot;
-
-                set_qsa_step_metadata(token_indices, mrope_positions, t, table_row, qsa_src,
-                                      qsa_dst, round_ws.qsa_token_indices,
-                                      round_ws.qsa_mrope_positions, round_ws.qsa_table_rows,
-                                      round_ws.qsa_source_slots, round_ws.qsa_destination_slots,
-                                      stream);
-
-                Tensor col_input  = round_ws.block_input.slice(1, t, 1);
-                Tensor col_output = round_ws.block_output.slice(1, t, 1);
-
-                flash_next_qsa_indexer_decode(
-                    col_input, model.full_attention[qsa_idx], round_ws.qsa_token_indices,
-                    round_ws.qsa_mrope_positions, round_ws.qsa_table_rows,
-                    round_ws.qsa_source_slots, round_ws.qsa_destination_slots,
-                    state.qsa_indexer_caches[qsa_idx], maximum_blocks, maximum_blocks,
-                    workspace, round_ws.qsa_selected_blocks, round_ws.qsa_selected_counts,
-                    stream);
-
-                flash_next_qsa_attention_decode(
-                    col_input, model.full_attention[qsa_idx], round_ws.qsa_token_indices,
-                    round_ws.qsa_mrope_positions, round_ws.qsa_table_rows,
-                    round_ws.qsa_selected_blocks, round_ws.qsa_selected_counts,
-                    state.qsa_attention_caches[qsa_idx], workspace, col_output, stream);
-            }
+            flash_next_qsa_indexer_prefill_chunk(
+                round_ws.block_input, model.full_attention[qsa_idx], token_indices,
+                mrope_positions, table_row, source_slot, destination_slot,
+                state.qsa_indexer_caches[qsa_idx], maximum_blocks, workspace,
+                round_ws.selected_blocks, round_ws.selected_counts, stream);
+            emit_state(prefix + "selected_counts", round_ws.selected_counts);
+            flash_next_qsa_attention_prefill_chunk(
+                round_ws.block_input, model.full_attention[qsa_idx], token_indices,
+                mrope_positions, table_row, round_ws.selected_blocks,
+                round_ws.selected_counts, state.qsa_attention_caches[qsa_idx],
+                workspace, round_ws.block_output, stream);
         } else {
             const std::size_t gdn_idx = gdn_ordinal(layer);
             flash_next_gdn_prefill_chunk(round_ws.block_input, model.gdn[gdn_idx], source_slot,

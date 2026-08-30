@@ -94,4 +94,54 @@ void flash_next_qsa_indexer_decode(const Tensor& input, const AttentionWeights& 
                                   selected_blocks, selected_counts, stream);
 }
 
+void flash_next_qsa_indexer_prefill_chunk(
+    const Tensor& input, const AttentionWeights& weights, const Tensor& token_indices,
+    const Tensor& mrope_positions, std::int32_t table_row, std::int32_t source_state_slot,
+    std::int32_t destination_state_slot, QsaIndexerCacheView cache, std::int32_t maximum_blocks,
+    WorkspaceArena& workspace, Tensor& selected_blocks, Tensor& selected_counts,
+    cudaStream_t stream) {
+    const std::int32_t tokens        = input.ne[1];
+    const std::int32_t logical_pages = cache.block_tables.ne[0];
+    if (maximum_blocks <= 0 || maximum_blocks > 65'536 ||
+        logical_pages < (maximum_blocks + 63) / 64 ||
+        !exact_tensor(input, DType::BF16, 2'560, tokens) || tokens <= 0 ||
+        !exact_bf16_weight(weights.indexer_query_key, 640, 2'560) ||
+        !exact_tensor(weights.indexer_query_norm, DType::BF16, 128) ||
+        !exact_tensor(weights.indexer_key_norm, DType::BF16, 128) ||
+        !exact_tensor(token_indices, DType::I32, tokens) || table_row < 0 ||
+        table_row >= cache.block_tables.ne[1] || source_state_slot < 0 ||
+        source_state_slot >= cache.raw_keys.ne[2] || destination_state_slot < 0 ||
+        destination_state_slot >= cache.raw_keys.ne[2] || cache.block_keys.dtype != DType::BF16 ||
+        cache.block_keys.ne[0] != 128 || cache.block_keys.ne[1] != 64 ||
+        cache.block_keys.ne[2] <= 0 || cache.block_keys.ne[3] != 1 ||
+        !cache.block_keys.is_contiguous() || !aligned_to(cache.block_keys.data, 16) ||
+        cache.block_tables.dtype != DType::I32 || logical_pages <= 0 ||
+        cache.block_tables.ne[1] <= 0 || cache.block_tables.ne[2] != 1 ||
+        cache.block_tables.ne[3] != 1 || !cache.block_tables.is_contiguous() ||
+        !aligned_to(cache.block_tables.data, 16) || cache.raw_keys.dtype != DType::BF16 ||
+        cache.raw_keys.ne[0] != 128 || cache.raw_keys.ne[1] != 4 || cache.raw_keys.ne[2] <= 0 ||
+        cache.raw_keys.ne[3] != 1 || !cache.raw_keys.is_contiguous() ||
+        !aligned_to(cache.raw_keys.data, 16) || cache.raw_positions.dtype != DType::I32 ||
+        cache.raw_positions.ne[0] != 3 || cache.raw_positions.ne[1] != 4 ||
+        cache.raw_positions.ne[2] != cache.raw_keys.ne[2] || cache.raw_positions.ne[3] != 1 ||
+        !cache.raw_positions.is_contiguous() || !aligned_to(cache.raw_positions.data, 16) ||
+        !exact_tensor(selected_blocks, DType::I32, 512, tokens) ||
+        !exact_tensor(selected_counts, DType::I32, tokens) || stream == nullptr) {
+        throw std::invalid_argument(
+            "Flash-Next QSA indexer prefill chunk received an invalid exact target view");
+    }
+
+    const auto scope             = workspace.scope();
+    const std::int32_t tile_size = flash_next_qsa_indexer_tile_size(maximum_blocks, tokens);
+    const std::size_t sort_temp =
+        flash_next_qsa_indexer_sort_temp_bytes(maximum_blocks, tile_size);
+    FlashNextQsaIndexerWorkspace scratch = allocate_flash_next_qsa_indexer_workspace(
+        workspace, maximum_blocks, tokens, tile_size, sort_temp);
+    ops::linear(input, weights.indexer_query_key, scratch.projected, stream);
+    flash_next_qsa_indexer_prefill_launch(
+        token_indices, mrope_positions, table_row, source_state_slot, destination_state_slot,
+        weights.indexer_query_norm, weights.indexer_key_norm, cache, scratch, maximum_blocks,
+        selected_blocks, selected_counts, stream);
+}
+
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

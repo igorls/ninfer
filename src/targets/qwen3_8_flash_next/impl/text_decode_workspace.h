@@ -22,13 +22,6 @@ struct FlashNextTextDecodeWorkspace {
     Tensor selected_blocks; // I32 [512, tokens]
     Tensor selected_counts; // I32 [tokens]
     FlashNextHyperWorkspace hyper_scratch;
-    Tensor qsa_token_indices;
-    Tensor qsa_mrope_positions;
-    Tensor qsa_table_rows;
-    Tensor qsa_source_slots;
-    Tensor qsa_destination_slots;
-    Tensor qsa_selected_blocks;
-    Tensor qsa_selected_counts;
     FlashNextHyperWorkspace single_token_hyper_scratch;
 };
 
@@ -43,13 +36,6 @@ FlashNextTextDecodeWorkspace allocate_flash_next_text_decode_workspace(Arena& ar
     ws.selected_blocks            = arena.alloc(DType::I32, {512, tokens}, 256);
     ws.selected_counts            = arena.alloc(DType::I32, {tokens}, 256);
     ws.hyper_scratch              = allocate_flash_next_hyper_workspace(arena, tokens);
-    ws.qsa_token_indices          = arena.alloc(DType::I32, {1}, 16);
-    ws.qsa_mrope_positions        = arena.alloc(DType::I32, {1, 3}, 16);
-    ws.qsa_table_rows             = arena.alloc(DType::I32, {1}, 16);
-    ws.qsa_source_slots           = arena.alloc(DType::I32, {1}, 16);
-    ws.qsa_destination_slots      = arena.alloc(DType::I32, {1}, 16);
-    ws.qsa_selected_blocks        = arena.alloc(DType::I32, {512, 1}, 256);
-    ws.qsa_selected_counts        = arena.alloc(DType::I32, {1}, 16);
     ws.single_token_hyper_scratch = allocate_flash_next_hyper_workspace(arena, 1);
     return ws;
 }
@@ -63,7 +49,7 @@ struct FlashNextPrefillChunkStaging {
     Tensor gathered_ple;    // BF16 [2560, tokens]
     Tensor token_ids;       // I32 [tokens]
     Tensor token_indices;   // I32 [tokens]
-    Tensor mrope_positions; // I32 [3, tokens]
+    Tensor mrope_positions; // I32 [tokens, 3] (planar: axis-major, token fastest)
     Tensor embedding;       // BF16 [2560, tokens]
 };
 
@@ -74,7 +60,7 @@ FlashNextPrefillChunkStaging allocate_flash_next_prefill_chunk_staging(Arena& ar
     staging.gathered_ple    = arena.alloc(DType::BF16, {2'560, tokens}, 256);
     staging.token_ids       = arena.alloc(DType::I32, {tokens}, 256);
     staging.token_indices   = arena.alloc(DType::I32, {tokens}, 256);
-    staging.mrope_positions = arena.alloc(DType::I32, {3, tokens}, 256);
+    staging.mrope_positions = arena.alloc(DType::I32, {tokens, 3}, 256);
     staging.embedding       = arena.alloc(DType::BF16, {2'560, tokens}, 256);
     return staging;
 }

@@ -32,4 +32,11 @@ void flash_next_qsa_indexer_decode(const Tensor& input, const AttentionWeights& 
                                    WorkspaceArena& workspace, Tensor& selected_blocks,
                                    Tensor& selected_counts, cudaStream_t stream);
 
+void flash_next_qsa_indexer_prefill_chunk(
+    const Tensor& input, const AttentionWeights& weights, const Tensor& token_indices,
+    const Tensor& mrope_positions, std::int32_t table_row, std::int32_t source_state_slot,
+    std::int32_t destination_state_slot, QsaIndexerCacheView cache, std::int32_t maximum_blocks,
+    WorkspaceArena& workspace, Tensor& selected_blocks, Tensor& selected_counts,
+    cudaStream_t stream);
+
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

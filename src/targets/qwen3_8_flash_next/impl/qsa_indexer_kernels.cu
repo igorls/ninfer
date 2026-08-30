@@ -293,4 +293,247 @@ void flash_next_qsa_indexer_launch(const Tensor& token_indices, const Tensor& mr
     CUDA_CHECK(cudaGetLastError());
 }
 
+__global__ void indexer_publish_complete_blocks_chunk_kernel(
+    const __nv_bfloat16* __restrict__ projected, const __nv_bfloat16* __restrict__ norm,
+    const std::int32_t* __restrict__ token_indices, const std::int32_t* __restrict__ positions,
+    int source_slot, int destination_slot, int table_row,
+    const std::int32_t* __restrict__ block_tables, int logical_pages,
+    __nv_bfloat16* __restrict__ block_keys, const __nv_bfloat16* __restrict__ raw_keys,
+    const std::int32_t* __restrict__ raw_positions, int tokens) {
+    __shared__ float warp_squares[4];
+    __shared__ __nv_bfloat16 pooled[kHeadDim];
+    __shared__ __nv_bfloat16 normalized[kHeadDim];
+    __shared__ std::int32_t first_token_pos[3];
+
+    const int dim               = static_cast<int>(threadIdx.x);
+    const int b                 = static_cast<int>(blockIdx.x);
+    const int warp              = dim >> 5;
+    const int lane              = dim & 31;
+    const int first_token_index = token_indices[0];
+    const int leftover_in       = first_token_index & 3;
+    const int complete_blocks   = (leftover_in + tokens) / 4;
+    if (b >= complete_blocks) { return; }
+
+    const std::int64_t source_base = static_cast<std::int64_t>(source_slot) * 4 * kHeadDim;
+
+    // First token of block b: s0 = 4 * b + 0
+    if (dim < 3) {
+        const int s0 = 4 * b;
+        if (s0 < leftover_in) {
+            first_token_pos[dim] =
+                raw_positions[static_cast<std::int64_t>(source_slot) * 12 + s0 * 3 + dim];
+        } else {
+            const int t0         = s0 - leftover_in;
+            first_token_pos[dim] = positions[dim * tokens + t0];
+        }
+    }
+    __syncthreads();
+
+    // 4 tokens of block b: s = 4 * b + slot (slot = 0, 1, 2, 3)
+    float sum_raw = 0.0F;
+    for (int slot = 0; slot < 4; ++slot) {
+        const int s = 4 * b + slot;
+        float val   = 0.0F;
+        if (s < leftover_in) {
+            val = __bfloat162float(raw_keys[source_base + slot * kHeadDim + dim]);
+        } else {
+            const int t = s - leftover_in;
+            val         = __bfloat162float(
+                projected[static_cast<std::int64_t>(t) * kProjectionRows + kRawKeyOffset + dim]);
+        }
+        sum_raw += val;
+    }
+
+    pooled[dim]              = __float2bfloat16_rn(sum_raw * 0.25F);
+    const float pooled_float = __bfloat162float(pooled[dim]);
+    const float square       = ops::warp_reduce_sum(pooled_float * pooled_float);
+    if (lane == 0) { warp_squares[warp] = square; }
+    __syncthreads();
+    const float sum = warp_squares[0] + warp_squares[1] + warp_squares[2] + warp_squares[3];
+    normalized[dim] =
+        __float2bfloat16_rn(pooled_float * rsqrtf(sum / static_cast<float>(kHeadDim) + 1.0e-6F) *
+                            (1.0F + __bfloat162float(norm[dim])));
+    __syncthreads();
+
+    const int global_block  = (first_token_index - leftover_in) / 4 + b;
+    const int logical_page  = global_block / kCompressedPage;
+    const int page_offset   = global_block % kCompressedPage;
+    const int physical_page = block_tables[table_row * logical_pages + logical_page];
+    auto* destination_key   = block_keys +
+                            static_cast<std::int64_t>(physical_page) * kCompressedPage * kHeadDim +
+                            page_offset * kHeadDim;
+    store_rotated(normalized, first_token_pos, destination_key, dim);
+}
+
+__global__ void indexer_update_leftover_chunk_kernel(
+    const __nv_bfloat16* __restrict__ projected, const std::int32_t* __restrict__ token_indices,
+    const std::int32_t* __restrict__ positions, int source_slot, int destination_slot,
+    __nv_bfloat16* __restrict__ raw_keys, std::int32_t* __restrict__ raw_positions, int tokens) {
+    const int dim               = static_cast<int>(threadIdx.x);
+    const int first_token_index = token_indices[0];
+    const int leftover_in       = first_token_index & 3;
+    const int complete_blocks   = (leftover_in + tokens) / 4;
+    const int leftover_out      = (leftover_in + tokens) & 3;
+
+    const std::int64_t source_base      = static_cast<std::int64_t>(source_slot) * 4 * kHeadDim;
+    const std::int64_t destination_base = static_cast<std::int64_t>(destination_slot) * 4 * kHeadDim;
+
+    for (int slot = 0; slot < leftover_out; ++slot) {
+        const int s = complete_blocks * 4 + slot;
+        if (s < leftover_in) {
+            raw_keys[destination_base + slot * kHeadDim + dim] =
+                raw_keys[source_base + s * kHeadDim + dim];
+            if (dim < 3) {
+                raw_positions[static_cast<std::int64_t>(destination_slot) * 12 + slot * 3 + dim] =
+                    raw_positions[static_cast<std::int64_t>(source_slot) * 12 + s * 3 + dim];
+            }
+        } else {
+            const int t = s - leftover_in;
+            raw_keys[destination_base + slot * kHeadDim + dim] =
+                projected[static_cast<std::int64_t>(t) * kProjectionRows + kRawKeyOffset + dim];
+            if (dim < 3) {
+                raw_positions[static_cast<std::int64_t>(destination_slot) * 12 + slot * 3 + dim] =
+                    positions[dim * tokens + t];
+            }
+        }
+    }
+}
+
+__global__ void score_blocks_chunk_kernel(const __nv_bfloat16* __restrict__ query,
+                                          const __nv_bfloat16* __restrict__ block_keys,
+                                          const std::int32_t* __restrict__ block_tables,
+                                          int table_row,
+                                          const std::int32_t* __restrict__ token_indices,
+                                          int logical_pages, int active_blocks,
+                                          float* __restrict__ scores) {
+    __shared__ float head_scores[kQueryHeads];
+    const int block                = static_cast<int>(blockIdx.x);
+    const int row                  = static_cast<int>(blockIdx.y);
+    const int tid                  = static_cast<int>(threadIdx.x);
+    const int head                 = tid >> 5;
+    const int lane                 = tid & 31;
+    const int token_index          = token_indices[row];
+    const int complete_blocks      = (token_index + 1) / 4;
+    const std::int64_t score_index = static_cast<std::int64_t>(row) * active_blocks + block;
+    if (block >= complete_blocks) {
+        if (tid == 0) { scores[score_index] = -__int_as_float(0x7F800000); }
+        return;
+    }
+    const int logical_page  = block / kCompressedPage;
+    const int page_offset   = block % kCompressedPage;
+    const int physical_page = block_tables[table_row * logical_pages + logical_page];
+    const auto* key         = block_keys +
+                      static_cast<std::int64_t>(physical_page) * kCompressedPage * kHeadDim +
+                      page_offset * kHeadDim;
+    const auto* q =
+        query + static_cast<std::int64_t>(row) * kQueryHeads * kHeadDim + head * kHeadDim;
+    float dot = 0.0F;
+    for (int dim = lane; dim < kHeadDim; dim += 32) {
+        dot = fmaf(__bfloat162float(q[dim]), __bfloat162float(key[dim]), dot);
+    }
+    dot = ops::warp_reduce_sum(dot);
+    if (lane == 0) { head_scores[head] = dot; }
+    __syncthreads();
+    if (tid == 0) {
+        float score = 0.0F;
+        for (float value : head_scores) { score += fmaxf(value, 0.0F); }
+        scores[score_index] = score * kIndexerScaling;
+    }
+}
+
+__global__ void publish_selection_chunk_kernel(const std::int32_t* __restrict__ sorted_ids,
+                                               const std::int32_t* __restrict__ token_indices,
+                                               int active_blocks,
+                                               std::int32_t* __restrict__ selected_blocks,
+                                               std::int32_t* __restrict__ selected_counts) {
+    const int row             = static_cast<int>(blockIdx.x);
+    const int tid             = static_cast<int>(threadIdx.x);
+    const int token_index     = token_indices[row];
+    const int complete_blocks = (token_index + 1) / 4;
+    const int count           = min(complete_blocks, kSelectedBlocks);
+    if (tid == 0) { selected_counts[row] = count; }
+    for (int index = tid; index < kSelectedBlocks; index += static_cast<int>(blockDim.x)) {
+        selected_blocks[static_cast<std::int64_t>(row) * kSelectedBlocks + index] =
+            index < count ? sorted_ids[static_cast<std::int64_t>(row) * active_blocks + index]
+                          : -1;
+    }
+}
+
+void flash_next_qsa_indexer_prefill_launch(
+    const Tensor& token_indices, const Tensor& mrope_positions, std::int32_t table_row,
+    std::int32_t source_state_slot, std::int32_t destination_state_slot, const Tensor& query_norm,
+    const Tensor& key_norm, QsaIndexerCacheView cache, FlashNextQsaIndexerWorkspace& scratch,
+    std::int32_t maximum_blocks, Tensor& selected_blocks, Tensor& selected_counts,
+    cudaStream_t stream) {
+    const int tokens = token_indices.ne[0];
+    prepare_query_kernel<<<dim3(kQueryHeads, tokens), kHeadDim, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(scratch.projected.data),
+        static_cast<const __nv_bfloat16*>(query_norm.data),
+        static_cast<const std::int32_t*>(mrope_positions.data),
+        static_cast<__nv_bfloat16*>(scratch.query.data), tokens);
+    CUDA_CHECK(cudaGetLastError());
+
+    const int max_complete_blocks = (tokens + 3) / 4;
+    if (max_complete_blocks > 0) {
+        indexer_publish_complete_blocks_chunk_kernel<<<max_complete_blocks, kHeadDim, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.projected.data),
+            static_cast<const __nv_bfloat16*>(key_norm.data),
+            static_cast<const std::int32_t*>(token_indices.data),
+            static_cast<const std::int32_t*>(mrope_positions.data), source_state_slot,
+            destination_state_slot, table_row,
+            static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
+            static_cast<__nv_bfloat16*>(cache.block_keys.data),
+            static_cast<const __nv_bfloat16*>(cache.raw_keys.data),
+            static_cast<const std::int32_t*>(cache.raw_positions.data), tokens);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    indexer_update_leftover_chunk_kernel<<<1, kHeadDim, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(scratch.projected.data),
+        static_cast<const std::int32_t*>(token_indices.data),
+        static_cast<const std::int32_t*>(mrope_positions.data), source_state_slot,
+        destination_state_slot, static_cast<__nv_bfloat16*>(cache.raw_keys.data),
+        static_cast<std::int32_t*>(cache.raw_positions.data), tokens);
+    CUDA_CHECK(cudaGetLastError());
+
+    const int tile_size     = flash_next_qsa_indexer_tile_size(maximum_blocks, tokens);
+    const int active_blocks = maximum_blocks;
+
+    for (int t_start = 0; t_start < tokens; t_start += tile_size) {
+        const int current_tile = min(tile_size, tokens - t_start);
+        constexpr int threads  = 256;
+        const int items        = active_blocks * current_tile;
+
+        initialize_sort_kernel<<<(items + threads - 1) / threads, threads, 0, stream>>>(
+            static_cast<std::int32_t*>(scratch.ids.data),
+            static_cast<std::int32_t*>(scratch.offsets.data), active_blocks, current_tile);
+        CUDA_CHECK(cudaGetLastError());
+
+        score_blocks_chunk_kernel<<<dim3(active_blocks, current_tile), kQueryHeads * 32, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.query.data) +
+                static_cast<std::int64_t>(t_start) * kQueryHeads * kHeadDim,
+            static_cast<const __nv_bfloat16*>(cache.block_keys.data),
+            static_cast<const std::int32_t*>(cache.block_tables.data), table_row,
+            static_cast<const std::int32_t*>(token_indices.data) + t_start, cache.block_tables.ne[0],
+            active_blocks, static_cast<float*>(scratch.scores.data));
+        CUDA_CHECK(cudaGetLastError());
+
+        std::size_t temp_bytes = scratch.sort_temp.bytes;
+        CUDA_CHECK(sort_pairs_descending(
+            scratch.sort_temp.data, temp_bytes, static_cast<const float*>(scratch.scores.data),
+            static_cast<float*>(scratch.sorted_scores.data),
+            static_cast<const std::int32_t*>(scratch.ids.data),
+            static_cast<std::int32_t*>(scratch.sorted_ids.data), items, current_tile,
+            static_cast<const std::int32_t*>(scratch.offsets.data), stream));
+
+        publish_selection_chunk_kernel<<<current_tile, 256, 0, stream>>>(
+            static_cast<const std::int32_t*>(scratch.sorted_ids.data),
+            static_cast<const std::int32_t*>(token_indices.data) + t_start, active_blocks,
+            static_cast<std::int32_t*>(selected_blocks.data) +
+                static_cast<std::int64_t>(t_start) * kSelectedBlocks,
+            static_cast<std::int32_t*>(selected_counts.data) + t_start);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
 } // namespace ninfer::targets::qwen3_8_flash_next::detail
