@@ -10,9 +10,31 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 
+namespace ninfer::targets::qwen3_6::detail {
+struct FlashNextPressureHandleAccess;
+
+template <>
+struct PressurePlanningSessionImpl<FlashNextPressureHandleAccess> {
+    static PressureTargetHandle make_handle(const void* session, std::uint32_t generation, std::uint32_t index) noexcept {
+        PressureTargetHandle h;
+        h.session_ = session;
+        h.generation_ = generation;
+        h.index_ = index;
+        return h;
+    }
+    static const void* get_session(const PressureTargetHandle& h) noexcept { return h.session_; }
+    static std::uint32_t get_generation(const PressureTargetHandle& h) noexcept { return h.generation_; }
+    static std::uint32_t get_index(const PressureTargetHandle& h) noexcept { return h.index_; }
+};
+}
+
 namespace ninfer::targets::qwen3_8_flash_next::detail {
+
+using FlashNextPressureHandleHelper =
+    ninfer::targets::qwen3_6::detail::PressurePlanningSessionImpl<ninfer::targets::qwen3_6::detail::FlashNextPressureHandleAccess>;
 
 ProgramImpl::ProgramImpl(const LoadedModelData* model_data, FlashNextRuntimePlan plan_in,
                          DeviceContext& dev, TextModelView text_override,
@@ -164,21 +186,87 @@ std::uint32_t ProgramImpl::count_freeable_physical_groups(
                : 0U;
 }
 
-void ProgramImpl::evict_continuation_slot(std::size_t slot_idx) {
+void ProgramImpl::vacate_slot(std::size_t slot_idx) {
     if (slot_idx >= continuation_slots_.size()) { return; }
     auto& c_slot = continuation_slots_[slot_idx];
     if (c_slot.role != ContinuationSlotRole::Catalogued) { return; }
-
     executor_.release_physical_groups(c_slot.physical_groups);
     c_slot.physical_groups.clear();
     c_slot.committed_tokens.clear();
-    c_slot.committed_frontier = 0;
-    c_slot.role = ContinuationSlotRole::Vacant;
+    c_slot.committed_frontier   = 0;
+    c_slot.role                 = ContinuationSlotRole::Vacant;
     c_slot.generation++;
+    c_slot.published_checkpoints = 1;
+    c_slot.paired_rewrite_slot.reset();
+    c_slot.paired_rewrite_generation = 0;
+}
+
+// An Engine owner is the endpoint slot plus the TurnClosure slot its summary published as the
+// rewrite checkpoint; the Engine drops both when it evicts or releases the owner.
+void ProgramImpl::vacate_owner(std::size_t slot_idx) {
+    if (slot_idx >= continuation_slots_.size()) { return; }
+    const auto paired     = continuation_slots_[slot_idx].paired_rewrite_slot;
+    const auto paired_gen = continuation_slots_[slot_idx].paired_rewrite_generation;
+    vacate_slot(slot_idx);
+    if (paired.has_value() && *paired < continuation_slots_.size()) {
+        const auto& turn = continuation_slots_[*paired];
+        if (turn.role == ContinuationSlotRole::Catalogued && turn.generation == paired_gen &&
+            !is_slot_protected(*paired)) {
+            vacate_slot(*paired);
+        }
+    }
+}
+
+std::uint32_t ProgramImpl::reserved_unowned_groups() const noexcept {
+    std::uint32_t reserved = 0;
+    for (const auto& st : lane_states_) {
+        if (!st.active) { continue; }
+        const auto owned =
+            static_cast<std::uint32_t>(executor_.lane_physical_groups(st.lane_handle).size());
+        if (st.planned_groups > owned) { reserved += st.planned_groups - owned; }
+    }
+    return reserved;
+}
+
+std::uint32_t ProgramImpl::published_checkpoints_of(std::size_t slot_idx) const noexcept {
+    return slot_idx < continuation_slots_.size() ? continuation_slots_[slot_idx].published_checkpoints
+                                                 : 1U;
+}
+
+// A lane that ends without cataloguing an endpoint (Released finish, abort, cancelled commit)
+// loses its Engine entry, and with it the TurnClosure it captured: drop our copy unless a
+// sibling lane is still resuming from it.
+void ProgramImpl::drop_unpublished_turn_closure(LaneState& st) {
+    if (!st.turn_closure_continuation_index.has_value()) { return; }
+    const std::size_t idx = *st.turn_closure_continuation_index;
+    if (idx >= continuation_slots_.size()) { return; }
+    const auto& turn = continuation_slots_[idx];
+    if (turn.role != ContinuationSlotRole::Catalogued ||
+        turn.kind != runtime::CheckpointKind::TurnClosure) {
+        return;
+    }
+    for (const auto& other : lane_states_) {
+        if (&other != &st && other.active && other.reused_from_continuation_index.has_value() &&
+            *other.reused_from_continuation_index == idx) {
+            return;
+        }
+    }
+    vacate_slot(idx);
+}
+
+void ProgramImpl::evict_continuation_slot(std::size_t slot_idx) {
+    if (slot_idx >= continuation_slots_.size()) { return; }
+    if (continuation_slots_[slot_idx].role != ContinuationSlotRole::Catalogued) { return; }
+    vacate_owner(slot_idx);
     ++resource_revision_;
 }
 
 bool ProgramImpl::ensure_physical_groups_available(std::size_t needed) {
+    if (executor_.available_physical_groups() >= needed) {
+        return true;
+    }
+    std::fprintf(stderr, "[warn] flash_next: unexpected defensive page group eviction needed=%zu available=%zu\n",
+                 needed, executor_.available_physical_groups());
     while (executor_.available_physical_groups() < needed) {
         std::int32_t best_c = -1;
         std::uint64_t oldest_epoch = std::numeric_limits<std::uint64_t>::max();
@@ -205,35 +293,13 @@ bool ProgramImpl::ensure_physical_groups_available(std::size_t needed) {
     return executor_.available_physical_groups() >= needed;
 }
 
-std::int32_t ProgramImpl::allocate_or_evict_continuation_slot() {
+std::int32_t ProgramImpl::allocate_vacant_continuation_slot() {
     const std::size_t cap = continuation_slots_.size();
-    if (cap == 0) { return -1; }
-
     for (std::size_t c = 0; c < cap; ++c) {
         if (continuation_slots_[c].role == ContinuationSlotRole::Vacant) {
             return static_cast<std::int32_t>(c);
         }
     }
-
-    std::int32_t best_c = -1;
-    std::uint64_t oldest_epoch = std::numeric_limits<std::uint64_t>::max();
-
-    for (std::size_t c = 0; c < cap; ++c) {
-        const auto& slot = continuation_slots_[c];
-        if (slot.role != ContinuationSlotRole::Catalogued) { continue; }
-        if (is_slot_protected(c)) { continue; }
-
-        if (slot.last_used_epoch < oldest_epoch) {
-            oldest_epoch = slot.last_used_epoch;
-            best_c       = static_cast<std::int32_t>(c);
-        }
-    }
-
-    if (best_c >= 0) {
-        evict_continuation_slot(static_cast<std::size_t>(best_c));
-        return best_c;
-    }
-
     return -1;
 }
 
@@ -314,6 +380,439 @@ const runtime::RequestPlanSummary& ResourcePlan::summary() const noexcept {
 // PressurePlanningSession
 // ---------------------------------------------------------------------------
 
+namespace detail {
+
+PressurePlanningSessionImpl::PressurePlanningSessionImpl(
+    ProgramImpl& program,
+    const runtime::ContextMachineCostModel& cost,
+    std::span<const AdmissionCandidate* const> candidates,
+    std::span<const ContinuationHandle* const> private_owners,
+    std::span<const std::uint32_t> private_owner_ordinals,
+    std::span<const SharedPrefixHandle* const> shared_owners,
+    std::span<const std::uint32_t> shared_owner_ordinals)
+    : program_(&program),
+      machine_cost_(&cost),
+      resource_revision_(program.resource_revision_) {
+    if (candidates.empty()) {
+        throw std::logic_error("pressure planning session: candidates empty");
+    }
+    if (private_owners.size() != private_owner_ordinals.size()) {
+        throw std::logic_error("pressure planning session: private owners/ordinals size mismatch");
+    }
+    if (shared_owners.size() != shared_owner_ordinals.size()) {
+        throw std::logic_error("pressure planning session: shared owners/ordinals size mismatch");
+    }
+    if (program.has_context_transaction_) {
+        throw std::logic_error("pressure planning session: active context transaction in progress");
+    }
+    if (program.pressure_planning_active_) {
+        throw std::logic_error("pressure planning session: another pressure planning session is already active");
+    }
+
+    candidates_.assign(candidates.begin(), candidates.end());
+    owners_.reserve(private_owners.size());
+    for (std::size_t i = 0; i < private_owners.size(); ++i) {
+        const ContinuationHandle* handle = private_owners[i];
+        if (handle == nullptr) {
+            throw std::logic_error("pressure planning private owner is null");
+        }
+        const std::uint32_t slot_idx = handle->index();
+        const std::uint64_t gen = handle->generation();
+        if (slot_idx >= program.continuation_slots_.size() ||
+            program.continuation_slots_[slot_idx].role != ContinuationSlotRole::Catalogued ||
+            program.continuation_slots_[slot_idx].generation != gen) {
+            // Should be unreachable once the Program never evicts on its own; if it happens the
+            // owner simply cannot be chosen as a victim (its outcome stays Retained).
+            std::fprintf(stderr,
+                         "[warn] flash_next: pressure planning private owner %u (generation %llu) is stale; ignoring it\n",
+                         slot_idx, static_cast<unsigned long long>(gen));
+            continue;
+        }
+        owners_.push_back(PressurePlanningOwner{
+            .handle = handle,
+            .ordinal = private_owner_ordinals[i],
+            .continuation_index = slot_idx,
+            .generation = gen,
+        });
+    }
+
+    std::sort(owners_.begin(), owners_.end(), [](const auto& a, const auto& b) {
+        return a.ordinal < b.ordinal;
+    });
+    for (std::size_t i = 1; i < owners_.size(); ++i) {
+        if (owners_[i - 1].ordinal == owners_[i].ordinal) {
+            throw std::logic_error("pressure planning owner ordinal is duplicated");
+        }
+    }
+
+    targets_.reserve(candidates_.size() + 16);
+    for (std::size_t i = 0; i < candidates_.size(); ++i) {
+        const AdmissionCandidate* cand = candidates_[i];
+        if (cand == nullptr || cand->impl_ == nullptr ||
+            cand->impl_->planning_revision != resource_revision_) {
+            throw std::logic_error("pressure planning candidate is stale");
+        }
+        targets_.push_back(PressurePlanningTargetNode{
+            .candidate_index = static_cast<std::uint32_t>(i),
+            .owner_evicted = std::vector<std::uint8_t>(owners_.size(), 0),
+            .stable_ordinal = static_cast<std::uint32_t>(i),
+            .root_maximal = false,
+        });
+    }
+
+    if (++program.pressure_planning_generation_ == 0) {
+        ++program.pressure_planning_generation_;
+    }
+    session_generation_ = program.pressure_planning_generation_;
+    program.pressure_planning_active_ = true;
+}
+
+PressurePlanningSessionImpl::~PressurePlanningSessionImpl() noexcept {
+    if (program_ != nullptr) {
+        program_->pressure_planning_active_ = false;
+    }
+}
+
+bool PressurePlanningSessionImpl::valid(PressureTargetHandle target) const noexcept {
+    return FlashNextPressureHandleHelper::get_session(target) == this &&
+           FlashNextPressureHandleHelper::get_generation(target) == session_generation_ &&
+           FlashNextPressureHandleHelper::get_index(target) < targets_.size() &&
+           program_ != nullptr &&
+           program_->resource_revision_ == resource_revision_;
+}
+
+std::uint32_t PressurePlanningSessionImpl::candidate_index(const AdmissionCandidate& candidate) const {
+    const auto it = std::find(candidates_.begin(), candidates_.end(), &candidate);
+    if (it == candidates_.end()) {
+        throw std::invalid_argument("pressure target candidate does not belong to this session");
+    }
+    return static_cast<std::uint32_t>(it - candidates_.begin());
+}
+
+PressureTargetHandle PressurePlanningSessionImpl::identity_target(const AdmissionCandidate& candidate) const {
+    const std::uint32_t idx = candidate_index(candidate);
+    return FlashNextPressureHandleHelper::make_handle(this, session_generation_, idx);
+}
+
+PressureTargetHandle PressurePlanningSessionImpl::root_maximal_target(const AdmissionCandidate& root_candidate) {
+    if (scratch_live_) {
+        throw std::logic_error("pressure expansion scratch is still live");
+    }
+    const std::uint32_t cand_idx = candidate_index(root_candidate);
+    const auto& cand_impl = *root_candidate.impl_;
+
+    PressurePlanningTargetNode maximal{
+        .candidate_index = cand_idx,
+        .owner_evicted = std::vector<std::uint8_t>(owners_.size(), 0),
+        .stable_ordinal = 0,
+        .root_maximal = true,
+    };
+
+    for (std::size_t i = 0; i < owners_.size(); ++i) {
+        const auto& owner = owners_[i];
+        bool is_protected = false;
+        if (cand_impl.has_source &&
+            cand_impl.source_continuation_index == owner.continuation_index &&
+            cand_impl.source_continuation_generation == owner.generation) {
+            is_protected = true;
+        }
+        if (program_->is_slot_protected(owner.continuation_index)) {
+            is_protected = true;
+        }
+        if (!is_protected) {
+            maximal.owner_evicted[i] = 1;
+        }
+    }
+
+    auto it = std::find_if(targets_.begin(), targets_.end(), [&](const auto& node) {
+        return node.candidate_index == maximal.candidate_index &&
+               node.owner_evicted == maximal.owner_evicted;
+    });
+
+    std::uint32_t target_idx = 0;
+    if (it != targets_.end()) {
+        it->root_maximal = true;
+        target_idx = static_cast<std::uint32_t>(it - targets_.begin());
+    } else {
+        maximal.stable_ordinal = static_cast<std::uint32_t>(targets_.size());
+        targets_.push_back(std::move(maximal));
+        target_idx = static_cast<std::uint32_t>(targets_.size() - 1);
+    }
+
+    return FlashNextPressureHandleHelper::make_handle(this, session_generation_, target_idx);
+}
+
+runtime::PressureTargetAssessment PressurePlanningSessionImpl::assess(PressureTargetHandle target) {
+    if (!valid(target) || scratch_live_) {
+        throw std::logic_error("pressure target assessment is stale or conflicts with expansion");
+    }
+    const std::uint32_t target_idx = FlashNextPressureHandleHelper::get_index(target);
+    const auto& node = targets_[target_idx];
+    const auto& cand = *candidates_[node.candidate_index];
+    const auto& details = *cand.impl_;
+
+    const bool is_identity = std::all_of(node.owner_evicted.begin(), node.owner_evicted.end(),
+                                         [](std::uint8_t v) { return v == 0; });
+
+    assessment_outcomes_.clear();
+    assessment_outcomes_.reserve(owners_.size());
+    assessment_impacts_.clear();
+    std::uint32_t total_degradation = 0;
+    std::uint32_t total_dropped = 0;
+    std::uint64_t projection_work = 1;
+
+    for (std::size_t i = 0; i < owners_.size(); ++i) {
+        if (node.owner_evicted[i] == 1) {
+            // The Engine validates this against continuation_checkpoint_count(entry.summary).
+            const std::uint32_t dropped = program_->published_checkpoints_of(owners_[i].continuation_index);
+            assessment_outcomes_.push_back(runtime::PressureOwnerOutcome{
+                .owner_ordinal = owners_[i].ordinal,
+                .disposition = runtime::ClaimDisposition::Evicted,
+                .degradation_units = 1,
+                .dropped_checkpoints = dropped,
+                .shared = false,
+            });
+            total_degradation += 1;
+            total_dropped += dropped;
+            projection_work += 1;
+        }
+    }
+
+    runtime::MaterializationPhysicalStatus status = runtime::MaterializationPhysicalStatus::Infeasible;
+    if (is_identity) {
+        status = details.assessment.physical_status;
+    } else {
+        std::uint32_t available = static_cast<std::uint32_t>(program_->executor_.available_physical_groups());
+        {
+            const std::uint32_t reserved = program_->reserved_unowned_groups();
+            available = available > reserved ? available - reserved : 0U;
+        }
+        {
+            // A group comes back only when every reference to it belongs to a slot this target
+            // evicts; an Engine owner is its endpoint slot plus the paired TurnClosure slot.
+            std::unordered_map<std::uint32_t, std::uint32_t> refs_in_target;
+            const auto add_slot = [&](std::size_t s) {
+                if (s >= program_->continuation_slots_.size()) { return; }
+                const auto& slot = program_->continuation_slots_[s];
+                if (slot.role != ContinuationSlotRole::Catalogued) { return; }
+                for (const std::uint32_t g : slot.physical_groups) { refs_in_target[g] += 1; }
+            };
+            for (std::size_t i = 0; i < owners_.size(); ++i) {
+                if (node.owner_evicted[i] != 1) { continue; }
+                const std::size_t s = owners_[i].continuation_index;
+                add_slot(s);
+                if (s < program_->continuation_slots_.size()) {
+                    const auto& slot = program_->continuation_slots_[s];
+                    if (slot.paired_rewrite_slot.has_value() &&
+                        *slot.paired_rewrite_slot < program_->continuation_slots_.size() &&
+                        program_->continuation_slots_[*slot.paired_rewrite_slot].generation ==
+                            slot.paired_rewrite_generation &&
+                        !program_->is_slot_protected(*slot.paired_rewrite_slot)) {
+                        add_slot(*slot.paired_rewrite_slot);
+                    }
+                }
+            }
+            for (const auto& [g, refs] : refs_in_target) {
+                if (program_->executor_.group_refcount(g) == refs) { available += 1; }
+            }
+        }
+        std::uint32_t needed = details.required_page_groups;
+        if (details.has_source && details.reusable_tokens > 0) {
+            const std::uint32_t source_groups = (details.reusable_tokens + 256U - 1U) / 256U;
+            needed = (needed > source_groups) ? (needed - source_groups) : 0;
+        }
+        if (available >= needed) {
+            status = runtime::MaterializationPhysicalStatus::Feasible;
+        } else {
+            status = runtime::MaterializationPhysicalStatus::Infeasible;
+        }
+    }
+
+    bool expandable = false;
+    for (std::size_t i = 0; i < owners_.size(); ++i) {
+        if (node.owner_evicted[i] == 0) {
+            bool is_protected = false;
+            if (details.has_source &&
+                details.source_continuation_index == owners_[i].continuation_index &&
+                details.source_continuation_generation == owners_[i].generation) {
+                is_protected = true;
+            }
+            if (program_->is_slot_protected(owners_[i].continuation_index)) {
+                is_protected = true;
+            }
+            if (!is_protected) {
+                expandable = true;
+                break;
+            }
+        }
+    }
+
+    std::uint64_t digest = details.assessment.assessment_digest;
+    if (!is_identity) {
+        digest = 1469598103934665603ULL;
+        digest ^= static_cast<std::uint64_t>(node.candidate_index); digest *= 1099511628211ULL;
+        digest ^= static_cast<std::uint64_t>(node.stable_ordinal); digest *= 1099511628211ULL;
+        digest ^= static_cast<std::uint64_t>(status); digest *= 1099511628211ULL;
+        digest ^= static_cast<std::uint64_t>(total_degradation); digest *= 1099511628211ULL;
+        for (std::uint8_t ev : node.owner_evicted) {
+            digest ^= static_cast<std::uint64_t>(ev); digest *= 1099511628211ULL;
+        }
+    }
+
+    return runtime::PressureTargetAssessment{
+        .physical_status = status,
+        .source_disposition = details.assessment.source_disposition,
+        .machine = details.assessment.machine,
+        .owner_outcomes = assessment_outcomes_,
+        .checkpoint_impacts = assessment_impacts_,
+        .candidate_ordinal = node.candidate_index,
+        .stable_target_ordinal = node.stable_ordinal,
+        .degradation_units = total_degradation,
+        .dropped_checkpoints = total_dropped,
+        .projection_work = projection_work,
+        .assessment_digest = digest,
+        .expandable = expandable,
+        .root_maximal = node.root_maximal,
+    };
+}
+
+PreparedPressureExpansion PressurePlanningSessionImpl::prepare_expansion(PressureTargetHandle parent) {
+    if (!valid(parent) || scratch_live_) {
+        throw std::logic_error("pressure expansion parent is stale or scratch is busy");
+    }
+    const std::uint32_t parent_idx = FlashNextPressureHandleHelper::get_index(parent);
+    const auto& node = targets_[parent_idx];
+    const auto& details = *candidates_[node.candidate_index]->impl_;
+
+    expansion_scratch_.clear();
+    scratch_new_count_ = 0;
+    scratch_parent_index_ = parent_idx;
+
+    for (std::size_t i = 0; i < owners_.size(); ++i) {
+        if (node.owner_evicted[i] == 0) {
+            bool is_protected = false;
+            if (details.has_source &&
+                details.source_continuation_index == owners_[i].continuation_index &&
+                details.source_continuation_generation == owners_[i].generation) {
+                is_protected = true;
+            }
+            if (program_->is_slot_protected(owners_[i].continuation_index)) {
+                is_protected = true;
+            }
+            if (!is_protected) {
+                PressurePlanningTargetNode child = node;
+                child.owner_evicted[i] = 1;
+                child.root_maximal = false;
+
+                const bool in_scratch = std::any_of(expansion_scratch_.begin(), expansion_scratch_.end(),
+                    [&](const auto& item) {
+                        return item.candidate_index == child.candidate_index &&
+                               item.owner_evicted == child.owner_evicted;
+                    });
+                if (!in_scratch) {
+                    const bool in_targets = std::any_of(targets_.begin(), targets_.end(),
+                        [&](const auto& item) {
+                            return item.candidate_index == child.candidate_index &&
+                                   item.owner_evicted == child.owner_evicted;
+                        });
+                    if (!in_targets) {
+                        scratch_new_count_++;
+                    }
+                    expansion_scratch_.push_back(std::move(child));
+                }
+            }
+        }
+    }
+
+    if (++scratch_generation_ == 0) {
+        ++scratch_generation_;
+    }
+    scratch_live_ = true;
+    return PreparedPressureExpansion(this, session_generation_, scratch_generation_, parent_idx, scratch_new_count_);
+}
+
+PressureExpansionView PressurePlanningSessionImpl::commit_expansion(PreparedPressureExpansion&& prepared) {
+    if (!scratch_live_ || prepared.new_canonical_count() != scratch_new_count_) {
+        throw std::logic_error("prepared pressure expansion is stale");
+    }
+
+    committed_children_.clear();
+    committed_children_.reserve(expansion_scratch_.size());
+
+    for (auto& child : expansion_scratch_) {
+        auto it = std::find_if(targets_.begin(), targets_.end(), [&](const auto& item) {
+            return item.candidate_index == child.candidate_index &&
+                   item.owner_evicted == child.owner_evicted;
+        });
+        std::uint32_t idx = 0;
+        if (it != targets_.end()) {
+            idx = static_cast<std::uint32_t>(it - targets_.begin());
+        } else {
+            child.stable_ordinal = static_cast<std::uint32_t>(targets_.size());
+            targets_.push_back(std::move(child));
+            idx = static_cast<std::uint32_t>(targets_.size() - 1);
+        }
+        committed_children_.push_back(FlashNextPressureHandleHelper::make_handle(this, session_generation_, idx));
+    }
+
+    const std::uint32_t count = scratch_new_count_;
+    expansion_scratch_.clear();
+    scratch_new_count_ = 0;
+    scratch_live_ = false;
+
+    return PressureExpansionView{
+        .children = committed_children_,
+        .new_canonical_count = count,
+    };
+}
+
+void PressurePlanningSessionImpl::discard_expansion(PreparedPressureExpansion&& /*prepared*/) noexcept {
+    if (scratch_live_) {
+        expansion_scratch_.clear();
+        scratch_new_count_ = 0;
+        scratch_live_ = false;
+    }
+}
+
+std::optional<ResourcePlan> PressurePlanningSessionImpl::seal(
+    PressureTargetHandle target, const qwen3_6::PreparedPrompt& /*prompt*/) {
+    if (!valid(target) || scratch_live_) {
+        throw std::logic_error("pressure target seal is stale or conflicts with expansion");
+    }
+    const std::uint32_t target_idx = FlashNextPressureHandleHelper::get_index(target);
+    const auto& node = targets_[target_idx];
+    const auto& cand = *candidates_[node.candidate_index];
+
+    std::vector<std::uint32_t> evicted_slots;
+    std::vector<std::uint32_t> evicted_ordinals;
+    for (std::size_t i = 0; i < owners_.size(); ++i) {
+        if (node.owner_evicted[i] == 1) {
+            evicted_slots.push_back(owners_[i].continuation_index);
+            evicted_ordinals.push_back(owners_[i].ordinal);
+        }
+    }
+
+    auto copy = std::make_unique<AdmissionCandidateImpl>();
+    copy->summary = cand.impl_->summary;
+    copy->assessment = cand.impl_->assessment;
+    if (cand.impl_->base_plan) {
+        copy->base_plan = std::make_unique<RequestBasePlanImpl>(*cand.impl_->base_plan);
+    }
+    copy->reusable_tokens = cand.impl_->reusable_tokens;
+    copy->source_continuation_index = cand.impl_->source_continuation_index;
+    copy->source_continuation_generation = cand.impl_->source_continuation_generation;
+    copy->has_source = cand.impl_->has_source;
+    copy->required_page_groups = cand.impl_->required_page_groups;
+    copy->planning_revision = cand.impl_->planning_revision;
+    copy->pressure_evicted_slots = std::move(evicted_slots);
+    copy->pressure_evicted_ordinals = std::move(evicted_ordinals);
+
+    AdmissionCandidate sealed_cand(std::move(copy));
+    return ResourcePlan(std::move(sealed_cand), program_->resource_revision_, false);
+}
+
+} // namespace detail
+
 PressurePlanningSession::PressurePlanningSession(
     std::unique_ptr<detail::PressurePlanningSessionImpl> impl) noexcept
     : impl_(std::move(impl)) {}
@@ -322,36 +821,46 @@ PressurePlanningSession& PressurePlanningSession::operator=(PressurePlanningSess
 PressurePlanningSession::~PressurePlanningSession()                                             = default;
 
 PressureTargetHandle
-PressurePlanningSession::identity_target(const AdmissionCandidate& /*candidate*/) const {
-    return PressureTargetHandle{};
+PressurePlanningSession::identity_target(const AdmissionCandidate& candidate) const {
+    if (impl_ == nullptr) { throw std::logic_error("PressurePlanningSession: instance is empty"); }
+    return impl_->identity_target(candidate);
 }
 
 PressureTargetHandle
-PressurePlanningSession::root_maximal_target(const AdmissionCandidate& /*root_candidate*/) {
-    return PressureTargetHandle{};
+PressurePlanningSession::root_maximal_target(const AdmissionCandidate& root_candidate) {
+    if (impl_ == nullptr) { throw std::logic_error("PressurePlanningSession: instance is empty"); }
+    return impl_->root_maximal_target(root_candidate);
 }
 
 runtime::PressureTargetAssessment
-PressurePlanningSession::assess(PressureTargetHandle /*target*/) {
-    return runtime::PressureTargetAssessment{};
+PressurePlanningSession::assess(PressureTargetHandle target) {
+    if (impl_ == nullptr) { throw std::logic_error("PressurePlanningSession: instance is empty"); }
+    return impl_->assess(target);
 }
 
 PreparedPressureExpansion
-PressurePlanningSession::prepare_expansion(PressureTargetHandle /*parent*/) {
-    return PreparedPressureExpansion(nullptr, 0, 0, 0, 0);
+PressurePlanningSession::prepare_expansion(PressureTargetHandle parent) {
+    if (impl_ == nullptr) { throw std::logic_error("PressurePlanningSession: instance is empty"); }
+    return impl_->prepare_expansion(parent);
 }
 
 PressureExpansionView
-PressurePlanningSession::commit_expansion(PreparedPressureExpansion&& /*prepared*/) {
-    return PressureExpansionView{};
+PressurePlanningSession::commit_expansion(PreparedPressureExpansion&& prepared) {
+    if (impl_ == nullptr) { throw std::logic_error("PressurePlanningSession: instance is empty"); }
+    return impl_->commit_expansion(std::move(prepared));
 }
 
-void PressurePlanningSession::discard_expansion(PreparedPressureExpansion&& /*prepared*/) noexcept {}
+void PressurePlanningSession::discard_expansion(PreparedPressureExpansion&& prepared) noexcept {
+    if (impl_ != nullptr) {
+        impl_->discard_expansion(std::move(prepared));
+    }
+}
 
 std::optional<ResourcePlan>
-PressurePlanningSession::seal(PressureTargetHandle /*target*/,
-                              const qwen3_6::PreparedPrompt& /*prompt*/) {
-    return std::nullopt;
+PressurePlanningSession::seal(PressureTargetHandle target,
+                              const qwen3_6::PreparedPrompt& prompt) {
+    if (impl_ == nullptr) { throw std::logic_error("PressurePlanningSession: instance is empty"); }
+    return impl_->seal(target, prompt);
 }
 
 // ---------------------------------------------------------------------------
@@ -598,8 +1107,13 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestB
     if (cont_slot != nullptr) {
         match_idx = matched_slot_index;
     }
-    const std::uint32_t total_freeable_groups =
-        impl_->count_freeable_physical_groups(match_idx);
+    // Identity semantics: an admission candidate assumes no evictions, so only the free list
+    // counts here. Catalogued groups come back through the pressure planner's root-maximal
+    // target and expansions, which the Engine commits before start_resource_transaction.
+    (void)match_idx;
+    const std::uint32_t free_now = static_cast<std::uint32_t>(impl_->executor_.available_physical_groups());
+    const std::uint32_t reserved = impl_->reserved_unowned_groups();
+    const std::uint32_t total_freeable_groups = free_now > reserved ? free_now - reserved : 0U;
     const bool groups_available = (total_freeable_groups >= additional_groups_needed);
     const bool feasible = (total_tokens <= impl_->plan_.resolved_tokens) && lane_available && groups_available;
     if (!feasible && std::getenv("NINFER_FLASH_NEXT_TRACE_ADMISSION") != nullptr) {
@@ -631,7 +1145,7 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestB
                                (cont_slot != nullptr && cont_slot->kind == runtime::CheckpointKind::TurnClosure)))
             ? runtime::ClaimDisposition::Retained
             : runtime::ClaimDisposition::ConsumedToActive;
-    cand_impl->assessment.expandable                     = false;
+    cand_impl->assessment.expandable                     = true;
     cand_impl->assessment.projection_work                = 1;
     cand_impl->assessment.machine.remaining_prefill_work = prefill_work;
     cand_impl->assessment.machine.reused_prompt_tokens   = reusable_tokens;
@@ -640,10 +1154,19 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestB
     cand_impl->assessment.machine.minimum_request_ns     = est_ns;
     cand_impl->base_plan                        = std::make_unique<detail::RequestBasePlanImpl>(*base.impl_);
     cand_impl->reusable_tokens                  = reusable_tokens;
+    cand_impl->has_source                       = (cont_slot != nullptr);
+    cand_impl->required_page_groups             = total_required_groups;
+    cand_impl->planning_revision                = impl_->resource_revision_;
     if (cont_slot != nullptr) {
         cand_impl->source_continuation_index      = matched_slot_index;
         cand_impl->source_continuation_generation = cont_slot->generation;
     }
+
+    std::uint64_t digest = 1469598103934665603ULL;
+    digest ^= static_cast<std::uint64_t>(cand_impl->assessment.physical_status); digest *= 1099511628211ULL;
+    digest ^= static_cast<std::uint64_t>(reusable_tokens); digest *= 1099511628211ULL;
+    digest ^= static_cast<std::uint64_t>(prompt_tokens); digest *= 1099511628211ULL;
+    cand_impl->assessment.assessment_digest = digest;
 
     return AdmissionCandidate(std::move(cand_impl));
 }
@@ -652,19 +1175,37 @@ std::optional<ResourcePlan>
 Program::seal_identity(const AdmissionCandidate& candidate,
                        const qwen3_6::PreparedPrompt& /*prompt*/) {
     if (impl_ == nullptr) { throw std::logic_error("Program: instance is empty"); }
-    return ResourcePlan(std::move(const_cast<AdmissionCandidate&>(candidate)),
-                        impl_->resource_revision_,
-                        false);
+    if (candidate.impl_ == nullptr || candidate.impl_->planning_revision != impl_->resource_revision_) {
+        return std::nullopt;
+    }
+    auto copy = std::make_unique<detail::AdmissionCandidateImpl>();
+    copy->summary = candidate.impl_->summary;
+    copy->assessment = candidate.impl_->assessment;
+    if (candidate.impl_->base_plan) {
+        copy->base_plan = std::make_unique<detail::RequestBasePlanImpl>(*candidate.impl_->base_plan);
+    }
+    copy->reusable_tokens = candidate.impl_->reusable_tokens;
+    copy->source_continuation_index = candidate.impl_->source_continuation_index;
+    copy->source_continuation_generation = candidate.impl_->source_continuation_generation;
+    copy->has_source = candidate.impl_->has_source;
+    copy->required_page_groups = candidate.impl_->required_page_groups;
+    copy->planning_revision = candidate.impl_->planning_revision;
+
+    AdmissionCandidate sealed_cand(std::move(copy));
+    return ResourcePlan(std::move(sealed_cand), impl_->resource_revision_, false);
 }
 
 PressurePlanningSession
-Program::begin_pressure_planning(const runtime::ContextMachineCostModel& /*machine_cost*/,
-                                 std::span<const AdmissionCandidate* const> /*candidates*/,
-                                 std::span<const ContinuationHandle* const> /*private_owners*/,
-                                 std::span<const std::uint32_t> /*private_owner_ordinals*/,
-                                 std::span<const SharedPrefixHandle* const> /*shared_owners*/,
-                                 std::span<const std::uint32_t> /*shared_owner_ordinals*/) {
-    return PressurePlanningSession(std::make_unique<detail::PressurePlanningSessionImpl>());
+Program::begin_pressure_planning(const runtime::ContextMachineCostModel& machine_cost,
+                                 std::span<const AdmissionCandidate* const> candidates,
+                                 std::span<const ContinuationHandle* const> private_owners,
+                                 std::span<const std::uint32_t> private_owner_ordinals,
+                                 std::span<const SharedPrefixHandle* const> shared_owners,
+                                 std::span<const std::uint32_t> shared_owner_ordinals) {
+    if (impl_ == nullptr) { throw std::logic_error("Program: instance is empty"); }
+    return PressurePlanningSession(std::make_unique<detail::PressurePlanningSessionImpl>(
+        *impl_, machine_cost, candidates, private_owners, private_owner_ordinals,
+        shared_owners, shared_owner_ordinals));
 }
 
 static std::optional<std::uint32_t>
@@ -689,6 +1230,9 @@ runtime::ContextTransactionReserveStatus
 Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt&& prompt,
                                     runtime::CancellationFlagView cancellation) {
     if (impl_ == nullptr) { throw std::logic_error("Program: instance is empty"); }
+    if (plan.resource_revision() == 0 || plan.resource_revision() != impl_->resource_revision_) {
+        return runtime::ContextTransactionReserveStatus::Aborted;
+    }
     if (cancellation.requested()) {
         return runtime::ContextTransactionReserveStatus::Aborted;
     }
@@ -698,6 +1242,22 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
 
     const runtime::RequestPlanSummary summary = plan.summary();
     auto adm = ContractAccess::take_admission(plan);
+
+    // 1. Execute planned pressure evictions
+    impl_->transaction_victims_.clear();
+    if (adm.impl_ != nullptr) {
+        for (std::size_t i = 0; i < adm.impl_->pressure_evicted_slots.size(); ++i) {
+            const std::uint32_t slot_idx = adm.impl_->pressure_evicted_slots[i];
+            impl_->vacate_owner(slot_idx);
+            qwen3_6::MaterializationVictimResult victim;
+            victim.disposition        = runtime::ClaimDisposition::Evicted;
+            victim.pressure_committed = true;
+            victim.final_summary      = std::nullopt;
+            impl_->transaction_victims_.push_back(victim);
+        }
+    }
+
+    // 2. Allocate lane
     detail::LaneHandle handle;
     try {
         handle = impl_->executor_.allocate_lane();
@@ -711,6 +1271,9 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
     st.active                    = true;
     st.epoch                     = handle.epoch();
     st.lane_handle               = handle;
+    st.planned_groups            = (summary.prompt_tokens +
+                                    (summary.effective_output_tokens > 0 ? summary.effective_output_tokens - 1U : 0U) +
+                                    255U) / 256U;
 
     auto prompt_data        = qwen3_6::PreparedPromptAccess::take(std::move(prompt));
     st.capture_frontier     = derive_turn_closure_frontier(prompt_data);
@@ -829,6 +1392,7 @@ Program::progress_context_transaction(runtime::CancellationFlagView cancellation
         impl_->transaction_has_source_ = false;
         MaterializationResult res;
         res.status = runtime::ContextTransactionStatus::Aborted;
+        res.victims = std::move(impl_->transaction_victims_);
         return res;
     }
 
@@ -843,6 +1407,7 @@ Program::progress_context_transaction(runtime::CancellationFlagView cancellation
             .disposition = impl_->transaction_source_disposition_,
         });
     }
+    res.victims = std::move(impl_->transaction_victims_);
     return res;
 }
 
@@ -853,6 +1418,7 @@ void Program::finalize_context_transaction() noexcept {
         impl_->transaction_lane_.reset();
         impl_->transaction_epoch_.reset();
         impl_->transaction_has_source_ = false;
+        impl_->transaction_victims_.clear();
     }
 }
 
@@ -1200,7 +1766,7 @@ Program::reserve_active_capture(CaptureOffer&& offer,
         return runtime::ContextTransactionReserveStatus::Aborted;
     }
 
-    const std::int32_t slot_idx = impl_->allocate_or_evict_continuation_slot();
+    const std::int32_t slot_idx = impl_->allocate_vacant_continuation_slot();
     if (slot_idx < 0) {
         skip_capture(std::move(offer));
         return runtime::ContextTransactionReserveStatus::Aborted;
@@ -1441,6 +2007,7 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
                 result.rows[b].disposition = runtime::CommitDisposition::Active;
             }
         } else {
+            impl_->drop_unpublished_turn_closure(st);
             impl_->executor_.release_lane(st.lane_handle);
             st.active   = false;
             st.finished = true;
@@ -1484,11 +2051,14 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
                         (st.committed_frontier > 0);
 
                     if (should_catalogue) {
-                        const std::int32_t target_c_idx = impl_->allocate_or_evict_continuation_slot();
+                        const std::int32_t target_c_idx = impl_->allocate_vacant_continuation_slot();
                         if (target_c_idx >= 0) {
                             auto& c_slot = impl_->continuation_slots_[target_c_idx];
                             c_slot.role = detail::ContinuationSlotRole::Catalogued;
                             c_slot.kind = runtime::CheckpointKind::SessionEndpoint;
+                            c_slot.published_checkpoints = 1;
+                            c_slot.paired_rewrite_slot.reset();
+                            c_slot.paired_rewrite_generation = 0;
                             c_slot.last_used_epoch = ++impl_->continuation_epoch_;
                             c_slot.committed_frontier = st.committed_frontier;
                             c_slot.committed_tokens = st.prompt_tokens;
@@ -1553,6 +2123,9 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
                                             0, static_cast<std::uint32_t>(turn_slot.committed_frontier), 0, 0,
                                             impl_->plan_.config.prefill_chunk);
                                         out.summary.rewrite = rw;
+                                        c_slot.published_checkpoints     = 2;
+                                        c_slot.paired_rewrite_slot       = turn_idx;
+                                        c_slot.paired_rewrite_generation = turn_slot.generation;
                                     }
                                 }
                             }
@@ -1573,6 +2146,7 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
                         }
                     }
 
+                    impl_->drop_unpublished_turn_closure(st);
                     impl_->executor_.release_lane(st.lane_handle);
                     st.active   = false;
                     st.finished = true;
@@ -1606,6 +2180,7 @@ AbortResult Program::abort(SequenceHandle sequence) noexcept {
                 if (impl_->pending_round_.valid()) {
                     impl_->pending_round_.abort();
                 }
+                impl_->drop_unpublished_turn_closure(st);
                 impl_->executor_.release_lane(st.lane_handle);
                 st.active   = false;
                 st.finished = true;
@@ -1633,12 +2208,7 @@ ReleaseResult Program::release_continuation(ContinuationHandle&& continuation) n
     if (c_idx < impl_->continuation_slots_.size()) {
         auto& c_slot = impl_->continuation_slots_[c_idx];
         if (c_slot.role == detail::ContinuationSlotRole::Catalogued && c_slot.generation == gen) {
-            impl_->executor_.release_physical_groups(c_slot.physical_groups);
-            c_slot.physical_groups.clear();
-            c_slot.committed_tokens.clear();
-            c_slot.committed_frontier = 0;
-            c_slot.role = detail::ContinuationSlotRole::Vacant;
-            c_slot.generation++;
+            impl_->vacate_owner(c_idx);
             ++impl_->resource_revision_;
         }
     }
@@ -1659,6 +2229,7 @@ void Program::fail_all_cleanup() noexcept {
     for (std::uint32_t l = 0; l < impl_->plan_.config.max_concurrency; ++l) {
         auto& st = impl_->lane_states_[l];
         if (st.active) {
+            impl_->drop_unpublished_turn_closure(st);
             impl_->executor_.release_lane(st.lane_handle);
             st.active   = false;
             st.finished = true;
@@ -1681,6 +2252,8 @@ void Program::fail_all_cleanup() noexcept {
     impl_->has_context_transaction_ = false;
     impl_->transaction_lane_.reset();
     impl_->transaction_epoch_.reset();
+    impl_->transaction_has_source_ = false;
+    impl_->transaction_victims_.clear();
     ++impl_->resource_revision_;
 }
 

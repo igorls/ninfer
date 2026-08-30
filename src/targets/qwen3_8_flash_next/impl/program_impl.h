@@ -45,10 +45,70 @@ public:
     std::uint32_t reusable_tokens = 0;
     std::uint32_t source_continuation_index = 0;
     std::uint64_t source_continuation_generation = 0;
+    bool has_source = false;
+    std::uint32_t required_page_groups = 0;
+    std::uint64_t planning_revision = 0;
+
+    std::vector<std::uint32_t> pressure_evicted_slots;
+    std::vector<std::uint32_t> pressure_evicted_ordinals;
+};
+
+struct PressurePlanningOwner {
+    const ContinuationHandle* handle = nullptr;
+    std::uint32_t ordinal = 0;
+    std::uint32_t continuation_index = 0;
+    std::uint64_t generation = 0;
+};
+
+struct PressurePlanningTargetNode {
+    std::uint32_t candidate_index = 0;
+    std::vector<std::uint8_t> owner_evicted;
+    std::uint32_t stable_ordinal = 0;
+    bool root_maximal = false;
 };
 
 class PressurePlanningSessionImpl {
 public:
+    PressurePlanningSessionImpl(
+        ProgramImpl& program,
+        const runtime::ContextMachineCostModel& cost,
+        std::span<const AdmissionCandidate* const> candidates,
+        std::span<const ContinuationHandle* const> private_owners,
+        std::span<const std::uint32_t> private_owner_ordinals,
+        std::span<const SharedPrefixHandle* const> shared_owners,
+        std::span<const std::uint32_t> shared_owner_ordinals);
+
+    ~PressurePlanningSessionImpl() noexcept;
+
+    [[nodiscard]] bool valid(PressureTargetHandle target) const noexcept;
+    [[nodiscard]] std::uint32_t candidate_index(const AdmissionCandidate& candidate) const;
+
+    [[nodiscard]] PressureTargetHandle identity_target(const AdmissionCandidate& candidate) const;
+    [[nodiscard]] PressureTargetHandle root_maximal_target(const AdmissionCandidate& root_candidate);
+    [[nodiscard]] runtime::PressureTargetAssessment assess(PressureTargetHandle target);
+    [[nodiscard]] PreparedPressureExpansion prepare_expansion(PressureTargetHandle parent);
+    [[nodiscard]] PressureExpansionView commit_expansion(PreparedPressureExpansion&& prepared);
+    void discard_expansion(PreparedPressureExpansion&& prepared) noexcept;
+    [[nodiscard]] std::optional<ResourcePlan> seal(PressureTargetHandle target,
+                                                  const qwen3_6::PreparedPrompt& prompt);
+
+    ProgramImpl* program_ = nullptr;
+    const runtime::ContextMachineCostModel* machine_cost_ = nullptr;
+    std::uint64_t resource_revision_ = 0;
+    std::uint32_t session_generation_ = 0;
+
+    std::vector<const AdmissionCandidate*> candidates_;
+    std::vector<PressurePlanningOwner> owners_;
+    std::vector<PressurePlanningTargetNode> targets_;
+
+    std::vector<PressurePlanningTargetNode> expansion_scratch_;
+    std::vector<PressureTargetHandle> committed_children_;
+    std::vector<runtime::PressureOwnerOutcome> assessment_outcomes_;
+    std::vector<runtime::PressureCheckpointRecoveryImpact> assessment_impacts_;
+    std::uint32_t scratch_generation_ = 0;
+    std::uint32_t scratch_parent_index_ = 0;
+    std::uint32_t scratch_new_count_ = 0;
+    bool scratch_live_ = false;
 };
 
 class SequencePlanImpl {
@@ -79,6 +139,13 @@ struct ContinuationSlot {
     PleTokenHistory history{};
     std::uint64_t last_used_epoch = 0;
     runtime::CheckpointKind kind = runtime::CheckpointKind::SessionEndpoint;
+    // What the Engine's catalog entry for this owner counts (endpoint + rewrite): the Engine
+    // validates an eviction's dropped_checkpoints against its own summary, not ours.
+    std::uint32_t published_checkpoints = 1;
+    // The TurnClosure slot published as this endpoint's rewrite; it belongs to the same
+    // Engine owner and goes away with it.
+    std::optional<std::uint32_t> paired_rewrite_slot;
+    std::uint64_t paired_rewrite_generation = 0;
 };
 
 struct LaneState {
@@ -112,6 +179,9 @@ struct LaneState {
     std::optional<std::uint32_t> capture_frontier;
     bool capture_offered = false;
     bool reused_from_turn_closure = false;
+    // Page groups this lane may still take (from the admitted plan); admission subtracts the
+    // part not yet owned from the free list so concurrent lanes cannot oversubscribe the pool.
+    std::uint32_t planned_groups = 0;
     std::optional<std::uint32_t> reused_from_continuation_index;
     std::optional<std::uint64_t> reused_from_continuation_generation;
 };
@@ -138,7 +208,16 @@ public:
         std::optional<std::size_t> current_matching_slot = std::nullopt) const;
     void evict_continuation_slot(std::size_t slot_idx);
     bool ensure_physical_groups_available(std::size_t needed);
-    std::int32_t allocate_or_evict_continuation_slot();
+    std::int32_t allocate_vacant_continuation_slot();
+    void vacate_slot(std::size_t slot_idx);
+    void vacate_owner(std::size_t slot_idx);
+    [[nodiscard]] std::uint32_t published_checkpoints_of(std::size_t slot_idx) const noexcept;
+    [[nodiscard]] std::uint32_t reserved_unowned_groups() const noexcept;
+    void drop_unpublished_turn_closure(LaneState& st);
+
+    std::uint32_t pressure_planning_generation_ = 0;
+    bool pressure_planning_active_ = false;
+    std::vector<qwen3_6::MaterializationVictimResult> transaction_victims_;
 
     const LoadedModelData* model_data_ = nullptr;
     TextModelView text_override_{};

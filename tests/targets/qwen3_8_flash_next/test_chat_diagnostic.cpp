@@ -160,9 +160,9 @@ int test_sampler_token_domain() {
                         positions_tensor, ninfer::ops::kSamplePurposeDecode, workspace,
                         device.stream);
 
+    device.synchronize();
     std::int32_t sampled_token = -1;
     device_out.copy_to_host(&sampled_token, sizeof(std::int32_t));
-    device.synchronize();
 
     if (sampled_token != 42) {
         std::cerr << "Sampler selected token " << sampled_token
