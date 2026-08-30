@@ -196,8 +196,11 @@ int test_program_lifecycle(ninfer::DeviceContext& device) {
         candidate3->identity_assessment().physical_status ==
             ninfer::runtime::MaterializationPhysicalStatus::Infeasible,
         "Candidate 3 must be Infeasible when all lanes are occupied");
-    failures += check(!program.isolated_request_feasible(base_plan3),
-                      "isolated_request_feasible must be false when all lanes are occupied");
+    // Isolation ignores current lane occupancy: the Engine turns a false answer into
+    // Readiness::PermanentlyInfeasible (resource_manager.h), while a busy lane set is only
+    // TemporarilyBlocked. The candidate above is what reports the momentary infeasibility.
+    failures += check(program.isolated_request_feasible(base_plan3),
+                      "isolated_request_feasible must stay true when all lanes are occupied");
 
     // 10. Finish Sequence 1
     auto finish1 = program.finish(seq1);

@@ -4,6 +4,8 @@
 #include "targets/qwen3_8_flash_next/impl/load/materialized.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstdio>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -80,6 +82,159 @@ void ProgramImpl::sample_tokens(const Tensor& logits,
                                B * sizeof(std::int32_t), cudaMemcpyDeviceToHost,
                                device_.stream));
     CUDA_CHECK(cudaStreamSynchronize(device_.stream));
+}
+
+bool ProgramImpl::is_slot_protected(std::size_t slot_idx) const {
+    if (slot_idx >= continuation_slots_.size()) { return false; }
+    const auto& slot = continuation_slots_[slot_idx];
+    if (slot.role != ContinuationSlotRole::Catalogued) { return false; }
+
+    for (const auto& st : lane_states_) {
+        if (st.active) {
+            if (st.reused_from_continuation_index.has_value() &&
+                *st.reused_from_continuation_index == slot_idx &&
+                st.reused_from_continuation_generation == slot.generation) {
+                return true;
+            }
+            if (st.turn_closure_continuation_index.has_value() &&
+                *st.turn_closure_continuation_index == slot_idx) {
+                return true;
+            }
+        }
+    }
+
+    if (has_context_transaction_ && transaction_has_source_) {
+        if (transaction_lane_.has_value()) {
+            const std::uint32_t lane_idx = transaction_lane_->value;
+            if (lane_idx < lane_states_.size()) {
+                const auto& st = lane_states_[lane_idx];
+                if (st.reused_from_continuation_index.has_value() &&
+                    *st.reused_from_continuation_index == slot_idx) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+std::uint32_t ProgramImpl::count_freeable_physical_groups(
+    std::optional<std::size_t> current_matching_slot) const {
+    std::vector<bool> unfreeable(plan_.main_page_groups, false);
+
+    for (const auto& st : lane_states_) {
+        if (st.active) {
+            for (const auto g : executor_.lane_physical_groups(st.lane_handle)) {
+                if (g < unfreeable.size()) {
+                    unfreeable[g] = true;
+                }
+            }
+        }
+    }
+
+    for (std::size_t c = 0; c < continuation_slots_.size(); ++c) {
+        const auto& slot = continuation_slots_[c];
+        if (slot.role != ContinuationSlotRole::Catalogued) {
+            continue;
+        }
+        if (current_matching_slot.has_value() && *current_matching_slot == c) {
+            for (const auto g : slot.physical_groups) {
+                if (g < unfreeable.size()) {
+                    unfreeable[g] = true;
+                }
+            }
+            continue;
+        }
+        if (is_slot_protected(c)) {
+            for (const auto g : slot.physical_groups) {
+                if (g < unfreeable.size()) {
+                    unfreeable[g] = true;
+                }
+            }
+        }
+    }
+
+    std::uint32_t unfreeable_count = 0;
+    for (bool b : unfreeable) {
+        if (b) { unfreeable_count += 1; }
+    }
+    return plan_.main_page_groups >= unfreeable_count
+               ? (plan_.main_page_groups - unfreeable_count)
+               : 0U;
+}
+
+void ProgramImpl::evict_continuation_slot(std::size_t slot_idx) {
+    if (slot_idx >= continuation_slots_.size()) { return; }
+    auto& c_slot = continuation_slots_[slot_idx];
+    if (c_slot.role != ContinuationSlotRole::Catalogued) { return; }
+
+    executor_.release_physical_groups(c_slot.physical_groups);
+    c_slot.physical_groups.clear();
+    c_slot.committed_tokens.clear();
+    c_slot.committed_frontier = 0;
+    c_slot.role = ContinuationSlotRole::Vacant;
+    c_slot.generation++;
+    ++resource_revision_;
+}
+
+bool ProgramImpl::ensure_physical_groups_available(std::size_t needed) {
+    while (executor_.available_physical_groups() < needed) {
+        std::int32_t best_c = -1;
+        std::uint64_t oldest_epoch = std::numeric_limits<std::uint64_t>::max();
+
+        for (std::size_t c = 0; c < continuation_slots_.size(); ++c) {
+            const auto& slot = continuation_slots_[c];
+            if (slot.role != ContinuationSlotRole::Catalogued) { continue; }
+            if (slot.physical_groups.empty()) { continue; }
+            if (is_slot_protected(c)) { continue; }
+
+            if (slot.last_used_epoch < oldest_epoch) {
+                oldest_epoch = slot.last_used_epoch;
+                best_c       = static_cast<std::int32_t>(c);
+            }
+        }
+
+        if (best_c < 0) {
+            break;
+        }
+
+        evict_continuation_slot(static_cast<std::size_t>(best_c));
+    }
+
+    return executor_.available_physical_groups() >= needed;
+}
+
+std::int32_t ProgramImpl::allocate_or_evict_continuation_slot() {
+    const std::size_t cap = continuation_slots_.size();
+    if (cap == 0) { return -1; }
+
+    for (std::size_t c = 0; c < cap; ++c) {
+        if (continuation_slots_[c].role == ContinuationSlotRole::Vacant) {
+            return static_cast<std::int32_t>(c);
+        }
+    }
+
+    std::int32_t best_c = -1;
+    std::uint64_t oldest_epoch = std::numeric_limits<std::uint64_t>::max();
+
+    for (std::size_t c = 0; c < cap; ++c) {
+        const auto& slot = continuation_slots_[c];
+        if (slot.role != ContinuationSlotRole::Catalogued) { continue; }
+        if (is_slot_protected(c)) { continue; }
+
+        if (slot.last_used_epoch < oldest_epoch) {
+            oldest_epoch = slot.last_used_epoch;
+            best_c       = static_cast<std::int32_t>(c);
+        }
+    }
+
+    if (best_c >= 0) {
+        evict_continuation_slot(static_cast<std::size_t>(best_c));
+        return best_c;
+    }
+
+    return -1;
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail
@@ -439,16 +594,23 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestB
         lane_available = (impl_->executor_.active_lanes_count() < impl_->plan_.config.max_concurrency);
     }
 
-    std::uint32_t evictable_groups = 0;
-    for (const auto& c : impl_->continuation_slots_) {
-        if (c.role == detail::ContinuationSlotRole::Catalogued && &c != cont_slot) {
-            evictable_groups += static_cast<std::uint32_t>(c.physical_groups.size());
-        }
+    std::optional<std::size_t> match_idx;
+    if (cont_slot != nullptr) {
+        match_idx = matched_slot_index;
     }
     const std::uint32_t total_freeable_groups =
-        static_cast<std::uint32_t>(impl_->executor_.available_physical_groups()) + evictable_groups;
+        impl_->count_freeable_physical_groups(match_idx);
     const bool groups_available = (total_freeable_groups >= additional_groups_needed);
     const bool feasible = (total_tokens <= impl_->plan_.resolved_tokens) && lane_available && groups_available;
+    if (!feasible && std::getenv("NINFER_FLASH_NEXT_TRACE_ADMISSION") != nullptr) {
+        std::fprintf(stderr,
+                     "[flash_next admission] infeasible: dest=%u lane_active=%d active_lanes=%u "
+                     "freeable_groups=%u needed=%u total_tokens=%u resolved_tokens=%u has_txn=%d\n",
+                     destination.value, lane_available ? 0 : 1,
+                     static_cast<unsigned>(impl_->executor_.active_lanes_count()), total_freeable_groups,
+                     additional_groups_needed, total_tokens, impl_->plan_.resolved_tokens,
+                     impl_->has_context_transaction_ ? 1 : 0);
+    }
 
     const runtime::PrefillWork prefill_work =
         runtime::make_prefill_work(reusable_tokens, prompt_tokens, 0, 0, impl_->plan_.config.prefill_chunk);
@@ -536,51 +698,11 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
 
     const runtime::RequestPlanSummary summary = plan.summary();
     auto adm = ContractAccess::take_admission(plan);
-    const std::uint32_t prompt_tokens = summary.prompt_tokens;
-    const std::uint32_t effective_out  = summary.effective_output_tokens;
-    const std::uint32_t total_tokens   = prompt_tokens + (effective_out > 0 ? effective_out - 1U : 0U);
-    const std::uint32_t total_req_groups = (total_tokens + 255U) / 256U;
-    const std::uint32_t cont_groups =
-        (adm.impl_ != nullptr && adm.impl_->reusable_tokens > 0 &&
-         adm.impl_->source_continuation_index < impl_->continuation_slots_.size())
-            ? static_cast<std::uint32_t>(
-                  impl_->continuation_slots_[adm.impl_->source_continuation_index].physical_groups.size())
-            : 0U;
-    const std::uint32_t additional_needed =
-        total_req_groups > cont_groups ? (total_req_groups - cont_groups) : 0U;
-
-    while (impl_->executor_.available_physical_groups() < additional_needed) {
-        std::uint32_t oldest_idx = impl_->plan_.config.continuation_capacity;
-        std::uint64_t oldest_epoch = std::numeric_limits<std::uint64_t>::max();
-        for (std::uint32_t c = 0; c < impl_->plan_.config.continuation_capacity; ++c) {
-            auto& slot = impl_->continuation_slots_[c];
-            if (slot.role == detail::ContinuationSlotRole::Catalogued) {
-                if (adm.impl_ != nullptr && adm.impl_->reusable_tokens > 0 &&
-                    c == adm.impl_->source_continuation_index) {
-                    continue;
-                }
-                if (slot.last_used_epoch < oldest_epoch) {
-                    oldest_epoch = slot.last_used_epoch;
-                    oldest_idx = c;
-                }
-            }
-        }
-        if (oldest_idx == impl_->plan_.config.continuation_capacity) {
-            break;
-        }
-        auto& victim = impl_->continuation_slots_[oldest_idx];
-        impl_->executor_.release_physical_groups(victim.physical_groups);
-        victim.physical_groups.clear();
-        victim.committed_tokens.clear();
-        victim.committed_frontier = 0;
-        victim.role = detail::ContinuationSlotRole::Vacant;
-        victim.generation++;
-    }
-
     detail::LaneHandle handle;
     try {
         handle = impl_->executor_.allocate_lane();
-    } catch (const std::exception&) {
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[flash_next start] allocate_lane failed: %s\n", e.what());
         return runtime::ContextTransactionReserveStatus::Aborted;
     }
     const std::uint32_t lane_idx = handle.lane_index();
@@ -601,6 +723,8 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
     st.media_payloads       = std::move(prompt_data.media_payloads);
     st.vision_items         = std::move(prompt_data.vision_items);
     st.turn_closure_continuation_index = std::nullopt;
+    st.reused_from_continuation_index.reset();
+    st.reused_from_continuation_generation.reset();
     st.pending_capture_offer = 0;
     st.reused_from_turn_closure = (adm.impl_ != nullptr && adm.impl_->summary.prefix_reuse_path == PrefixReusePath::PrivateTurnClosure);
     st.prompt_tokens_processed = 0;
@@ -650,6 +774,8 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
                 } else {
                     // TurnClosure checkpoint: stays catalogued and immutable for future turns / sibling requests!
                     c_slot.last_used_epoch = ++impl_->continuation_epoch_;
+                    st.reused_from_continuation_index = c_idx;
+                    st.reused_from_continuation_generation = gen;
                 }
             }
         }
@@ -881,6 +1007,15 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
 
     const bool is_capture_split = can_offer_capture && (end_i == *st.capture_frontier);
 
+    const std::int32_t last_token_in_chunk = static_cast<std::int32_t>(end_i - 1);
+    const std::size_t req_groups =
+        static_cast<std::size_t>(last_token_in_chunk / static_cast<std::int32_t>(detail::kMainPageGroupTokens)) + 1U;
+    const std::size_t owned = impl_->executor_.lane_physical_groups(st.lane_handle).size();
+    if (req_groups > owned) {
+        const std::size_t needed = req_groups - owned;
+        impl_->ensure_physical_groups_available(needed);
+    }
+
     if (end_i < N) {
         auto round = impl_->executor_.execute_prefill_chunk(
             st.lane_handle, chunk_token_ids, chunk_positions, static_cast<std::int32_t>(start_i),
@@ -1065,29 +1200,7 @@ Program::reserve_active_capture(CaptureOffer&& offer,
         return runtime::ContextTransactionReserveStatus::Aborted;
     }
 
-    std::int32_t slot_idx = -1;
-    for (std::size_t c = 0; c < impl_->continuation_slots_.size(); ++c) {
-        if (impl_->continuation_slots_[c].role == detail::ContinuationSlotRole::Vacant) {
-            slot_idx = static_cast<std::int32_t>(c);
-            break;
-        }
-    }
-    if (slot_idx < 0) {
-        std::uint64_t oldest_epoch = std::numeric_limits<std::uint64_t>::max();
-        for (std::size_t c = 0; c < impl_->continuation_slots_.size(); ++c) {
-            if (impl_->continuation_slots_[c].role == detail::ContinuationSlotRole::Catalogued &&
-                impl_->continuation_slots_[c].last_used_epoch < oldest_epoch) {
-                oldest_epoch = impl_->continuation_slots_[c].last_used_epoch;
-                slot_idx     = static_cast<std::int32_t>(c);
-            }
-        }
-        if (slot_idx >= 0) {
-            impl_->executor_.release_physical_groups(
-                impl_->continuation_slots_[slot_idx].physical_groups);
-            impl_->continuation_slots_[slot_idx].physical_groups.clear();
-            impl_->continuation_slots_[slot_idx].generation++;
-        }
-    }
+    const std::int32_t slot_idx = impl_->allocate_or_evict_continuation_slot();
     if (slot_idx < 0) {
         skip_capture(std::move(offer));
         return runtime::ContextTransactionReserveStatus::Aborted;
@@ -1190,6 +1303,21 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
         };
     }
 
+    std::size_t total_needed = 0;
+    for (std::size_t b = 0; b < B; ++b) {
+        const auto& st = impl_->lane_states_[lane_indices[b]];
+        const std::int32_t next_token_index = st.last_token_index;
+        const std::size_t req_groups =
+            static_cast<std::size_t>(next_token_index / static_cast<std::int32_t>(detail::kMainPageGroupTokens)) + 1U;
+        const std::size_t owned = impl_->executor_.lane_physical_groups(st.lane_handle).size();
+        if (req_groups > owned) {
+            total_needed += (req_groups - owned);
+        }
+    }
+    if (total_needed > 0) {
+        impl_->ensure_physical_groups_available(total_needed);
+    }
+
     impl_->pending_round_ = impl_->executor_.execute_round(requests);
 
     const auto sampled = impl_->pending_round_.sampled_tokens();
@@ -1244,6 +1372,13 @@ Program::append_forced_tokens(std::span<const SequenceHandle> sequences,
                 .mrope_positions = {st.last_token_pos + 1, st.last_token_pos + 1,
                                     st.last_token_pos + 1},
             };
+            const std::size_t req_groups =
+                static_cast<std::size_t>(req.token_index / static_cast<std::int32_t>(detail::kMainPageGroupTokens)) + 1U;
+            const std::size_t owned = impl_->executor_.lane_physical_groups(st.lane_handle).size();
+            if (req_groups > owned) {
+                impl_->ensure_physical_groups_available(req_groups - owned);
+            }
+
             auto round = impl_->executor_.execute_round(std::span(&req, 1));
             std::array<detail::LaneCommitDecision, 1> decision = {{{.accept = true}}};
             round.commit(decision);
@@ -1309,6 +1444,10 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
             impl_->executor_.release_lane(st.lane_handle);
             st.active   = false;
             st.finished = true;
+            st.reused_from_continuation_index.reset();
+            st.reused_from_continuation_generation.reset();
+            st.turn_closure_continuation_index.reset();
+            st.pending_capture_offer = 0;
             ++impl_->resource_revision_;
             result.rows[b].disposition = runtime::CommitDisposition::CancelledReleased;
         }
@@ -1344,123 +1483,113 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
                         st.publish_continuation && (impl_->plan_.config.continuation_capacity > 0) &&
                         (st.committed_frontier > 0);
 
-                if (should_catalogue) {
-                    std::uint32_t target_c_idx = impl_->plan_.config.continuation_capacity;
-                    for (std::uint32_t c = 0; c < impl_->plan_.config.continuation_capacity; ++c) {
-                        if (impl_->continuation_slots_[c].role == detail::ContinuationSlotRole::Vacant) {
-                            target_c_idx = c;
-                            break;
-                        }
-                    }
-                    if (target_c_idx == impl_->plan_.config.continuation_capacity) {
-                        // Evict oldest (LRU)
-                        std::uint64_t oldest_epoch = std::numeric_limits<std::uint64_t>::max();
-                        for (std::uint32_t c = 0; c < impl_->plan_.config.continuation_capacity; ++c) {
-                            if (impl_->continuation_slots_[c].last_used_epoch < oldest_epoch) {
-                                oldest_epoch = impl_->continuation_slots_[c].last_used_epoch;
-                                target_c_idx = c;
-                            }
-                        }
-                        if (target_c_idx < impl_->plan_.config.continuation_capacity) {
-                            impl_->executor_.release_physical_groups(
-                                impl_->continuation_slots_[target_c_idx].physical_groups);
-                            impl_->continuation_slots_[target_c_idx].physical_groups.clear();
-                            impl_->continuation_slots_[target_c_idx].generation++;
-                        }
-                    }
+                    if (should_catalogue) {
+                        const std::int32_t target_c_idx = impl_->allocate_or_evict_continuation_slot();
+                        if (target_c_idx >= 0) {
+                            auto& c_slot = impl_->continuation_slots_[target_c_idx];
+                            c_slot.role = detail::ContinuationSlotRole::Catalogued;
+                            c_slot.kind = runtime::CheckpointKind::SessionEndpoint;
+                            c_slot.last_used_epoch = ++impl_->continuation_epoch_;
+                            c_slot.committed_frontier = st.committed_frontier;
+                            c_slot.committed_tokens = st.prompt_tokens;
+                            c_slot.history = impl_->executor_.lane_history(st.lane_handle);
+                            c_slot.physical_groups = impl_->executor_.take_lane_physical_groups(st.lane_handle);
 
-                    if (target_c_idx < impl_->plan_.config.continuation_capacity) {
-                        auto& c_slot = impl_->continuation_slots_[target_c_idx];
-                        c_slot.role = detail::ContinuationSlotRole::Catalogued;
-                        c_slot.kind = runtime::CheckpointKind::SessionEndpoint;
-                        c_slot.last_used_epoch = ++impl_->continuation_epoch_;
-                        c_slot.committed_frontier = st.committed_frontier;
-                        c_slot.committed_tokens = st.prompt_tokens;
-                        c_slot.history = impl_->executor_.lane_history(st.lane_handle);
-                        c_slot.physical_groups = impl_->executor_.take_lane_physical_groups(st.lane_handle);
+                            const std::int32_t active_slot = impl_->executor_.allocation().current_source_slot(lane_idx);
+                            impl_->executor_.copy_state_slot(static_cast<std::uint32_t>(active_slot), c_slot.cache_slot);
 
-                        const std::int32_t active_slot = impl_->executor_.allocation().current_source_slot(lane_idx);
-                        impl_->executor_.copy_state_slot(static_cast<std::uint32_t>(active_slot), c_slot.cache_slot);
+                            const std::uint64_t digest = st.prefix_digests.at(st.committed_frontier);
+                            c_slot.prefix_digest = digest;
 
-                        const std::uint64_t digest = st.prefix_digests.at(st.committed_frontier);
-                        c_slot.prefix_digest = digest;
+                            FinishResult out;
+                            CheckpointSummary cp;
+                            cp.ref = runtime::CheckpointRef{
+                                .frontier = static_cast<std::uint32_t>(st.committed_frontier),
+                                .ordinal  = 0,
+                            };
+                            cp.shortlist_key = PrefixShortlistKey{
+                                .digest       = digest,
+                                .frontier     = static_cast<std::uint32_t>(st.committed_frontier),
+                                .identity_tag = 0,
+                            };
+                            cp.state_residency = runtime::ReplicaResidency::DeviceOnly;
+                            cp.required_kv = TargetKVRequirement{
+                                .main_frontier    = static_cast<std::uint32_t>(st.committed_frontier),
+                                .backend_frontier = 0,
+                                .main_pages       = static_cast<std::uint32_t>(c_slot.physical_groups.size() * 4),
+                                .backend_pages    = 0,
+                            };
+                            cp.rebuild_work = runtime::make_prefill_work(
+                                0, static_cast<std::uint32_t>(st.committed_frontier), 0, 0,
+                                impl_->plan_.config.prefill_chunk);
 
-                        FinishResult out;
-                        CheckpointSummary cp;
-                        cp.ref = runtime::CheckpointRef{
-                            .frontier = static_cast<std::uint32_t>(st.committed_frontier),
-                            .ordinal  = 0,
-                        };
-                        cp.shortlist_key = PrefixShortlistKey{
-                            .digest       = digest,
-                            .frontier     = static_cast<std::uint32_t>(st.committed_frontier),
-                            .identity_tag = 0,
-                        };
-                        cp.state_residency = runtime::ReplicaResidency::DeviceOnly;
-                        cp.required_kv = TargetKVRequirement{
-                            .main_frontier    = static_cast<std::uint32_t>(st.committed_frontier),
-                            .backend_frontier = 0,
-                            .main_pages       = static_cast<std::uint32_t>(c_slot.physical_groups.size() * 4),
-                            .backend_pages    = 0,
-                        };
-                        cp.rebuild_work = runtime::make_prefill_work(
-                            0, static_cast<std::uint32_t>(st.committed_frontier), 0, 0,
-                            impl_->plan_.config.prefill_chunk);
+                            out.summary.endpoint          = cp;
+                            out.summary.active_references = 0;
 
-                        out.summary.endpoint          = cp;
-                        out.summary.active_references = 0;
-
-                        if (st.turn_closure_continuation_index.has_value()) {
-                            const std::uint32_t turn_idx = *st.turn_closure_continuation_index;
-                            if (turn_idx < impl_->continuation_slots_.size()) {
-                                const auto& turn_slot = impl_->continuation_slots_[turn_idx];
-                                if (turn_slot.role == detail::ContinuationSlotRole::Catalogued) {
-                                    CheckpointSummary rw;
-                                    rw.ref = runtime::CheckpointRef{
-                                        .kind     = runtime::CheckpointKind::TurnClosure,
-                                        .frontier = static_cast<std::uint32_t>(turn_slot.committed_frontier),
-                                        .ordinal  = 0,
-                                    };
-                                    rw.shortlist_key = PrefixShortlistKey{
-                                        .digest       = turn_slot.prefix_digest,
-                                        .frontier     = static_cast<std::uint32_t>(turn_slot.committed_frontier),
-                                        .identity_tag = 0,
-                                    };
-                                    rw.state_residency = runtime::ReplicaResidency::DeviceOnly;
-                                    rw.required_kv = TargetKVRequirement{
-                                        .main_frontier    = static_cast<std::uint32_t>(turn_slot.committed_frontier),
-                                        .backend_frontier = 0,
-                                        .main_pages       = static_cast<std::uint32_t>(turn_slot.physical_groups.size() * 4),
-                                        .backend_pages    = 0,
-                                    };
-                                    rw.rebuild_work = runtime::make_prefill_work(
-                                        0, static_cast<std::uint32_t>(turn_slot.committed_frontier), 0, 0,
-                                        impl_->plan_.config.prefill_chunk);
-                                    out.summary.rewrite = rw;
+                            if (st.turn_closure_continuation_index.has_value()) {
+                                const std::uint32_t turn_idx = *st.turn_closure_continuation_index;
+                                if (turn_idx < impl_->continuation_slots_.size()) {
+                                    const auto& turn_slot = impl_->continuation_slots_[turn_idx];
+                                    if (turn_slot.role == detail::ContinuationSlotRole::Catalogued) {
+                                        CheckpointSummary rw;
+                                        rw.ref = runtime::CheckpointRef{
+                                            .kind     = runtime::CheckpointKind::TurnClosure,
+                                            .frontier = static_cast<std::uint32_t>(turn_slot.committed_frontier),
+                                            .ordinal  = 0,
+                                        };
+                                        rw.shortlist_key = PrefixShortlistKey{
+                                            .digest       = turn_slot.prefix_digest,
+                                            .frontier     = static_cast<std::uint32_t>(turn_slot.committed_frontier),
+                                            .identity_tag = 0,
+                                        };
+                                        rw.state_residency = runtime::ReplicaResidency::DeviceOnly;
+                                        rw.required_kv = TargetKVRequirement{
+                                            .main_frontier    = static_cast<std::uint32_t>(turn_slot.committed_frontier),
+                                            .backend_frontier = 0,
+                                            .main_pages       = static_cast<std::uint32_t>(turn_slot.physical_groups.size() * 4),
+                                            .backend_pages    = 0,
+                                        };
+                                        rw.rebuild_work = runtime::make_prefill_work(
+                                            0, static_cast<std::uint32_t>(turn_slot.committed_frontier), 0, 0,
+                                            impl_->plan_.config.prefill_chunk);
+                                        out.summary.rewrite = rw;
+                                    }
                                 }
                             }
+
+                            impl_->executor_.release_lane(st.lane_handle);
+                            st.active   = false;
+                            st.finished = true;
+                            st.reused_from_continuation_index.reset();
+                            st.reused_from_continuation_generation.reset();
+                            st.turn_closure_continuation_index.reset();
+                            st.pending_capture_offer = 0;
+                            out.status               = runtime::ConsumeStatus::Consumed;
+                            out.disposition          = runtime::FinishDisposition::Catalogued;
+                            out.continuation         = ContinuationHandle(
+                                this, static_cast<std::uint32_t>(target_c_idx), c_slot.generation);
+                            ++impl_->resource_revision_;
+                            return out;
                         }
-
-                        out.continuation.emplace(ContinuationHandle(
-                            this, target_c_idx, c_slot.generation));
-                        out.disposition = runtime::FinishDisposition::Catalogued;
-                        out.status      = runtime::ConsumeStatus::Consumed;
-
-                        impl_->executor_.release_lane(st.lane_handle);
-                        st.active   = false;
-                        st.finished = true;
-                        ++impl_->resource_revision_;
-                        return out;
                     }
-                }
 
-                impl_->executor_.release_lane(st.lane_handle);
-                st.active   = false;
-                st.finished = true;
-                ++impl_->resource_revision_;
+                    impl_->executor_.release_lane(st.lane_handle);
+                    st.active   = false;
+                    st.finished = true;
+                    st.reused_from_continuation_index.reset();
+                    st.reused_from_continuation_generation.reset();
+                    st.turn_closure_continuation_index.reset();
+                    st.pending_capture_offer = 0;
+                    ++impl_->resource_revision_;
+                }
             }
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "[flash_next finish] lane %u: swallowed exception: %s\n",
+                         sequence.lane().value, e.what());
+        } catch (...) {
+            std::fprintf(stderr, "[flash_next finish] lane %u: swallowed unknown exception\n",
+                         sequence.lane().value);
         }
-        } catch (...) {}
     }
     return FinishResult{
         .status      = runtime::ConsumeStatus::Consumed,
@@ -1480,6 +1609,9 @@ AbortResult Program::abort(SequenceHandle sequence) noexcept {
                 impl_->executor_.release_lane(st.lane_handle);
                 st.active   = false;
                 st.finished = true;
+                st.reused_from_continuation_index.reset();
+                st.reused_from_continuation_generation.reset();
+                st.turn_closure_continuation_index.reset();
                 st.pending_capture_offer = 0;
                 ++impl_->resource_revision_;
             }
@@ -1530,6 +1662,10 @@ void Program::fail_all_cleanup() noexcept {
             impl_->executor_.release_lane(st.lane_handle);
             st.active   = false;
             st.finished = true;
+            st.reused_from_continuation_index.reset();
+            st.reused_from_continuation_generation.reset();
+            st.turn_closure_continuation_index.reset();
+            st.pending_capture_offer = 0;
         }
     }
     for (auto& c_slot : impl_->continuation_slots_) {
@@ -1549,13 +1685,12 @@ void Program::fail_all_cleanup() noexcept {
 }
 
 bool Program::isolated_request_feasible(const RequestBasePlan& base) const noexcept {
-    if (impl_ == nullptr) { return false; }
+    if (impl_ == nullptr || base.impl_ == nullptr) { return false; }
     const std::uint32_t prompt_tokens = base.summary().prompt_tokens;
     const std::uint32_t effective_out = base.summary().effective_output_tokens;
     const std::uint32_t total_tokens  = prompt_tokens + (effective_out > 0 ? effective_out - 1U : 0U);
     return total_tokens <= impl_->plan_.resolved_tokens &&
-           (impl_->plan_.main_page_groups >= (total_tokens + 255U) / 256U) &&
-           (impl_->executor_.active_lanes_count() < impl_->plan_.config.max_concurrency);
+           (impl_->plan_.main_page_groups >= (total_tokens + 255U) / 256U);
 }
 
 std::uint64_t Program::resource_revision() const noexcept {

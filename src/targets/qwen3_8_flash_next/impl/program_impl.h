@@ -112,6 +112,8 @@ struct LaneState {
     std::optional<std::uint32_t> capture_frontier;
     bool capture_offered = false;
     bool reused_from_turn_closure = false;
+    std::optional<std::uint32_t> reused_from_continuation_index;
+    std::optional<std::uint64_t> reused_from_continuation_generation;
 };
 
 class ProgramImpl {
@@ -130,6 +132,13 @@ public:
     void sample_tokens(const Tensor& logits,
                        std::span<const std::uint32_t> lane_indices,
                        std::span<std::int32_t> out_tokens);
+
+    [[nodiscard]] bool is_slot_protected(std::size_t slot_idx) const;
+    [[nodiscard]] std::uint32_t count_freeable_physical_groups(
+        std::optional<std::size_t> current_matching_slot = std::nullopt) const;
+    void evict_continuation_slot(std::size_t slot_idx);
+    bool ensure_physical_groups_available(std::size_t needed);
+    std::int32_t allocate_or_evict_continuation_slot();
 
     const LoadedModelData* model_data_ = nullptr;
     TextModelView text_override_{};

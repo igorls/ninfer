@@ -1695,6 +1695,400 @@ int test_state_slot_capacity_saturation_and_eviction(ninfer::DeviceContext& devi
     return failures;
 }
 
+int test_small_pool_page_pressure_eviction(ninfer::DeviceContext& device) {
+    std::printf("[RUN] test_small_pool_page_pressure_eviction\n");
+    std::fflush(stdout);
+    int failures = 0;
+    auto model   = make_synthetic_model(device);
+    auto ple_meta = make_synthetic_ple_meta();
+
+    // Pool has 4 page groups total. Max concurrency 2, max context 512 (2 groups per lane).
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency       = 2,
+        .max_context           = 512,
+        .state_slot_capacity   = 0,
+        .continuation_capacity = 4,
+        .prefill_chunk         = 256,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+
+    auto program_impl = std::make_unique<ProgramImpl>(nullptr, plan, device, model.view, std::nullopt, ple_meta);
+    Program program(std::move(program_impl));
+
+    ninfer::runtime::ResolvedExecutionOptions exec_options{};
+    exec_options.allow_prefix_reuse     = true;
+    exec_options.requested_output_tokens = 8;
+    ninfer::runtime::ContextMachineCostModel cost_model{};
+    std::atomic<bool> flag{false};
+    ninfer::runtime::CancellationFlagView cancellation{&flag};
+    std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = true}}};
+
+    // 1. Fill catalog with checkpoints owning all 4 page groups
+    // Checkpoint A: 510 tokens -> 2 page groups
+    std::vector<ninfer::TokenId> tokens_a(510);
+    for (std::size_t i = 0; i < 510; ++i) { tokens_a[i] = static_cast<ninfer::TokenId>(1000 + i); }
+    const auto prompt_a = make_prompt(tokens_a, true);
+    auto base_a = program.plan_request(prompt_a, exec_options);
+    auto cand_a = program.inspect_admission(prompt_a, base_a, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand_a.has_value(), "Admission A must succeed");
+    auto res_a = program.seal_identity(*cand_a, prompt_a);
+    (void)program.start_resource_transaction(std::move(*res_a), make_prompt(tokens_a, true), cancellation);
+    auto prog_a = program.progress_context_transaction(cancellation);
+    SequenceHandle seq_a = std::get_if<MaterializationResult>(&prog_a)->published->sequence;
+    program.finalize_context_transaction();
+    auto pa_step1 = program.advance_prefill(seq_a); // 0..256
+    auto pa_step2 = program.advance_prefill(seq_a); // 256..510 (samples 1st token)
+    if (pa_step2.pending.has_value()) { (void)program.commit(std::move(*pa_step2.pending), commit_dec); }
+    FinishResult fin_a = program.finish(seq_a);
+    failures += check(fin_a.disposition == ninfer::runtime::FinishDisposition::Catalogued, "Finish A must catalogue");
+
+    // Checkpoint B: 510 tokens -> 2 page groups
+    std::vector<ninfer::TokenId> tokens_b(510);
+    for (std::size_t i = 0; i < 510; ++i) { tokens_b[i] = static_cast<ninfer::TokenId>(2000 + i); }
+    const auto prompt_b = make_prompt(tokens_b, true);
+    auto base_b = program.plan_request(prompt_b, exec_options);
+    auto cand_b = program.inspect_admission(prompt_b, base_b, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand_b.has_value(), "Admission B must succeed");
+    auto res_b = program.seal_identity(*cand_b, prompt_b);
+    (void)program.start_resource_transaction(std::move(*res_b), make_prompt(tokens_b, true), cancellation);
+    auto prog_b = program.progress_context_transaction(cancellation);
+    SequenceHandle seq_b = std::get_if<MaterializationResult>(&prog_b)->published->sequence;
+    program.finalize_context_transaction();
+    auto pb_step1 = program.advance_prefill(seq_b); // 0..256
+    auto pb_step2 = program.advance_prefill(seq_b); // 256..510
+    if (pb_step2.pending.has_value()) { (void)program.commit(std::move(*pb_step2.pending), commit_dec); }
+    FinishResult fin_b = program.finish(seq_b);
+    failures += check(fin_b.disposition == ninfer::runtime::FinishDisposition::Catalogued, "Finish B must catalogue");
+
+    // Check that available_physical_groups() is 0 (all 4 groups held in catalog)
+    failures += check(program.impl_->executor_.available_physical_groups() == 0,
+                      "Available physical groups must be 0 before pressure test");
+
+    // 2. Concurrently admit, prefill, and decode 2 lanes to 510 tokens each (requires all 4 groups)
+    std::vector<ninfer::TokenId> tokens_1(510);
+    for (std::size_t i = 0; i < 510; ++i) { tokens_1[i] = static_cast<ninfer::TokenId>(3000 + i); }
+    const auto prompt_1 = make_prompt(tokens_1, true);
+    auto base_1 = program.plan_request(prompt_1, exec_options);
+    auto cand_1 = program.inspect_admission(prompt_1, base_1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand_1.has_value(), "Admission 1 must succeed under page pressure");
+    if (cand_1.has_value()) {
+        failures += check(cand_1->identity_assessment().physical_status == ninfer::runtime::MaterializationPhysicalStatus::Feasible,
+                          "Admission 1 must be Feasible");
+    }
+
+    std::vector<ninfer::TokenId> tokens_2(510);
+    for (std::size_t i = 0; i < 510; ++i) { tokens_2[i] = static_cast<ninfer::TokenId>(4000 + i); }
+    const auto prompt_2 = make_prompt(tokens_2, true);
+    auto base_2 = program.plan_request(prompt_2, exec_options);
+    auto cand_2 = program.inspect_admission(prompt_2, base_2, ninfer::runtime::LaneId(1), nullptr, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand_2.has_value(), "Admission 2 must succeed under page pressure");
+    if (cand_2.has_value()) {
+        failures += check(cand_2->identity_assessment().physical_status == ninfer::runtime::MaterializationPhysicalStatus::Feasible,
+                          "Admission 2 must be Feasible");
+    }
+
+    auto res_1 = program.seal_identity(*cand_1, prompt_1);
+    (void)program.start_resource_transaction(std::move(*res_1), make_prompt(tokens_1, true), cancellation);
+    auto prog_1 = program.progress_context_transaction(cancellation);
+    SequenceHandle seq_1 = std::get_if<MaterializationResult>(&prog_1)->published->sequence;
+    program.finalize_context_transaction();
+
+    auto res_2 = program.seal_identity(*cand_2, prompt_2);
+    (void)program.start_resource_transaction(std::move(*res_2), make_prompt(tokens_2, true), cancellation);
+    auto prog_2 = program.progress_context_transaction(cancellation);
+    SequenceHandle seq_2 = std::get_if<MaterializationResult>(&prog_2)->published->sequence;
+    program.finalize_context_transaction();
+
+    // Prefill both sequences
+    std::array<ninfer::runtime::CommitDecision, 1> non_term = {{{.accepted_tokens = 1, .terminal = false}}};
+    auto p1_chunk1 = program.advance_prefill(seq_1); // evicts catalog to get group 1
+    auto p1_chunk2 = program.advance_prefill(seq_1); // gets group 2 (samples 1st token)
+    failures += check(p1_chunk2.complete, "Prefill 1 must complete");
+    if (p1_chunk2.pending.has_value()) { (void)program.commit(std::move(*p1_chunk2.pending), non_term); }
+
+    auto p2_chunk1 = program.advance_prefill(seq_2); // evicts catalog to get group 3
+    auto p2_chunk2 = program.advance_prefill(seq_2); // gets group 4 (samples 1st token)
+    failures += check(p2_chunk2.complete, "Prefill 2 must complete");
+    if (p2_chunk2.pending.has_value()) { (void)program.commit(std::move(*p2_chunk2.pending), non_term); }
+
+    // Decode 2 concurrent rounds with batch size 2
+    std::array<SequenceHandle, 2> seqs = {seq_1, seq_2};
+    std::array<ninfer::runtime::RoundBudget, 2> budgets{};
+    std::array<ninfer::runtime::CommitDecision, 2> commit_term = {
+        {{.accepted_tokens = 1, .terminal = true}, {.accepted_tokens = 1, .terminal = true}}};
+
+    auto dec_batch = program.decode(seqs, budgets);
+    failures += check(dec_batch.row_count() == 2, "Decode batch row count must be 2");
+    (void)program.commit(std::move(dec_batch), commit_term);
+
+    // Finish both
+    FinishResult fin_1 = program.finish(seq_1);
+    FinishResult fin_2 = program.finish(seq_2);
+
+    // Release any continuations
+    for (std::size_t c = 0; c < program.impl_->continuation_slots_.size(); ++c) {
+        auto& c_slot = program.impl_->continuation_slots_[c];
+        if (c_slot.role == detail::ContinuationSlotRole::Catalogued) {
+            (void)program.release_continuation(
+                ContinuationHandle(&program, static_cast<std::uint32_t>(c), c_slot.generation));
+        }
+    }
+
+    const auto usage_after = program.physical_usage();
+    failures += check(usage_after.device_state_slots == 0,
+                      "All device state slots must be reclaimed (0)");
+    failures += check(usage_after.device_main_kv_pages == 0,
+                      "All physical page groups must be returned to free list (0 used pages)");
+
+    std::printf("[DONE] test_small_pool_page_pressure_eviction, failures: %d\n", failures);
+    std::fflush(stdout);
+    return failures;
+}
+
+int test_repeated_8way_batches_over_full_catalog(ninfer::DeviceContext& device) {
+    std::printf("[RUN] test_repeated_8way_batches_over_full_catalog\n");
+    std::fflush(stdout);
+    int failures = 0;
+    auto model   = make_synthetic_model(device);
+    auto ple_meta = make_synthetic_ple_meta();
+
+    // Concurrency 8, max_context 256, continuation_capacity 8, prefill_chunk 128
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency       = 8,
+        .max_context           = 256,
+        .state_slot_capacity   = 0,
+        .continuation_capacity = 8,
+        .prefill_chunk         = 128,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+
+    auto program_impl = std::make_unique<ProgramImpl>(nullptr, plan, device, model.view, std::nullopt, ple_meta);
+    Program program(std::move(program_impl));
+
+    ninfer::runtime::ResolvedExecutionOptions exec_options{};
+    exec_options.allow_prefix_reuse     = true;
+    exec_options.requested_output_tokens = 8;
+    ninfer::runtime::ContextMachineCostModel cost_model{};
+    std::atomic<bool> flag{false};
+    ninfer::runtime::CancellationFlagView cancellation{&flag};
+
+    // Run 3 consecutive 8-way batches
+    for (int batch_idx = 0; batch_idx < 3; ++batch_idx) {
+        std::vector<SequenceHandle> sequences(8);
+
+        for (std::uint32_t lane = 0; lane < 8; ++lane) {
+            std::vector<ninfer::TokenId> tokens(128);
+            for (std::size_t i = 0; i < 128; ++i) {
+                tokens[i] = static_cast<ninfer::TokenId>(batch_idx * 1000 + lane * 100 + i);
+            }
+            const auto prompt = make_prompt(tokens, true);
+            auto base = program.plan_request(prompt, exec_options);
+            auto cand = program.inspect_admission(prompt, base, ninfer::runtime::LaneId(lane), nullptr, nullptr, std::nullopt, false, cost_model);
+            failures += check(cand.has_value(), "Admission in 8-way batch must succeed");
+            auto res = program.seal_identity(*cand, prompt);
+            (void)program.start_resource_transaction(std::move(*res), make_prompt(tokens, true), cancellation);
+            auto prog = program.progress_context_transaction(cancellation);
+            sequences[lane] = std::get_if<MaterializationResult>(&prog)->published->sequence;
+            program.finalize_context_transaction();
+        }
+
+        // Prefill all 8 lanes and capture TurnClosure
+        for (std::uint32_t lane = 0; lane < 8; ++lane) {
+            auto pref = program.advance_prefill(sequences[lane]);
+            failures += check(pref.complete, "Prefill must complete");
+            if (pref.capture.has_value()) {
+                auto cap_stat = program.reserve_active_capture(
+                    std::move(*pref.capture), nullptr, nullptr, std::nullopt, cancellation);
+                failures += check(cap_stat == ninfer::runtime::ContextTransactionReserveStatus::Reserved,
+                                  "Capture reservation in 8-way batch must succeed");
+                (void)program.progress_context_transaction(cancellation);
+                program.finalize_context_transaction();
+            }
+            std::array<ninfer::runtime::CommitDecision, 1> non_term = {{{.accepted_tokens = 1, .terminal = false}}};
+            if (pref.pending.has_value()) {
+                (void)program.commit(std::move(*pref.pending), non_term);
+            }
+        }
+
+        // Decode 2 rounds for all 8 lanes concurrently
+        std::array<ninfer::runtime::RoundBudget, 8> budgets{};
+        std::array<ninfer::runtime::CommitDecision, 8> dec_non_term;
+        for (auto& d : dec_non_term) { d = {.accepted_tokens = 1, .terminal = false}; }
+        std::array<ninfer::runtime::CommitDecision, 8> dec_term;
+        for (auto& d : dec_term) { d = {.accepted_tokens = 1, .terminal = true}; }
+
+        auto dec1 = program.decode(sequences, budgets);
+        failures += check(dec1.row_count() == 8, "Decode round 1 row count must be 8");
+        (void)program.commit(std::move(dec1), dec_non_term);
+
+        auto dec2 = program.decode(sequences, budgets);
+        failures += check(dec2.row_count() == 8, "Decode round 2 row count must be 8");
+        (void)program.commit(std::move(dec2), dec_term);
+
+        // Finish all 8 sequences
+        for (std::uint32_t lane = 0; lane < 8; ++lane) {
+            FinishResult fin = program.finish(sequences[lane]);
+            failures += check(fin.disposition == ninfer::runtime::FinishDisposition::Catalogued,
+                              "8-way batch finish must catalogue");
+        }
+    }
+
+    // Release all continuations in catalog
+    for (std::size_t c = 0; c < program.impl_->continuation_slots_.size(); ++c) {
+        auto& c_slot = program.impl_->continuation_slots_[c];
+        if (c_slot.role == detail::ContinuationSlotRole::Catalogued) {
+            (void)program.release_continuation(
+                ContinuationHandle(&program, static_cast<std::uint32_t>(c), c_slot.generation));
+        }
+    }
+
+    const auto usage_after = program.physical_usage();
+    failures += check(usage_after.device_state_slots == 0,
+                      "All device state slots must be reclaimed (0)");
+    failures += check(usage_after.device_main_kv_pages == 0,
+                      "All physical page groups must be returned to free list (0 used pages)");
+
+    std::printf("[DONE] test_repeated_8way_batches_over_full_catalog, failures: %d\n", failures);
+    std::fflush(stdout);
+    return failures;
+}
+
+int test_resumed_checkpoint_not_evicted_while_lane_runs(ninfer::DeviceContext& device) {
+    std::printf("[RUN] test_resumed_checkpoint_not_evicted_while_lane_runs\n");
+    std::fflush(stdout);
+    int failures = 0;
+    auto model   = make_synthetic_model(device);
+    auto ple_meta = make_synthetic_ple_meta();
+
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency       = 2,
+        .max_context           = 256,
+        .state_slot_capacity   = 0,
+        .continuation_capacity = 4,
+        .prefill_chunk         = 128,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+
+    auto program_impl = std::make_unique<ProgramImpl>(nullptr, plan, device, model.view, std::nullopt, ple_meta);
+    Program program(std::move(program_impl));
+
+    ninfer::runtime::ResolvedExecutionOptions exec_options{};
+    exec_options.allow_prefix_reuse     = true;
+    exec_options.requested_output_tokens = 8;
+    ninfer::runtime::ContextMachineCostModel cost_model{};
+    std::atomic<bool> flag{false};
+    ninfer::runtime::CancellationFlagView cancellation{&flag};
+    std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = true}}};
+
+    // 1. Run Sequence 1 on Lane 0, capture TurnClosure checkpoint at 32 tokens
+    std::vector<ninfer::TokenId> t1_tokens(48);
+    for (std::size_t i = 0; i < 48; ++i) { t1_tokens[i] = static_cast<ninfer::TokenId>(500 + i); }
+    const auto prompt1 = make_prompt(t1_tokens, true, 32);
+    auto base1 = program.plan_request(prompt1, exec_options);
+    auto cand1 = program.inspect_admission(prompt1, base1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto res1 = program.seal_identity(*cand1, prompt1);
+    (void)program.start_resource_transaction(std::move(*res1), make_prompt(t1_tokens, true, 32), cancellation);
+    auto prog1 = program.progress_context_transaction(cancellation);
+    SequenceHandle seq1 = std::get_if<MaterializationResult>(&prog1)->published->sequence;
+    program.finalize_context_transaction();
+
+    auto p1 = program.advance_prefill(seq1);
+    failures += check(p1.capture.has_value(), "Turn 1 must offer capture");
+    (void)program.reserve_active_capture(std::move(*p1.capture), nullptr, nullptr, std::nullopt, cancellation);
+    (void)program.progress_context_transaction(cancellation);
+    program.finalize_context_transaction();
+
+    auto p1_step2 = program.advance_prefill(seq1);
+    failures += check(p1_step2.complete, "Turn 1 step 2 must complete");
+    if (p1_step2.pending.has_value()) { (void)program.commit(std::move(*p1_step2.pending), commit_dec); }
+    FinishResult fin1 = program.finish(seq1);
+
+    // Identify which slot has the TurnClosure checkpoint
+    std::int32_t tc_slot_idx = -1;
+    std::uint64_t tc_gen = 0;
+    for (std::size_t c = 0; c < program.impl_->continuation_slots_.size(); ++c) {
+        const auto& sl = program.impl_->continuation_slots_[c];
+        if (sl.role == detail::ContinuationSlotRole::Catalogued && sl.kind == runtime::CheckpointKind::TurnClosure) {
+            tc_slot_idx = static_cast<std::int32_t>(c);
+            tc_gen = sl.generation;
+            break;
+        }
+    }
+    failures += check(tc_slot_idx >= 0, "TurnClosure slot must exist");
+
+    // 2. Start Turn 2 on Lane 0, resumed from TurnClosure
+    std::vector<ninfer::TokenId> t2_tokens(64);
+    for (std::size_t i = 0; i < 32; ++i) { t2_tokens[i] = t1_tokens[i]; }
+    for (std::size_t i = 32; i < 64; ++i) { t2_tokens[i] = static_cast<ninfer::TokenId>(600 + i); }
+    const auto prompt2 = make_prompt(t2_tokens, true);
+    auto base2 = program.plan_request(prompt2, exec_options);
+    auto cand2 = program.inspect_admission(prompt2, base2, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand2.has_value(), "Turn 2 admission against TurnClosure must succeed");
+    auto res2 = program.seal_identity(*cand2, prompt2);
+    (void)program.start_resource_transaction(std::move(*res2), make_prompt(t2_tokens, true), cancellation);
+    auto prog2 = program.progress_context_transaction(cancellation);
+    SequenceHandle seq2 = std::get_if<MaterializationResult>(&prog2)->published->sequence;
+    program.finalize_context_transaction();
+
+    // Verify Lane 0 is actively referencing tc_slot_idx
+    failures += check(program.impl_->lane_states_[0].reused_from_continuation_index.has_value() &&
+                      *program.impl_->lane_states_[0].reused_from_continuation_index == static_cast<std::uint32_t>(tc_slot_idx),
+                      "Lane 0 must track reused continuation index");
+    failures += check(program.impl_->is_slot_protected(tc_slot_idx),
+                      "TurnClosure slot must be protected while Lane 0 is active");
+
+    // 3. Trigger pressure on Lane 1 and fill remaining continuation slots
+    std::vector<ninfer::TokenId> t3_tokens(64);
+    for (std::size_t i = 0; i < 64; ++i) { t3_tokens[i] = static_cast<ninfer::TokenId>(700 + i); }
+    const auto prompt3 = make_prompt(t3_tokens, true);
+    auto base3 = program.plan_request(prompt3, exec_options);
+    auto cand3 = program.inspect_admission(prompt3, base3, ninfer::runtime::LaneId(1), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto res3 = program.seal_identity(*cand3, prompt3);
+    (void)program.start_resource_transaction(std::move(*res3), make_prompt(t3_tokens, true), cancellation);
+    auto prog3 = program.progress_context_transaction(cancellation);
+    SequenceHandle seq3 = std::get_if<MaterializationResult>(&prog3)->published->sequence;
+    program.finalize_context_transaction();
+
+    // Advance prefill on Lane 1 (which triggers page group and continuation eviction)
+    auto p3 = program.advance_prefill(seq3);
+
+    // Verify tc_slot_idx was NEVER evicted
+    failures += check(program.impl_->continuation_slots_[tc_slot_idx].role == detail::ContinuationSlotRole::Catalogued,
+                      "Resumed TurnClosure checkpoint must NOT be evicted while lane is running");
+    failures += check(program.impl_->continuation_slots_[tc_slot_idx].generation == tc_gen,
+                      "TurnClosure generation must be intact");
+
+    // Clean up sequences
+    if (p3.pending.has_value()) { (void)program.commit(std::move(*p3.pending), commit_dec); }
+    (void)program.finish(seq3);
+
+    auto p2 = program.advance_prefill(seq2);
+    if (p2.pending.has_value()) { (void)program.commit(std::move(*p2.pending), commit_dec); }
+    (void)program.finish(seq2);
+
+    // Release all
+    for (std::size_t c = 0; c < program.impl_->continuation_slots_.size(); ++c) {
+        auto& c_slot = program.impl_->continuation_slots_[c];
+        if (c_slot.role == detail::ContinuationSlotRole::Catalogued) {
+            (void)program.release_continuation(
+                ContinuationHandle(&program, static_cast<std::uint32_t>(c), c_slot.generation));
+        }
+    }
+
+    const auto usage_after = program.physical_usage();
+    failures += check(usage_after.device_state_slots == 0,
+                      "All device state slots must be reclaimed (0)");
+    failures += check(usage_after.device_main_kv_pages == 0,
+                      "All physical page groups must be returned to free list (0 used pages)");
+
+    std::printf("[DONE] test_resumed_checkpoint_not_evicted_while_lane_runs, failures: %d\n", failures);
+    std::fflush(stdout);
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -1719,6 +2113,9 @@ int main() {
         failures += test_turn_closure_chain_retention(device);
         failures += test_turn2_resumed_vs_scratch_divergence(device);
         failures += test_state_slot_capacity_saturation_and_eviction(device);
+        failures += test_small_pool_page_pressure_eviction(device);
+        failures += test_repeated_8way_batches_over_full_catalog(device);
+        failures += test_resumed_checkpoint_not_evicted_while_lane_runs(device);
 
         if (failures == 0) {
             std::printf("ALL FLASH-NEXT CONTINUATION LIFECYCLE TESTS PASSED\n");
