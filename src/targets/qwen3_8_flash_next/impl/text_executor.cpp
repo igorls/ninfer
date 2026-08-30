@@ -254,8 +254,8 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
             "FlashNextTextExecutor: token_ids and positions must be non-empty and matching size");
     }
 
-    const auto num_tokens = static_cast<std::uint32_t>(token_ids.size());
-    const std::uint32_t lane = handle.lane_index();
+    const auto num_tokens                  = static_cast<std::uint32_t>(token_ids.size());
+    const std::uint32_t lane               = handle.lane_index();
     const std::int32_t initial_active_slot = alloc_.current_source_slot(lane);
     const std::int32_t initial_standby_slot = alloc_.current_destination_slot(lane);
 
@@ -268,83 +268,66 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
         pending_prefill_initial_active_slot_  = initial_active_slot;
         pending_prefill_initial_standby_slot_ = initial_standby_slot;
 
+        alloc_.workspace().reset();
+
         // Sync table updates if dirty
         ledger_.sync_tables_if_dirty(alloc_, device_.stream);
 
-        // Maintain temporary history copy for sequential token PLE gather
-        PleTokenHistory current_history = ledger_.lane_history(handle);
+        // 1. Gather all 16*T PLE rows for the chunk at once
+        PleTokenHistory temp_history = ledger_.lane_history(handle);
+        std::vector<std::array<std::int64_t, 16>> chunk_ple_indices(num_tokens);
+        for (std::uint32_t t = 0; t < num_tokens; ++t) {
+            chunk_ple_indices[t] = ple_indices(ple_metadata_, temp_history, token_ids[t]);
+            temp_history.commit(token_ids[t]);
+        }
+        auto ticket = ple_pipeline_.prepare(std::span(chunk_ple_indices));
+        Tensor gathered_ple = alloc_.workspace().alloc(
+            DType::BF16, {2'560, static_cast<std::int32_t>(num_tokens)}, 256);
+        ple_pipeline_.enqueue_copy(std::move(ticket), gathered_ple);
 
+        // 2. Upload chunk input metadata to workspace
+        Tensor dev_token_ids = alloc_.workspace().alloc(
+            DType::I32, {static_cast<std::int32_t>(num_tokens)}, 256);
+        Tensor dev_token_indices = alloc_.workspace().alloc(
+            DType::I32, {static_cast<std::int32_t>(num_tokens)}, 256);
+        Tensor dev_mrope_positions = alloc_.workspace().alloc(
+            DType::I32, {3, static_cast<std::int32_t>(num_tokens)}, 256);
+
+        std::vector<std::int32_t> host_indices(num_tokens);
+        std::vector<std::int32_t> host_flat_positions(3 * num_tokens);
+        for (std::uint32_t t = 0; t < num_tokens; ++t) {
+            host_indices[t]                = first_token_index + static_cast<std::int32_t>(t);
+            host_flat_positions[t * 3 + 0] = positions[t][0];
+            host_flat_positions[t * 3 + 1] = positions[t][1];
+            host_flat_positions[t * 3 + 2] = positions[t][2];
+        }
+
+        CUDA_CHECK(cudaMemcpyAsync(dev_token_ids.data, token_ids.data(),
+                                   num_tokens * sizeof(std::int32_t), cudaMemcpyHostToDevice,
+                                   device_.stream));
+        CUDA_CHECK(cudaMemcpyAsync(dev_token_indices.data, host_indices.data(),
+                                   num_tokens * sizeof(std::int32_t), cudaMemcpyHostToDevice,
+                                   device_.stream));
+        CUDA_CHECK(cudaMemcpyAsync(dev_mrope_positions.data, host_flat_positions.data(),
+                                   3 * num_tokens * sizeof(std::int32_t), cudaMemcpyHostToDevice,
+                                   device_.stream));
+
+        // 3. Compute embedding [2560, T]
+        Tensor embedding = alloc_.workspace().alloc(
+            DType::BF16, {2'560, static_cast<std::int32_t>(num_tokens)}, 256);
+        ops::embedding(dev_token_ids, model_.token_embedding, embedding, device_.stream);
+
+        // 4. Output tensors
         Tensor logits(alloc_.round_tensors().logits.data, DType::BF16, {248'320, 1});
         Tensor final_hidden(alloc_.round_tensors().final_hidden.data, DType::BF16, {2'560, 1});
 
-        for (std::uint32_t t = 0; t < num_tokens; ++t) {
-            alloc_.workspace().reset();
-
-            const std::int32_t tok_id  = token_ids[t];
-            const std::int32_t tok_idx = first_token_index + static_cast<std::int32_t>(t);
-            const auto pos             = positions[t];
-
-            // 1. Gather PLE
-            const auto ple_idx = ple_indices(ple_metadata_, current_history, tok_id);
-            std::array<std::array<std::int64_t, 16>, 1> ple_req = {ple_idx};
-            auto ticket = ple_pipeline_.prepare(std::span(ple_req));
-            Tensor gathered_ple(alloc_.round_tensors().gathered_ple_embedding.data, DType::BF16,
-                                {2'560, 1});
-            ple_pipeline_.enqueue_copy(std::move(ticket), gathered_ple);
-            current_history.commit(tok_id);
-
-            // 2. Upload round tensors for batch=1
-            host_token_ids_[0]     = tok_id;
-            host_token_indices_[0] = tok_idx;
-            for (std::uint32_t d = 0; d < 3; ++d) { host_mrope_positions_[d] = pos[d]; }
-            host_table_rows_[0]        = static_cast<std::int32_t>(lane);
-            host_source_slots_[0]      = alloc_.current_source_slot(lane);
-            host_destination_slots_[0] = alloc_.current_destination_slot(lane);
-
-            Tensor dev_token_ids(alloc_.round_tensors().token_ids.data, DType::I32, {1});
-            Tensor dev_token_indices(alloc_.round_tensors().token_indices.data, DType::I32, {1});
-            Tensor dev_mrope_positions(alloc_.round_tensors().mrope_positions.data, DType::I32,
-                                       {1, 3});
-            Tensor dev_table_rows(alloc_.round_tensors().table_rows.data, DType::I32, {1});
-            Tensor dev_source_slots(alloc_.round_tensors().source_slots.data, DType::I32, {1});
-            Tensor dev_destination_slots(alloc_.round_tensors().destination_slots.data, DType::I32,
-                                         {1});
-
-            CUDA_CHECK(cudaMemcpyAsync(dev_token_ids.data, host_token_ids_.data(),
-                                       sizeof(std::int32_t), cudaMemcpyHostToDevice,
-                                       device_.stream));
-            CUDA_CHECK(cudaMemcpyAsync(dev_token_indices.data, host_token_indices_.data(),
-                                       sizeof(std::int32_t), cudaMemcpyHostToDevice,
-                                       device_.stream));
-            CUDA_CHECK(cudaMemcpyAsync(dev_mrope_positions.data, host_mrope_positions_.data(),
-                                       3 * sizeof(std::int32_t), cudaMemcpyHostToDevice,
-                                       device_.stream));
-            CUDA_CHECK(cudaMemcpyAsync(dev_table_rows.data, host_table_rows_.data(),
-                                       sizeof(std::int32_t), cudaMemcpyHostToDevice,
-                                       device_.stream));
-            CUDA_CHECK(cudaMemcpyAsync(dev_source_slots.data, host_source_slots_.data(),
-                                       sizeof(std::int32_t), cudaMemcpyHostToDevice,
-                                       device_.stream));
-            CUDA_CHECK(cudaMemcpyAsync(dev_destination_slots.data, host_destination_slots_.data(),
-                                       sizeof(std::int32_t), cudaMemcpyHostToDevice,
-                                       device_.stream));
-
-            // 3. Embedding
-            Tensor embedding = alloc_.workspace().alloc(DType::BF16, {2'560, 1}, 256);
-            ops::embedding(dev_token_ids, model_.token_embedding, embedding, device_.stream);
-
-            // 4. Core decode step
-            const std::int32_t active_blocks = (tok_idx + 1) / 4;
-            flash_next_text_decode_core(
-                model_, embedding, dev_token_indices, dev_mrope_positions, dev_table_rows,
-                dev_source_slots, dev_destination_slots, gathered_ple,
-                static_cast<std::int32_t>(alloc_.plan().maximum_blocks), active_blocks,
-                alloc_.state_view(), alloc_.workspace(), final_hidden, logits, device_.stream,
-                sink);
-
-            // Step recurrent slot on intermediate tokens
-            if (t + 1 < num_tokens) { alloc_.commit_row_slot(lane, device_.stream); }
-        }
+        // 5. Execute T-wide prefill core
+        flash_next_text_prefill_chunk(
+            model_, embedding, dev_token_indices, dev_mrope_positions,
+            static_cast<std::int32_t>(lane), initial_active_slot, initial_standby_slot,
+            gathered_ple, static_cast<std::int32_t>(alloc_.plan().maximum_blocks),
+            alloc_.state_view(), alloc_.workspace(), final_hidden, logits, device_.stream,
+            sink);
 
         return PendingRound(this, prepared.transaction_id, 1, logits, final_hidden);
     } catch (...) {

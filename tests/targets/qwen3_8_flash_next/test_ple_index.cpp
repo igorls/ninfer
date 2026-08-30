@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <iostream>
+#include <vector>
 
 int main() {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
@@ -66,6 +67,29 @@ int main() {
     if (history.previous_token() != 248'044 || history.second_previous_token() != 248'044) {
         std::cerr << "Token 248044 did not reset boundary history\n";
         return 1;
+    }
+
+    // Test chunk vs sequential PLE indices parity over a chunk of arbitrary tokens
+    const std::vector<std::int32_t> test_tokens = {100, 200, 300, 400, 248'044, 500, 600, 248'046, 700};
+    PleTokenHistory seq_hist;
+    std::vector<std::array<std::int64_t, 16>> seq_indices;
+    for (std::int32_t tok : test_tokens) {
+        seq_indices.push_back(ple_indices(metadata, seq_hist, tok));
+        seq_hist.commit(tok);
+    }
+
+    PleTokenHistory chunk_hist;
+    std::vector<std::array<std::int64_t, 16>> chunk_indices(test_tokens.size());
+    for (std::size_t t = 0; t < test_tokens.size(); ++t) {
+        chunk_indices[t] = ple_indices(metadata, chunk_hist, test_tokens[t]);
+        chunk_hist.commit(test_tokens[t]);
+    }
+
+    for (std::size_t t = 0; t < test_tokens.size(); ++t) {
+        if (chunk_indices[t] != seq_indices[t]) {
+            std::cerr << "Chunk vs sequential PLE index mismatch at t=" << t << '\n';
+            return 1;
+        }
     }
 
     return 0;

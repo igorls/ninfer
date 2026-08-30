@@ -81,4 +81,40 @@ void flash_next_ple_decode(const Tensor& hidden, const Tensor& gathered_embeddin
                           stream);
 }
 
+void flash_next_ple_prefill_chunk(const Tensor& hidden, const Tensor& gathered_embedding,
+                                  const PleWeights& weights, std::int32_t source_slot,
+                                  std::int32_t destination_slot, Tensor& convolution_states,
+                                  WorkspaceArena& workspace, Tensor& output, cudaStream_t stream) {
+    const std::int32_t tokens      = hidden.ne[1];
+    const std::int32_t state_slots = convolution_states.ne[2];
+    if (!exact_tensor(hidden, DType::BF16, 10'240, tokens) || tokens < 1 ||
+        !exact_tensor(gathered_embedding, DType::BF16, 2'560, tokens) ||
+        !exact_tensor(output, DType::BF16, 10'240, tokens) ||
+        !exact_bf16_weight(weights.key_projection, 10'240, 2'560) ||
+        !exact_bf16_weight(weights.value_projection, 2'560, 2'560) ||
+        !exact_tensor(weights.query_norm, DType::BF16, 10'240) ||
+        !exact_tensor(weights.key_norm, DType::BF16, 10'240) ||
+        !exact_tensor(weights.conv_norm, DType::BF16, 10'240) ||
+        !exact_tensor(weights.convolution, DType::BF16, 10'240, 4) ||
+        !exact_tensor(convolution_states, DType::BF16, 10'240, 9, state_slots) ||
+        source_slot < 0 || source_slot >= state_slots || destination_slot < 0 ||
+        destination_slot >= state_slots || stream == nullptr) {
+        throw std::invalid_argument("Flash-Next PLE prefill chunk received an invalid view");
+    }
+
+    const auto scope              = workspace.scope();
+    FlashNextPleWorkspace scratch = allocate_flash_next_ple_workspace(workspace, tokens);
+
+    ops::linear(gathered_embedding, weights.key_projection, scratch.projected_key,
+                ops::LinearPolicy::A16Only, workspace, stream);
+    ops::linear(gathered_embedding, weights.value_projection, scratch.projected_value,
+                ops::LinearPolicy::A16Only, workspace, stream);
+
+    flash_next_ple_chunk_launch(hidden, scratch.projected_key, scratch.projected_value,
+                                weights.query_norm, weights.key_norm, weights.conv_norm,
+                                weights.convolution, source_slot, destination_slot,
+                                convolution_states, scratch.gated, scratch.normalized_gated,
+                                output, state_slots, tokens, stream);
+}
+
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

@@ -2,6 +2,7 @@
 
 #include "core/device.h"
 #include "ninfer/ops/embedding.h"
+#include "ninfer/ops/gated_delta_net.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/residual_add.h"
 
@@ -130,7 +131,7 @@ std::size_t flash_next_text_prefill_workspace_capacity_bytes(std::int32_t maximu
     WorkspaceLayoutBuilder layout;
     layout.alloc(DType::BF16, {2'560, tokens}, 256);
     (void)allocate_flash_next_text_decode_workspace(layout, tokens);
-    const std::size_t sort_temp = flash_next_qsa_indexer_sort_temp_bytes(maximum_blocks, tokens);
+    const std::size_t sort_temp = flash_next_qsa_indexer_sort_temp_bytes(maximum_blocks, 1);
     {
         auto scope = layout.scope();
         (void)allocate_flash_next_ple_workspace(layout, tokens);
@@ -138,14 +139,17 @@ std::size_t flash_next_text_prefill_workspace_capacity_bytes(std::int32_t maximu
     {
         auto scope = layout.scope();
         (void)allocate_flash_next_gdn_workspace(layout, tokens);
+        const std::size_t gdn_op_ws =
+            ops::gated_delta_net_workspace_capacity_bytes(16, 48, true, tokens, tokens);
+        layout.alloc_bytes(gdn_op_ws, 256);
     }
     {
         auto scope = layout.scope();
-        (void)allocate_flash_next_qsa_indexer_workspace(layout, maximum_blocks, tokens, sort_temp);
+        (void)allocate_flash_next_qsa_indexer_workspace(layout, maximum_blocks, 1, sort_temp);
     }
     {
         auto scope = layout.scope();
-        (void)allocate_flash_next_qsa_attention_workspace(layout, tokens);
+        (void)allocate_flash_next_qsa_attention_workspace(layout, 1);
     }
     {
         auto scope = layout.scope();
@@ -293,6 +297,146 @@ void flash_next_text_decode(const TextModelView& model, const Tensor& token_ids,
                                 source_slots, destination_slots, gathered_ple_embedding,
                                 maximum_blocks, active_blocks, state, workspace, final_hidden,
                                 logits, stream, sink);
+}
+
+void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& embedding,
+                                   const Tensor& token_indices, const Tensor& mrope_positions,
+                                   std::int32_t table_row, std::int32_t source_slot,
+                                   std::int32_t destination_slot,
+                                   const Tensor& gathered_ple_embedding, std::int32_t maximum_blocks,
+                                   FlashNextDecodeStateView state, WorkspaceArena& workspace,
+                                   Tensor& final_hidden, Tensor& logits, cudaStream_t stream,
+                                   const FlashNextDecodeStateSink* sink) {
+    const std::int32_t tokens      = embedding.ne[1];
+    const std::int32_t state_slots = state.ple_convolution_states.ne[2];
+    if (tokens <= 0 || maximum_blocks <= 0 || maximum_blocks > 65'536 || table_row < 0 ||
+        source_slot < 0 || source_slot >= state_slots || destination_slot < 0 ||
+        destination_slot >= state_slots ||
+        !exact_tensor(embedding, DType::BF16, 2'560, tokens) ||
+        !exact_tensor(token_indices, DType::I32, tokens) ||
+        mrope_positions.dtype != DType::I32 || !mrope_positions.is_contiguous() ||
+        !aligned_to(mrope_positions.data, 16) ||
+        !((mrope_positions.ne[0] == 3 && mrope_positions.ne[1] == tokens) ||
+          (mrope_positions.ne[0] == tokens && mrope_positions.ne[1] == 3) ||
+          (mrope_positions.ne[0] == 1 && mrope_positions.ne[1] == 3 && mrope_positions.ne[2] == tokens)) ||
+        !exact_tensor(gathered_ple_embedding, DType::BF16, 2'560, tokens) ||
+        !exact_tensor(final_hidden, DType::BF16, 2'560, 1) ||
+        !exact_tensor(logits, DType::BF16, 248'320, 1) ||
+        !exact_bf16_weight(model.output_head, 248'320, 2'560) || stream == nullptr) {
+        throw std::invalid_argument("Flash-Next text prefill chunk received an invalid input view");
+    }
+    validate_flash_next_decode_state(state, state_slots);
+
+    auto emit_state = [&](std::string_view name, const Tensor& tensor) {
+        if (sink && sink->on_state) {
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            sink->on_state(name, tensor);
+        }
+    };
+
+    emit_state("embedding", embedding);
+
+    const auto round_scope = workspace.scope();
+    FlashNextTextDecodeWorkspace round_ws =
+        allocate_flash_next_text_decode_workspace(workspace, tokens);
+
+    // 1. Repeat embedding into 4 hyperconnection streams
+    repeat_embedding_to_hyper_streams(embedding, round_ws.hyper_hidden, stream);
+    emit_state("hyper_init", round_ws.hyper_hidden);
+
+    // 2. 48-layer execution loop
+    for (std::size_t layer = 0; layer < 48; ++layer) {
+        char prefix_buf[32];
+        std::snprintf(prefix_buf, sizeof(prefix_buf), "L%02zu_", layer);
+        const std::string prefix(prefix_buf);
+
+        // At layer 1: evaluate PLE neural injection and add residual
+        if (layer == 1) {
+            emit_state("ple_gathered", gathered_ple_embedding);
+            flash_next_ple_prefill_chunk(round_ws.hyper_hidden, gathered_ple_embedding, model.ple,
+                                         source_slot, destination_slot,
+                                         state.ple_convolution_states, workspace,
+                                         round_ws.ple_injection, stream);
+            emit_state("ple_injection", round_ws.ple_injection);
+            ops::residual_add(round_ws.ple_injection, round_ws.hyper_hidden, stream);
+            emit_state("hyper_after_ple", round_ws.hyper_hidden);
+        }
+
+        // Attention hyper prepare -> block_input [2560, T]
+        flash_next_hyper_prepare(round_ws.hyper_hidden, model.layers[layer].attention_hyper,
+                                 round_ws.hyper_scratch, round_ws.block_input, stream);
+        emit_state(prefix + "attn_block_input", round_ws.block_input);
+
+        // Execute QSA or GDN attention
+        if (is_qsa_layer(layer)) {
+            const std::size_t qsa_idx = qsa_ordinal(layer);
+            for (std::int32_t t = 0; t < tokens; ++t) {
+                const std::int32_t qsa_src = (t == 0) ? source_slot : destination_slot;
+                const std::int32_t qsa_dst = destination_slot;
+
+                set_qsa_step_metadata(token_indices, mrope_positions, t, table_row, qsa_src,
+                                      qsa_dst, round_ws.qsa_token_indices,
+                                      round_ws.qsa_mrope_positions, round_ws.qsa_table_rows,
+                                      round_ws.qsa_source_slots, round_ws.qsa_destination_slots,
+                                      stream);
+
+                Tensor col_input  = round_ws.block_input.slice(1, t, 1);
+                Tensor col_output = round_ws.block_output.slice(1, t, 1);
+
+                flash_next_qsa_indexer_decode(
+                    col_input, model.full_attention[qsa_idx], round_ws.qsa_token_indices,
+                    round_ws.qsa_mrope_positions, round_ws.qsa_table_rows,
+                    round_ws.qsa_source_slots, round_ws.qsa_destination_slots,
+                    state.qsa_indexer_caches[qsa_idx], maximum_blocks, maximum_blocks,
+                    workspace, round_ws.qsa_selected_blocks, round_ws.qsa_selected_counts,
+                    stream);
+
+                flash_next_qsa_attention_decode(
+                    col_input, model.full_attention[qsa_idx], round_ws.qsa_token_indices,
+                    round_ws.qsa_mrope_positions, round_ws.qsa_table_rows,
+                    round_ws.qsa_selected_blocks, round_ws.qsa_selected_counts,
+                    state.qsa_attention_caches[qsa_idx], workspace, col_output, stream);
+            }
+        } else {
+            const std::size_t gdn_idx = gdn_ordinal(layer);
+            flash_next_gdn_prefill_chunk(round_ws.block_input, model.gdn[gdn_idx], source_slot,
+                                         destination_slot, state.gdn_convolution_states[gdn_idx],
+                                         state.gdn_ssm_states[gdn_idx], workspace,
+                                         round_ws.block_output, stream);
+        }
+        emit_state(prefix + "attn_block_output", round_ws.block_output);
+
+        // Attention hyper inject
+        flash_next_hyper_inject(round_ws.block_output, round_ws.hyper_scratch.injection,
+                                round_ws.hyper_hidden, stream);
+        emit_state(prefix + "hyper_after_attn", round_ws.hyper_hidden);
+
+        // MLP hyper prepare -> block_input [2560, T]
+        flash_next_hyper_prepare(round_ws.hyper_hidden, model.layers[layer].mlp_hyper,
+                                 round_ws.hyper_scratch, round_ws.block_input, stream);
+        emit_state(prefix + "mlp_block_input", round_ws.block_input);
+
+        // MoE
+        flash_next_moe(round_ws.block_input, model.layers[layer].moe, round_ws.block_output,
+                       workspace, stream);
+        emit_state(prefix + "mlp_block_output", round_ws.block_output);
+
+        // MLP hyper inject
+        flash_next_hyper_inject(round_ws.block_output, round_ws.hyper_scratch.injection,
+                                round_ws.hyper_hidden, stream);
+        emit_state(prefix + "hyper_after_mlp", round_ws.hyper_hidden);
+    }
+
+    // 3. Final hyper mixer on last token only -> final_hidden [2560, 1]
+    Tensor last_hidden = round_ws.hyper_hidden.slice(1, tokens - 1, 1);
+    flash_next_hyper_mix(last_hidden, model.final_mixer, round_ws.single_token_hyper_scratch,
+                         final_hidden, stream);
+    emit_state("final_hidden", final_hidden);
+
+    // 4. Output head linear projection -> logits [248320, 1]
+    ops::linear(final_hidden, model.output_head, logits, ops::LinearPolicy::A16Only, workspace,
+                stream);
+    emit_state("logits", logits);
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

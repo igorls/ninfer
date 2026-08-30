@@ -36,8 +36,8 @@ bool exact_expert_bank(const Nvfp4ExpertBankView& bank, std::int32_t rows, std::
 
 std::size_t flash_next_moe_workspace_capacity_bytes(std::int32_t min_tokens,
                                                     std::int32_t max_tokens) {
-    if (min_tokens <= 0 || max_tokens < min_tokens || max_tokens > 8) {
-        throw std::invalid_argument("Flash-Next MoE workspace requires T in [1,8]");
+    if (min_tokens <= 0 || max_tokens < min_tokens) {
+        throw std::invalid_argument("Flash-Next MoE workspace requires positive tokens");
     }
     WorkspaceLayoutBuilder layout;
     (void)allocate_flash_next_moe_workspace(layout, max_tokens);
@@ -48,7 +48,7 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
                     WorkspaceArena& workspace, cudaStream_t stream) {
     const std::int32_t tokens = input.ne[1];
     if (input.dtype != DType::BF16 || output.dtype != DType::BF16 || input.ne[0] != 2'560 ||
-        output.ne[0] != 2'560 || tokens < 1 || tokens > 8 || output.ne[1] != tokens ||
+        output.ne[0] != 2'560 || tokens < 1 || output.ne[1] != tokens ||
         input.ne[2] != 1 || input.ne[3] != 1 || output.ne[2] != 1 || output.ne[3] != 1 ||
         !input.is_contiguous() || !output.is_contiguous() || !aligned_to(input.data, 16) ||
         !aligned_to(output.data, 16) || !exact_bf16_weight(weights.router, 512, 2'560) ||

@@ -340,16 +340,17 @@ int test_real_artifact_preflight_if_available() {
                   << report.planned_mapped_tensors_count << "\n";
         return 1;
     }
-    if (report.runtime_plan.total_device_bytes != 509'714'432ULL) {
-        std::cerr << "Preflight runtime total_device_bytes mismatch: expected 509714432 got "
+    if (report.runtime_plan.total_device_bytes != 623'181'056ULL) {
+        std::cerr << "Preflight runtime total_device_bytes mismatch: expected 623181056 got "
                   << report.runtime_plan.total_device_bytes << "\n";
         return 1;
     }
     if (report.runtime_plan.attention_kv_bytes != 100'663'296ULL ||
         report.runtime_plan.indexer_block_keys_bytes != 3'145'728ULL ||
         report.runtime_plan.recurrent_state_bytes != 231'312'384ULL ||
-        report.runtime_plan.workspace_bytes != 174'084'096ULL) {
-        std::cerr << "Preflight runtime plan sub-allocations mismatch\n";
+        report.runtime_plan.workspace_bytes != 287'550'720ULL) {
+        std::cerr << "Preflight runtime plan sub-allocations mismatch: workspace_bytes="
+                  << report.runtime_plan.workspace_bytes << " expected 287550720\n";
         return 1;
     }
 

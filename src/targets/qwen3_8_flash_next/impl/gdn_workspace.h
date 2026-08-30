@@ -9,6 +9,8 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 
 struct FlashNextGdnWorkspace {
     Tensor projected;
+    Tensor conv_in;
+    Tensor conv_output;
     Tensor query;
     Tensor key;
     Tensor value;
@@ -23,6 +25,8 @@ template <class Arena>
 FlashNextGdnWorkspace allocate_flash_next_gdn_workspace(Arena& arena, std::int32_t tokens) {
     return {
         .projected        = arena.alloc(DType::BF16, {16'384, tokens}, 256),
+        .conv_in          = arena.alloc(DType::BF16, {10'240, tokens}, 256),
+        .conv_output      = arena.alloc(DType::BF16, {10'240, tokens}, 256),
         .query            = arena.alloc(DType::BF16, {2'048, tokens}, 256),
         .key              = arena.alloc(DType::BF16, {2'048, tokens}, 256),
         .value            = arena.alloc(DType::BF16, {6'144, tokens}, 256),

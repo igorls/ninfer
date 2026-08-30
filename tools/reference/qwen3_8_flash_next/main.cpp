@@ -144,49 +144,67 @@ public:
             pos_rec.mrope_position = mrope_positions[i];
         }
 
-        auto current_step = std::make_shared<std::size_t>(0);
-
         return FlashNextDecodeStateSink{
-            .on_state = [this, first_idx, count, current_step](std::string_view name,
-                                                               const Tensor& tensor) {
-                const std::size_t step = *current_step;
-                if (step >= count) { return; }
-                auto& pos_rec = positions_[first_idx + step];
-                char pos_buf[32];
-                std::snprintf(pos_buf, sizeof(pos_buf), "pos%04d", pos_rec.position);
-                const std::string pos_str           = pos_buf;
-                const std::filesystem::path pos_dir = std::filesystem::path(dump_dir_) / pos_str;
-                const std::string filename          = std::string(name) + ".bin";
-                const std::filesystem::path file_path = pos_dir / filename;
-
+            .on_state = [this, first_idx, count](std::string_view name, const Tensor& tensor) {
                 std::vector<std::uint8_t> host_bytes(tensor.bytes());
                 CUDA_CHECK(cudaMemcpy(host_bytes.data(), tensor.data, tensor.bytes(),
                                       cudaMemcpyDeviceToHost));
 
-                std::ofstream ofs(file_path, std::ios::binary);
-                if (!ofs) {
-                    throw std::runtime_error("Failed to open file for writing: " +
-                                             file_path.string());
-                }
-                ofs.write(reinterpret_cast<const char*>(host_bytes.data()), host_bytes.size());
+                const std::string filename = std::string(name) + ".bin";
+                if (tensor.ne[1] == static_cast<std::int32_t>(count)) {
+                    const std::size_t col_bytes = tensor.bytes() / count;
+                    for (std::size_t i = 0; i < count; ++i) {
+                        auto& pos_rec = positions_[first_idx + i];
+                        char pos_buf[32];
+                        std::snprintf(pos_buf, sizeof(pos_buf), "pos%04d", pos_rec.position);
+                        const std::string pos_str = pos_buf;
+                        const std::filesystem::path pos_dir =
+                            std::filesystem::path(dump_dir_) / pos_str;
+                        const std::filesystem::path file_path = pos_dir / filename;
 
-                TensorDumpRecord rec;
-                rec.name  = std::string(name);
-                rec.dtype = dtype_to_string(tensor.dtype);
-                if (tensor.ne[3] > 1) {
-                    rec.shape = {tensor.ne[0], tensor.ne[1], tensor.ne[2], tensor.ne[3]};
-                } else if (tensor.ne[2] > 1) {
-                    rec.shape = {tensor.ne[0], tensor.ne[1], tensor.ne[2]};
-                } else if (tensor.ne[1] > 1 || tensor.ne[0] > 1) {
-                    rec.shape = {tensor.ne[0], tensor.ne[1]};
+                        std::ofstream ofs(file_path, std::ios::binary);
+                        if (!ofs) {
+                            throw std::runtime_error("Failed to open file for writing: " +
+                                                     file_path.string());
+                        }
+                        ofs.write(
+                            reinterpret_cast<const char*>(host_bytes.data() + i * col_bytes),
+                            col_bytes);
+
+                        TensorDumpRecord rec;
+                        rec.name  = std::string(name);
+                        rec.dtype = dtype_to_string(tensor.dtype);
+                        rec.shape = {tensor.ne[0], 1};
+                        rec.file  = pos_str + "/" + filename;
+                        rec.bytes = col_bytes;
+                        pos_rec.tensors.push_back(std::move(rec));
+                    }
                 } else {
-                    rec.shape = {tensor.ne[0]};
-                }
-                rec.file  = pos_str + "/" + filename;
-                rec.bytes = tensor.bytes();
-                pos_rec.tensors.push_back(std::move(rec));
+                    // Single-token tensor (e.g. final_hidden, logits on last token)
+                    const std::size_t last_idx = first_idx + count - 1;
+                    auto& pos_rec              = positions_[last_idx];
+                    char pos_buf[32];
+                    std::snprintf(pos_buf, sizeof(pos_buf), "pos%04d", pos_rec.position);
+                    const std::string pos_str = pos_buf;
+                    const std::filesystem::path pos_dir =
+                        std::filesystem::path(dump_dir_) / pos_str;
+                    const std::filesystem::path file_path = pos_dir / filename;
 
-                if (name == "logits") { *current_step += 1; }
+                    std::ofstream ofs(file_path, std::ios::binary);
+                    if (!ofs) {
+                        throw std::runtime_error("Failed to open file for writing: " +
+                                                 file_path.string());
+                    }
+                    ofs.write(reinterpret_cast<const char*>(host_bytes.data()), host_bytes.size());
+
+                    TensorDumpRecord rec;
+                    rec.name  = std::string(name);
+                    rec.dtype = dtype_to_string(tensor.dtype);
+                    rec.shape = {tensor.ne[0], 1};
+                    rec.file  = pos_str + "/" + filename;
+                    rec.bytes = tensor.bytes();
+                    pos_rec.tensors.push_back(std::move(rec));
+                }
             },
         };
     }

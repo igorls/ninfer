@@ -91,7 +91,8 @@ int main() {
     }
     CUDA_CHECK(count_error);
 
-    ninfer::DeviceContext device(0);
+    try {
+        ninfer::DeviceContext device(0);
     ninfer::DeviceBuffer input(2'560 * 2);
     ninfer::DeviceBuffer output(2'560 * 2);
     ninfer::DeviceBuffer a_log(48 * 2);
@@ -142,7 +143,7 @@ int main() {
     ninfer::Tensor convolution_state_view(convolution_states.p, ninfer::DType::BF16,
                                           {10'240, 3, 2});
     ninfer::Tensor ssm_state_view(ssm_states.p, ninfer::DType::FP32, {128, 128, 48, 2});
-    ninfer::WorkspaceArena workspace(flash_next_gdn_workspace_capacity_bytes(1, 1));
+    ninfer::WorkspaceArena workspace(flash_next_gdn_workspace_capacity_bytes(1, 16));
     flash_next_gdn_decode(input_view, weights, source_view, destination_view,
                           convolution_state_view, ssm_state_view, workspace, output_view,
                           device.stream);
@@ -227,5 +228,136 @@ int main() {
                   << first_output << " vs expected " << expected_output << '\n';
         return 1;
     }
-    return 0;
+
+    // -----------------------------------------------------------------
+    // Test 2: GDN T-wide chunk vs sequential equivalence test for T = 4..16
+    // -----------------------------------------------------------------
+    for (int T = 4; T <= 16; T += 4) {
+        ninfer::DeviceBuffer chunk_input(2'560ULL * T * sizeof(std::uint16_t));
+        ninfer::DeviceBuffer chunk_output(2'560ULL * T * sizeof(std::uint16_t));
+        ninfer::DeviceBuffer chunk_conv_states(10'240ULL * 3 * 2 * sizeof(std::uint16_t));
+        ninfer::DeviceBuffer chunk_ssm_states(128ULL * 128 * 48 * 2 * sizeof(float));
+
+        ninfer::DeviceBuffer seq_output(2'560ULL * T * sizeof(std::uint16_t));
+        ninfer::DeviceBuffer seq_conv_states(10'240ULL * 3 * 2 * sizeof(std::uint16_t));
+        ninfer::DeviceBuffer seq_ssm_states(128ULL * 128 * 48 * 2 * sizeof(float));
+
+        std::vector<std::uint16_t> h_input(2'560ULL * T);
+        std::uint32_t rng = 987654321U + static_cast<std::uint32_t>(T);
+        for (auto& v : h_input) {
+            rng = rng * 1664525U + 1013904223U;
+            const float r = static_cast<float>((rng & 0xFFFFU)) / 65536.0F * 0.2F - 0.1F;
+            const std::uint32_t bits = std::bit_cast<std::uint32_t>(r);
+            v = static_cast<std::uint16_t>((bits + 0x7FFFU + ((bits >> 16U) & 1U)) >> 16U);
+        }
+        chunk_input.copy_from_host(h_input.data(), h_input.size() * sizeof(std::uint16_t));
+
+        chunk_conv_states.fill(0);
+        chunk_ssm_states.fill(0);
+        seq_conv_states.fill(0);
+        seq_ssm_states.fill(0);
+
+        ninfer::Tensor chunk_in_t(chunk_input.p, ninfer::DType::BF16, {2'560, T});
+        ninfer::Tensor chunk_out_t(chunk_output.p, ninfer::DType::BF16, {2'560, T});
+        ninfer::Tensor chunk_conv_t(chunk_conv_states.p, ninfer::DType::BF16, {10'240, 3, 2});
+        ninfer::Tensor chunk_ssm_t(chunk_ssm_states.p, ninfer::DType::FP32, {128, 128, 48, 2});
+
+        // 1. Run T-wide prefill chunk
+        flash_next_gdn_prefill_chunk(chunk_in_t, weights, 0, 1, chunk_conv_t, chunk_ssm_t,
+                                     workspace, chunk_out_t, device.stream);
+        device.synchronize();
+
+        // 2. Run sequential decode
+        ninfer::Tensor seq_conv_t(seq_conv_states.p, ninfer::DType::BF16, {10'240, 3, 2});
+        ninfer::Tensor seq_ssm_t(seq_ssm_states.p, ninfer::DType::FP32, {128, 128, 48, 2});
+        std::int32_t cur_src = 0;
+        std::int32_t cur_dst = 1;
+        for (int t = 0; t < T; ++t) {
+            ninfer::DeviceBuffer tok_src(sizeof(std::int32_t));
+            ninfer::DeviceBuffer tok_dst(sizeof(std::int32_t));
+            tok_src.copy_from_host(&cur_src, sizeof(std::int32_t));
+            tok_dst.copy_from_host(&cur_dst, sizeof(std::int32_t));
+            ninfer::Tensor tok_src_t(tok_src.p, ninfer::DType::I32, {1});
+            ninfer::Tensor tok_dst_t(tok_dst.p, ninfer::DType::I32, {1});
+
+            ninfer::Tensor tok_in(
+                static_cast<std::uint16_t*>(chunk_input.p) + static_cast<std::size_t>(t) * 2'560,
+                ninfer::DType::BF16, {2'560, 1});
+            ninfer::Tensor tok_out(
+                static_cast<std::uint16_t*>(seq_output.p) + static_cast<std::size_t>(t) * 2'560,
+                ninfer::DType::BF16, {2'560, 1});
+
+            flash_next_gdn_decode(tok_in, weights, tok_src_t, tok_dst_t, seq_conv_t, seq_ssm_t,
+                                  workspace, tok_out, device.stream);
+            device.synchronize();
+
+            std::swap(cur_src, cur_dst);
+        }
+
+        // 3. Compare outputs
+        std::vector<std::uint16_t> h_chunk_out(2'560ULL * T);
+        std::vector<std::uint16_t> h_seq_out(2'560ULL * T);
+        chunk_output.copy_to_host(h_chunk_out.data(), h_chunk_out.size() * sizeof(std::uint16_t));
+        seq_output.copy_to_host(h_seq_out.data(), h_seq_out.size() * sizeof(std::uint16_t));
+
+        double out_diff = 0.0, out_ref = 0.0;
+        for (std::size_t i = 0; i < h_chunk_out.size(); ++i) {
+            const float a = bf16_to_float(h_chunk_out[i]);
+            const float b = bf16_to_float(h_seq_out[i]);
+            out_diff += (a - b) * (a - b);
+            out_ref += b * b;
+        }
+        const double out_rel_l2 = std::sqrt(out_diff) / std::max(1e-6, std::sqrt(out_ref));
+        if (out_rel_l2 > 1e-2) {
+            std::cerr << "FAIL: GDN chunk T=" << T << " output rel-L2=" << out_rel_l2 << " > 1e-2\n";
+            return 1;
+        }
+
+        // 4. Compare final SSM state (slot 1 for chunk vs cur_src for sequential)
+        constexpr std::size_t ssm_slot_floats = 128ULL * 128 * 48;
+        std::vector<float> h_chunk_ssm(ssm_slot_floats * 2);
+        std::vector<float> h_seq_ssm(ssm_slot_floats * 2);
+        chunk_ssm_states.copy_to_host(h_chunk_ssm.data(), h_chunk_ssm.size() * sizeof(float));
+        seq_ssm_states.copy_to_host(h_seq_ssm.data(), h_seq_ssm.size() * sizeof(float));
+
+        double ssm_diff = 0.0, ssm_ref = 0.0;
+        for (std::size_t i = 0; i < ssm_slot_floats; ++i) {
+            const float a = h_chunk_ssm[1 * ssm_slot_floats + i];
+            const float b = h_seq_ssm[static_cast<std::size_t>(cur_src) * ssm_slot_floats + i];
+            ssm_diff += (a - b) * (a - b);
+            ssm_ref += b * b;
+        }
+        const double ssm_rel_l2 = std::sqrt(ssm_diff) / std::max(1e-6, std::sqrt(ssm_ref));
+        if (ssm_rel_l2 > 1e-2) {
+            std::cerr << "FAIL: GDN chunk T=" << T << " SSM state rel-L2=" << ssm_rel_l2 << " > 1e-2\n";
+            return 1;
+        }
+
+        // 5. Compare final Conv state
+        constexpr std::size_t conv_slot_u16 = 10'240ULL * 3;
+        std::vector<std::uint16_t> h_chunk_conv(conv_slot_u16 * 2);
+        std::vector<std::uint16_t> h_seq_conv(conv_slot_u16 * 2);
+        chunk_conv_states.copy_to_host(h_chunk_conv.data(), h_chunk_conv.size() * sizeof(std::uint16_t));
+        seq_conv_states.copy_to_host(h_seq_conv.data(), h_seq_conv.size() * sizeof(std::uint16_t));
+
+        double conv_diff = 0.0, conv_ref = 0.0;
+        for (std::size_t i = 0; i < conv_slot_u16; ++i) {
+            const float a = bf16_to_float(h_chunk_conv[1 * conv_slot_u16 + i]);
+            const float b = bf16_to_float(h_seq_conv[static_cast<std::size_t>(cur_src) * conv_slot_u16 + i]);
+            conv_diff += (a - b) * (a - b);
+            conv_ref += b * b;
+        }
+        const double conv_rel_l2 = std::sqrt(conv_diff) / std::max(1e-6, std::sqrt(conv_ref));
+        if (conv_rel_l2 > 1e-2) {
+            std::cerr << "FAIL: GDN chunk T=" << T << " Conv state rel-L2=" << conv_rel_l2 << " > 1e-2\n";
+            return 1;
+        }
+    }
+
+        std::cout << "PASS: test_gdn\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_gdn exception: " << e.what() << "\n";
+        return 1;
+    }
 }

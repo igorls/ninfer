@@ -31,7 +31,7 @@ void validate_common(const Tensor& hidden, const Tensor& block_input,
                      const FlashNextHyperWorkspace& scratch) {
     const std::int32_t tokens = hidden.ne[1];
     if (hidden.dtype != DType::BF16 || hidden.ne[0] != 10'240 || hidden.ne[2] != 1 ||
-        hidden.ne[3] != 1 || tokens < 1 || tokens > 8 || !hidden.is_contiguous() ||
+        hidden.ne[3] != 1 || tokens < 1 || !hidden.is_contiguous() ||
         !aligned_to(hidden.data, 16) || block_input.dtype != DType::BF16 ||
         block_input.ne[0] != 2'560 || block_input.ne[1] != tokens || block_input.ne[2] != 1 ||
         block_input.ne[3] != 1 || !block_input.is_contiguous() ||
@@ -51,8 +51,8 @@ void validate_common(const Tensor& hidden, const Tensor& block_input,
 
 std::size_t flash_next_hyper_workspace_capacity_bytes(std::int32_t min_tokens,
                                                       std::int32_t max_tokens) {
-    if (min_tokens <= 0 || max_tokens < min_tokens || max_tokens > 8) {
-        throw std::invalid_argument("Flash-Next hyper workspace requires T in [1,8]");
+    if (min_tokens <= 0 || max_tokens < min_tokens) {
+        throw std::invalid_argument("Flash-Next hyper workspace requires positive tokens");
     }
     WorkspaceLayoutBuilder layout;
     (void)allocate_flash_next_hyper_workspace(layout, max_tokens);
@@ -75,7 +75,7 @@ void flash_next_hyper_inject(const Tensor& block_output, const Tensor& injection
                              cudaStream_t stream) {
     const std::int32_t tokens = hidden.ne[1];
     if (hidden.dtype != DType::BF16 || hidden.ne[0] != 10'240 || hidden.ne[2] != 1 ||
-        hidden.ne[3] != 1 || tokens < 1 || tokens > 8 || !hidden.is_contiguous() ||
+        hidden.ne[3] != 1 || tokens < 1 || !hidden.is_contiguous() ||
         !aligned_to(hidden.data, 16) || block_output.dtype != DType::BF16 ||
         block_output.ne[0] != 2'560 || block_output.ne[1] != tokens ||
         !block_output.is_contiguous() || !aligned_to(block_output.data, 16) ||

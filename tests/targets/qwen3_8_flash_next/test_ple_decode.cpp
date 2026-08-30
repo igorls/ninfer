@@ -158,7 +158,7 @@ int main() {
                                  {total_dims, 9, state_slots});
     ninfer::Tensor output_tensor(output.p, ninfer::DType::BF16, {total_dims, batch});
 
-    ninfer::WorkspaceArena workspace(flash_next_ple_workspace_capacity_bytes(batch));
+    ninfer::WorkspaceArena workspace(flash_next_ple_workspace_capacity_bytes(128));
     flash_next_ple_decode(hidden_tensor, gathered_tensor, weights, src_slots_tensor,
                           dst_slots_tensor, states_tensor, workspace, output_tensor, device.stream);
     device.synchronize();
@@ -311,6 +311,133 @@ int main() {
             }
         }
         if (failures > 20) break;
+    }
+
+    if (failures != 0) {
+        std::cerr << "FAIL: " << failures << " errors in test_ple_decode token test\n";
+        return 1;
+    }
+
+    // -------------------------------------------------------------
+    // Test 2: ple_conv_inject_chunk against naive CPU stencil for T in {1, 2, 8, 9, 10, 64, 128}
+    // -------------------------------------------------------------
+    const std::vector<int> test_t_values = {1, 2, 8, 9, 10, 64, 128};
+    for (int T : test_t_values) {
+        ninfer::DeviceBuffer chunk_hidden(total_dims * T * sizeof(std::uint16_t));
+        ninfer::DeviceBuffer chunk_gathered(stream_dims * T * sizeof(std::uint16_t));
+        ninfer::DeviceBuffer chunk_states(total_dims * 9 * state_slots * sizeof(std::uint16_t));
+        ninfer::DeviceBuffer chunk_output(total_dims * T * sizeof(std::uint16_t));
+
+        std::vector<std::uint16_t> h_chunk_hidden(total_dims * T);
+        std::vector<std::uint16_t> h_chunk_gathered(stream_dims * T);
+        std::vector<std::uint16_t> h_chunk_states(total_dims * 9 * state_slots);
+
+        // Fill with pseudo-random reproducible data
+        std::uint32_t rng = 123456789U + static_cast<std::uint32_t>(T);
+        auto next_rand    = [&]() -> float {
+            rng = rng * 1664525U + 1013904223U;
+            return static_cast<float>((rng & 0xFFFFU)) / 65536.0F * 2.0F - 1.0F;
+        };
+
+        for (auto& v : h_chunk_hidden) { v = float_to_bf16(next_rand() * 0.5F); }
+        for (auto& v : h_chunk_gathered) { v = float_to_bf16(next_rand() * 0.5F); }
+        for (auto& v : h_chunk_states) { v = float_to_bf16(next_rand() * 0.5F); }
+
+        chunk_hidden.copy_from_host(h_chunk_hidden.data(), h_chunk_hidden.size() * sizeof(std::uint16_t));
+        chunk_gathered.copy_from_host(h_chunk_gathered.data(),
+                                      h_chunk_gathered.size() * sizeof(std::uint16_t));
+        chunk_states.copy_from_host(h_chunk_states.data(),
+                                    h_chunk_states.size() * sizeof(std::uint16_t));
+
+        ninfer::Tensor hidden_t(chunk_hidden.p, ninfer::DType::BF16, {total_dims, T});
+        ninfer::Tensor gathered_t(chunk_gathered.p, ninfer::DType::BF16, {stream_dims, T});
+        ninfer::Tensor states_t(chunk_states.p, ninfer::DType::BF16, {total_dims, 9, state_slots});
+        ninfer::Tensor output_t(chunk_output.p, ninfer::DType::BF16, {total_dims, T});
+
+        flash_next_ple_prefill_chunk(hidden_t, gathered_t, weights, 0, 1, states_t, workspace,
+                                     output_t, device.stream);
+        device.synchronize();
+
+        // Also run sequential token-by-token decode using duplicate initial states to verify parity
+        ninfer::DeviceBuffer seq_states(total_dims * 9 * state_slots * sizeof(std::uint16_t));
+        seq_states.copy_from_host(h_chunk_states.data(),
+                                  h_chunk_states.size() * sizeof(std::uint16_t));
+        ninfer::Tensor seq_states_t(seq_states.p, ninfer::DType::BF16,
+                                    {total_dims, 9, state_slots});
+        std::vector<std::uint16_t> seq_output_host(total_dims * T);
+
+        std::int32_t cur_src = 0;
+        std::int32_t cur_dst = 1;
+        for (int t = 0; t < T; ++t) {
+            ninfer::DeviceBuffer tok_src(sizeof(std::int32_t));
+            ninfer::DeviceBuffer tok_dst(sizeof(std::int32_t));
+            tok_src.copy_from_host(&cur_src, sizeof(std::int32_t));
+            tok_dst.copy_from_host(&cur_dst, sizeof(std::int32_t));
+            ninfer::Tensor tok_src_t(tok_src.p, ninfer::DType::I32, {1});
+            ninfer::Tensor tok_dst_t(tok_dst.p, ninfer::DType::I32, {1});
+
+            ninfer::Tensor tok_hidden(
+                static_cast<std::uint16_t*>(chunk_hidden.p) + static_cast<std::size_t>(t) * total_dims,
+                ninfer::DType::BF16, {total_dims, 1});
+            ninfer::Tensor tok_gathered(static_cast<std::uint16_t*>(chunk_gathered.p) +
+                                            static_cast<std::size_t>(t) * stream_dims,
+                                        ninfer::DType::BF16, {stream_dims, 1});
+            ninfer::Tensor tok_output(static_cast<std::uint16_t*>(output.p), ninfer::DType::BF16,
+                                      {total_dims, 1});
+
+            flash_next_ple_decode(tok_hidden, tok_gathered, weights, tok_src_t, tok_dst_t,
+                                  seq_states_t, workspace, tok_output, device.stream);
+            device.synchronize();
+
+            output.copy_to_host(seq_output_host.data() + static_cast<std::size_t>(t) * total_dims,
+                                total_dims * sizeof(std::uint16_t));
+
+            // Step slots
+            std::swap(cur_src, cur_dst);
+        }
+
+        std::vector<std::uint16_t> chunk_act_out(total_dims * T);
+        chunk_output.copy_to_host(chunk_act_out.data(), chunk_act_out.size() * sizeof(std::uint16_t));
+
+        std::vector<std::uint16_t> chunk_act_states(total_dims * 9 * state_slots);
+        chunk_states.copy_to_host(chunk_act_states.data(),
+                                  chunk_act_states.size() * sizeof(std::uint16_t));
+
+        std::vector<std::uint16_t> seq_act_states(total_dims * 9 * state_slots);
+        seq_states.copy_to_host(seq_act_states.data(),
+                                seq_act_states.size() * sizeof(std::uint16_t));
+
+        // Check output parity
+        double diff_norm = 0.0;
+        double ref_norm  = 0.0;
+        for (std::size_t i = 0; i < chunk_act_out.size(); ++i) {
+            const float act  = bf16_to_float(chunk_act_out[i]);
+            const float seq  = bf16_to_float(seq_output_host[i]);
+            const float diff = act - seq;
+            diff_norm += diff * diff;
+            ref_norm += seq * seq;
+        }
+        const double rel_l2 = std::sqrt(diff_norm) / std::max(1e-6, std::sqrt(ref_norm));
+        if (rel_l2 > 1e-3) {
+            std::cerr << "FAIL: PLE chunk T=" << T << " output rel-L2=" << rel_l2 << " > 1e-3\n";
+            failures++;
+        }
+
+        // Check final history state in destination slot (slot 1 for chunked) vs sequential final source
+        for (int tap = 0; tap < 9; ++tap) {
+            for (int c = 0; c < total_dims; ++c) {
+                const std::uint16_t act = chunk_act_states[(1 * 9 + tap) * total_dims + c];
+                const std::uint16_t seq = seq_act_states[(cur_src * 9 + tap) * total_dims + c];
+                if (act != seq) {
+                    std::cerr << "FAIL: PLE chunk T=" << T << " state mismatch at tap=" << tap
+                              << " c=" << c << ": chunk=0x" << std::hex << act << " seq=0x" << seq
+                              << std::dec << "\n";
+                    failures++;
+                    break;
+                }
+            }
+            if (failures > 10) break;
+        }
     }
 
     if (failures != 0) {

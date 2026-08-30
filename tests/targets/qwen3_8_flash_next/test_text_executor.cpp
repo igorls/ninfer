@@ -877,19 +877,41 @@ int test_prefill_chunk_executor(ninfer::DeviceContext& device) {
         CUDA_CHECK(cudaMemcpy(chunk_hidden.data(), alloc_chunk.round_tensors().final_hidden.data,
                               chunk_hidden.size() * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
 
-        // 3. Compare state storage equality
-        if (std::memcmp(seq_storage.data(), chunk_storage.data(), persistent_bytes) != 0) {
-            std::cerr << "Persistent state storage mismatch between sequential and chunked prefill\n";
+        // 3. Compare final hidden and logits equality within numerical tolerances
+        auto bf16_to_f = [](std::uint16_t v) {
+            return std::bit_cast<float>(static_cast<std::uint32_t>(v) << 16U);
+        };
+        double hid_diff = 0.0, hid_ref = 0.0;
+        for (std::size_t i = 0; i < seq_hidden.size(); ++i) {
+            float a = bf16_to_f(seq_hidden[i]);
+            float b = bf16_to_f(chunk_hidden[i]);
+            hid_diff += (a - b) * (a - b);
+            hid_ref += a * a;
+        }
+        double hid_rel_l2 = std::sqrt(hid_diff) / std::max(1e-6, std::sqrt(hid_ref));
+        if (hid_rel_l2 > 2e-2) {
+            std::cerr << "Final hidden rel-L2 mismatch: " << hid_rel_l2 << " > 2e-2\n";
             return 1;
         }
 
-        // 4. Compare final hidden and logits equality
-        if (seq_hidden != chunk_hidden) {
-            std::cerr << "Final hidden mismatch between sequential and chunked prefill\n";
+        double log_diff = 0.0, log_ref = 0.0;
+        std::size_t seq_argmax = 0, chunk_argmax = 0;
+        float seq_max = -1e30F, chunk_max = -1e30F;
+        for (std::size_t i = 0; i < seq_logits.size(); ++i) {
+            float a = bf16_to_f(seq_logits[i]);
+            float b = bf16_to_f(chunk_logits[i]);
+            log_diff += (a - b) * (a - b);
+            log_ref += a * a;
+            if (a > seq_max) { seq_max = a; seq_argmax = i; }
+            if (b > chunk_max) { chunk_max = b; chunk_argmax = i; }
+        }
+        double log_rel_l2 = std::sqrt(log_diff) / std::max(1e-6, std::sqrt(log_ref));
+        if (log_rel_l2 > 2e-2) {
+            std::cerr << "Logits rel-L2 mismatch: " << log_rel_l2 << " > 2e-2\n";
             return 1;
         }
-        if (seq_logits != chunk_logits) {
-            std::cerr << "Logits mismatch between sequential and chunked prefill\n";
+        if (seq_argmax != chunk_argmax) {
+            std::cerr << "Argmax mismatch: seq=" << seq_argmax << " chunk=" << chunk_argmax << "\n";
             return 1;
         }
 

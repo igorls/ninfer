@@ -172,6 +172,65 @@ __global__ void ple_conv_inject_kernel(
     convolution_states[dst_base + 8 * kTotalDims] = cur_norm_bf16;
 }
 
+__global__ void ple_conv_inject_chunk_kernel(
+    const __nv_bfloat16* __restrict__ gated, const __nv_bfloat16* __restrict__ normalized_gated,
+    const __nv_bfloat16* __restrict__ convolution, std::int32_t source_slot,
+    std::int32_t destination_slot, __nv_bfloat16* __restrict__ convolution_states,
+    __nv_bfloat16* __restrict__ output, int state_slots, int tokens) {
+    const int channel = blockIdx.x * blockDim.x + threadIdx.x;
+    if (channel >= kTotalDims) { return; }
+
+    if (source_slot < 0 || source_slot >= state_slots || destination_slot < 0 ||
+        destination_slot >= state_slots) {
+        return;
+    }
+
+    const int64_t src_base = (static_cast<int64_t>(source_slot) * 9) * kTotalDims + channel;
+    const int64_t dst_base = (static_cast<int64_t>(destination_slot) * 9) * kTotalDims + channel;
+
+    const float w0 = __bfloat162float(convolution[0 * kTotalDims + channel]);
+    const float w1 = __bfloat162float(convolution[1 * kTotalDims + channel]);
+    const float w2 = __bfloat162float(convolution[2 * kTotalDims + channel]);
+    const float w3 = __bfloat162float(convolution[3 * kTotalDims + channel]);
+
+    // Compute convolution output for each token t in [0, tokens)
+    for (int t = 0; t < tokens; ++t) {
+        const int tau0 = t - 9;
+        const int tau1 = t - 6;
+        const int tau2 = t - 3;
+
+        const float h0 = (tau0 < 0)
+                             ? __bfloat162float(convolution_states[src_base + (9 + tau0) * kTotalDims])
+                             : __bfloat162float(normalized_gated[static_cast<int64_t>(tau0) * kTotalDims + channel]);
+        const float h1 = (tau1 < 0)
+                             ? __bfloat162float(convolution_states[src_base + (9 + tau1) * kTotalDims])
+                             : __bfloat162float(normalized_gated[static_cast<int64_t>(tau1) * kTotalDims + channel]);
+        const float h2 = (tau2 < 0)
+                             ? __bfloat162float(convolution_states[src_base + (9 + tau2) * kTotalDims])
+                             : __bfloat162float(normalized_gated[static_cast<int64_t>(tau2) * kTotalDims + channel]);
+        const float h3 = __bfloat162float(normalized_gated[static_cast<int64_t>(t) * kTotalDims + channel]);
+
+        float conv = fmaf(h0, w0, 0.0F);
+        conv       = fmaf(h1, w1, conv);
+        conv       = fmaf(h2, w2, conv);
+        conv       = fmaf(h3, w3, conv);
+
+        const float silu_conv = conv / (1.0F + expf(-conv));
+        const float g_val     = __bfloat162float(gated[static_cast<int64_t>(t) * kTotalDims + channel]);
+        output[static_cast<int64_t>(t) * kTotalDims + channel] = __float2bfloat16_rn(g_val + silu_conv);
+    }
+
+    // Write destination history: last 9 columns of concat(history, normalized_gated)
+#pragma unroll
+    for (int i = 0; i < 9; ++i) {
+        const int tau = tokens - 9 + i;
+        const auto val = (tau < 0)
+                             ? convolution_states[src_base + (9 + tau) * kTotalDims]
+                             : normalized_gated[static_cast<int64_t>(tau) * kTotalDims + channel];
+        convolution_states[dst_base + i * kTotalDims] = val;
+    }
+}
+
 } // namespace
 
 void flash_next_ple_launch(const Tensor& hidden, const Tensor& projected_key,
@@ -201,6 +260,34 @@ void flash_next_ple_launch(const Tensor& hidden, const Tensor& projected_key,
         static_cast<const int32_t*>(destination_slots.data),
         static_cast<__nv_bfloat16*>(convolution_states.data),
         static_cast<__nv_bfloat16*>(output.data), state_slots, batch);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void flash_next_ple_chunk_launch(const Tensor& hidden, const Tensor& projected_key,
+                                 const Tensor& projected_value, const Tensor& query_norm,
+                                 const Tensor& key_norm, const Tensor& conv_norm,
+                                 const Tensor& convolution, std::int32_t source_slot,
+                                 std::int32_t destination_slot, Tensor& convolution_states,
+                                 Tensor& gated, Tensor& normalized_gated, Tensor& output,
+                                 int state_slots, int tokens, cudaStream_t stream) {
+    dim3 grid_gate(kStreams, tokens);
+    ple_gate_norm_kernel<<<grid_gate, 256, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(hidden.data),
+        static_cast<const __nv_bfloat16*>(projected_key.data),
+        static_cast<const __nv_bfloat16*>(projected_value.data),
+        static_cast<const __nv_bfloat16*>(query_norm.data),
+        static_cast<const __nv_bfloat16*>(key_norm.data),
+        static_cast<const __nv_bfloat16*>(conv_norm.data), static_cast<__nv_bfloat16*>(gated.data),
+        static_cast<__nv_bfloat16*>(normalized_gated.data), tokens);
+    CUDA_CHECK(cudaGetLastError());
+
+    dim3 grid_conv((kTotalDims + 255) / 256);
+    ple_conv_inject_chunk_kernel<<<grid_conv, 256, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(gated.data),
+        static_cast<const __nv_bfloat16*>(normalized_gated.data),
+        static_cast<const __nv_bfloat16*>(convolution.data), source_slot, destination_slot,
+        static_cast<__nv_bfloat16*>(convolution_states.data),
+        static_cast<__nv_bfloat16*>(output.data), state_slots, tokens);
     CUDA_CHECK(cudaGetLastError());
 }
 

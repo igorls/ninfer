@@ -133,11 +133,11 @@ int main() {
 
     std::array<std::uint16_t, 2'560> actual{};
     output.copy_to_host(actual.data(), sizeof(actual));
-    // Each selected expert produces 4096, and the full 512-way softmax gives each one weight
-    // 1/512. Ten selected experts therefore produce exactly 80.0; the zero shared expert adds 0.
+    // Each selected expert produces 4096, and top-10 softmax renormalization gives each one weight
+    // 1/10. Ten selected experts therefore produce exactly 4096.0 (0x4580 in BF16); the zero shared expert adds 0.
     if (!std::all_of(actual.begin(), actual.end(),
-                     [](std::uint16_t value) { return value == 0x42A0U; })) {
-        std::cerr << "Flash-Next encoded NVFP4 MoE did not produce exact BF16 80.0: first=0x"
+                     [](std::uint16_t value) { return value == 0x4580U; })) {
+        std::cerr << "Flash-Next encoded NVFP4 MoE did not produce exact BF16 4096.0: first=0x"
                   << std::hex << actual.front() << '\n';
         return 1;
     }

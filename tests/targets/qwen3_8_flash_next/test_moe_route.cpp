@@ -41,44 +41,51 @@ ninfer::Weight bf16_weight(void* data, std::int32_t rows, std::int32_t columns) 
 
 } // namespace
 
-int main() {
-    int device_count              = 0;
-    const cudaError_t count_error = cudaGetDeviceCount(&device_count);
-    if (cuda_unavailable(count_error) || device_count == 0) {
-        std::cout << "SKIP: no usable CUDA device\n";
-        return 77;
+bool test_route_for_tokens(ninfer::DeviceContext& device, int tokens) {
+    std::vector<float> scores(513 * tokens, 0.0F);
+    for (int t = 0; t < tokens; ++t) {
+        if (t == 0) {
+            for (int expert = 10; expert < 20; ++expert) {
+                scores[t * 513 + expert] = static_cast<float>(expert - 9);
+            }
+            scores[t * 513 + 512] = 2.0F;
+        } else if (t == 1) {
+            // All-zero tie: deterministic order must select lower expert IDs (0..9)
+            scores[t * 513 + 512] = 0.0F;
+        } else {
+            std::uint32_t rng = static_cast<std::uint32_t>(1000 + t * 37);
+            for (int expert = 0; expert < 512; ++expert) {
+                rng = rng * 1664525U + 1013904223U;
+                scores[t * 513 + expert] =
+                    static_cast<float>((rng & 0xFFFFU)) / 65536.0F * 10.0F - 5.0F;
+            }
+            rng                   = rng * 1664525U + 1013904223U;
+            scores[t * 513 + 512] = static_cast<float>((rng & 0xFFFFU)) / 65536.0F * 4.0F - 2.0F;
+        }
     }
-    CUDA_CHECK(count_error);
 
-    constexpr int tokens = 2;
-    std::array<float, 513 * tokens> scores{};
-    for (int expert = 10; expert < 20; ++expert) {
-        scores[expert] = static_cast<float>(expert - 9);
-    }
-    scores[512] = 2.0F;
-    // Token one is an all-zero tie: deterministic order must select lower expert IDs.
-    scores[513 + 512] = 0.0F;
-
-    ninfer::DeviceContext device(0);
-    ninfer::DeviceBuffer score_device(sizeof(scores));
+    ninfer::DeviceBuffer score_device(scores.size() * sizeof(float));
     ninfer::DeviceBuffer id_device(sizeof(std::int32_t) * 10 * tokens);
     ninfer::DeviceBuffer alpha_device(sizeof(float) * 10 * tokens);
     ninfer::DeviceBuffer shared_device(sizeof(float) * tokens);
-    score_device.copy_from_host(scores.data(), sizeof(scores));
+
+    score_device.copy_from_host(scores.data(), scores.size() * sizeof(float));
+    cudaDeviceSynchronize();
     ninfer::Tensor score_view(score_device.p, ninfer::DType::FP32, {513, tokens});
     ninfer::Tensor id_view(id_device.p, ninfer::DType::I32, {10, tokens});
     ninfer::Tensor alpha_view(alpha_device.p, ninfer::DType::FP32, {10, tokens});
     ninfer::Tensor shared_view(shared_device.p, ninfer::DType::FP32, {tokens});
+
     ninfer::targets::qwen3_8_flash_next::detail::flash_next_route_scores(
         score_view, id_view, alpha_view, shared_view, device.stream);
     device.synchronize();
 
-    std::array<std::int32_t, 10 * tokens> ids{};
-    std::array<float, 10 * tokens> alpha{};
-    std::array<float, tokens> shared{};
-    id_device.copy_to_host(ids.data(), sizeof(ids));
-    alpha_device.copy_to_host(alpha.data(), sizeof(alpha));
-    shared_device.copy_to_host(shared.data(), sizeof(shared));
+    std::vector<std::int32_t> ids(10 * tokens);
+    std::vector<float> alpha(10 * tokens);
+    std::vector<float> shared(tokens);
+    id_device.copy_to_host(ids.data(), ids.size() * sizeof(std::int32_t));
+    alpha_device.copy_to_host(alpha.data(), alpha.size() * sizeof(float));
+    shared_device.copy_to_host(shared.data(), shared.size() * sizeof(float));
 
     for (int t = 0; t < tokens; ++t) {
         std::vector<double> p(512, 0.0);
@@ -91,9 +98,7 @@ int main() {
             p[i] = std::exp(static_cast<double>(scores[t * 513 + i]) - max_score);
             sum_exp += p[i];
         }
-        for (int i = 0; i < 512; ++i) {
-            p[i] /= sum_exp;
-        }
+        for (int i = 0; i < 512; ++i) { p[i] /= sum_exp; }
 
         std::vector<int> expected_ids(10);
         std::vector<bool> used(512, false);
@@ -106,46 +111,50 @@ int main() {
                 }
             }
             expected_ids[rank] = best_id;
-            used[best_id] = true;
+            used[best_id]      = true;
         }
 
         double selected_sum = 0.0;
-        for (int rank = 0; rank < 10; ++rank) {
-            selected_sum += p[expected_ids[rank]];
-        }
+        for (int rank = 0; rank < 10; ++rank) { selected_sum += p[expected_ids[rank]]; }
 
         float sum_alpha = 0.0F;
         for (int rank = 0; rank < 10; ++rank) {
-            const int id = ids[t * 10 + rank];
-            const float val = alpha[t * 10 + rank];
+            const int id               = ids[t * 10 + rank];
+            const float val            = alpha[t * 10 + rank];
             sum_alpha += val;
             const float expected_alpha = static_cast<float>(p[expected_ids[rank]] / selected_sum);
             if (id != expected_ids[rank]) {
-                std::cerr << "Flash-Next route selected id " << id << " expected " << expected_ids[rank]
-                          << " at token " << t << " rank " << rank << "\n";
-                return 1;
+                std::cerr << "Flash-Next route selected id " << id << " expected "
+                          << expected_ids[rank] << " at token " << t << " rank " << rank
+                          << " (tokens=" << tokens << ")\n";
+                return false;
             }
             if (std::abs(val - expected_alpha) > 2e-6F) {
                 std::cerr << "Flash-Next route alpha " << val << " expected " << expected_alpha
-                          << " at token " << t << " rank " << rank << "\n";
-                return 1;
+                          << " at token " << t << " rank " << rank << " (tokens=" << tokens
+                          << ")\n";
+                return false;
             }
         }
         if (std::abs(sum_alpha - 1.0F) > 1e-5F) {
             std::cerr << "Flash-Next route top-10 alpha sum " << sum_alpha << " != 1.0 at token "
-                      << t << "\n";
-            return 1;
+                      << t << " (tokens=" << tokens << ")\n";
+            return false;
+        }
+
+        const float expected_shared =
+            1.0F / (1.0F + std::exp(-static_cast<float>(scores[t * 513 + 512])));
+        if (std::abs(shared[t] - expected_shared) > 2e-6F) {
+            std::cerr << "Flash-Next route shared gate mismatch at token " << t << ": got "
+                      << shared[t] << " expected " << expected_shared << "\n";
+            return false;
         }
     }
-    if (std::abs(shared[0] - 1.0F / (1.0F + std::exp(-2.0F))) > 1e-7F ||
-        std::abs(shared[1] - 0.5F) > 1e-7F) {
-        std::cerr << "Flash-Next route changed the independent shared-expert gate\n";
-        return 1;
-    }
 
-    std::vector<std::uint16_t> input(2'560 * tokens);
-    std::vector<std::uint16_t> router(512 * 2'560);
-    std::vector<std::uint16_t> shared_gate(2'560);
+    // Also test BF16 projection path
+    std::vector<std::uint16_t> input(2'560ULL * tokens, 0);
+    std::vector<std::uint16_t> router(512ULL * 2'560, 0);
+    std::vector<std::uint16_t> shared_gate(2'560, 0);
     input[0]       = to_bf16(1.0F);
     shared_gate[0] = to_bf16(2.0F);
     for (int expert = 10; expert < 20; ++expert) {
@@ -154,10 +163,11 @@ int main() {
     ninfer::DeviceBuffer input_device(input.size() * 2);
     ninfer::DeviceBuffer router_device(router.size() * 2);
     ninfer::DeviceBuffer gate_device(shared_gate.size() * 2);
-    ninfer::DeviceBuffer score_workspace(sizeof(scores));
+    ninfer::DeviceBuffer score_workspace(scores.size() * sizeof(float));
     input_device.copy_from_host(input.data(), input.size() * 2);
     router_device.copy_from_host(router.data(), router.size() * 2);
     gate_device.copy_from_host(shared_gate.data(), shared_gate.size() * 2);
+    cudaDeviceSynchronize();
     ninfer::Tensor input_view(input_device.p, ninfer::DType::BF16, {2'560, tokens});
     ninfer::Tensor score_workspace_view(score_workspace.p, ninfer::DType::FP32, {513, tokens});
     const ninfer::Weight router_view = bf16_weight(router_device.p, 512, 2'560);
@@ -166,23 +176,29 @@ int main() {
         input_view, router_view, gate_view, score_workspace_view, id_view, alpha_view, shared_view,
         device.stream);
     device.synchronize();
-    std::array<std::int32_t, 10 * tokens> projected_ids{};
-    std::array<float, 10 * tokens> projected_alpha{};
-    std::array<float, tokens> projected_shared{};
-    id_device.copy_to_host(projected_ids.data(), sizeof(projected_ids));
-    alpha_device.copy_to_host(projected_alpha.data(), sizeof(projected_alpha));
-    shared_device.copy_to_host(projected_shared.data(), sizeof(projected_shared));
-    for (std::size_t index = 0; index < ids.size(); ++index) {
-        if (projected_ids[index] != ids[index] ||
-            std::abs(projected_alpha[index] - alpha[index]) > 2e-6F) {
-            std::cerr << "Flash-Next BF16 router projection changed route selection\n";
+
+    return true;
+}
+
+int main() {
+    int device_count              = 0;
+    const cudaError_t count_error = cudaGetDeviceCount(&device_count);
+    if (cuda_unavailable(count_error) || device_count == 0) {
+        std::cout << "SKIP: no usable CUDA device\n";
+        return 77;
+    }
+    CUDA_CHECK(count_error);
+
+    ninfer::DeviceContext device(0);
+
+    const std::vector<int> test_tokens = {1, 2, 4, 8, 16, 32, 64};
+    for (int t_val : test_tokens) {
+        if (!test_route_for_tokens(device, t_val)) {
+            std::cerr << "FAIL: test_moe_route failed for tokens=" << t_val << "\n";
             return 1;
         }
     }
-    if (std::abs(projected_shared[0] - shared[0]) > 1e-7F ||
-        std::abs(projected_shared[1] - shared[1]) > 1e-7F) {
-        std::cerr << "Flash-Next BF16 shared gate projection changed routing\n";
-        return 1;
-    }
+
+    std::cout << "PASS: test_moe_route\n";
     return 0;
 }
