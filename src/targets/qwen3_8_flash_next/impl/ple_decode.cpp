@@ -35,12 +35,12 @@ bool exact_bf16_weight(const Weight& weight, std::int32_t rows, std::int32_t col
 
 } // namespace
 
-std::size_t flash_next_ple_workspace_capacity_bytes(std::int32_t batch) {
-    if (batch <= 0 || batch > 8) {
-        throw std::invalid_argument("Flash-Next PLE requires B in [1,8]");
+std::size_t flash_next_ple_workspace_capacity_bytes(std::int32_t tokens) {
+    if (tokens <= 0 || tokens > 512) {
+        throw std::invalid_argument("Flash-Next PLE requires tokens in [1,512]");
     }
     WorkspaceLayoutBuilder layout;
-    (void)allocate_flash_next_ple_workspace(layout, batch);
+    (void)allocate_flash_next_ple_workspace(layout, tokens);
     return layout.peak_bytes(256);
 }
 

@@ -146,7 +146,7 @@ flash_next_capacity_curve(const FlashNextRuntimeConfig& config) {
                                  recurrent_state_bytes, round_tensors_bytes, workspace_bytes);
 
     const std::size_t graph_allowance =
-        config.use_cuda_graph ? checked_mul<std::size_t>(12ULL * 1024ULL * 1024ULL, config.max_concurrency)
+        config.use_cuda_graph ? checked_mul<std::size_t>(24ULL * 1024ULL * 1024ULL, config.max_concurrency)
                               : 0ULL;
 
     ninfer::runtime::SequenceCapacityCurve curve{};
@@ -202,7 +202,7 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
         plan.round_tensors_bytes, plan.workspace_bytes);
 
     const std::size_t graph_allowance =
-        config.use_cuda_graph ? checked_mul<std::size_t>(12ULL * 1024ULL * 1024ULL, config.max_concurrency)
+        config.use_cuda_graph ? checked_mul<std::size_t>(24ULL * 1024ULL * 1024ULL, config.max_concurrency)
                               : 0ULL;
     plan.cuda_graph_allowance_bytes = graph_allowance;
 

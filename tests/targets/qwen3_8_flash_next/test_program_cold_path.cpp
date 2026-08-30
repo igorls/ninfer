@@ -327,8 +327,8 @@ int test_plan_request_validations(ninfer::DeviceContext& device) {
     };
     const auto curve_on = flash_next_capacity_curve(cfg_graph_on);
     auto plan_on        = finalize_flash_next_runtime_plan(cfg_graph_on, curve_on.minimum_main_page_groups);
-    if (plan_on.cuda_graph_allowance_bytes != 4ULL * 12ULL * 1024ULL * 1024ULL) {
-        std::cerr << "Expected 48 MiB cuda_graph_allowance_bytes, got "
+    if (plan_on.cuda_graph_allowance_bytes != 4ULL * 24ULL * 1024ULL * 1024ULL) {
+        std::cerr << "Expected 96 MiB cuda_graph_allowance_bytes, got "
                   << plan_on.cuda_graph_allowance_bytes << "\n";
         failures += 1;
     }

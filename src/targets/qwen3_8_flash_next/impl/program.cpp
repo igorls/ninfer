@@ -869,6 +869,7 @@ MemorySummary Program::memory_summary() const noexcept {
                            impl_->plan_.total_device_bytes - impl_->plan_.workspace_bytes,
                            impl_->plan_.total_device_bytes - impl_->plan_.workspace_bytes};
     out.workspace = ArenaMemorySummary{impl_->plan_.workspace_bytes, 0, 0};
+    out.cuda_graph_allowance_bytes = impl_->plan_.cuda_graph_allowance_bytes;
     return out;
 }
 

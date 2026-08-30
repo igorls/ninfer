@@ -368,13 +368,14 @@ int main() {
 
         std::int32_t cur_src = 0;
         std::int32_t cur_dst = 1;
+        ninfer::DeviceBuffer tok_src(sizeof(std::int32_t));
+        ninfer::DeviceBuffer tok_dst(sizeof(std::int32_t));
+        ninfer::Tensor tok_src_t(tok_src.p, ninfer::DType::I32, {1});
+        ninfer::Tensor tok_dst_t(tok_dst.p, ninfer::DType::I32, {1});
+
         for (int t = 0; t < T; ++t) {
-            ninfer::DeviceBuffer tok_src(sizeof(std::int32_t));
-            ninfer::DeviceBuffer tok_dst(sizeof(std::int32_t));
             tok_src.copy_from_host(&cur_src, sizeof(std::int32_t));
             tok_dst.copy_from_host(&cur_dst, sizeof(std::int32_t));
-            ninfer::Tensor tok_src_t(tok_src.p, ninfer::DType::I32, {1});
-            ninfer::Tensor tok_dst_t(tok_dst.p, ninfer::DType::I32, {1});
 
             ninfer::Tensor tok_hidden(
                 static_cast<std::uint16_t*>(chunk_hidden.p) + static_cast<std::size_t>(t) * total_dims,
@@ -391,6 +392,7 @@ int main() {
 
             output.copy_to_host(seq_output_host.data() + static_cast<std::size_t>(t) * total_dims,
                                 total_dims * sizeof(std::uint16_t));
+            device.synchronize();
 
             // Step slots
             std::swap(cur_src, cur_dst);

@@ -22,10 +22,316 @@
 #include <string>
 #include <vector>
 
+#include <random>
+
 namespace {
 
 bool cuda_unavailable(cudaError_t error) {
     return error == cudaErrorNoDevice || error == cudaErrorInsufficientDriver;
+}
+
+float bf16_to_float(std::uint16_t value) {
+    return std::bit_cast<float>(static_cast<std::uint32_t>(value) << 16U);
+}
+
+std::uint16_t float_to_bf16(float value) {
+    const std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
+    const std::uint32_t lsb  = (bits >> 16U) & 1U;
+    const std::uint32_t bias = 0x7FFFU + lsb;
+    return static_cast<std::uint16_t>((bits + bias) >> 16U);
+}
+
+struct SyntheticFlashNextModel {
+    ninfer::DeviceBuffer big_bf16_buf;
+    ninfer::DeviceBuffer norm_bf16_buf;
+    ninfer::DeviceBuffer gdn_a_log_buf;
+    ninfer::DeviceBuffer gdn_dt_bias_buf;
+    ninfer::DeviceBuffer gdn_conv_buf;
+    ninfer::DeviceBuffer ple_conv_buf;
+    ninfer::DeviceBuffer shared_gate_weight_buf;
+    ninfer::DeviceBuffer inject_buf;
+
+    ninfer::DeviceBuffer fp8_qkvz_buf;
+    ninfer::DeviceBuffer fp8_qgkv_buf;
+    ninfer::DeviceBuffer fp8_out_buf;
+
+    ninfer::DeviceBuffer big_nvfp4_gate_codes_buf;
+    ninfer::DeviceBuffer big_nvfp4_gate_scales_buf;
+    ninfer::DeviceBuffer big_nvfp4_down_codes_buf;
+    ninfer::DeviceBuffer big_nvfp4_down_scales_buf;
+    ninfer::DeviceBuffer big_divisors_buf;
+
+    std::vector<std::byte> ple_table_data;
+    ninfer::targets::qwen3_8_flash_next::detail::TextModelView view;
+};
+
+SyntheticFlashNextModel make_synthetic_model(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    SyntheticFlashNextModel model;
+    std::mt19937 rng(42);
+    std::uniform_real_distribution<float> dist_bf16(-0.02f, 0.02f);
+    std::uniform_real_distribution<float> dist_norm(0.98f, 1.02f);
+
+    // 1. Generic BF16 weights (token_embedding, output_head, linear projections)
+    constexpr std::uint64_t kOutputHeadBytes = 248'320ULL * 2'560 * 2;
+    model.big_bf16_buf = ninfer::DeviceBuffer(kOutputHeadBytes);
+    constexpr std::size_t kChunkFloats = 2'560 * 1024;
+    std::vector<std::uint16_t> h_bf16(kChunkFloats);
+    for (auto& v : h_bf16) { v = float_to_bf16(dist_bf16(rng)); }
+    for (std::size_t off = 0; off < kOutputHeadBytes; off += h_bf16.size() * sizeof(std::uint16_t)) {
+        std::size_t chunk = std::min<std::size_t>(h_bf16.size() * sizeof(std::uint16_t), kOutputHeadBytes - off);
+        model.big_bf16_buf.copy_from_host(h_bf16.data(), chunk, off);
+    }
+
+    // 2. RMSNorm weights (~1.0)
+    std::vector<std::uint16_t> h_norm(10'240);
+    for (auto& v : h_norm) { v = float_to_bf16(dist_norm(rng)); }
+    model.norm_bf16_buf = ninfer::DeviceBuffer(10'240 * sizeof(std::uint16_t));
+    model.norm_bf16_buf.copy_from_host(h_norm.data(), h_norm.size() * sizeof(std::uint16_t));
+
+    // 3. GDN structural parameters
+    std::vector<std::uint16_t> h_a_log(48);
+    for (auto& v : h_a_log) { v = float_to_bf16(-1.0f); }
+    model.gdn_a_log_buf = ninfer::DeviceBuffer(48 * sizeof(std::uint16_t));
+    model.gdn_a_log_buf.copy_from_host(h_a_log.data(), h_a_log.size() * sizeof(std::uint16_t));
+
+    std::vector<std::uint16_t> h_dt_bias(48);
+    for (auto& v : h_dt_bias) { v = float_to_bf16(0.05f); }
+    model.gdn_dt_bias_buf = ninfer::DeviceBuffer(48 * sizeof(std::uint16_t));
+    model.gdn_dt_bias_buf.copy_from_host(h_dt_bias.data(), h_dt_bias.size() * sizeof(std::uint16_t));
+
+    std::vector<std::uint16_t> h_gdn_conv(10'240 * 4);
+    for (auto& v : h_gdn_conv) { v = float_to_bf16(0.25f); }
+    model.gdn_conv_buf = ninfer::DeviceBuffer(10'240 * 4 * sizeof(std::uint16_t));
+    model.gdn_conv_buf.copy_from_host(h_gdn_conv.data(), h_gdn_conv.size() * sizeof(std::uint16_t));
+
+    // 4. PLE convolution weights
+    std::vector<std::uint16_t> h_ple_conv(10'240 * 4);
+    for (int c = 0; c < 10'240; ++c) {
+        h_ple_conv[0 * 10'240 + c] = float_to_bf16(0.25f);
+        h_ple_conv[1 * 10'240 + c] = float_to_bf16(0.50f);
+        h_ple_conv[2 * 10'240 + c] = float_to_bf16(0.75f);
+        h_ple_conv[3 * 10'240 + c] = float_to_bf16(1.00f);
+    }
+    model.ple_conv_buf = ninfer::DeviceBuffer(10'240 * 4 * sizeof(std::uint16_t));
+    model.ple_conv_buf.copy_from_host(h_ple_conv.data(), h_ple_conv.size() * sizeof(std::uint16_t));
+
+    // 5. Shared gate weight and hyper injection
+    std::vector<std::uint16_t> h_sgw(2'560);
+    for (auto& v : h_sgw) { v = float_to_bf16(0.1f); }
+    model.shared_gate_weight_buf = ninfer::DeviceBuffer(2'560 * sizeof(std::uint16_t));
+    model.shared_gate_weight_buf.copy_from_host(h_sgw.data(), h_sgw.size() * sizeof(std::uint16_t));
+
+    std::vector<std::uint16_t> h_inject(4 * 10'240);
+    for (auto& v : h_inject) { v = float_to_bf16(0.25f); }
+    model.inject_buf = ninfer::DeviceBuffer(4 * 10'240 * sizeof(std::uint16_t));
+    model.inject_buf.copy_from_host(h_inject.data(), h_inject.size() * sizeof(std::uint16_t));
+
+    // 6. FP8 weights with dedicated code areas and FP32 row scales
+    auto init_fp8_buf = [&](ninfer::DeviceBuffer& buf, std::int32_t rows, std::int32_t cols, float scale_val) {
+        const std::uint64_t codes_bytes = static_cast<std::uint64_t>(rows) * cols;
+        const std::uint64_t scale_off   = (codes_bytes + 255U) & ~255ULL;
+        const std::uint64_t total_bytes = scale_off + static_cast<std::uint64_t>(rows) * sizeof(float);
+        buf = ninfer::DeviceBuffer(total_bytes);
+
+        std::vector<std::uint8_t> h_codes(codes_bytes);
+        for (std::size_t i = 0; i < codes_bytes; ++i) {
+            h_codes[i] = static_cast<std::uint8_t>(0x18 + (rng() % 32));
+        }
+        buf.copy_from_host(h_codes.data(), codes_bytes, 0);
+
+        std::vector<float> h_scales(rows, scale_val);
+        buf.copy_from_host(h_scales.data(), rows * sizeof(float), scale_off);
+    };
+
+    init_fp8_buf(model.fp8_qkvz_buf, 16'384, 2'560, 1.0f / std::sqrt(2'560.0f));
+    init_fp8_buf(model.fp8_qgkv_buf, 13'312, 2'560, 1.0f / std::sqrt(2'560.0f));
+    init_fp8_buf(model.fp8_out_buf, 2'560, 6'144, 1.0f / std::sqrt(6'144.0f));
+
+    // 7. NVFP4 Expert Banks
+    constexpr std::uint64_t gate_code_bytes_per_expert  = 1'280ULL * 2'560 / 2;
+    constexpr std::uint64_t gate_scale_bytes_per_expert = 1'280ULL * 2'560 / 16;
+    constexpr std::uint64_t down_code_bytes_per_expert  = 2'560ULL * 640 / 2;
+    constexpr std::uint64_t down_scale_bytes_per_expert = 2'560ULL * 640 / 16;
+
+    model.big_nvfp4_gate_codes_buf  = ninfer::DeviceBuffer(512 * gate_code_bytes_per_expert);
+    model.big_nvfp4_gate_scales_buf = ninfer::DeviceBuffer(512 * gate_scale_bytes_per_expert);
+    model.big_nvfp4_down_codes_buf  = ninfer::DeviceBuffer(512 * down_code_bytes_per_expert);
+    model.big_nvfp4_down_scales_buf = ninfer::DeviceBuffer(512 * down_scale_bytes_per_expert);
+    model.big_divisors_buf          = ninfer::DeviceBuffer(512 * sizeof(float));
+
+    std::vector<std::uint8_t> h_fp4(1024 * 1024);
+    for (auto& b : h_fp4) {
+        const auto low  = static_cast<std::uint8_t>(1 + (rng() % 3));
+        const auto high = static_cast<std::uint8_t>(1 + (rng() % 3));
+        b = static_cast<std::uint8_t>((high << 4) | low);
+    }
+    for (std::size_t off = 0; off < model.big_nvfp4_gate_codes_buf.bytes; off += h_fp4.size()) {
+        std::size_t chunk = std::min<std::size_t>(h_fp4.size(), model.big_nvfp4_gate_codes_buf.bytes - off);
+        model.big_nvfp4_gate_codes_buf.copy_from_host(h_fp4.data(), chunk, off);
+    }
+    model.big_nvfp4_gate_scales_buf.fill(0x38);
+    for (std::size_t off = 0; off < model.big_nvfp4_down_codes_buf.bytes; off += h_fp4.size()) {
+        std::size_t chunk = std::min<std::size_t>(h_fp4.size(), model.big_nvfp4_down_codes_buf.bytes - off);
+        model.big_nvfp4_down_codes_buf.copy_from_host(h_fp4.data(), chunk, off);
+    }
+    model.big_nvfp4_down_scales_buf.fill(0x38);
+
+    std::vector<float> divisors(512, 1.0f);
+    model.big_divisors_buf.copy_from_host(divisors.data(), divisors.size() * sizeof(float));
+
+    // 8. PLE table
+    constexpr std::uint64_t rows         = 1;
+    constexpr std::uint64_t width        = 160;
+    constexpr std::uint64_t scale_offset = 256;
+    model.ple_table_data = std::vector<std::byte>(scale_offset + (width / 16) * 2, std::byte{0});
+    for (std::size_t i = 0; i < width / 2; ++i) {
+        model.ple_table_data[i] = static_cast<std::byte>(0x22 + (rng() % 16));
+    }
+    for (std::uint8_t index = 0; index < 8; ++index) {
+        model.ple_table_data[index] = static_cast<std::byte>(index * 2 | ((index * 2 + 1) << 4));
+    }
+    constexpr std::uint16_t half_point_five = 0x3800;
+    for (std::size_t offset = scale_offset; offset < model.ple_table_data.size(); offset += 2) {
+        std::memcpy(model.ple_table_data.data() + offset, &half_point_five, sizeof(half_point_five));
+    }
+    for (PleShardView& shard : model.view.ple.table.shards) {
+        shard = make_ple_shard_view(model.ple_table_data, rows, width);
+    }
+
+    auto make_bf16_weight_from = [](ninfer::DeviceBuffer& buf, std::int32_t rows, std::int32_t cols) {
+        ninfer::Weight w{};
+        w.payload         = buf.p;
+        w.payload_bytes   = static_cast<std::uint64_t>(rows) * cols * 2;
+        w.qdata           = buf.p;
+        w.qtype           = ninfer::QType::BF16_CTRL;
+        w.layout          = ninfer::QuantLayout::Contiguous;
+        w.n               = rows;
+        w.k               = cols;
+        w.ndim            = 2;
+        w.shape[0]        = rows;
+        w.shape[1]        = cols;
+        w.padded_shape[0] = rows;
+        w.padded_shape[1] = cols;
+        return w;
+    };
+
+    auto make_bf16_weight = [&](std::int32_t rows, std::int32_t cols) {
+        return make_bf16_weight_from(model.big_bf16_buf, rows, cols);
+    };
+
+    auto make_fp8_weight = [](ninfer::DeviceBuffer& buf, std::int32_t rows, std::int32_t cols) {
+        const std::uint64_t codes = static_cast<std::uint64_t>(rows) * cols;
+        const std::uint64_t scale_off = (codes + 255U) & ~255ULL;
+        ninfer::Weight w{};
+        w.payload           = buf.p;
+        w.payload_bytes     = buf.bytes;
+        w.qdata             = buf.p;
+        w.scales            = static_cast<const std::byte*>(buf.p) + scale_off;
+        w.qtype             = ninfer::QType::FP8_E4M3FN_ROW_F32S;
+        w.layout            = ninfer::QuantLayout::RowScale;
+        w.scale_dtype       = ninfer::DType::FP32;
+        w.group_size        = cols;
+        w.group             = cols;
+        w.n                 = rows;
+        w.k                 = cols;
+        w.ndim              = 2;
+        w.shape[0]          = rows;
+        w.shape[1]          = cols;
+        w.shape[2]          = 1;
+        w.shape[3]          = 1;
+        w.padded_shape[0]   = rows;
+        w.padded_shape[1]   = cols;
+        w.padded_shape[2]   = 1;
+        w.padded_shape[3]   = 1;
+        w.scale_ne[0]       = rows;
+        w.scale_ne[1]       = 1;
+        w.scale_ne[2]       = 1;
+        w.scale_ne[3]       = 1;
+        w.scale_nb[0]       = 4;
+        w.scale_nb[1]       = static_cast<std::int64_t>(rows) * 4;
+        w.scale_nb[2]       = static_cast<std::int64_t>(rows) * 4;
+        w.scale_nb[3]       = static_cast<std::int64_t>(rows) * 4;
+        return w;
+    };
+
+    model.view.token_embedding = make_bf16_weight(248'320, 2'560);
+    model.view.output_head     = make_bf16_weight(248'320, 2'560);
+
+    model.view.ple.convolution      = ninfer::Tensor(model.ple_conv_buf.p, ninfer::DType::BF16, {10'240, 4});
+    model.view.ple.key_projection   = make_bf16_weight(10'240, 2'560);
+    model.view.ple.conv_norm        = ninfer::Tensor(model.norm_bf16_buf.p, ninfer::DType::BF16, {10'240});
+    model.view.ple.key_norm         = ninfer::Tensor(model.norm_bf16_buf.p, ninfer::DType::BF16, {10'240});
+    model.view.ple.query_norm       = ninfer::Tensor(model.norm_bf16_buf.p, ninfer::DType::BF16, {10'240});
+    model.view.ple.value_projection = make_bf16_weight(2'560, 2'560);
+
+    model.view.final_mixer.norm           = ninfer::Tensor(model.norm_bf16_buf.p, ninfer::DType::BF16, {10'240});
+    model.view.final_mixer.input_mix_down = make_bf16_weight(320, 10'240);
+    model.view.final_mixer.input_mix_up   = make_bf16_weight(10'240, 320);
+
+    for (std::size_t l = 0; l < 48; ++l) {
+        auto& layer = model.view.layers[l];
+        layer.attention_hyper.block_inject   = make_bf16_weight_from(model.inject_buf, 4, 10'240);
+        layer.attention_hyper.norm           = ninfer::Tensor(model.norm_bf16_buf.p, ninfer::DType::BF16, {10'240});
+        layer.attention_hyper.input_mix_down = make_bf16_weight(320, 10'240);
+        layer.attention_hyper.input_mix_up   = make_bf16_weight(10'240, 320);
+
+        layer.mlp_hyper.block_inject   = make_bf16_weight_from(model.inject_buf, 4, 10'240);
+        layer.mlp_hyper.norm           = ninfer::Tensor(model.norm_bf16_buf.p, ninfer::DType::BF16, {10'240});
+        layer.mlp_hyper.input_mix_down = make_bf16_weight(320, 10'240);
+        layer.mlp_hyper.input_mix_up   = make_bf16_weight(10'240, 320);
+
+        layer.moe.router             = make_bf16_weight(512, 2'560);
+        layer.moe.shared_down        = make_bf16_weight(2'560, 640);
+        layer.moe.shared_gate        = make_bf16_weight(640, 2'560);
+        layer.moe.shared_up          = make_bf16_weight(640, 2'560);
+        layer.moe.shared_gate_weight = make_bf16_weight_from(model.shared_gate_weight_buf, 1, 2'560);
+        layer.moe.expert_gate_up     = Nvfp4ExpertBankView{
+            .codes                  = static_cast<const std::byte*>(model.big_nvfp4_gate_codes_buf.p),
+            .scales                 = static_cast<const std::byte*>(model.big_nvfp4_gate_scales_buf.p),
+            .weight_scale_divisors  = static_cast<const float*>(model.big_divisors_buf.p),
+            .experts                = 512,
+            .rows                   = 1'280,
+            .columns                = 2'560,
+            .code_bytes_per_expert  = gate_code_bytes_per_expert,
+            .scale_bytes_per_expert = gate_scale_bytes_per_expert,
+        };
+        layer.moe.expert_down        = Nvfp4ExpertBankView{
+            .codes                  = static_cast<const std::byte*>(model.big_nvfp4_down_codes_buf.p),
+            .scales                 = static_cast<const std::byte*>(model.big_nvfp4_down_scales_buf.p),
+            .weight_scale_divisors  = static_cast<const float*>(model.big_divisors_buf.p),
+            .experts                = 512,
+            .rows                   = 2'560,
+            .columns                = 640,
+            .code_bytes_per_expert  = down_code_bytes_per_expert,
+            .scale_bytes_per_expert = down_scale_bytes_per_expert,
+        };
+    }
+
+    for (std::size_t i = 0; i < kGdnLayers; ++i) {
+        auto& gdn = model.view.gdn[i];
+        gdn.a_log             = ninfer::Tensor(model.gdn_a_log_buf.p, ninfer::DType::BF16, {48});
+        gdn.convolution       = ninfer::Tensor(model.gdn_conv_buf.p, ninfer::DType::BF16, {10'240, 4});
+        gdn.dt_bias           = ninfer::Tensor(model.gdn_dt_bias_buf.p, ninfer::DType::BF16, {48});
+        gdn.a_b_projection    = make_bf16_weight(96, 2'560);
+        gdn.norm              = ninfer::Tensor(model.norm_bf16_buf.p, ninfer::DType::BF16, {128});
+        gdn.query_key_value_z = make_fp8_weight(model.fp8_qkvz_buf, 16'384, 2'560);
+        gdn.output            = make_fp8_weight(model.fp8_out_buf, 2'560, 6'144);
+    }
+
+    for (std::size_t i = 0; i < kFullAttentionLayers; ++i) {
+        auto& att = model.view.full_attention[i];
+        att.indexer_query_key    = make_bf16_weight(640, 2'560);
+        att.indexer_key_norm     = ninfer::Tensor(model.norm_bf16_buf.p, ninfer::DType::BF16, {128});
+        att.indexer_query_norm   = ninfer::Tensor(model.norm_bf16_buf.p, ninfer::DType::BF16, {128});
+        att.key_norm             = ninfer::Tensor(model.norm_bf16_buf.p, ninfer::DType::BF16, {256});
+        att.query_norm           = ninfer::Tensor(model.norm_bf16_buf.p, ninfer::DType::BF16, {256});
+        att.query_gate_key_value = make_fp8_weight(model.fp8_qgkv_buf, 13'312, 2'560);
+        att.output               = make_fp8_weight(model.fp8_out_buf, 2'560, 6'144);
+    }
+
+    device.synchronize();
+    return model;
 }
 
 int test_ledger_cpu() {
@@ -605,203 +911,153 @@ int test_ledger_prefill_chunk_cpu() {
     return 0;
 }
 
-struct SyntheticFlashNextModel {
-    ninfer::DeviceBuffer big_bf16_buf;
-    ninfer::DeviceBuffer big_fp8_buf;
-    ninfer::DeviceBuffer big_nvfp4_gate_codes_buf;
-    ninfer::DeviceBuffer big_nvfp4_gate_scales_buf;
-    ninfer::DeviceBuffer big_nvfp4_down_codes_buf;
-    ninfer::DeviceBuffer big_nvfp4_down_scales_buf;
-    ninfer::DeviceBuffer big_divisors_buf;
-    std::vector<std::byte> ple_table_data;
-    ninfer::targets::qwen3_8_flash_next::detail::TextModelView view;
-};
-
-SyntheticFlashNextModel make_synthetic_model(ninfer::DeviceContext& device) {
+int test_finite_model_stages(ninfer::DeviceContext& device) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
-    SyntheticFlashNextModel model;
-    constexpr std::uint64_t kOutputHeadBytes = 248'320ULL * 2'560 * 2;
-    model.big_bf16_buf = ninfer::DeviceBuffer(kOutputHeadBytes);
-    model.big_bf16_buf.fill(0);
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
 
-    constexpr std::uint64_t kFp8Codes = 16'384ULL * 2'560;
-    constexpr std::uint64_t kFp8Bytes = ((kFp8Codes + 255U) & ~255ULL) + 16'384ULL * 4;
-    model.big_fp8_buf = ninfer::DeviceBuffer(kFp8Bytes);
-    model.big_fp8_buf.fill(0);
-    std::vector<float> fp8_scales(16'384, 1.0f);
-    model.big_fp8_buf.copy_from_host(fp8_scales.data(), fp8_scales.size() * sizeof(float), ((kFp8Codes + 255U) & ~255ULL));
+        auto synthetic_model = make_synthetic_model(device);
 
-    constexpr std::uint64_t gate_code_bytes_per_expert  = 1'280ULL * 2'560 / 2;
-    constexpr std::uint64_t gate_scale_bytes_per_expert = 1'280ULL * 2'560 / 16;
-    constexpr std::uint64_t down_code_bytes_per_expert  = 2'560ULL * 640 / 2;
-    constexpr std::uint64_t down_scale_bytes_per_expert = 2'560ULL * 640 / 16;
+        FlashNextRuntimeConfig cfg{
+            .max_concurrency     = 1,
+            .max_context         = 512,
+            .state_slot_capacity = 2,
+            .prefill_chunk       = 128,
+            .use_cuda_graph      = false,
+        };
+        const auto curve = flash_next_capacity_curve(cfg);
+        auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
 
-    model.big_nvfp4_gate_codes_buf  = ninfer::DeviceBuffer(512 * gate_code_bytes_per_expert);
-    model.big_nvfp4_gate_scales_buf = ninfer::DeviceBuffer(512 * gate_scale_bytes_per_expert);
-    model.big_nvfp4_down_codes_buf  = ninfer::DeviceBuffer(512 * down_code_bytes_per_expert);
-    model.big_nvfp4_down_scales_buf = ninfer::DeviceBuffer(512 * down_scale_bytes_per_expert);
-    model.big_divisors_buf          = ninfer::DeviceBuffer(512 * sizeof(float));
+        FlashNextRuntimeAllocation alloc(plan);
+        alloc.initialize(device.stream);
+        FlashNextTextExecutor exec(synthetic_model.view, ple_meta, device, alloc);
 
-    model.big_nvfp4_gate_codes_buf.fill(0x22);
-    model.big_nvfp4_gate_scales_buf.fill(0x38);
-    model.big_nvfp4_down_codes_buf.fill(0x22);
-    model.big_nvfp4_down_scales_buf.fill(0x38);
+        // 1. Check one eager round with sink
+        std::size_t eager_stages = 0;
+        std::string first_eager_non_finite;
+        FlashNextDecodeStateSink eager_sink;
+        eager_sink.on_state = [&](std::string_view name, const ninfer::Tensor& t) {
+            ++eager_stages;
+            if (!first_eager_non_finite.empty()) { return; }
+            std::size_t count = 1;
+            for (int d = 0; d < 4; ++d) { if (t.ne[d] > 0) { count *= static_cast<std::size_t>(t.ne[d]); } }
+            if (t.dtype == ninfer::DType::BF16) {
+                std::vector<std::uint16_t> host(count);
+                device.synchronize();
+                CUDA_CHECK(cudaMemcpy(host.data(), t.data, count * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+                for (auto v : host) {
+                    const float f = bf16_to_float(v);
+                    if (std::isnan(f) || std::isinf(f)) {
+                        first_eager_non_finite = std::string(name);
+                        break;
+                    }
+                }
+            } else if (t.dtype == ninfer::DType::FP32) {
+                std::vector<float> host(count);
+                device.synchronize();
+                CUDA_CHECK(cudaMemcpy(host.data(), t.data, count * sizeof(float), cudaMemcpyDeviceToHost));
+                for (auto f : host) {
+                    if (std::isnan(f) || std::isinf(f)) {
+                        first_eager_non_finite = std::string(name);
+                        break;
+                    }
+                }
+            }
+        };
 
-    std::vector<float> divisors(512, 1.0f);
-    model.big_divisors_buf.copy_from_host(divisors.data(), sizeof(divisors));
+        auto lane = exec.allocate_lane();
+        LaneStepRequest req{
+            .handle          = lane,
+            .token_id        = 100,
+            .token_index     = 0,
+            .mrope_positions = {0, 0, 0},
+            .sampling        = {.temperature = 0.0F, .top_p = 1.0F},
+        };
+        auto round = exec.execute_round(std::span(&req, 1), &eager_sink);
+        std::vector<LaneCommitDecision> dec = {{.accept = true}};
+        round.commit(dec);
+        device.synchronize();
 
-    constexpr std::uint64_t rows         = 1;
-    constexpr std::uint64_t width        = 160;
-    constexpr std::uint64_t scale_offset = 256;
-    model.ple_table_data = std::vector<std::byte>(scale_offset + (width / 16) * 2, std::byte{0});
-    std::fill_n(model.ple_table_data.begin(), width / 2, std::byte{0x88});
-    for (std::uint8_t index = 0; index < 8; ++index) {
-        model.ple_table_data[index] = static_cast<std::byte>(index * 2 | ((index * 2 + 1) << 4));
-    }
-    constexpr std::uint16_t half_point_five = 0x3800;
-    for (std::size_t offset = scale_offset; offset < model.ple_table_data.size(); offset += 2) {
-        std::memcpy(model.ple_table_data.data() + offset, &half_point_five, sizeof(half_point_five));
-    }
-    for (PleShardView& shard : model.view.ple.table.shards) {
-        shard = make_ple_shard_view(model.ple_table_data, rows, width);
-    }
-
-    auto make_bf16_weight = [&](std::int32_t rows, std::int32_t cols) {
-        ninfer::Weight w{};
-        w.payload         = model.big_bf16_buf.p;
-        w.payload_bytes   = static_cast<std::uint64_t>(rows) * cols * 2;
-        w.qdata           = model.big_bf16_buf.p;
-        w.qtype           = ninfer::QType::BF16_CTRL;
-        w.layout          = ninfer::QuantLayout::Contiguous;
-        w.n               = rows;
-        w.k               = cols;
-        w.ndim            = 2;
-        w.shape[0]        = rows;
-        w.shape[1]        = cols;
-        w.padded_shape[0] = rows;
-        w.padded_shape[1] = cols;
-        return w;
-    };
-
-    auto make_fp8_weight = [&](std::int32_t rows, std::int32_t cols) {
-        const std::uint64_t codes = static_cast<std::uint64_t>(rows) * cols;
-        const std::uint64_t scale_off = (codes + 255U) & ~255ULL;
-        ninfer::Weight w{};
-        w.payload           = model.big_fp8_buf.p;
-        w.payload_bytes     = model.big_fp8_buf.bytes;
-        w.qdata             = model.big_fp8_buf.p;
-        w.scales            = static_cast<const std::byte*>(model.big_fp8_buf.p) + scale_off;
-        w.qtype             = ninfer::QType::FP8_E4M3FN_ROW_F32S;
-        w.layout            = ninfer::QuantLayout::RowScale;
-        w.scale_dtype       = ninfer::DType::FP32;
-        w.group_size        = cols;
-        w.group             = cols;
-        w.n                 = rows;
-        w.k                 = cols;
-        w.ndim              = 2;
-        w.shape[0]          = rows;
-        w.shape[1]          = cols;
-        w.shape[2]          = 1;
-        w.shape[3]          = 1;
-        w.padded_shape[0]   = rows;
-        w.padded_shape[1]   = cols;
-        w.padded_shape[2]   = 1;
-        w.padded_shape[3]   = 1;
-        w.scale_ne[0]       = rows;
-        w.scale_ne[1]       = 1;
-        w.scale_ne[2]       = 1;
-        w.scale_ne[3]       = 1;
-        w.scale_nb[0]       = 4;
-        w.scale_nb[1]       = static_cast<std::int64_t>(rows) * 4;
-        w.scale_nb[2]       = static_cast<std::int64_t>(rows) * 4;
-        w.scale_nb[3]       = static_cast<std::int64_t>(rows) * 4;
-        return w;
-    };
-
-    auto make_tensor = [&](ninfer::DType dt, std::initializer_list<std::int32_t> dims) {
-        if (dt == ninfer::DType::BF16) {
-            return ninfer::Tensor(model.big_bf16_buf.p, dt, dims);
-        } else {
-            return ninfer::Tensor(model.big_fp8_buf.p, dt, dims);
+        if (!first_eager_non_finite.empty()) {
+            std::cerr << "FAIL: Eager decode produced non-finite value at stage: "
+                      << first_eager_non_finite << "\n";
+            return 1;
         }
-    };
+        if (eager_stages == 0) {
+            std::cerr << "FAIL: Eager decode did not emit any stages to sink\n";
+            return 1;
+        }
 
-    model.view.token_embedding = make_bf16_weight(248'320, 2'560);
-    model.view.output_head     = make_bf16_weight(248'320, 2'560);
-
-    model.view.ple.convolution      = make_tensor(ninfer::DType::BF16, {10'240, 4});
-    model.view.ple.key_projection   = make_bf16_weight(10'240, 2'560);
-    model.view.ple.conv_norm        = make_tensor(ninfer::DType::BF16, {10'240});
-    model.view.ple.key_norm         = make_tensor(ninfer::DType::BF16, {10'240});
-    model.view.ple.query_norm       = make_tensor(ninfer::DType::BF16, {10'240});
-    model.view.ple.value_projection = make_bf16_weight(2'560, 2'560);
-
-    model.view.final_mixer.norm           = make_tensor(ninfer::DType::BF16, {10'240});
-    model.view.final_mixer.input_mix_down = make_bf16_weight(320, 10'240);
-    model.view.final_mixer.input_mix_up   = make_bf16_weight(10'240, 320);
-
-    for (std::size_t l = 0; l < 48; ++l) {
-        auto& layer = model.view.layers[l];
-        layer.attention_hyper.block_inject   = make_bf16_weight(4, 10'240);
-        layer.attention_hyper.norm           = make_tensor(ninfer::DType::BF16, {10'240});
-        layer.attention_hyper.input_mix_down = make_bf16_weight(320, 10'240);
-        layer.attention_hyper.input_mix_up   = make_bf16_weight(10'240, 320);
-
-        layer.mlp_hyper.block_inject   = make_bf16_weight(4, 10'240);
-        layer.mlp_hyper.norm           = make_tensor(ninfer::DType::BF16, {10'240});
-        layer.mlp_hyper.input_mix_down = make_bf16_weight(320, 10'240);
-        layer.mlp_hyper.input_mix_up   = make_bf16_weight(10'240, 320);
-
-        layer.moe.router             = make_bf16_weight(512, 2'560);
-        layer.moe.shared_down        = make_bf16_weight(2'560, 640);
-        layer.moe.shared_gate        = make_bf16_weight(640, 2'560);
-        layer.moe.shared_up          = make_bf16_weight(640, 2'560);
-        layer.moe.shared_gate_weight = make_bf16_weight(1, 2'560);
-        layer.moe.expert_gate_up     = Nvfp4ExpertBankView{
-            .codes                  = static_cast<const std::byte*>(model.big_nvfp4_gate_codes_buf.p),
-            .scales                 = static_cast<const std::byte*>(model.big_nvfp4_gate_scales_buf.p),
-            .weight_scale_divisors  = static_cast<const float*>(model.big_divisors_buf.p),
-            .experts                = 512,
-            .rows                   = 1'280,
-            .columns                = 2'560,
-            .code_bytes_per_expert  = gate_code_bytes_per_expert,
-            .scale_bytes_per_expert = gate_scale_bytes_per_expert,
+        // 2. Check one prefill chunk with sink
+        std::size_t prefill_stages = 0;
+        std::string first_prefill_non_finite;
+        FlashNextDecodeStateSink prefill_sink;
+        prefill_sink.on_state = [&](std::string_view name, const ninfer::Tensor& t) {
+            ++prefill_stages;
+            if (!first_prefill_non_finite.empty()) { return; }
+            std::size_t count = 1;
+            for (int d = 0; d < 4; ++d) { if (t.ne[d] > 0) { count *= static_cast<std::size_t>(t.ne[d]); } }
+            if (t.dtype == ninfer::DType::BF16) {
+                std::vector<std::uint16_t> host(count);
+                device.synchronize();
+                CUDA_CHECK(cudaMemcpy(host.data(), t.data, count * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+                for (auto v : host) {
+                    const float f = bf16_to_float(v);
+                    if (std::isnan(f) || std::isinf(f)) {
+                        first_prefill_non_finite = std::string(name);
+                        break;
+                    }
+                }
+            } else if (t.dtype == ninfer::DType::FP32) {
+                std::vector<float> host(count);
+                device.synchronize();
+                CUDA_CHECK(cudaMemcpy(host.data(), t.data, count * sizeof(float), cudaMemcpyDeviceToHost));
+                for (auto f : host) {
+                    if (std::isnan(f) || std::isinf(f)) {
+                        first_prefill_non_finite = std::string(name);
+                        break;
+                    }
+                }
+            }
         };
-        layer.moe.expert_down        = Nvfp4ExpertBankView{
-            .codes                  = static_cast<const std::byte*>(model.big_nvfp4_down_codes_buf.p),
-            .scales                 = static_cast<const std::byte*>(model.big_nvfp4_down_scales_buf.p),
-            .weight_scale_divisors  = static_cast<const float*>(model.big_divisors_buf.p),
-            .experts                = 512,
-            .rows                   = 2'560,
-            .columns                = 640,
-            .code_bytes_per_expert  = down_code_bytes_per_expert,
-            .scale_bytes_per_expert = down_scale_bytes_per_expert,
-        };
-    }
 
-    for (std::size_t i = 0; i < kGdnLayers; ++i) {
-        auto& gdn = model.view.gdn[i];
-        gdn.a_log             = make_tensor(ninfer::DType::BF16, {48});
-        gdn.convolution       = make_tensor(ninfer::DType::BF16, {10'240, 4});
-        gdn.dt_bias           = make_tensor(ninfer::DType::BF16, {48});
-        gdn.a_b_projection    = make_bf16_weight(96, 2'560);
-        gdn.norm              = make_tensor(ninfer::DType::BF16, {128});
-        gdn.query_key_value_z = make_fp8_weight(16'384, 2'560);
-        gdn.output            = make_fp8_weight(2'560, 6'144);
-    }
+        exec.release_lane(lane);
+        lane = exec.allocate_lane();
+        constexpr std::int32_t kChunk = 128;
+        std::vector<std::int32_t> prefill_tokens(kChunk);
+        std::vector<std::array<std::int32_t, 3>> prefill_pos(kChunk);
+        for (std::int32_t t = 0; t < kChunk; ++t) {
+            prefill_tokens[t] = 100 + t;
+            prefill_pos[t]    = {t, t, t};
+        }
+        auto pr = exec.execute_prefill_chunk(lane, prefill_tokens, prefill_pos, 0, &prefill_sink);
+        pr.commit(dec);
+        device.synchronize();
 
-    for (std::size_t i = 0; i < kFullAttentionLayers; ++i) {
-        auto& att = model.view.full_attention[i];
-        att.indexer_query_key    = make_bf16_weight(640, 2'560);
-        att.indexer_key_norm     = make_tensor(ninfer::DType::BF16, {128});
-        att.indexer_query_norm   = make_tensor(ninfer::DType::BF16, {128});
-        att.key_norm             = make_tensor(ninfer::DType::BF16, {256});
-        att.query_norm           = make_tensor(ninfer::DType::BF16, {256});
-        att.query_gate_key_value = make_fp8_weight(13'312, 2'560);
-        att.output               = make_fp8_weight(2'560, 6'144);
-    }
+        if (!first_prefill_non_finite.empty()) {
+            std::cerr << "FAIL: Prefill chunk produced non-finite value at stage: "
+                      << first_prefill_non_finite << "\n";
+            return 1;
+        }
+        if (prefill_stages == 0) {
+            std::cerr << "FAIL: Prefill chunk did not emit any stages to sink\n";
+            return 1;
+        }
 
-    return model;
+        exec.release_lane(lane);
+        std::cout << "NAN PROBE: stages=" << eager_stages << " first non-finite stage: none\n";
+        std::cout << "PASS: test_finite_model_stages\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_finite_model_stages exception: " << e.what() << "\n";
+        return 1;
+    } catch (...) {
+        std::cerr << "test_finite_model_stages unknown exception\n";
+        return 1;
+    }
 }
 
 int test_prefill_chunk_executor(ninfer::DeviceContext& device) {
@@ -891,6 +1147,10 @@ int test_prefill_chunk_executor(ninfer::DeviceContext& device) {
         for (std::size_t i = 0; i < seq_hidden.size(); ++i) {
             float a = bf16_to_f(seq_hidden[i]);
             float b = bf16_to_f(chunk_hidden[i]);
+            if (std::isnan(a) || std::isnan(b) || std::isinf(a) || std::isinf(b)) {
+                std::cerr << "Non-finite value in prefill chunk hidden state\n";
+                return 1;
+            }
             hid_diff += (a - b) * (a - b);
             hid_ref += a * a;
         }
@@ -906,6 +1166,10 @@ int test_prefill_chunk_executor(ninfer::DeviceContext& device) {
         for (std::size_t i = 0; i < seq_logits.size(); ++i) {
             float a = bf16_to_f(seq_logits[i]);
             float b = bf16_to_f(chunk_logits[i]);
+            if (std::isnan(a) || std::isnan(b) || std::isinf(a) || std::isinf(b)) {
+                std::cerr << "Non-finite value in prefill chunk logits\n";
+                return 1;
+            }
             log_diff += (a - b) * (a - b);
             log_ref += a * a;
             if (a > seq_max) { seq_max = a; seq_argmax = i; }
@@ -937,10 +1201,6 @@ int test_prefill_chunk_executor(ninfer::DeviceContext& device) {
 
 int test_prefill_chunk_workspace_envelope(ninfer::DeviceContext& device) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
-    // Regression: a full prefill_chunk-wide chunk exhausted the workspace arena (std::bad_alloc
-    // from DeviceArena::alloc inside layer 0's GDN block) because the capacity estimate did not
-    // include the executor's staging tensors. max_concurrency=1 keeps the decode estimate small so
-    // it cannot mask a prefill under-estimate; two chunks cover the non-zero frontier as well.
     try {
         PleIndexMetadata ple_meta{};
         ple_meta.multipliers = {1, 2, 3};
@@ -1041,8 +1301,7 @@ int test_cuda_graph_decode_equivalence(ninfer::DeviceContext& device) {
             alloc_graph.initialize(device.stream);
             FlashNextTextExecutor exec_graph(synthetic_model.view, ple_meta, device, alloc_graph);
 
-            // DIAG: captured graphs, then eager body — isolates capture-time state pollution
-            // from replay itself.
+            // Captured graphs, then eager body — isolates capture-time state pollution from replay
             FlashNextRuntimeAllocation alloc_mixed(plan_graph);
             alloc_mixed.initialize(device.stream);
             FlashNextTextExecutor exec_mixed(synthetic_model.view, ple_meta, device, alloc_mixed);
@@ -1067,7 +1326,8 @@ int test_cuda_graph_decode_equivalence(ninfer::DeviceContext& device) {
                 lanes_mixed.push_back(exec_mixed.allocate_lane());
             }
 
-            for (std::size_t step = 0; step < 4; ++step) {
+            constexpr std::size_t kRounds = 8;
+            for (std::size_t step = 0; step < kRounds; ++step) {
                 std::vector<LaneStepRequest> reqs_eager(B);
                 std::vector<LaneStepRequest> reqs_graph(B);
                 for (std::uint32_t b = 0; b < B; ++b) {
@@ -1091,52 +1351,16 @@ int test_cuda_graph_decode_equivalence(ninfer::DeviceContext& device) {
                     };
                 }
 
-                if (B == 1 && step == 0) {
-                    // NAN PROBE: which stage first produces NaN on the synthetic model?
-                    std::string first_nan;
-                    std::size_t stages = 0;
-                    FlashNextDecodeStateSink probe;
-                    probe.on_state = [&](std::string_view name, const ninfer::Tensor& t) {
-                        ++stages;
-                        if (!first_nan.empty() || t.dtype != ninfer::DType::BF16) { return; }
-                        std::size_t count = 1;
-                        for (int d = 0; d < 4; ++d) { if (t.ne[d] > 0) { count *= static_cast<std::size_t>(t.ne[d]); } }
-                        std::vector<std::uint16_t> host(count);
-                        CUDA_CHECK(cudaMemcpy(host.data(), t.data, count * sizeof(std::uint16_t),
-                                              cudaMemcpyDeviceToHost));
-                        std::size_t nans = 0;
-                        for (auto v : host) {
-                            const float f = std::bit_cast<float>(static_cast<std::uint32_t>(v) << 16U);
-                            if (std::isnan(f) || std::isinf(f)) { ++nans; }
-                        }
-                        if (nans > 0) {
-                            first_nan = std::string(name) + " (" + std::to_string(nans) + "/" +
-                                        std::to_string(count) + " non-finite)";
-                        }
-                    };
-                    FlashNextRuntimeAllocation alloc_probe(plan_eager);
-                    alloc_probe.initialize(device.stream);
-                    FlashNextTextExecutor exec_probe(synthetic_model.view, ple_meta, device, alloc_probe);
-                    auto lane_probe = exec_probe.allocate_lane();
-                    LaneStepRequest req_probe = reqs_eager[0];
-                    req_probe.handle          = lane_probe;
-                    auto round_probe = exec_probe.execute_round(std::span<const LaneStepRequest>(&req_probe, 1), &probe);
-                    std::vector<LaneCommitDecision> d1 = {{.accept = true}};
-                    round_probe.commit(d1);
-                    device.synchronize();
-                    std::cout << "NAN PROBE: stages=" << stages << " first non-finite stage: "
-                              << (first_nan.empty() ? "none" : first_nan) << "\n";
-                    exec_probe.release_lane(lane_probe);
-                }
                 std::vector<LaneStepRequest> reqs_mixed = reqs_graph;
                 for (std::uint32_t b = 0; b < B; ++b) { reqs_mixed[b].handle = lanes_mixed[b]; }
                 auto round_eager = exec_eager.execute_round(reqs_eager);
                 auto round_graph = exec_graph.execute_round(reqs_graph);
                 auto round_mixed = exec_mixed.execute_round(reqs_mixed);
 
-                // Check sampled tokens equivalence
+                // 1. Bit-exact sampled tokens
                 auto eager_tokens = round_eager.sampled_tokens();
                 auto graph_tokens = round_graph.sampled_tokens();
+                auto mixed_tokens = round_mixed.sampled_tokens();
                 for (std::uint32_t b = 0; b < B; ++b) {
                     if (eager_tokens[b] != graph_tokens[b]) {
                         std::cerr << "Sampled token mismatch at B=" << B << " step=" << step
@@ -1144,45 +1368,51 @@ int test_cuda_graph_decode_equivalence(ninfer::DeviceContext& device) {
                                   << " graph=" << graph_tokens[b] << "\n";
                         return 1;
                     }
+                    if (eager_tokens[b] != mixed_tokens[b]) {
+                        std::cerr << "Sampled token mismatch at B=" << B << " step=" << step
+                                  << " b=" << b << ": eager=" << eager_tokens[b]
+                                  << " mixed=" << mixed_tokens[b] << "\n";
+                        return 1;
+                    }
                 }
 
-                // Check logits equivalence
+                // 2. Bit-exact logits
                 std::vector<std::uint16_t> logits_eager(248'320 * B);
                 std::vector<std::uint16_t> logits_graph(248'320 * B);
+                std::vector<std::uint16_t> logits_mixed(248'320 * B);
+
+                device.synchronize();
                 CUDA_CHECK(cudaMemcpy(logits_eager.data(), round_eager.logits().data,
                                       logits_eager.size() * sizeof(std::uint16_t),
                                       cudaMemcpyDeviceToHost));
                 CUDA_CHECK(cudaMemcpy(logits_graph.data(), round_graph.logits().data,
                                       logits_graph.size() * sizeof(std::uint16_t),
                                       cudaMemcpyDeviceToHost));
-
-                auto bf16_to_f = [](std::uint16_t v) {
-                    return std::bit_cast<float>(static_cast<std::uint32_t>(v) << 16U);
-                };
-                std::vector<std::uint16_t> logits_mixed(248'320 * B);
                 CUDA_CHECK(cudaMemcpy(logits_mixed.data(), round_mixed.logits().data,
                                       logits_mixed.size() * sizeof(std::uint16_t),
                                       cudaMemcpyDeviceToHost));
-                float max_eg = 0.0F, max_em = 0.0F, max_gm = 0.0F;
-                std::size_t n_eg = 0, n_em = 0, n_gm = 0;
+
+                // Assert finite and exact bit identity
                 for (std::size_t i = 0; i < logits_eager.size(); ++i) {
-                    const float e = bf16_to_f(logits_eager[i]);
-                    const float g = bf16_to_f(logits_graph[i]);
-                    const float m = bf16_to_f(logits_mixed[i]);
-                    if (e != g) { ++n_eg; max_eg = std::max(max_eg, std::abs(e - g)); }
-                    if (e != m) { ++n_em; max_em = std::max(max_em, std::abs(e - m)); }
-                    if (g != m) { ++n_gm; max_gm = std::max(max_gm, std::abs(g - m)); }
-                }
-                std::size_t n_nan = 0;
-                for (std::size_t i = 0; i < logits_eager.size(); ++i) { if (std::isnan(bf16_to_f(logits_eager[i]))) { ++n_nan; } }
-                std::cout << "DIAG nan(eager)=" << n_nan << " ";
-                std::cout << "DIAG B=" << B << " step=" << step << " eager-vs-graph: " << n_eg
-                          << " differ (max " << max_eg << ") | eager-vs-mixed: " << n_em
-                          << " differ (max " << max_em << ") | graph-vs-mixed: " << n_gm
-                          << " differ (max " << max_gm << ")\n";
-                if (max_eg > 1e-3F) {
-                    std::cerr << "Logits diff exceeded at B=" << B << " step=" << step << "\n";
-                    return 1;
+                    const float e = bf16_to_float(logits_eager[i]);
+                    if (std::isnan(e) || std::isinf(e)) {
+                        std::cerr << "Non-finite eager logit at index " << i << "\n";
+                        return 1;
+                    }
+                    if (logits_eager[i] != logits_graph[i]) {
+                        std::cerr << "Logits bit-mismatch (eager vs graph) at B=" << B
+                                  << " step=" << step << " idx=" << i << ": eager=0x"
+                                  << std::hex << logits_eager[i] << " graph=0x"
+                                  << logits_graph[i] << std::dec << "\n";
+                        return 1;
+                    }
+                    if (logits_eager[i] != logits_mixed[i]) {
+                        std::cerr << "Logits bit-mismatch (eager vs mixed) at B=" << B
+                                  << " step=" << step << " idx=" << i << ": eager=0x"
+                                  << std::hex << logits_eager[i] << " mixed=0x"
+                                  << logits_mixed[i] << std::dec << "\n";
+                        return 1;
+                    }
                 }
 
                 std::vector<LaneCommitDecision> decisions(B, {.accept = true});
@@ -1203,6 +1433,7 @@ int test_cuda_graph_decode_equivalence(ninfer::DeviceContext& device) {
             for (std::uint32_t b = 0; b < B; ++b) {
                 exec_eager.release_lane(lanes_eager[b]);
                 exec_graph.release_lane(lanes_graph[b]);
+                exec_mixed.release_lane(lanes_mixed[b]);
             }
         }
         std::cout << "PASS: test_cuda_graph_decode_equivalence\n";
@@ -1212,6 +1443,65 @@ int test_cuda_graph_decode_equivalence(ninfer::DeviceContext& device) {
         return 1;
     } catch (...) {
         std::cerr << "test_cuda_graph_decode_equivalence unknown exception\n";
+        return 1;
+    }
+}
+
+int test_measure_cuda_graph_footprint(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+
+        auto synthetic_model = make_synthetic_model(device);
+
+        std::size_t total_footprint = 0;
+        std::cout << "--- CUDA Graph Device Footprint (Synthetic Model, B=1..8) ---\n";
+
+        for (std::uint32_t B = 1; B <= 8; ++B) {
+            FlashNextRuntimeConfig cfg{
+                .max_concurrency     = B,
+                .max_context         = 512,
+                .state_slot_capacity = 2 * B,
+                .prefill_chunk       = 512,
+                .use_cuda_graph      = true,
+            };
+            const auto curve = flash_next_capacity_curve(cfg);
+            auto plan = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+
+            FlashNextRuntimeAllocation alloc(plan);
+            alloc.initialize(device.stream);
+            device.synchronize();
+
+            std::size_t free_before = 0, total_mem = 0;
+            CUDA_CHECK(cudaMemGetInfo(&free_before, &total_mem));
+
+            FlashNextTextExecutor exec(synthetic_model.view, ple_meta, device, alloc);
+            device.synchronize();
+
+            std::size_t free_after = 0;
+            CUDA_CHECK(cudaMemGetInfo(&free_after, &total_mem));
+
+            std::size_t footprint = (free_before > free_after) ? (free_before - free_after) : 0;
+            total_footprint += footprint;
+
+            std::cout << "  B=" << B << " graph footprint: " << (footprint / (1024.0 * 1024.0))
+                      << " MiB (" << footprint << " bytes)\n";
+        }
+        std::cout << "Total measured footprint (8 graphs): "
+                  << (total_footprint / (1024.0 * 1024.0)) << " MiB (" << total_footprint << " bytes)\n";
+        std::cout << "Configured allowance for B=8: " << (8ULL * 24) << " MiB ("
+                  << (8ULL * 24ULL * 1024ULL * 1024ULL) << " bytes)\n";
+        std::cout << "------------------------------------------------------------\n";
+        std::cout << "PASS: test_measure_cuda_graph_footprint\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_measure_cuda_graph_footprint exception: " << e.what() << "\n";
+        return 1;
+    } catch (...) {
+        std::cerr << "test_measure_cuda_graph_footprint unknown exception\n";
         return 1;
     }
 }
@@ -1512,10 +1802,12 @@ int main() {
     ninfer::DeviceContext device(0);
 
     if (test_cuda_ledger_and_executor(device) != 0) return 1;
+    if (test_finite_model_stages(device) != 0) return 1;
     if (test_prefill_chunk_executor(device) != 0) return 1;
     if (test_prefill_chunk_workspace_envelope(device) != 0) return 1;
     if (test_cuda_graph_decode_equivalence(device) != 0) return 1;
     if (test_cuda_graph_frontier_masking_and_churn(device) != 0) return 1;
+    if (test_measure_cuda_graph_footprint(device) != 0) return 1;
     if (test_cuda_graph_timing_benchmark(device) != 0) return 1;
 
     std::cout << "OK Flash-Next Text Executor\n";

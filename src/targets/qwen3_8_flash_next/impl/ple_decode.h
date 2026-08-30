@@ -10,7 +10,7 @@
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
-[[nodiscard]] std::size_t flash_next_ple_workspace_capacity_bytes(std::int32_t batch);
+[[nodiscard]] std::size_t flash_next_ple_workspace_capacity_bytes(std::int32_t tokens);
 
 void flash_next_ple_decode(const Tensor& hidden, const Tensor& gathered_embedding,
                            const PleWeights& weights, const Tensor& source_slots,

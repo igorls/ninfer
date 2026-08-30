@@ -272,13 +272,14 @@ int main() {
         ninfer::Tensor seq_ssm_t(seq_ssm_states.p, ninfer::DType::FP32, {128, 128, 48, 2});
         std::int32_t cur_src = 0;
         std::int32_t cur_dst = 1;
+        ninfer::DeviceBuffer tok_src(sizeof(std::int32_t));
+        ninfer::DeviceBuffer tok_dst(sizeof(std::int32_t));
+        ninfer::Tensor tok_src_t(tok_src.p, ninfer::DType::I32, {1});
+        ninfer::Tensor tok_dst_t(tok_dst.p, ninfer::DType::I32, {1});
+
         for (int t = 0; t < T; ++t) {
-            ninfer::DeviceBuffer tok_src(sizeof(std::int32_t));
-            ninfer::DeviceBuffer tok_dst(sizeof(std::int32_t));
             tok_src.copy_from_host(&cur_src, sizeof(std::int32_t));
             tok_dst.copy_from_host(&cur_dst, sizeof(std::int32_t));
-            ninfer::Tensor tok_src_t(tok_src.p, ninfer::DType::I32, {1});
-            ninfer::Tensor tok_dst_t(tok_dst.p, ninfer::DType::I32, {1});
 
             ninfer::Tensor tok_in(
                 static_cast<std::uint16_t*>(chunk_input.p) + static_cast<std::size_t>(t) * 2'560,
