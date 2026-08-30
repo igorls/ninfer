@@ -177,7 +177,7 @@ set_tests_properties(ninfer_qwen3_6_35b_a3b_dflash_load_plan_test
 
 ninfer_add_test(ninfer_qwen3_8_flash_next_load_plan_test
   SOURCES targets/qwen3_8_flash_next/test_load_plan.cpp
-  LIBRARIES ninfer_qwen3_8_flash_next)
+  LIBRARIES ninfer_qwen3_8_flash_next ninfer_engine)
 target_include_directories(ninfer_qwen3_8_flash_next_load_plan_test PRIVATE
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_8_flash_next)
 set_tests_properties(ninfer_qwen3_8_flash_next_load_plan_test

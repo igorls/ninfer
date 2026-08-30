@@ -179,7 +179,7 @@ int test_frontend_parity_with_embedded_resources_if_available() {
     const std::filesystem::path path =
         env_path ? std::filesystem::path(env_path)
                  : std::filesystem::path(
-                       R"(C:\models\Qwen3.8-Flash-Next\qwen3_8_flash_next_mixed.ninfer)");
+                       "" /* real-artifact cases run only when NINFER_WEIGHTS is set explicitly */);
 
     if (!std::filesystem::is_regular_file(path)) {
         std::cout << "SKIP: test_frontend_parity (artifact not present at " << path << ")\n";
@@ -295,7 +295,7 @@ int test_real_artifact_chat_diagnostic_smoke_if_available() {
     const std::filesystem::path path =
         env_path ? std::filesystem::path(env_path)
                  : std::filesystem::path(
-                       R"(C:\models\Qwen3.8-Flash-Next\qwen3_8_flash_next_mixed.ninfer)");
+                       "" /* real-artifact cases run only when NINFER_WEIGHTS is set explicitly */);
 
     if (!std::filesystem::is_regular_file(path)) {
         std::cout << "SKIP: test_real_artifact_chat_diagnostic_smoke (artifact not present at "

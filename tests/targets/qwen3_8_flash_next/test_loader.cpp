@@ -293,7 +293,7 @@ int test_real_artifact_preflight_if_available() {
         env_path != nullptr && *env_path != '\0'
             ? std::filesystem::path(env_path)
             : std::filesystem::path(
-                  R"(C:\models\Qwen3.8-Flash-Next\qwen3_8_flash_next_mixed.ninfer)");
+                  "" /* real-artifact cases run only when NINFER_WEIGHTS is set explicitly */);
 
     if (!std::filesystem::is_regular_file(path)) {
         std::cout << "SKIP: Real artifact preflight (artifact not present at " << path << ")\n";
@@ -363,7 +363,7 @@ int test_real_artifact_full_binding_if_available() {
         env_path != nullptr && *env_path != '\0'
             ? std::filesystem::path(env_path)
             : std::filesystem::path(
-                  R"(C:\models\Qwen3.8-Flash-Next\qwen3_8_flash_next_mixed.ninfer)");
+                  "" /* real-artifact cases run only when NINFER_WEIGHTS is set explicitly */);
 
     if (!std::filesystem::is_regular_file(path)) {
         std::cout << "SKIP: Real artifact full binding (artifact not present at " << path << ")\n";
@@ -399,7 +399,7 @@ int test_real_artifact_text_and_vision_plan_if_available() {
         env_path != nullptr && *env_path != '\0'
             ? std::filesystem::path(env_path)
             : std::filesystem::path(
-                  R"(C:\models\Qwen3.8-Flash-Next\qwen3_8_flash_next_mixed.ninfer)");
+                  "" /* real-artifact cases run only when NINFER_WEIGHTS is set explicitly */);
 
     if (!std::filesystem::is_regular_file(path)) {
         std::cout << "SKIP: Real artifact text+vision plan (artifact not present at " << path

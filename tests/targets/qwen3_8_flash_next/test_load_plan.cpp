@@ -13,7 +13,7 @@ std::filesystem::path artifact_path() {
         value != nullptr && *value != '\0') {
         return value;
     }
-    return R"(C:\models\Qwen3.8-Flash-Next\qwen3_8_flash_next_mixed.ninfer)";
+    return "" /* real-artifact cases run only when NINFER_WEIGHTS is set explicitly */;
 }
 
 } // namespace
