@@ -112,8 +112,16 @@ public:
         return ledger_.take_lane_physical_groups(handle);
     }
 
+    void acquire_physical_groups(std::span<const std::uint32_t> groups) {
+        ledger_.acquire_physical_groups(groups);
+    }
+
     void release_physical_groups(std::span<const std::uint32_t> groups) {
         ledger_.release_physical_groups(groups);
+    }
+
+    [[nodiscard]] std::uint32_t group_refcount(std::uint32_t group) const noexcept {
+        return ledger_.group_refcount(group);
     }
 
     void attach_physical_groups(LaneHandle handle, std::span<const std::uint32_t> groups,

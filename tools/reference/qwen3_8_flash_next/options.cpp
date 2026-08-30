@@ -91,6 +91,7 @@ void print_reference_tool_usage(std::string_view prog) {
         << "  --materialize-vision       Shortcut for --mode materialize-vision\n"
         << "  --chat-diagnostic          Shortcut for --mode chat-diagnostic\n"
         << "  --execute-vision           Shortcut for --mode execute-vision\n"
+        << "  --continuation-check <text> Run Turn 1, Turn 2 resumed and from-scratch, compare logits\n"
         << "  --prompt <string>          User prompt text for chat-diagnostic\n"
         << "  --system <string>          Optional system prompt for chat-diagnostic\n"
         << "  --dump-states <dir>        Directory to dump raw state tensors for oracle comparison\n"
@@ -216,6 +217,11 @@ ReferenceToolOptions parse_reference_tool_options(std::span<const std::string_vi
             if (++i >= args.size())
                 throw std::invalid_argument("Missing argument for --prefill-chunk");
             opts.prefill_chunk = parse_strict_u32(args[i], "--prefill-chunk");
+        } else if (arg == "--continuation-check") {
+            if (++i >= args.size())
+                throw std::invalid_argument("Missing argument for --continuation-check");
+            opts.mode = "continuation-check";
+            opts.continuation_check = std::string(args[i]);
         } else if (arg == "--commit") {
             opts.do_commit = true;
         } else if (arg == "--abort") {
@@ -230,10 +236,11 @@ ReferenceToolOptions parse_reference_tool_options(std::span<const std::string_vi
     if (opts.model_path.empty()) { throw std::invalid_argument("--model <path> is required"); }
     if (opts.mode != "preflight" && opts.mode != "execute-token" &&
         opts.mode != "materialize-full" && opts.mode != "materialize-vision" &&
-        opts.mode != "chat-diagnostic" && opts.mode != "execute-vision") {
+        opts.mode != "chat-diagnostic" && opts.mode != "execute-vision" &&
+        opts.mode != "continuation-check") {
         throw std::invalid_argument(
             "Invalid --mode: must be 'preflight', 'execute-token', 'materialize-full', "
-            "'materialize-vision', 'chat-diagnostic', or 'execute-vision'");
+            "'materialize-vision', 'chat-diagnostic', 'execute-vision', or 'continuation-check'");
     }
     if (opts.thinking_budget > 0) {
         throw std::invalid_argument(

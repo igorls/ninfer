@@ -362,6 +362,7 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestB
         return std::nullopt;
     }
 
+    std::uint32_t matched_slot_index = 0;
     if (source != nullptr) {
         if (source->owner() != this) {
             return std::nullopt;
@@ -375,17 +376,53 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestB
         if (c.role != detail::ContinuationSlotRole::Catalogued || c.generation != gen) {
             return std::nullopt;
         }
+
+        // Try matching endpoint continuation
         const std::size_t K = static_cast<std::size_t>(c.committed_frontier);
-        if (K == 0 || K > prompt_data.token_ids.size() || K > c.committed_tokens.size()) {
-            return std::nullopt;
-        }
-        for (std::size_t i = 0; i < K; ++i) {
-            if (prompt_data.token_ids[i] != c.committed_tokens[i]) {
-                return std::nullopt;
+        if (K > 0 && K <= prompt_data.token_ids.size() && K <= c.committed_tokens.size()) {
+            bool match = true;
+            for (std::size_t i = 0; i < K; ++i) {
+                if (prompt_data.token_ids[i] != c.committed_tokens[i]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) {
+                reusable_tokens    = static_cast<std::uint32_t>(K);
+                cont_slot          = &c;
+                matched_slot_index = c_idx;
             }
         }
-        reusable_tokens = static_cast<std::uint32_t>(K);
-        cont_slot       = &c;
+
+        // If endpoint didn't match (e.g. omitted reasoning / divergence in multi-turn), check TurnClosure checkpoints
+        if (cont_slot == nullptr) {
+            for (std::size_t tc_idx = 0; tc_idx < impl_->continuation_slots_.size(); ++tc_idx) {
+                const auto& tc = impl_->continuation_slots_[tc_idx];
+                if (tc.role == detail::ContinuationSlotRole::Catalogued &&
+                    tc.kind == runtime::CheckpointKind::TurnClosure) {
+                    const std::size_t tc_K = static_cast<std::size_t>(tc.committed_frontier);
+                    if (tc_K > 0 && tc_K <= prompt_data.token_ids.size() && tc_K <= tc.committed_tokens.size()) {
+                        bool match = true;
+                        for (std::size_t i = 0; i < tc_K; ++i) {
+                            if (prompt_data.token_ids[i] != tc.committed_tokens[i]) {
+                                match = false;
+                                break;
+                            }
+                        }
+                        if (match && tc_K > reusable_tokens) {
+                            reusable_tokens    = static_cast<std::uint32_t>(tc_K);
+                            cont_slot          = &tc;
+                            matched_slot_index = static_cast<std::uint32_t>(tc_idx);
+                        }
+                    }
+                }
+            }
+        }
+
+        // If neither endpoint nor TurnClosure matched, admission against this source fails
+        if (cont_slot == nullptr) {
+            return std::nullopt;
+        }
     }
 
     const std::uint32_t total_tokens = prompt_tokens + (effective_out > 0 ? effective_out - 1U : 0U);
@@ -416,14 +453,20 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestB
     const runtime::PrefillWork prefill_work =
         runtime::make_prefill_work(reusable_tokens, prompt_tokens, 0, 0, impl_->plan_.config.prefill_chunk);
 
-    auto cand_impl                              = std::make_unique<detail::AdmissionCandidateImpl>();
-    cand_impl->summary                          = base.summary();
-    cand_impl->summary.reusable_prompt_tokens   = reusable_tokens;
-    cand_impl->summary.prefix_reuse_path        = reusable_tokens > 0 ? PrefixReusePath::PrivateEndpoint : PrefixReusePath::Root;
+    auto cand_impl                            = std::make_unique<detail::AdmissionCandidateImpl>();
+    cand_impl->summary                        = base.summary();
+    cand_impl->summary.reusable_prompt_tokens = reusable_tokens;
+    cand_impl->summary.prefix_reuse_path =
+        reusable_tokens > 0
+            ? (cont_slot && cont_slot->kind == runtime::CheckpointKind::TurnClosure
+                   ? PrefixReusePath::PrivateTurnClosure
+                   : PrefixReusePath::PrivateEndpoint)
+            : PrefixReusePath::Root;
     cand_impl->assessment.physical_status = feasible ? runtime::MaterializationPhysicalStatus::Feasible
                                                    : runtime::MaterializationPhysicalStatus::Infeasible;
     cand_impl->assessment.source_disposition =
-        (source != nullptr && must_retain_private_source)
+        (source != nullptr && (must_retain_private_source ||
+                               (cont_slot != nullptr && cont_slot->kind == runtime::CheckpointKind::TurnClosure)))
             ? runtime::ClaimDisposition::Retained
             : runtime::ClaimDisposition::ConsumedToActive;
     cand_impl->assessment.expandable                     = false;
@@ -435,9 +478,9 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestB
     cand_impl->assessment.machine.minimum_request_ns     = est_ns;
     cand_impl->base_plan                        = std::make_unique<detail::RequestBasePlanImpl>(*base.impl_);
     cand_impl->reusable_tokens                  = reusable_tokens;
-    if (source != nullptr) {
-        cand_impl->source_continuation_index      = source->index();
-        cand_impl->source_continuation_generation = source->generation();
+    if (cont_slot != nullptr) {
+        cand_impl->source_continuation_index      = matched_slot_index;
+        cand_impl->source_continuation_generation = cont_slot->generation;
     }
 
     return AdmissionCandidate(std::move(cand_impl));
@@ -460,6 +503,24 @@ Program::begin_pressure_planning(const runtime::ContextMachineCostModel& /*machi
                                  std::span<const SharedPrefixHandle* const> /*shared_owners*/,
                                  std::span<const std::uint32_t> /*shared_owner_ordinals*/) {
     return PressurePlanningSession(std::make_unique<detail::PressurePlanningSessionImpl>());
+}
+
+static std::optional<std::uint32_t>
+derive_turn_closure_frontier(const qwen3_6::PreparedPromptData& prompt_data) {
+    if (prompt_data.identity.rewrite_checkpoint &&
+        prompt_data.identity.rewrite_checkpoint->frontier > 0 &&
+        prompt_data.identity.rewrite_checkpoint->frontier < prompt_data.token_ids.size()) {
+        return prompt_data.identity.rewrite_checkpoint->frontier;
+    }
+    std::optional<std::uint32_t> last_opp;
+    for (const auto& opp : prompt_data.context_cache.opportunities) {
+        if (opp.frontier > 0 && opp.frontier < prompt_data.token_ids.size()) {
+            if (!last_opp || opp.frontier > *last_opp) {
+                last_opp = opp.frontier;
+            }
+        }
+    }
+    return last_opp;
 }
 
 runtime::ContextTransactionReserveStatus
@@ -522,14 +583,16 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
     } catch (const std::exception&) {
         return runtime::ContextTransactionReserveStatus::Aborted;
     }
-
     const std::uint32_t lane_idx = handle.lane_index();
+
     auto& st                     = impl_->lane_states_[lane_idx];
     st.active                    = true;
     st.epoch                     = handle.epoch();
     st.lane_handle               = handle;
 
     auto prompt_data        = qwen3_6::PreparedPromptAccess::take(std::move(prompt));
+    st.capture_frontier     = derive_turn_closure_frontier(prompt_data);
+    st.capture_offered      = false;
     st.mrope_pos0.assign(prompt_data.position_axis(0).begin(), prompt_data.position_axis(0).end());
     st.mrope_pos1.assign(prompt_data.position_axis(1).begin(), prompt_data.position_axis(1).end());
     st.mrope_pos2.assign(prompt_data.position_axis(2).begin(), prompt_data.position_axis(2).end());
@@ -537,7 +600,9 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
     st.prompt_tokens        = std::move(prompt_data.token_ids);
     st.media_payloads       = std::move(prompt_data.media_payloads);
     st.vision_items         = std::move(prompt_data.vision_items);
-    st.encoded_item_index   = std::nullopt;
+    st.turn_closure_continuation_index = std::nullopt;
+    st.pending_capture_offer = 0;
+    st.reused_from_turn_closure = (adm.impl_ != nullptr && adm.impl_->summary.prefix_reuse_path == PrefixReusePath::PrivateTurnClosure);
     st.prompt_tokens_processed = 0;
     st.reused_prompt_tokens    = 0;
     st.committed_frontier      = 0;
@@ -574,12 +639,18 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
                 st.last_token_index        = static_cast<std::int32_t>(adm.impl_->reusable_tokens) - 1;
                 st.committed_frontier      = static_cast<std::int32_t>(adm.impl_->reusable_tokens);
 
-                // Consumed to active: release continuation cache entry (page groups transferred to active lane)
-                c_slot.physical_groups.clear();
-                c_slot.committed_tokens.clear();
-                c_slot.committed_frontier = 0;
-                c_slot.role = detail::ContinuationSlotRole::Vacant;
-                c_slot.generation++;
+                if (c_slot.kind != runtime::CheckpointKind::TurnClosure) {
+                    // Consumed to active: release continuation cache entry (page groups transferred to active lane)
+                    impl_->executor_.release_physical_groups(c_slot.physical_groups);
+                    c_slot.physical_groups.clear();
+                    c_slot.committed_tokens.clear();
+                    c_slot.committed_frontier = 0;
+                    c_slot.role               = detail::ContinuationSlotRole::Vacant;
+                    c_slot.generation++;
+                } else {
+                    // TurnClosure checkpoint: stays catalogued and immutable for future turns / sibling requests!
+                    c_slot.last_used_epoch = ++impl_->continuation_epoch_;
+                }
             }
         }
     }
@@ -610,6 +681,11 @@ Program::progress_context_transaction(runtime::CancellationFlagView cancellation
     if (impl_ == nullptr) { throw std::logic_error("Program: instance is empty"); }
     if (!impl_->has_context_transaction_) {
         throw std::logic_error("Program: no active context transaction to progress");
+    }
+
+    if (impl_->is_capture_transaction_) {
+        ActiveCaptureResult res = std::move(impl_->pending_capture_result_);
+        return res;
     }
 
     if (cancellation.requested()) {
@@ -647,6 +723,7 @@ Program::progress_context_transaction(runtime::CancellationFlagView cancellation
 void Program::finalize_context_transaction() noexcept {
     if (impl_ != nullptr) {
         impl_->has_context_transaction_ = false;
+        impl_->is_capture_transaction_  = false;
         impl_->transaction_lane_.reset();
         impl_->transaction_epoch_.reset();
         impl_->transaction_has_source_ = false;
@@ -679,9 +756,61 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
 
     const std::size_t N         = st.prompt_tokens.size();
     const std::uint32_t start_i = st.prompt_tokens_processed;
+
+    if (start_i == N) {
+        if (!impl_->pending_round_.valid()) {
+            throw std::logic_error("advance_prefill called on completed prompt without pending round");
+        }
+        // Sample the first output token from logits (step 2: completion)
+        impl_->sample_tokens(impl_->pending_round_.logits(), std::span(&lane_idx, 1),
+                             std::span(impl_->host_sampled_tokens_.data(), 1));
+
+        impl_->pending_batch_tokens_.resize(1);
+        impl_->pending_batch_row_counts_.resize(1);
+        impl_->pending_batch_tokens_[0]     = static_cast<TokenId>(impl_->host_sampled_tokens_[0]);
+        impl_->pending_batch_row_counts_[0] = 1;
+
+        st.prefill_completed  = true;
+        st.committed_frontier = static_cast<std::int32_t>(N);
+        st.media_payloads.clear();
+        if (impl_->vision_session_.has_value()) {
+            impl_->vision_session_->retire_handoff();
+        }
+
+        PrefillProgress progress;
+        progress.summary.prompt_tokens        = static_cast<std::uint32_t>(N);
+        progress.summary.reused_prompt_tokens = st.reused_prompt_tokens;
+        progress.summary.prefix_reuse_path =
+            st.reused_prompt_tokens > 0
+                ? (st.reused_from_turn_closure
+                       ? PrefixReusePath::PrivateTurnClosure
+                       : PrefixReusePath::PrivateEndpoint)
+                : PrefixReusePath::Root;
+        progress.processed_prompt_tokens      = 0;
+        progress.complete                     = true;
+        progress.timing                       = timing.finish();
+        progress.pending                      = ContractAccess::make_pending(
+            this, 1, std::span(&sequence, 1),
+            std::span(impl_->pending_batch_tokens_.data(), 1),
+            std::span(impl_->pending_batch_row_counts_.data(), 1), 1, progress.timing);
+        return progress;
+    }
+
     std::uint32_t end_i =
         std::min<std::uint32_t>(start_i + impl_->plan_.config.prefill_chunk,
                                 static_cast<std::uint32_t>(N));
+
+    // Clip at capture frontier F if not yet offered
+    const bool can_offer_capture =
+        st.publish_continuation && (impl_->plan_.config.continuation_capacity > 0) &&
+        st.capture_frontier.has_value() && !st.capture_offered;
+
+    if (can_offer_capture) {
+        const std::uint32_t F = *st.capture_frontier;
+        if (start_i < F && end_i > F) {
+            end_i = F;
+        }
+    }
 
     // Chunk clipping for vision items: a chunk never crosses into a new vision item
     if (st.vision_control.has_value() && !st.vision_control->items.empty()) {
@@ -750,6 +879,8 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
         }
     }
 
+    const bool is_capture_split = can_offer_capture && (end_i == *st.capture_frontier);
+
     if (end_i < N) {
         auto round = impl_->executor_.execute_prefill_chunk(
             st.lane_handle, chunk_token_ids, chunk_positions, static_cast<std::int32_t>(start_i),
@@ -759,57 +890,137 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
         st.last_token_id    = chunk_token_ids.back();
         st.last_token_pos   = chunk_positions.back()[0];
         st.last_token_index = static_cast<std::int32_t>(end_i - 1);
-    } else {
-        // Final prefill chunk ending at N - 1
+        st.prompt_tokens_processed = end_i;
+
+        PrefillProgress progress;
+        progress.summary.prompt_tokens        = static_cast<std::uint32_t>(N);
+        progress.summary.reused_prompt_tokens = st.reused_prompt_tokens;
+        progress.summary.prefix_reuse_path =
+            st.reused_prompt_tokens > 0
+                ? (st.reused_from_turn_closure
+                       ? PrefixReusePath::PrivateTurnClosure
+                       : PrefixReusePath::PrivateEndpoint)
+                : PrefixReusePath::Root;
+        progress.processed_prompt_tokens      = chunk_size;
+        progress.complete                     = false;
+        progress.timing                       = timing.finish();
+
+        if (is_capture_split) {
+            st.capture_offered             = true;
+            const std::uint64_t capture_id = ++impl_->capture_counter_;
+            st.pending_capture_offer       = capture_id;
+            progress.capture               = ContractAccess::make_capture_offer(
+                this, sequence.lane(), sequence.epoch(), capture_id);
+        }
+        return progress;
+    }
+
+    // Final prefill chunk ending at N
+    if (is_capture_split) {
+        // F == N: offer capture at N before sampling
         impl_->pending_round_ = impl_->executor_.execute_prefill_chunk(
             st.lane_handle, chunk_token_ids, chunk_positions, static_cast<std::int32_t>(start_i),
             nullptr, visual_embeddings, local_scatter_indices);
         st.last_token_id    = chunk_token_ids.back();
         st.last_token_pos   = chunk_positions.back()[0];
         st.last_token_index = static_cast<std::int32_t>(end_i - 1);
+        st.prompt_tokens_processed = end_i;
+        st.capture_offered         = true;
 
-        // Sample the first output token from logits
-        impl_->sample_tokens(impl_->pending_round_.logits(), std::span(&lane_idx, 1),
-                             std::span(impl_->host_sampled_tokens_.data(), 1));
+        const std::uint64_t capture_id = ++impl_->capture_counter_;
+        st.pending_capture_offer       = capture_id;
 
-        impl_->pending_batch_tokens_.resize(1);
-        impl_->pending_batch_row_counts_.resize(1);
-        impl_->pending_batch_tokens_[0]     = static_cast<TokenId>(impl_->host_sampled_tokens_[0]);
-        impl_->pending_batch_row_counts_[0] = 1;
-
-        st.prefill_completed = true;
-        st.committed_frontier = static_cast<std::int32_t>(N);
-        st.media_payloads.clear();
-        if (impl_->vision_session_.has_value()) {
-            impl_->vision_session_->retire_handoff();
-        }
+        PrefillProgress progress;
+        progress.summary.prompt_tokens        = static_cast<std::uint32_t>(N);
+        progress.summary.reused_prompt_tokens = st.reused_prompt_tokens;
+        progress.summary.prefix_reuse_path =
+            st.reused_prompt_tokens > 0
+                ? (st.reused_from_turn_closure
+                       ? PrefixReusePath::PrivateTurnClosure
+                       : PrefixReusePath::PrivateEndpoint)
+                : PrefixReusePath::Root;
+        progress.processed_prompt_tokens      = chunk_size;
+        progress.complete                     = false;
+        progress.timing                       = timing.finish();
+        progress.capture                      = ContractAccess::make_capture_offer(
+            this, sequence.lane(), sequence.epoch(), capture_id);
+        return progress;
     }
+
+    // Normal completion at N without capture offer at N
+    impl_->pending_round_ = impl_->executor_.execute_prefill_chunk(
+        st.lane_handle, chunk_token_ids, chunk_positions, static_cast<std::int32_t>(start_i),
+        nullptr, visual_embeddings, local_scatter_indices);
+    st.last_token_id    = chunk_token_ids.back();
+    st.last_token_pos   = chunk_positions.back()[0];
+    st.last_token_index = static_cast<std::int32_t>(end_i - 1);
     st.prompt_tokens_processed = end_i;
+
+    impl_->sample_tokens(impl_->pending_round_.logits(), std::span(&lane_idx, 1),
+                         std::span(impl_->host_sampled_tokens_.data(), 1));
+
+    impl_->pending_batch_tokens_.resize(1);
+    impl_->pending_batch_row_counts_.resize(1);
+    impl_->pending_batch_tokens_[0]     = static_cast<TokenId>(impl_->host_sampled_tokens_[0]);
+    impl_->pending_batch_row_counts_[0] = 1;
+
+    st.prefill_completed  = true;
+    st.committed_frontier = static_cast<std::int32_t>(N);
+    st.media_payloads.clear();
+    if (impl_->vision_session_.has_value()) {
+        impl_->vision_session_->retire_handoff();
+    }
 
     PrefillProgress progress;
     progress.summary.prompt_tokens        = static_cast<std::uint32_t>(N);
     progress.summary.reused_prompt_tokens = st.reused_prompt_tokens;
     progress.summary.prefix_reuse_path =
-        st.reused_prompt_tokens > 0 ? PrefixReusePath::PrivateEndpoint : PrefixReusePath::Root;
-    progress.processed_prompt_tokens      = end_i - start_i;
-    progress.complete                     = (end_i == N);
+        st.reused_prompt_tokens > 0
+            ? (st.reused_from_turn_closure
+                   ? PrefixReusePath::PrivateTurnClosure
+                   : PrefixReusePath::PrivateEndpoint)
+            : PrefixReusePath::Root;
+    progress.processed_prompt_tokens      = chunk_size;
+    progress.complete                     = true;
     progress.timing                       = timing.finish();
-
-    if (progress.complete) {
-        progress.pending = ContractAccess::make_pending(
-            this, impl_->pending_round_.valid() ? 1 : 0, std::span(&sequence, 1),
-            std::span(impl_->pending_batch_tokens_.data(), 1),
-            std::span(impl_->pending_batch_row_counts_.data(), 1), 1, progress.timing);
-    }
+    progress.pending                      = ContractAccess::make_pending(
+        this, 1, std::span(&sequence, 1),
+        std::span(impl_->pending_batch_tokens_.data(), 1),
+        std::span(impl_->pending_batch_row_counts_.data(), 1), 1, progress.timing);
     return progress;
 }
 
 CaptureAssessment
-Program::inspect_capture(const CaptureOffer& /*offer*/,
+Program::inspect_capture(const CaptureOffer& offer,
                          const SharedPrefixHandle* /*exact_shared*/,
                          const SharedPrefixHandle* /*replacement*/,
                          std::optional<runtime::CheckpointRef> /*private_replacement*/) const {
-    return CaptureAssessment{};
+    if (impl_ == nullptr || offer.owner() != this) {
+        return CaptureAssessment{};
+    }
+    const std::uint32_t lane_idx = offer.lane().value;
+    if (lane_idx >= impl_->plan_.config.max_concurrency) {
+        return CaptureAssessment{};
+    }
+    const auto& st = impl_->lane_states_[lane_idx];
+    if (!st.active || st.epoch != offer.epoch()) {
+        return CaptureAssessment{};
+    }
+    if (impl_->plan_.config.continuation_capacity == 0) {
+        return CaptureAssessment{};
+    }
+
+    CaptureAssessment assessment;
+    const std::uint32_t N        = st.prompt_tokens_processed;
+    assessment.frontier          = N;
+    assessment.publishes_private = st.publish_continuation && (impl_->plan_.config.continuation_capacity > 0);
+    assessment.publishes_shared  = false;
+    assessment.shortlist_key     = PrefixShortlistKey{
+        .digest       = st.prefix_digests.at(N),
+        .frontier     = N,
+        .identity_tag = 0,
+    };
+    return assessment;
 }
 
 bool Program::shared_capture_matches(const CaptureOffer& /*offer*/,
@@ -817,15 +1028,125 @@ bool Program::shared_capture_matches(const CaptureOffer& /*offer*/,
     return false;
 }
 
-void Program::skip_capture(CaptureOffer&& /*offer*/) {}
+void Program::skip_capture(CaptureOffer&& offer) {
+    if (impl_ == nullptr || offer.owner() != this) { return; }
+    const std::uint32_t lane_idx = offer.lane().value;
+    if (lane_idx < impl_->plan_.config.max_concurrency) {
+        impl_->lane_states_[lane_idx].pending_capture_offer = 0;
+    }
+    ContractAccess::consume(offer);
+}
 
 runtime::ContextTransactionReserveStatus
-Program::reserve_active_capture(CaptureOffer&& /*offer*/,
+Program::reserve_active_capture(CaptureOffer&& offer,
                                 const SharedPrefixHandle* /*exact_shared*/,
                                 const SharedPrefixHandle* /*replacement*/,
                                 std::optional<runtime::CheckpointRef> /*private_replacement*/,
-                                runtime::CancellationFlagView /*cancellation*/) {
-    return runtime::ContextTransactionReserveStatus::Aborted;
+                                runtime::CancellationFlagView cancellation) {
+    if (impl_ == nullptr || offer.owner() != this) {
+        return runtime::ContextTransactionReserveStatus::Aborted;
+    }
+    if (cancellation.requested()) {
+        skip_capture(std::move(offer));
+        return runtime::ContextTransactionReserveStatus::Aborted;
+    }
+    const std::uint32_t lane_idx = offer.lane().value;
+    if (lane_idx >= impl_->plan_.config.max_concurrency) {
+        skip_capture(std::move(offer));
+        return runtime::ContextTransactionReserveStatus::Aborted;
+    }
+    auto& st = impl_->lane_states_[lane_idx];
+    if (!st.active || st.epoch != offer.epoch()) {
+        skip_capture(std::move(offer));
+        return runtime::ContextTransactionReserveStatus::Aborted;
+    }
+    if (impl_->has_context_transaction_) {
+        skip_capture(std::move(offer));
+        return runtime::ContextTransactionReserveStatus::Aborted;
+    }
+
+    std::int32_t slot_idx = -1;
+    for (std::size_t c = 0; c < impl_->continuation_slots_.size(); ++c) {
+        if (impl_->continuation_slots_[c].role == detail::ContinuationSlotRole::Vacant) {
+            slot_idx = static_cast<std::int32_t>(c);
+            break;
+        }
+    }
+    if (slot_idx < 0) {
+        std::uint64_t oldest_epoch = std::numeric_limits<std::uint64_t>::max();
+        for (std::size_t c = 0; c < impl_->continuation_slots_.size(); ++c) {
+            if (impl_->continuation_slots_[c].role == detail::ContinuationSlotRole::Catalogued &&
+                impl_->continuation_slots_[c].last_used_epoch < oldest_epoch) {
+                oldest_epoch = impl_->continuation_slots_[c].last_used_epoch;
+                slot_idx     = static_cast<std::int32_t>(c);
+            }
+        }
+        if (slot_idx >= 0) {
+            impl_->executor_.release_physical_groups(
+                impl_->continuation_slots_[slot_idx].physical_groups);
+            impl_->continuation_slots_[slot_idx].physical_groups.clear();
+            impl_->continuation_slots_[slot_idx].generation++;
+        }
+    }
+    if (slot_idx < 0) {
+        skip_capture(std::move(offer));
+        return runtime::ContextTransactionReserveStatus::Aborted;
+    }
+
+    const std::int32_t capture_frontier = static_cast<std::int32_t>(st.prompt_tokens_processed);
+    auto& c_slot              = impl_->continuation_slots_[slot_idx];
+    c_slot.role               = detail::ContinuationSlotRole::Catalogued;
+    c_slot.generation         = ++impl_->continuation_epoch_;
+    c_slot.committed_tokens.assign(st.prompt_tokens.begin(),
+                                   st.prompt_tokens.begin() + capture_frontier);
+    c_slot.committed_frontier = capture_frontier;
+    c_slot.prefix_digest      = st.prefix_digests.at(capture_frontier);
+    c_slot.last_used_epoch    = ++impl_->continuation_epoch_;
+    c_slot.kind               = runtime::CheckpointKind::TurnClosure;
+    const auto groups         = impl_->executor_.lane_physical_groups(st.lane_handle);
+    c_slot.physical_groups.assign(groups.begin(), groups.end());
+    c_slot.history            = impl_->executor_.lane_history(st.lane_handle);
+    impl_->executor_.acquire_physical_groups(c_slot.physical_groups);
+
+    const auto active_slot = impl_->allocation_.current_source_slot(lane_idx);
+    impl_->executor_.copy_state_slot(static_cast<std::uint32_t>(active_slot), c_slot.cache_slot);
+
+    st.turn_closure_continuation_index = static_cast<std::uint32_t>(slot_idx);
+    st.pending_capture_offer           = 0;
+    ContractAccess::consume(offer);
+
+    impl_->has_context_transaction_ = true;
+    impl_->is_capture_transaction_  = true;
+    impl_->transaction_lane_        = runtime::LaneId(lane_idx);
+    impl_->transaction_epoch_       = st.epoch;
+
+    ActiveCaptureResult capture_res;
+    capture_res.status = runtime::ContextTransactionStatus::Published;
+    capture_res.active_summary.rewrite = CheckpointSummary{
+        .ref = runtime::CheckpointRef{
+            .kind     = runtime::CheckpointKind::TurnClosure,
+            .frontier = static_cast<std::uint32_t>(capture_frontier),
+            .ordinal  = 0,
+        },
+        .shortlist_key = PrefixShortlistKey{
+            .digest       = c_slot.prefix_digest,
+            .frontier     = static_cast<std::uint32_t>(capture_frontier),
+            .identity_tag = 0,
+        },
+        .state_residency = runtime::ReplicaResidency::DeviceOnly,
+        .required_kv = TargetKVRequirement{
+            .main_frontier    = static_cast<std::uint32_t>(capture_frontier),
+            .backend_frontier = 0,
+            .main_pages       = static_cast<std::uint32_t>(c_slot.physical_groups.size() * 4),
+            .backend_pages    = 0,
+        },
+        .rebuild_work = runtime::make_prefill_work(
+            0, static_cast<std::uint32_t>(capture_frontier), 0, 0,
+            impl_->plan_.config.prefill_chunk),
+    };
+    impl_->pending_capture_result_ = std::move(capture_res);
+
+    return runtime::ContextTransactionReserveStatus::Reserved;
 }
 
 PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
@@ -1051,6 +1372,7 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
                     if (target_c_idx < impl_->plan_.config.continuation_capacity) {
                         auto& c_slot = impl_->continuation_slots_[target_c_idx];
                         c_slot.role = detail::ContinuationSlotRole::Catalogued;
+                        c_slot.kind = runtime::CheckpointKind::SessionEndpoint;
                         c_slot.last_used_epoch = ++impl_->continuation_epoch_;
                         c_slot.committed_frontier = st.committed_frontier;
                         c_slot.committed_tokens = st.prompt_tokens;
@@ -1088,6 +1410,37 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
                         out.summary.endpoint          = cp;
                         out.summary.active_references = 0;
 
+                        if (st.turn_closure_continuation_index.has_value()) {
+                            const std::uint32_t turn_idx = *st.turn_closure_continuation_index;
+                            if (turn_idx < impl_->continuation_slots_.size()) {
+                                const auto& turn_slot = impl_->continuation_slots_[turn_idx];
+                                if (turn_slot.role == detail::ContinuationSlotRole::Catalogued) {
+                                    CheckpointSummary rw;
+                                    rw.ref = runtime::CheckpointRef{
+                                        .kind     = runtime::CheckpointKind::TurnClosure,
+                                        .frontier = static_cast<std::uint32_t>(turn_slot.committed_frontier),
+                                        .ordinal  = 0,
+                                    };
+                                    rw.shortlist_key = PrefixShortlistKey{
+                                        .digest       = turn_slot.prefix_digest,
+                                        .frontier     = static_cast<std::uint32_t>(turn_slot.committed_frontier),
+                                        .identity_tag = 0,
+                                    };
+                                    rw.state_residency = runtime::ReplicaResidency::DeviceOnly;
+                                    rw.required_kv = TargetKVRequirement{
+                                        .main_frontier    = static_cast<std::uint32_t>(turn_slot.committed_frontier),
+                                        .backend_frontier = 0,
+                                        .main_pages       = static_cast<std::uint32_t>(turn_slot.physical_groups.size() * 4),
+                                        .backend_pages    = 0,
+                                    };
+                                    rw.rebuild_work = runtime::make_prefill_work(
+                                        0, static_cast<std::uint32_t>(turn_slot.committed_frontier), 0, 0,
+                                        impl_->plan_.config.prefill_chunk);
+                                    out.summary.rewrite = rw;
+                                }
+                            }
+                        }
+
                         out.continuation.emplace(ContinuationHandle(
                             this, target_c_idx, c_slot.generation));
                         out.disposition = runtime::FinishDisposition::Catalogued;
@@ -1121,9 +1474,13 @@ AbortResult Program::abort(SequenceHandle sequence) noexcept {
         if (lane_idx < impl_->plan_.config.max_concurrency) {
             auto& st = impl_->lane_states_[lane_idx];
             if (st.active && st.epoch == sequence.epoch()) {
+                if (impl_->pending_round_.valid()) {
+                    impl_->pending_round_.abort();
+                }
                 impl_->executor_.release_lane(st.lane_handle);
                 st.active   = false;
                 st.finished = true;
+                st.pending_capture_offer = 0;
                 ++impl_->resource_revision_;
             }
         }

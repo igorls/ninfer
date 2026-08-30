@@ -15,6 +15,7 @@ FlashNextLaneLedger::FlashNextLaneLedger(const FlashNextRuntimePlan& plan)
     lane_physical_groups_.resize(concurrency);
     previous_group_counts_.resize(concurrency, 0);
 
+    physical_group_refcounts_.resize(plan_.main_page_groups, 0);
     free_physical_groups_.reserve(plan_.main_page_groups);
     for (std::uint32_t g = plan_.main_page_groups; g > 0; --g) {
         free_physical_groups_.push_back(g - 1U);
@@ -50,7 +51,16 @@ void FlashNextLaneLedger::release_lane(LaneHandle handle) {
     validate_handle(handle, LaneState::Active);
     const std::uint32_t lane = handle.lane_index();
 
-    for (const auto g : lane_physical_groups_[lane]) { free_physical_groups_.push_back(g); }
+    for (const auto g : lane_physical_groups_[lane]) {
+        if (g < physical_group_refcounts_.size()) {
+            if (physical_group_refcounts_[g] > 0) {
+                physical_group_refcounts_[g] -= 1;
+            }
+            if (physical_group_refcounts_[g] == 0) {
+                free_physical_groups_.push_back(g);
+            }
+        }
+    }
     lane_physical_groups_[lane].clear();
     previous_group_counts_[lane] = 0;
 
@@ -58,6 +68,7 @@ void FlashNextLaneLedger::release_lane(LaneHandle handle) {
     lanes_[lane].state = LaneState::Free;
     lanes_[lane].epoch += 1;
     lanes_[lane].committed_frontier = 0;
+    lanes_[lane].history            = PleTokenHistory{};
     lanes_[lane].history            = PleTokenHistory{};
 
     // Block table indexing: lane * logical_pages + page
@@ -72,8 +83,21 @@ void FlashNextLaneLedger::release_lane(LaneHandle handle) {
 }
 
 std::int32_t FlashNextLaneLedger::committed_frontier(LaneHandle handle) const {
-    validate_handle(handle, LaneState::Active);
-    return lanes_[handle.lane_index()].committed_frontier;
+    const std::uint32_t concurrency = plan_.config.max_concurrency;
+    if (handle.lane_index() >= concurrency) {
+        throw std::invalid_argument("FlashNextLaneLedger: invalid lane index in handle");
+    }
+    const auto& lane = lanes_[handle.lane_index()];
+    if (lane.owner != handle.owner()) {
+        throw std::invalid_argument("FlashNextLaneLedger: cross-executor or invalid owner handle");
+    }
+    if (lane.epoch != handle.epoch()) {
+        throw std::invalid_argument("FlashNextLaneLedger: stale lane handle epoch");
+    }
+    if (lane.state == LaneState::Free) {
+        throw std::logic_error("FlashNextLaneLedger: lane is free");
+    }
+    return lane.committed_frontier;
 }
 
 const PleTokenHistory& FlashNextLaneLedger::lane_history(LaneHandle handle) const {
@@ -95,7 +119,20 @@ const PleTokenHistory& FlashNextLaneLedger::lane_history(LaneHandle handle) cons
 }
 
 std::span<const std::uint32_t> FlashNextLaneLedger::lane_physical_groups(LaneHandle handle) const {
-    validate_handle(handle, LaneState::Active);
+    const std::uint32_t concurrency = plan_.config.max_concurrency;
+    if (handle.lane_index() >= concurrency) {
+        throw std::invalid_argument("FlashNextLaneLedger: invalid lane index in handle");
+    }
+    const auto& lane = lanes_[handle.lane_index()];
+    if (lane.owner != handle.owner()) {
+        throw std::invalid_argument("FlashNextLaneLedger: cross-executor or invalid owner handle");
+    }
+    if (lane.epoch != handle.epoch()) {
+        throw std::invalid_argument("FlashNextLaneLedger: stale lane handle epoch");
+    }
+    if (lane.state == LaneState::Free) {
+        throw std::logic_error("FlashNextLaneLedger: lane is free");
+    }
     return lane_physical_groups_[handle.lane_index()];
 }
 
@@ -108,9 +145,24 @@ std::vector<std::uint32_t> FlashNextLaneLedger::take_lane_physical_groups(LaneHa
     return groups;
 }
 
+void FlashNextLaneLedger::acquire_physical_groups(std::span<const std::uint32_t> groups) {
+    for (const auto g : groups) {
+        if (g < physical_group_refcounts_.size()) {
+            physical_group_refcounts_[g] += 1;
+        }
+    }
+}
+
 void FlashNextLaneLedger::release_physical_groups(std::span<const std::uint32_t> groups) {
     for (const auto g : groups) {
-        free_physical_groups_.push_back(g);
+        if (g < physical_group_refcounts_.size()) {
+            if (physical_group_refcounts_[g] > 0) {
+                physical_group_refcounts_[g] -= 1;
+            }
+            if (physical_group_refcounts_[g] == 0) {
+                free_physical_groups_.push_back(g);
+            }
+        }
     }
 }
 
@@ -124,6 +176,13 @@ void FlashNextLaneLedger::attach_physical_groups(
     previous_group_counts_[lane] = groups.size();
     lanes_[lane].committed_frontier = committed_frontier;
     lanes_[lane].history = history;
+
+    // Active lane acquires reference to attached groups
+    for (const auto g : groups) {
+        if (g < physical_group_refcounts_.size()) {
+            physical_group_refcounts_[g] += 1;
+        }
+    }
 
     // Populate block tables for the attached groups
     for (std::size_t g_idx = 0; g_idx < groups.size(); ++g_idx) {
@@ -242,6 +301,9 @@ FlashNextLaneLedger::begin_round(std::span<const LaneStepRequest> requests,
         while (owned_groups.size() < req_groups) {
             const auto phys_group = free_physical_groups_.back();
             free_physical_groups_.pop_back();
+            if (phys_group < physical_group_refcounts_.size()) {
+                physical_group_refcounts_[phys_group] = 1;
+            }
 
             const auto log_group = static_cast<std::uint32_t>(owned_groups.size());
             owned_groups.push_back(phys_group);
@@ -323,6 +385,9 @@ FlashNextLaneLedger::begin_prefill_chunk(LaneHandle handle,
         while (owned_groups.size() < req_groups) {
             const auto phys_group = free_physical_groups_.back();
             free_physical_groups_.pop_back();
+            if (phys_group < physical_group_refcounts_.size()) {
+                physical_group_refcounts_[phys_group] = 1;
+            }
 
             const auto log_group = static_cast<std::uint32_t>(owned_groups.size());
             owned_groups.push_back(phys_group);
@@ -365,6 +430,7 @@ void FlashNextLaneLedger::rollback_prepared_prefill_chunk(std::uint64_t tx_id) {
     const auto prev_count = previous_group_counts_[lane];
     auto& owned           = lane_physical_groups_[lane];
     while (owned.size() > prev_count) {
+        const auto g = owned.back();
         const auto log_group = static_cast<std::uint32_t>(owned.size() - 1U);
         for (std::uint32_t s = 0; s < 4U; ++s) {
             const auto log_att = log_group * 4U + s;
@@ -378,7 +444,14 @@ void FlashNextLaneLedger::rollback_prepared_prefill_chunk(std::uint64_t tx_id) {
             host_indexer_table_[static_cast<std::size_t>(lane) * plan_.indexer_logical_pages +
                                 log_group] = -1;
         }
-        free_physical_groups_.push_back(owned.back());
+        if (g < physical_group_refcounts_.size()) {
+            if (physical_group_refcounts_[g] > 0) {
+                physical_group_refcounts_[g] -= 1;
+            }
+            if (physical_group_refcounts_[g] == 0) {
+                free_physical_groups_.push_back(g);
+            }
+        }
         owned.pop_back();
         block_tables_dirty_ = true;
     }
@@ -429,6 +502,7 @@ void FlashNextLaneLedger::rollback_prepared_round(std::uint64_t tx_id) {
         const auto prev_count = previous_group_counts_[lane];
         auto& owned           = lane_physical_groups_[lane];
         while (owned.size() > prev_count) {
+            const auto g = owned.back();
             const auto log_group = static_cast<std::uint32_t>(owned.size() - 1U);
             for (std::uint32_t s = 0; s < 4U; ++s) {
                 const auto log_att = log_group * 4U + s;
@@ -442,7 +516,14 @@ void FlashNextLaneLedger::rollback_prepared_round(std::uint64_t tx_id) {
                 host_indexer_table_[static_cast<std::size_t>(lane) * plan_.indexer_logical_pages +
                                     log_group] = -1;
             }
-            free_physical_groups_.push_back(owned.back());
+            if (g < physical_group_refcounts_.size()) {
+                if (physical_group_refcounts_[g] > 0) {
+                    physical_group_refcounts_[g] -= 1;
+                }
+                if (physical_group_refcounts_[g] == 0) {
+                    free_physical_groups_.push_back(g);
+                }
+            }
             owned.pop_back();
             block_tables_dirty_ = true;
         }

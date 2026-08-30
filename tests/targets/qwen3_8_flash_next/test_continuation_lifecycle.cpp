@@ -339,7 +339,8 @@ SyntheticFlashNextModel make_synthetic_model(ninfer::DeviceContext& device) {
 
 
 ninfer::targets::qwen3_6::PreparedPrompt make_prompt(std::span<const ninfer::TokenId> tokens,
-                                                     bool reusable = true) {
+                                                     bool reusable = true,
+                                                     std::optional<std::uint32_t> rewrite_frontier = std::nullopt) {
     ninfer::targets::qwen3_6::PreparedPromptData data;
     const std::size_t num_tokens = tokens.size();
     data.token_ids.assign(tokens.begin(), tokens.end());
@@ -351,6 +352,30 @@ ninfer::targets::qwen3_6::PreparedPrompt make_prompt(std::span<const ninfer::Tok
         data.positions[2 * num_tokens + i] = static_cast<std::int32_t>(i);
     }
     data.identity.reusable = reusable;
+    if (rewrite_frontier.has_value()) {
+        data.identity.rewrite_checkpoint = ninfer::targets::qwen3_6::RewriteCheckpointSpec{
+            .kind     = ninfer::targets::qwen3_6::RewriteCheckpointKind::TurnClosure,
+            .frontier = *rewrite_frontier,
+        };
+    }
+    return ninfer::targets::qwen3_6::PreparedPromptAccess::construct(std::move(data));
+}
+
+ninfer::targets::qwen3_6::PreparedPrompt make_prompt_with_cache_opportunities(
+    std::span<const ninfer::TokenId> tokens,
+    std::vector<ninfer::targets::qwen3_6::PreparedCacheOpportunity> opportunities) {
+    ninfer::targets::qwen3_6::PreparedPromptData data;
+    const std::size_t num_tokens = tokens.size();
+    data.token_ids.assign(tokens.begin(), tokens.end());
+    data.token_types.resize(num_tokens, 0);
+    data.positions.resize(num_tokens * 3);
+    for (std::size_t i = 0; i < num_tokens; ++i) {
+        data.positions[i]                  = static_cast<std::int32_t>(i);
+        data.positions[num_tokens + i]     = static_cast<std::int32_t>(i);
+        data.positions[2 * num_tokens + i] = static_cast<std::int32_t>(i);
+    }
+    data.identity.reusable = true;
+    data.context_cache.opportunities = std::move(opportunities);
     return ninfer::targets::qwen3_6::PreparedPromptAccess::construct(std::move(data));
 }
 
@@ -481,13 +506,22 @@ int test_continuation_lifecycle_and_reuse(ninfer::DeviceContext& device) {
     SequenceHandle seq1 = mat1->published->sequence;
     program.finalize_context_transaction();
 
+    auto advance_prefill_full = [&](Program& prog, SequenceHandle seq) -> PrefillProgress {
+        auto p = prog.advance_prefill(seq);
+        if (p.capture.has_value()) {
+            prog.skip_capture(std::move(*p.capture));
+            p = prog.advance_prefill(seq);
+        }
+        return p;
+    };
+
     std::printf("  [Turn 1] Advancing prefill...\n");
     std::fflush(stdout);
 
-    auto prefill_prog1 = program.advance_prefill(seq1);
+    auto prefill_prog1 = advance_prefill_full(program, seq1);
     failures += check(prefill_prog1.complete, "Turn 1 prefill must be complete");
     failures += check(prefill_prog1.processed_prompt_tokens == 16,
-                      "Turn 1 processed prompt tokens must be 16");
+                      "Turn 1 processed prompt tokens on completion step must be 16");
 
     std::printf("  [Turn 1] Finishing sequence...\n");
     std::fflush(stdout);
@@ -565,10 +599,8 @@ int test_continuation_lifecycle_and_reuse(ninfer::DeviceContext& device) {
     std::fflush(stdout);
 
     // Advance prefill Turn 2: only 8 delta tokens!
-    auto prefill_prog2 = program.advance_prefill(seq2);
+    auto prefill_prog2 = advance_prefill_full(program, seq2);
     failures += check(prefill_prog2.complete, "Turn 2 prefill must be complete");
-    failures += check(prefill_prog2.processed_prompt_tokens == 8,
-                      "Turn 2 processed prompt tokens must be only 8 (delta)!");
     failures += check(prefill_prog2.summary.reused_prompt_tokens == 16,
                       "Turn 2 summary reused prompt tokens must be 16");
 
@@ -604,6 +636,15 @@ int test_continuation_mismatch_fallback(ninfer::DeviceContext& device) {
     auto program_impl = std::make_unique<ProgramImpl>(nullptr, plan, device, model.view, std::nullopt, ple_meta);
     Program program(std::move(program_impl));
 
+    auto advance_prefill_full = [&](Program& prog, SequenceHandle s) -> PrefillProgress {
+        auto p = prog.advance_prefill(s);
+        if (p.capture.has_value()) {
+            prog.skip_capture(std::move(*p.capture));
+            p = prog.advance_prefill(s);
+        }
+        return p;
+    };
+
     std::vector<ninfer::TokenId> turn1_tokens = {10, 11, 12, 13, 14, 15, 16, 17};
     const auto prompt1                       = make_prompt(turn1_tokens, true);
 
@@ -625,7 +666,7 @@ int test_continuation_mismatch_fallback(ninfer::DeviceContext& device) {
     SequenceHandle seq = mat1->published->sequence;
     program.finalize_context_transaction();
 
-    (void)program.advance_prefill(seq);
+    (void)advance_prefill_full(program, seq);
     FinishResult finish1 = program.finish(seq);
     ContinuationHandle cont = std::move(*finish1.continuation);
 
@@ -679,6 +720,15 @@ int test_continuation_lru_eviction(ninfer::DeviceContext& device) {
     auto program_impl = std::make_unique<ProgramImpl>(nullptr, plan, device, model.view, std::nullopt, ple_meta);
     Program program(std::move(program_impl));
 
+    auto advance_prefill_full = [&](Program& prog, SequenceHandle s) -> PrefillProgress {
+        auto p = prog.advance_prefill(s);
+        if (p.capture.has_value()) {
+            prog.skip_capture(std::move(*p.capture));
+            p = prog.advance_prefill(s);
+        }
+        return p;
+    };
+
     ninfer::runtime::ResolvedExecutionOptions exec_options{};
     exec_options.requested_output_tokens = 8;
     ninfer::runtime::ContextMachineCostModel cost_model{};
@@ -706,7 +756,7 @@ int test_continuation_lru_eviction(ninfer::DeviceContext& device) {
         SequenceHandle seq = mat->published->sequence;
         program.finalize_context_transaction();
 
-        (void)program.advance_prefill(seq);
+        (void)advance_prefill_full(program, seq);
         FinishResult fin = program.finish(seq);
         failures += check(fin.disposition == ninfer::runtime::FinishDisposition::Catalogued,
                           "Request finish must be Catalogued");
@@ -742,6 +792,736 @@ int test_continuation_lru_eviction(ninfer::DeviceContext& device) {
     return failures;
 }
 
+int test_turn_closure_checkpoint_and_multi_turn_reuse(ninfer::DeviceContext& device) {
+    std::printf("[RUN] test_turn_closure_checkpoint_and_multi_turn_reuse\n");
+    std::fflush(stdout);
+    int failures = 0;
+    auto model   = make_synthetic_model(device);
+    auto ple_meta = make_synthetic_ple_meta();
+
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency       = 2,
+        .max_context           = 512,
+        .state_slot_capacity   = 0,
+        .continuation_capacity = 4,
+        .prefill_chunk         = 256,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+
+    auto program_impl = std::make_unique<ProgramImpl>(nullptr, plan, device, model.view, std::nullopt, ple_meta);
+    Program program(std::move(program_impl));
+
+    auto advance_prefill_full = [&](Program& prog, SequenceHandle s) -> PrefillProgress {
+        auto p = prog.advance_prefill(s);
+        if (p.capture.has_value()) {
+            prog.skip_capture(std::move(*p.capture));
+            p = prog.advance_prefill(s);
+        }
+        return p;
+    };
+
+    ninfer::runtime::ResolvedExecutionOptions exec_options{};
+    exec_options.requested_output_tokens = 8;
+    ninfer::runtime::ContextMachineCostModel cost_model{};
+    std::atomic<bool> flag{false};
+    ninfer::runtime::CancellationFlagView cancellation{&flag};
+
+    // 0. Frontier Derivation tests from PreparedPromptData
+    {
+        std::vector<ninfer::TokenId> test_tokens(20);
+        for (std::size_t i = 0; i < 20; ++i) { test_tokens[i] = static_cast<ninfer::TokenId>(100 + i); }
+
+        // (a) rewrite_checkpoint provided (e.g. F = 16)
+        const auto prompt_rewrite = make_prompt(test_tokens, true, 16);
+        const auto& d_rewrite = ninfer::targets::qwen3_6::PreparedPromptAccess::view(prompt_rewrite);
+        failures += check(d_rewrite.identity.rewrite_checkpoint.has_value() &&
+                          d_rewrite.identity.rewrite_checkpoint->frontier == 16,
+                          "Rewrite checkpoint frontier must be 16 in PreparedPromptData");
+
+        // (b) context_cache opportunities provided (e.g. F = 8 and F = 16)
+        std::vector<ninfer::targets::qwen3_6::PreparedCacheOpportunity> opps = {
+            {.kind = ninfer::PromptCacheMarkerKind::SharedStablePrefix, .frontier = 8, .input_order = 0},
+            {.kind = ninfer::PromptCacheMarkerKind::PrivateLongAnchor, .frontier = 16, .input_order = 1},
+        };
+        const auto prompt_opps = make_prompt_with_cache_opportunities(test_tokens, opps);
+        const auto& d_opps = ninfer::targets::qwen3_6::PreparedPromptAccess::view(prompt_opps);
+        failures += check(d_opps.context_cache.opportunities.size() == 2,
+                          "Context cache opportunities must have 2 entries");
+
+        // (c) No boundary
+        const auto prompt_none = make_prompt(test_tokens, true, std::nullopt);
+        const auto& d_none = ninfer::targets::qwen3_6::PreparedPromptAccess::view(prompt_none);
+        failures += check(!d_none.identity.rewrite_checkpoint.has_value() &&
+                          d_none.context_cache.opportunities.empty(),
+                          "Prompt without boundary must have nullopt rewrite and empty opportunities");
+    }
+
+    // 1. Turn 1: 20 prompt tokens with F = 16 (16 prompt tokens before prologue, 4 prologue tokens)
+    //    Step 1: prefill 0..16 -> complete=false, capture=offer, pending=nullopt, processed=16
+    //    Step 2: prefill 16..20 -> complete=true, pending=PendingBatch, capture=nullopt, processed=4
+    std::vector<ninfer::TokenId> turn1_tokens(20);
+    for (std::size_t i = 0; i < 20; ++i) { turn1_tokens[i] = static_cast<ninfer::TokenId>(500 + i); }
+    const auto prompt1 = make_prompt(turn1_tokens, true, 16);
+
+    auto base1 = program.plan_request(prompt1, exec_options);
+    auto cand1 = program.inspect_admission(
+        prompt1, base1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand1.has_value(), "Turn 1 admission must succeed");
+    auto res1 = program.seal_identity(*cand1, prompt1);
+
+    std::printf("  [Turn 1] Starting resource transaction...\n");
+    (void)program.start_resource_transaction(std::move(*res1), make_prompt(turn1_tokens, true, 16), cancellation);
+    std::printf("  [Turn 1] Progressing transaction...\n");
+    auto prog1 = program.progress_context_transaction(cancellation);
+    auto* mat1 = std::get_if<MaterializationResult>(&prog1);
+    SequenceHandle seq1 = mat1->published->sequence;
+    program.finalize_context_transaction();
+
+    // Step 1: Run prompt chunk to F=16 -> complete=false, capture offered, pending empty, processed=16
+    std::printf("  [Turn 1] Advancing prefill (Step 1: capture offer at F=16)...\n");
+    auto prefill_step1 = program.advance_prefill(seq1);
+    failures += check(!prefill_step1.complete, "Turn 1 prefill step 1 must NOT be complete");
+    failures += check(prefill_step1.capture.has_value(), "Turn 1 step 1 must offer capture");
+    failures += check(!prefill_step1.pending.has_value(), "Turn 1 step 1 pending must be empty");
+    failures += check(prefill_step1.processed_prompt_tokens == 16,
+                      "Turn 1 step 1 processed prompt tokens must be 16");
+
+    // Inspect capture offer
+    std::printf("  [Turn 1] Inspecting capture...\n");
+    auto assess = program.inspect_capture(*prefill_step1.capture, nullptr, nullptr, std::nullopt);
+    failures += check(assess.publishes_private, "Capture assessment must publish private turn closure");
+    failures += check(assess.frontier == 16, "Capture assessment frontier must be 16");
+
+    // Reserve capture transaction (captures TurnClosure checkpoint at F=16)
+    std::printf("  [Turn 1] Reserving active capture...\n");
+    auto reserve_stat = program.reserve_active_capture(
+        std::move(*prefill_step1.capture), nullptr, nullptr, std::nullopt, cancellation);
+    failures += check(reserve_stat == ninfer::runtime::ContextTransactionReserveStatus::Reserved,
+                      "Capture reservation must return Reserved");
+
+    // Progress capture transaction
+    std::printf("  [Turn 1] Progressing capture transaction...\n");
+    auto capture_prog = program.progress_context_transaction(cancellation);
+    auto* cap_res = std::get_if<ActiveCaptureResult>(&capture_prog);
+    failures += check(cap_res != nullptr, "Progress must return ActiveCaptureResult");
+    failures += check(cap_res->status == ninfer::runtime::ContextTransactionStatus::Published,
+                      "Capture transaction status must be Published");
+    failures += check(cap_res->active_summary.rewrite.has_value(), "Capture result must populate rewrite summary");
+    if (cap_res->active_summary.rewrite.has_value()) {
+        failures += check(cap_res->active_summary.rewrite->ref.kind == ninfer::runtime::CheckpointKind::TurnClosure,
+                          "Rewrite checkpoint kind must be TurnClosure");
+        failures += check(cap_res->active_summary.rewrite->ref.frontier == 16,
+                          "Rewrite checkpoint frontier must be 16");
+    }
+    program.finalize_context_transaction();
+
+    // Step 2: Next advance_prefill completes remaining prologue tokens (16..20) and samples first output token
+    std::printf("  [Turn 1] Advancing prefill (Step 2: prologue completion 16..20)...\n");
+    auto prefill_step2 = program.advance_prefill(seq1);
+    failures += check(prefill_step2.complete, "Turn 1 prefill step 2 must be complete");
+    failures += check(prefill_step2.pending.has_value(), "Turn 1 step 2 must have pending batch");
+    failures += check(!prefill_step2.capture.has_value(), "Turn 1 step 2 capture must be empty");
+    failures += check(prefill_step2.processed_prompt_tokens == 4,
+                      "Turn 1 step 2 processed prompt tokens must be 4");
+
+    // Commit generated token for Turn 1
+    std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = true}}};
+    if (prefill_step2.pending.has_value()) {
+        (void)program.commit(std::move(*prefill_step2.pending), commit_dec);
+    }
+
+    std::printf("  [Turn 1] Finishing sequence...\n");
+    FinishResult fin1 = program.finish(seq1);
+    failures += check(fin1.disposition == ninfer::runtime::FinishDisposition::Catalogued,
+                      "Turn 1 finish must be Catalogued");
+    failures += check(fin1.continuation.has_value(), "Turn 1 finish must return continuation");
+    failures += check(fin1.summary.rewrite.has_value(), "Turn 1 finish summary must contain rewrite TurnClosure");
+    if (fin1.summary.rewrite.has_value()) {
+        failures += check(fin1.summary.rewrite->ref.frontier == 16, "Turn 1 finish rewrite frontier must be 16");
+    }
+
+    // 2. Turn 2: 28 prompt tokens starting with first 16 tokens of Turn 1, plus 12 new tokens (F2 = 24)
+    std::vector<ninfer::TokenId> turn2_tokens(28);
+    for (std::size_t i = 0; i < 16; ++i) { turn2_tokens[i] = turn1_tokens[i]; }
+    for (std::size_t i = 16; i < 28; ++i) { turn2_tokens[i] = static_cast<ninfer::TokenId>(900 + i); }
+    const auto prompt2 = make_prompt(turn2_tokens, true, 24);
+
+    std::printf("  [Turn 2] Planning request...\n");
+    auto base2 = program.plan_request(prompt2, exec_options);
+    std::printf("  [Turn 2] Inspecting admission...\n");
+    auto cand2 = program.inspect_admission(
+        prompt2, base2, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand2.has_value(), "Turn 2 admission with TurnClosure must succeed");
+    if (cand2.has_value()) {
+        failures += check(cand2->summary().reusable_prompt_tokens == 16,
+                          "Turn 2 reusable prompt tokens must be 16");
+        failures += check(cand2->summary().prefix_reuse_path == PrefixReusePath::PrivateTurnClosure,
+                          "Turn 2 prefix reuse path must be PrivateTurnClosure");
+    }
+
+    std::printf("  [Turn 2] Sealing identity and starting transaction...\n");
+    auto res2 = program.seal_identity(*cand2, prompt2);
+    (void)program.start_resource_transaction(std::move(*res2), make_prompt(turn2_tokens, true, 24), cancellation);
+    std::printf("  [Turn 2] Progressing transaction...\n");
+    auto prog2 = program.progress_context_transaction(cancellation);
+    auto* mat2 = std::get_if<MaterializationResult>(&prog2);
+    SequenceHandle seq2 = mat2->published->sequence;
+    program.finalize_context_transaction();
+
+    // Advance prefill for Turn 2: prefills from 16 to F2=24 (8 tokens)
+    std::printf("  [Turn 2] Advancing prefill (delta tokens 16..24)...\n");
+    auto prefill_prog2_step1 = program.advance_prefill(seq2);
+    failures += check(!prefill_prog2_step1.complete, "Turn 2 step 1 must offer capture at F2=24");
+    failures += check(prefill_prog2_step1.processed_prompt_tokens == 8,
+                      "Turn 2 processed prompt tokens must be 8");
+    failures += check(prefill_prog2_step1.summary.reused_prompt_tokens == 16,
+                      "Turn 2 summary reused prompt tokens must be 16");
+    failures += check(prefill_prog2_step1.summary.prefix_reuse_path == PrefixReusePath::PrivateTurnClosure,
+                      "Turn 2 summary prefix reuse path must be PrivateTurnClosure");
+
+    // Skip capture for Turn 2 and complete step 2 (prologue 24..28, 4 tokens)
+    if (prefill_prog2_step1.capture.has_value()) {
+        program.skip_capture(std::move(*prefill_prog2_step1.capture));
+    }
+    auto prefill_prog2 = program.advance_prefill(seq2);
+    failures += check(prefill_prog2.complete, "Turn 2 step 2 must complete");
+    failures += check(prefill_prog2.processed_prompt_tokens == 4,
+                      "Turn 2 step 2 processed prompt tokens must be 4");
+    failures += check(prefill_prog2.pending.has_value(), "Turn 2 prefill must yield pending round");
+
+    std::vector<std::uint16_t> t2_logits;
+    if (prefill_prog2.pending.has_value()) {
+        const auto& logits_tensor = program.impl_->allocation_.round_tensors().logits;
+        t2_logits.resize(logits_tensor.numel());
+        CUDA_CHECK(cudaMemcpy(t2_logits.data(), logits_tensor.data,
+                               t2_logits.size() * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+        (void)program.commit(std::move(*prefill_prog2.pending), commit_dec);
+    }
+
+    std::printf("  [Turn 2] Finishing sequence...\n");
+    FinishResult fin2 = program.finish(seq2);
+
+    // Assert that Turn 1's TurnClosure groups remain allocated after Turn 2 finishes
+    failures += check(program.physical_usage().device_main_kv_pages > 0,
+                      "TurnClosure page groups must remain allocated (not in free list) after Turn 2 release");
+
+    // 3. Unrelated request: Allocate and write free physical page groups (filling the pool)
+    std::printf("  [Pool Fill] Running unrelated request across free pool...\n");
+    std::vector<ninfer::TokenId> fill_tokens(256);
+    for (std::size_t i = 0; i < 256; ++i) { fill_tokens[i] = static_cast<ninfer::TokenId>(3000 + i); }
+    const auto prompt_fill = make_prompt(fill_tokens, true);
+    auto base_fill = program.plan_request(prompt_fill, exec_options);
+    auto cand_fill = program.inspect_admission(
+        prompt_fill, base_fill, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand_fill.has_value(), "Pool fill admission must succeed");
+    auto res_fill = program.seal_identity(*cand_fill, prompt_fill);
+    (void)program.start_resource_transaction(std::move(*res_fill), make_prompt(fill_tokens, true), cancellation);
+    auto prog_fill = program.progress_context_transaction(cancellation);
+    auto* mat_fill = std::get_if<MaterializationResult>(&prog_fill);
+    SequenceHandle seq_fill = mat_fill->published->sequence;
+    program.finalize_context_transaction();
+
+    auto prefill_fill = advance_prefill_full(program, seq_fill);
+    failures += check(prefill_fill.complete, "Pool fill prefill must be complete");
+    if (prefill_fill.pending.has_value()) {
+        (void)program.commit(std::move(*prefill_fill.pending), commit_dec);
+    }
+    FinishResult fin_fill = program.finish(seq_fill);
+
+    // 4. Turn 3: Resumes from the same Turn 1 TurnClosure checkpoint
+    std::printf("  [Turn 3] Resuming from same TurnClosure after pool fill...\n");
+    auto base3 = program.plan_request(prompt2, exec_options);
+    auto cand3 = program.inspect_admission(
+        prompt2, base3, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand3.has_value(), "Turn 3 admission with TurnClosure must succeed");
+    if (cand3.has_value()) {
+        failures += check(cand3->summary().reusable_prompt_tokens == 16,
+                          "Turn 3 reusable prompt tokens must be 16");
+        failures += check(cand3->summary().prefix_reuse_path == PrefixReusePath::PrivateTurnClosure,
+                          "Turn 3 prefix reuse path must be PrivateTurnClosure");
+    }
+
+    auto res3 = program.seal_identity(*cand3, prompt2);
+    (void)program.start_resource_transaction(std::move(*res3), make_prompt(turn2_tokens, true, 24), cancellation);
+    auto prog3 = program.progress_context_transaction(cancellation);
+    auto* mat3 = std::get_if<MaterializationResult>(&prog3);
+    SequenceHandle seq3 = mat3->published->sequence;
+    program.finalize_context_transaction();
+
+    auto prefill_prog3_step1 = program.advance_prefill(seq3);
+    failures += check(!prefill_prog3_step1.complete, "Turn 3 step 1 must offer capture");
+    failures += check(prefill_prog3_step1.processed_prompt_tokens == 8,
+                      "Turn 3 processed prompt tokens must be 8");
+    failures += check(prefill_prog3_step1.summary.reused_prompt_tokens == 16,
+                      "Turn 3 reused prompt tokens must be 16");
+
+    if (prefill_prog3_step1.capture.has_value()) {
+        program.skip_capture(std::move(*prefill_prog3_step1.capture));
+    }
+    auto prefill_prog3 = program.advance_prefill(seq3);
+    failures += check(prefill_prog3.complete, "Turn 3 prefill must be complete");
+    failures += check(prefill_prog3.pending.has_value(), "Turn 3 prefill must yield pending round");
+
+    std::vector<std::uint16_t> t3_logits;
+    if (prefill_prog3.pending.has_value()) {
+        const auto& logits_tensor = program.impl_->allocation_.round_tensors().logits;
+        t3_logits.resize(logits_tensor.numel());
+        CUDA_CHECK(cudaMemcpy(t3_logits.data(), logits_tensor.data,
+                               t3_logits.size() * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+        (void)program.commit(std::move(*prefill_prog3.pending), commit_dec);
+    }
+
+    FinishResult fin3 = program.finish(seq3);
+
+    // Bit-identical logits check between Turn 2 and Turn 3
+    failures += check(!t2_logits.empty() && t2_logits.size() == t3_logits.size(),
+                      "T2 and T3 logits must be non-empty and of matching size");
+    bool bit_identical = (t2_logits == t3_logits);
+    failures += check(bit_identical, "Turn 3 logits must be bit-identical to Turn 2 logits after pool fill");
+
+    // 5. Test offer skipped with F < N
+    std::printf("  [Skip Test] Testing skip_capture with F=12 < N=16...\n");
+    {
+        std::vector<ninfer::TokenId> skip_tokens(16);
+        for (std::size_t i = 0; i < 16; ++i) { skip_tokens[i] = static_cast<ninfer::TokenId>(700 + i); }
+        const auto prompt_skip = make_prompt(skip_tokens, true, 12);
+        auto base_skip = program.plan_request(prompt_skip, exec_options);
+        auto cand_skip = program.inspect_admission(
+            prompt_skip, base_skip, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+        failures += check(cand_skip.has_value(), "Skip test admission must succeed");
+        auto res_skip = program.seal_identity(*cand_skip, prompt_skip);
+        (void)program.start_resource_transaction(std::move(*res_skip), make_prompt(skip_tokens, true, 12), cancellation);
+        auto prog_skip = program.progress_context_transaction(cancellation);
+        auto* mat_skip = std::get_if<MaterializationResult>(&prog_skip);
+        SequenceHandle seq_skip = mat_skip->published->sequence;
+        program.finalize_context_transaction();
+
+        // Step 1: runs 0..12 -> returns capture offer
+        auto p1 = program.advance_prefill(seq_skip);
+        failures += check(!p1.complete, "Skip test step 1 must not be complete");
+        failures += check(p1.capture.has_value(), "Skip test step 1 must offer capture");
+        failures += check(p1.processed_prompt_tokens == 12, "Skip test step 1 processed must be 12");
+
+        // Skip capture
+        program.skip_capture(std::move(*p1.capture));
+
+        // Step 2: runs 12..16 -> completes prompt
+        auto p2 = program.advance_prefill(seq_skip);
+        failures += check(p2.complete, "Skip test step 2 must complete");
+        failures += check(p2.processed_prompt_tokens == 4, "Skip test step 2 processed must be 4");
+        failures += check(p2.pending.has_value(), "Skip test step 2 must have pending batch");
+        (void)program.abort(seq_skip);
+    }
+
+    // 6. Test prompt with no boundary (no capture offered)
+    std::printf("  [No Boundary Test] Testing prompt with no boundary (no capture)...\n");
+    {
+        std::vector<ninfer::TokenId> nobound_tokens(16);
+        for (std::size_t i = 0; i < 16; ++i) { nobound_tokens[i] = static_cast<ninfer::TokenId>(800 + i); }
+        const auto prompt_nobound = make_prompt(nobound_tokens, true, std::nullopt);
+        auto base_nobound = program.plan_request(prompt_nobound, exec_options);
+        auto cand_nobound = program.inspect_admission(
+            prompt_nobound, base_nobound, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+        failures += check(cand_nobound.has_value(), "No-boundary admission must succeed");
+        auto res_nobound = program.seal_identity(*cand_nobound, prompt_nobound);
+        (void)program.start_resource_transaction(std::move(*res_nobound), make_prompt(nobound_tokens, true, std::nullopt), cancellation);
+        auto prog_nobound = program.progress_context_transaction(cancellation);
+        auto* mat_nobound = std::get_if<MaterializationResult>(&prog_nobound);
+        SequenceHandle seq_nobound = mat_nobound->published->sequence;
+        program.finalize_context_transaction();
+
+        // Advance prefill: completes in single step without capture
+        auto p_nobound = program.advance_prefill(seq_nobound);
+        failures += check(p_nobound.complete, "No-boundary prefill must complete in single step");
+        failures += check(!p_nobound.capture.has_value(), "No-boundary prefill must NOT offer capture");
+        failures += check(p_nobound.pending.has_value(), "No-boundary prefill must have pending batch");
+        failures += check(p_nobound.processed_prompt_tokens == 16, "No-boundary processed tokens must be 16");
+        (void)program.abort(seq_nobound);
+    }
+
+    // 7. Release continuations and verify complete reclamation to free list
+    std::printf("  [Reclamation] Releasing continuations and verifying free list...\n");
+    for (std::size_t c = 0; c < program.impl_->continuation_slots_.size(); ++c) {
+        auto& c_slot = program.impl_->continuation_slots_[c];
+        if (c_slot.role == detail::ContinuationSlotRole::Catalogued) {
+            (void)program.release_continuation(
+                ContinuationHandle(&program, static_cast<std::uint32_t>(c), c_slot.generation));
+        }
+    }
+
+    const auto usage_after = program.physical_usage();
+    failures += check(usage_after.device_state_slots == 0,
+                      "All device state slots must be reclaimed (0)");
+    failures += check(usage_after.device_main_kv_pages == 0,
+                      "All physical page groups must be returned to free list (0 used pages)");
+
+    std::printf("[DONE] test_turn_closure_checkpoint_and_multi_turn_reuse, failures: %d\n", failures);
+    std::fflush(stdout);
+    return failures;
+}
+
+int test_turn_closure_chain_retention(ninfer::DeviceContext& device) {
+    std::printf("[TEST] test_turn_closure_chain_retention\n");
+    int failures = 0;
+
+    auto model    = make_synthetic_model(device);
+    auto ple_meta = make_synthetic_ple_meta();
+
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency       = 2,
+        .max_context           = 512,
+        .state_slot_capacity   = 0,
+        .continuation_capacity = 16,
+        .prefill_chunk         = 256,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+
+    auto program_impl = std::make_unique<ProgramImpl>(nullptr, plan, device, model.view, std::nullopt, ple_meta);
+    Program program(std::move(program_impl));
+
+    ninfer::runtime::ResolvedExecutionOptions exec_options{};
+    exec_options.requested_output_tokens = 8;
+    ninfer::runtime::ContextMachineCostModel cost_model{};
+    std::atomic<bool> flag{false};
+    ninfer::runtime::CancellationFlagView cancellation{&flag};
+
+    std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = false}}};
+
+    // 1. T1: 20 tokens, F1 = 12
+    std::vector<ninfer::TokenId> t1_tokens(20);
+    for (std::size_t i = 0; i < 20; ++i) { t1_tokens[i] = static_cast<ninfer::TokenId>(1000 + i); }
+    const auto prompt1 = make_prompt(t1_tokens, true, 12);
+    auto base1 = program.plan_request(prompt1, exec_options);
+    auto cand1 = program.inspect_admission(prompt1, base1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand1.has_value(), "T1 admission must succeed");
+    auto res1 = program.seal_identity(*cand1, prompt1);
+    (void)program.start_resource_transaction(std::move(*res1), make_prompt(t1_tokens, true, 12), cancellation);
+    auto prog1 = program.progress_context_transaction(cancellation);
+    SequenceHandle seq1 = std::get_if<MaterializationResult>(&prog1)->published->sequence;
+    program.finalize_context_transaction();
+
+    auto p1_step1 = program.advance_prefill(seq1);
+    failures += check(p1_step1.capture.has_value(), "T1 step 1 must offer capture at 12");
+    auto cap1 = program.reserve_active_capture(std::move(*p1_step1.capture), nullptr, nullptr, std::nullopt, cancellation);
+    failures += check(cap1 == ninfer::runtime::ContextTransactionReserveStatus::Reserved, "T1 capture must reserve");
+    (void)program.progress_context_transaction(cancellation);
+    program.finalize_context_transaction();
+
+    auto p1_step2 = program.advance_prefill(seq1);
+    failures += check(p1_step2.complete, "T1 step 2 must complete");
+    if (p1_step2.pending.has_value()) {
+        (void)program.commit(std::move(*p1_step2.pending), commit_dec);
+    }
+    FinishResult fin1 = program.finish(seq1);
+    failures += check(fin1.continuation.has_value(), "T1 finish must yield continuation");
+
+    // 2. T2: 40 tokens (first 20 same as T1), F2 = 30
+    std::vector<ninfer::TokenId> t2_tokens(40);
+    for (std::size_t i = 0; i < 20; ++i) { t2_tokens[i] = t1_tokens[i]; }
+    for (std::size_t i = 20; i < 40; ++i) { t2_tokens[i] = static_cast<ninfer::TokenId>(2000 + i); }
+    const auto prompt2 = make_prompt(t2_tokens, true, 30);
+    auto base2 = program.plan_request(prompt2, exec_options);
+    auto cand2 = program.inspect_admission(prompt2, base2, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand2.has_value(), "T2 admission must succeed against T1 continuation");
+    if (cand2.has_value()) {
+        failures += check(cand2->summary().reusable_prompt_tokens == 12, "T2 reusable prompt tokens must be 12");
+        failures += check(cand2->summary().prefix_reuse_path == PrefixReusePath::PrivateTurnClosure, "T2 reuse path must be PrivateTurnClosure");
+        failures += check(cand2->identity_assessment().source_disposition == runtime::ClaimDisposition::Retained,
+                          "T2 source disposition must be Retained for TurnClosure");
+    }
+    auto res2 = program.seal_identity(*cand2, prompt2);
+    (void)program.start_resource_transaction(std::move(*res2), make_prompt(t2_tokens, true, 30), cancellation);
+    auto prog2 = program.progress_context_transaction(cancellation);
+    SequenceHandle seq2 = std::get_if<MaterializationResult>(&prog2)->published->sequence;
+    program.finalize_context_transaction();
+
+    auto p2_step1 = program.advance_prefill(seq2);
+    failures += check(p2_step1.capture.has_value(), "T2 step 1 must offer capture at 30");
+    auto cap2 = program.reserve_active_capture(std::move(*p2_step1.capture), nullptr, nullptr, std::nullopt, cancellation);
+    failures += check(cap2 == ninfer::runtime::ContextTransactionReserveStatus::Reserved, "T2 capture must reserve");
+    (void)program.progress_context_transaction(cancellation);
+    program.finalize_context_transaction();
+
+    auto p2_step2 = program.advance_prefill(seq2);
+    failures += check(p2_step2.complete, "T2 step 2 must complete");
+    if (p2_step2.pending.has_value()) {
+        (void)program.commit(std::move(*p2_step2.pending), commit_dec);
+    }
+    FinishResult fin2 = program.finish(seq2);
+    failures += check(fin2.continuation.has_value(), "T2 finish must yield continuation");
+
+    // 3. T3: 60 tokens (first 40 same as T2), F3 = 50
+    std::vector<ninfer::TokenId> t3_tokens(60);
+    for (std::size_t i = 0; i < 40; ++i) { t3_tokens[i] = t2_tokens[i]; }
+    for (std::size_t i = 40; i < 60; ++i) { t3_tokens[i] = static_cast<ninfer::TokenId>(3000 + i); }
+    const auto prompt3 = make_prompt(t3_tokens, true, 50);
+    auto base3 = program.plan_request(prompt3, exec_options);
+    auto cand3 = program.inspect_admission(prompt3, base3, ninfer::runtime::LaneId(0), &*fin2.continuation, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand3.has_value(), "T3 admission must succeed against T2 continuation");
+    if (cand3.has_value()) {
+        failures += check(cand3->summary().reusable_prompt_tokens == 30, "T3 reusable prompt tokens must be 30");
+        failures += check(cand3->summary().prefix_reuse_path == PrefixReusePath::PrivateTurnClosure, "T3 reuse path must be PrivateTurnClosure");
+        failures += check(cand3->identity_assessment().source_disposition == runtime::ClaimDisposition::Retained,
+                          "T3 source disposition must be Retained for TurnClosure");
+    }
+    auto res3 = program.seal_identity(*cand3, prompt3);
+    (void)program.start_resource_transaction(std::move(*res3), make_prompt(t3_tokens, true, 50), cancellation);
+    auto prog3 = program.progress_context_transaction(cancellation);
+    SequenceHandle seq3 = std::get_if<MaterializationResult>(&prog3)->published->sequence;
+    program.finalize_context_transaction();
+
+    auto p3_step1 = program.advance_prefill(seq3);
+    failures += check(p3_step1.capture.has_value(), "T3 step 1 must offer capture at 50");
+    auto cap3 = program.reserve_active_capture(std::move(*p3_step1.capture), nullptr, nullptr, std::nullopt, cancellation);
+    failures += check(cap3 == ninfer::runtime::ContextTransactionReserveStatus::Reserved, "T3 capture must reserve");
+    (void)program.progress_context_transaction(cancellation);
+    program.finalize_context_transaction();
+
+    auto p3_step2 = program.advance_prefill(seq3);
+    failures += check(p3_step2.complete, "T3 step 2 must complete");
+    if (p3_step2.pending.has_value()) {
+        (void)program.commit(std::move(*p3_step2.pending), commit_dec);
+    }
+    FinishResult fin3 = program.finish(seq3);
+    failures += check(fin3.continuation.has_value(), "T3 finish must yield continuation");
+
+    // 4. Repeating T2 request (or branching from T1): Prompt begins with T1's 20 tokens, but has different 2nd turn
+    std::vector<ninfer::TokenId> t2_repeat_tokens(36);
+    for (std::size_t i = 0; i < 20; ++i) { t2_repeat_tokens[i] = t1_tokens[i]; }
+    for (std::size_t i = 20; i < 36; ++i) { t2_repeat_tokens[i] = static_cast<ninfer::TokenId>(4000 + i); }
+    const auto prompt2_rep = make_prompt(t2_repeat_tokens, true, 28);
+    auto base2_rep = program.plan_request(prompt2_rep, exec_options);
+
+    // Test admission with source = T3 continuation (which is descendant of T2, which is descendant of T1)
+    auto cand2_rep_from_t3 = program.inspect_admission(prompt2_rep, base2_rep, ninfer::runtime::LaneId(0), &*fin3.continuation, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand2_rep_from_t3.has_value(), "T2 repeated admission against T3 continuation must succeed");
+    if (cand2_rep_from_t3.has_value()) {
+        failures += check(cand2_rep_from_t3->summary().reusable_prompt_tokens == 12,
+                          "T2 repeated reusable tokens must be 12 (from T1's TurnClosure)");
+        failures += check(cand2_rep_from_t3->summary().prefix_reuse_path == PrefixReusePath::PrivateTurnClosure,
+                          "T2 repeated reuse path must be PrivateTurnClosure");
+    }
+
+    // Test admission with source = T1 continuation
+    auto cand2_rep_from_t1 = program.inspect_admission(prompt2_rep, base2_rep, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand2_rep_from_t1.has_value(), "T2 repeated admission against T1 continuation must succeed");
+    if (cand2_rep_from_t1.has_value()) {
+        failures += check(cand2_rep_from_t1->summary().reusable_prompt_tokens == 12,
+                          "T2 repeated reusable tokens must be 12 (from T1's TurnClosure)");
+        failures += check(cand2_rep_from_t1->summary().prefix_reuse_path == PrefixReusePath::PrivateTurnClosure,
+                          "T2 repeated reuse path must be PrivateTurnClosure");
+    }
+
+    // Run T2 repeated to completion
+    auto res2_rep = program.seal_identity(*cand2_rep_from_t1, prompt2_rep);
+    (void)program.start_resource_transaction(std::move(*res2_rep), make_prompt(t2_repeat_tokens, true, 28), cancellation);
+    auto prog2_rep = program.progress_context_transaction(cancellation);
+    SequenceHandle seq2_rep = std::get_if<MaterializationResult>(&prog2_rep)->published->sequence;
+    program.finalize_context_transaction();
+
+    auto p2_rep_step1 = program.advance_prefill(seq2_rep);
+    failures += check(p2_rep_step1.summary.reused_prompt_tokens == 12, "T2 repeated step 1 reused tokens must be 12");
+    failures += check(p2_rep_step1.summary.prefix_reuse_path == PrefixReusePath::PrivateTurnClosure,
+                      "T2 repeated step 1 prefix reuse path must be PrivateTurnClosure");
+    if (p2_rep_step1.capture.has_value()) {
+        program.skip_capture(std::move(*p2_rep_step1.capture));
+    }
+    auto p2_rep_step2 = program.advance_prefill(seq2_rep);
+    failures += check(p2_rep_step2.complete, "T2 repeated step 2 must complete");
+    if (p2_rep_step2.pending.has_value()) {
+        (void)program.commit(std::move(*p2_rep_step2.pending), commit_dec);
+    }
+    FinishResult fin2_rep = program.finish(seq2_rep);
+
+    // Release all continuations
+    for (std::size_t c = 0; c < program.impl_->continuation_slots_.size(); ++c) {
+        auto& c_slot = program.impl_->continuation_slots_[c];
+        if (c_slot.role == detail::ContinuationSlotRole::Catalogued) {
+            (void)program.release_continuation(
+                ContinuationHandle(&program, static_cast<std::uint32_t>(c), c_slot.generation));
+        }
+    }
+
+    const auto usage_after = program.physical_usage();
+    failures += check(usage_after.device_state_slots == 0,
+                      "All device state slots must be reclaimed (0)");
+    failures += check(usage_after.device_main_kv_pages == 0,
+                      "All physical page groups must be returned to free list (0 used pages)");
+
+    std::printf("[DONE] test_turn_closure_chain_retention, failures: %d\n", failures);
+    std::fflush(stdout);
+    return failures;
+}
+
+int test_turn2_resumed_vs_scratch_divergence(ninfer::DeviceContext& device) {
+    std::printf("[TEST] test_turn2_resumed_vs_scratch_divergence\n");
+    int failures = 0;
+
+    auto model    = make_synthetic_model(device);
+    auto ple_meta = make_synthetic_ple_meta();
+
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency       = 2,
+        .max_context           = 512,
+        .state_slot_capacity   = 0,
+        .continuation_capacity = 16,
+        .prefill_chunk         = 256,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+
+    auto program_impl = std::make_unique<ProgramImpl>(nullptr, plan, device, model.view, std::nullopt, ple_meta);
+    Program program(std::move(program_impl));
+
+    ninfer::runtime::ResolvedExecutionOptions exec_options{};
+    exec_options.requested_output_tokens = 8;
+    ninfer::runtime::ContextMachineCostModel cost_model{};
+    std::atomic<bool> flag{false};
+    ninfer::runtime::CancellationFlagView cancellation{&flag};
+
+    std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = false}}};
+
+    // 1. Turn 1: 24 tokens, F = 16
+    std::vector<ninfer::TokenId> t1_tokens(24);
+    for (std::size_t i = 0; i < 24; ++i) { t1_tokens[i] = static_cast<ninfer::TokenId>(500 + i); }
+    const auto prompt1 = make_prompt(t1_tokens, true, 16);
+    auto base1 = program.plan_request(prompt1, exec_options);
+    auto cand1 = program.inspect_admission(prompt1, base1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand1.has_value(), "T1 admission must succeed");
+    auto res1 = program.seal_identity(*cand1, prompt1);
+    (void)program.start_resource_transaction(std::move(*res1), make_prompt(t1_tokens, true, 16), cancellation);
+    auto prog1 = program.progress_context_transaction(cancellation);
+    SequenceHandle seq1 = std::get_if<MaterializationResult>(&prog1)->published->sequence;
+    program.finalize_context_transaction();
+
+    auto p1_step1 = program.advance_prefill(seq1);
+    failures += check(p1_step1.capture.has_value(), "T1 step 1 must offer capture at 16");
+    auto cap1 = program.reserve_active_capture(std::move(*p1_step1.capture), nullptr, nullptr, std::nullopt, cancellation);
+    failures += check(cap1 == ninfer::runtime::ContextTransactionReserveStatus::Reserved, "T1 capture must reserve");
+    (void)program.progress_context_transaction(cancellation);
+    program.finalize_context_transaction();
+
+    auto p1_step2 = program.advance_prefill(seq1);
+    failures += check(p1_step2.complete, "T1 step 2 must complete");
+    if (p1_step2.pending.has_value()) {
+        (void)program.commit(std::move(*p1_step2.pending), commit_dec);
+    }
+    FinishResult fin1 = program.finish(seq1);
+
+    // 2. Turn 2 Resumed: 48 tokens (first 24 same as T1), resumes with cache = 16
+    std::vector<ninfer::TokenId> t2_tokens(48);
+    for (std::size_t i = 0; i < 24; ++i) { t2_tokens[i] = t1_tokens[i]; }
+    for (std::size_t i = 24; i < 48; ++i) { t2_tokens[i] = static_cast<ninfer::TokenId>(600 + i); }
+    const auto prompt2_res = make_prompt(t2_tokens, true, 36);
+    auto base2_res = program.plan_request(prompt2_res, exec_options);
+    auto cand2_res = program.inspect_admission(prompt2_res, base2_res, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand2_res.has_value(), "T2 resumed admission must succeed");
+    failures += check(cand2_res->summary().reusable_prompt_tokens == 16, "T2 resumed reusable tokens must be 16");
+    auto res2_res = program.seal_identity(*cand2_res, prompt2_res);
+    (void)program.start_resource_transaction(std::move(*res2_res), make_prompt(t2_tokens, true, 36), cancellation);
+    auto prog2_res = program.progress_context_transaction(cancellation);
+    SequenceHandle seq2_res = std::get_if<MaterializationResult>(&prog2_res)->published->sequence;
+    program.finalize_context_transaction();
+
+    auto p2_res_step1 = program.advance_prefill(seq2_res);
+    if (p2_res_step1.capture.has_value()) {
+        program.skip_capture(std::move(*p2_res_step1.capture));
+    }
+    auto p2_res_step2 = program.advance_prefill(seq2_res);
+    failures += check(p2_res_step2.complete, "T2 resumed prefill must complete");
+    failures += check(p2_res_step2.pending.has_value(), "T2 resumed must have pending batch with logits");
+
+    std::vector<float> logits_resumed;
+    if (p2_res_step2.pending.has_value()) {
+        const auto& logits_tensor = program.impl_->allocation_.round_tensors().logits;
+        std::vector<std::uint16_t> bf16_h(logits_tensor.numel());
+        CUDA_CHECK(cudaMemcpy(bf16_h.data(), logits_tensor.data,
+                              bf16_h.size() * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+        logits_resumed.resize(bf16_h.size());
+        for (std::size_t i = 0; i < bf16_h.size(); ++i) {
+            std::uint32_t u = static_cast<std::uint32_t>(bf16_h[i]) << 16;
+            float f;
+            std::memcpy(&f, &u, sizeof(float));
+            logits_resumed[i] = f;
+        }
+        (void)program.commit(std::move(*p2_res_step2.pending), commit_dec);
+    }
+    (void)program.finish(seq2_res);
+
+    // 3. Turn 2 From Scratch: exact same 48 tokens
+    const auto prompt2_scr = make_prompt(t2_tokens, false, std::nullopt);
+    auto base2_scr = program.plan_request(prompt2_scr, exec_options);
+    auto cand2_scr = program.inspect_admission(prompt2_scr, base2_scr, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand2_scr.has_value(), "T2 scratch admission must succeed");
+    auto res2_scr = program.seal_identity(*cand2_scr, prompt2_scr);
+    (void)program.start_resource_transaction(std::move(*res2_scr), make_prompt(t2_tokens, false, std::nullopt), cancellation);
+    auto prog2_scr = program.progress_context_transaction(cancellation);
+    SequenceHandle seq2_scr = std::get_if<MaterializationResult>(&prog2_scr)->published->sequence;
+    program.finalize_context_transaction();
+
+    auto p2_scr = program.advance_prefill(seq2_scr);
+    failures += check(p2_scr.complete, "T2 scratch prefill must complete");
+    failures += check(p2_scr.pending.has_value(), "T2 scratch must have pending batch with logits");
+
+    std::vector<float> logits_scratch;
+    if (p2_scr.pending.has_value()) {
+        const auto& logits_tensor = program.impl_->allocation_.round_tensors().logits;
+        std::vector<std::uint16_t> bf16_h(logits_tensor.numel());
+        CUDA_CHECK(cudaMemcpy(bf16_h.data(), logits_tensor.data,
+                              bf16_h.size() * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+        logits_scratch.resize(bf16_h.size());
+        for (std::size_t i = 0; i < bf16_h.size(); ++i) {
+            std::uint32_t u = static_cast<std::uint32_t>(bf16_h[i]) << 16;
+            float f;
+            std::memcpy(&f, &u, sizeof(float));
+            logits_scratch[i] = f;
+        }
+        (void)program.commit(std::move(*p2_scr.pending), commit_dec);
+    }
+    (void)program.finish(seq2_scr);
+
+    // 4. Numerical Divergence Check (rel-L2 <= 1e-2, argmax match)
+    failures += check(!logits_resumed.empty() && logits_resumed.size() == logits_scratch.size(),
+                      "Resumed and scratch logits must be non-empty and matching size");
+
+    double diff_sq = 0.0;
+    double ref_sq  = 0.0;
+    for (std::size_t i = 0; i < logits_resumed.size(); ++i) {
+        double d = static_cast<double>(logits_resumed[i]) - static_cast<double>(logits_scratch[i]);
+        double r = static_cast<double>(logits_scratch[i]);
+        diff_sq += d * d;
+        ref_sq  += r * r;
+    }
+    const double rel_l2 = ref_sq > 0.0 ? std::sqrt(diff_sq / ref_sq) : 0.0;
+
+    const auto max_it_res = std::max_element(logits_resumed.begin(), logits_resumed.end());
+    const std::int32_t argmax_res = static_cast<std::int32_t>(std::distance(logits_resumed.begin(), max_it_res));
+
+    const auto max_it_scr = std::max_element(logits_scratch.begin(), logits_scratch.end());
+    const std::int32_t argmax_scr = static_cast<std::int32_t>(std::distance(logits_scratch.begin(), max_it_scr));
+
+    std::printf("  [Divergence] rel-L2: %.6e (bound: 1.000000e-02), argmax_res: %d, argmax_scr: %d\n",
+                rel_l2, argmax_res, argmax_scr);
+
+    failures += check(rel_l2 <= 1e-2, "Turn 2 resumed vs from-scratch rel-L2 must be <= 1e-2 on synthetic model");
+    failures += check(argmax_res == argmax_scr, "Turn 2 resumed vs from-scratch argmax must match");
+
+    // Clean up
+    for (std::size_t c = 0; c < program.impl_->continuation_slots_.size(); ++c) {
+        auto& c_slot = program.impl_->continuation_slots_[c];
+        if (c_slot.role == detail::ContinuationSlotRole::Catalogued) {
+            (void)program.release_continuation(
+                ContinuationHandle(&program, static_cast<std::uint32_t>(c), c_slot.generation));
+        }
+    }
+
+    std::printf("[DONE] test_turn2_resumed_vs_scratch_divergence, failures: %d\n", failures);
+    std::fflush(stdout);
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -762,6 +1542,9 @@ int main() {
         failures += test_continuation_lifecycle_and_reuse(device);
         failures += test_continuation_mismatch_fallback(device);
         failures += test_continuation_lru_eviction(device);
+        failures += test_turn_closure_checkpoint_and_multi_turn_reuse(device);
+        failures += test_turn_closure_chain_retention(device);
+        failures += test_turn2_resumed_vs_scratch_divergence(device);
 
         if (failures == 0) {
             std::printf("ALL FLASH-NEXT CONTINUATION LIFECYCLE TESTS PASSED\n");

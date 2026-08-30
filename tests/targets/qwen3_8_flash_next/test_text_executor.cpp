@@ -1478,17 +1478,20 @@ int test_measure_cuda_graph_footprint(ninfer::DeviceContext& device) {
             std::size_t free_before = 0, total_mem = 0;
             CUDA_CHECK(cudaMemGetInfo(&free_before, &total_mem));
 
-            FlashNextTextExecutor exec(synthetic_model.view, ple_meta, device, alloc);
+            {
+                FlashNextTextExecutor exec(synthetic_model.view, ple_meta, device, alloc);
+                device.synchronize();
+
+                std::size_t free_after = 0;
+                CUDA_CHECK(cudaMemGetInfo(&free_after, &total_mem));
+
+                std::size_t footprint = (free_before > free_after) ? (free_before - free_after) : 0;
+                total_footprint += footprint;
+
+                std::cout << "  B=" << B << " graph footprint: " << (footprint / (1024.0 * 1024.0))
+                          << " MiB (" << footprint << " bytes)\n";
+            }
             device.synchronize();
-
-            std::size_t free_after = 0;
-            CUDA_CHECK(cudaMemGetInfo(&free_after, &total_mem));
-
-            std::size_t footprint = (free_before > free_after) ? (free_before - free_after) : 0;
-            total_footprint += footprint;
-
-            std::cout << "  B=" << B << " graph footprint: " << (footprint / (1024.0 * 1024.0))
-                      << " MiB (" << footprint << " bytes)\n";
         }
         std::cout << "Total measured footprint (8 graphs): "
                   << (total_footprint / (1024.0 * 1024.0)) << " MiB (" << total_footprint << " bytes)\n";

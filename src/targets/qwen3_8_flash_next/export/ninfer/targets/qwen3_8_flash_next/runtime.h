@@ -158,7 +158,7 @@ public:
     [[nodiscard]] const void* owner() const noexcept { return owner_; }
     [[nodiscard]] runtime::LaneId lane() const noexcept { return lane_; }
     [[nodiscard]] std::uint64_t epoch() const noexcept { return epoch_; }
-    [[nodiscard]] std::uint64_t id() const noexcept { return id_; }
+    friend class ContractAccess;
 
 private:
     const void* owner_ = nullptr;
@@ -602,6 +602,41 @@ public:
         pending.row_counts_  = {};
         pending.row_stride_  = 0;
         pending.timing_      = {};
+    }
+
+    [[nodiscard]] static CaptureOffer make_capture_offer(const void* owner,
+                                                         runtime::LaneId lane,
+                                                         std::uint64_t epoch,
+                                                         std::uint64_t id) noexcept {
+        CaptureOffer out;
+        out.owner_ = owner;
+        out.lane_  = lane;
+        out.epoch_ = epoch;
+        out.id_    = id;
+        return out;
+    }
+
+    [[nodiscard]] static const void* owner(const CaptureOffer& offer) noexcept {
+        return offer.owner_;
+    }
+
+    [[nodiscard]] static runtime::LaneId lane(const CaptureOffer& offer) noexcept {
+        return offer.lane_;
+    }
+
+    [[nodiscard]] static std::uint64_t epoch(const CaptureOffer& offer) noexcept {
+        return offer.epoch_;
+    }
+
+    [[nodiscard]] static std::uint64_t id(const CaptureOffer& offer) noexcept {
+        return offer.id_;
+    }
+
+    static void consume(CaptureOffer& offer) noexcept {
+        offer.owner_ = nullptr;
+        offer.lane_  = {};
+        offer.epoch_ = 0;
+        offer.id_    = 0;
     }
 
     [[nodiscard]] static AdmissionCandidate

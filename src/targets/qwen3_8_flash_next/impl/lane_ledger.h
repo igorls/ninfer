@@ -78,9 +78,13 @@ public:
     }
     [[nodiscard]] std::span<const std::uint32_t> lane_physical_groups(LaneHandle handle) const;
     std::vector<std::uint32_t> take_lane_physical_groups(LaneHandle handle);
+    void acquire_physical_groups(std::span<const std::uint32_t> groups);
     void release_physical_groups(std::span<const std::uint32_t> groups);
     void attach_physical_groups(LaneHandle handle, std::span<const std::uint32_t> groups,
                                 std::int32_t committed_frontier, const PleTokenHistory& history);
+    [[nodiscard]] std::uint32_t group_refcount(std::uint32_t group) const noexcept {
+        return group < physical_group_refcounts_.size() ? physical_group_refcounts_[group] : 0U;
+    }
 
     [[nodiscard]] std::size_t active_lanes_count() const noexcept;
 
@@ -159,6 +163,7 @@ private:
     std::vector<LaneInfo> lanes_;
     std::vector<std::vector<std::uint32_t>> lane_physical_groups_;
     std::vector<std::uint32_t> free_physical_groups_;
+    std::vector<std::uint32_t> physical_group_refcounts_;
 
     // Host block tables (stride = logical_pages)
     // attention index: lane * attention_logical_pages + page

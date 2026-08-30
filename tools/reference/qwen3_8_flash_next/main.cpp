@@ -12,15 +12,29 @@
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
 #include "targets/qwen3_8_flash_next/impl/text_executor.h"
 #include "targets/qwen3_8_flash_next/impl/vision_adapter.h"
+#include "targets/qwen3_8_flash_next/impl/program_impl.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/targets/qwen3_6/frontend.h"
 #include "ninfer/targets/qwen3_6/frontend_resources.h"
 #include "ninfer/targets/qwen3_6/prepared_prompt.h"
 #include "ninfer/targets/qwen3_6/vision_control.h"
 #include <ninfer/targets/qwen3_vision/vision.h>
+#include <ninfer/targets/qwen3_8_flash_next/package.h>
+#include <ninfer/targets/qwen3_8_flash_next/runtime.h>
+#include "runtime/engine/context_cost.h"
 #include "options.h"
 
 #include <cuda_runtime.h>
+
+#ifndef CHECK_CUDA
+#define CHECK_CUDA(call)                                                                           \
+    do {                                                                                           \
+        cudaError_t err__ = (call);                                                                \
+        if (err__ != cudaSuccess) {                                                                \
+            throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(err__));     \
+        }                                                                                          \
+    } while (0)
+#endif
 
 #include <algorithm>
 #include <array>
@@ -40,6 +54,7 @@
 namespace {
 
 using namespace ninfer;
+using namespace ninfer::targets::qwen3_8_flash_next;
 using namespace ninfer::targets::qwen3_8_flash_next::detail;
 using LoadedModel = StandaloneLoadedModel;
 
@@ -1415,6 +1430,297 @@ int run_execute_vision(const ReferenceToolOptions& opts) {
     return 0;
 }
 
+int run_continuation_check(const ReferenceToolOptions& opts) {
+    ninfer::DeviceContext device(0);
+
+    // 1. Load model with Text features
+    auto loaded = LoadedModel::load_from_file(
+        opts.model_path, device, LoadFeatures{.vision = false, .mtp = false});
+
+    // 2. Build Frontend
+    auto frontend = make_frontend(
+        loaded,
+        ninfer::targets::qwen3_6::FrontendOptions{
+            .vision_enabled = false,
+            .max_context    = opts.max_context,
+        });
+
+    // 3. Setup Runtime Plan & Program
+    FlashNextRuntimeConfig config{
+        .max_concurrency       = 1,
+        .max_context           = opts.max_context,
+        // Lane slots plus catalog slots. 2*mc + capacity was not enough on the real artifact
+        // (copy_state_slot: slot index exceeds state_slots) while 40 works: the Program's cache
+        // slot numbering needs auditing (sequence 6f); keep a generous default meanwhile.
+        .state_slot_capacity   = opts.state_slots > 0 ? opts.state_slots : 40u,
+        .continuation_capacity = 16,
+        .prefill_chunk         = opts.prefill_chunk > 0 ? opts.prefill_chunk : 1024,
+        .use_cuda_graph        = opts.use_cuda_graph,
+    };
+    const auto curve = flash_next_capacity_curve(config);
+    const std::uint32_t resolved_groups =
+        opts.page_groups == 0 ? curve.maximum_main_page_groups : opts.page_groups;
+    auto plan = finalize_flash_next_runtime_plan(config, resolved_groups);
+    auto program_impl = std::make_unique<ProgramImpl>(
+        nullptr, plan, device, loaded.text_view(), std::nullopt, loaded.ple_metadata());
+    Program program(std::move(program_impl));
+
+    std::atomic<bool> flag{false};
+    ninfer::runtime::CancellationFlagView cancellation{&flag};
+    std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = false}}};
+
+    // 4. Prepare Turn 1 Prompt
+    std::vector<ninfer::ChatMessage> messages_t1;
+    if (!opts.system_prompt.empty()) {
+        ninfer::ChatMessage sys_msg;
+        sys_msg.role = ninfer::ChatRole::System;
+        sys_msg.parts.push_back(ninfer::MessagePart{.kind = ninfer::MessagePartKind::Text, .text = opts.system_prompt});
+        messages_t1.push_back(std::move(sys_msg));
+    }
+    const std::string prompt_text_t1 = opts.prompt.empty()
+                                        ? "Hello! Tell me who you are in one concise sentence."
+                                        : opts.prompt;
+    ninfer::ChatMessage user_msg_t1;
+    user_msg_t1.role = ninfer::ChatRole::User;
+    user_msg_t1.parts.push_back(ninfer::MessagePart{.kind = ninfer::MessagePartKind::Text, .text = prompt_text_t1});
+    messages_t1.push_back(std::move(user_msg_t1));
+
+    ninfer::PromptInput input_t1{.messages = messages_t1};
+    if (opts.reasoning_effort == "low") {
+        input_t1.options.reasoning_effort = ninfer::ReasoningEffort::Low;
+    } else if (opts.reasoning_effort == "high" || opts.reasoning_effort == "xhigh") {
+        input_t1.options.reasoning_effort = ninfer::ReasoningEffort::XHigh;
+    } else if (opts.reasoning_effort == "none") {
+        input_t1.options.enable_thinking = false;
+    } else {
+        input_t1.options.reasoning_effort = ninfer::ReasoningEffort::Medium;
+    }
+
+    auto prepared_t1 = frontend.prepare(PromptInput(input_t1));
+    const std::size_t t1_prompt_tokens = ninfer::targets::qwen3_6::PreparedPromptAccess::view(prepared_t1).token_ids.size();
+
+    // 5. Execute Turn 1 through Program (capturing at F, finish)
+    ninfer::runtime::ResolvedExecutionOptions exec_options{};
+    exec_options.requested_output_tokens = 1;
+    auto base_t1 = program.plan_request(prepared_t1, exec_options);
+    ninfer::runtime::ContextMachineCostModel cost_model{};
+    auto cand_t1 = program.inspect_admission(prepared_t1, base_t1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    if (!cand_t1) { throw std::runtime_error("Turn 1 admission failed"); }
+    auto res_t1 = program.seal_identity(*cand_t1, prepared_t1);
+    (void)program.start_resource_transaction(std::move(*res_t1), std::move(prepared_t1), cancellation);
+    auto prog_t1 = program.progress_context_transaction(cancellation);
+    auto* mat_t1 = std::get_if<MaterializationResult>(&prog_t1);
+    if (!mat_t1 || !mat_t1->published) { throw std::runtime_error("Turn 1 materialization failed"); }
+    SequenceHandle seq_t1 = mat_t1->published->sequence;
+    program.finalize_context_transaction();
+
+    std::uint32_t t1_capture_frontier = 0;
+    while (true) {
+        auto pref_t1 = program.advance_prefill(seq_t1);
+        if (pref_t1.capture.has_value()) {
+            t1_capture_frontier = pref_t1.processed_prompt_tokens;
+            auto cap_res = program.reserve_active_capture(std::move(*pref_t1.capture), nullptr, nullptr, std::nullopt, cancellation);
+            if (cap_res == ninfer::runtime::ContextTransactionReserveStatus::Reserved) {
+                (void)program.progress_context_transaction(cancellation);
+                program.finalize_context_transaction();
+            }
+        }
+        if (pref_t1.pending.has_value()) {
+            (void)program.commit(std::move(*pref_t1.pending), commit_dec);
+        }
+        if (pref_t1.complete) {
+            break;
+        }
+    }
+    FinishResult fin_t1 = program.finish(seq_t1);
+    if (!fin_t1.continuation.has_value()) {
+        throw std::runtime_error("Turn 1 finish did not yield continuation handle");
+    }
+    ContinuationHandle cont_t1 = std::move(*fin_t1.continuation);
+
+    // 6. Build Turn 2 Prompt
+    const std::string turn2_text = opts.continuation_check.empty()
+                                       ? "Tell me more details about that."
+                                       : opts.continuation_check;
+    std::vector<ninfer::ChatMessage> messages_t2;
+    if (!opts.system_prompt.empty()) {
+        messages_t2.push_back(ninfer::ChatMessage{
+            .role = ninfer::ChatRole::System,
+            .parts = {ninfer::MessagePart{.kind = ninfer::MessagePartKind::Text, .text = opts.system_prompt}},
+        });
+    }
+    messages_t2.push_back(ninfer::ChatMessage{
+        .role = ninfer::ChatRole::User,
+        .parts = {ninfer::MessagePart{.kind = ninfer::MessagePartKind::Text, .text = prompt_text_t1}},
+    });
+    messages_t2.push_back(ninfer::ChatMessage{
+        .role = ninfer::ChatRole::Assistant,
+        .parts = {ninfer::MessagePart{.kind = ninfer::MessagePartKind::Text, .text = "I am Qwen, an AI assistant developed by Alibaba Cloud."}},
+    });
+    messages_t2.push_back(ninfer::ChatMessage{
+        .role = ninfer::ChatRole::User,
+        .parts = {ninfer::MessagePart{.kind = ninfer::MessagePartKind::Text, .text = turn2_text}},
+    });
+
+    ninfer::PromptInput input_t2{.messages = messages_t2};
+    if (opts.reasoning_effort == "low") {
+        input_t2.options.reasoning_effort = ninfer::ReasoningEffort::Low;
+    } else if (opts.reasoning_effort == "high" || opts.reasoning_effort == "xhigh") {
+        input_t2.options.reasoning_effort = ninfer::ReasoningEffort::XHigh;
+    } else if (opts.reasoning_effort == "none") {
+        input_t2.options.enable_thinking = false;
+    } else {
+        input_t2.options.reasoning_effort = ninfer::ReasoningEffort::Medium;
+    }
+
+    auto prepared_t2_resumed = frontend.prepare(PromptInput(input_t2));
+    const std::size_t t2_prompt_tokens = ninfer::targets::qwen3_6::PreparedPromptAccess::view(prepared_t2_resumed).token_ids.size();
+
+    // 7. Execute Turn 2 Resumed
+    auto base_t2_res = program.plan_request(prepared_t2_resumed, exec_options);
+    auto cand_t2_res = program.inspect_admission(prepared_t2_resumed, base_t2_res, ninfer::runtime::LaneId(0), &cont_t1, nullptr, std::nullopt, false, cost_model);
+    if (!cand_t2_res) { throw std::runtime_error("Turn 2 resumed admission failed"); }
+    const std::uint32_t reused_tokens = cand_t2_res->summary().reusable_prompt_tokens;
+    auto res_t2 = program.seal_identity(*cand_t2_res, prepared_t2_resumed);
+    (void)program.start_resource_transaction(std::move(*res_t2), std::move(prepared_t2_resumed), cancellation);
+    auto prog_t2 = program.progress_context_transaction(cancellation);
+    SequenceHandle seq_t2 = std::get_if<MaterializationResult>(&prog_t2)->published->sequence;
+    program.finalize_context_transaction();
+
+    std::vector<float> logits_resumed;
+    std::vector<std::uint16_t> logits_resumed_raw;
+    while (true) {
+        auto pref_t2 = program.advance_prefill(seq_t2);
+        if (pref_t2.capture.has_value()) {
+            program.skip_capture(std::move(*pref_t2.capture));
+        }
+        if (pref_t2.pending.has_value()) {
+            const auto& l_tensor = program.impl_->allocation_.round_tensors().logits;
+            logits_resumed_raw.resize(l_tensor.numel());
+            CHECK_CUDA(cudaMemcpy(logits_resumed_raw.data(), l_tensor.data,
+                                  logits_resumed_raw.size() * sizeof(std::uint16_t),
+                                  cudaMemcpyDeviceToHost));
+            logits_resumed.resize(logits_resumed_raw.size());
+            for (std::size_t i = 0; i < logits_resumed_raw.size(); ++i) {
+                std::uint32_t u = static_cast<std::uint32_t>(logits_resumed_raw[i]) << 16;
+                float f;
+                std::memcpy(&f, &u, sizeof(float));
+                logits_resumed[i] = f;
+            }
+            (void)program.commit(std::move(*pref_t2.pending), commit_dec);
+        }
+        if (pref_t2.complete) {
+            break;
+        }
+    }
+    (void)program.finish(seq_t2);
+
+    // 8. Execute Turn 2 From Scratch
+    auto prepared_t2_scratch = frontend.prepare(std::move(input_t2));
+    auto base_t2_scr = program.plan_request(prepared_t2_scratch, exec_options);
+    auto cand_t2_scr = program.inspect_admission(prepared_t2_scratch, base_t2_scr, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    if (!cand_t2_scr) { throw std::runtime_error("Turn 2 scratch admission failed"); }
+    auto res_t2_scr = program.seal_identity(*cand_t2_scr, prepared_t2_scratch);
+    (void)program.start_resource_transaction(std::move(*res_t2_scr), std::move(prepared_t2_scratch), cancellation);
+    auto prog_t2_scr = program.progress_context_transaction(cancellation);
+    SequenceHandle seq_t2_scr = std::get_if<MaterializationResult>(&prog_t2_scr)->published->sequence;
+    program.finalize_context_transaction();
+
+    std::vector<float> logits_scratch;
+    std::vector<std::uint16_t> logits_scratch_raw;
+    while (true) {
+        auto pref_scr = program.advance_prefill(seq_t2_scr);
+        if (pref_scr.capture.has_value()) {
+            program.skip_capture(std::move(*pref_scr.capture));
+        }
+        if (pref_scr.pending.has_value()) {
+            const auto& l_tensor = program.impl_->allocation_.round_tensors().logits;
+            logits_scratch_raw.resize(l_tensor.numel());
+            CHECK_CUDA(cudaMemcpy(logits_scratch_raw.data(), l_tensor.data,
+                                  logits_scratch_raw.size() * sizeof(std::uint16_t),
+                                  cudaMemcpyDeviceToHost));
+            logits_scratch.resize(logits_scratch_raw.size());
+            for (std::size_t i = 0; i < logits_scratch_raw.size(); ++i) {
+                std::uint32_t u = static_cast<std::uint32_t>(logits_scratch_raw[i]) << 16;
+                float f;
+                std::memcpy(&f, &u, sizeof(float));
+                logits_scratch[i] = f;
+            }
+            (void)program.commit(std::move(*pref_scr.pending), commit_dec);
+        }
+        if (pref_scr.complete) {
+            break;
+        }
+    }
+    (void)program.finish(seq_t2_scr);
+
+    // 9. Compute Metrics & Output
+    if (logits_resumed.empty() || logits_scratch.empty() || logits_resumed.size() != logits_scratch.size()) {
+        throw std::runtime_error("Empty or mismatched logits size between resumed and scratch prefill");
+    }
+
+    double diff_norm_sq = 0.0;
+    double ref_norm_sq = 0.0;
+    for (std::size_t i = 0; i < logits_resumed.size(); ++i) {
+        double d = static_cast<double>(logits_resumed[i]) - static_cast<double>(logits_scratch[i]);
+        double r = static_cast<double>(logits_scratch[i]);
+        diff_norm_sq += d * d;
+        ref_norm_sq += r * r;
+    }
+    const double rel_l2 = (ref_norm_sq > 0.0) ? std::sqrt(diff_norm_sq / ref_norm_sq) : 0.0;
+
+    const auto max_it_res = std::max_element(logits_resumed.begin(), logits_resumed.end());
+    const std::int32_t argmax_res = static_cast<std::int32_t>(std::distance(logits_resumed.begin(), max_it_res));
+    const float logit_res = *max_it_res;
+
+    const auto max_it_scr = std::max_element(logits_scratch.begin(), logits_scratch.end());
+    const std::int32_t argmax_scr = static_cast<std::int32_t>(std::distance(logits_scratch.begin(), max_it_scr));
+    const float logit_scr = *max_it_scr;
+
+    const bool argmax_match = (argmax_res == argmax_scr);
+
+    // Dump raw logits if requested
+    if (!opts.dump_gen_logits.empty()) {
+        std::filesystem::create_directories(opts.dump_gen_logits);
+        const std::string res_path = opts.dump_gen_logits + "/gen_000_resumed.bin";
+        const std::string scr_path = opts.dump_gen_logits + "/gen_000_scratch.bin";
+        std::ofstream f_res(res_path, std::ios::binary);
+        if (f_res) { f_res.write(reinterpret_cast<const char*>(logits_resumed_raw.data()), logits_resumed_raw.size() * sizeof(std::uint16_t)); }
+        std::ofstream f_scr(scr_path, std::ios::binary);
+        if (f_scr) { f_scr.write(reinterpret_cast<const char*>(logits_scratch_raw.data()), logits_scratch_raw.size() * sizeof(std::uint16_t)); }
+    }
+
+    if (opts.json_output) {
+        std::cout << "{\n"
+                  << "  \"mode\": \"continuation-check\",\n"
+                  << "  \"turn1_prompt_tokens\": " << t1_prompt_tokens << ",\n"
+                  << "  \"turn1_capture_frontier\": " << t1_capture_frontier << ",\n"
+                  << "  \"turn2_prompt_tokens\": " << t2_prompt_tokens << ",\n"
+                  << "  \"turn2_reused_tokens\": " << reused_tokens << ",\n"
+                  << "  \"argmax_resumed\": " << argmax_res << ",\n"
+                  << "  \"logit_resumed\": " << logit_res << ",\n"
+                  << "  \"argmax_scratch\": " << argmax_scr << ",\n"
+                  << "  \"logit_scratch\": " << logit_scr << ",\n"
+                  << "  \"argmax_match\": " << (argmax_match ? "true" : "false") << ",\n"
+                  << "  \"rel_l2\": " << rel_l2 << ",\n"
+                  << "  \"status\": \"" << (argmax_match && rel_l2 <= 0.1 ? "OK" : "MISMATCH") << "\"\n"
+                  << "}\n";
+    } else {
+        std::cout << "\n=== Continuation Check Report ===\n"
+                  << "Turn 1 Prompt Tokens:        " << t1_prompt_tokens << "\n"
+                  << "Turn 1 Capture Frontier (F): " << t1_capture_frontier << "\n"
+                  << "Turn 2 Prompt Tokens:        " << t2_prompt_tokens << "\n"
+                  << "Turn 2 Reused Prompt Tokens: " << reused_tokens << "\n"
+                  << "Resumed First-Gen Argmax:    " << argmax_res << " (logit: " << std::fixed << std::setprecision(4) << logit_res << ")\n"
+                  << "Scratch First-Gen Argmax:    " << argmax_scr << " (logit: " << std::fixed << std::setprecision(4) << logit_scr << ")\n"
+                  << "Argmax Match:                " << (argmax_match ? "YES" : "NO") << "\n"
+                  << "Relative L2 Error:           " << std::scientific << std::setprecision(6) << rel_l2 << "\n"
+                  << "Status:                      " << (argmax_match && rel_l2 <= 0.1 ? "OK" : "DIVERGENCE_MISMATCH") << "\n";
+    }
+
+    return (argmax_match && rel_l2 <= 0.1) ? 0 : 1;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1432,6 +1738,8 @@ int main(int argc, char** argv) {
             return run_chat_diagnostic(opts);
         } else if (opts.mode == "execute-vision") {
             return run_execute_vision(opts);
+        } else if (opts.mode == "continuation-check") {
+            return run_continuation_check(opts);
         }
     } catch (const std::exception& ex) {
         std::cerr << "Error: " << ex.what() << "\n";

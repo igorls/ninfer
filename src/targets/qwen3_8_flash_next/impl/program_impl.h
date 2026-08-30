@@ -78,6 +78,7 @@ struct ContinuationSlot {
     std::uint64_t prefix_digest = 0;
     PleTokenHistory history{};
     std::uint64_t last_used_epoch = 0;
+    runtime::CheckpointKind kind = runtime::CheckpointKind::SessionEndpoint;
 };
 
 struct LaneState {
@@ -106,6 +107,11 @@ struct LaneState {
     bool prefill_completed = false;
     bool finished          = false;
     qwen3_6::detail::PrefixShortlistDigests prefix_digests;
+    std::optional<std::uint32_t> turn_closure_continuation_index;
+    std::uint64_t pending_capture_offer = 0;
+    std::optional<std::uint32_t> capture_frontier;
+    bool capture_offered = false;
+    bool reused_from_turn_closure = false;
 };
 
 class ProgramImpl {
@@ -139,12 +145,16 @@ public:
     std::vector<LaneState> lane_states_;
     std::vector<ContinuationSlot> continuation_slots_;
     std::uint64_t continuation_epoch_ = 0;
+    std::uint64_t capture_counter_ = 0;
 
     bool has_context_transaction_ = false;
     std::optional<runtime::LaneId> transaction_lane_;
     std::optional<std::uint64_t> transaction_epoch_;
     bool transaction_has_source_ = false;
     runtime::ClaimDisposition transaction_source_disposition_ = runtime::ClaimDisposition::ConsumedToActive;
+
+    bool is_capture_transaction_ = false;
+    ActiveCaptureResult pending_capture_result_;
 
     PendingRound pending_round_;
     std::vector<TokenId> pending_batch_tokens_;
