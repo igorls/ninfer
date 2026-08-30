@@ -182,7 +182,11 @@ __global__ void sparse_attention_kernel(
             if (dim < stride) { reduction[dim] = fmaxf(reduction[dim], reduction[dim + stride]); }
             __syncthreads();
         }
-        const float chunk_max   = reduction[0];
+        const float chunk_max = reduction[0];
+        // Every thread must have read reduction[0] before thread 0 overwrites it below; without
+        // this barrier a late warp reads a probability instead of the max (intermittent, one
+        // (head, token) output per hit).
+        __syncthreads();
         const float probability = dim < count ? expf(scores[dim] - chunk_max) : 0.0F;
         scores[dim]             = probability;
         reduction[dim]          = probability;
@@ -409,7 +413,11 @@ __global__ void qsa_prefill_sparse_attention_kernel(
             if (dim < stride) { reduction[dim] = fmaxf(reduction[dim], reduction[dim + stride]); }
             __syncthreads();
         }
-        const float chunk_max   = reduction[0];
+        const float chunk_max = reduction[0];
+        // Every thread must have read reduction[0] before thread 0 overwrites it below; without
+        // this barrier a late warp reads a probability instead of the max (intermittent, one
+        // (head, token) output per hit).
+        __syncthreads();
         const float probability = dim < count ? expf(scores[dim] - chunk_max) : 0.0F;
         scores[dim]             = probability;
         reduction[dim]          = probability;
