@@ -222,7 +222,7 @@ int test_program_lifecycle(ninfer::DeviceContext& device) {
     return failures;
 }
 
-int test_plan_request_validations() {
+int test_plan_request_validations(ninfer::DeviceContext& device) {
     using namespace ninfer::targets::qwen3_8_flash_next;
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
 
@@ -237,8 +237,7 @@ int test_plan_request_validations() {
     const auto curve = flash_next_capacity_curve(cfg);
     auto plan        = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
 
-    ninfer::DeviceContext dummy_device{};
-    auto program_impl = std::make_unique<ProgramImpl>(nullptr, plan, dummy_device);
+    auto program_impl = std::make_unique<ProgramImpl>(nullptr, plan, device);
     Program program(std::move(program_impl));
 
     // 1. Empty prompt rejection
@@ -293,23 +292,78 @@ int test_plan_request_validations() {
         // Expected
     }
 
+    // 5. Concurrency limit and CUDA graph allowance validations
+    try {
+        FlashNextRuntimeConfig bad_cfg_9{
+            .max_concurrency = 9,
+            .max_context     = 128,
+            .prefill_chunk   = 128,
+        };
+        (void)finalize_flash_next_runtime_plan(bad_cfg_9, 1);
+        std::cerr << "Expected max_concurrency > 8 rejection but none thrown\n";
+        failures += 1;
+    } catch (const std::invalid_argument&) {
+        // Expected
+    }
+
+    try {
+        FlashNextRuntimeConfig bad_cfg_0{
+            .max_concurrency = 0,
+            .max_context     = 128,
+            .prefill_chunk   = 128,
+        };
+        (void)finalize_flash_next_runtime_plan(bad_cfg_0, 1);
+        std::cerr << "Expected max_concurrency == 0 rejection but none thrown\n";
+        failures += 1;
+    } catch (const std::invalid_argument&) {
+        // Expected
+    }
+
+    FlashNextRuntimeConfig cfg_graph_on{
+        .max_concurrency = 4,
+        .max_context     = 512,
+        .prefill_chunk   = 512,
+        .use_cuda_graph  = true,
+    };
+    const auto curve_on = flash_next_capacity_curve(cfg_graph_on);
+    auto plan_on        = finalize_flash_next_runtime_plan(cfg_graph_on, curve_on.minimum_main_page_groups);
+    if (plan_on.cuda_graph_allowance_bytes != 4ULL * 12ULL * 1024ULL * 1024ULL) {
+        std::cerr << "Expected 48 MiB cuda_graph_allowance_bytes, got "
+                  << plan_on.cuda_graph_allowance_bytes << "\n";
+        failures += 1;
+    }
+
+    FlashNextRuntimeConfig cfg_graph_off{
+        .max_concurrency = 4,
+        .max_context     = 512,
+        .prefill_chunk   = 512,
+        .use_cuda_graph  = false,
+    };
+    const auto curve_off = flash_next_capacity_curve(cfg_graph_off);
+    auto plan_off        = finalize_flash_next_runtime_plan(cfg_graph_off, curve_off.minimum_main_page_groups);
+    if (plan_off.cuda_graph_allowance_bytes != 0) {
+        std::cerr << "Expected 0 cuda_graph_allowance_bytes when use_cuda_graph is false, got "
+                  << plan_off.cuda_graph_allowance_bytes << "\n";
+        failures += 1;
+    }
+
     return failures;
 }
 
 } // namespace
 
 int main() {
-    int failures = 0;
-    failures += test_plan_request_validations();
-
     int device_count = 0;
     const cudaError_t err = cudaGetDeviceCount(&device_count);
     if (cuda_unavailable(err) || device_count == 0) {
         std::cout << "CUDA device unavailable; skipped GPU Program lifecycle execution.\n";
-    } else {
-        ninfer::DeviceContext device(0);
-        failures += test_program_lifecycle(device);
+        return 0;
     }
+
+    int failures = 0;
+    ninfer::DeviceContext device(0);
+    failures += test_plan_request_validations(device);
+    failures += test_program_lifecycle(device);
 
     if (failures == 0) {
         std::cout << "All Program cold path contract tests passed cleanly.\n";

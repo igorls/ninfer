@@ -609,18 +609,18 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
             .token_id        = st.last_token_id,
             .token_index     = st.last_token_index,
             .mrope_positions = {st.last_token_pos, st.last_token_pos, st.last_token_pos},
+            .sampling        = st.sampling_config,
         };
     }
 
     impl_->pending_round_ = impl_->executor_.execute_round(requests);
 
-    impl_->sample_tokens(impl_->pending_round_.logits(), lane_indices,
-                         std::span(impl_->host_sampled_tokens_.data(), B));
+    const auto sampled = impl_->pending_round_.sampled_tokens();
 
     impl_->pending_batch_tokens_.resize(B);
     impl_->pending_batch_row_counts_.resize(B);
     for (std::size_t b = 0; b < B; ++b) {
-        impl_->pending_batch_tokens_[b]     = static_cast<TokenId>(impl_->host_sampled_tokens_[b]);
+        impl_->pending_batch_tokens_[b]     = static_cast<TokenId>(sampled[b]);
         impl_->pending_batch_row_counts_[b] = 1;
     }
 

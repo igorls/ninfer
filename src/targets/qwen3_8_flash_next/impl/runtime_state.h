@@ -3,11 +3,14 @@
 #include "core/arena.h"
 #include "core/device.h"
 #include "core/tensor.h"
+#include "ninfer/ops/sampling.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode_state.h"
 
 #include <cuda_runtime.h>
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -22,6 +25,7 @@ struct FlashNextRoundTensors {
     Tensor table_rows;             // I32 [max_concurrency]
     Tensor source_slots;           // I32 [max_concurrency]
     Tensor destination_slots;      // I32 [max_concurrency]
+    Tensor sampled_tokens;         // I32 [max_concurrency]
     Tensor gathered_ple_embedding; // BF16 [2560, max_concurrency]
     Tensor final_hidden;           // BF16 [2560, max_concurrency]
     Tensor logits;                 // BF16 [248320, max_concurrency]
@@ -53,6 +57,31 @@ public:
 
     [[nodiscard]] WorkspaceArena& workspace() noexcept { return *workspace_; }
 
+    [[nodiscard]] FlashNextDecodeIngress* host_ingress() noexcept {
+        return static_cast<FlashNextDecodeIngress*>(host_ingress_.data());
+    }
+    [[nodiscard]] const FlashNextDecodeIngress* host_ingress() const noexcept {
+        return static_cast<const FlashNextDecodeIngress*>(host_ingress_.data());
+    }
+
+    [[nodiscard]] FlashNextDecodeEgress* host_egress() noexcept {
+        return static_cast<FlashNextDecodeEgress*>(host_egress_.data());
+    }
+    [[nodiscard]] const FlashNextDecodeEgress* host_egress() const noexcept {
+        return static_cast<const FlashNextDecodeEgress*>(host_egress_.data());
+    }
+
+    [[nodiscard]] void* device_ingress_ptr() noexcept { return device_ingress_; }
+    [[nodiscard]] const void* device_ingress_ptr() const noexcept { return device_ingress_; }
+
+    [[nodiscard]] void* device_egress_ptr() noexcept { return device_egress_; }
+    [[nodiscard]] const void* device_egress_ptr() const noexcept { return device_egress_; }
+
+    [[nodiscard]] const ops::SamplingConfig* device_sampling_configs() const noexcept {
+        return reinterpret_cast<const ops::SamplingConfig*>(
+            static_cast<const std::byte*>(device_ingress_) + offsetof(FlashNextDecodeIngress, sampling));
+    }
+
     // Initialize device slot tensors and state before the first decode round
     void initialize(cudaStream_t stream);
 
@@ -75,6 +104,11 @@ private:
     FlashNextRuntimePlan plan_;
     std::unique_ptr<DeviceBuffer> storage_;
     std::unique_ptr<WorkspaceArena> workspace_;
+
+    PinnedHostBuffer host_ingress_;
+    PinnedHostBuffer host_egress_;
+    void* device_ingress_ = nullptr;
+    void* device_egress_  = nullptr;
 
     FlashNextDecodeStateView state_view_{};
     FlashNextRoundTensors round_tensors_{};

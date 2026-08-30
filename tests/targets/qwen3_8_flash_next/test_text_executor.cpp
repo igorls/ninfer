@@ -6,15 +6,20 @@
 #include "targets/qwen3_8_flash_next/impl/ple_table.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_state.h"
+#include "targets/qwen3_8_flash_next/impl/text_decode.h"
+#include "targets/qwen3_8_flash_next/impl/text_decode_workspace.h"
 #include "targets/qwen3_8_flash_next/impl/text_executor.h"
 
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace {
@@ -841,7 +846,8 @@ int test_prefill_chunk_executor(ninfer::DeviceContext& device) {
         }
         device.synchronize();
 
-        const std::size_t persistent_bytes = plan.total_device_bytes - plan.workspace_bytes;
+        const std::size_t persistent_bytes =
+            plan.total_device_bytes - plan.workspace_bytes - plan.cuda_graph_allowance_bytes;
         std::vector<std::uint8_t> seq_storage(persistent_bytes);
         CUDA_CHECK(cudaMemcpy(seq_storage.data(), alloc_seq.state_view().qsa_attention_caches[0].key_pages.data,
                               persistent_bytes, cudaMemcpyDeviceToHost));
@@ -993,6 +999,501 @@ int test_prefill_chunk_workspace_envelope(ninfer::DeviceContext& device) {
     }
 }
 
+int test_cuda_graph_decode_equivalence(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+
+        auto synthetic_model = make_synthetic_model(device);
+
+        const std::vector<std::uint32_t> test_batches = {1, 2, 4, 8};
+        for (std::uint32_t B : test_batches) {
+            FlashNextRuntimeConfig cfg_eager{
+                .max_concurrency     = B,
+                .max_context         = 512,
+                .state_slot_capacity = 2 * B,
+                .prefill_chunk       = 512,
+                .use_cuda_graph      = false,
+            };
+            const auto curve_eager = flash_next_capacity_curve(cfg_eager);
+            auto plan_eager =
+                finalize_flash_next_runtime_plan(cfg_eager, curve_eager.maximum_main_page_groups);
+
+            FlashNextRuntimeAllocation alloc_eager(plan_eager);
+            alloc_eager.initialize(device.stream);
+            FlashNextTextExecutor exec_eager(synthetic_model.view, ple_meta, device, alloc_eager);
+
+            FlashNextRuntimeConfig cfg_graph{
+                .max_concurrency     = B,
+                .max_context         = 512,
+                .state_slot_capacity = 2 * B,
+                .prefill_chunk       = 512,
+                .use_cuda_graph      = true,
+            };
+            const auto curve_graph = flash_next_capacity_curve(cfg_graph);
+            auto plan_graph =
+                finalize_flash_next_runtime_plan(cfg_graph, curve_graph.maximum_main_page_groups);
+
+            FlashNextRuntimeAllocation alloc_graph(plan_graph);
+            alloc_graph.initialize(device.stream);
+            FlashNextTextExecutor exec_graph(synthetic_model.view, ple_meta, device, alloc_graph);
+
+            // DIAG: captured graphs, then eager body — isolates capture-time state pollution
+            // from replay itself.
+            FlashNextRuntimeAllocation alloc_mixed(plan_graph);
+            alloc_mixed.initialize(device.stream);
+            FlashNextTextExecutor exec_mixed(synthetic_model.view, ple_meta, device, alloc_mixed);
+            exec_mixed.set_use_cuda_graph(false);
+
+            const std::size_t expected_cap =
+                flash_next_text_decode_workspace_capacity_bytes(plan_graph.maximum_blocks, B);
+            const std::size_t peak_capture = alloc_graph.workspace().peak_used();
+            if (((peak_capture + 255U) & ~255ULL) != expected_cap) {
+                std::cerr << "Workspace peak_used after capture mismatch at B=" << B << ": got "
+                          << peak_capture << " (aligned " << ((peak_capture + 255U) & ~255ULL)
+                          << ") expected " << expected_cap << "\n";
+                return 1;
+            }
+
+            std::vector<LaneHandle> lanes_eager;
+            std::vector<LaneHandle> lanes_graph;
+            std::vector<LaneHandle> lanes_mixed;
+            for (std::uint32_t b = 0; b < B; ++b) {
+                lanes_eager.push_back(exec_eager.allocate_lane());
+                lanes_graph.push_back(exec_graph.allocate_lane());
+                lanes_mixed.push_back(exec_mixed.allocate_lane());
+            }
+
+            for (std::size_t step = 0; step < 4; ++step) {
+                std::vector<LaneStepRequest> reqs_eager(B);
+                std::vector<LaneStepRequest> reqs_graph(B);
+                for (std::uint32_t b = 0; b < B; ++b) {
+                    reqs_eager[b] = LaneStepRequest{
+                        .handle          = lanes_eager[b],
+                        .token_id        = static_cast<std::int32_t>(100 + step * 10 + b),
+                        .token_index     = static_cast<std::int32_t>(step),
+                        .mrope_positions = {static_cast<std::int32_t>(step),
+                                            static_cast<std::int32_t>(step),
+                                            static_cast<std::int32_t>(step)},
+                        .sampling        = {.temperature = 0.0F, .top_p = 1.0F},
+                    };
+                    reqs_graph[b] = LaneStepRequest{
+                        .handle          = lanes_graph[b],
+                        .token_id        = static_cast<std::int32_t>(100 + step * 10 + b),
+                        .token_index     = static_cast<std::int32_t>(step),
+                        .mrope_positions = {static_cast<std::int32_t>(step),
+                                            static_cast<std::int32_t>(step),
+                                            static_cast<std::int32_t>(step)},
+                        .sampling        = {.temperature = 0.0F, .top_p = 1.0F},
+                    };
+                }
+
+                if (B == 1 && step == 0) {
+                    // NAN PROBE: which stage first produces NaN on the synthetic model?
+                    std::string first_nan;
+                    std::size_t stages = 0;
+                    FlashNextDecodeStateSink probe;
+                    probe.on_state = [&](std::string_view name, const ninfer::Tensor& t) {
+                        ++stages;
+                        if (!first_nan.empty() || t.dtype != ninfer::DType::BF16) { return; }
+                        std::size_t count = 1;
+                        for (int d = 0; d < 4; ++d) { if (t.ne[d] > 0) { count *= static_cast<std::size_t>(t.ne[d]); } }
+                        std::vector<std::uint16_t> host(count);
+                        CUDA_CHECK(cudaMemcpy(host.data(), t.data, count * sizeof(std::uint16_t),
+                                              cudaMemcpyDeviceToHost));
+                        std::size_t nans = 0;
+                        for (auto v : host) {
+                            const float f = std::bit_cast<float>(static_cast<std::uint32_t>(v) << 16U);
+                            if (std::isnan(f) || std::isinf(f)) { ++nans; }
+                        }
+                        if (nans > 0) {
+                            first_nan = std::string(name) + " (" + std::to_string(nans) + "/" +
+                                        std::to_string(count) + " non-finite)";
+                        }
+                    };
+                    FlashNextRuntimeAllocation alloc_probe(plan_eager);
+                    alloc_probe.initialize(device.stream);
+                    FlashNextTextExecutor exec_probe(synthetic_model.view, ple_meta, device, alloc_probe);
+                    auto lane_probe = exec_probe.allocate_lane();
+                    LaneStepRequest req_probe = reqs_eager[0];
+                    req_probe.handle          = lane_probe;
+                    auto round_probe = exec_probe.execute_round(std::span<const LaneStepRequest>(&req_probe, 1), &probe);
+                    std::vector<LaneCommitDecision> d1 = {{.accept = true}};
+                    round_probe.commit(d1);
+                    device.synchronize();
+                    std::cout << "NAN PROBE: stages=" << stages << " first non-finite stage: "
+                              << (first_nan.empty() ? "none" : first_nan) << "\n";
+                    exec_probe.release_lane(lane_probe);
+                }
+                std::vector<LaneStepRequest> reqs_mixed = reqs_graph;
+                for (std::uint32_t b = 0; b < B; ++b) { reqs_mixed[b].handle = lanes_mixed[b]; }
+                auto round_eager = exec_eager.execute_round(reqs_eager);
+                auto round_graph = exec_graph.execute_round(reqs_graph);
+                auto round_mixed = exec_mixed.execute_round(reqs_mixed);
+
+                // Check sampled tokens equivalence
+                auto eager_tokens = round_eager.sampled_tokens();
+                auto graph_tokens = round_graph.sampled_tokens();
+                for (std::uint32_t b = 0; b < B; ++b) {
+                    if (eager_tokens[b] != graph_tokens[b]) {
+                        std::cerr << "Sampled token mismatch at B=" << B << " step=" << step
+                                  << " b=" << b << ": eager=" << eager_tokens[b]
+                                  << " graph=" << graph_tokens[b] << "\n";
+                        return 1;
+                    }
+                }
+
+                // Check logits equivalence
+                std::vector<std::uint16_t> logits_eager(248'320 * B);
+                std::vector<std::uint16_t> logits_graph(248'320 * B);
+                CUDA_CHECK(cudaMemcpy(logits_eager.data(), round_eager.logits().data,
+                                      logits_eager.size() * sizeof(std::uint16_t),
+                                      cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(logits_graph.data(), round_graph.logits().data,
+                                      logits_graph.size() * sizeof(std::uint16_t),
+                                      cudaMemcpyDeviceToHost));
+
+                auto bf16_to_f = [](std::uint16_t v) {
+                    return std::bit_cast<float>(static_cast<std::uint32_t>(v) << 16U);
+                };
+                std::vector<std::uint16_t> logits_mixed(248'320 * B);
+                CUDA_CHECK(cudaMemcpy(logits_mixed.data(), round_mixed.logits().data,
+                                      logits_mixed.size() * sizeof(std::uint16_t),
+                                      cudaMemcpyDeviceToHost));
+                float max_eg = 0.0F, max_em = 0.0F, max_gm = 0.0F;
+                std::size_t n_eg = 0, n_em = 0, n_gm = 0;
+                for (std::size_t i = 0; i < logits_eager.size(); ++i) {
+                    const float e = bf16_to_f(logits_eager[i]);
+                    const float g = bf16_to_f(logits_graph[i]);
+                    const float m = bf16_to_f(logits_mixed[i]);
+                    if (e != g) { ++n_eg; max_eg = std::max(max_eg, std::abs(e - g)); }
+                    if (e != m) { ++n_em; max_em = std::max(max_em, std::abs(e - m)); }
+                    if (g != m) { ++n_gm; max_gm = std::max(max_gm, std::abs(g - m)); }
+                }
+                std::size_t n_nan = 0;
+                for (std::size_t i = 0; i < logits_eager.size(); ++i) { if (std::isnan(bf16_to_f(logits_eager[i]))) { ++n_nan; } }
+                std::cout << "DIAG nan(eager)=" << n_nan << " ";
+                std::cout << "DIAG B=" << B << " step=" << step << " eager-vs-graph: " << n_eg
+                          << " differ (max " << max_eg << ") | eager-vs-mixed: " << n_em
+                          << " differ (max " << max_em << ") | graph-vs-mixed: " << n_gm
+                          << " differ (max " << max_gm << ")\n";
+                if (max_eg > 1e-3F) {
+                    std::cerr << "Logits diff exceeded at B=" << B << " step=" << step << "\n";
+                    return 1;
+                }
+
+                std::vector<LaneCommitDecision> decisions(B, {.accept = true});
+                round_eager.commit(decisions);
+                round_graph.commit(decisions);
+                round_mixed.commit(decisions);
+                device.synchronize();
+
+                if (((alloc_graph.workspace().peak_used() + 255U) & ~255ULL) != expected_cap ||
+                    alloc_graph.workspace().peak_used() != peak_capture) {
+                    std::cerr << "Workspace peak_used after replay mismatch at B=" << B << ": got "
+                              << alloc_graph.workspace().peak_used() << " expected " << peak_capture
+                              << "\n";
+                    return 1;
+                }
+            }
+
+            for (std::uint32_t b = 0; b < B; ++b) {
+                exec_eager.release_lane(lanes_eager[b]);
+                exec_graph.release_lane(lanes_graph[b]);
+            }
+        }
+        std::cout << "PASS: test_cuda_graph_decode_equivalence\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_cuda_graph_decode_equivalence exception: " << e.what() << "\n";
+        return 1;
+    } catch (...) {
+        std::cerr << "test_cuda_graph_decode_equivalence unknown exception\n";
+        return 1;
+    }
+}
+
+int test_cuda_graph_frontier_masking_and_churn(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+
+        auto synthetic_model = make_synthetic_model(device);
+
+        FlashNextRuntimeConfig cfg{
+            .max_concurrency     = 4,
+            .max_context         = 512,
+            .state_slot_capacity = 8,
+            .prefill_chunk       = 512,
+            .use_cuda_graph      = true,
+        };
+        const auto curve = flash_next_capacity_curve(cfg);
+        auto plan = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+
+        FlashNextRuntimeAllocation alloc(plan);
+        alloc.initialize(device.stream);
+        FlashNextTextExecutor exec(synthetic_model.view, ple_meta, device, alloc);
+
+        // 1. Allocate 4 lanes
+        auto lane0 = exec.allocate_lane();
+        auto lane1 = exec.allocate_lane();
+        auto lane2 = exec.allocate_lane();
+        auto lane3 = exec.allocate_lane();
+
+        // 2. Prefill lane0 up to frontier 250 (nearing group boundary 256)
+        std::vector<std::int32_t> prefill_tokens(250, 100);
+        std::vector<std::array<std::int32_t, 3>> prefill_pos(250);
+        for (std::int32_t i = 0; i < 250; ++i) { prefill_pos[i] = {i, i, i}; }
+        auto pr = exec.execute_prefill_chunk(lane0, prefill_tokens, prefill_pos, 0);
+        std::vector<LaneCommitDecision> accept1 = {{.accept = true}};
+        pr.commit(accept1);
+        device.synchronize();
+
+        // 3. Step lane0 across boundary (N=250 -> 260) with batch B=1 using graph replay
+        for (std::int32_t step = 250; step < 260; ++step) {
+            LaneStepRequest req{
+                .handle          = lane0,
+                .token_id        = 100 + step,
+                .token_index     = step,
+                .mrope_positions = {step, step, step},
+                .sampling        = {.temperature = 0.0F, .top_p = 1.0F},
+            };
+            auto round = exec.execute_round(std::span(&req, 1));
+            round.commit(accept1);
+            device.synchronize();
+        }
+
+        if (exec.committed_frontier(lane0) != 260) {
+            std::cerr << "Frontier expected 260 after crossing boundary, got "
+                      << exec.committed_frontier(lane0) << "\n";
+            return 1;
+        }
+
+        // 4. Lane churn and slot recycling under graph replay:
+        // Release lane 1 and lane 2
+        exec.release_lane(lane1);
+        exec.release_lane(lane2);
+
+        // Step remaining lanes (lane 0 and lane 3) as B=2 round
+        std::vector<LaneStepRequest> reqs_b2 = {
+            {.handle          = lane0,
+             .token_id        = 400,
+             .token_index     = 260,
+             .mrope_positions = {260, 260, 260},
+             .sampling        = {.temperature = 0.0F, .top_p = 1.0F}},
+            {.handle          = lane3,
+             .token_id        = 401,
+             .token_index     = 0,
+             .mrope_positions = {0, 0, 0},
+             .sampling        = {.temperature = 0.0F, .top_p = 1.0F}},
+        };
+        auto round_b2 = exec.execute_round(reqs_b2);
+        std::vector<LaneCommitDecision> accept2(2, {.accept = true});
+        round_b2.commit(accept2);
+        device.synchronize();
+
+        // Reallocate 2 new lanes (will recycle previously freed state slots)
+        auto lane4 = exec.allocate_lane();
+        auto lane5 = exec.allocate_lane();
+
+        // Step all 4 lanes as B=4 round
+        std::vector<LaneStepRequest> reqs_b4 = {
+            {.handle          = lane0,
+             .token_id        = 500,
+             .token_index     = 261,
+             .mrope_positions = {261, 261, 261},
+             .sampling        = {.temperature = 0.0F, .top_p = 1.0F}},
+            {.handle          = lane3,
+             .token_id        = 501,
+             .token_index     = 1,
+             .mrope_positions = {1, 1, 1},
+             .sampling        = {.temperature = 0.0F, .top_p = 1.0F}},
+            {.handle          = lane4,
+             .token_id        = 502,
+             .token_index     = 0,
+             .mrope_positions = {0, 0, 0},
+             .sampling        = {.temperature = 0.0F, .top_p = 1.0F}},
+            {.handle          = lane5,
+             .token_id        = 503,
+             .token_index     = 0,
+             .mrope_positions = {0, 0, 0},
+             .sampling        = {.temperature = 0.0F, .top_p = 1.0F}},
+        };
+        auto round_b4 = exec.execute_round(reqs_b4);
+        std::vector<LaneCommitDecision> accept4(4, {.accept = true});
+        round_b4.commit(accept4);
+        device.synchronize();
+
+        exec.release_lane(lane0);
+        exec.release_lane(lane3);
+        exec.release_lane(lane4);
+        exec.release_lane(lane5);
+
+        std::cout << "PASS: test_cuda_graph_frontier_masking_and_churn\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_cuda_graph_frontier_masking_and_churn exception: " << e.what() << "\n";
+        return 1;
+    } catch (...) {
+        std::cerr << "test_cuda_graph_frontier_masking_and_churn unknown exception\n";
+        return 1;
+    }
+}
+
+int test_cuda_graph_timing_benchmark(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+
+        auto synthetic_model = make_synthetic_model(device);
+
+        const std::vector<std::uint32_t> benchmark_batches = {1, 8};
+        constexpr int kWarmupRounds = 5;
+        constexpr int kBenchRounds  = 30;
+
+        std::cout << "--- Decode Performance Benchmark (Synthetic Model) ---\n";
+        for (std::uint32_t B : benchmark_batches) {
+            // 1. Eager mode
+            FlashNextRuntimeConfig cfg_eager{
+                .max_concurrency     = B,
+                .max_context         = 512,
+                .state_slot_capacity = 2 * B,
+                .prefill_chunk       = 512,
+                .use_cuda_graph      = false,
+            };
+            const auto curve_eager = flash_next_capacity_curve(cfg_eager);
+            auto plan_eager =
+                finalize_flash_next_runtime_plan(cfg_eager, curve_eager.maximum_main_page_groups);
+            FlashNextRuntimeAllocation alloc_eager(plan_eager);
+            alloc_eager.initialize(device.stream);
+            FlashNextTextExecutor exec_eager(synthetic_model.view, ple_meta, device, alloc_eager);
+            std::vector<LaneHandle> lanes_eager;
+            for (std::uint32_t b = 0; b < B; ++b) {
+                lanes_eager.push_back(exec_eager.allocate_lane());
+            }
+
+            std::vector<LaneStepRequest> reqs_eager(B);
+            std::vector<LaneCommitDecision> accept(B, {.accept = true});
+
+            int step_eager = 0;
+            for (int r = 0; r < kWarmupRounds; ++r, ++step_eager) {
+                for (std::uint32_t b = 0; b < B; ++b) {
+                    reqs_eager[b] = {
+                        .handle          = lanes_eager[b],
+                        .token_id        = static_cast<std::int32_t>(100 + b),
+                        .token_index     = step_eager,
+                        .mrope_positions = {step_eager, step_eager, step_eager},
+                        .sampling        = {.temperature = 0.0F, .top_p = 1.0F},
+                    };
+                }
+                auto rd = exec_eager.execute_round(reqs_eager);
+                rd.commit(accept);
+                device.synchronize();
+            }
+
+            auto start_eager = std::chrono::high_resolution_clock::now();
+            for (int r = 0; r < kBenchRounds; ++r, ++step_eager) {
+                for (std::uint32_t b = 0; b < B; ++b) {
+                    reqs_eager[b] = {
+                        .handle          = lanes_eager[b],
+                        .token_id        = static_cast<std::int32_t>(100 + b),
+                        .token_index     = step_eager,
+                        .mrope_positions = {step_eager, step_eager, step_eager},
+                        .sampling        = {.temperature = 0.0F, .top_p = 1.0F},
+                    };
+                }
+                auto rd = exec_eager.execute_round(reqs_eager);
+                rd.commit(accept);
+            }
+            device.synchronize();
+            auto end_eager = std::chrono::high_resolution_clock::now();
+            double eager_us_per_round =
+                std::chrono::duration<double, std::micro>(end_eager - start_eager).count() /
+                kBenchRounds;
+            double eager_tok_per_sec = (B * 1e6) / eager_us_per_round;
+
+            // 2. Graph Replay mode
+            FlashNextRuntimeConfig cfg_graph{
+                .max_concurrency     = B,
+                .max_context         = 512,
+                .state_slot_capacity = 2 * B,
+                .prefill_chunk       = 512,
+                .use_cuda_graph      = true,
+            };
+            const auto curve_graph = flash_next_capacity_curve(cfg_graph);
+            auto plan_graph =
+                finalize_flash_next_runtime_plan(cfg_graph, curve_graph.maximum_main_page_groups);
+            FlashNextRuntimeAllocation alloc_graph(plan_graph);
+            alloc_graph.initialize(device.stream);
+            FlashNextTextExecutor exec_graph(synthetic_model.view, ple_meta, device, alloc_graph);
+            std::vector<LaneHandle> lanes_graph;
+            for (std::uint32_t b = 0; b < B; ++b) {
+                lanes_graph.push_back(exec_graph.allocate_lane());
+            }
+
+            std::vector<LaneStepRequest> reqs_graph(B);
+            int step_graph = 0;
+            for (int r = 0; r < kWarmupRounds; ++r, ++step_graph) {
+                for (std::uint32_t b = 0; b < B; ++b) {
+                    reqs_graph[b] = {
+                        .handle          = lanes_graph[b],
+                        .token_id        = static_cast<std::int32_t>(100 + b),
+                        .token_index     = step_graph,
+                        .mrope_positions = {step_graph, step_graph, step_graph},
+                        .sampling        = {.temperature = 0.0F, .top_p = 1.0F},
+                    };
+                }
+                auto rd = exec_graph.execute_round(reqs_graph);
+                rd.commit(accept);
+                device.synchronize();
+            }
+
+            auto start_graph = std::chrono::high_resolution_clock::now();
+            for (int r = 0; r < kBenchRounds; ++r, ++step_graph) {
+                for (std::uint32_t b = 0; b < B; ++b) {
+                    reqs_graph[b] = {
+                        .handle          = lanes_graph[b],
+                        .token_id        = static_cast<std::int32_t>(100 + b),
+                        .token_index     = step_graph,
+                        .mrope_positions = {step_graph, step_graph, step_graph},
+                        .sampling        = {.temperature = 0.0F, .top_p = 1.0F},
+                    };
+                }
+                auto rd = exec_graph.execute_round(reqs_graph);
+                rd.commit(accept);
+            }
+            device.synchronize();
+            auto end_graph = std::chrono::high_resolution_clock::now();
+            double graph_us_per_round =
+                std::chrono::duration<double, std::micro>(end_graph - start_graph).count() /
+                kBenchRounds;
+            double graph_tok_per_sec = (B * 1e6) / graph_us_per_round;
+
+            std::cout << "B=" << B << " | Eager: " << eager_us_per_round << " us/round ("
+                      << eager_tok_per_sec << " tok/s) | Graph Replay: " << graph_us_per_round
+                      << " us/round (" << graph_tok_per_sec << " tok/s) | Speedup: "
+                      << (eager_us_per_round / graph_us_per_round) << "x\n";
+        }
+        std::cout << "--------------------------------------------------------\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_cuda_graph_timing_benchmark exception: " << e.what() << "\n";
+        return 1;
+    } catch (...) {
+        std::cerr << "test_cuda_graph_timing_benchmark unknown exception\n";
+        return 1;
+    }
+}
+
 } // namespace
 
 int main() {
@@ -1013,6 +1514,9 @@ int main() {
     if (test_cuda_ledger_and_executor(device) != 0) return 1;
     if (test_prefill_chunk_executor(device) != 0) return 1;
     if (test_prefill_chunk_workspace_envelope(device) != 0) return 1;
+    if (test_cuda_graph_decode_equivalence(device) != 0) return 1;
+    if (test_cuda_graph_frontier_masking_and_churn(device) != 0) return 1;
+    if (test_cuda_graph_timing_benchmark(device) != 0) return 1;
 
     std::cout << "OK Flash-Next Text Executor\n";
     return 0;

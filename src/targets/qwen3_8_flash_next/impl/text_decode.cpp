@@ -379,11 +379,16 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                 state.qsa_indexer_caches[qsa_idx], maximum_blocks, workspace,
                 round_ws.selected_blocks, round_ws.selected_counts, stream);
             emit_state(prefix + "selected_counts", round_ws.selected_counts);
+            emit_state(prefix + "selected_blocks", round_ws.selected_blocks);
+            QsaStageEmitter qsa_emit;
+            if (sink && sink->on_state) {
+                qsa_emit = [&](std::string_view name, const Tensor& t) { emit_state(prefix + std::string(name), t); };
+            }
             flash_next_qsa_attention_prefill_chunk(
                 round_ws.block_input, model.full_attention[qsa_idx], token_indices,
                 mrope_positions, table_row, round_ws.selected_blocks,
                 round_ws.selected_counts, state.qsa_attention_caches[qsa_idx],
-                workspace, round_ws.block_output, stream);
+                workspace, round_ws.block_output, stream, qsa_emit);
         } else {
             const std::size_t gdn_idx = gdn_ordinal(layer);
             flash_next_gdn_prefill_chunk(round_ws.block_input, model.gdn[gdn_idx], source_slot,

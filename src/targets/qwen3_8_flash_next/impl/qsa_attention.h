@@ -1,5 +1,8 @@
 #pragma once
 
+#include <functional>
+#include <string_view>
+
 #include "core/arena.h"
 #include "targets/qwen3_8_flash_next/impl/model_view.h"
 
@@ -25,10 +28,12 @@ void flash_next_qsa_attention_decode(const Tensor& input, const AttentionWeights
                                      WorkspaceArena& workspace, Tensor& output,
                                      cudaStream_t stream);
 
+// DIAG: optional emitter for the block's internals (empty = no-op).
+using QsaStageEmitter = std::function<void(std::string_view, const Tensor&)>;
 void flash_next_qsa_attention_prefill_chunk(
     const Tensor& input, const AttentionWeights& weights, const Tensor& token_indices,
     const Tensor& mrope_positions, std::int32_t table_row, const Tensor& selected_blocks,
     const Tensor& selected_counts, QsaAttentionCacheView cache, WorkspaceArena& workspace,
-    Tensor& output, cudaStream_t stream);
+    Tensor& output, cudaStream_t stream, const QsaStageEmitter& emit = {});
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

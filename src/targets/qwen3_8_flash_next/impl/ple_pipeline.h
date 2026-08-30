@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/arena.h"
 #include "core/device.h"
 #include "core/host_worker_pool.h"
 #include "core/tensor.h"
@@ -44,6 +45,10 @@ public:
     // a dependency into the main stream. The main stream itself is never host-synchronized.
     void enqueue_copy(Ticket&& ticket, Tensor& output);
 
+    // Decode graph support: synchronous host gather into fixed pinned buffer before graph launch.
+    void gather_pinned(std::span<const std::array<std::int64_t, 16>> global_rows);
+    [[nodiscard]] const void* fixed_host_buffer() const noexcept { return fixed_host_buffer_.data(); }
+
 private:
     struct Slot;
 
@@ -55,6 +60,7 @@ private:
     std::vector<std::unique_ptr<Slot>> slots_;
     HostWorkerPool workers_;
     std::size_t next_slot_ = 0;
+    PinnedHostBuffer fixed_host_buffer_;
 };
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ninfer/ops/sampling.h"
 #include "targets/qwen3_8_flash_next/impl/ple_index.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_state.h"
@@ -46,6 +47,7 @@ struct LaneStepRequest {
     std::int32_t token_id                       = 0;
     std::int32_t token_index                    = 0;
     std::array<std::int32_t, 3> mrope_positions = {0, 0, 0};
+    ops::SamplingConfig sampling                = {};
     const Tensor* custom_embedding              = nullptr;
 };
 

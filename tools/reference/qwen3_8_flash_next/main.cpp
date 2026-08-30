@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <bit>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -828,6 +829,7 @@ int run_chat_diagnostic(const ReferenceToolOptions& opts) {
         .max_context         = opts.max_context,
         .state_slot_capacity = opts.state_slots,
         .prefill_chunk       = opts.prefill_chunk > 0 ? opts.prefill_chunk : 1024,
+        .use_cuda_graph      = opts.use_cuda_graph,
     };
     const auto curve = flash_next_capacity_curve(config);
     const std::uint32_t resolved_groups =
@@ -875,6 +877,7 @@ int run_chat_diagnostic(const ReferenceToolOptions& opts) {
     const std::size_t prompt_len = prompt_tokens.size();
     PendingRound round;
 
+    auto run_prefill = [&]() {
     if (opts.prefill_chunk == 0) {
         for (std::size_t i = 0; i + 1 < prompt_len; ++i) {
             LaneStepRequest req{
@@ -944,6 +947,40 @@ int run_chat_diagnostic(const ReferenceToolOptions& opts) {
         }
     }
 
+    };
+    run_prefill();
+    if (opts.repeat_prefill > 1) {
+        auto grab = [&](std::vector<std::uint16_t>& out) {
+            out.resize(248'320);
+            CUDA_CHECK(cudaStreamSynchronize(device.stream));
+            CUDA_CHECK(cudaMemcpy(out.data(), round.logits().data, out.size() * sizeof(std::uint16_t),
+                                  cudaMemcpyDeviceToHost));
+        };
+        auto bf = [](std::uint16_t v) { return std::bit_cast<float>(static_cast<std::uint32_t>(v) << 16U); };
+        std::vector<std::uint16_t> first;
+        grab(first);
+        std::uint32_t differing = 0;
+        float worst = 0.0F;
+        for (std::uint32_t r = 1; r < opts.repeat_prefill; ++r) {
+            std::vector<LaneCommitDecision> d = {{.accept = true}};
+            round.commit(d);
+            executor.release_lane(lane);
+            lane = executor.allocate_lane();
+            run_prefill();
+            std::vector<std::uint16_t> cur;
+            grab(cur);
+            if (cur != first) {
+                float m = 0.0F;
+                for (std::size_t i = 0; i < cur.size(); ++i) { m = std::max(m, std::abs(bf(cur[i]) - bf(first[i]))); }
+                worst = std::max(worst, m);
+                ++differing;
+                std::cout << "repeat-prefill " << r << ": DIFFERS from the first run, max|d|=" << m << "\n";
+            }
+        }
+        std::cout << "repeat-prefill: " << differing << " of " << (opts.repeat_prefill - 1)
+                  << " repetitions differ from the first (worst max|d| " << worst << ")\n";
+    }
+
     if (dumper) {
         dumper->write_manifest();
         if (!opts.json_output) {
@@ -971,7 +1008,21 @@ int run_chat_diagnostic(const ReferenceToolOptions& opts) {
                   << "--- Output ---\n";
     }
 
+    if (!opts.dump_gen_logits.empty()) { std::filesystem::create_directories(opts.dump_gen_logits); }
     while (true) {
+        if (!opts.dump_gen_logits.empty()) {
+            // Per-round logits without a state sink, so graph replay stays in effect.
+            device.synchronize();
+            std::vector<std::uint16_t> host_logits(248'320);
+            CUDA_CHECK(cudaMemcpy(host_logits.data(), round.logits().data,
+                                  host_logits.size() * sizeof(std::uint16_t),
+                                  cudaMemcpyDeviceToHost));
+            char name[32];
+            std::snprintf(name, sizeof(name), "gen_%03u.bin", generated_tokens);
+            std::ofstream out(std::filesystem::path(opts.dump_gen_logits) / name, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(host_logits.data()),
+                      static_cast<std::streamsize>(host_logits.size() * sizeof(std::uint16_t)));
+        }
         device_positions.copy_from_host(&current_pos, sizeof(std::int32_t));
         ninfer::ops::sample(
             round.logits(), out_tensor, kSemanticTokenDomain,

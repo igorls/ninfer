@@ -104,7 +104,7 @@ void flash_next_qsa_attention_prefill_chunk(
     const Tensor& input, const AttentionWeights& weights, const Tensor& token_indices,
     const Tensor& mrope_positions, std::int32_t table_row, const Tensor& selected_blocks,
     const Tensor& selected_counts, QsaAttentionCacheView cache, WorkspaceArena& workspace,
-    Tensor& output, cudaStream_t stream) {
+    Tensor& output, cudaStream_t stream, const QsaStageEmitter& emit) {
     const std::int32_t tokens = input.ne[1];
     if (tokens <= 0 || !exact_tensor(input, DType::BF16, 2'560, tokens) ||
         !exact_tensor(output, DType::BF16, 2'560, tokens) ||
@@ -135,9 +135,18 @@ void flash_next_qsa_attention_prefill_chunk(
         allocate_flash_next_qsa_attention_workspace(workspace, tokens);
     ops::linear(input, weights.query_gate_key_value, scratch.projected, ops::LinearPolicy::A16Only,
                 workspace, stream);
+    if (emit) { emit("qsa_projected", scratch.projected); }
     flash_next_qsa_attention_prefill_launch(token_indices, mrope_positions, table_row, selected_blocks,
                                             selected_counts, weights.query_norm, weights.key_norm,
                                             cache, scratch, stream);
+    if (emit) {
+        emit("qsa_query", scratch.query);
+        emit("qsa_gate", scratch.gate);
+        emit("qsa_key", scratch.key);
+        emit("qsa_value", scratch.value);
+        emit("qsa_attended", scratch.attended);
+        emit("qsa_gated", scratch.gated);
+    }
     ops::linear(scratch.gated, weights.output, output, ops::LinearPolicy::A16Only, workspace,
                 stream);
 }

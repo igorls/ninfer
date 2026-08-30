@@ -36,7 +36,8 @@ std::size_t checked_align_up_256(std::size_t bytes) {
 void validate_config_invariants(const FlashNextRuntimeConfig& config,
                                 std::uint32_t& resolved_state_slots) {
     if (config.max_concurrency < 1 || config.max_concurrency > 8) {
-        throw std::invalid_argument("Flash-Next max_concurrency must be in [1, 8]");
+        throw std::invalid_argument(
+            "Flash-Next max_concurrency must be in [1, 8] (CUDA graphs decode hard limit)");
     }
     if (config.max_context < 1 || config.max_context > 262'144) {
         throw std::invalid_argument("Flash-Next max_context must be in [1, 262144]");
@@ -90,27 +91,17 @@ compute_fixed_base_bytes(const FlashNextRuntimeConfig& config, std::uint32_t res
         checked_add(ple_conv, checked_add(checked_mul(12ULL, single_raw_keys),
                                           checked_mul(12ULL, single_raw_pos))));
 
-    // 3. Round buffers
+    // 3. Round buffers (pinned/device ingress & egress, plus gathered PLE, hidden, logits)
     round_tensors_bytes = checked_add(
-        checked_align_up_256(config.max_concurrency * sizeof(std::int32_t)),
+        checked_align_up_256(sizeof(FlashNextDecodeIngress)),
         checked_add(
-            checked_align_up_256(config.max_concurrency * sizeof(std::int32_t)),
+            checked_align_up_256(sizeof(FlashNextDecodeEgress)),
             checked_add(
-                checked_align_up_256(config.max_concurrency * 3 * sizeof(std::int32_t)),
+                checked_align_up_256(2'560ULL * config.max_concurrency * sizeof(std::uint16_t)),
                 checked_add(
-                    checked_align_up_256(config.max_concurrency * sizeof(std::int32_t)),
-                    checked_add(
-                        checked_align_up_256(config.max_concurrency * sizeof(std::int32_t)),
-                        checked_add(
-                            checked_align_up_256(config.max_concurrency * sizeof(std::int32_t)),
-                            checked_add(
-                                checked_align_up_256(2'560ULL * config.max_concurrency *
-                                                     sizeof(std::uint16_t)),
-                                checked_add(
-                                    checked_align_up_256(2'560ULL * config.max_concurrency *
-                                                         sizeof(std::uint16_t)),
-                                    checked_align_up_256(248'320ULL * config.max_concurrency *
-                                                         sizeof(std::uint16_t))))))))));
+                    checked_align_up_256(2'560ULL * config.max_concurrency * sizeof(std::uint16_t)),
+                    checked_align_up_256(248'320ULL * config.max_concurrency *
+                                         sizeof(std::uint16_t))))));
 
     // 4. Text decode and prefill workspace peak
     const std::size_t decode_workspace =
@@ -154,13 +145,18 @@ flash_next_capacity_curve(const FlashNextRuntimeConfig& config) {
                                  indexer_logical_pages, maximum_blocks, block_tables_bytes,
                                  recurrent_state_bytes, round_tensors_bytes, workspace_bytes);
 
+    const std::size_t graph_allowance =
+        config.use_cuda_graph ? checked_mul<std::size_t>(12ULL * 1024ULL * 1024ULL, config.max_concurrency)
+                              : 0ULL;
+
     ninfer::runtime::SequenceCapacityCurve curve{};
     curve.main_page_tokens                     = kMainPageGroupTokens;
     curve.minimum_main_page_groups             = min_groups;
     curve.maximum_main_page_groups             = max_groups;
     curve.bytes_per_additional_main_page_group = kPhysicalStrideBytesPerGroup;
     curve.minimum_device_reservation_bytes     = checked_add(
-        fixed_base_bytes, checked_mul<std::size_t>(min_groups, kPhysicalStrideBytesPerGroup));
+        checked_add(fixed_base_bytes, checked_mul<std::size_t>(min_groups, kPhysicalStrideBytesPerGroup)),
+        graph_allowance);
 
     return curve;
 }
@@ -205,8 +201,14 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
         plan.maximum_blocks, plan.block_tables_bytes, plan.recurrent_state_bytes,
         plan.round_tensors_bytes, plan.workspace_bytes);
 
+    const std::size_t graph_allowance =
+        config.use_cuda_graph ? checked_mul<std::size_t>(12ULL * 1024ULL * 1024ULL, config.max_concurrency)
+                              : 0ULL;
+    plan.cuda_graph_allowance_bytes = graph_allowance;
+
     plan.total_device_bytes = checked_add(
-        checked_add(plan.attention_kv_bytes, plan.indexer_block_keys_bytes), fixed_base_bytes);
+        checked_add(plan.attention_kv_bytes, plan.indexer_block_keys_bytes),
+        checked_add(fixed_base_bytes, graph_allowance));
     plan.capacity_curve = curve;
 
     return plan;

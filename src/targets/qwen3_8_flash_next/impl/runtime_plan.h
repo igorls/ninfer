@@ -1,9 +1,11 @@
 #pragma once
 
 #include "core/tensor.h"
+#include "ninfer/ops/sampling.h"
 #include "runtime/contract/types.h"
 #include "targets/qwen3_8_flash_next/impl/model_view.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -45,11 +47,28 @@ inline constexpr std::size_t kRecurrentStateBytesPerSlot =
 
 inline constexpr std::uint32_t kPrefillChunkAlignment = 128;
 
+// Fixed-address pinned ingress structure copied by a single captured cudaMemcpyAsync
+struct FlashNextDecodeIngress {
+    std::array<std::int32_t, 8> token_ids{};
+    std::array<std::int32_t, 8> token_indices{};
+    std::array<std::int32_t, 3 * 8> mrope_positions{}; // Planar [3, 8]
+    std::array<std::int32_t, 8> table_rows{};
+    std::array<std::int32_t, 8> source_slots{};
+    std::array<std::int32_t, 8> destination_slots{};
+    std::array<ops::SamplingConfig, 8> sampling{};
+};
+
+// Fixed-address pinned egress structure copied by a single captured D2H cudaMemcpyAsync
+struct FlashNextDecodeEgress {
+    std::array<std::int32_t, 8> sampled_tokens{};
+};
+
 struct FlashNextRuntimeConfig {
     std::uint32_t max_concurrency     = 1;    // 1..8
     std::uint32_t max_context         = 4096; // in tokens: 1..262144
     std::uint32_t state_slot_capacity = 0;    // 0 -> default 2 * max_concurrency
     std::uint32_t prefill_chunk       = 1024; // nonzero multiple of 128, <= max_context
+    bool use_cuda_graph               = true;
 };
 
 struct FlashNextRuntimePlan {
@@ -64,13 +83,14 @@ struct FlashNextRuntimePlan {
     std::uint32_t maximum_blocks           = 0; // ceil(max_context / 4)
 
     // Memory breakdown in bytes
-    std::size_t attention_kv_bytes       = 0;
-    std::size_t indexer_block_keys_bytes = 0;
-    std::size_t block_tables_bytes       = 0;
-    std::size_t recurrent_state_bytes    = 0;
-    std::size_t round_tensors_bytes      = 0;
-    std::size_t workspace_bytes          = 0;
-    std::size_t total_device_bytes       = 0;
+    std::size_t attention_kv_bytes         = 0;
+    std::size_t indexer_block_keys_bytes   = 0;
+    std::size_t block_tables_bytes         = 0;
+    std::size_t recurrent_state_bytes      = 0;
+    std::size_t round_tensors_bytes        = 0;
+    std::size_t workspace_bytes            = 0;
+    std::size_t cuda_graph_allowance_bytes = 0;
+    std::size_t total_device_bytes         = 0;
 
     ninfer::runtime::SequenceCapacityCurve capacity_curve;
 };

@@ -94,6 +94,9 @@ void print_reference_tool_usage(std::string_view prog) {
         << "  --prompt <string>          User prompt text for chat-diagnostic\n"
         << "  --system <string>          Optional system prompt for chat-diagnostic\n"
         << "  --dump-states <dir>        Directory to dump raw state tensors for oracle comparison\n"
+        << "  --dump-gen-logits <dir>    Write the logits of every generation round (gen_NNN.bin)\n"
+        << "  --no-cuda-graph            Run decode rounds eagerly instead of replaying CUDA graphs\n"
+        << "  --repeat-prefill <n>       Run the prompt prefill n times on fresh lanes and compare logits\n"
         << "  --temperature <float>      Sampling temperature (default: 1.0, 0 = greedy)\n"
         << "  --top-k <N>                Sampling top-k (default: 20)\n"
         << "  --top-p <float>            Sampling top-p (default: 0.95)\n"
@@ -199,6 +202,16 @@ ReferenceToolOptions parse_reference_tool_options(std::span<const std::string_vi
         } else if (arg == "--token-id") {
             if (++i >= args.size()) throw std::invalid_argument("Missing argument for --token-id");
             opts.token_id = parse_strict_i32(args[i], "--token-id");
+        } else if (arg == "--repeat-prefill") {
+            if (++i >= args.size())
+                throw std::invalid_argument("Missing argument for --repeat-prefill");
+            opts.repeat_prefill = parse_strict_u32(args[i], "--repeat-prefill");
+        } else if (arg == "--no-cuda-graph") {
+            opts.use_cuda_graph = false;
+        } else if (arg == "--dump-gen-logits") {
+            if (++i >= args.size())
+                throw std::invalid_argument("Missing argument for --dump-gen-logits");
+            opts.dump_gen_logits = std::string(args[i]);
         } else if (arg == "--prefill-chunk") {
             if (++i >= args.size())
                 throw std::invalid_argument("Missing argument for --prefill-chunk");

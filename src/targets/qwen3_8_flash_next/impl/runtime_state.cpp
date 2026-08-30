@@ -27,6 +27,7 @@ void validate_plan_match(const FlashNextRuntimePlan& actual) {
         actual.recurrent_state_bytes != expected.recurrent_state_bytes ||
         actual.round_tensors_bytes != expected.round_tensors_bytes ||
         actual.workspace_bytes != expected.workspace_bytes ||
+        actual.cuda_graph_allowance_bytes != expected.cuda_graph_allowance_bytes ||
         actual.total_device_bytes != expected.total_device_bytes ||
         actual.capacity_curve.main_page_tokens != expected.capacity_curve.main_page_tokens ||
         actual.capacity_curve.minimum_main_page_groups !=
@@ -45,7 +46,8 @@ void validate_plan_match(const FlashNextRuntimePlan& actual) {
 } // namespace
 
 FlashNextRuntimeAllocation::FlashNextRuntimeAllocation(FlashNextRuntimePlan plan)
-    : plan_(std::move(plan)) {
+    : plan_(std::move(plan)), host_ingress_(sizeof(FlashNextDecodeIngress)),
+      host_egress_(sizeof(FlashNextDecodeEgress)) {
     validate_plan_match(plan_);
 
     const std::uint32_t concurrency = plan_.config.max_concurrency;
@@ -56,9 +58,10 @@ FlashNextRuntimeAllocation::FlashNextRuntimeAllocation(FlashNextRuntimePlan plan
         host_standby_slots_[b] = static_cast<std::int32_t>(2U * b + 1U);
     }
 
-    const std::size_t persistent_bytes = plan_.total_device_bytes - plan_.workspace_bytes;
-    storage_                           = std::make_unique<DeviceBuffer>(persistent_bytes);
-    workspace_                         = std::make_unique<WorkspaceArena>(plan_.workspace_bytes);
+    const std::size_t persistent_bytes =
+        plan_.total_device_bytes - plan_.workspace_bytes - plan_.cuda_graph_allowance_bytes;
+    storage_   = std::make_unique<DeviceBuffer>(persistent_bytes);
+    workspace_ = std::make_unique<WorkspaceArena>(plan_.workspace_bytes);
 
     materialize_views();
     validate_flash_next_decode_state(state_view_, plan_.state_slots);
@@ -159,27 +162,45 @@ void FlashNextRuntimeAllocation::materialize_views() {
         cur += raw_pos_bytes;
     }
 
-    // 5. Round buffers
-    round_tensors_.token_ids = Tensor(cur, DType::I32, {static_cast<std::int32_t>(concurrency)});
-    cur += align_up_256(concurrency * sizeof(std::int32_t));
+    // 5. Round buffers (device ingress/egress structs, gathered PLE, final hidden, logits)
+    device_ingress_ = cur;
+    cur += align_up_256(sizeof(FlashNextDecodeIngress));
+
+    device_egress_ = cur;
+    cur += align_up_256(sizeof(FlashNextDecodeEgress));
+
+    round_tensors_.token_ids =
+        Tensor(static_cast<std::byte*>(device_ingress_) + offsetof(FlashNextDecodeIngress, token_ids),
+               DType::I32, {static_cast<std::int32_t>(concurrency)});
 
     round_tensors_.token_indices =
-        Tensor(cur, DType::I32, {static_cast<std::int32_t>(concurrency)});
-    cur += align_up_256(concurrency * sizeof(std::int32_t));
+        Tensor(static_cast<std::byte*>(device_ingress_) +
+                   offsetof(FlashNextDecodeIngress, token_indices),
+               DType::I32, {static_cast<std::int32_t>(concurrency)});
 
     round_tensors_.mrope_positions =
-        Tensor(cur, DType::I32, {static_cast<std::int32_t>(concurrency), 3});
-    cur += align_up_256(concurrency * 3 * sizeof(std::int32_t));
+        Tensor(static_cast<std::byte*>(device_ingress_) +
+                   offsetof(FlashNextDecodeIngress, mrope_positions),
+               DType::I32, {static_cast<std::int32_t>(concurrency), 3});
 
-    round_tensors_.table_rows = Tensor(cur, DType::I32, {static_cast<std::int32_t>(concurrency)});
-    cur += align_up_256(concurrency * sizeof(std::int32_t));
+    round_tensors_.table_rows =
+        Tensor(static_cast<std::byte*>(device_ingress_) + offsetof(FlashNextDecodeIngress, table_rows),
+               DType::I32, {static_cast<std::int32_t>(concurrency)});
 
-    round_tensors_.source_slots = Tensor(cur, DType::I32, {static_cast<std::int32_t>(concurrency)});
-    cur += align_up_256(concurrency * sizeof(std::int32_t));
+    round_tensors_.source_slots =
+        Tensor(static_cast<std::byte*>(device_ingress_) +
+                   offsetof(FlashNextDecodeIngress, source_slots),
+               DType::I32, {static_cast<std::int32_t>(concurrency)});
 
     round_tensors_.destination_slots =
-        Tensor(cur, DType::I32, {static_cast<std::int32_t>(concurrency)});
-    cur += align_up_256(concurrency * sizeof(std::int32_t));
+        Tensor(static_cast<std::byte*>(device_ingress_) +
+                   offsetof(FlashNextDecodeIngress, destination_slots),
+               DType::I32, {static_cast<std::int32_t>(concurrency)});
+
+    round_tensors_.sampled_tokens =
+        Tensor(static_cast<std::byte*>(device_egress_) +
+                   offsetof(FlashNextDecodeEgress, sampled_tokens),
+               DType::I32, {static_cast<std::int32_t>(concurrency)});
 
     round_tensors_.gathered_ple_embedding =
         Tensor(cur, DType::BF16, {2'560, static_cast<std::int32_t>(concurrency)});

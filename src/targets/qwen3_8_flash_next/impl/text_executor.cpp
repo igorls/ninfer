@@ -3,8 +3,14 @@
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode_workspace.h"
 #include "ninfer/ops/embedding.h"
+#include "ninfer/ops/sampling.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
 #include <stdexcept>
 #include <utility>
 
@@ -15,13 +21,20 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 // ---------------------------------------------------------------------------
 
 PendingRound::PendingRound(FlashNextTextExecutor* owner, std::uint64_t transaction_id,
-                           std::uint32_t batch_size, Tensor logits, Tensor final_hidden) noexcept
+                           std::uint32_t batch_size, Tensor logits, Tensor final_hidden,
+                           std::span<const std::int32_t> sampled_tokens) noexcept
     : owner_(owner), transaction_id_(transaction_id), batch_size_(batch_size), logits_(logits),
-      final_hidden_(final_hidden) {}
+      final_hidden_(final_hidden) {
+    const std::size_t n = std::min<std::size_t>(batch_size, sampled_tokens.size());
+    for (std::size_t i = 0; i < n; ++i) {
+        sampled_tokens_[i] = sampled_tokens[i];
+    }
+}
 
 PendingRound::PendingRound(PendingRound&& other) noexcept
     : owner_(other.owner_), transaction_id_(other.transaction_id_), batch_size_(other.batch_size_),
-      logits_(other.logits_), final_hidden_(other.final_hidden_) {
+      logits_(other.logits_), final_hidden_(other.final_hidden_),
+      sampled_tokens_(other.sampled_tokens_) {
     other.owner_          = nullptr;
     other.transaction_id_ = 0;
     other.batch_size_     = 0;
@@ -35,6 +48,7 @@ PendingRound& PendingRound::operator=(PendingRound&& other) noexcept {
         batch_size_           = other.batch_size_;
         logits_               = other.logits_;
         final_hidden_         = other.final_hidden_;
+        sampled_tokens_       = other.sampled_tokens_;
         other.owner_          = nullptr;
         other.transaction_id_ = 0;
         other.batch_size_     = 0;
@@ -57,6 +71,11 @@ Tensor PendingRound::logits() const {
 Tensor PendingRound::final_hidden() const {
     if (!valid()) { throw std::logic_error("PendingRound: transaction is not valid"); }
     return final_hidden_;
+}
+
+std::span<const std::int32_t> PendingRound::sampled_tokens() const {
+    if (!valid()) { throw std::logic_error("PendingRound: transaction is not valid"); }
+    return std::span(sampled_tokens_.data(), batch_size_);
 }
 
 void PendingRound::commit(std::span<const LaneCommitDecision> decisions) {
@@ -90,16 +109,62 @@ FlashNextTextExecutor::FlashNextTextExecutor(const TextModelView& model,
       ple_pipeline_(model.ple.table, device,
                     std::max(allocation.plan().config.max_concurrency,
                              allocation.plan().config.prefill_chunk)),
-      ledger_(allocation.plan()) {
-    const auto& plan                = alloc_.plan();
-    const std::uint32_t concurrency = plan.config.max_concurrency;
+      ledger_(allocation.plan()),
+      use_cuda_graph_(allocation.plan().config.use_cuda_graph),
+      sampling_workspace_(std::max<std::size_t>(
+          256,
+          ops::sampling_workspace_capacity_bytes(
+              248'077, 1, static_cast<std::int32_t>(allocation.plan().config.max_concurrency)))),
+      round_completion_(device) {
+    instantiate_graphs();
+}
 
-    host_token_ids_.resize(concurrency);
-    host_token_indices_.resize(concurrency);
-    host_mrope_positions_.resize(concurrency * 3);
-    host_table_rows_.resize(concurrency);
-    host_source_slots_.resize(concurrency);
-    host_destination_slots_.resize(concurrency);
+void FlashNextTextExecutor::instantiate_graphs() {
+    if (!use_cuda_graph_ || model_.token_embedding.payload == nullptr) { return; }
+
+    const std::uint32_t max_concurrency = alloc_.plan().config.max_concurrency;
+    decode_graphs_.profiles.clear();
+    decode_graphs_.topologies.clear();
+    decode_graphs_.profiles.reserve(max_concurrency);
+    decode_graphs_.topologies.reserve(max_concurrency);
+
+    std::memset(alloc_.host_ingress(), 0, sizeof(FlashNextDecodeIngress));
+    std::memset(const_cast<void*>(ple_pipeline_.fixed_host_buffer()), 0,
+                max_concurrency * 2'560 * sizeof(std::uint16_t));
+
+    for (std::uint32_t B = 1; B <= max_concurrency; ++B) {
+        // 1. Eager warm round for module materialization
+        execute_round_body(B, nullptr);
+        device_.synchronize();
+
+        // 2. Capture graph definition
+        DecodeGraphProfile profile;
+        profile.batch_size             = B;
+        profile.min_execution_frontier = 0;
+        profile.max_execution_frontier = alloc_.plan().maximum_blocks;
+        profile.topology_class         = B;
+
+        profile.definition.capture(device_.stream, [this, B] {
+            execute_round_body(B, nullptr);
+        });
+
+        if (!profile.definition.ready()) {
+            throw std::runtime_error("FlashNextTextExecutor: failed to capture decode graph for B=" +
+                                     std::to_string(B));
+        }
+
+        decode_graphs_.profiles.push_back(std::move(profile));
+
+        // 3. Instantiate and upload executable
+        DecodeGraphTopology topology;
+        topology.topology_class    = B;
+        topology.executable.instantiate(decode_graphs_.profiles.back().definition);
+        topology.installed_profile = decode_graphs_.profiles.size() - 1;
+        topology.executable.upload(device_.stream);
+        device_.synchronize();
+
+        decode_graphs_.topologies.push_back(std::move(topology));
+    }
 }
 
 LaneHandle FlashNextTextExecutor::allocate_lane() {
@@ -133,111 +198,149 @@ std::size_t FlashNextTextExecutor::active_lanes_count() const noexcept {
     return ledger_.active_lanes_count();
 }
 
+void FlashNextTextExecutor::execute_round_body(std::uint32_t batch_size,
+                                              const FlashNextDecodeStateSink* sink) {
+    alloc_.workspace().reset();
+
+    // 1. Single captured H2D memcpy of pinned ingress
+    CUDA_CHECK(cudaMemcpyAsync(alloc_.device_ingress_ptr(), alloc_.host_ingress(),
+                               sizeof(FlashNextDecodeIngress), cudaMemcpyHostToDevice,
+                               device_.stream));
+
+    // 2. Fixed-address H2D memcpy of PLE gathered rows
+    Tensor gathered_ple(alloc_.round_tensors().gathered_ple_embedding.data, DType::BF16,
+                        {2'560, static_cast<std::int32_t>(batch_size)});
+    CUDA_CHECK(cudaMemcpyAsync(gathered_ple.data, ple_pipeline_.fixed_host_buffer(),
+                               batch_size * 2'560 * sizeof(std::uint16_t),
+                               cudaMemcpyHostToDevice, device_.stream));
+
+    // 3. Token embedding
+    Tensor token_ids =
+        alloc_.round_tensors().token_ids.slice(0, 0, static_cast<std::int32_t>(batch_size));
+    Tensor embedding =
+        alloc_.workspace().alloc(DType::BF16, {2'560, static_cast<std::int32_t>(batch_size)}, 256);
+    ops::embedding(token_ids, model_.token_embedding, embedding, device_.stream);
+
+    // 4. Target decode core
+    Tensor token_indices =
+        alloc_.round_tensors().token_indices.slice(0, 0, static_cast<std::int32_t>(batch_size));
+    Tensor mrope_positions(alloc_.round_tensors().mrope_positions.data, DType::I32,
+                           {static_cast<std::int32_t>(batch_size), 3});
+    Tensor table_rows =
+        alloc_.round_tensors().table_rows.slice(0, 0, static_cast<std::int32_t>(batch_size));
+    Tensor source_slots =
+        alloc_.round_tensors().source_slots.slice(0, 0, static_cast<std::int32_t>(batch_size));
+    Tensor destination_slots =
+        alloc_.round_tensors().destination_slots.slice(0, 0, static_cast<std::int32_t>(batch_size));
+    Tensor final_hidden =
+        alloc_.round_tensors().final_hidden.slice(1, 0, static_cast<std::int32_t>(batch_size));
+    Tensor logits =
+        alloc_.round_tensors().logits.slice(1, 0, static_cast<std::int32_t>(batch_size));
+
+    const auto max_blocks = static_cast<std::int32_t>(alloc_.plan().maximum_blocks);
+    flash_next_text_decode_core(model_, embedding, token_indices, mrope_positions, table_rows,
+                                source_slots, destination_slots, gathered_ple,
+                                max_blocks, max_blocks, alloc_.state_view(), alloc_.workspace(),
+                                final_hidden, logits, device_.stream, sink);
+
+    // 5. Sampler
+    Tensor sampled_tokens =
+        alloc_.round_tensors().sampled_tokens.slice(0, 0, static_cast<std::int32_t>(batch_size));
+    constexpr std::int32_t kSemanticTokenDomain = 248'077;
+    ops::sample(logits, sampled_tokens, kSemanticTokenDomain,
+                alloc_.device_sampling_configs(), token_indices,
+                ops::kSamplePurposeDecode, sampling_workspace_, device_.stream);
+
+    // 6. Single captured D2H memcpy of pinned egress
+    CUDA_CHECK(cudaMemcpyAsync(alloc_.host_egress(), alloc_.device_egress_ptr(),
+                               sizeof(FlashNextDecodeEgress), cudaMemcpyDeviceToHost,
+                               device_.stream));
+}
+
 PendingRound FlashNextTextExecutor::execute_round(std::span<const LaneStepRequest> requests,
-                                                   const FlashNextDecodeStateSink* sink) {
+                                                 const FlashNextDecodeStateSink* sink) {
     for (const auto& req : requests) {
         if (req.handle.owner() != this) {
             throw std::invalid_argument(
                 "FlashNextTextExecutor: cross-executor or invalid owner handle");
         }
+        if (req.custom_embedding != nullptr) {
+            throw std::invalid_argument(
+                "FlashNextTextExecutor: decode rounds never carry custom embeddings");
+        }
     }
 
     const auto batch_size = static_cast<std::uint32_t>(requests.size());
-    auto prepared         = ledger_.begin_round(requests, ple_metadata_);
+    if (batch_size == 0 || batch_size > alloc_.plan().config.max_concurrency) {
+        throw std::invalid_argument("FlashNextTextExecutor: invalid round batch size");
+    }
+    if (round_in_flight_) {
+        throw std::logic_error(
+            "FlashNextTextExecutor: cannot start round while previous round is in flight");
+    }
+
+    auto prepared = ledger_.begin_round(requests, ple_metadata_);
 
     try {
         pending_is_prefill_chunk_ = false;
-        alloc_.workspace().reset();
 
-        // Sync dirty tables to device
+        // 1. Sync dirty tables to device (out of captured graph)
         ledger_.sync_tables_if_dirty(alloc_, device_.stream);
 
-        // Prepare and enqueue PLE gather
-        auto ticket = ple_pipeline_.prepare(prepared.ple_indices);
-        Tensor gathered_ple(alloc_.round_tensors().gathered_ple_embedding.data, DType::BF16,
-                            {2'560, static_cast<std::int32_t>(batch_size)});
-        ple_pipeline_.enqueue_copy(std::move(ticket), gathered_ple);
+        // 2. Synchronous host gather into fixed pinned host buffer before launch
+        ple_pipeline_.gather_pinned(prepared.ple_indices);
 
-        // Populate and upload host round buffers
+        // 3. Populate pinned host ingress
+        auto* host_ing = alloc_.host_ingress();
         for (std::uint32_t i = 0; i < batch_size; ++i) {
             const auto lane            = requests[i].handle.lane_index();
-            host_token_ids_[i]         = requests[i].token_id;
-            host_token_indices_[i]     = requests[i].token_index;
+            host_ing->token_ids[i]     = requests[i].token_id;
+            host_ing->token_indices[i] = requests[i].token_index;
             for (std::uint32_t d = 0; d < 3; ++d) {
-                host_mrope_positions_[d * batch_size + i] = requests[i].mrope_positions[d];
+                host_ing->mrope_positions[d * batch_size + i] = requests[i].mrope_positions[d];
             }
-            host_table_rows_[i]        = static_cast<std::int32_t>(lane);
-            host_source_slots_[i]      = alloc_.current_source_slot(lane);
-            host_destination_slots_[i] = alloc_.current_destination_slot(lane);
+            host_ing->table_rows[i]        = static_cast<std::int32_t>(lane);
+            host_ing->source_slots[i]      = alloc_.current_source_slot(lane);
+            host_ing->destination_slots[i] = alloc_.current_destination_slot(lane);
+            host_ing->sampling[i]          = requests[i].sampling;
         }
 
-        Tensor token_ids(alloc_.round_tensors().token_ids.data, DType::I32,
-                         {static_cast<std::int32_t>(batch_size)});
-        Tensor token_indices(alloc_.round_tensors().token_indices.data, DType::I32,
-                             {static_cast<std::int32_t>(batch_size)});
-        Tensor mrope_positions(alloc_.round_tensors().mrope_positions.data, DType::I32,
-                               {static_cast<std::int32_t>(batch_size), 3});
-        Tensor table_rows(alloc_.round_tensors().table_rows.data, DType::I32,
-                          {static_cast<std::int32_t>(batch_size)});
-        Tensor source_slots(alloc_.round_tensors().source_slots.data, DType::I32,
-                            {static_cast<std::int32_t>(batch_size)});
-        Tensor destination_slots(alloc_.round_tensors().destination_slots.data, DType::I32,
-                                 {static_cast<std::int32_t>(batch_size)});
+        // 4. Launch either CUDA graph replay or eager decode body. A state sink needs the eager
+        //    body: replay cannot emit per-stage states, and silently ignoring the sink would
+        //    break the teacher-forced dump harness.
+        if (use_cuda_graph_ && sink == nullptr && !decode_graphs_.topologies.empty()) {
+            if (batch_size - 1 >= decode_graphs_.topologies.size()) {
+                throw std::logic_error(
+                    "FlashNextTextExecutor: graph topology not available for batch size");
+            }
+            auto& topology = decode_graphs_.topologies[batch_size - 1];
+            topology.executable.launch(device_.stream);
+        } else {
+            execute_round_body(batch_size, sink);
+        }
 
-        CUDA_CHECK(cudaMemcpyAsync(token_ids.data, host_token_ids_.data(),
-                                   batch_size * sizeof(std::int32_t), cudaMemcpyHostToDevice,
-                                   device_.stream));
-        CUDA_CHECK(cudaMemcpyAsync(token_indices.data, host_token_indices_.data(),
-                                   batch_size * sizeof(std::int32_t), cudaMemcpyHostToDevice,
-                                   device_.stream));
-        CUDA_CHECK(cudaMemcpyAsync(mrope_positions.data, host_mrope_positions_.data(),
-                                   batch_size * 3 * sizeof(std::int32_t), cudaMemcpyHostToDevice,
-                                   device_.stream));
-        CUDA_CHECK(cudaMemcpyAsync(table_rows.data, host_table_rows_.data(),
-                                   batch_size * sizeof(std::int32_t), cudaMemcpyHostToDevice,
-                                   device_.stream));
-        CUDA_CHECK(cudaMemcpyAsync(source_slots.data, host_source_slots_.data(),
-                                   batch_size * sizeof(std::int32_t), cudaMemcpyHostToDevice,
-                                   device_.stream));
-        CUDA_CHECK(cudaMemcpyAsync(destination_slots.data, host_destination_slots_.data(),
-                                   batch_size * sizeof(std::int32_t), cudaMemcpyHostToDevice,
-                                   device_.stream));
+        // 5. Complete round on event wait
+        round_completion_.record(device_.stream);
+        round_completion_.synchronize();
 
-        Tensor final_hidden(alloc_.round_tensors().final_hidden.data, DType::BF16,
-                            {2'560, static_cast<std::int32_t>(batch_size)});
-        Tensor logits(alloc_.round_tensors().logits.data, DType::BF16,
-                      {248'320, static_cast<std::int32_t>(batch_size)});
-
-        // Allocate embedding buffer in workspace
-        Tensor embedding = alloc_.workspace().alloc(DType::BF16, {2'560, static_cast<std::int32_t>(batch_size)}, 256);
-        ops::embedding(token_ids, model_.token_embedding, embedding, device_.stream);
-
-        // Replace custom embeddings if specified (multimodal vision tokens)
+        // 6. Copy sampled tokens from pinned host egress
+        std::array<std::int32_t, 8> sampled_tokens{};
+        const auto* host_egr = alloc_.host_egress();
         for (std::uint32_t i = 0; i < batch_size; ++i) {
-            if (requests[i].custom_embedding != nullptr) {
-                const auto& custom = *requests[i].custom_embedding;
-                if (custom.dtype != DType::BF16 || custom.ne[0] != 2'560 || !custom.is_contiguous() || custom.data == nullptr) {
-                    throw std::invalid_argument("LaneStepRequest custom_embedding tensor view is invalid");
-                }
-                CUDA_CHECK(cudaMemcpyAsync(
-                    static_cast<std::uint16_t*>(embedding.data) + static_cast<std::size_t>(i) * 2'560,
-                    custom.data,
-                    2'560 * sizeof(std::uint16_t),
-                    cudaMemcpyDeviceToDevice,
-                    device_.stream));
-            }
+            sampled_tokens[i] = host_egr->sampled_tokens[i];
         }
 
-        // Launch full target decode core
-        flash_next_text_decode_core(model_, embedding, token_indices, mrope_positions, table_rows,
-                                    source_slots, destination_slots, gathered_ple,
-                                    static_cast<std::int32_t>(alloc_.plan().maximum_blocks),
-                                    prepared.max_active_blocks, alloc_.state_view(), alloc_.workspace(),
-                                    final_hidden, logits, device_.stream, sink);
+        Tensor final_hidden =
+            alloc_.round_tensors().final_hidden.slice(1, 0, static_cast<std::int32_t>(batch_size));
+        Tensor logits =
+            alloc_.round_tensors().logits.slice(1, 0, static_cast<std::int32_t>(batch_size));
 
-        return PendingRound(this, prepared.transaction_id, batch_size, logits, final_hidden);
+        round_in_flight_ = true;
+        return PendingRound(this, prepared.transaction_id, batch_size, logits, final_hidden,
+                            std::span(sampled_tokens.data(), batch_size));
     } catch (...) {
         ledger_.rollback_prepared_round(prepared.transaction_id);
+        round_in_flight_ = false;
         throw;
     }
 }
@@ -254,11 +357,16 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
         throw std::invalid_argument(
             "FlashNextTextExecutor: token_ids and positions must be non-empty and matching size");
     }
+    if (round_in_flight_) {
+        throw std::logic_error(
+            "FlashNextTextExecutor: cannot start prefill chunk while previous round is in flight");
+    }
 
     const auto num_tokens                  = static_cast<std::uint32_t>(token_ids.size());
     const std::uint32_t lane               = handle.lane_index();
     const std::int32_t initial_active_slot = alloc_.current_source_slot(lane);
-    const std::int32_t initial_standby_slot = alloc_.current_destination_slot(lane);
+    const std::int32_t initial_standby_slot =
+        alloc_.current_destination_slot(lane);
 
     auto prepared =
         ledger_.begin_prefill_chunk(handle, token_ids, first_token_index, ple_metadata_);
@@ -293,7 +401,6 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
         ple_pipeline_.enqueue_copy(std::move(ticket), gathered_ple);
 
         // 2. Upload chunk input metadata to the staging tensors
-
         std::vector<std::int32_t> host_indices(num_tokens);
         std::vector<std::int32_t> host_flat_positions(3 * num_tokens);
         for (std::uint32_t t = 0; t < num_tokens; ++t) {
@@ -321,16 +428,40 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
         Tensor final_hidden(alloc_.round_tensors().final_hidden.data, DType::BF16, {2'560, 1});
 
         // 5. Execute T-wide prefill core
+        // Diagnostic hook: NINFER_FLASH_NEXT_TRACE_STAGES=<dir> dumps every stage of every prefill
+        // chunk (raw device bytes, chunk<k>_<stage>.bin) through the core's state sink. This is
+        // how the sparse-attention shared-memory race was localised in a served process.
+        static const char* stage_dir = std::getenv("NINFER_FLASH_NEXT_TRACE_STAGES");
+        static int chunk_counter     = 0;
+        FlashNextDecodeStateSink stage_sink;
+        const FlashNextDecodeStateSink* effective_sink = sink;
+        if (stage_dir != nullptr && stage_dir[0] != '\0' && sink == nullptr) {
+            const int chunk_id  = chunk_counter++;
+            stage_sink.on_state = [chunk_id](std::string_view name, const Tensor& t) {
+                std::size_t count = 1;
+                for (int d = 0; d < 4; ++d) { if (t.ne[d] > 0) { count *= static_cast<std::size_t>(t.ne[d]); } }
+                const std::size_t elem = (t.dtype == DType::FP32 || t.dtype == DType::I32) ? 4 : 2;
+                std::vector<unsigned char> host(count * elem);
+                cudaMemcpy(host.data(), t.data, host.size(), cudaMemcpyDeviceToHost);
+                const std::string path = std::string(stage_dir) + "/chunk" + std::to_string(chunk_id) +
+                                         "_" + std::string(name) + ".bin";
+                std::FILE* f = std::fopen(path.c_str(), "wb");
+                if (f != nullptr) { std::fwrite(host.data(), 1, host.size(), f); std::fclose(f); }
+            };
+            effective_sink = &stage_sink;
+        }
         flash_next_text_prefill_chunk(
             model_, embedding, dev_token_indices, dev_mrope_positions,
             static_cast<std::int32_t>(lane), initial_active_slot, initial_standby_slot,
             gathered_ple, static_cast<std::int32_t>(alloc_.plan().maximum_blocks),
             alloc_.state_view(), alloc_.workspace(), final_hidden, logits, device_.stream,
-            sink);
+            effective_sink);
 
+        round_in_flight_ = true;
         return PendingRound(this, prepared.transaction_id, 1, logits, final_hidden);
     } catch (...) {
         pending_is_prefill_chunk_ = false;
+        round_in_flight_          = false;
         alloc_.restore_lane_slots(lane, initial_active_slot, initial_standby_slot, device_.stream);
         ledger_.rollback_prepared_prefill_chunk(prepared.transaction_id);
         throw;
@@ -339,6 +470,7 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
 
 void FlashNextTextExecutor::commit_transaction(std::uint64_t tx_id,
                                                std::span<const LaneCommitDecision> decisions) {
+    round_in_flight_ = false;
     if (pending_is_prefill_chunk_) {
         if (!decisions.empty() && decisions[0].accept) {
             alloc_.commit_row_slot(pending_prefill_lane_, device_.stream);
@@ -352,6 +484,7 @@ void FlashNextTextExecutor::commit_transaction(std::uint64_t tx_id,
 }
 
 void FlashNextTextExecutor::abort_transaction(std::uint64_t tx_id) noexcept {
+    round_in_flight_ = false;
     if (pending_is_prefill_chunk_) {
         alloc_.restore_lane_slots(pending_prefill_lane_, pending_prefill_initial_active_slot_,
                                   pending_prefill_initial_standby_slot_, device_.stream);

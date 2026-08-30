@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/arena.h"
+#include "core/decode_graph.h"
 #include "core/device.h"
 #include "core/tensor.h"
 #include "targets/qwen3_8_flash_next/impl/lane_ledger.h"
@@ -13,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -20,6 +23,25 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 
 struct FlashNextDecodeStateSink;
 class FlashNextTextExecutor;
+
+struct DecodeGraphProfile {
+    std::uint32_t batch_size             = 1;
+    std::uint32_t min_execution_frontier = 0;
+    std::uint32_t max_execution_frontier = 0;
+    std::uint32_t topology_class         = 0;
+    DecodeGraphDefinition definition;
+};
+
+struct DecodeGraphTopology {
+    std::uint32_t topology_class = 0;
+    DecodeGraphExecutable executable;
+    std::optional<std::size_t> installed_profile;
+};
+
+struct DecodeGraphFamily {
+    std::vector<DecodeGraphProfile> profiles;
+    std::vector<DecodeGraphTopology> topologies;
+};
 
 class PendingRound {
 public:
@@ -38,6 +60,7 @@ public:
     [[nodiscard]] std::uint32_t batch_size() const;
     [[nodiscard]] Tensor logits() const;
     [[nodiscard]] Tensor final_hidden() const;
+    [[nodiscard]] std::span<const std::int32_t> sampled_tokens() const;
 
     void commit(std::span<const LaneCommitDecision> decisions);
     void abort() noexcept;
@@ -45,13 +68,15 @@ public:
 private:
     friend class FlashNextTextExecutor;
     PendingRound(FlashNextTextExecutor* owner, std::uint64_t transaction_id,
-                 std::uint32_t batch_size, Tensor logits, Tensor final_hidden) noexcept;
+                 std::uint32_t batch_size, Tensor logits, Tensor final_hidden,
+                 std::span<const std::int32_t> sampled_tokens = {}) noexcept;
 
     FlashNextTextExecutor* owner_ = nullptr;
     std::uint64_t transaction_id_ = 0;
     std::uint32_t batch_size_     = 0;
     Tensor logits_{};
     Tensor final_hidden_{};
+    std::array<std::int32_t, 8> sampled_tokens_{};
 };
 
 class FlashNextTextExecutor {
@@ -102,6 +127,13 @@ public:
 
     [[nodiscard]] FlashNextLaneLedger& ledger() noexcept { return ledger_; }
 
+    [[nodiscard]] bool use_cuda_graph() const noexcept { return use_cuda_graph_; }
+    void set_use_cuda_graph(bool enable) noexcept { use_cuda_graph_ = enable; }
+    [[nodiscard]] const DecodeGraphFamily& decode_graphs() const noexcept { return decode_graphs_; }
+
+    void instantiate_graphs();
+    void execute_round_body(std::uint32_t batch_size, const FlashNextDecodeStateSink* sink);
+
 private:
     friend class PendingRound;
 
@@ -113,13 +145,11 @@ private:
     PleGatherPipeline ple_pipeline_;
     FlashNextLaneLedger ledger_;
 
-    // Host staging buffers for round tensor upload
-    std::vector<std::int32_t> host_token_ids_;
-    std::vector<std::int32_t> host_token_indices_;
-    std::vector<std::int32_t> host_mrope_positions_;
-    std::vector<std::int32_t> host_table_rows_;
-    std::vector<std::int32_t> host_source_slots_;
-    std::vector<std::int32_t> host_destination_slots_;
+    bool use_cuda_graph_ = true;
+    DecodeGraphFamily decode_graphs_;
+    WorkspaceArena sampling_workspace_;
+    CudaCompletionEvent round_completion_;
+    bool round_in_flight_ = false;
 
     bool pending_is_prefill_chunk_                     = false;
     std::uint32_t pending_prefill_lane_                = 0;

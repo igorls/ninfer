@@ -17,6 +17,9 @@ struct ReferenceToolOptions {
     std::uint32_t state_slots     = 0;
     std::int32_t token_id         = 0;
     std::uint32_t prefill_chunk   = 0;
+    bool use_cuda_graph           = true; // --no-cuda-graph forces the eager decode body
+    std::string dump_gen_logits;          // per-round logits of the generation loop
+    std::uint32_t repeat_prefill  = 1;    // --repeat-prefill N: prefill N times, compare logits
     bool do_commit                = true;
     bool json_output              = false;
 
