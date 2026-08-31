@@ -71,7 +71,7 @@ bool test_prefill_vs_decode_equivalence(ninfer::DeviceContext& device) {
     const std::uint64_t qgkv_codes        = static_cast<std::uint64_t>(proj_rows) * input_dim;
     const std::uint64_t qgkv_scale_offset = (qgkv_codes + 255U) & ~std::uint64_t{255U};
     std::vector<std::uint8_t> host_qgkv_codes(qgkv_codes);
-    for (auto& v : host_qgkv_codes) { v = static_cast<std::uint8_t>(rng() & 0x7F); }
+    for (auto& v : host_qgkv_codes) { v = static_cast<std::uint8_t>((rng() % 120) + 1); }
     std::vector<float> host_qgkv_scales(proj_rows, 0.05f);
 
     ninfer::DeviceBuffer qgkv_storage(fp8_payload_bytes(proj_rows, input_dim));
@@ -82,7 +82,7 @@ bool test_prefill_vs_decode_equivalence(ninfer::DeviceContext& device) {
     const std::uint64_t out_codes        = static_cast<std::uint64_t>(out_rows) * out_cols;
     const std::uint64_t out_scale_offset = (out_codes + 255U) & ~std::uint64_t{255U};
     std::vector<std::uint8_t> host_out_codes(out_codes);
-    for (auto& v : host_out_codes) { v = static_cast<std::uint8_t>(rng() & 0x7F); }
+    for (auto& v : host_out_codes) { v = static_cast<std::uint8_t>((rng() % 120) + 1); }
     std::vector<float> host_out_scales(out_rows, 0.05f);
 
     ninfer::DeviceBuffer out_storage(fp8_payload_bytes(out_rows, out_cols));
@@ -104,7 +104,7 @@ bool test_prefill_vs_decode_equivalence(ninfer::DeviceContext& device) {
     weights.query_gate_key_value = fp8_f32_weight(qgkv_storage, proj_rows, input_dim);
     weights.output               = fp8_f32_weight(out_storage, out_rows, out_cols);
 
-    const std::vector<std::int32_t> test_t = {1, 2, 4, 8, 16, 64};
+    const std::vector<std::int32_t> test_t = {1, 2, 4, 8, 16, 64, 128, 512};
     for (std::int32_t T : test_t) {
         const std::int32_t first_token_index = 64;
 
@@ -245,17 +245,29 @@ bool test_prefill_vs_decode_equivalence(ninfer::DeviceContext& device) {
         }
 
         // Compare output
+        double diff_sq = 0.0, base_sq = 0.0, max_diff = 0.0;
+        int nan_count = 0;
         for (std::size_t i = 0; i < seq_output.size(); ++i) {
             float f_seq =
                 __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&seq_output[i]));
             float f_chk =
                 __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&chunk_output[i]));
+            if (std::isnan(f_seq) || std::isnan(f_chk)) {
+                nan_count++;
+                continue;
+            }
+            double d = f_seq - f_chk;
+            diff_sq += d * d;
+            base_sq += static_cast<double>(f_seq) * f_seq;
+            max_diff = std::max(max_diff, std::abs(d));
             if (std::abs(f_seq - f_chk) > 1e-2f) {
                 std::cerr << "Attended output mismatch at T=" << T << ", idx=" << i
                           << ": seq=" << f_seq << ", chunk=" << f_chk << "\n";
                 return false;
             }
         }
+        double rel_l2 = (diff_sq == 0.0) ? 0.0 : (base_sq > 0.0 ? std::sqrt(diff_sq / base_sq) : std::sqrt(diff_sq));
+        std::printf("  [QSA Equivalence] T=%3d: rel-L2 = %.6e, max-abs-diff = %.6e\n", T, rel_l2, max_diff);
     }
     return true;
 }
@@ -461,6 +473,103 @@ int main() {
         std::cerr << "FAIL: test_prefill_vs_decode_equivalence failed\n";
         return 1;
     }
+
+    // Decode batch test B=1..8
+    for (std::int32_t b = 1; b <= 8; ++b) {
+        ninfer::DeviceBuffer in_b(input_dim * b * sizeof(std::uint16_t));
+        ninfer::DeviceBuffer out_b(input_dim * b * sizeof(std::uint16_t));
+        ninfer::DeviceBuffer tok_b(b * sizeof(std::int32_t));
+        ninfer::DeviceBuffer pos_b(b * 3 * sizeof(std::int32_t));
+        ninfer::DeviceBuffer row_b(b * sizeof(std::int32_t));
+        ninfer::DeviceBuffer sel_b(512 * b * sizeof(std::int32_t));
+        ninfer::DeviceBuffer cnt_b(b * sizeof(std::int32_t));
+
+        std::vector<std::uint16_t> h_in(input_dim * b, 0);
+        for (int i = 0; i < b; ++i) { h_in[i * input_dim] = 0x3F80U; }
+        in_b.copy_from_host(h_in.data(), h_in.size() * sizeof(std::uint16_t));
+        out_b.fill(0);
+        tok_b.fill(0);
+        pos_b.fill(0);
+        row_b.fill(0);
+        sel_b.fill(0);
+        cnt_b.fill(0);
+
+        ninfer::Tensor in_t(in_b.p, ninfer::DType::BF16, {input_dim, b});
+        ninfer::Tensor out_t(out_b.p, ninfer::DType::BF16, {input_dim, b});
+        ninfer::Tensor tok_t(tok_b.p, ninfer::DType::I32, {b});
+        ninfer::Tensor pos_t(pos_b.p, ninfer::DType::I32, {b, 3});
+        ninfer::Tensor row_t(row_b.p, ninfer::DType::I32, {b});
+        ninfer::Tensor sel_t(sel_b.p, ninfer::DType::I32, {512, b});
+        ninfer::Tensor cnt_t(cnt_b.p, ninfer::DType::I32, {b});
+
+        ninfer::WorkspaceArena ws(flash_next_qsa_attention_workspace_capacity_bytes(b));
+        flash_next_qsa_attention_decode(in_t, weights, tok_t, pos_t, row_t, sel_t, cnt_t, cache, ws,
+                                        out_t, device.stream);
+        device.synchronize();
+
+        std::vector<std::uint16_t> h_out(input_dim * b);
+        out_b.copy_to_host(h_out.data(), h_out.size() * sizeof(std::uint16_t));
+        for (std::size_t i = 0; i < h_out.size(); ++i) {
+            if (h_out[i] != 0x3F00U) {
+                std::cerr << "Mismatch at decode B=" << b << ", idx=" << i << ": 0x"
+                          << std::hex << h_out[i] << std::dec << "\n";
+                return 1;
+            }
+        }
+    }
+    std::cout << "PASS: Decode B=1..8 bit-exact verification passed\n";
+
+    // Timing measurements
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    std::printf("\n=== Flash-Next QSA Attention Prefill & Decode Timing ===\n");
+    for (std::int32_t T : {128, 512}) {
+        ninfer::DeviceBuffer in_t(input_dim * T * sizeof(std::uint16_t));
+        ninfer::DeviceBuffer out_t(input_dim * T * sizeof(std::uint16_t));
+        ninfer::DeviceBuffer tok_t(T * sizeof(std::int32_t));
+        ninfer::DeviceBuffer pos_t(T * 3 * sizeof(std::int32_t));
+        ninfer::DeviceBuffer sel_t(512 * T * sizeof(std::int32_t));
+        ninfer::DeviceBuffer cnt_t(T * sizeof(std::int32_t));
+        in_t.fill(0);
+        out_t.fill(0);
+        tok_t.fill(0);
+        pos_t.fill(0);
+        sel_t.fill(0);
+        cnt_t.fill(0);
+
+        ninfer::Tensor tin(in_t.p, ninfer::DType::BF16, {input_dim, T});
+        ninfer::Tensor tout(out_t.p, ninfer::DType::BF16, {input_dim, T});
+        ninfer::Tensor ttok(tok_t.p, ninfer::DType::I32, {T});
+        ninfer::Tensor tpos(pos_t.p, ninfer::DType::I32, {T, 3});
+        ninfer::Tensor tsel(sel_t.p, ninfer::DType::I32, {512, T});
+        ninfer::Tensor tcnt(cnt_t.p, ninfer::DType::I32, {T});
+
+        ninfer::WorkspaceArena ws(flash_next_qsa_attention_workspace_capacity_bytes(T));
+
+        // Warmup
+        flash_next_qsa_attention_prefill_chunk(tin, weights, ttok, tpos, 0, tsel, tcnt, cache, ws,
+                                               tout, device.stream);
+        device.synchronize();
+
+        constexpr int kIters = 50;
+        CUDA_CHECK(cudaEventRecord(start, device.stream));
+        for (int i = 0; i < kIters; ++i) {
+            flash_next_qsa_attention_prefill_chunk(tin, weights, ttok, tpos, 0, tsel, tcnt, cache, ws,
+                                                   tout, device.stream);
+        }
+        CUDA_CHECK(cudaEventRecord(stop, device.stream));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        float us = (ms / kIters) * 1000.0f;
+        std::printf("  Prefill T=%3d: %.2f us / chunk-layer (%.3f ms across 12 layers)\n",
+                    T, us, (us * 12.0f) / 1000.0f);
+    }
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
 
     std::cout << "PASS: test_qsa_attention\n";
     return 0;
