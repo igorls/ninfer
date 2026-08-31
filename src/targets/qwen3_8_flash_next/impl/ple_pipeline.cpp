@@ -1,6 +1,7 @@
 #include "targets/qwen3_8_flash_next/impl/ple_pipeline.h"
 
 #include "core/arena.h"
+#include "targets/qwen3_8_flash_next/impl/ple_decode_kernels.h"
 
 #include <cuda_runtime.h>
 
@@ -12,18 +13,23 @@
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 namespace {
 
-constexpr std::size_t kPleOutputWidth = 16 * kPleRowWidth;
-constexpr std::size_t kPleTokenBytes  = kPleOutputWidth * sizeof(std::uint16_t);
+constexpr std::size_t kPleOutputWidth          = 16 * kPleRowWidth;
+constexpr std::size_t kPleTokenBytes           = kPleOutputWidth * sizeof(std::uint16_t);
+constexpr std::size_t kPleCodesPerRow          = 80;
+constexpr std::size_t kPleScalesPerRow         = 20;
+constexpr std::size_t kPleCompressedRowBytes   = kPleCodesPerRow + kPleScalesPerRow; // 100
+constexpr std::size_t kPleCompressedTokenBytes = 16 * kPleCompressedRowBytes;       // 1600
 
 enum class SlotState : std::uint8_t { Idle, Gathering, Copying };
 
 } // namespace
 
 struct PleGatherPipeline::Slot {
-    Slot(DeviceContext& device, std::size_t bytes)
-        : buffer(bytes), completion(device), ordering(device) {}
+    Slot(DeviceContext& device, std::size_t host_bytes, std::size_t dev_bytes)
+        : buffer(host_bytes), device_compressed(dev_bytes), completion(device), ordering(device) {}
 
     PinnedHostBuffer buffer;
+    DeviceBuffer device_compressed;
     CudaCompletionEvent completion;
     // Orders the H2D copy after everything already enqueued on the compute stream: the startup
     // zero-fill of the round tensors and the previous round's consumers of `output`. Without it
@@ -50,7 +56,9 @@ PleGatherPipeline::PleGatherPipeline(PleTableView table, DeviceContext& device,
     }
     slots_.reserve(slot_count);
     for (std::size_t slot = 0; slot < slot_count; ++slot) {
-        slots_.push_back(std::make_unique<Slot>(device_, max_tokens_ * kPleTokenBytes));
+        slots_.push_back(std::make_unique<Slot>(
+            device_, max_tokens_ * kPleCompressedTokenBytes,
+            max_tokens_ * kPleCompressedTokenBytes));
     }
 }
 
@@ -96,30 +104,18 @@ PleGatherPipeline::prepare(std::span<const std::array<std::int64_t, 16>> global_
     slot.state                   = SlotState::Gathering;
     ++slot.generation;
     slot.work.clear();
-    slot.work.reserve(global_rows.size());
 
-    auto* output = static_cast<std::uint16_t*>(slot.buffer.data());
-    try {
-        for (std::size_t token = 0; token < global_rows.size(); ++token) {
-            const std::array<std::int64_t, 16> rows = global_rows[token];
-            slot.work.push_back(workers_.submit([this, output, rows, token] {
-                gather_ple_rows_bf16(
-                    table_, rows,
-                    std::span<std::uint16_t>(output + token * kPleOutputWidth, kPleOutputWidth));
-            }));
-        }
-    } catch (...) {
-        for (std::future<void>& work : slot.work) {
-            if (work.valid()) {
-                try {
-                    work.get();
-                } catch (...) {}
-            }
-        }
-        slot.state = SlotState::Idle;
-        throw;
-    }
-    return Ticket(this, slot_index, slot.generation, global_rows.size());
+    const std::size_t tokens       = global_rows.size();
+    auto* base                     = static_cast<std::byte*>(slot.buffer.data());
+    const std::size_t codes_bytes  = tokens * 16 * kPleCodesPerRow;
+    const std::size_t scales_bytes = tokens * 16 * kPleScalesPerRow;
+
+    gather_ple_rows_compressed(
+        table_, global_rows,
+        std::span<std::byte>(base, codes_bytes),
+        std::span<std::byte>(base + codes_bytes, scales_bytes));
+
+    return Ticket(this, slot_index, slot.generation, tokens);
 }
 
 void PleGatherPipeline::enqueue_copy(Ticket&& ticket, Tensor& output) {
@@ -145,13 +141,15 @@ void PleGatherPipeline::enqueue_copy(Ticket&& ticket, Tensor& output) {
         throw;
     }
     slot.work.clear();
-    const std::size_t bytes = ticket.tokens_ * kPleTokenBytes;
+    const std::size_t bytes = ticket.tokens_ * kPleCompressedTokenBytes;
     slot.ordering.record(device_.stream);
     slot.ordering.wait(device_.transfer_stream);
-    CUDA_CHECK(cudaMemcpyAsync(output.data, slot.buffer.data(), bytes, cudaMemcpyHostToDevice,
-                               device_.transfer_stream));
+    CUDA_CHECK(cudaMemcpyAsync(slot.device_compressed.p, slot.buffer.data(), bytes,
+                               cudaMemcpyHostToDevice, device_.transfer_stream));
     slot.completion.record(device_.transfer_stream);
     slot.completion.wait(device_.stream);
+    flash_next_ple_dequant_launch(slot.device_compressed.p, output,
+                                  static_cast<int>(ticket.tokens_), device_.stream);
     slot.state    = SlotState::Copying;
     ticket.owner_ = nullptr;
 }

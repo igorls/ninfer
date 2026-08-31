@@ -76,5 +76,21 @@ int main() {
             return 1;
         }
     }
+
+    std::array<std::array<std::int64_t, 16>, 1> chunk_indices = {indices};
+    std::vector<std::byte> comp_codes(16 * 80);
+    std::vector<std::byte> comp_scales(16 * 20);
+    gather_ple_rows_compressed(table, chunk_indices, comp_codes, comp_scales);
+    for (std::size_t head = 0; head < 16; ++head) {
+        if (std::memcmp(comp_codes.data() + head * 80, shard.codes.data(), 80) != 0) {
+            std::cerr << "PLE compressed gather code mismatch at head " << head << '\n';
+            return 1;
+        }
+        if (std::memcmp(comp_scales.data() + head * 20, shard.scales.data(), 20) != 0) {
+            std::cerr << "PLE compressed gather scale mismatch at head " << head << '\n';
+            return 1;
+        }
+    }
+
     return 0;
 }

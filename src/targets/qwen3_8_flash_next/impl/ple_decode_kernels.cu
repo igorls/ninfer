@@ -291,4 +291,50 @@ void flash_next_ple_chunk_launch(const Tensor& hidden, const Tensor& projected_k
     CUDA_CHECK(cudaGetLastError());
 }
 
+__global__ void ple_dequant_kernel(const std::uint8_t* __restrict__ codes,
+                                  const std::uint16_t* __restrict__ scales,
+                                  __nv_bfloat162* __restrict__ out,
+                                  int total_pairs) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total_pairs) { return; }
+
+    const int t             = idx / 1280;
+    const int pair_in_token = idx % 1280;
+    const int head          = pair_in_token / 80;
+    const int pair_in_row   = pair_in_token % 80;
+
+    const int row_idx       = t * 16 + head;
+    const std::uint8_t packed = codes[row_idx * 80 + pair_in_row];
+    const std::uint8_t code0  = packed & 0x0FU;
+    const std::uint8_t code1  = static_cast<std::uint8_t>(packed >> 4U);
+
+    const int scale_group          = pair_in_row / 8;
+    const std::uint16_t scale_bits = scales[row_idx * 10 + scale_group];
+
+    const __half_raw hr{scale_bits};
+    const float scale = __half2float(__half(hr));
+
+    const float v0 = (static_cast<float>(code0) - 8.0F) * scale;
+    const float v1 = (static_cast<float>(code1) - 8.0F) * scale;
+
+    const __nv_bfloat16 bf0 = __float2bfloat16_rn(v0);
+    const __nv_bfloat16 bf1 = __float2bfloat16_rn(v1);
+
+    out[idx] = __nv_bfloat162(bf0, bf1);
+}
+
+void flash_next_ple_dequant_launch(const void* compressed, Tensor& output, int tokens,
+                                   cudaStream_t stream) {
+    if (tokens <= 0) { return; }
+    const int total_pairs = tokens * 1280;
+    const auto* codes     = static_cast<const std::uint8_t*>(compressed);
+    const auto* scales    = reinterpret_cast<const std::uint16_t*>(codes + tokens * 1280);
+    auto* out             = reinterpret_cast<__nv_bfloat162*>(output.data);
+
+    constexpr int kBlock = 256;
+    const int grid       = (total_pairs + kBlock - 1) / kBlock;
+    ple_dequant_kernel<<<grid, kBlock, 0, stream>>>(codes, scales, out, total_pairs);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

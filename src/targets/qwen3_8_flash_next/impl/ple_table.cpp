@@ -135,4 +135,40 @@ void gather_ple_rows_bf16(const PleTableView& table, std::span<const std::int64_
     }
 }
 
+void gather_ple_rows_compressed(const PleTableView& table,
+                                std::span<const std::array<std::int64_t, 16>> global_rows,
+                                std::span<std::byte> out_codes,
+                                std::span<std::byte> out_scales) {
+    const std::size_t tokens            = global_rows.size();
+    constexpr std::size_t kCodesPerRow  = 80;
+    constexpr std::size_t kScalesPerRow = 20;
+    if (out_codes.size() < tokens * 16 * kCodesPerRow ||
+        out_scales.size() < tokens * 16 * kScalesPerRow) {
+        throw std::invalid_argument("PLE compressed gather output buffer is too small");
+    }
+
+    auto* codes_ptr  = reinterpret_cast<std::uint8_t*>(out_codes.data());
+    auto* scales_ptr = reinterpret_cast<std::uint8_t*>(out_scales.data());
+
+    for (std::size_t t = 0; t < tokens; ++t) {
+        for (std::size_t head = 0; head < 16; ++head) {
+            const std::int64_t g_row = global_rows[t][head];
+            if (g_row < 0) { throw std::out_of_range("PLE row must be non-negative"); }
+            const PleRowAddress addr  = locate_ple_row(static_cast<std::uint64_t>(g_row));
+            const PleShardView& shard = table.shards[addr.shard];
+            const std::size_t row_idx = t * 16 + head;
+
+            const std::size_t code_src_offset = addr.row * kCodesPerRow;
+            std::memcpy(codes_ptr + row_idx * kCodesPerRow,
+                        shard.codes.data() + code_src_offset,
+                        kCodesPerRow);
+
+            const std::size_t scale_src_offset = addr.row * kScalesPerRow;
+            std::memcpy(scales_ptr + row_idx * kScalesPerRow,
+                        shard.scales.data() + scale_src_offset,
+                        kScalesPerRow);
+        }
+    }
+}
+
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

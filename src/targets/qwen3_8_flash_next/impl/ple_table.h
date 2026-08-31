@@ -45,4 +45,10 @@ void gather_ple_rows(const PleTableView& table, std::span<const std::int64_t, 16
 void gather_ple_rows_bf16(const PleTableView& table, std::span<const std::int64_t, 16> global_rows,
                           std::span<std::uint16_t> output);
 
+// Runtime compressed gather: gathers raw U4 codes and FP16 scales into pinned staging buffers.
+void gather_ple_rows_compressed(const PleTableView& table,
+                                std::span<const std::array<std::int64_t, 16>> global_rows,
+                                std::span<std::byte> out_codes,
+                                std::span<std::byte> out_scales);
+
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

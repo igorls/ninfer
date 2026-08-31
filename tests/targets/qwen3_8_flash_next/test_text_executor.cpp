@@ -1790,6 +1790,77 @@ int test_cuda_graph_timing_benchmark(ninfer::DeviceContext& device) {
     }
 }
 
+int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(100);
+
+        auto synthetic_model = make_synthetic_model(device);
+
+        std::cout << "--- Prefill Chunk Performance & Host CPU Benchmark (Synthetic Model) ---\n";
+
+        const std::vector<std::int32_t> chunk_sizes = {128, 2048};
+        for (std::int32_t T : chunk_sizes) {
+            FlashNextRuntimeConfig cfg{
+                .max_concurrency     = 1,
+                .max_context         = 16384,
+                .state_slot_capacity = 2,
+                .prefill_chunk       = static_cast<std::uint32_t>(T),
+            };
+            const auto curve = flash_next_capacity_curve(cfg);
+            auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+
+            FlashNextRuntimeAllocation alloc(plan);
+            alloc.initialize(device.stream);
+            FlashNextTextExecutor exec(synthetic_model.view, ple_meta, device, alloc);
+
+            std::vector<std::int32_t> tokens(T);
+            std::vector<std::array<std::int32_t, 3>> positions(T);
+            for (std::int32_t t = 0; t < T; ++t) {
+                tokens[t]    = 100 + t;
+                positions[t] = {t, t, t};
+            }
+
+            // Warmup
+            auto lane_w = exec.allocate_lane();
+            auto w_rd = exec.execute_prefill_chunk(lane_w, tokens, positions, 0);
+            std::vector<LaneCommitDecision> accept = {{.accept = true}};
+            w_rd.commit(accept);
+            exec.release_lane(lane_w);
+            device.synchronize();
+
+            // Measure end-to-end chunk execution time
+            constexpr int kIters = 3;
+            auto start = std::chrono::high_resolution_clock::now();
+            for (int i = 0; i < kIters; ++i) {
+                auto lane = exec.allocate_lane();
+                auto rd = exec.execute_prefill_chunk(lane, tokens, positions, 0);
+                rd.commit(accept);
+                exec.release_lane(lane);
+            }
+            device.synchronize();
+            auto end = std::chrono::high_resolution_clock::now();
+
+            double total_us = std::chrono::duration<double, std::micro>(end - start).count() / kIters;
+            double tok_per_sec = (T * 1e6) / total_us;
+
+            std::cout << "  Prefill T=" << T << " : " << (total_us / 1000.0) << " ms/chunk ("
+                      << tok_per_sec << " tok/s)\n";
+        }
+        std::cout << "------------------------------------------------------------------------\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_prefill_chunk_timing_benchmark exception: " << e.what() << "\n";
+        return 1;
+    } catch (...) {
+        std::cerr << "test_prefill_chunk_timing_benchmark unknown exception\n";
+        return 1;
+    }
+}
+
 } // namespace
 
 int main() {
@@ -1815,6 +1886,7 @@ int main() {
     if (test_cuda_graph_frontier_masking_and_churn(device) != 0) return 1;
     if (test_measure_cuda_graph_footprint(device) != 0) return 1;
     if (test_cuda_graph_timing_benchmark(device) != 0) return 1;
+    if (test_prefill_chunk_timing_benchmark(device) != 0) return 1;
 
     std::cout << "OK Flash-Next Text Executor\n";
     return 0;

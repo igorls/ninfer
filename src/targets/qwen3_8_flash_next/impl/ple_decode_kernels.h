@@ -24,4 +24,7 @@ void flash_next_ple_chunk_launch(const Tensor& hidden, const Tensor& projected_k
                                  Tensor& gated, Tensor& normalized_gated, Tensor& output,
                                  int state_slots, int tokens, cudaStream_t stream);
 
+void flash_next_ple_dequant_launch(const void* compressed, Tensor& output, int tokens,
+                                   cudaStream_t stream);
+
 } // namespace ninfer::targets::qwen3_8_flash_next::detail
