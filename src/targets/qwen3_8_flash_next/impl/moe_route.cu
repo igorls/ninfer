@@ -142,6 +142,80 @@ __global__ void route_projection_kernel(const __nv_bfloat16* __restrict__ input,
     }
 }
 
+// Prefill router projection: Tiled GEMM amortizing router weights over tokens
+// Grid.x = (513 + 31) / 32 = 17 blocks, Grid.y = (tokens + 15) / 16 blocks.
+// Inside each block, weights are loaded ONCE and multiplied with 16 tokens in registers.
+__global__ void __launch_bounds__(256)
+route_prefill_projection_kernel(const __nv_bfloat16* __restrict__ input,
+                                const __nv_bfloat16* __restrict__ router,
+                                const __nv_bfloat16* __restrict__ shared_gate,
+                                float* __restrict__ scores, int tokens) {
+    const int warp         = static_cast<int>(threadIdx.x) >> 5;
+    const int lane         = static_cast<int>(threadIdx.x) & 31;
+    const int row_base     = (static_cast<int>(blockIdx.x) * 8 + warp) * 4;
+    const int token_base   = static_cast<int>(blockIdx.y) * 16;
+    const int batch_tokens = min(16, tokens - token_base);
+
+    if (batch_tokens <= 0) { return; }
+
+    float acc[4][16] = {};
+
+    for (int chunk = lane; chunk < (kHidden / 8); chunk += 32) {
+        const int col_base = chunk * 8;
+
+        // 1. Load 16 token inputs for this chunk
+        ulonglong2 x_raw[16];
+        #pragma unroll
+        for (int b = 0; b < 16; ++b) {
+            if (b < batch_tokens) {
+                const int t_idx = token_base + b;
+                x_raw[b] = *reinterpret_cast<const ulonglong2*>(
+                    input + static_cast<std::int64_t>(t_idx) * kHidden + col_base);
+            }
+        }
+
+        // 2. Load router weight rows ONCE and multiply across all 16 tokens
+        #pragma unroll
+        for (int r_idx = 0; r_idx < 4; ++r_idx) {
+            const int row = row_base + r_idx;
+            if (row < kExperts + 1) {
+                const __nv_bfloat16* weight =
+                    row < kExperts ? router + static_cast<std::int64_t>(row) * kHidden : shared_gate;
+                const auto w_raw = *reinterpret_cast<const ulonglong2*>(weight + col_base);
+                const auto* w_bf = reinterpret_cast<const __nv_bfloat16*>(&w_raw);
+
+                #pragma unroll
+                for (int b = 0; b < 16; ++b) {
+                    if (b < batch_tokens) {
+                        const auto* x_bf = reinterpret_cast<const __nv_bfloat16*>(&x_raw[b]);
+                        #pragma unroll
+                        for (int i = 0; i < 8; ++i) {
+                            acc[r_idx][b] = fmaf(__bfloat162float(w_bf[i]), __bfloat162float(x_bf[i]), acc[r_idx][b]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #pragma unroll
+    for (int r_idx = 0; r_idx < 4; ++r_idx) {
+        const int row = row_base + r_idx;
+        if (row < kExperts + 1) {
+            #pragma unroll
+            for (int b = 0; b < 16; ++b) {
+                if (b < batch_tokens) {
+                    const float sum = warp_sum_lane0(acc[r_idx][b]);
+                    if (lane == 0) {
+                        const int t_idx = token_base + b;
+                        scores[static_cast<std::int64_t>(t_idx) * (kExperts + 1) + row] = sum;
+                    }
+                }
+            }
+        }
+    }
+}
+
 bool aligned_to(const void* pointer, std::uintptr_t alignment) {
     return pointer != nullptr && (reinterpret_cast<std::uintptr_t>(pointer) & (alignment - 1)) == 0;
 }
@@ -194,13 +268,23 @@ void flash_next_route(const Tensor& input, const Weight& router, const Weight& s
         throw std::invalid_argument(
             "Flash-Next router requires exact aligned BF16 [2560,T] inputs");
     }
-    dim3 grid(static_cast<unsigned>(kExperts + 1), static_cast<unsigned>(tokens));
-    route_projection_kernel<<<grid, 256, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(input.data),
-        static_cast<const __nv_bfloat16*>(router.qdata),
-        static_cast<const __nv_bfloat16*>(shared_gate.qdata),
-        static_cast<float*>(score_workspace.data), tokens);
-    CUDA_CHECK(cudaGetLastError());
+    if (tokens <= 8) {
+        dim3 grid(static_cast<unsigned>(kExperts + 1), static_cast<unsigned>(tokens));
+        route_projection_kernel<<<grid, 256, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(input.data),
+            static_cast<const __nv_bfloat16*>(router.qdata),
+            static_cast<const __nv_bfloat16*>(shared_gate.qdata),
+            static_cast<float*>(score_workspace.data), tokens);
+        CUDA_CHECK(cudaGetLastError());
+    } else {
+        const dim3 grid((kExperts + 1 + 31) / 32, (static_cast<unsigned>(tokens) + 15) / 16);
+        route_prefill_projection_kernel<<<grid, 256, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(input.data),
+            static_cast<const __nv_bfloat16*>(router.qdata),
+            static_cast<const __nv_bfloat16*>(shared_gate.qdata),
+            static_cast<float*>(score_workspace.data), tokens);
+        CUDA_CHECK(cudaGetLastError());
+    }
 
     flash_next_route_scores(score_workspace, ids, alpha, shared_scale, stream);
 }

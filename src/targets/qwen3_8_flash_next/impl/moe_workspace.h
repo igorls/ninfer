@@ -13,6 +13,16 @@ struct FlashNextMoeWorkspace {
     Tensor alpha;
     Tensor shared_scale;
     Tensor activations;
+    // Prefill grouping & amortized GEMM workspace (tokens > 8)
+    Tensor expert_counts;
+    Tensor expert_offsets;
+    Tensor active_expert_ids;
+    Tensor active_count;
+    Tensor grouped_tokens;
+    Tensor grouped_paths;
+    Tensor grouped_experts;
+    Tensor down_intermediate;
+    Tensor task_counter;
 };
 
 template <class Arena>
@@ -24,6 +34,18 @@ FlashNextMoeWorkspace allocate_flash_next_moe_workspace(Arena& arena, std::int32
     out.shared_scale = arena.alloc(DType::FP32, {tokens}, 16);
     // Ten routed SwiGLU paths followed by the always-on shared path.
     out.activations = arena.alloc(DType::BF16, {640, 11, tokens}, 256);
+
+    if (tokens > 8) {
+        out.expert_counts     = arena.alloc(DType::I32, {512}, 16);
+        out.expert_offsets    = arena.alloc(DType::I32, {513}, 16);
+        out.active_expert_ids = arena.alloc(DType::I32, {512}, 16);
+        out.active_count      = arena.alloc(DType::I32, {1}, 16);
+        out.grouped_tokens    = arena.alloc(DType::I32, {10 * tokens}, 16);
+        out.grouped_paths     = arena.alloc(DType::I32, {10 * tokens}, 16);
+        out.grouped_experts   = arena.alloc(DType::I32, {10 * tokens}, 16);
+        out.down_intermediate = arena.alloc(DType::FP32, {2'560, 10, tokens}, 256);
+        out.task_counter      = arena.alloc(DType::I32, {4}, 16);
+    }
     return out;
 }
 

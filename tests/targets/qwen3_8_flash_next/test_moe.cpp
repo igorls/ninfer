@@ -1,13 +1,22 @@
 #include "core/arena.h"
 #include "core/device.h"
 #include "targets/qwen3_8_flash_next/impl/moe.h"
+#include "targets/qwen3_8_flash_next/impl/moe_kernels.h"
+#include "targets/qwen3_8_flash_next/impl/moe_route.h"
+#include "targets/qwen3_8_flash_next/impl/moe_workspace.h"
 
+#include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cmath>
 #include <cstdint>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <random>
 #include <vector>
 
 namespace {
@@ -33,19 +42,8 @@ ninfer::Weight bf16_weight(void* data, std::int32_t rows, std::int32_t columns) 
     return out;
 }
 
-} // namespace
-
-int main() {
+int test_basic_unit(ninfer::DeviceContext& device) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
-    int device_count              = 0;
-    const cudaError_t count_error = cudaGetDeviceCount(&device_count);
-    if (cuda_unavailable(count_error) || device_count == 0) {
-        std::cout << "SKIP: no usable CUDA device\n";
-        return 77;
-    }
-    CUDA_CHECK(count_error);
-
-    ninfer::DeviceContext device(0);
     ninfer::DeviceBuffer input(2'560 * 2);
     ninfer::DeviceBuffer output(2'560 * 2);
     ninfer::DeviceBuffer router(512ULL * 2'560 * 2);
@@ -141,5 +139,243 @@ int main() {
                   << std::hex << actual.front() << '\n';
         return 1;
     }
+    std::cout << "PASS: test_decode_basic_unit\n";
+    return 0;
+}
+
+float bf16_to_float(std::uint16_t value) {
+    return std::bit_cast<float>(static_cast<std::uint32_t>(value) << 16U);
+}
+
+std::uint16_t float_to_bf16(float value) {
+    const std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
+    const std::uint32_t lsb  = (bits >> 16U) & 1U;
+    const std::uint32_t bias = 0x7FFFU + lsb;
+    return static_cast<std::uint16_t>((bits + bias) >> 16U);
+}
+
+double relative_l2_error(const std::vector<float>& act, const std::vector<float>& exp) {
+    double diff_sq = 0.0;
+    double exp_sq  = 0.0;
+    for (std::size_t i = 0; i < act.size(); ++i) {
+        double d = static_cast<double>(act[i]) - static_cast<double>(exp[i]);
+        diff_sq += d * d;
+        exp_sq  += static_cast<double>(exp[i]) * static_cast<double>(exp[i]);
+    }
+    return std::sqrt(diff_sq) / (std::sqrt(exp_sq) + 1.0e-12);
+}
+
+int test_prefill_equivalence_and_benchmark(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    std::mt19937 rng(1337);
+    std::uniform_real_distribution<float> dist_router(-0.1F, 0.1F);
+    std::uniform_real_distribution<float> dist_act(-1.0F, 1.0F);
+
+    constexpr std::uint64_t gate_code_bytes_per_expert  = 1'280ULL * 2'560 / 2;
+    constexpr std::uint64_t gate_scale_bytes_per_expert = 1'280ULL * 2'560 / 16;
+    constexpr std::uint64_t down_code_bytes_per_expert  = 2'560ULL * 640 / 2;
+    constexpr std::uint64_t down_scale_bytes_per_expert = 2'560ULL * 640 / 16;
+
+    // Allocate 512 physical experts for prefill test
+    ninfer::DeviceBuffer gate_codes(512 * gate_code_bytes_per_expert);
+    ninfer::DeviceBuffer gate_scales(512 * gate_scale_bytes_per_expert);
+    ninfer::DeviceBuffer down_codes(512 * down_code_bytes_per_expert);
+    ninfer::DeviceBuffer down_scales(512 * down_scale_bytes_per_expert);
+    ninfer::DeviceBuffer gate_divisors(512 * sizeof(float));
+    ninfer::DeviceBuffer down_divisors(512 * sizeof(float));
+
+    std::vector<std::uint8_t> h_gate_codes(512 * gate_code_bytes_per_expert, 0x22U);
+    std::vector<std::uint8_t> h_gate_scales(512 * gate_scale_bytes_per_expert, 0x38U);
+    std::vector<std::uint8_t> h_down_codes(512 * down_code_bytes_per_expert, 0x22U);
+    std::vector<std::uint8_t> h_down_scales(512 * down_scale_bytes_per_expert, 0x38U);
+    std::vector<float> h_divisors(512, 1.0F);
+
+    gate_codes.copy_from_host(h_gate_codes.data(), h_gate_codes.size());
+    gate_scales.copy_from_host(h_gate_scales.data(), h_gate_scales.size());
+    down_codes.copy_from_host(h_down_codes.data(), h_down_codes.size());
+    down_scales.copy_from_host(h_down_scales.data(), h_down_scales.size());
+    gate_divisors.copy_from_host(h_divisors.data(), sizeof(float) * 512);
+    down_divisors.copy_from_host(h_divisors.data(), sizeof(float) * 512);
+
+    ninfer::DeviceBuffer d_router(512ULL * 2'560 * 2);
+    ninfer::DeviceBuffer d_shared_down(2'560ULL * 640 * 2);
+    ninfer::DeviceBuffer d_shared_gate(640ULL * 2'560 * 2);
+    ninfer::DeviceBuffer d_shared_up(640ULL * 2'560 * 2);
+    ninfer::DeviceBuffer d_shared_gate_weight(2'560 * 2);
+
+    std::vector<std::uint16_t> h_router(512ULL * 2'560);
+    for (auto& v : h_router) { v = float_to_bf16(dist_router(rng)); }
+    d_router.copy_from_host(h_router.data(), h_router.size() * 2);
+
+    std::vector<std::uint16_t> h_shared_down(2'560ULL * 640);
+    for (auto& v : h_shared_down) { v = float_to_bf16(dist_router(rng)); }
+    d_shared_down.copy_from_host(h_shared_down.data(), h_shared_down.size() * 2);
+
+    std::vector<std::uint16_t> h_shared_gate(640ULL * 2'560);
+    for (auto& v : h_shared_gate) { v = float_to_bf16(dist_router(rng)); }
+    d_shared_gate.copy_from_host(h_shared_gate.data(), h_shared_gate.size() * 2);
+
+    std::vector<std::uint16_t> h_shared_up(640ULL * 2'560);
+    for (auto& v : h_shared_up) { v = float_to_bf16(dist_router(rng)); }
+    d_shared_up.copy_from_host(h_shared_up.data(), h_shared_up.size() * 2);
+
+    std::vector<std::uint16_t> h_shared_gate_weight(2'560);
+    for (auto& v : h_shared_gate_weight) { v = float_to_bf16(dist_router(rng)); }
+    d_shared_gate_weight.copy_from_host(h_shared_gate_weight.data(), h_shared_gate_weight.size() * 2);
+
+    MoeWeights weights{
+        .router             = bf16_weight(d_router.p, 512, 2'560),
+        .shared_down        = bf16_weight(d_shared_down.p, 2'560, 640),
+        .shared_gate        = bf16_weight(d_shared_gate.p, 640, 2'560),
+        .shared_up          = bf16_weight(d_shared_up.p, 640, 2'560),
+        .shared_gate_weight = bf16_weight(d_shared_gate_weight.p, 1, 2'560),
+        .expert_gate_up     = {.codes                  = static_cast<const std::byte*>(gate_codes.p),
+                               .scales                 = static_cast<const std::byte*>(gate_scales.p),
+                               .weight_scale_divisors  = static_cast<const float*>(gate_divisors.p),
+                               .experts                = 512,
+                               .rows                   = 1'280,
+                               .columns                = 2'560,
+                               .code_bytes_per_expert  = gate_code_bytes_per_expert,
+                               .scale_bytes_per_expert = gate_scale_bytes_per_expert},
+        .expert_down        = {.codes                  = static_cast<const std::byte*>(down_codes.p),
+                               .scales                 = static_cast<const std::byte*>(down_scales.p),
+                               .weight_scale_divisors  = static_cast<const float*>(down_divisors.p),
+                               .experts                = 512,
+                               .rows                   = 2'560,
+                               .columns                = 640,
+                               .code_bytes_per_expert  = down_code_bytes_per_expert,
+                               .scale_bytes_per_expert = down_scale_bytes_per_expert},
+    };
+
+    double max_rel_l2 = 0.0;
+    float time_128_us = 0.0F;
+    float time_512_us = 0.0F;
+
+    for (int tokens : {128, 512}) {
+        std::vector<std::uint16_t> h_input(static_cast<std::size_t>(tokens) * 2'560);
+        for (auto& v : h_input) { v = float_to_bf16(dist_act(rng)); }
+
+        ninfer::DeviceBuffer d_input(h_input.size() * 2);
+        d_input.copy_from_host(h_input.data(), h_input.size() * 2);
+        ninfer::DeviceBuffer d_out_prefill(h_input.size() * 2);
+        ninfer::DeviceBuffer d_out_decode(h_input.size() * 2);
+
+        ninfer::Tensor in_view(d_input.p, ninfer::DType::BF16, {2'560, tokens});
+        ninfer::Tensor out_prefill_view(d_out_prefill.p, ninfer::DType::BF16, {2'560, tokens});
+        ninfer::Tensor out_decode_view(d_out_decode.p, ninfer::DType::BF16, {2'560, tokens});
+
+        ninfer::WorkspaceArena ws_prefill(flash_next_moe_workspace_capacity_bytes(1, tokens));
+        ninfer::WorkspaceArena ws_decode(flash_next_moe_workspace_capacity_bytes(1, 8));
+
+        // 1. Run grouped prefill
+        flash_next_moe(in_view, weights, out_prefill_view, ws_prefill, device.stream);
+        device.synchronize();
+
+        // 2. Run decode reference in batches of 8 tokens (decode path T <= 8)
+        for (int t = 0; t < tokens; t += 8) {
+            const int cur_t = std::min(8, tokens - t);
+            ninfer::Tensor in_t(static_cast<__nv_bfloat16*>(d_input.p) + static_cast<std::int64_t>(t) * 2'560,
+                               ninfer::DType::BF16, {2'560, cur_t});
+            ninfer::Tensor out_t(static_cast<__nv_bfloat16*>(d_out_decode.p) + static_cast<std::int64_t>(t) * 2'560,
+                                ninfer::DType::BF16, {2'560, cur_t});
+            flash_next_moe(in_t, weights, out_t, ws_decode, device.stream);
+        }
+        device.synchronize();
+
+        std::vector<std::uint16_t> act_prefill_bf(h_input.size());
+        std::vector<std::uint16_t> act_decode_bf(h_input.size());
+        d_out_prefill.copy_to_host(act_prefill_bf.data(), act_prefill_bf.size() * 2);
+        d_out_decode.copy_to_host(act_decode_bf.data(), act_decode_bf.size() * 2);
+
+        std::vector<float> act_prefill_f(h_input.size());
+        std::vector<float> act_decode_f(h_input.size());
+        for (std::size_t i = 0; i < h_input.size(); ++i) {
+            act_prefill_f[i] = bf16_to_float(act_prefill_bf[i]);
+            act_decode_f[i]  = bf16_to_float(act_decode_bf[i]);
+        }
+
+        double err = relative_l2_error(act_prefill_f, act_decode_f);
+        max_rel_l2 = std::max(max_rel_l2, err);
+        std::cout << "  Tokens T=" << tokens << " Prefill vs Decode Rel-L2 Error: "
+                  << std::scientific << std::setprecision(6) << err << "\n" << std::flush;
+
+        // Benchmark timing
+        // Warmup
+        for (int i = 0; i < 5; ++i) {
+            flash_next_moe(in_view, weights, out_prefill_view, ws_prefill, device.stream);
+        }
+        device.synchronize();
+
+        constexpr int kIters = 20;
+        cudaEvent_t ev_start, ev_stop;
+        CUDA_CHECK(cudaEventCreate(&ev_start));
+        CUDA_CHECK(cudaEventCreate(&ev_stop));
+        CUDA_CHECK(cudaEventRecord(ev_start, device.stream));
+        for (int i = 0; i < kIters; ++i) {
+            flash_next_moe(in_view, weights, out_prefill_view, ws_prefill, device.stream);
+        }
+        CUDA_CHECK(cudaEventRecord(ev_stop, device.stream));
+        CUDA_CHECK(cudaEventSynchronize(ev_stop));
+        float total_ms = 0.0F;
+        CUDA_CHECK(cudaEventElapsedTime(&total_ms, ev_start, ev_stop));
+
+        const float avg_layer_us = (total_ms / kIters) * 1000.0F;
+        const float total_48_layer_ms = (avg_layer_us * 48.0F) / 1000.0F;
+
+        if (tokens == 128) {
+            time_128_us = avg_layer_us;
+        } else if (tokens == 512) {
+            time_512_us = avg_layer_us;
+        }
+
+        std::cout << std::fixed << std::setprecision(2);
+        std::cout << "  Tokens T=" << tokens << " MoE Timing:\n";
+        std::cout << "    Per-layer MoE compute      : " << avg_layer_us << " us\n";
+        std::cout << "    Estimated 48-layer chunk MoE: " << total_48_layer_ms << " ms\n" << std::flush;
+    }
+
+    constexpr double kMaxRelL2Tolerance = 1.0e-3;
+    if (max_rel_l2 > kMaxRelL2Tolerance) {
+        std::cerr << "FAILED: Relative L2 error exceeded tolerance: " << max_rel_l2 << "\n" << std::flush;
+        return 1;
+    }
+
+    const float scaling_factor = time_512_us / (time_128_us + 1e-6F);
+    const float total_128_ms   = (time_128_us * 48.0F) / 1000.0F;
+
+    std::cout << "\n=== Flash-Next Prefill MoE Summary ===\n";
+    std::cout << "  128-token 48-layer MoE time: " << total_128_ms << " ms\n";
+    std::cout << "  T=512 vs T=128 scaling factor: " << scaling_factor << "x\n";
+    std::cout << "======================================\n" << std::flush;
+
+    std::cout << "PASS: test_prefill_equivalence_and_benchmark\n";
+    return 0;
+}
+
+} // namespace
+
+int main() {
+    int device_count              = 0;
+    const cudaError_t count_error = cudaGetDeviceCount(&device_count);
+    if (cuda_unavailable(count_error) || device_count == 0) {
+        std::cout << "SKIP: no usable CUDA device\n";
+        return 77;
+    }
+    CUDA_CHECK(count_error);
+
+    ninfer::DeviceContext device(0);
+
+    if (test_basic_unit(device) != 0) {
+        std::cerr << "FAILED: test_basic_unit\n";
+        return 1;
+    }
+    std::cout << "PASS: test_decode_basic_unit\n";
+
+    if (test_prefill_equivalence_and_benchmark(device) != 0) {
+        std::cerr << "FAILED: test_prefill_equivalence_and_benchmark\n";
+        return 1;
+    }
+
+    std::cout << "OK Flash-Next MoE\n";
     return 0;
 }
