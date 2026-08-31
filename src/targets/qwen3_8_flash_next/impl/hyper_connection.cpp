@@ -40,9 +40,13 @@ void validate_common(const Tensor& hidden, const Tensor& block_input,
         scratch.low_rank.dtype != DType::BF16 || scratch.low_rank.ne[0] != 320 ||
         scratch.low_rank.ne[1] != tokens || scratch.injection.dtype != DType::FP32 ||
         scratch.injection.ne[0] != 4 || scratch.injection.ne[1] != tokens ||
+        scratch.up_gemm.dtype != DType::BF16 || scratch.up_gemm.ne[0] != 10'240 ||
+        scratch.up_gemm.ne[1] != tokens ||
         !scratch.normalized.is_contiguous() || !scratch.low_rank.is_contiguous() ||
-        !scratch.injection.is_contiguous() || !aligned_to(scratch.normalized.data, 16) ||
-        !aligned_to(scratch.low_rank.data, 16) || !aligned_to(scratch.injection.data, 16)) {
+        !scratch.injection.is_contiguous() || !scratch.up_gemm.is_contiguous() ||
+        !aligned_to(scratch.normalized.data, 16) ||
+        !aligned_to(scratch.low_rank.data, 16) || !aligned_to(scratch.injection.data, 16) ||
+        !aligned_to(scratch.up_gemm.data, 16)) {
         throw std::invalid_argument("Flash-Next hyper connection received invalid exact tensors");
     }
 }

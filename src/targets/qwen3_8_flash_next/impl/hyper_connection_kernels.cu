@@ -3,6 +3,9 @@
 #include "core/device.h"
 #include "ops/common/math.cuh"
 #include "ops/common/warp.cuh"
+#include "ops/linear/bf16/bf16_config.h"
+#include "ops/linear/bf16/bf16_gemm_mma.cuh"
+#include "ops/linear/bf16/bf16_gemm_mma_config.h"
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -250,6 +253,208 @@ hyper_inject_vectorized_kernel(const __nv_bfloat16* __restrict__ block_output,
     *reinterpret_cast<ulonglong2*>(hid_ptr) = res_raw;
 }
 
+// =========================================================================
+// 2. PREFILL KERNELS (T >= 16) - Weight-Stationary & Tensor Core Accelerated
+// =========================================================================
+
+// Streamlined 4-Stream Group RMSNorm: 1 CTA per token (64 threads per stream)
+__global__ void __launch_bounds__(256)
+group_norm_prefill_kernel(
+    const __nv_bfloat16* __restrict__ hidden,
+    const __nv_bfloat16* __restrict__ norm,
+    __nv_bfloat16* __restrict__ normalized,
+    int tokens) {
+    
+    __shared__ float s_warp_sums[kStreams][2];
+    __shared__ float s_inv_rms[kStreams];
+
+    const int token   = static_cast<int>(blockIdx.x);
+    const int tid     = static_cast<int>(threadIdx.x);
+    const int stream  = tid / 64;
+    const int stream_tid = tid % 64;
+    const int warp_in_stream = stream_tid / 32;
+    const int lane_id = stream_tid % 32;
+
+    if (token >= tokens) { return; }
+
+    const int stream_offset = stream * kHidden;
+    const auto* in_stream   = hidden + static_cast<std::int64_t>(token) * kConcat + stream_offset;
+
+    float sum_sq = 0.0F;
+    #pragma unroll
+    for (int step = 0; step < 5; ++step) {
+        const int chunk = stream_tid + step * 64;
+        const auto raw_in = *reinterpret_cast<const ulonglong2*>(in_stream + chunk * 8);
+        const auto* bf_in = reinterpret_cast<const __nv_bfloat16*>(&raw_in);
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const float v = __bfloat162float(bf_in[i]);
+            sum_sq = fmaf(v, v, sum_sq);
+        }
+    }
+
+    sum_sq = ops::warp_reduce_sum(sum_sq);
+    if (lane_id == 0) {
+        s_warp_sums[stream][warp_in_stream] = sum_sq;
+    }
+    __syncthreads();
+
+    if (stream_tid == 0) {
+        float total_sq = s_warp_sums[stream][0] + s_warp_sums[stream][1];
+        s_inv_rms[stream] = rsqrtf(total_sq / static_cast<float>(kHidden) + 1.0e-6F);
+    }
+    __syncthreads();
+
+    const float inv_rms = s_inv_rms[stream];
+    const auto* norm_stream = norm + stream_offset;
+    auto* out_stream        = normalized + static_cast<std::int64_t>(token) * kConcat + stream_offset;
+
+    #pragma unroll
+    for (int step = 0; step < 5; ++step) {
+        const int chunk     = stream_tid + step * 64;
+        const int col_base  = chunk * 8;
+        const auto raw_in   = *reinterpret_cast<const ulonglong2*>(in_stream + col_base);
+        const auto* bf_in   = reinterpret_cast<const __nv_bfloat16*>(&raw_in);
+        const auto raw_norm = *reinterpret_cast<const ulonglong2*>(norm_stream + col_base);
+        const auto* bf_norm = reinterpret_cast<const __nv_bfloat16*>(&raw_norm);
+
+        ulonglong2 raw_out;
+        auto* bf_out = reinterpret_cast<__nv_bfloat16*>(&raw_out);
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const float v = __bfloat162float(bf_in[i]);
+            const float n = __bfloat162float(bf_norm[i]);
+            bf_out[i]     = __float2bfloat16_rn(v * inv_rms * (1.0F + n));
+        }
+        *reinterpret_cast<ulonglong2*>(out_stream + col_base) = raw_out;
+    }
+}
+
+// Fused MMA Output Tile for Down-Projection (applies SiLU(acc * 0.25) in epilogue)
+struct Bf16HyperDownMmaOutputTile {
+    __nv_bfloat16* low_rank;
+
+    __device__ __forceinline__ void store(std::int32_t row, std::int32_t token,
+                                          float accumulator) const {
+        if (row < kLowRank) {
+            low_rank[static_cast<std::int64_t>(token) * kLowRank + row] =
+                __float2bfloat16_rn(ops::silu(accumulator * 0.25F));
+        }
+    }
+};
+
+struct Bf16HyperDownMmaOutput {
+    __nv_bfloat16* low_rank;
+
+    __device__ __forceinline__ Bf16HyperDownMmaOutputTile tile(std::int32_t) const {
+        return {low_rank};
+    }
+};
+
+// Streamlined Injection Gate: 1 CTA per token (4 warps = 4 streams, zero inter-warp sync)
+__global__ void __launch_bounds__(128)
+injection_gate_prefill_kernel(
+    const __nv_bfloat16* __restrict__ normalized,
+    const __nv_bfloat16* __restrict__ inject_weight,
+    float* __restrict__ injection,
+    int tokens) {
+    
+    const int token   = static_cast<int>(blockIdx.x);
+    const int tid     = static_cast<int>(threadIdx.x);
+    const int stream  = tid >> 5; // 0..3
+    const int lane_id = tid & 31; // 0..31
+
+    if (token >= tokens || stream >= kStreams) { return; }
+
+    const auto* x_token = normalized + static_cast<std::int64_t>(token) * kConcat;
+    const auto* w_row   = inject_weight + static_cast<std::int64_t>(stream) * kConcat;
+
+    float sum = 0.0F;
+    #pragma unroll 4
+    for (int step = 0; step < 40; ++step) {
+        const int chunk    = lane_id + step * 32;
+        const int col_base = chunk * 8;
+        const auto w_raw   = *reinterpret_cast<const ulonglong2*>(w_row + col_base);
+        const auto* w_bf   = reinterpret_cast<const __nv_bfloat16*>(&w_raw);
+        const auto x_raw   = *reinterpret_cast<const ulonglong2*>(x_token + col_base);
+        const auto* x_bf   = reinterpret_cast<const __nv_bfloat16*>(&x_raw);
+
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            sum = fmaf(__bfloat162float(w_bf[i]), __bfloat162float(x_bf[i]), sum);
+        }
+    }
+
+    sum = ops::warp_reduce_sum(sum);
+
+    if (lane_id == 0) {
+        injection[static_cast<std::int64_t>(token) * kStreams + stream] =
+            2.0F * ops::sigmoid(sum * 0.25F);
+    }
+}
+
+// Vectorized Up Reduction: 1 CTA per token (256 threads process 320 ulonglong2 chunks)
+__global__ void __launch_bounds__(256)
+up_reduction_vectorized_kernel(
+    const __nv_bfloat16* __restrict__ gemm_out,
+    const __nv_bfloat16* __restrict__ normalized,
+    __nv_bfloat16* __restrict__ block_input,
+    int tokens) {
+    
+    const int token = static_cast<int>(blockIdx.x);
+    const int tid   = static_cast<int>(threadIdx.x);
+
+    if (token >= tokens) { return; }
+
+    const std::int64_t tok_offset = static_cast<std::int64_t>(token) * kConcat;
+
+    for (int chunk = tid; chunk < (kHidden / 8); chunk += 256) {
+        const int h_base = chunk * 8;
+
+        float mean[8];
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            mean[i] = 0.0F;
+        }
+
+        #pragma unroll
+        for (int s = 0; s < kStreams; ++s) {
+            const int row_base = s * kHidden + h_base;
+            const auto z_raw   = *reinterpret_cast<const ulonglong2*>(gemm_out + tok_offset + row_base);
+            const auto* z_bf   = reinterpret_cast<const __nv_bfloat16*>(&z_raw);
+            const auto n_raw   = *reinterpret_cast<const ulonglong2*>(normalized + tok_offset + row_base);
+            const auto* n_bf   = reinterpret_cast<const __nv_bfloat16*>(&n_raw);
+
+            #pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                const float z = __bfloat162float(z_bf[i]);
+                const float n = __bfloat162float(n_bf[i]);
+                mean[i] += ops::sigmoid(z) * n;
+            }
+        }
+
+        ulonglong2 out_raw;
+        auto* out_bf = reinterpret_cast<__nv_bfloat16*>(&out_raw);
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            out_bf[i] = __float2bfloat16_rn(mean[i] * 0.25F);
+        }
+
+        *reinterpret_cast<ulonglong2*>(block_input + static_cast<std::int64_t>(token) * kHidden + h_base) = out_raw;
+    }
+}
+
+// Down & Up MMA Geometries and Schedules
+using DownGeom    = ops::detail::Bf16GemvGeometry<320, 10240>;
+using DownSched   = ops::detail::Bf16MmaSchedule<32, 32, 256, 16, 16, 2, 2, ops::Cache::cg, ops::Cache::cg,
+                                                 ops::detail::Bf16MmaFragmentPipeline::PingPong,
+                                                 ops::detail::Bf16MmaRaster::TokenFast>;
+
+using UpGeom      = ops::detail::Bf16GemvGeometry<10240, 320>;
+using UpSched     = ops::detail::Bf16MmaSchedule<64, 64, 64, 32, 32, 2, 2, ops::Cache::cg, ops::Cache::cg,
+                                                 ops::detail::Bf16MmaFragmentPipeline::PingPong,
+                                                 ops::detail::Bf16MmaRaster::TokenFast>;
+
 } // namespace
 
 void flash_next_hyper_prepare_launch(const Tensor& hidden, const HyperConnectionWeights& weights,
@@ -257,30 +462,87 @@ void flash_next_hyper_prepare_launch(const Tensor& hidden, const HyperConnection
                                      cudaStream_t stream) {
     const int tokens = static_cast<int>(hidden.ne[1]);
 
-    // 1. Group Norm (4 CTAs per token)
-    group_norm_vectorized_kernel<<<dim3(kStreams, tokens), kNormThreads, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(hidden.data),
-        static_cast<const __nv_bfloat16*>(weights.norm.data),
-        static_cast<__nv_bfloat16*>(scratch.normalized.data), tokens);
-    CUDA_CHECK(cudaGetLastError());
+    if (tokens <= 8) {
+        // Decode route (T <= 8)
+        group_norm_vectorized_kernel<<<dim3(kStreams, tokens), kNormThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(hidden.data),
+            static_cast<const __nv_bfloat16*>(weights.norm.data),
+            static_cast<__nv_bfloat16*>(scratch.normalized.data), tokens);
+        CUDA_CHECK(cudaGetLastError());
 
-    // 2. Fused Down Projection + Injection Gates (324 CTAs per token)
-    constexpr int kTotalRows = kLowRank + kStreams; // 324
-    low_rank_and_injection_kernel<<<dim3(kTotalRows, tokens), 256, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(scratch.normalized.data),
-        static_cast<const __nv_bfloat16*>(weights.input_mix_down.qdata),
-        static_cast<const __nv_bfloat16*>(weights.block_inject.qdata),
-        static_cast<__nv_bfloat16*>(scratch.low_rank.data),
-        static_cast<float*>(scratch.injection.data), tokens, kTotalRows);
-    CUDA_CHECK(cudaGetLastError());
+        constexpr int kTotalRows = kLowRank + kStreams; // 324
+        low_rank_and_injection_kernel<<<dim3(kTotalRows, tokens), 256, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.normalized.data),
+            static_cast<const __nv_bfloat16*>(weights.input_mix_down.qdata),
+            static_cast<const __nv_bfloat16*>(weights.block_inject.qdata),
+            static_cast<__nv_bfloat16*>(scratch.low_rank.data),
+            static_cast<float*>(scratch.injection.data), tokens, kTotalRows);
+        CUDA_CHECK(cudaGetLastError());
 
-    // 3. Mix Up Projection & 4-Stream Reduction (2,560 CTAs per token)
-    mix_up_and_reduce_kernel<<<dim3(kHidden, tokens), 128, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(scratch.normalized.data),
-        static_cast<const __nv_bfloat16*>(scratch.low_rank.data),
-        static_cast<const __nv_bfloat16*>(weights.input_mix_up.qdata),
-        static_cast<__nv_bfloat16*>(block_input.data), tokens);
-    CUDA_CHECK(cudaGetLastError());
+        mix_up_and_reduce_kernel<<<dim3(kHidden, tokens), 128, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.normalized.data),
+            static_cast<const __nv_bfloat16*>(scratch.low_rank.data),
+            static_cast<const __nv_bfloat16*>(weights.input_mix_up.qdata),
+            static_cast<__nv_bfloat16*>(block_input.data), tokens);
+        CUDA_CHECK(cudaGetLastError());
+    } else {
+        // Prefill route (T >= 16) - Weight-Stationary & Tensor Core Accelerated
+        // 1. Group Norm
+        group_norm_prefill_kernel<<<tokens, 256, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(hidden.data),
+            static_cast<const __nv_bfloat16*>(weights.norm.data),
+            static_cast<__nv_bfloat16*>(scratch.normalized.data), tokens);
+        CUDA_CHECK(cudaGetLastError());
+
+        // 2. Down-Projection via Tensor Core MMA with Fused SiLU Epilogue
+        Bf16HyperDownMmaOutput out_down{static_cast<__nv_bfloat16*>(scratch.low_rank.data)};
+        const int tiles_m_down = 320 / DownSched::kBlockRows;
+        const int tiles_n_down = (tokens + DownSched::kBlockCols - 1) / DownSched::kBlockCols;
+        const int blocks_down  = tiles_m_down * tiles_n_down;
+
+        static const cudaError_t attr_down = cudaFuncSetAttribute(
+            ops::detail::bf16_gemm_mma_kernel<DownGeom, DownSched, true, Bf16HyperDownMmaOutput>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, DownSched::kSharedBytes);
+        CUDA_CHECK(attr_down);
+
+        ops::detail::bf16_gemm_mma_kernel<DownGeom, DownSched, true><<<blocks_down, DownSched::kThreads, DownSched::kSharedBytes, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.normalized.data),
+            static_cast<const __nv_bfloat16*>(weights.input_mix_down.qdata),
+            out_down, tokens);
+        CUDA_CHECK(cudaGetLastError());
+
+        // 3. Injection Gates
+        injection_gate_prefill_kernel<<<tokens, 128, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.normalized.data),
+            static_cast<const __nv_bfloat16*>(weights.block_inject.qdata),
+            static_cast<float*>(scratch.injection.data), tokens);
+        CUDA_CHECK(cudaGetLastError());
+
+        // 4. Up-Projection via Tensor Core MMA
+        ops::detail::Bf16MmaContiguousOutput out_up{
+            static_cast<__nv_bfloat16*>(scratch.up_gemm.data), 10240};
+        const int tiles_m_up = 10240 / UpSched::kBlockRows;
+        const int tiles_n_up = (tokens + UpSched::kBlockCols - 1) / UpSched::kBlockCols;
+        const int blocks_up  = tiles_m_up * tiles_n_up;
+
+        static const cudaError_t attr_up = cudaFuncSetAttribute(
+            ops::detail::bf16_gemm_mma_kernel<UpGeom, UpSched, true, ops::detail::Bf16MmaContiguousOutput>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, UpSched::kSharedBytes);
+        CUDA_CHECK(attr_up);
+
+        ops::detail::bf16_gemm_mma_kernel<UpGeom, UpSched, true><<<blocks_up, UpSched::kThreads, UpSched::kSharedBytes, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.low_rank.data),
+            static_cast<const __nv_bfloat16*>(weights.input_mix_up.qdata),
+            out_up, tokens);
+        CUDA_CHECK(cudaGetLastError());
+
+        // 5. Up Reduction & 4-Stream Average
+        up_reduction_vectorized_kernel<<<tokens, 256, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.up_gemm.data),
+            static_cast<const __nv_bfloat16*>(scratch.normalized.data),
+            static_cast<__nv_bfloat16*>(block_input.data), tokens);
+        CUDA_CHECK(cudaGetLastError());
+    }
 }
 
 void flash_next_hyper_mix_launch(const Tensor& hidden, const HyperMixerWeights& weights,
@@ -288,29 +550,79 @@ void flash_next_hyper_mix_launch(const Tensor& hidden, const HyperMixerWeights& 
                                  cudaStream_t stream) {
     const int tokens = static_cast<int>(hidden.ne[1]);
 
-    // 1. Group Norm (4 CTAs per token)
-    group_norm_vectorized_kernel<<<dim3(kStreams, tokens), kNormThreads, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(hidden.data),
-        static_cast<const __nv_bfloat16*>(weights.norm.data),
-        static_cast<__nv_bfloat16*>(scratch.normalized.data), tokens);
-    CUDA_CHECK(cudaGetLastError());
+    if (tokens <= 8) {
+        // Decode route (T <= 8)
+        group_norm_vectorized_kernel<<<dim3(kStreams, tokens), kNormThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(hidden.data),
+            static_cast<const __nv_bfloat16*>(weights.norm.data),
+            static_cast<__nv_bfloat16*>(scratch.normalized.data), tokens);
+        CUDA_CHECK(cudaGetLastError());
 
-    // 2. Down Projection only (320 CTAs per token)
-    low_rank_and_injection_kernel<<<dim3(kLowRank, tokens), 256, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(scratch.normalized.data),
-        static_cast<const __nv_bfloat16*>(weights.input_mix_down.qdata),
-        nullptr,
-        static_cast<__nv_bfloat16*>(scratch.low_rank.data),
-        nullptr, tokens, kLowRank);
-    CUDA_CHECK(cudaGetLastError());
+        low_rank_and_injection_kernel<<<dim3(kLowRank, tokens), 256, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.normalized.data),
+            static_cast<const __nv_bfloat16*>(weights.input_mix_down.qdata),
+            nullptr,
+            static_cast<__nv_bfloat16*>(scratch.low_rank.data),
+            nullptr, tokens, kLowRank);
+        CUDA_CHECK(cudaGetLastError());
 
-    // 3. Mix Up Projection & 4-Stream Reduction (2,560 CTAs per token)
-    mix_up_and_reduce_kernel<<<dim3(kHidden, tokens), 128, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(scratch.normalized.data),
-        static_cast<const __nv_bfloat16*>(scratch.low_rank.data),
-        static_cast<const __nv_bfloat16*>(weights.input_mix_up.qdata),
-        static_cast<__nv_bfloat16*>(block_input.data), tokens);
-    CUDA_CHECK(cudaGetLastError());
+        mix_up_and_reduce_kernel<<<dim3(kHidden, tokens), 128, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.normalized.data),
+            static_cast<const __nv_bfloat16*>(scratch.low_rank.data),
+            static_cast<const __nv_bfloat16*>(weights.input_mix_up.qdata),
+            static_cast<__nv_bfloat16*>(block_input.data), tokens);
+        CUDA_CHECK(cudaGetLastError());
+    } else {
+        // Prefill route (T >= 16)
+        // 1. Group Norm
+        group_norm_prefill_kernel<<<tokens, 256, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(hidden.data),
+            static_cast<const __nv_bfloat16*>(weights.norm.data),
+            static_cast<__nv_bfloat16*>(scratch.normalized.data), tokens);
+        CUDA_CHECK(cudaGetLastError());
+
+        // 2. Down-Projection via Tensor Core MMA
+        Bf16HyperDownMmaOutput out_down{static_cast<__nv_bfloat16*>(scratch.low_rank.data)};
+        const int tiles_m_down = 320 / DownSched::kBlockRows;
+        const int tiles_n_down = (tokens + DownSched::kBlockCols - 1) / DownSched::kBlockCols;
+        const int blocks_down  = tiles_m_down * tiles_n_down;
+
+        static const cudaError_t attr_down = cudaFuncSetAttribute(
+            ops::detail::bf16_gemm_mma_kernel<DownGeom, DownSched, true, Bf16HyperDownMmaOutput>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, DownSched::kSharedBytes);
+        CUDA_CHECK(attr_down);
+
+        ops::detail::bf16_gemm_mma_kernel<DownGeom, DownSched, true><<<blocks_down, DownSched::kThreads, DownSched::kSharedBytes, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.normalized.data),
+            static_cast<const __nv_bfloat16*>(weights.input_mix_down.qdata),
+            out_down, tokens);
+        CUDA_CHECK(cudaGetLastError());
+
+        // 3. Up-Projection via Tensor Core MMA
+        ops::detail::Bf16MmaContiguousOutput out_up{
+            static_cast<__nv_bfloat16*>(scratch.up_gemm.data), 10240};
+        const int tiles_m_up = 10240 / UpSched::kBlockRows;
+        const int tiles_n_up = (tokens + UpSched::kBlockCols - 1) / UpSched::kBlockCols;
+        const int blocks_up  = tiles_m_up * tiles_n_up;
+
+        static const cudaError_t attr_up = cudaFuncSetAttribute(
+            ops::detail::bf16_gemm_mma_kernel<UpGeom, UpSched, true, ops::detail::Bf16MmaContiguousOutput>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, UpSched::kSharedBytes);
+        CUDA_CHECK(attr_up);
+
+        ops::detail::bf16_gemm_mma_kernel<UpGeom, UpSched, true><<<blocks_up, UpSched::kThreads, UpSched::kSharedBytes, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.low_rank.data),
+            static_cast<const __nv_bfloat16*>(weights.input_mix_up.qdata),
+            out_up, tokens);
+        CUDA_CHECK(cudaGetLastError());
+
+        // 4. Up Reduction & 4-Stream Average
+        up_reduction_vectorized_kernel<<<tokens, 256, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.up_gemm.data),
+            static_cast<const __nv_bfloat16*>(scratch.normalized.data),
+            static_cast<__nv_bfloat16*>(block_input.data), tokens);
+        CUDA_CHECK(cudaGetLastError());
+    }
 }
 
 void flash_next_hyper_inject_launch(const Tensor& block_output, const Tensor& injection,
