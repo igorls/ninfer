@@ -2,6 +2,7 @@
 
 #include "ops/linear/fp8/fp8_a8_plan.h"
 #include "ops/linear/fp8/fp8_config.h"
+#include "ops/linear/fp8/fp8_f32_a8_plan.h"
 #include "ops/linear/fp8/fp8_format.h"
 #include "ops/linear/fp8/fp8_launch.h"
 
@@ -49,7 +50,7 @@ Fp8LinearRoute resolve_route(std::int32_t output_rows, std::int32_t input_rows, 
     case Fp8Problem::FlashNextAttnInput:
     case Fp8Problem::FlashNextGdnInput:
     case Fp8Problem::FlashNextResidual:
-        return Fp8LinearRoute::A16;
+        return tokens >= 16 ? Fp8LinearRoute::A8 : Fp8LinearRoute::A16;
     }
     throw std::logic_error("unreachable FP8 linear problem");
 }
@@ -98,7 +99,7 @@ bool interval_uses_a8(Fp8Problem problem, LinearPolicy policy, std::int32_t min_
     case Fp8Problem::FlashNextAttnInput:
     case Fp8Problem::FlashNextGdnInput:
     case Fp8Problem::FlashNextResidual:
-        return false;
+        return max_tokens >= 16;
     }
     throw std::logic_error("unreachable FP8 linear problem");
 }
@@ -110,6 +111,14 @@ std::size_t fp8_linear_workspace_capacity_bytes(std::int32_t output_rows, std::i
                                                 std::int32_t max_tokens) {
     if (min_tokens <= 0 || max_tokens < min_tokens) {
         throw std::invalid_argument("fp8 linear workspace: invalid token interval");
+    }
+    if (is_fp8_f32_linear_problem(output_rows, input_rows)) {
+        const Fp8Problem problem = resolve_fp8_problem(output_rows, input_rows);
+        (void)resolve_route(output_rows, input_rows, policy, min_tokens);
+        (void)resolve_route(output_rows, input_rows, policy, max_tokens);
+        return interval_uses_a8(problem, policy, min_tokens, max_tokens)
+                   ? fp8_f32_a8_workspace_capacity_bytes(output_rows, input_rows, max_tokens)
+                   : 0;
     }
     if (!is_fp8_bf16_linear_problem(output_rows, input_rows)) {
         throw std::invalid_argument("fp8 linear workspace: unsupported BF16-scale shape");
@@ -125,16 +134,6 @@ std::size_t fp8_linear_workspace_capacity_bytes(std::int32_t output_rows, std::i
 void fp8_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
                   WorkspaceArena* workspace, cudaStream_t stream) {
     validate_fp8_weight(weight, "fp8 linear");
-    if (weight.qtype == QType::FP8_E4M3FN_ROW_F32S) {
-        if (!is_fp8_f32_linear_problem(weight.n, weight.k)) {
-            throw std::invalid_argument("fp8 linear: unsupported F32-scale shape");
-        }
-        launch_a16(x, weight, out, stream);
-        return;
-    }
-    if (!is_fp8_bf16_linear_problem(weight.n, weight.k)) {
-        throw std::invalid_argument("fp8 linear: unsupported BF16-scale shape");
-    }
     const Fp8LinearRoute route = resolve_route(weight.n, weight.k, policy, x.ne[1]);
     if (route == Fp8LinearRoute::A16) {
         launch_a16(x, weight, out, stream);
@@ -142,6 +141,13 @@ void fp8_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPoli
     }
     if (workspace == nullptr) {
         throw std::invalid_argument("fp8 A8 linear requires caller workspace");
+    }
+    if (weight.qtype == QType::FP8_E4M3FN_ROW_F32S) {
+        launch_fp8_f32_a8(x, weight, out, *workspace, stream);
+        return;
+    }
+    if (!is_fp8_bf16_linear_problem(weight.n, weight.k)) {
+        throw std::invalid_argument("fp8 linear: unsupported BF16-scale shape");
     }
     auto scope                   = workspace->scope();
     const Fp8A8Workspace scratch = allocate_fp8_a8_workspace(*workspace, x.ne[1], weight.k);

@@ -147,13 +147,9 @@ std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_row
         return detail::nvfp4_linear_workspace_capacity_bytes(output_rows, input_rows, policy,
                                                              min_tokens, max_tokens);
     case QType::FP8_E4M3FN_ROW_BF16S:
+    case QType::FP8_E4M3FN_ROW_F32S:
         return detail::fp8_linear_workspace_capacity_bytes(output_rows, input_rows, policy,
                                                            min_tokens, max_tokens);
-    case QType::FP8_E4M3FN_ROW_F32S:
-        if (!detail::is_fp8_f32_linear_problem(output_rows, input_rows)) {
-            throw std::invalid_argument("linear workspace: unsupported FP8/F32 profile");
-        }
-        return 0;
     case QType::FP32_CTRL:
     case QType::I32_CTRL:
         break;

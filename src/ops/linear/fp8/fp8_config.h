@@ -128,6 +128,7 @@ using Fp8Residual17408Geometry      = Fp8Geometry<5120, 17408>;
 using Fp8FlashNextAttnInputGeometry = Fp8Geometry<13312, 2560>;
 using Fp8FlashNextGdnInputGeometry  = Fp8Geometry<16384, 2560>;
 using Fp8FlashNextResidualGeometry  = Fp8Geometry<2560, 6144>;
+using Fp8Activation2560Geometry     = Fp8ActivationGeometry<2560>;
 using Fp8Activation5120Geometry     = Fp8ActivationGeometry<5120>;
 using Fp8Activation6144Geometry     = Fp8ActivationGeometry<6144>;
 using Fp8Activation17408Geometry    = Fp8ActivationGeometry<17408>;

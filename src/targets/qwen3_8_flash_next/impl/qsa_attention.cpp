@@ -53,6 +53,14 @@ std::size_t flash_next_qsa_attention_workspace_capacity_bytes(std::int32_t batch
     }
     WorkspaceLayoutBuilder layout;
     (void)allocate_flash_next_qsa_attention_workspace(layout, batch);
+    {
+        auto scope = layout.scope();
+        const std::size_t qgkv_ws = ops::linear_workspace_capacity_bytes(
+            QType::FP8_E4M3FN_ROW_F32S, 13'312, 2'560, ops::LinearPolicy::AllowA8, 1, batch);
+        const std::size_t out_ws = ops::linear_workspace_capacity_bytes(
+            QType::FP8_E4M3FN_ROW_F32S, 2'560, 6'144, ops::LinearPolicy::AllowA8, 1, batch);
+        (void)layout.alloc_bytes(std::max(qgkv_ws, out_ws), 256);
+    }
     return layout.peak_bytes(256);
 }
 
@@ -133,8 +141,10 @@ void flash_next_qsa_attention_prefill_chunk(
     const auto scope = workspace.scope();
     FlashNextQsaAttentionWorkspace scratch =
         allocate_flash_next_qsa_attention_workspace(workspace, tokens);
-    ops::linear(input, weights.query_gate_key_value, scratch.projected, ops::LinearPolicy::A16Only,
-                workspace, stream);
+    const ops::LinearPolicy linear_policy =
+        tokens >= 16 ? ops::LinearPolicy::AllowA8 : ops::LinearPolicy::A16Only;
+    ops::linear(input, weights.query_gate_key_value, scratch.projected, linear_policy, workspace,
+                stream);
     if (emit) { emit("qsa_projected", scratch.projected); }
     flash_next_qsa_attention_prefill_launch(token_indices, mrope_positions, table_row, selected_blocks,
                                             selected_counts, weights.query_norm, weights.key_norm,
@@ -147,8 +157,7 @@ void flash_next_qsa_attention_prefill_chunk(
         emit("qsa_attended", scratch.attended);
         emit("qsa_gated", scratch.gated);
     }
-    ops::linear(scratch.gated, weights.output, output, ops::LinearPolicy::A16Only, workspace,
-                stream);
+    ops::linear(scratch.gated, weights.output, output, linear_policy, workspace, stream);
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

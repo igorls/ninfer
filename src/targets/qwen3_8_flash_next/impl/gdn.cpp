@@ -66,6 +66,16 @@ std::size_t flash_next_gdn_workspace_capacity_bytes(std::int32_t min_batch,
     }
     WorkspaceLayoutBuilder layout;
     (void)allocate_flash_next_gdn_workspace(layout, max_batch);
+    {
+        auto scope = layout.scope();
+        const std::size_t qkvz_ws = ops::linear_workspace_capacity_bytes(
+            QType::FP8_E4M3FN_ROW_F32S, 16'384, 2'560, ops::LinearPolicy::AllowA8, 1, max_batch);
+        const std::size_t out_ws = ops::linear_workspace_capacity_bytes(
+            QType::FP8_E4M3FN_ROW_F32S, 2'560, 6'144, ops::LinearPolicy::AllowA8, 1, max_batch);
+        const std::size_t gdn_op_ws =
+            ops::gated_delta_net_workspace_capacity_bytes(16, 48, true, max_batch, max_batch);
+        (void)layout.alloc_bytes(std::max({qkvz_ws, out_ws, gdn_op_ws}), 256);
+    }
     return layout.peak_bytes(256);
 }
 
@@ -145,10 +155,12 @@ void flash_next_gdn_prefill_chunk(const Tensor& input, const GdnWeights& weights
 
     const auto scope              = workspace.scope();
     FlashNextGdnWorkspace scratch = allocate_flash_next_gdn_workspace(workspace, tokens);
+    const ops::LinearPolicy linear_policy =
+        tokens >= 16 ? ops::LinearPolicy::AllowA8 : ops::LinearPolicy::A16Only;
 
     // 1. Projection -> scratch.projected [16384, T]
-    ops::linear(input, weights.query_key_value_z, scratch.projected, ops::LinearPolicy::A16Only,
-                workspace, stream);
+    ops::linear(input, weights.query_key_value_z, scratch.projected, linear_policy, workspace,
+                stream);
 
     // 2. Causal conv on rows [0, 10240)
     ops::extract_bf16_columns(scratch.projected, 0, scratch.conv_in, stream);
@@ -183,8 +195,7 @@ void flash_next_gdn_prefill_chunk(const Tensor& input, const GdnWeights& weights
 
     // 5. Output gate & projection
     flash_next_gdn_output_gate_launch(scratch, weights.norm, stream);
-    ops::linear(scratch.gated_output, weights.output, output, ops::LinearPolicy::A16Only, workspace,
-                stream);
+    ops::linear(scratch.gated_output, weights.output, output, linear_policy, workspace, stream);
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail
