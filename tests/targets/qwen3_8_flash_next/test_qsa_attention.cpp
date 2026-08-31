@@ -2,6 +2,8 @@
 #include "core/device.h"
 #include "ninfer/ops/linear.h"
 #include "targets/qwen3_8_flash_next/impl/qsa_attention.h"
+#include "targets/qwen3_8_flash_next/impl/qsa_attention_kernels.h"
+#include "targets/qwen3_8_flash_next/impl/qsa_attention_workspace.h"
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -19,6 +21,15 @@ namespace {
 
 bool cuda_unavailable(cudaError_t error) {
     return error == cudaErrorNoDevice || error == cudaErrorInsufficientDriver;
+}
+
+inline std::uint16_t float_to_bf16(float value) {
+    const __nv_bfloat16 raw = __float2bfloat16_rn(value);
+    return *reinterpret_cast<const std::uint16_t*>(&raw);
+}
+
+inline float bf16_to_float(std::uint16_t value) {
+    return __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&value));
 }
 
 ninfer::Weight fp8_f32_weight(ninfer::DeviceBuffer& storage, std::int32_t rows,
@@ -41,9 +52,16 @@ ninfer::Weight fp8_f32_weight(ninfer::DeviceBuffer& storage, std::int32_t rows,
     out.ndim            = 2;
     out.shape[0]        = rows;
     out.shape[1]        = columns;
+    out.shape[2]        = 1;
+    out.shape[3]        = 1;
     out.padded_shape[0] = rows;
     out.padded_shape[1] = columns;
+    out.padded_shape[2] = 1;
+    out.padded_shape[3] = 1;
     out.scale_ne[0]     = rows;
+    out.scale_ne[1]     = 1;
+    out.scale_ne[2]     = 1;
+    out.scale_ne[3]     = 1;
     out.scale_nb[0]     = 4;
     out.scale_nb[1]     = static_cast<std::int64_t>(rows) * 4;
     out.scale_nb[2]     = out.scale_nb[1];
@@ -93,10 +111,11 @@ bool test_prefill_vs_decode_equivalence(ninfer::DeviceContext& device) {
     ninfer::DeviceBuffer query_norm(256 * sizeof(std::uint16_t));
     ninfer::DeviceBuffer key_norm(256 * sizeof(std::uint16_t));
     std::vector<std::uint16_t> host_qnorm(256), host_knorm(256);
-    for (auto& v : host_qnorm) { v = __float2bfloat16_rn(dist(rng) * 0.1f); }
-    for (auto& v : host_knorm) { v = __float2bfloat16_rn(dist(rng) * 0.1f); }
+    for (auto& v : host_qnorm) { v = float_to_bf16(dist(rng) * 0.1f); }
+    for (auto& v : host_knorm) { v = float_to_bf16(dist(rng) * 0.1f); }
     query_norm.copy_from_host(host_qnorm.data(), host_qnorm.size() * 2);
     key_norm.copy_from_host(host_knorm.data(), host_knorm.size() * 2);
+    device.synchronize(); // Ensure legacy stream copies order against device.stream
 
     AttentionWeights weights{};
     weights.query_norm           = ninfer::Tensor(query_norm.p, ninfer::DType::BF16, {256});
@@ -109,7 +128,7 @@ bool test_prefill_vs_decode_equivalence(ninfer::DeviceContext& device) {
         const std::int32_t first_token_index = 64;
 
         std::vector<std::uint16_t> host_input(static_cast<std::size_t>(input_dim) * T);
-        for (auto& v : host_input) { v = __float2bfloat16_rn(dist(rng)); }
+        for (auto& v : host_input) { v = float_to_bf16(dist(rng)); }
 
         std::vector<std::int32_t> host_pos(3 * T);
         for (std::int32_t t = 0; t < T; ++t) {
@@ -130,8 +149,16 @@ bool test_prefill_vs_decode_equivalence(ninfer::DeviceContext& device) {
         ninfer::DeviceBuffer key_pages_a(256ULL * 64 * 2 * physical_pages * 2);
         ninfer::DeviceBuffer value_pages_a(256ULL * 64 * 2 * physical_pages * 2);
         ninfer::DeviceBuffer block_tables(logical_pages * sizeof(std::int32_t));
-        key_pages_a.fill(0);
-        value_pages_a.fill(0);
+
+        // Pre-populate page 0 (tokens 0..63) with real non-zero K/V so selected_blocks (0..15)
+        // produce realistic non-zero attended outputs.
+        std::vector<std::uint16_t> init_kv(256ULL * 64 * 2 * physical_pages, 0);
+        for (std::size_t i = 0; i < 256ULL * 64 * 2; ++i) {
+            init_kv[i] = float_to_bf16(dist(rng));
+        }
+        key_pages_a.copy_from_host(init_kv.data(), init_kv.size() * sizeof(std::uint16_t));
+        value_pages_a.copy_from_host(init_kv.data(), init_kv.size() * sizeof(std::uint16_t));
+
         std::array<std::int32_t, logical_pages> page_ids{};
         for (std::int32_t p = 0; p < logical_pages; ++p) { page_ids[p] = p; }
         block_tables.copy_from_host(page_ids.data(), sizeof(page_ids));
@@ -146,8 +173,9 @@ bool test_prefill_vs_decode_equivalence(ninfer::DeviceContext& device) {
 
         ninfer::DeviceBuffer key_pages_b(256ULL * 64 * 2 * physical_pages * 2);
         ninfer::DeviceBuffer value_pages_b(256ULL * 64 * 2 * physical_pages * 2);
-        key_pages_b.fill(0);
-        value_pages_b.fill(0);
+        key_pages_b.copy_from_host(init_kv.data(), init_kv.size() * sizeof(std::uint16_t));
+        value_pages_b.copy_from_host(init_kv.data(), init_kv.size() * sizeof(std::uint16_t));
+
         QsaAttentionCacheView cache_b{
             .key_pages =
                 ninfer::Tensor(key_pages_b.p, ninfer::DType::BF16, {256, 64, 2, physical_pages}),
@@ -158,6 +186,7 @@ bool test_prefill_vs_decode_equivalence(ninfer::DeviceContext& device) {
 
         ninfer::DeviceBuffer input_dev(static_cast<std::size_t>(input_dim) * T * 2);
         input_dev.copy_from_host(host_input.data(), host_input.size() * 2);
+        device.synchronize(); // Ensure legacy stream copies order against device.stream
 
         // Path A: Sequential decode
         std::vector<std::uint16_t> seq_output(static_cast<std::size_t>(input_dim) * T);
@@ -180,6 +209,7 @@ bool test_prefill_vs_decode_equivalence(ninfer::DeviceContext& device) {
             pos_buf.copy_from_host(pos_t.data(), sizeof(pos_t));
             sel_buf.copy_from_host(&host_selected_blocks[t * 512], 512 * sizeof(std::int32_t));
             cnt_buf.copy_from_host(&host_selected_counts[t], sizeof(std::int32_t));
+            device.synchronize(); // Ensure legacy stream copies order against device.stream
 
             ninfer::Tensor in_t(
                 static_cast<std::uint16_t*>(input_dev.p) + static_cast<std::size_t>(t) * input_dim,
@@ -213,6 +243,7 @@ bool test_prefill_vs_decode_equivalence(ninfer::DeviceContext& device) {
                                host_selected_blocks.size() * sizeof(std::int32_t));
         dev_cnt.copy_from_host(host_selected_counts.data(),
                                host_selected_counts.size() * sizeof(std::int32_t));
+        device.synchronize(); // Ensure legacy stream copies order against device.stream
 
         ninfer::DeviceBuffer chunk_out(static_cast<std::size_t>(input_dim) * T * 2);
         ninfer::Tensor chunk_in(input_dev.p, ninfer::DType::BF16, {input_dim, T});
@@ -236,34 +267,81 @@ bool test_prefill_vs_decode_equivalence(ninfer::DeviceContext& device) {
         std::vector<std::uint16_t> kp_b(256ULL * 64 * 2 * physical_pages);
         key_pages_a.copy_to_host(kp_a.data(), kp_a.size() * 2);
         key_pages_b.copy_to_host(kp_b.data(), kp_b.size() * 2);
+        double key_diff_sq = 0.0, key_base_sq = 0.0, key_max_diff = 0.0;
+        int key_nan = 0;
         for (std::size_t i = 0; i < kp_a.size(); ++i) {
+            float f_a = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&kp_a[i]));
+            float f_b = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&kp_b[i]));
+            if (!std::isfinite(f_a) || !std::isfinite(f_b)) {
+                key_nan++;
+                continue;
+            }
             if (T < 16) {
                 if (kp_a[i] != kp_b[i]) {
-                    std::cerr << "Key cache mismatch at T=" << T << ", idx=" << i << ": seq=0x"
+                    std::cerr << "Key cache bitwise mismatch at T=" << T << ", idx=" << i << ": seq=0x"
                               << std::hex << kp_a[i] << ", chunk=0x" << kp_b[i] << std::dec << "\n";
                     return false;
                 }
-            } else {
-                float f_a = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&kp_a[i]));
-                float f_b = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&kp_b[i]));
-                if (std::abs(f_a - f_b) > 0.05f) {
-                    std::cerr << "Key cache mismatch at T=" << T << ", idx=" << i << ": seq="
-                              << f_a << ", chunk=" << f_b << "\n";
+            }
+            double d = f_a - f_b;
+            key_diff_sq += d * d;
+            key_base_sq += static_cast<double>(f_a) * f_a;
+            key_max_diff = std::max(key_max_diff, std::abs(d));
+        }
+        if (key_nan > 0) {
+            std::cerr << "FAIL: Key cache contained " << key_nan << " non-finite elements at T=" << T << "\n";
+            return false;
+        }
+        if (key_base_sq <= 0.0) {
+            std::cerr << "FAIL: Key cache was vacuous at T=" << T << "\n";
+            return false;
+        }
+        const double key_rel_l2 = std::sqrt(key_diff_sq / key_base_sq);
+
+        std::vector<std::uint16_t> vp_a(256ULL * 64 * 2 * physical_pages);
+        std::vector<std::uint16_t> vp_b(256ULL * 64 * 2 * physical_pages);
+        value_pages_a.copy_to_host(vp_a.data(), vp_a.size() * 2);
+        value_pages_b.copy_to_host(vp_b.data(), vp_b.size() * 2);
+        double val_diff_sq = 0.0, val_base_sq = 0.0, val_max_diff = 0.0;
+        int val_nan = 0;
+        for (std::size_t i = 0; i < vp_a.size(); ++i) {
+            float f_a = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&vp_a[i]));
+            float f_b = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&vp_b[i]));
+            if (!std::isfinite(f_a) || !std::isfinite(f_b)) {
+                val_nan++;
+                continue;
+            }
+            if (T < 16) {
+                if (vp_a[i] != vp_b[i]) {
+                    std::cerr << "Value cache bitwise mismatch at T=" << T << ", idx=" << i << ": seq=0x"
+                              << std::hex << vp_a[i] << ", chunk=0x" << vp_b[i] << std::dec << "\n";
                     return false;
                 }
             }
+            double d = f_a - f_b;
+            val_diff_sq += d * d;
+            val_base_sq += static_cast<double>(f_a) * f_a;
+            val_max_diff = std::max(val_max_diff, std::abs(d));
         }
+        if (val_nan > 0) {
+            std::cerr << "FAIL: Value cache contained " << val_nan << " non-finite elements at T=" << T << "\n";
+            return false;
+        }
+        if (val_base_sq <= 0.0) {
+            std::cerr << "FAIL: Value cache was vacuous at T=" << T << "\n";
+            return false;
+        }
+        const double val_rel_l2 = std::sqrt(val_diff_sq / val_base_sq);
 
         // Compare output
         double diff_sq = 0.0, base_sq = 0.0, max_diff = 0.0;
         int nan_count = 0;
-        const float out_tol = T >= 16 ? 5e-2f : 1e-2f;
         for (std::size_t i = 0; i < seq_output.size(); ++i) {
             float f_seq =
                 __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&seq_output[i]));
             float f_chk =
                 __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&chunk_output[i]));
-            if (std::isnan(f_seq) || std::isnan(f_chk)) {
+            if (!std::isfinite(f_seq) || !std::isfinite(f_chk)) {
                 nan_count++;
                 continue;
             }
@@ -271,19 +349,32 @@ bool test_prefill_vs_decode_equivalence(ninfer::DeviceContext& device) {
             diff_sq += d * d;
             base_sq += static_cast<double>(f_seq) * f_seq;
             max_diff = std::max(max_diff, std::abs(d));
-            if (std::abs(f_seq - f_chk) > out_tol) {
-                std::cerr << "Attended output mismatch at T=" << T << ", idx=" << i
-                          << ": seq=" << f_seq << ", chunk=" << f_chk << "\n";
-                return false;
-            }
         }
         double rel_l2 = (diff_sq == 0.0) ? 0.0 : (base_sq > 0.0 ? std::sqrt(diff_sq / base_sq) : std::sqrt(diff_sq));
-        std::printf("  [QSA Equivalence] T=%3d: rel-L2 = %.6e, max-abs-diff = %.6e, nan=%d, base_sq=%.3e, seq[0]=%.5f chunk[0]=%.5f seq[1]=%.5f chunk[1]=%.5f\n",
-                    T, rel_l2, max_diff, nan_count, base_sq,
-                    __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&seq_output[0])),
-                    __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&chunk_output[0])),
-                    __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&seq_output[1])),
-                    __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&chunk_output[1])));
+        std::printf("  [QSA Equivalence] T=%3d: out_rel-L2 = %.6e (max-d=%.4e), key_rel-L2 = %.6e, val_rel-L2 = %.6e, base_sq=%.3e\n",
+                    T, rel_l2, max_diff, key_rel_l2, val_rel_l2, base_sq);
+        if (nan_count > 0) {
+            std::cerr << "FAIL: T=" << T << " output contained " << nan_count << " non-finite elements\n";
+            return false;
+        }
+        if (base_sq <= 0.0) {
+            std::cerr << "FAIL: T=" << T << " output was vacuous (base_sq <= 0)\n";
+            return false;
+        }
+        const double out_tol = T >= 16 ? 8e-2 : 1e-3;
+        const double kv_tol  = T >= 16 ? 4e-2 : 1e-3;
+        if (rel_l2 > out_tol) {
+            std::cerr << "FAIL: T=" << T << " out rel-L2 " << rel_l2 << " > tol " << out_tol << "\n";
+            return false;
+        }
+        if (key_rel_l2 > kv_tol) {
+            std::cerr << "FAIL: T=" << T << " key rel-L2 " << key_rel_l2 << " > tol " << kv_tol << "\n";
+            return false;
+        }
+        if (val_rel_l2 > kv_tol) {
+            std::cerr << "FAIL: T=" << T << " val rel-L2 " << val_rel_l2 << " > tol " << kv_tol << "\n";
+            return false;
+        }
     }
     return true;
 }

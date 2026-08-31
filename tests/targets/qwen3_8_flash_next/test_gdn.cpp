@@ -200,6 +200,7 @@ int main() {
         output_codes[static_cast<std::size_t>(row) * 6'144] = 0x38U;
     }
     output_projection.copy_from_host(output_codes.data(), output_codes.size());
+    device.synchronize(); // Drain legacy stream before kernel launch on non-blocking device.stream
 
     flash_next_gdn_decode(input_view, weights, source_view, destination_view,
                           convolution_state_view, ssm_state_view, workspace, output_view,
@@ -256,6 +257,7 @@ int main() {
         chunk_ssm_states.fill(0);
         seq_conv_states.fill(0);
         seq_ssm_states.fill(0);
+        device.synchronize(); // Ensure legacy stream copies order against device.stream
 
         ninfer::Tensor chunk_in_t(chunk_input.p, ninfer::DType::BF16, {2'560, T});
         ninfer::Tensor chunk_out_t(chunk_output.p, ninfer::DType::BF16, {2'560, T});
@@ -280,6 +282,7 @@ int main() {
         for (int t = 0; t < T; ++t) {
             tok_src.copy_from_host(&cur_src, sizeof(std::int32_t));
             tok_dst.copy_from_host(&cur_dst, sizeof(std::int32_t));
+            device.synchronize(); // Ensure legacy stream copies order against device.stream
 
             ninfer::Tensor tok_in(
                 static_cast<std::uint16_t*>(chunk_input.p) + static_cast<std::size_t>(t) * 2'560,
@@ -302,14 +305,27 @@ int main() {
         seq_output.copy_to_host(h_seq_out.data(), h_seq_out.size() * sizeof(std::uint16_t));
 
         double out_diff = 0.0, out_ref = 0.0;
+        int out_nan = 0;
         for (std::size_t i = 0; i < h_chunk_out.size(); ++i) {
             const float a = bf16_to_float(h_chunk_out[i]);
             const float b = bf16_to_float(h_seq_out[i]);
+            if (!std::isfinite(a) || !std::isfinite(b)) {
+                out_nan++;
+                continue;
+            }
             out_diff += (a - b) * (a - b);
             out_ref += b * b;
         }
+        if (out_nan > 0) {
+            std::cerr << "FAIL: GDN chunk T=" << T << " output had " << out_nan << " non-finite elements\n";
+            return 1;
+        }
+        if (out_ref <= 0.0) {
+            std::cerr << "FAIL: GDN chunk T=" << T << " output reference was vacuous (out_ref <= 0)\n";
+            return 1;
+        }
         const double tol = T >= 16 ? 5e-2 : 1e-2;
-        const double out_rel_l2 = std::sqrt(out_diff) / std::max(1e-6, std::sqrt(out_ref));
+        const double out_rel_l2 = std::sqrt(out_diff / out_ref);
         if (out_rel_l2 > tol) {
             std::cerr << "FAIL: GDN chunk T=" << T << " output rel-L2=" << out_rel_l2 << " > " << tol << "\n";
             return 1;
@@ -323,13 +339,26 @@ int main() {
         seq_ssm_states.copy_to_host(h_seq_ssm.data(), h_seq_ssm.size() * sizeof(float));
 
         double ssm_diff = 0.0, ssm_ref = 0.0;
+        int ssm_nan = 0;
         for (std::size_t i = 0; i < ssm_slot_floats; ++i) {
             const float a = h_chunk_ssm[1 * ssm_slot_floats + i];
             const float b = h_seq_ssm[static_cast<std::size_t>(cur_src) * ssm_slot_floats + i];
+            if (!std::isfinite(a) || !std::isfinite(b)) {
+                ssm_nan++;
+                continue;
+            }
             ssm_diff += (a - b) * (a - b);
             ssm_ref += b * b;
         }
-        const double ssm_rel_l2 = std::sqrt(ssm_diff) / std::max(1e-6, std::sqrt(ssm_ref));
+        if (ssm_nan > 0) {
+            std::cerr << "FAIL: GDN chunk T=" << T << " SSM state had " << ssm_nan << " non-finite elements\n";
+            return 1;
+        }
+        if (ssm_ref <= 0.0) {
+            std::cerr << "FAIL: GDN chunk T=" << T << " SSM reference was vacuous (ssm_ref <= 0)\n";
+            return 1;
+        }
+        const double ssm_rel_l2 = std::sqrt(ssm_diff / ssm_ref);
         if (ssm_rel_l2 > tol) {
             std::cerr << "FAIL: GDN chunk T=" << T << " SSM state rel-L2=" << ssm_rel_l2 << " > " << tol << "\n";
             return 1;
@@ -343,13 +372,26 @@ int main() {
         seq_conv_states.copy_to_host(h_seq_conv.data(), h_seq_conv.size() * sizeof(std::uint16_t));
 
         double conv_diff = 0.0, conv_ref = 0.0;
+        int conv_nan = 0;
         for (std::size_t i = 0; i < conv_slot_u16; ++i) {
             const float a = bf16_to_float(h_chunk_conv[1 * conv_slot_u16 + i]);
             const float b = bf16_to_float(h_seq_conv[static_cast<std::size_t>(cur_src) * conv_slot_u16 + i]);
+            if (!std::isfinite(a) || !std::isfinite(b)) {
+                conv_nan++;
+                continue;
+            }
             conv_diff += (a - b) * (a - b);
             conv_ref += b * b;
         }
-        const double conv_rel_l2 = std::sqrt(conv_diff) / std::max(1e-6, std::sqrt(conv_ref));
+        if (conv_nan > 0) {
+            std::cerr << "FAIL: GDN chunk T=" << T << " Conv state had " << conv_nan << " non-finite elements\n";
+            return 1;
+        }
+        if (conv_ref <= 0.0) {
+            std::cerr << "FAIL: GDN chunk T=" << T << " Conv reference was vacuous (conv_ref <= 0)\n";
+            return 1;
+        }
+        const double conv_rel_l2 = std::sqrt(conv_diff / conv_ref);
         if (conv_rel_l2 > tol) {
             std::cerr << "FAIL: GDN chunk T=" << T << " Conv state rel-L2=" << conv_rel_l2 << " > " << tol << "\n";
             return 1;
