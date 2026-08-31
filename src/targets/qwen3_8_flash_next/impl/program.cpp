@@ -1352,12 +1352,28 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
 
                 if (c_slot.kind != runtime::CheckpointKind::TurnClosure) {
                     // Consumed to active: release continuation cache entry (page groups transferred to active lane)
+                    const auto paired_turn = c_slot.paired_rewrite_slot;
+                    const auto paired_gen  = c_slot.paired_rewrite_generation;
                     impl_->executor_.release_physical_groups(c_slot.physical_groups);
                     c_slot.physical_groups.clear();
                     c_slot.committed_tokens.clear();
                     c_slot.committed_frontier = 0;
                     c_slot.role               = detail::ContinuationSlotRole::Vacant;
                     c_slot.generation++;
+                    c_slot.published_checkpoints     = 1;
+                    c_slot.paired_rewrite_slot.reset();
+                    c_slot.paired_rewrite_generation = 0;
+
+                    // Vacate paired TurnClosure slot unless another active lane is resuming from it
+                    if (paired_turn.has_value() && *paired_turn < impl_->continuation_slots_.size()) {
+                        const auto& turn = impl_->continuation_slots_[*paired_turn];
+                        if (turn.role == detail::ContinuationSlotRole::Catalogued &&
+                            turn.generation == paired_gen &&
+                            turn.kind == runtime::CheckpointKind::TurnClosure &&
+                            !impl_->is_slot_protected(*paired_turn)) {
+                            impl_->vacate_slot(*paired_turn);
+                        }
+                    }
                 } else {
                     // TurnClosure checkpoint: stays catalogued and immutable for future turns / sibling requests!
                     c_slot.last_used_epoch = ++impl_->continuation_epoch_;
@@ -2319,15 +2335,8 @@ void Program::fail_all_cleanup() noexcept {
             st.pending_capture_offer = 0;
         }
     }
-    for (auto& c_slot : impl_->continuation_slots_) {
-        if (c_slot.role == detail::ContinuationSlotRole::Catalogued) {
-            impl_->executor_.release_physical_groups(c_slot.physical_groups);
-            c_slot.physical_groups.clear();
-            c_slot.committed_tokens.clear();
-            c_slot.committed_frontier = 0;
-            c_slot.role = detail::ContinuationSlotRole::Vacant;
-            c_slot.generation++;
-        }
+    for (std::size_t c = 0; c < impl_->continuation_slots_.size(); ++c) {
+        impl_->vacate_slot(c);
     }
     impl_->has_context_transaction_ = false;
     impl_->transaction_lane_.reset();

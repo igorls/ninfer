@@ -261,9 +261,8 @@ ReferenceToolOptions parse_reference_tool_options(std::span<const std::string_vi
     if (opts.max_context < 1 || opts.max_context > 262'144) {
         throw std::invalid_argument("--max-context must be between 1 and 262144");
     }
-    if (opts.state_slots == 0) {
-        opts.state_slots = 2U * opts.max_concurrency;
-    } else if (opts.state_slots < 2U * opts.max_concurrency || opts.state_slots > 64) {
+    if (opts.state_slots != 0 &&
+        (opts.state_slots < 2U * opts.max_concurrency || opts.state_slots > 64)) {
         throw std::invalid_argument("--state-slots must be between 2 * max_concurrency and 64");
     }
     if (opts.token_id < 0 || opts.token_id >= 248'320) {

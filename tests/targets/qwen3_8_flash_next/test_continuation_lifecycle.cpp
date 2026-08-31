@@ -2362,6 +2362,144 @@ int test_materialization_planner_call_sequence(ninfer::DeviceContext& device) {
     return failures;
 }
 
+int test_resume_from_endpoint_consumes_pair(ninfer::DeviceContext& device) {
+    std::printf("[RUN] test_resume_from_endpoint_consumes_pair\n");
+    std::fflush(stdout);
+    int failures = 0;
+    auto model    = make_synthetic_model(device);
+    auto ple_meta = make_synthetic_ple_meta();
+
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency       = 2,
+        .max_context           = 512,
+        .state_slot_capacity   = 0,
+        .continuation_capacity = 4,
+        .prefill_chunk         = 256,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+
+    auto program_impl =
+        std::make_unique<ProgramImpl>(nullptr, plan, device, model.view, std::nullopt, ple_meta);
+    Program program(std::move(program_impl));
+
+    auto advance_prefill_full = [&](Program& prog, SequenceHandle s) -> PrefillProgress {
+        auto p = prog.advance_prefill(s);
+        if (p.capture.has_value()) {
+            prog.skip_capture(std::move(*p.capture));
+            p = prog.advance_prefill(s);
+        }
+        return p;
+    };
+
+    ninfer::runtime::ResolvedExecutionOptions exec_options{};
+    exec_options.requested_output_tokens = 8;
+    ninfer::runtime::ContextMachineCostModel cost_model{};
+    std::atomic<bool> flag{false};
+    ninfer::runtime::CancellationFlagView cancellation{&flag};
+
+    // 1. Turn 1: 20 prompt tokens with rewrite boundary F=16
+    //    Offers TurnClosure at F=16 -> we accept & reserve capture!
+    //    Finish publishes Endpoint paired with TurnClosure.
+    std::vector<ninfer::TokenId> turn1_tokens(20);
+    for (std::size_t i = 0; i < 20; ++i) { turn1_tokens[i] = static_cast<ninfer::TokenId>(600 + i); }
+    const auto prompt1 = make_prompt(turn1_tokens, true, 16);
+
+    auto base1 = program.plan_request(prompt1, exec_options);
+    auto cand1 = program.inspect_admission(
+        prompt1, base1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand1.has_value(), "Turn 1 admission must succeed");
+    auto res1 = program.seal_identity(*cand1, prompt1);
+
+    (void)program.start_resource_transaction(std::move(*res1), make_prompt(turn1_tokens, true, 16), cancellation);
+    auto prog1 = program.progress_context_transaction(cancellation);
+    auto* mat1 = std::get_if<MaterializationResult>(&prog1);
+    SequenceHandle seq1 = mat1->published->sequence;
+    program.finalize_context_transaction();
+
+    // Advance chunk 1 to F=16 -> capture offer
+    auto p1 = program.advance_prefill(seq1);
+    failures += check(p1.capture.has_value(), "Turn 1 must offer capture at F=16");
+    auto reserve_stat = program.reserve_active_capture(
+        std::move(*p1.capture), nullptr, nullptr, std::nullopt, cancellation);
+    failures += check(reserve_stat == ninfer::runtime::ContextTransactionReserveStatus::Reserved,
+                      "Capture reservation must succeed");
+    (void)program.progress_context_transaction(cancellation);
+    program.finalize_context_transaction();
+
+    // Advance chunk 2 to completion
+    auto p2 = program.advance_prefill(seq1);
+    failures += check(p2.complete, "Turn 1 prefill step 2 must be complete");
+
+    FinishResult fin1 = program.finish(seq1);
+    failures += check(fin1.disposition == ninfer::runtime::FinishDisposition::Catalogued,
+                      "Turn 1 finish must be Catalogued");
+    failures += check(fin1.continuation.has_value(), "Turn 1 must return continuation handle");
+    failures += check(fin1.summary.rewrite.has_value(), "Turn 1 summary must have paired rewrite TurnClosure");
+
+    // After Turn 1: exactly 2 slots used (Endpoint + paired TurnClosure)
+    failures += check(program.physical_usage().device_state_slots == 2,
+                      "Turn 1 must occupy exactly 2 device state slots (Endpoint + TurnClosure)");
+    failures += check(program.physical_usage().device_main_kv_pages > 0,
+                      "Turn 1 must have allocated main KV pages");
+
+    // 2. Turn 2: Resumes from the Endpoint (token count = 20 prompt tokens + 8 delta tokens)
+    std::vector<ninfer::TokenId> turn2_tokens = turn1_tokens;
+    for (std::size_t i = 0; i < 8; ++i) {
+        turn2_tokens.push_back(static_cast<ninfer::TokenId>(700 + i));
+    }
+    const auto prompt2 = make_prompt(turn2_tokens, true);
+    auto base2 = program.plan_request(prompt2, exec_options);
+
+    auto cand2 = program.inspect_admission(
+        prompt2, base2, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false, cost_model);
+    failures += check(cand2.has_value(), "Turn 2 admission must succeed");
+    if (cand2.has_value()) {
+        failures += check(cand2->summary().prefix_reuse_path == ninfer::PrefixReusePath::PrivateEndpoint,
+                          "Turn 2 prefix reuse path must be PrivateEndpoint");
+        failures += check(cand2->identity_assessment().source_disposition == ninfer::runtime::ClaimDisposition::ConsumedToActive,
+                          "Turn 2 source disposition must be ConsumedToActive");
+    }
+
+    auto res2 = program.seal_identity(*cand2, prompt2);
+    failures += check(res2.has_value(), "Turn 2 seal identity must succeed");
+
+    // Starting resource transaction must consume the endpoint AND vacate the paired TurnClosure
+    auto start_stat2 = program.start_resource_transaction(
+        std::move(*res2), make_prompt(turn2_tokens, true), cancellation);
+    failures += check(start_stat2 == ninfer::runtime::ContextTransactionReserveStatus::Reserved,
+                      "Turn 2 start_resource_transaction must succeed");
+
+    auto prog2 = program.progress_context_transaction(cancellation);
+    auto* mat2 = std::get_if<MaterializationResult>(&prog2);
+    SequenceHandle seq2 = mat2->published->sequence;
+    program.finalize_context_transaction();
+
+    // At this point, the lane is active (1 active lane state slot), but the catalog has 0 entries!
+    // (both Endpoint and TurnClosure were vacated from catalog upon consumption).
+    failures += check(program.physical_usage().device_state_slots == 1,
+                      "Only the active lane should hold a state slot; catalog slots must be vacated");
+
+    // Finish Turn 2 without cataloguing
+    auto p_t2 = advance_prefill_full(program, seq2);
+    failures += check(p_t2.complete, "Turn 2 prefill must be complete");
+
+    FinishResult fin2 = program.finish(seq2);
+    if (fin2.continuation.has_value()) {
+        (void)program.release_continuation(std::move(*fin2.continuation));
+    }
+
+    // All slots and physical page groups must now have zero refcount and be completely free!
+    failures += check(program.physical_usage().device_state_slots == 0,
+                      "Device state slots must be exactly 0 after finish and release");
+    failures += check(program.physical_usage().device_main_kv_pages == 0,
+                      "Device main KV pages must be exactly 0 after finish and release");
+
+    std::printf("[DONE] test_resume_from_endpoint_consumes_pair, failures: %d\n", failures);
+    std::fflush(stdout);
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -2390,6 +2528,7 @@ int main() {
         failures += test_repeated_8way_batches_over_full_catalog(device);
         failures += test_resumed_checkpoint_not_evicted_while_lane_runs(device);
         failures += test_materialization_planner_call_sequence(device);
+        failures += test_resume_from_endpoint_consumes_pair(device);
 
         if (failures == 0) {
             std::printf("ALL FLASH-NEXT CONTINUATION LIFECYCLE TESTS PASSED\n");

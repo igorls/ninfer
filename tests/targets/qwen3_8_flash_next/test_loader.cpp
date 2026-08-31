@@ -186,7 +186,7 @@ int test_options_parser_validation() {
     try {
         const auto opts = parse_reference_tool_options(valid_args);
         if (opts.model_path != "model.ninfer" || opts.mode != "preflight" ||
-            opts.max_context != 2048 || opts.max_concurrency != 2 || opts.state_slots != 4) {
+            opts.max_context != 2048 || opts.max_concurrency != 2 || opts.state_slots != 0) {
             std::cerr << "Parsed options mismatch on valid args\n";
             return 1;
         }

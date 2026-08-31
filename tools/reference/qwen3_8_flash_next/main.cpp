@@ -1449,9 +1449,7 @@ int run_continuation_check(const ReferenceToolOptions& opts) {
     FlashNextRuntimeConfig config{
         .max_concurrency       = 1,
         .max_context           = opts.max_context,
-        // options.cpp normalises --state-slots 0 to 2 * max_concurrency (lane slots only); the
-        // continuation catalog needs 2 * max_concurrency + continuation_capacity on top of that.
-        .state_slot_capacity   = std::max<std::uint32_t>(opts.state_slots, 2U * 1U + 16U),
+        .state_slot_capacity   = opts.state_slots,
         .continuation_capacity = 16,
         .prefill_chunk         = opts.prefill_chunk > 0 ? opts.prefill_chunk : 1024,
         .use_cuda_graph        = opts.use_cuda_graph,
