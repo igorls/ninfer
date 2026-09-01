@@ -366,6 +366,21 @@ int test_prefill_equivalence_and_benchmark(ninfer::DeviceContext& device) {
                   << "    Router Time : " << avg_route_us << " us\n"
                   << "    MoE GEMMs   : " << avg_comp_us  << " us\n"
                   << "    Total Layer : " << avg_route_us + avg_comp_us << " us\n";
+
+        if (tokens == 2048) {
+            cudaEvent_t ev0, ev1, ev2, ev3, ev4, ev5, ev6;
+            cudaEventCreate(&ev0); cudaEventCreate(&ev1); cudaEventCreate(&ev2);
+            cudaEventCreate(&ev3); cudaEventCreate(&ev4); cudaEventCreate(&ev5);
+            cudaEventCreate(&ev6);
+
+            cudaEventRecord(ev0, device.stream);
+            for (int i = 0; i < kIters; ++i) {
+                // 1. Build groups
+                flash_next_moe_kernels_launch(in_view, weights, scratch, out_prefill_view, device.stream);
+            }
+            cudaEventRecord(ev6, device.stream);
+            cudaEventSynchronize(ev6);
+        }
     }
 
     const float scaling_factor_512  = time_512_us / (time_128_us + 1e-6F);
