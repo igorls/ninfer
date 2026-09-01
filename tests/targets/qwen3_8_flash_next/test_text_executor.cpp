@@ -19,7 +19,9 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -33,6 +35,67 @@ namespace {
 
 bool cuda_unavailable(cudaError_t error) {
     return error == cudaErrorNoDevice || error == cudaErrorInsufficientDriver;
+}
+
+// Default remains 3. NINFER_PREFILL_BENCH_ITERS=<n> selects the counted samples after
+// discarding the first cudaEvent-timed chunk. Invalid/empty env keeps the default.
+int prefill_bench_iters() {
+    const char* env = std::getenv("NINFER_PREFILL_BENCH_ITERS");
+    if (env == nullptr || env[0] == '\0') { return 3; }
+    char* end = nullptr;
+    const long parsed = std::strtol(env, &end, 10);
+    if (end == env || parsed < 1 || parsed > 10'000) { return 3; }
+    return static_cast<int>(parsed);
+}
+
+int prefill_bench_warmup_s(bool interleaved_ab) {
+    const char* env = std::getenv("NINFER_PREFILL_BENCH_WARMUP_S");
+    if (env == nullptr || env[0] == '\0') { return interleaved_ab ? 60 : 0; }
+    char* end = nullptr;
+    const long parsed = std::strtol(env, &end, 10);
+    if (end == env || parsed < 0 || parsed > 600) { return interleaved_ab ? 60 : 0; }
+    return static_cast<int>(parsed);
+}
+
+bool prefill_bench_ab_requested(bool mode_ab) {
+    if (mode_ab) { return true; }
+    const char* env = std::getenv("NINFER_PREFILL_BENCH_AB");
+    return env != nullptr && std::strcmp(env, "1") == 0;
+}
+
+void set_residual_splitk_env(int split_k) {
+    const char* value = split_k == 1 ? "1" : "4";
+#ifdef _WIN32
+    (void)_putenv_s("NINFER_FLASH_NEXT_RESIDUAL_SPLITK", value);
+#else
+    (void)setenv("NINFER_FLASH_NEXT_RESIDUAL_SPLITK", value, 1);
+#endif
+}
+
+struct PrefillBenchStats {
+    float min_ms    = 0.0F;
+    float median_ms = 0.0F;
+    float max_ms    = 0.0F;
+    float mean_ms   = 0.0F;
+};
+
+PrefillBenchStats prefill_bench_stats(std::vector<float> samples) {
+    PrefillBenchStats out{};
+    if (samples.empty()) { return out; }
+    std::sort(samples.begin(), samples.end());
+    out.min_ms = samples.front();
+    out.max_ms = samples.back();
+    const int n = static_cast<int>(samples.size());
+    if ((n % 2) == 1) {
+        out.median_ms = samples[static_cast<std::size_t>(n / 2)];
+    } else {
+        out.median_ms = 0.5F * (samples[static_cast<std::size_t>(n / 2 - 1)] +
+                                samples[static_cast<std::size_t>(n / 2)]);
+    }
+    double sum = 0.0;
+    for (float sample : samples) { sum += static_cast<double>(sample); }
+    out.mean_ms = static_cast<float>(sum / static_cast<double>(n));
+    return out;
 }
 
 float bf16_to_float(std::uint16_t value) {
@@ -1849,7 +1912,7 @@ int test_cuda_graph_timing_benchmark(ninfer::DeviceContext& device) {
     }
 }
 
-int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device) {
+int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device, bool mode_ab) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
     try {
         PleIndexMetadata ple_meta{};
@@ -1859,9 +1922,18 @@ int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device) {
 
         auto synthetic_model = make_synthetic_model(device);
 
+        const bool interleaved_ab = prefill_bench_ab_requested(mode_ab);
+        const int bench_iters     = prefill_bench_iters();
+        const int warmup_s        = prefill_bench_warmup_s(interleaved_ab);
         std::cout << "--- Prefill Chunk Performance & Host CPU Benchmark (Synthetic Model) ---\n";
+        std::cout << "NINFER_PREFILL_BENCH_ITERS=" << bench_iters
+                  << " WARMUP_S=" << warmup_s
+                  << " AB=" << (interleaved_ab ? "1" : "0")
+                  << " (one plan/executor; split-K read at each residual A8 launch)\n";
 
-        const std::vector<std::int32_t> chunk_sizes = {128, 2048};
+        const std::vector<std::int32_t> chunk_sizes =
+            interleaved_ab ? std::vector<std::int32_t>{2048, 128} : std::vector<std::int32_t>{128, 2048};
+        bool warmed = false;
         for (std::int32_t T : chunk_sizes) {
             FlashNextRuntimeConfig cfg{
                 .max_concurrency     = 1,
@@ -1883,7 +1955,6 @@ int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device) {
                 positions[t] = {t, t, t};
             }
 
-            // Warmup
             auto lane_w = exec.allocate_lane();
             auto w_rd = exec.execute_prefill_chunk(lane_w, tokens, positions, 0);
             std::vector<LaneCommitDecision> accept = {{.accept = true}};
@@ -1891,23 +1962,82 @@ int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device) {
             exec.release_lane(lane_w);
             device.synchronize();
 
-            // Measure end-to-end chunk execution time
-            constexpr int kIters = 3;
-            auto start = std::chrono::high_resolution_clock::now();
-            for (int i = 0; i < kIters; ++i) {
+            cudaEvent_t start_event = nullptr;
+            cudaEvent_t stop_event  = nullptr;
+            CUDA_CHECK(cudaEventCreate(&start_event));
+            CUDA_CHECK(cudaEventCreate(&stop_event));
+
+            auto time_one_chunk_ms = [&]() -> float {
                 auto lane = exec.allocate_lane();
+                CUDA_CHECK(cudaEventRecord(start_event, device.stream));
                 auto rd = exec.execute_prefill_chunk(lane, tokens, positions, 0);
                 rd.commit(accept);
+                CUDA_CHECK(cudaEventRecord(stop_event, device.stream));
+                CUDA_CHECK(cudaEventSynchronize(stop_event));
                 exec.release_lane(lane);
+                float elapsed_ms = 0.0F;
+                CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, start_event, stop_event));
+                return elapsed_ms;
+            };
+
+            const int run_warmup = (!warmed && warmup_s > 0) ? warmup_s : 0;
+            if (run_warmup > 0) {
+                set_residual_splitk_env(4);
+                const auto warm_t0 = std::chrono::steady_clock::now();
+                int warm_chunks    = 0;
+                while (std::chrono::duration<double>(std::chrono::steady_clock::now() - warm_t0)
+                           .count() < static_cast<double>(run_warmup)) {
+                    (void)time_one_chunk_ms();
+                    ++warm_chunks;
+                }
+                warmed = true;
+                std::cout << "  T=" << T << " warmup " << run_warmup << " s (" << warm_chunks
+                          << " chunks, splitk=4)\n";
             }
-            device.synchronize();
-            auto end = std::chrono::high_resolution_clock::now();
 
-            double total_us = std::chrono::duration<double, std::micro>(end - start).count() / kIters;
-            double tok_per_sec = (T * 1e6) / total_us;
-
-            std::cout << "  Prefill T=" << T << " : " << (total_us / 1000.0) << " ms/chunk ("
-                      << tok_per_sec << " tok/s)\n";
+            if (interleaved_ab) {
+                set_residual_splitk_env(4);
+                (void)time_one_chunk_ms();
+                set_residual_splitk_env(1);
+                (void)time_one_chunk_ms();
+                std::vector<float> samples4(static_cast<std::size_t>(bench_iters));
+                std::vector<float> samples1(static_cast<std::size_t>(bench_iters));
+                for (int i = 0; i < bench_iters; ++i) {
+                    set_residual_splitk_env(4);
+                    samples4[static_cast<std::size_t>(i)] = time_one_chunk_ms();
+                    set_residual_splitk_env(1);
+                    samples1[static_cast<std::size_t>(i)] = time_one_chunk_ms();
+                }
+                const PrefillBenchStats s4 = prefill_bench_stats(samples4);
+                const PrefillBenchStats s1 = prefill_bench_stats(samples1);
+                const float paired         = s4.median_ms - s1.median_ms;
+                std::cout << std::fixed << std::setprecision(3);
+                std::cout << "  Prefill T=" << T << " AB n=" << bench_iters
+                          << " paired_median_delta=" << paired << " ms (split4-split1; + = unsplit faster)\n";
+                std::cout << "    arm splitk=4 min=" << s4.min_ms << " median=" << s4.median_ms
+                          << " max=" << s4.max_ms << " mean=" << s4.mean_ms
+                          << " span=" << (s4.max_ms - s4.min_ms) << " ms\n";
+                std::cout << "    arm splitk=1 min=" << s1.min_ms << " median=" << s1.median_ms
+                          << " max=" << s1.max_ms << " mean=" << s1.mean_ms
+                          << " span=" << (s1.max_ms - s1.min_ms) << " ms\n";
+            } else {
+                (void)time_one_chunk_ms();
+                std::vector<float> samples(static_cast<std::size_t>(bench_iters));
+                for (int i = 0; i < bench_iters; ++i) {
+                    samples[static_cast<std::size_t>(i)] = time_one_chunk_ms();
+                }
+                const PrefillBenchStats s = prefill_bench_stats(samples);
+                const double tok_per_sec =
+                    (static_cast<double>(T) * 1.0e3) / static_cast<double>(s.median_ms);
+                std::cout << std::fixed << std::setprecision(3);
+                std::cout << "  Prefill T=" << T << " : " << s.median_ms << " ms/chunk ("
+                          << tok_per_sec << " tok/s)\n";
+                std::cout << "    cudaEvent n=" << bench_iters << " discard-first min=" << s.min_ms
+                          << " median=" << s.median_ms << " mean=" << s.mean_ms << " max=" << s.max_ms
+                          << " ms\n";
+            }
+            CUDA_CHECK(cudaEventDestroy(start_event));
+            CUDA_CHECK(cudaEventDestroy(stop_event));
         }
         std::cout << "------------------------------------------------------------------------\n";
         return 0;
@@ -3425,6 +3555,8 @@ int main(int argc, char** argv) {
     if (mode == "g8-graph-nodes") { return test_g8_graph_node_diff(device); }
     if (mode == "g8-stage-checksum") { return test_g8_stage_checksum(device); }
     if (mode == "g9-gate") { return test_g9_prefill_determinism(device); }
+    if (mode == "prefill-timing") { return test_prefill_chunk_timing_benchmark(device, false); }
+    if (mode == "prefill-timing-ab") { return test_prefill_chunk_timing_benchmark(device, true); }
     if (mode == "g14-prefill") { return test_g14_prefill_and_decode(device, 128); }
     if (mode == "g14-prefill-32") { return test_g14_prefill_and_decode(device, 32); }
     if (mode == "g14-det") { return test_g14_determinism(device); }
@@ -3440,7 +3572,7 @@ int main(int argc, char** argv) {
     if (test_cuda_graph_frontier_masking_and_churn(device) != 0) return 1;
     if (test_measure_cuda_graph_footprint(device) != 0) return 1;
     if (test_cuda_graph_timing_benchmark(device) != 0) return 1;
-    if (test_prefill_chunk_timing_benchmark(device) != 0) return 1;
+    if (test_prefill_chunk_timing_benchmark(device, false) != 0) return 1;
     if (test_g9_prefill_determinism(device) != 0) return 1;
 
     std::cout << "OK Flash-Next Text Executor\n";

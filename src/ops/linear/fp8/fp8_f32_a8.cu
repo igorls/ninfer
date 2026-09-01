@@ -11,6 +11,8 @@
 #include <cuda_fp8.h>
 
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 
 namespace ninfer::ops::detail {
@@ -277,6 +279,30 @@ split_k_reduction_kernel(
     output[static_cast<std::int64_t>(token) * N_DIM + row] = __float2bfloat16_rn(sum);
 }
 
+int flash_next_residual_split_k(std::int32_t tokens) {
+    const char* env = std::getenv("NINFER_FLASH_NEXT_RESIDUAL_SPLITK");
+    if (env != nullptr && env[0] != '\0') {
+        if (std::strcmp(env, "1") == 0) { return 1; }
+        if (std::strcmp(env, "4") == 0) { return 4; }
+    }
+    // T-wide residual was tile-starved at small T (hence split-K=4). Unsplit when T is large
+    // enough that the unsplit CTA grid covers the device with at least two waves, or T>=512.
+    if (tokens >= 512) { return 1; }
+    constexpr int kBM = 64;
+    constexpr int kBN = 128;
+    constexpr int kN  = 2560;
+    const int row_tiles   = (kN + kBN - 1) / kBN;
+    const int token_tiles = (tokens + kBM - 1) / kBM;
+    const int ctas        = row_tiles * token_tiles;
+    int sms               = 0;
+    if (cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, 0) != cudaSuccess ||
+        sms <= 0) {
+        return kFlashNextResidualSplitK;
+    }
+    if (ctas >= sms * 2) { return 1; }
+    return kFlashNextResidualSplitK;
+}
+
 } // namespace
 
 void launch_fp8_f32_a8(const Tensor& x, const Weight& weight, Tensor& out,
@@ -317,19 +343,27 @@ void launch_fp8_f32_a8(const Tensor& x, const Weight& weight, Tensor& out,
                 act_codes, act_scales, weight_codes, weight_scales, out_data, nullptr, tokens);
         CUDA_CHECK(cudaGetLastError());
     } else if (output_rows == 2560 && input_rows == 6144) {
-        constexpr int SPLIT_K = kFlashNextResidualSplitK;
-        dim3 grid(row_tiles, token_tiles, SPLIT_K);
-        fp8_f32_gemm_mma_kernel<2560, 6144, BM, BN, BK, STAGES, 2, 2, SPLIT_K>
-            <<<grid, 128, SMEM, stream>>>(
-                act_codes, act_scales, weight_codes, weight_scales, out_data, ws_ptrs.split_workspace, tokens);
-        CUDA_CHECK(cudaGetLastError());
-
-        const int total_elements = output_rows * tokens;
-        const int reduce_threads = 256;
-        const int reduce_blocks  = (total_elements + reduce_threads - 1) / reduce_threads;
-        split_k_reduction_kernel<SPLIT_K><<<reduce_blocks, reduce_threads, 0, stream>>>(
-            ws_ptrs.split_workspace, out_data, output_rows, tokens);
-        CUDA_CHECK(cudaGetLastError());
+        const int split_k = flash_next_residual_split_k(tokens);
+        if (split_k == 1) {
+            dim3 grid(row_tiles, token_tiles, 1);
+            fp8_f32_gemm_mma_kernel<2560, 6144, BM, BN, BK, STAGES, 2, 2, 1>
+                <<<grid, 128, SMEM, stream>>>(act_codes, act_scales, weight_codes, weight_scales,
+                                              out_data, nullptr, tokens);
+            CUDA_CHECK(cudaGetLastError());
+        } else {
+            constexpr int kSplit4 = kFlashNextResidualSplitK;
+            dim3 grid(row_tiles, token_tiles, kSplit4);
+            fp8_f32_gemm_mma_kernel<2560, 6144, BM, BN, BK, STAGES, 2, 2, kSplit4>
+                <<<grid, 128, SMEM, stream>>>(act_codes, act_scales, weight_codes, weight_scales,
+                                              out_data, ws_ptrs.split_workspace, tokens);
+            CUDA_CHECK(cudaGetLastError());
+            const int total_elements = output_rows * tokens;
+            const int reduce_threads = 256;
+            const int reduce_blocks  = (total_elements + reduce_threads - 1) / reduce_threads;
+            split_k_reduction_kernel<kSplit4><<<reduce_blocks, reduce_threads, 0, stream>>>(
+                ws_ptrs.split_workspace, out_data, output_rows, tokens);
+            CUDA_CHECK(cudaGetLastError());
+        }
     } else {
         throw std::invalid_argument("launch_fp8_f32_a8: unsupported geometry");
     }
