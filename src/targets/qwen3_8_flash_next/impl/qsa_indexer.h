@@ -47,7 +47,10 @@ void flash_next_qsa_indexer_prefill_chunk(
     cudaStream_t stream);
 // Prefill selection: identity when the chunk (or tile) max complete_blocks <= 512, otherwise
 // one DeviceSegmentedRadixSort::SortPairsDescending per tile. Decode keeps packed-key DeviceTopK.
-// Identity publishes 0..complete-1 (G1 order). Segmented sort publishes the same SET and
-// score-descending ORDER as decode TopK.
+// Prefill scoring is a tiled bf16 MMA GEMM (BM=64 x BN=64, house m16n8k16); decode scoring
+// stays the per-(block,token) warp-reduce kernel. MMA vs warp_reduce_sum is a declared
+// numerics change: ranking SET is preserved where score gaps exceed MMA rounding; two-run
+// output stays bitwise. Identity publishes 0..complete-1 (G1 order). Segmented sort
+// publishes score-descending ORDER of the GEMM scores.
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

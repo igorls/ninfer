@@ -1121,25 +1121,46 @@ bool test_prefill_decode_select_equivalence(ninfer::DeviceContext& device) {
                       << " prefill=" << count_prefill << " at N=" << n << " " << fixture << "\n";
             return false;
         }
+        std::array<std::int32_t, 512> set_decode = ids_decode;
+        std::array<std::int32_t, 512> set_prefill = ids_prefill;
+        std::sort(set_decode.begin(), set_decode.end());
+        std::sort(set_prefill.begin(), set_prefill.end());
+        if (std::memcmp(set_decode.data(), set_prefill.data(), sizeof(set_decode)) != 0) {
+            std::cerr << "FAIL: prefill-vs-decode SET mismatch at N=" << n << " " << fixture << "\n";
+            return false;
+        }
+        int order_mismatches = 0;
+        double id_l2 = 0.0;
+        double id_max_abs = 0.0;
         double energy = 0.0;
         for (std::int32_t i = 0; i < 512; ++i) {
+            const double a = static_cast<double>(ids_decode[static_cast<std::size_t>(i)]);
+            const double b = static_cast<double>(ids_prefill[static_cast<std::size_t>(i)]);
+            const double d = a - b;
+            id_l2 += d * d;
+            id_max_abs = std::max(id_max_abs, std::abs(d));
+            energy += a * a;
             if (ids_decode[static_cast<std::size_t>(i)] != ids_prefill[static_cast<std::size_t>(i)]) {
-                std::cerr << "FAIL: prefill-vs-decode id[" << i
-                          << "] decode=" << ids_decode[static_cast<std::size_t>(i)]
-                          << " prefill=" << ids_prefill[static_cast<std::size_t>(i)] << " at N=" << n
-                          << " " << fixture << "\n";
-                return false;
+                ++order_mismatches;
             }
-            energy += static_cast<double>(ids_decode[static_cast<std::size_t>(i)]) *
-                      static_cast<double>(ids_decode[static_cast<std::size_t>(i)]);
         }
-        if (!(energy > 0.0) || !std::isfinite(energy) || ids_decode[0] == ids_decode[1]) {
+        const double base_sq = energy;
+        const double rel_l2 = (base_sq > 0.0) ? std::sqrt(id_l2 / base_sq) : 0.0;
+        if (!(energy > 0.0) || !std::isfinite(energy) || !std::isfinite(rel_l2) ||
+            ids_decode[0] == ids_decode[1]) {
             std::cerr << "FAIL: prefill-vs-decode comparison vacuous at N=" << n << " " << fixture
                       << " energy=" << energy << "\n";
             return false;
         }
-        std::cout << "  N=" << n << " " << fixture << " prefill==decode id0=" << ids_decode[0]
-                  << " energy=" << energy << "\n";
+        const bool want_order = std::strcmp(fixture, "monotonic") != 0;
+        if (want_order && order_mismatches != 0) {
+            std::cerr << "FAIL: prefill-vs-decode ORDER mismatch at N=" << n << " " << fixture
+                      << " mismatches=" << order_mismatches << "\n";
+            return false;
+        }
+        std::cout << "  N=" << n << " " << fixture << " SET exact order_mismatches="
+                  << order_mismatches << " rel-L2=" << rel_l2 << " max_abs=" << id_max_abs
+                  << " id0=" << ids_decode[0] << " energy=" << energy << "\n";
         return true;
     };
     for (std::int32_t n : ns) {

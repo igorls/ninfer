@@ -1,6 +1,9 @@
 #include "targets/qwen3_8_flash_next/impl/qsa_indexer_kernels.h"
 
 #include "core/device.h"
+#include "ops/common/memory.cuh"
+#include "ops/common/mma.cuh"
+#include "ops/common/rowsplit_mma.cuh"
 #include "ops/common/warp.cuh"
 
 #include <cub/device/device_segmented_radix_sort.cuh>
@@ -531,45 +534,141 @@ __global__ void indexer_update_leftover_chunk_kernel(
     }
 }
 
-__global__ void score_blocks_chunk_kernel(const __nv_bfloat16* __restrict__ query,
-                                          const __nv_bfloat16* __restrict__ block_keys,
-                                          const std::int32_t* __restrict__ block_tables,
-                                          int table_row,
-                                          const std::int32_t* __restrict__ token_indices,
-                                          int logical_pages, int active_blocks,
-                                          float* __restrict__ scores) {
-    __shared__ float head_scores[kQueryHeads];
-    const int block                = static_cast<int>(blockIdx.x);
-    const int row                  = static_cast<int>(blockIdx.y);
-    const int tid                  = static_cast<int>(threadIdx.x);
-    const int head                 = tid >> 5;
-    const int lane                 = tid & 31;
-    const int token_index          = token_indices[row];
-    const int complete_blocks      = (token_index + 1) / 4;
-    const std::int64_t score_index = static_cast<std::int64_t>(row) * active_blocks + block;
-    if (block >= complete_blocks) {
-        if (tid == 0) { scores[score_index] = -__int_as_float(0x7F800000); }
-        return;
+// Prefill scoring GEMM. Reuses sparse_moe_prefill_router_mma_kernel mechanics
+// (gemm_swz64, ldmatrix, mma_bf16 m16n8k16, cp_async_zfill). A CTA owns a
+// (BM x BN) region of scores, stages BM paged block-keys once, and reuses them
+// across BN tokens and 4 query heads. Decode keeps the per-(block,token) kernel.
+constexpr int kScoreBM      = 64;
+constexpr int kScoreBN      = 64;
+constexpr int kScoreWarps   = 4;
+constexpr int kScoreThreads = 32 * kScoreWarps;
+constexpr int kScoreNTiles  = kScoreBN / 8;
+
+__global__ __launch_bounds__(kScoreThreads)
+void score_blocks_chunk_kernel(const __nv_bfloat16* __restrict__ query,
+                               const __nv_bfloat16* __restrict__ block_keys,
+                               const std::int32_t* __restrict__ block_tables,
+                               int table_row,
+                               const std::int32_t* __restrict__ token_indices,
+                               int logical_pages, int active_blocks, int tokens,
+                               float* __restrict__ scores) {
+    using ops::cp_async_zfill;
+    using ops::cp_commit;
+    using ops::cp_wait;
+    using ops::ldmatrix_x2;
+    using ops::ldmatrix_x4;
+    using ops::mma_bf16;
+    using ops::smem_addr;
+    using ops::detail::gemm_swz64;
+    using Cache = ops::Cache;
+
+    __shared__ __align__(16) __nv_bfloat16 Ks[kScoreBM * kHeadDim];
+    __shared__ __align__(16) __nv_bfloat16 Qs[kScoreBN * kHeadDim];
+    __shared__ std::int32_t complete_s[kScoreBN];
+
+    const int tid     = static_cast<int>(threadIdx.x);
+    const int warp    = tid >> 5;
+    const int lane    = tid & 31;
+    const int block0  = static_cast<int>(blockIdx.x) * kScoreBM;
+    const int token0  = static_cast<int>(blockIdx.y) * kScoreBN;
+
+    if (tid < kScoreBN) {
+        const int t = token0 + tid;
+        complete_s[tid] =
+            (t < tokens) ? (token_indices[t] + 1) / 4 : 0;
     }
-    const int logical_page  = block / kCompressedPage;
-    const int page_offset   = block % kCompressedPage;
-    const int physical_page = block_tables[table_row * logical_pages + logical_page];
-    const auto* key         = block_keys +
-                      static_cast<std::int64_t>(physical_page) * kCompressedPage * kHeadDim +
-                      page_offset * kHeadDim;
-    const auto* q =
-        query + static_cast<std::int64_t>(row) * kQueryHeads * kHeadDim + head * kHeadDim;
-    float dot = 0.0F;
-    for (int dim = lane; dim < kHeadDim; dim += 32) {
-        dot = fmaf(__bfloat162float(q[dim]), __bfloat162float(key[dim]), dot);
+
+    for (int item = tid; item < kScoreBM * (kHeadDim / 8); item += kScoreThreads) {
+        const int row = item / (kHeadDim / 8);
+        const int k8  = item - row * (kHeadDim / 8);
+        const int blk = block0 + row;
+        auto* dst     = &Ks[row * kHeadDim + gemm_swz64(row, k8 * 8)];
+        const bool valid = blk >= 0 && blk < active_blocks;
+        const __nv_bfloat16* src = block_keys;
+        if (valid) {
+            const int logical_page  = blk / kCompressedPage;
+            const int page_offset   = blk % kCompressedPage;
+            const int physical_page = block_tables[table_row * logical_pages + logical_page];
+            src = block_keys +
+                  static_cast<std::int64_t>(physical_page) * kCompressedPage * kHeadDim +
+                  page_offset * kHeadDim + k8 * 8;
+        }
+        cp_async_zfill<16, Cache::cg>(dst, src, valid ? 16 : 0);
     }
-    dot = ops::warp_reduce_sum(dot);
-    if (lane == 0) { head_scores[head] = dot; }
+    cp_commit();
+    cp_wait<0>();
     __syncthreads();
-    if (tid == 0) {
-        float score = 0.0F;
-        for (float value : head_scores) { score += fmaxf(value, 0.0F); }
-        scores[score_index] = score * kIndexerScaling;
+
+    float score[kScoreNTiles][4] = {};
+    const int a_mat    = lane >> 3;
+    const int a_rin    = lane & 7;
+    const int a_rowoff = a_rin + ((a_mat & 1) << 3);
+    const int a_coloff = (a_mat >> 1) << 3;
+    const int b_rin    = lane & 7;
+    const int b_koff   = ((lane >> 3) & 1) << 3;
+    const int arow     = warp * 16 + a_rowoff;
+
+    for (int head = 0; head < kQueryHeads; ++head) {
+        for (int item = tid; item < kScoreBN * (kHeadDim / 8); item += kScoreThreads) {
+            const int col = item / (kHeadDim / 8);
+            const int k8  = item - col * (kHeadDim / 8);
+            const int t   = token0 + col;
+            auto* dst     = &Qs[col * kHeadDim + gemm_swz64(col, k8 * 8)];
+            const bool valid = t >= 0 && t < tokens;
+            const __nv_bfloat16* src =
+                query + static_cast<std::int64_t>(valid ? t : 0) * kQueryHeads * kHeadDim +
+                head * kHeadDim + k8 * 8;
+            cp_async_zfill<16, Cache::cg>(dst, src, valid ? 16 : 0);
+        }
+        cp_commit();
+        cp_wait<0>();
+        __syncthreads();
+
+        float acc[kScoreNTiles][4] = {};
+#pragma unroll
+        for (int ki = 0; ki < kHeadDim / 16; ++ki) {
+            unsigned af[4];
+            ldmatrix_x4(af[0], af[1], af[2], af[3],
+                        smem_addr(&Ks[arow * kHeadDim + gemm_swz64(arow, ki * 16 + a_coloff)]));
+#pragma unroll
+            for (int nt = 0; nt < kScoreNTiles; ++nt) {
+                unsigned bf[2];
+                const int brow = nt * 8 + b_rin;
+                ldmatrix_x2(bf[0], bf[1],
+                            smem_addr(&Qs[brow * kHeadDim + gemm_swz64(brow, ki * 16 + b_koff)]));
+                mma_bf16(acc[nt][0], acc[nt][1], acc[nt][2], acc[nt][3], af[0], af[1], af[2],
+                         af[3], bf[0], bf[1]);
+            }
+        }
+#pragma unroll
+        for (int nt = 0; nt < kScoreNTiles; ++nt) {
+            score[nt][0] += fmaxf(acc[nt][0], 0.0F);
+            score[nt][1] += fmaxf(acc[nt][1], 0.0F);
+            score[nt][2] += fmaxf(acc[nt][2], 0.0F);
+            score[nt][3] += fmaxf(acc[nt][3], 0.0F);
+        }
+        __syncthreads();
+    }
+
+    const int gid = lane >> 2;
+    const int lid = lane & 3;
+    const int r0  = block0 + warp * 16 + gid;
+    const int r1  = r0 + 8;
+    const float ninf = -__int_as_float(0x7F800000);
+#pragma unroll
+    for (int nt = 0; nt < kScoreNTiles; ++nt) {
+        const int c0 = token0 + nt * 8 + 2 * lid;
+        const int c1 = c0 + 1;
+        auto store = [&](int blk, int tok, float value) {
+            if (tok < 0 || tok >= tokens || blk < 0 || blk >= active_blocks) { return; }
+            const int complete = complete_s[tok - token0];
+            scores[static_cast<std::int64_t>(tok) * active_blocks + blk] =
+                (blk < complete) ? value * kIndexerScaling : ninf;
+        };
+        store(r0, c0, score[nt][0]);
+        store(r0, c1, score[nt][1]);
+        store(r1, c0, score[nt][2]);
+        store(r1, c1, score[nt][3]);
     }
 }
 
@@ -653,12 +752,14 @@ void flash_next_qsa_indexer_prefill_launch(
             static_cast<std::int32_t*>(scratch.offsets.data), active_blocks, current_tile);
         CUDA_CHECK(cudaGetLastError());
 
-        score_blocks_chunk_kernel<<<dim3(active_blocks, current_tile), kQueryHeads * 32, 0, stream>>>(
+        const dim3 score_grid((active_blocks + kScoreBM - 1) / kScoreBM,
+                              (current_tile + kScoreBN - 1) / kScoreBN);
+        score_blocks_chunk_kernel<<<score_grid, kScoreThreads, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(scratch.query.data) +
                 static_cast<std::int64_t>(t_start) * kQueryHeads * kHeadDim,
             static_cast<const __nv_bfloat16*>(cache.block_keys.data),
             static_cast<const std::int32_t*>(cache.block_tables.data), table_row,
-            tile_token_indices, cache.block_tables.ne[0], active_blocks,
+            tile_token_indices, cache.block_tables.ne[0], active_blocks, current_tile,
             static_cast<float*>(scratch.scores.data));
         CUDA_CHECK(cudaGetLastError());
 
