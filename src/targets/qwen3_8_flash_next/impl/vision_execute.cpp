@@ -46,6 +46,7 @@ Tensor FlashNextVisionSession::encode(const qwen3_6::VisionItemControl& control,
     elapsed_seconds_ += timer.elapsed_ms() / 1000.0;
 
     vision_tokens_ += control.merged_count;
+    ++encode_count_;
     handoff_active_bytes_ = output.bytes();
     handoff_peak_bytes_   = std::max(handoff_peak_bytes_, handoff_active_bytes_);
     output_handoff_       = output;

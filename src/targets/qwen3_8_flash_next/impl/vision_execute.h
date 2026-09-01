@@ -39,6 +39,7 @@ public:
 
     [[nodiscard]] double elapsed_seconds() const noexcept { return elapsed_seconds_; }
     [[nodiscard]] std::uint64_t vision_tokens() const noexcept { return vision_tokens_; }
+    [[nodiscard]] std::uint64_t encode_count() const noexcept { return encode_count_; }
 
     [[nodiscard]] VisionWorkspaceMemorySummary memory_summary(std::uint32_t prompt_tokens) const noexcept;
     [[nodiscard]] const qwen3_vision::WorkspacePlan& workspace_plan() const noexcept { return workspace_plan_; }
@@ -56,6 +57,7 @@ private:
 
     double elapsed_seconds_           = 0.0;
     std::uint64_t vision_tokens_      = 0;
+    std::uint64_t encode_count_       = 0;
     std::size_t handoff_active_bytes_ = 0;
     std::size_t handoff_peak_bytes_   = 0;
 };

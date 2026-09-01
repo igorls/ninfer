@@ -16,6 +16,7 @@
 
 #include <cuda_runtime.h>
 
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -23,6 +24,7 @@
 #include <iostream>
 #include <memory>
 #include <random>
+#include <span>
 #include <vector>
 
 namespace {
@@ -431,6 +433,32 @@ struct SyntheticVisionModel {
         view.merger_fc2_bias    = Tensor(merger_fc2_b.p, DType::BF16, {2560});
         device.synchronize();
     }
+
+    // Zero weights make every image encode to zeros (vacuous). A non-uniform signal path
+    // makes patch content observable in the 2560-d handoff so sequential images can differ.
+    void install_signal_path() {
+        auto fill_indexed = [](DeviceBuffer& buf, float scale) {
+            const std::size_t n = buf.bytes / sizeof(std::uint16_t);
+            std::vector<std::uint16_t> host(n);
+            for (std::size_t i = 0; i < n; ++i) {
+                host[i] = float_to_bf16(scale * static_cast<float>((i % 17U) + 1U));
+            }
+            buf.copy_from_host(host.data(), buf.bytes);
+        };
+        auto fill_ones = [](DeviceBuffer& buf) {
+            const std::size_t n = buf.bytes / sizeof(std::uint16_t);
+            std::vector<std::uint16_t> host(n, float_to_bf16(1.0f));
+            buf.copy_from_host(host.data(), buf.bytes);
+        };
+        fill_indexed(patch_w_buf, 0.02f);
+        fill_ones(merger_norm_w);
+        fill_indexed(merger_fc1_w, 0.02f);
+        fill_indexed(merger_fc2_w, 0.02f);
+        for (auto& layer : layers) {
+            fill_ones(layer.norm1_w);
+            fill_ones(layer.norm2_w);
+        }
+    }
 };
 
 int test_vision_adapter() {
@@ -684,6 +712,311 @@ int test_program_vision_request_and_chunk_clipping(DeviceContext& device) {
     return 0;
 }
 
+struct G16ImageSpec {
+    std::size_t begin = 0;
+    std::size_t count = 0;
+    std::uint32_t seed = 0;
+};
+
+ninfer::targets::qwen3_6::PreparedPrompt make_g16_prompt(std::size_t total_tokens,
+                                                         std::span<const G16ImageSpec> images) {
+    ninfer::targets::qwen3_6::PreparedPromptData prompt_data;
+    prompt_data.token_ids.resize(total_tokens);
+    prompt_data.token_types.resize(total_tokens, 0);
+    prompt_data.positions.resize(total_tokens * 3);
+    for (std::size_t i = 0; i < total_tokens; ++i) {
+        prompt_data.token_ids[i]                    = static_cast<TokenId>(100 + (i % 1000));
+        prompt_data.positions[i]                    = static_cast<std::int32_t>(i);
+        prompt_data.positions[total_tokens + i]     = static_cast<std::int32_t>(i);
+        prompt_data.positions[2 * total_tokens + i] = static_cast<std::int32_t>(i);
+    }
+
+    std::uint64_t raw_patches   = 0;
+    std::uint64_t vision_tokens = 0;
+    for (const auto& img : images) {
+        for (std::size_t i = 0; i < img.count; ++i) {
+            prompt_data.token_types[img.begin + i] = 1;
+        }
+        const std::size_t patches = img.count * VisionTowerConfig::merge_unit;
+        auto media                = std::make_shared<ninfer::targets::qwen3_6::PreparedMediaPayload>();
+        media->patch_elements     = patches * VisionTowerConfig::patch_dim;
+        media->patches            = std::make_unique<std::uint16_t[]>(media->patch_elements);
+        for (std::size_t i = 0; i < media->patch_elements; ++i) {
+            const float v =
+                0.05f * static_cast<float>((i % 19U) + 1U) + 0.25f * static_cast<float>(img.seed);
+            media->patches[i] = float_to_bf16(v);
+        }
+        ninfer::targets::qwen3_6::VisionItem vitem{
+            .modality    = ninfer::targets::qwen3_6::PromptModality::Image,
+            .grid        = {.temporal = 1,
+                            .height   = static_cast<std::int32_t>(VisionTowerConfig::merge * 2),
+                            .width    = static_cast<std::int32_t>(VisionTowerConfig::merge * 2)},
+            .patch_begin = raw_patches,
+            .patch_count = patches,
+            .token_spans = {{.begin = img.begin, .count = img.count}},
+        };
+        prompt_data.media_payloads.push_back(std::move(media));
+        prompt_data.vision_items.push_back(vitem);
+        raw_patches += patches;
+        vision_tokens += img.count;
+    }
+    prompt_data.prepare.raw_patches   = raw_patches;
+    prompt_data.prepare.vision_tokens = vision_tokens;
+    prompt_data.identity.reusable     = false;
+    return ninfer::targets::qwen3_6::PreparedPromptAccess::construct(std::move(prompt_data));
+}
+
+bool g16_admit(Program& program, ninfer::targets::qwen3_6::PreparedPrompt& prompt,
+               SequenceHandle& seq) {
+    ninfer::runtime::ResolvedExecutionOptions exec_options{};
+    exec_options.requested_output_tokens = 8;
+    exec_options.allow_prefix_reuse      = false;
+    exec_options.sampling.temperature    = 0.0F;
+    exec_options.sampling.top_p          = 1.0F;
+    auto base_plan                       = program.plan_request(prompt, exec_options);
+    ninfer::runtime::ContextMachineCostModel cost_model{};
+    auto candidate = program.inspect_admission(
+        prompt, base_plan, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false,
+        cost_model);
+    if (!candidate.has_value()) {
+        std::cerr << "G16 admit: candidate missing\n";
+        return false;
+    }
+    auto resource_plan = program.seal_identity(*candidate, prompt);
+    if (!resource_plan.has_value()) {
+        std::cerr << "G16 admit: resource_plan missing\n";
+        return false;
+    }
+    std::atomic<bool> cancel{false};
+    ninfer::runtime::CancellationFlagView cancel_view{&cancel};
+    auto res_status = program.start_resource_transaction(
+        std::move(*resource_plan), std::move(prompt), cancel_view);
+    if (res_status != ninfer::runtime::ContextTransactionReserveStatus::Reserved) {
+        std::cerr << "G16 admit: reserve failed\n";
+        return false;
+    }
+    auto progress = program.progress_context_transaction(cancel_view);
+    auto* mat     = std::get_if<MaterializationResult>(&progress);
+    if (mat == nullptr || !mat->published.has_value()) {
+        std::cerr << "G16 admit: progress failed\n";
+        return false;
+    }
+    seq = mat->published->sequence;
+    program.finalize_context_transaction();
+    return true;
+}
+
+bool g16_copy_handoff(Program& program, std::vector<std::uint16_t>& host) {
+    if (program.impl_ == nullptr || !program.impl_->vision_session_.has_value()) {
+        std::cerr << "G16: vision session missing\n";
+        return false;
+    }
+    const Tensor& t = program.impl_->vision_session_->output_tensor();
+    if (t.data == nullptr || t.ne[0] != 2560 || t.ne[1] <= 0) {
+        std::cerr << "G16: handoff tensor empty shape=[" << t.ne[0] << "," << t.ne[1] << "]\n";
+        return false;
+    }
+    const std::size_t n = static_cast<std::size_t>(t.ne[0]) * static_cast<std::size_t>(t.ne[1]);
+    host.resize(n);
+    CUDA_CHECK(cudaMemcpy(host.data(), t.data, n * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+    return true;
+}
+
+std::uint64_t g16_checksum(std::span<const std::uint16_t> words) {
+    std::uint64_t h = 14695981039346656037ULL;
+    for (auto w : words) {
+        h ^= static_cast<std::uint64_t>(w);
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+bool g16_nonvacuous(std::span<const std::uint16_t> words, const char* label) {
+    if (words.empty()) {
+        std::cerr << "G16 " << label << ": empty embedding\n";
+        return false;
+    }
+    std::size_t nonzero = 0;
+    for (auto w : words) {
+        const std::uint16_t exp = (w >> 7U) & 0xFFU;
+        if (exp == 0xFFU) {
+            std::cerr << "G16 " << label << ": non-finite bf16\n";
+            return false;
+        }
+        if ((w & 0x7FFFU) != 0) { ++nonzero; }
+    }
+    if (nonzero == 0) {
+        std::cerr << "G16 " << label << ": all-zero embedding (vacuous)\n";
+        return false;
+    }
+    return true;
+}
+
+std::uint64_t g16_encode_count(Program& program) {
+    if (program.impl_ == nullptr || !program.impl_->vision_session_.has_value()) { return 0; }
+    return program.impl_->vision_session_->encode_count();
+}
+
+bool g16_prefill_until_encode(Program& program, SequenceHandle seq, std::uint64_t target_encodes) {
+    if (g16_encode_count(program) >= target_encodes) { return true; }
+    for (int step = 0; step < 16; ++step) {
+        auto p = program.advance_prefill(seq);
+        if (g16_encode_count(program) >= target_encodes) { return true; }
+        if (p.complete) {
+            std::cerr << "G16: prefill completed before encode_count=" << target_encodes
+                      << " processed=" << p.processed_prompt_tokens << "\n";
+            return false;
+        }
+    }
+    std::cerr << "G16: did not reach encode_count=" << target_encodes << "\n";
+    return false;
+}
+
+int test_g16_stale_vision_embeddings(DeviceContext& device) {
+    auto synth_text = make_synthetic_model(device);
+    SyntheticVisionModel synth_vision(device);
+    synth_vision.install_signal_path();
+    device.synchronize();
+
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency     = 1,
+        .max_context         = 512,
+        .state_slot_capacity = 2,
+        .prefill_chunk       = 128,
+        .use_cuda_graph      = false,
+        .vision_enabled      = true,
+        .max_vision_tokens   = 512,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+    PleIndexMetadata ple_meta{};
+    ple_meta.multipliers.fill(0);
+    ple_meta.head_offsets.fill(0);
+    ple_meta.head_vocab_sizes.fill(1);
+
+    auto program_impl = std::make_unique<ProgramImpl>(
+        nullptr, plan, device, synth_text.view, synth_vision.view, ple_meta);
+    Program program(std::move(program_impl));
+
+    auto run_one_image = [&](std::uint32_t seed, std::vector<std::uint16_t>& handoff,
+                             std::uint64_t expected_encodes) -> int {
+        const G16ImageSpec spec{.begin = 10, .count = 4, .seed = seed};
+        auto prompt = make_g16_prompt(24, std::span(&spec, 1));
+        SequenceHandle seq{};
+        if (!g16_admit(program, prompt, seq)) { return 1; }
+        if (!g16_prefill_until_encode(program, seq, expected_encodes)) { return 1; }
+        const std::uint64_t encodes = g16_encode_count(program);
+        if (encodes != expected_encodes) {
+            std::cerr << "G16 seed=" << seed << " encode_count=" << encodes << " expected "
+                      << expected_encodes << "\n";
+            return 1;
+        }
+        if (!g16_copy_handoff(program, handoff)) { return 1; }
+        (void)program.abort(seq);
+        return 0;
+    };
+
+    std::vector<std::uint16_t> emb_a;
+    std::vector<std::uint16_t> emb_b;
+    std::vector<std::uint16_t> emb_c;
+    if (run_one_image(1, emb_a, 1) != 0) { return 1; }
+    if (run_one_image(2, emb_b, 2) != 0) { return 1; }
+    if (!g16_nonvacuous(emb_a, "imageA") || !g16_nonvacuous(emb_b, "imageB")) { return 1; }
+    if (emb_a == emb_b) {
+        std::cerr << "G16: second request reused first image embeddings (byte-identical handoff)\n";
+        return 1;
+    }
+    const std::uint64_t sum_a = g16_checksum(emb_a);
+    const std::uint64_t sum_b = g16_checksum(emb_b);
+    if (sum_a == 0 || sum_b == 0 || sum_a == sum_b) {
+        std::cerr << "G16: checksum vacuous or equal a=" << sum_a << " b=" << sum_b << "\n";
+        return 1;
+    }
+    std::cout << "G16 sequential A then B encode_count=2 checksums " << sum_a << " vs " << sum_b
+              << "\n";
+
+    {
+        ninfer::targets::qwen3_6::PreparedPromptData text;
+        text.token_ids.resize(16);
+        text.token_types.resize(16, 0);
+        text.positions.resize(16 * 3);
+        for (std::size_t i = 0; i < 16; ++i) {
+            text.token_ids[i]          = static_cast<TokenId>(300 + i);
+            text.positions[i]          = static_cast<std::int32_t>(i);
+            text.positions[16 + i]     = static_cast<std::int32_t>(i);
+            text.positions[32 + i]     = static_cast<std::int32_t>(i);
+        }
+        text.identity.reusable = false;
+        auto text_prompt       = ninfer::targets::qwen3_6::PreparedPromptAccess::construct(std::move(text));
+        SequenceHandle seq{};
+        if (!g16_admit(program, text_prompt, seq)) { return 1; }
+        auto p = program.advance_prefill(seq);
+        if (!p.complete || p.processed_prompt_tokens != 16) {
+            std::cerr << "G16 text-only prefill failed processed=" << p.processed_prompt_tokens
+                      << " complete=" << p.complete << "\n";
+            return 1;
+        }
+        if (g16_encode_count(program) != 2) {
+            std::cerr << "G16 text-only mutated encode_count=" << g16_encode_count(program) << "\n";
+            return 1;
+        }
+        (void)program.abort(seq);
+    }
+
+    if (run_one_image(3, emb_c, 3) != 0) { return 1; }
+    if (!g16_nonvacuous(emb_c, "imageC")) { return 1; }
+    if (emb_c == emb_a || emb_c == emb_b) {
+        std::cerr << "G16: third image after text-only matched an earlier embedding\n";
+        return 1;
+    }
+    const std::uint64_t sum_c = g16_checksum(emb_c);
+    if (sum_c == 0 || sum_c == sum_a || sum_c == sum_b) {
+        std::cerr << "G16: third checksum vacuous or collided c=" << sum_c << "\n";
+        return 1;
+    }
+    std::cout << "G16 interleaved text-only then image C encode_count=3 checksum " << sum_c << "\n";
+
+    {
+        const G16ImageSpec two[] = {
+            {.begin = 4, .count = 4, .seed = 11},
+            {.begin = 12, .count = 4, .seed = 22},
+        };
+        auto prompt = make_g16_prompt(24, two);
+        SequenceHandle seq{};
+        if (!g16_admit(program, prompt, seq)) { return 1; }
+        const std::uint64_t before = g16_encode_count(program);
+        std::vector<std::uint16_t> first_item;
+        std::vector<std::uint16_t> second_item;
+        if (!g16_prefill_until_encode(program, seq, before + 1)) { return 1; }
+        if (g16_encode_count(program) != before + 1) {
+            std::cerr << "G16 multi-image: first item did not encode\n";
+            return 1;
+        }
+        if (!g16_copy_handoff(program, first_item)) { return 1; }
+        if (!g16_prefill_until_encode(program, seq, before + 2)) { return 1; }
+        if (g16_encode_count(program) != before + 2) {
+            std::cerr << "G16 multi-image: second item in one request did not encode (stale)\n";
+            return 1;
+        }
+        if (!g16_copy_handoff(program, second_item)) { return 1; }
+        if (!g16_nonvacuous(first_item, "multi-first") ||
+            !g16_nonvacuous(second_item, "multi-second")) {
+            return 1;
+        }
+        if (first_item == second_item) {
+            std::cerr << "G16: second image WITHIN one request reused first item embeddings\n";
+            return 1;
+        }
+        (void)program.abort(seq);
+        std::cout << "G16 multi-image-in-one-request encode_count +"
+                  << (g16_encode_count(program) - before) << " checksums "
+                  << g16_checksum(first_item) << " vs " << g16_checksum(second_item) << "\n";
+    }
+
+    std::cout << "PASS: test_g16_stale_vision_embeddings\n";
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -702,6 +1035,7 @@ int main() {
         ninfer::DeviceContext device(0);
         if (test_vision_session_lifecycle(device) != 0) return 1;
         if (test_program_vision_request_and_chunk_clipping(device) != 0) return 1;
+        if (test_g16_stale_vision_embeddings(device) != 0) return 1;
     } catch (const std::exception& ex) {
         std::cerr << "Fatal exception: " << ex.what() << std::endl;
         return 1;

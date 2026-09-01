@@ -1309,6 +1309,9 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
     st.prompt_tokens        = std::move(prompt_data.token_ids);
     st.media_payloads       = std::move(prompt_data.media_payloads);
     st.vision_items         = std::move(prompt_data.vision_items);
+    // Per-request cache. A leftover 0 skips encode on the next image and reuses the prior handoff.
+    st.encoded_item_index.reset();
+    st.vision_control.reset();
     st.turn_closure_continuation_index = std::nullopt;
     st.reused_from_continuation_index.reset();
     st.reused_from_continuation_generation.reset();
