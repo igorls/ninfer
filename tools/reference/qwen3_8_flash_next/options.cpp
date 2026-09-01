@@ -144,6 +144,10 @@ ReferenceToolOptions parse_reference_tool_options(std::span<const std::string_vi
             opts.mode = "materialize-full";
         } else if (arg == "--materialize-vision") {
             opts.mode = "materialize-vision";
+        } else if (arg == "--materialize-mtp") {
+            opts.mode = "materialize-mtp";
+        } else if (arg == "--mtp-step") {
+            opts.mode = "mtp-step";
         } else if (arg == "--chat-diagnostic") {
             opts.mode = "chat-diagnostic";
         } else if (arg == "--prompt") {

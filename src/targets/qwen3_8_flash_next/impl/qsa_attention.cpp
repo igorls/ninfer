@@ -24,6 +24,15 @@ bool exact_tensor(const Tensor& tensor, DType dtype, std::int32_t n0, std::int32
            aligned_to(tensor.data, 16);
 }
 
+bool exact_bf16_weight(const Weight& weight, std::int32_t rows, std::int32_t columns) {
+    return weight.qtype == QType::BF16_CTRL && weight.layout == QuantLayout::Contiguous &&
+           weight.n == rows && weight.k == columns && weight.ndim == 2 && weight.shape[0] == rows &&
+           weight.shape[1] == columns && weight.padded_shape[0] == rows &&
+           weight.padded_shape[1] == columns && weight.qdata == weight.payload &&
+           weight.payload_bytes >= static_cast<std::uint64_t>(rows) * columns * 2 &&
+           aligned_to(weight.qdata, 16);
+}
+
 bool exact_fp8_f32_weight(const Weight& weight, std::int32_t rows, std::int32_t columns) {
     const std::uint64_t codes        = static_cast<std::uint64_t>(rows) * columns;
     const std::uint64_t scale_offset = (codes + 255U) & ~std::uint64_t{255U};
@@ -43,6 +52,13 @@ bool exact_fp8_f32_weight(const Weight& weight, std::int32_t rows, std::int32_t 
            weight.high_plane_bytes == 0 &&
            weight.payload_bytes >= scale_offset + static_cast<std::uint64_t>(rows) * 4 &&
            aligned_to(weight.qdata, 16) && aligned_to(weight.scales, 16);
+}
+
+bool exact_projection_weight(const Weight& weight, std::int32_t rows, std::int32_t columns) {
+    if (weight.qtype == QType::BF16_CTRL) {
+        return exact_bf16_weight(weight, rows, columns);
+    }
+    return exact_fp8_f32_weight(weight, rows, columns);
 }
 
 } // namespace
@@ -75,8 +91,8 @@ void flash_next_qsa_attention_decode(const Tensor& input, const AttentionWeights
         !exact_tensor(output, DType::BF16, 2'560, batch) ||
         !exact_tensor(weights.query_norm, DType::BF16, 256) ||
         !exact_tensor(weights.key_norm, DType::BF16, 256) ||
-        !exact_fp8_f32_weight(weights.query_gate_key_value, 13'312, 2'560) ||
-        !exact_fp8_f32_weight(weights.output, 2'560, 6'144) ||
+        !exact_projection_weight(weights.query_gate_key_value, 13'312, 2'560) ||
+        !exact_projection_weight(weights.output, 2'560, 6'144) ||
         !exact_tensor(token_indices, DType::I32, batch) ||
         !exact_tensor(mrope_positions, DType::I32, batch, 3) ||
         !exact_tensor(table_rows, DType::I32, batch) ||
@@ -118,8 +134,8 @@ void flash_next_qsa_attention_prefill_chunk(
         !exact_tensor(output, DType::BF16, 2'560, tokens) ||
         !exact_tensor(weights.query_norm, DType::BF16, 256) ||
         !exact_tensor(weights.key_norm, DType::BF16, 256) ||
-        !exact_fp8_f32_weight(weights.query_gate_key_value, 13'312, 2'560) ||
-        !exact_fp8_f32_weight(weights.output, 2'560, 6'144) ||
+        !exact_projection_weight(weights.query_gate_key_value, 13'312, 2'560) ||
+        !exact_projection_weight(weights.output, 2'560, 6'144) ||
         !exact_tensor(token_indices, DType::I32, tokens) ||
         table_row < 0 || table_row >= cache.block_tables.ne[1] ||
         !exact_tensor(selected_blocks, DType::I32, 512, tokens) ||

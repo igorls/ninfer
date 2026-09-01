@@ -12,6 +12,7 @@
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
 #include "targets/qwen3_8_flash_next/impl/text_executor.h"
 #include "targets/qwen3_8_flash_next/impl/vision_adapter.h"
+#include "targets/qwen3_8_flash_next/impl/mtp_forward.h"
 #include "targets/qwen3_8_flash_next/impl/program_impl.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/targets/qwen3_6/frontend.h"
@@ -23,6 +24,7 @@
 #include <ninfer/targets/qwen3_8_flash_next/runtime.h>
 #include "runtime/engine/context_cost.h"
 #include "options.h"
+#include "targets/qwen3_8_flash_next/impl/state_dumper.h"
 
 #include <cuda_runtime.h>
 
@@ -57,215 +59,6 @@ using namespace ninfer;
 using namespace ninfer::targets::qwen3_8_flash_next;
 using namespace ninfer::targets::qwen3_8_flash_next::detail;
 using LoadedModel = StandaloneLoadedModel;
-
-const char* dtype_to_string(DType dt) {
-    switch (dt) {
-        case DType::BF16: return "BF16";
-        case DType::FP32: return "FP32";
-        case DType::I32:  return "I32";
-        case DType::I64:  return "I64";
-        case DType::FP16: return "FP16";
-        case DType::U8:   return "U8";
-        default:          return "UNKNOWN";
-    }
-}
-
-struct TensorDumpRecord {
-    std::string name;
-    std::string dtype;
-    std::vector<std::int32_t> shape;
-    std::string file;
-    std::size_t bytes = 0;
-};
-
-struct PositionDumpRecord {
-    std::int32_t position = 0;
-    std::int32_t token_id = 0;
-    std::array<std::int32_t, 3> mrope_position{0, 0, 0};
-    std::vector<TensorDumpRecord> tensors;
-};
-
-class StateDumper {
-public:
-    explicit StateDumper(std::string dump_dir) : dump_dir_(std::move(dump_dir)) {
-        std::filesystem::create_directories(dump_dir_);
-    }
-
-    FlashNextDecodeStateSink make_sink(std::int32_t position, std::int32_t token_id,
-                                       std::array<std::int32_t, 3> mrope_pos) {
-        char pos_buf[32];
-        std::snprintf(pos_buf, sizeof(pos_buf), "pos%04d", position);
-        const std::string pos_str = pos_buf;
-        const std::filesystem::path pos_dir = std::filesystem::path(dump_dir_) / pos_str;
-        std::filesystem::create_directories(pos_dir);
-
-        const std::size_t pos_idx = positions_.size();
-        auto& pos_rec = positions_.emplace_back();
-        pos_rec.position = position;
-        pos_rec.token_id = token_id;
-        pos_rec.mrope_position = mrope_pos;
-
-        return FlashNextDecodeStateSink{
-            .on_state = [this, pos_idx, pos_str, pos_dir](std::string_view name,
-                                                          const Tensor& tensor) {
-                const std::string filename = std::string(name) + ".bin";
-                const std::filesystem::path file_path = pos_dir / filename;
-
-                std::vector<std::uint8_t> host_bytes(tensor.bytes());
-                CUDA_CHECK(cudaMemcpy(host_bytes.data(), tensor.data, tensor.bytes(),
-                                      cudaMemcpyDeviceToHost));
-
-                std::ofstream ofs(file_path, std::ios::binary);
-                if (!ofs) {
-                    throw std::runtime_error("Failed to open file for writing: " +
-                                             file_path.string());
-                }
-                ofs.write(reinterpret_cast<const char*>(host_bytes.data()), host_bytes.size());
-
-                TensorDumpRecord rec;
-                rec.name  = std::string(name);
-                rec.dtype = dtype_to_string(tensor.dtype);
-                if (tensor.ne[3] > 1) {
-                    rec.shape = {tensor.ne[0], tensor.ne[1], tensor.ne[2], tensor.ne[3]};
-                } else if (tensor.ne[2] > 1) {
-                    rec.shape = {tensor.ne[0], tensor.ne[1], tensor.ne[2]};
-                } else if (tensor.ne[1] > 1 || tensor.ne[0] > 1) {
-                    rec.shape = {tensor.ne[0], tensor.ne[1]};
-                } else {
-                    rec.shape = {tensor.ne[0]};
-                }
-                rec.file  = pos_str + "/" + filename;
-                rec.bytes = tensor.bytes();
-                positions_[pos_idx].tensors.push_back(std::move(rec));
-            },
-        };
-    }
-
-    FlashNextDecodeStateSink
-    make_chunk_sink(std::int32_t first_position, std::span<const std::int32_t> token_ids,
-                    std::span<const std::array<std::int32_t, 3>> mrope_positions) {
-        const std::size_t count     = token_ids.size();
-        const std::size_t first_idx = positions_.size();
-        for (std::size_t i = 0; i < count; ++i) {
-            char pos_buf[32];
-            std::snprintf(pos_buf, sizeof(pos_buf), "pos%04d",
-                          first_position + static_cast<std::int32_t>(i));
-            const std::string pos_str           = pos_buf;
-            const std::filesystem::path pos_dir = std::filesystem::path(dump_dir_) / pos_str;
-            std::filesystem::create_directories(pos_dir);
-
-            auto& pos_rec          = positions_.emplace_back();
-            pos_rec.position       = first_position + static_cast<std::int32_t>(i);
-            pos_rec.token_id       = token_ids[i];
-            pos_rec.mrope_position = mrope_positions[i];
-        }
-
-        return FlashNextDecodeStateSink{
-            .on_state = [this, first_idx, count](std::string_view name, const Tensor& tensor) {
-                std::vector<std::uint8_t> host_bytes(tensor.bytes());
-                CUDA_CHECK(cudaMemcpy(host_bytes.data(), tensor.data, tensor.bytes(),
-                                      cudaMemcpyDeviceToHost));
-
-                const std::string filename = std::string(name) + ".bin";
-                if (tensor.ne[1] == static_cast<std::int32_t>(count)) {
-                    const std::size_t col_bytes = tensor.bytes() / count;
-                    for (std::size_t i = 0; i < count; ++i) {
-                        auto& pos_rec = positions_[first_idx + i];
-                        char pos_buf[32];
-                        std::snprintf(pos_buf, sizeof(pos_buf), "pos%04d", pos_rec.position);
-                        const std::string pos_str = pos_buf;
-                        const std::filesystem::path pos_dir =
-                            std::filesystem::path(dump_dir_) / pos_str;
-                        const std::filesystem::path file_path = pos_dir / filename;
-
-                        std::ofstream ofs(file_path, std::ios::binary);
-                        if (!ofs) {
-                            throw std::runtime_error("Failed to open file for writing: " +
-                                                     file_path.string());
-                        }
-                        ofs.write(
-                            reinterpret_cast<const char*>(host_bytes.data() + i * col_bytes),
-                            col_bytes);
-
-                        TensorDumpRecord rec;
-                        rec.name  = std::string(name);
-                        rec.dtype = dtype_to_string(tensor.dtype);
-                        rec.shape = {tensor.ne[0], 1};
-                        rec.file  = pos_str + "/" + filename;
-                        rec.bytes = col_bytes;
-                        pos_rec.tensors.push_back(std::move(rec));
-                    }
-                } else {
-                    // Single-token tensor (e.g. final_hidden, logits on last token)
-                    const std::size_t last_idx = first_idx + count - 1;
-                    auto& pos_rec              = positions_[last_idx];
-                    char pos_buf[32];
-                    std::snprintf(pos_buf, sizeof(pos_buf), "pos%04d", pos_rec.position);
-                    const std::string pos_str = pos_buf;
-                    const std::filesystem::path pos_dir =
-                        std::filesystem::path(dump_dir_) / pos_str;
-                    const std::filesystem::path file_path = pos_dir / filename;
-
-                    std::ofstream ofs(file_path, std::ios::binary);
-                    if (!ofs) {
-                        throw std::runtime_error("Failed to open file for writing: " +
-                                                 file_path.string());
-                    }
-                    ofs.write(reinterpret_cast<const char*>(host_bytes.data()), host_bytes.size());
-
-                    TensorDumpRecord rec;
-                    rec.name  = std::string(name);
-                    rec.dtype = dtype_to_string(tensor.dtype);
-                    rec.shape = {tensor.ne[0], 1};
-                    rec.file  = pos_str + "/" + filename;
-                    rec.bytes = tensor.bytes();
-                    pos_rec.tensors.push_back(std::move(rec));
-                }
-            },
-        };
-    }
-
-    void write_manifest() const {
-        const std::filesystem::path manifest_path =
-            std::filesystem::path(dump_dir_) / "manifest.json";
-        std::ofstream ofs(manifest_path);
-        if (!ofs) {
-            throw std::runtime_error("Failed to open manifest for writing: " +
-                                     manifest_path.string());
-        }
-        ofs << "{\n  \"positions\": [\n";
-        for (std::size_t p = 0; p < positions_.size(); ++p) {
-            const auto& pos = positions_[p];
-            ofs << "    {\n";
-            ofs << "      \"position\": " << pos.position << ",\n";
-            ofs << "      \"token_id\": " << pos.token_id << ",\n";
-            ofs << "      \"mrope_position\": [" << pos.mrope_position[0] << ", "
-                << pos.mrope_position[1] << ", " << pos.mrope_position[2] << "],\n";
-            ofs << "      \"tensors\": [\n";
-            for (std::size_t t = 0; t < pos.tensors.size(); ++t) {
-                const auto& item = pos.tensors[t];
-                ofs << "        {\n";
-                ofs << "          \"name\": \"" << item.name << "\",\n";
-                ofs << "          \"dtype\": \"" << item.dtype << "\",\n";
-                ofs << "          \"shape\": [";
-                for (std::size_t s = 0; s < item.shape.size(); ++s) {
-                    ofs << item.shape[s] << (s + 1 < item.shape.size() ? ", " : "");
-                }
-                ofs << "],\n";
-                ofs << "          \"file\": \"" << item.file << "\",\n";
-                ofs << "          \"bytes\": " << item.bytes << "\n";
-                ofs << "        }" << (t + 1 < pos.tensors.size() ? "," : "") << "\n";
-            }
-            ofs << "      ]\n";
-            ofs << "    }" << (p + 1 < positions_.size() ? "," : "") << "\n";
-        }
-        ofs << "  ]\n}\n";
-    }
-
-private:
-    std::string dump_dir_;
-    std::vector<PositionDumpRecord> positions_;
-};
 
 float bf16_to_float(std::uint16_t val) {
     const std::uint32_t bits = static_cast<std::uint32_t>(val) << 16U;
@@ -1851,6 +1644,147 @@ int run_continuation_check(const ReferenceToolOptions& opts) {
     return (first_divergence_round < 0 || round_rel_l2[0] <= 0.1) ? 0 : 1;
 }
 
+int run_materialize_mtp(const ReferenceToolOptions& opts) {
+    int device_count = 0;
+    const auto err   = cudaGetDeviceCount(&device_count);
+    if (err != cudaSuccess || device_count == 0) {
+        throw std::runtime_error("No CUDA device available for MTP materialization probe");
+    }
+
+    std::size_t free_before  = 0;
+    std::size_t total_before = 0;
+    CUDA_CHECK(cudaMemGetInfo(&free_before, &total_before));
+
+    DeviceContext device(0);
+
+    constexpr std::string_view kExpectedModelId   = "qwen3.8-flash-next";
+    constexpr std::string_view kExpectedWeightsId = "groupwise-nvfp4-dense-bf16-router-bf16";
+
+    if (!opts.json_output) {
+        std::cout << "Loading and materializing MTP: " << opts.model_path << " ...\n";
+    }
+
+    auto model = LoadedModel::load_from_file(opts.model_path, device,
+                                             LoadFeatures{.vision = false, .mtp = true});
+    device.synchronize();
+
+    const auto& text = model.text_view();
+    if (!text.mtp.has_value()) {
+        throw std::logic_error("LoadedModel reports text.mtp is null after requesting MTP load");
+    }
+    const auto& mtp = *text.mtp;
+
+    std::size_t free_resident  = 0;
+    std::size_t total_resident = 0;
+    CUDA_CHECK(cudaMemGetInfo(&free_resident, &total_resident));
+
+    if (opts.json_output) {
+        std::cout << "{\n"
+                  << "  \"mode\": \"materialize-mtp\",\n"
+                  << "  \"model_id\": \"" << kExpectedModelId << "\",\n"
+                  << "  \"weights_id\": \"" << kExpectedWeightsId << "\",\n"
+                  << "  \"mtp_materialized\": true,\n"
+                  << "  \"cuda_free_bytes_before\": " << free_before << ",\n"
+                  << "  \"cuda_total_bytes_before\": " << total_before << ",\n"
+                  << "  \"cuda_free_bytes_resident\": " << free_resident << ",\n"
+                  << "  \"cuda_total_bytes_resident\": " << total_resident << ",\n"
+                  << "  \"status\": \"OK\"\n"
+                  << "}\n";
+    } else {
+        std::cout << "\n=== MTP GPU Residency Materialization Report ===\n"
+                  << "MTP Materialized:             YES\n"
+                  << "CUDA Free Bytes Before:       " << free_before << "\n"
+                  << "CUDA Free Bytes Resident:     " << free_resident << "\n"
+                  << "MTP MoE Experts:              " << mtp.moe.expert_gate_up.experts << "\n"
+                  << "Status:                       OK\n";
+    }
+    return 0;
+}
+
+int run_mtp_step(const ReferenceToolOptions& opts) {
+    int device_count = 0;
+    const auto err   = cudaGetDeviceCount(&device_count);
+    if (err != cudaSuccess || device_count == 0) {
+        throw std::runtime_error("No CUDA device available for MTP step");
+    }
+
+    DeviceContext device(0);
+
+    auto model = LoadedModel::load_from_file(opts.model_path, device,
+                                             LoadFeatures{.vision = false, .mtp = true});
+    device.synchronize();
+
+    const auto& text = model.text_view();
+    if (!text.mtp.has_value()) {
+        throw std::logic_error("MTP weights not materialized");
+    }
+
+    const std::int32_t batch = 1;
+    DeviceArena workspace(flash_next_mtp_workspace_capacity_bytes(batch) + 64 * 1024 * 1024);
+
+    Tensor input_emb       = workspace.alloc(DType::BF16, {2'560, batch}, 256);
+    Tensor backbone_hidden = workspace.alloc(DType::BF16, {10'240, batch}, 256);
+    Tensor token_indices   = workspace.alloc(DType::I32, {batch}, 16);
+    Tensor mrope_positions = workspace.alloc(DType::I32, {batch, 3}, 16);
+    Tensor table_rows      = workspace.alloc(DType::I32, {batch}, 16);
+    Tensor selected_blocks = workspace.alloc(DType::I32, {512, batch}, 16);
+    Tensor selected_counts = workspace.alloc(DType::I32, {batch}, 16);
+    Tensor draft_logits    = workspace.alloc(DType::BF16, {248'320, batch}, 256);
+    Tensor draft_tokens    = workspace.alloc(DType::I32, {batch}, 16);
+
+    Tensor key_pages    = workspace.alloc(DType::BF16, {256, 64, 2, 64}, 256);
+    Tensor value_pages  = workspace.alloc(DType::BF16, {256, 64, 2, 64}, 256);
+    Tensor block_tables = workspace.alloc(DType::I32, {64, 1}, 16);
+    QsaAttentionCacheView mtp_cache{
+        .key_pages    = key_pages,
+        .value_pages  = value_pages,
+        .block_tables = block_tables,
+    };
+
+    CHECK_CUDA(cudaMemsetAsync(input_emb.data, 0, input_emb.bytes(), device.stream));
+    CHECK_CUDA(cudaMemsetAsync(backbone_hidden.data, 0, backbone_hidden.bytes(), device.stream));
+    CHECK_CUDA(cudaMemsetAsync(token_indices.data, 0, token_indices.bytes(), device.stream));
+    CHECK_CUDA(cudaMemsetAsync(mrope_positions.data, 0, mrope_positions.bytes(), device.stream));
+    CHECK_CUDA(cudaMemsetAsync(table_rows.data, 0, table_rows.bytes(), device.stream));
+    CHECK_CUDA(cudaMemsetAsync(selected_blocks.data, 0, selected_blocks.bytes(), device.stream));
+    CHECK_CUDA(cudaMemsetAsync(selected_counts.data, 0, selected_counts.bytes(), device.stream));
+    CHECK_CUDA(cudaMemsetAsync(key_pages.data, 0, key_pages.bytes(), device.stream));
+    CHECK_CUDA(cudaMemsetAsync(value_pages.data, 0, value_pages.bytes(), device.stream));
+    CHECK_CUDA(cudaMemsetAsync(block_tables.data, 0, block_tables.bytes(), device.stream));
+
+    std::unique_ptr<StateDumper> dumper;
+    std::optional<FlashNextDecodeStateSink> sink;
+    if (!opts.dump_states.empty()) {
+        dumper = std::make_unique<StateDumper>(opts.dump_states);
+        sink   = dumper->make_sink(0, opts.token_id, {0, 0, 0});
+    }
+
+    flash_next_mtp_step(text, input_emb, backbone_hidden, token_indices, mrope_positions,
+                        table_rows, selected_blocks, selected_counts, mtp_cache, workspace,
+                        draft_logits, draft_tokens, device.stream, sink ? &*sink : nullptr);
+    device.synchronize();
+
+    if (dumper) {
+        dumper->write_manifest();
+    }
+
+    std::int32_t draft_token = 0;
+    CHECK_CUDA(cudaMemcpy(&draft_token, draft_tokens.data, sizeof(std::int32_t), cudaMemcpyDeviceToHost));
+
+    if (opts.json_output) {
+        std::cout << "{\n"
+                  << "  \"mode\": \"mtp-step\",\n"
+                  << "  \"draft_token\": " << draft_token << ",\n"
+                  << "  \"status\": \"OK\"\n"
+                  << "}\n";
+    } else {
+        std::cout << "\n=== MTP Single-Step Forward Execution ===\n"
+                  << "Draft Token: " << draft_token << "\n"
+                  << "Status:      OK\n";
+    }
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1864,6 +1798,10 @@ int main(int argc, char** argv) {
             return run_materialize_full(opts);
         } else if (opts.mode == "materialize-vision") {
             return run_materialize_vision(opts);
+        } else if (opts.mode == "materialize-mtp") {
+            return run_materialize_mtp(opts);
+        } else if (opts.mode == "mtp-step") {
+            return run_mtp_step(opts);
         } else if (opts.mode == "chat-diagnostic") {
             return run_chat_diagnostic(opts);
         } else if (opts.mode == "execute-vision") {

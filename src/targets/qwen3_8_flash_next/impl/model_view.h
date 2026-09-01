@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstddef>
+#include <optional>
 
 namespace ninfer {
 class DeviceArena;
@@ -37,6 +38,16 @@ struct MoeWeights {
     Weight shared_gate_weight;
     Nvfp4ExpertBankView expert_gate_up;
     Nvfp4ExpertBankView expert_down;
+};
+
+struct MoeBf16Weights {
+    Weight router;
+    Weight shared_down;
+    Weight shared_gate;
+    Weight shared_up;
+    Weight shared_gate_weight;
+    Bf16ExpertBankView expert_gate_up;
+    Bf16ExpertBankView expert_down;
 };
 
 struct TextLayerWeights {
@@ -75,6 +86,18 @@ struct PleWeights {
     PleTableView table;
 };
 
+struct MtpModelView {
+    Weight embedding_projection;
+    Weight hidden_projection;
+    HyperMixerWeights mixer;
+    HyperConnectionWeights attention_hyper;
+    AttentionWeights attention;
+    HyperConnectionWeights mlp_hyper;
+    MoeBf16Weights moe;
+    Tensor embedding_norm;
+    Tensor hidden_norm;
+};
+
 struct TextModelView {
     DeviceArena* weights_arena = nullptr;
     Weight token_embedding;
@@ -84,6 +107,7 @@ struct TextModelView {
     PleWeights ple;
     Weight output_head;
     HyperMixerWeights final_mixer;
+    std::optional<MtpModelView> mtp;
 };
 
 struct VisionLayerWeights {

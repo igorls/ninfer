@@ -719,6 +719,68 @@ __global__ void flash_next_moe_prefill_down_reduce_kernel(
     }
 }
 
+__global__ void flash_next_moe_bf16_gate_up_kernel(
+    const __nv_bfloat16* __restrict__ input, const std::int32_t* __restrict__ ids,
+    const __nv_bfloat16* __restrict__ expert_gate_up, std::uint64_t expert_stride,
+    const __nv_bfloat16* __restrict__ shared_gate, const __nv_bfloat16* __restrict__ shared_up,
+    __nv_bfloat16* __restrict__ activations) {
+    const int token = static_cast<int>(blockIdx.y);
+    const int path  = static_cast<int>(blockIdx.z);
+    const int warp  = static_cast<int>(threadIdx.x) >> 5;
+    const int lane  = static_cast<int>(threadIdx.x) & 31;
+    const int row   = static_cast<int>(blockIdx.x) * GateSchedule::kWarpsPerCta + warp;
+    if (row >= kIntermediate) { return; }
+    const auto* x = input + static_cast<std::int64_t>(token) * kHidden;
+    float gate    = 0.0F;
+    float up      = 0.0F;
+    if (path < kTopK) {
+        const int expert    = ids[token * kTopK + path];
+        const auto* exp_ptr = expert_gate_up + static_cast<std::uint64_t>(expert) * expert_stride;
+        const auto* gate_w  = exp_ptr + static_cast<std::int64_t>(row) * kHidden;
+        const auto* up_w    = exp_ptr + static_cast<std::int64_t>(row + kIntermediate) * kHidden;
+        dot_bf16_pair<kHidden>(x, gate_w, up_w, gate, up);
+    } else {
+        dot_bf16_pair<kHidden>(x, shared_gate + static_cast<std::int64_t>(row) * kHidden,
+                               shared_up + static_cast<std::int64_t>(row) * kHidden, gate, up);
+    }
+    if (lane == 0) {
+        activations[(static_cast<std::int64_t>(token) * kPaths + path) * kIntermediate + row] =
+            __float2bfloat16_rn(ops::silu(gate) * up);
+    }
+}
+
+__global__ void flash_next_moe_bf16_down_kernel(
+    const std::int32_t* __restrict__ ids, const float* __restrict__ alpha,
+    const float* __restrict__ shared_scale, const __nv_bfloat16* __restrict__ activations,
+    const __nv_bfloat16* __restrict__ expert_down, std::uint64_t expert_stride,
+    const __nv_bfloat16* __restrict__ shared_down, __nv_bfloat16* __restrict__ output) {
+    const int token = static_cast<int>(blockIdx.y);
+    const int warp  = static_cast<int>(threadIdx.x) >> 5;
+    const int lane  = static_cast<int>(threadIdx.x) & 31;
+    const int row   = static_cast<int>(blockIdx.x) * kDownWarps + warp;
+    if (row >= kHidden) { return; }
+
+    float routed = 0.0F;
+#pragma unroll
+    for (int path = 0; path < kTopK; ++path) {
+        const int expert = ids[token * kTopK + path];
+        const auto* x =
+            activations + (static_cast<std::int64_t>(token) * kPaths + path) * kIntermediate;
+        const auto* down_w = expert_down + static_cast<std::uint64_t>(expert) * expert_stride +
+                             static_cast<std::int64_t>(row) * kIntermediate;
+        const float value = dot_bf16<kIntermediate>(x, down_w);
+        if (lane == 0) { routed = fmaf(alpha[token * kTopK + path], value, routed); }
+    }
+    const auto* shared_x =
+        activations + (static_cast<std::int64_t>(token) * kPaths + kTopK) * kIntermediate;
+    const float shared_value = dot_bf16<kIntermediate>(
+        shared_x, shared_down + static_cast<std::int64_t>(row) * kIntermediate);
+    if (lane == 0) {
+        output[static_cast<std::int64_t>(token) * kHidden + row] =
+            __float2bfloat16_rn(fmaf(shared_scale[token], shared_value, routed));
+    }
+}
+
 } // namespace
 
 void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weights,
@@ -832,6 +894,40 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
             tokens);
         CUDA_CHECK(cudaGetLastError());
     }
+}
+
+void flash_next_moe_bf16_kernels_launch(const Tensor& input, const MoeBf16Weights& weights,
+                                        const FlashNextMoeWorkspace& workspace, Tensor& output,
+                                        cudaStream_t stream) {
+    const int tokens = static_cast<int>(input.ne[1]);
+    const std::uint64_t gate_up_stride =
+        weights.expert_gate_up.bytes_per_expert / sizeof(std::uint16_t);
+    const std::uint64_t down_stride =
+        weights.expert_down.bytes_per_expert / sizeof(std::uint16_t);
+
+    const dim3 gate_grid(kIntermediate / GateSchedule::kWarpsPerCta,
+                         static_cast<unsigned>(tokens), kPaths);
+    flash_next_moe_bf16_gate_up_kernel<<<gate_grid, GateSchedule::kThreads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(input.data),
+        static_cast<const std::int32_t*>(workspace.ids.data),
+        reinterpret_cast<const __nv_bfloat16*>(weights.expert_gate_up.data),
+        gate_up_stride,
+        static_cast<const __nv_bfloat16*>(weights.shared_gate.qdata),
+        static_cast<const __nv_bfloat16*>(weights.shared_up.qdata),
+        static_cast<__nv_bfloat16*>(workspace.activations.data));
+    CUDA_CHECK(cudaGetLastError());
+
+    const dim3 down_grid(kHidden / kDownWarps, static_cast<unsigned>(tokens));
+    flash_next_moe_bf16_down_kernel<<<down_grid, kDownWarps * 32, 0, stream>>>(
+        static_cast<const std::int32_t*>(workspace.ids.data),
+        static_cast<const float*>(workspace.alpha.data),
+        static_cast<const float*>(workspace.shared_scale.data),
+        static_cast<const __nv_bfloat16*>(workspace.activations.data),
+        reinterpret_cast<const __nv_bfloat16*>(weights.expert_down.data),
+        down_stride,
+        static_cast<const __nv_bfloat16*>(weights.shared_down.qdata),
+        static_cast<__nv_bfloat16*>(output.data));
+    CUDA_CHECK(cudaGetLastError());
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

@@ -12,7 +12,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.activations import ACT2FN
 from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
-from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextModel
+from transformers.models.qwen4_exp.modeling_qwen4_exp import (
+    Qwen4ExpTextModel,
+    Qwen4ExpTextRMSNorm,
+    Qwen4ExpTextGatedResidual,
+    Qwen4ExpTextRotaryEmbedding,
+    Qwen4ExpTextDecoderLayer,
+)
 
 FP4_LUT = torch.tensor(
     [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
@@ -283,6 +289,73 @@ def register_hooks(model: nn.Module):
 
     return stage_outputs
 
+class Qwen4ExpMTP(nn.Module):
+    def __init__(self, config: Qwen4ExpTextConfig):
+        super().__init__()
+        self.config = config
+        self.pre_fc_norm_embedding = Qwen4ExpTextRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.fc_embedding = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+        self.hyper_connection_mixer = Qwen4ExpTextGatedResidual(config, use_combine=False)
+        self.fc_hidden = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+        self.rotary = Qwen4ExpTextRotaryEmbedding(config=config)
+        self.layer = Qwen4ExpTextDecoderLayer(config, layer_idx=0)
+        self.final_mixer = Qwen4ExpTextGatedResidual(config, use_combine=False)
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+
+    def forward(self, input_embedding: torch.Tensor, backbone_hyper_hidden: torch.Tensor):
+        stages = {}
+        emb_norm = self.pre_fc_norm_embedding(input_embedding)
+        stages["mtp_embedding_norm"] = emb_norm
+        emb_proj = self.fc_embedding(emb_norm)
+        stages["mtp_embedding_proj"] = emb_proj
+
+        hid_mix = self.hyper_connection_mixer(backbone_hyper_hidden)
+        stages["mtp_hidden_mix"] = hid_mix
+        hid_proj = self.fc_hidden(hid_mix)
+        stages["mtp_hidden_proj"] = hid_proj
+
+        trunk_sum = emb_proj + hid_proj
+        stages["mtp_trunk_input"] = trunk_sum
+        mtp_hyper_init = trunk_sum.unsqueeze(1).repeat(1, 1, 4)
+        stages["mtp_hyper_init"] = mtp_hyper_init.squeeze(1)
+
+        batch = input_embedding.shape[0]
+        pos_ids = torch.zeros((3, batch, 1), dtype=torch.long)
+        pos_emb = self.rotary(mtp_hyper_init, position_ids=pos_ids)
+        attn_mask = torch.zeros((batch, 1, 1, 1), dtype=torch.bool)
+
+        def attn_hc_hook(module, inp, out):
+            stages["mtp_attn_block_input"] = out[0].squeeze(1) if out[0].ndim == 3 else out[0]
+        def attn_hook(module, inp, out):
+            res = out[0] if isinstance(out, tuple) else out
+            stages["mtp_attn_block_output"] = res.squeeze(1) if res.ndim == 3 else res
+        def mlp_hc_hook(module, inp, out):
+            stages["mtp_mlp_block_input"] = out[0].squeeze(1) if out[0].ndim == 3 else out[0]
+        def mlp_hook(module, inp, out):
+            res = out[0] if isinstance(out, tuple) else out
+            stages["mtp_mlp_block_output"] = res.squeeze(1) if res.ndim == 3 else res
+
+        h1 = self.layer.attn_hyper_connection.register_forward_hook(attn_hc_hook)
+        h2 = self.layer.self_attn.register_forward_hook(attn_hook)
+        h3 = self.layer.mlp_hyper_connection.register_forward_hook(mlp_hc_hook)
+        h4 = self.layer.mlp.register_forward_hook(mlp_hook)
+
+        hyper_after_layer = self.layer(mtp_hyper_init, position_embeddings=pos_emb, attention_mask=attn_mask)
+        stages["mtp_hyper_after_mlp"] = hyper_after_layer.squeeze(1)
+
+        h1.remove(); h2.remove(); h3.remove(); h4.remove()
+
+        final_hidden = self.final_mixer(hyper_after_layer.squeeze(1))
+        stages["mtp_final_hidden"] = final_hidden
+
+        logits = self.lm_head(final_hidden)
+        stages["mtp_draft_logits"] = logits
+
+        draft_tokens = torch.argmax(logits, dim=-1)
+        stages["mtp_draft_tokens"] = draft_tokens
+
+        return stages
+
 def main():
     parser = argparse.ArgumentParser(description="Authoritative HF Qwen4Exp CPU FP32 reference oracle for Qwen3.8-Flash-Next")
     parser.add_argument("--model-dir", default=r"E:\NInfer\qwen3_8_flash_next\source\mixed", help="Path to mixed source model dir")
@@ -290,7 +363,56 @@ def main():
     parser.add_argument("--token-id", type=int, default=248045, help="Single token ID to execute")
     parser.add_argument("--ids", type=str, default="", help="Comma-separated token IDs to execute in sequence")
     parser.add_argument("--dump-states", type=str, default="", help="Directory to dump state tensors and manifest")
+    parser.add_argument("--mtp-synthetic", action="store_true", help="Run MTP synthetic architecture parity step")
     args = parser.parse_args()
+
+    if args.mtp_synthetic:
+        print("Running authoritative Qwen4ExpMTP synthetic reference step ...")
+        with open(os.path.join(args.model_dir, "config.json"), "r", encoding="utf-8") as f:
+            text_cfg_dict = json.load(f)["text_config"]
+        text_cfg_dict["layer_types"] = ["full_attention"]
+        text_cfg_dict["num_hidden_layers"] = 1
+        text_cfg_dict["ple_layer_ids"] = []
+        cfg = Qwen4ExpTextConfig(**text_cfg_dict)
+
+        mtp = Qwen4ExpMTP(cfg)
+        mtp.eval()
+
+        dim = 2560
+        with torch.no_grad():
+            mtp.fc_embedding.weight.copy_(torch.eye(dim))
+            mtp.fc_hidden.weight.copy_(torch.eye(dim))
+            mtp.lm_head.weight.zero_()
+            for i in range(100):
+                mtp.lm_head.weight[i, 0] = float(i + 1)
+
+        input_emb = torch.ones(1, dim)
+        backbone_h = torch.ones(1, 10240)
+
+        with torch.no_grad():
+            stages = mtp(input_emb, backbone_h)
+
+        print(f"MTP Reference Output: Draft Token = {stages['mtp_draft_tokens'][0].item()}")
+        if args.dump_states:
+            pos_dir = os.path.join(args.dump_states, "pos0000")
+            os.makedirs(pos_dir, exist_ok=True)
+            manifest = {"positions": [{"position": 0, "token_id": 0, "mrope_position": [0, 0, 0], "tensors": []}]}
+            for name, tensor in stages.items():
+                f32_arr = tensor.detach().cpu().numpy().astype(np.float32)
+                bin_path = os.path.join(pos_dir, f"{name}.bin")
+                with open(bin_path, "wb") as f:
+                    f.write(f32_arr.tobytes())
+                manifest["positions"][0]["tensors"].append({
+                    "name": name,
+                    "dtype": "FP32",
+                    "shape": list(f32_arr.shape),
+                    "file": f"pos0000/{name}.bin",
+                    "bytes": f32_arr.nbytes,
+                })
+            with open(os.path.join(args.dump_states, "manifest.json"), "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=2)
+            print(f"Dumped MTP oracle states to {args.dump_states}/manifest.json")
+        return
 
     print(f"Building authoritative Transformers Qwen4ExpTextModel from {args.model_dir} ...")
     model, lm_head_weight = build_oracle(args.model_dir, args.ple_dir)

@@ -41,4 +41,29 @@ materialized_nvfp4_expert_bank_view(const artifact::MaterializedArtifact& materi
                                     artifact::ObjectHandle handle, std::int32_t experts,
                                     std::int32_t rows, std::int32_t columns);
 
+struct Bf16ExpertMatrixView {
+    const std::byte* data;
+    std::int32_t rows;
+    std::int32_t columns;
+};
+
+struct Bf16ExpertBankView {
+    const std::byte* data;
+    std::int32_t experts;
+    std::int32_t rows;
+    std::int32_t columns;
+    std::uint64_t bytes_per_expert;
+
+    [[nodiscard]] Bf16ExpertMatrixView expert(std::int32_t index) const;
+};
+
+[[nodiscard]] Bf16ExpertBankView
+make_bf16_expert_bank_view(const void* payload, std::uint64_t payload_bytes, std::int32_t experts,
+                           std::int32_t rows, std::int32_t columns);
+
+[[nodiscard]] Bf16ExpertBankView
+materialized_bf16_expert_bank_view(const artifact::MaterializedArtifact& materialized,
+                                   artifact::ObjectHandle handle, std::int32_t experts,
+                                   std::int32_t rows, std::int32_t columns);
+
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

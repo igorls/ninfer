@@ -135,15 +135,52 @@ VisionModelView load_vision(const VisionPlan& plan, const artifact::Materialized
     return out;
 }
 
+AttentionWeights load_mtp_attention(const AttentionPlan& plan,
+                                    const artifact::MaterializedArtifact& backing) {
+    return {
+        .indexer_query_key    = bf16_weight(backing, plan.indexer_query_key, 640, 2'560),
+        .indexer_key_norm     = bf16_tensor(backing, plan.indexer_key_norm, {128}),
+        .indexer_query_norm   = bf16_tensor(backing, plan.indexer_query_norm, {128}),
+        .key_norm             = bf16_tensor(backing, plan.key_norm, {256}),
+        .query_norm           = bf16_tensor(backing, plan.query_norm, {256}),
+        .query_gate_key_value = bf16_weight(backing, plan.query_gate_key_value, 13'312, 2'560),
+        .output               = bf16_weight(backing, plan.output, 2'560, 6'144),
+    };
+}
+
+MoeBf16Weights load_mtp_moe(const MoePlan& plan, const artifact::MaterializedArtifact& backing) {
+    return {
+        .router             = bf16_weight(backing, plan.router, 512, 2'560),
+        .shared_down        = bf16_weight(backing, plan.shared_down, 2'560, 640),
+        .shared_gate        = bf16_weight(backing, plan.shared_gate, 640, 2'560),
+        .shared_up          = bf16_weight(backing, plan.shared_up, 640, 2'560),
+        .shared_gate_weight = bf16_weight(backing, plan.shared_gate_weight, 1, 2'560),
+        .expert_gate_up =
+            materialized_bf16_expert_bank_view(backing, plan.expert_gate_up, 512, 1'280, 2'560),
+        .expert_down =
+            materialized_bf16_expert_bank_view(backing, plan.expert_down, 512, 2'560, 640),
+    };
+}
+
+MtpModelView load_mtp(const MtpPlan& plan, const artifact::MaterializedArtifact& backing) {
+    return {
+        .embedding_projection = bf16_weight(backing, plan.embedding_projection, 2'560, 2'560),
+        .hidden_projection    = bf16_weight(backing, plan.hidden_projection, 2'560, 2'560),
+        .mixer                = load_mixer(plan.mixer, backing),
+        .attention_hyper      = load_hyper(plan.attention_hyper, backing),
+        .attention            = load_mtp_attention(plan.attention, backing),
+        .mlp_hyper            = load_hyper(plan.mlp_hyper, backing),
+        .moe                  = load_mtp_moe(plan.moe, backing),
+        .embedding_norm       = bf16_tensor(backing, plan.embedding_norm, {2'560}),
+        .hidden_norm          = bf16_tensor(backing, plan.hidden_norm, {10'240}),
+    };
+}
+
 } // namespace
 
 LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifact materialized,
                                  bool quantize_output_head_fp8)
     : backing(std::move(materialized)) {
-    if (plan.features.mtp) {
-        throw std::invalid_argument(
-            "MTP materialization is not yet supported in Flash-Next runtime");
-    }
     frontend = qwen3_6::take_frontend_resources(backing, plan.frontend);
 
     text.weights_arena     = &backing.device_arena();
@@ -177,6 +214,7 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
     }
     text.final_mixer = load_mixer(plan.final_mixer, backing);
 
+    if (plan.features.mtp) { text.mtp = load_mtp(plan.mtp, backing); }
     if (plan.features.vision) { vision = load_vision(plan.vision, backing); }
 }
 

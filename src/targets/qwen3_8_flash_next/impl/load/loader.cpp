@@ -66,10 +66,6 @@ StandaloneLoadedModel StandaloneLoadedModel::load(const artifact::Reader& reader
                                                   LoadFeatures features, LoadQuantization quantization,
                                                   artifact::LoadProgress* progress) {
     validate_identity(reader.identity());
-    if (features.mtp) {
-        throw std::invalid_argument(
-            "MTP materialization is not yet supported in Flash-Next runtime");
-    }
 
     artifact::Binder binder(reader);
     auto load_plan    = bind_artifact(binder, features);
