@@ -78,6 +78,7 @@ SyntheticFlashNextModel make_synthetic_model(ninfer::DeviceContext& device) {
     std::uniform_real_distribution<float> dist_embed(-0.05f, 0.05f);
     std::uniform_real_distribution<float> dist_bf16(-0.02f, 0.02f);
     std::uniform_real_distribution<float> dist_router(-0.10f, 0.10f);
+    std::uniform_real_distribution<float> dist_inject(-0.05f, 0.05f);
     std::uniform_real_distribution<float> dist_norm(0.99f, 1.01f);
 
     // 1. Generic BF16 weights (token_embedding, output_head, linear projections)
@@ -146,23 +147,17 @@ SyntheticFlashNextModel make_synthetic_model(ninfer::DeviceContext& device) {
     model.gdn_dt_bias_buf.copy_from_host(h_dt_bias.data(), h_dt_bias.size() * sizeof(std::uint16_t));
 
     std::vector<std::uint16_t> h_gdn_conv(10'240 * 4);
-    for (auto& v : h_gdn_conv) { v = float_to_bf16(0.25f); }
+    for (auto& v : h_gdn_conv) { v = float_to_bf16(dist_inject(rng)); }
     model.gdn_conv_buf = ninfer::DeviceBuffer(10'240 * 4 * sizeof(std::uint16_t));
     model.gdn_conv_buf.copy_from_host(h_gdn_conv.data(), h_gdn_conv.size() * sizeof(std::uint16_t));
 
-    // 4. PLE convolution weights
+    // 4. PLE convolution weights (zero-mean to prevent early layer routing collapse)
     std::vector<std::uint16_t> h_ple_conv(10'240 * 4);
-    for (int c = 0; c < 10'240; ++c) {
-        h_ple_conv[0 * 10'240 + c] = float_to_bf16(0.25f);
-        h_ple_conv[1 * 10'240 + c] = float_to_bf16(0.50f);
-        h_ple_conv[2 * 10'240 + c] = float_to_bf16(0.75f);
-        h_ple_conv[3 * 10'240 + c] = float_to_bf16(1.00f);
-    }
+    for (auto& v : h_ple_conv) { v = float_to_bf16(dist_inject(rng)); }
     model.ple_conv_buf = ninfer::DeviceBuffer(10'240 * 4 * sizeof(std::uint16_t));
     model.ple_conv_buf.copy_from_host(h_ple_conv.data(), h_ple_conv.size() * sizeof(std::uint16_t));
 
     // 5. Shared gate weight and hyper injection (zero-mean to prevent DC bias drift)
-    std::uniform_real_distribution<float> dist_inject(-0.05f, 0.05f);
     std::vector<std::uint16_t> h_sgw(2'560);
     for (auto& v : h_sgw) { v = float_to_bf16(dist_inject(rng)); }
     model.shared_gate_weight_buf = ninfer::DeviceBuffer(2'560 * sizeof(std::uint16_t));
@@ -182,7 +177,8 @@ SyntheticFlashNextModel make_synthetic_model(ninfer::DeviceContext& device) {
 
         std::vector<std::uint8_t> h_codes(codes_bytes);
         for (std::size_t i = 0; i < codes_bytes; ++i) {
-            h_codes[i] = static_cast<std::uint8_t>(0x18 + (rng() % 32));
+            const auto s = (rng() % 2) ? 0x80U : 0x00U;
+            h_codes[i] = static_cast<std::uint8_t>(s | (0x10 + (rng() % 32)));
         }
         buf.copy_from_host(h_codes.data(), codes_bytes, 0);
 
