@@ -936,6 +936,71 @@ bool test_long_context_topk(ninfer::DeviceContext& device) {
     return true;
 }
 
+bool test_padded_score_nan_sentinel(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    constexpr std::int32_t maximum_blocks  = 1024;
+    constexpr std::int32_t logical_pages   = 16;
+    constexpr std::int32_t complete_blocks = 600;
+    constexpr std::int32_t token           = complete_blocks * 4 - 1;
+    IndexerProbe poisoned(maximum_blocks, logical_pages);
+    IndexerProbe clean(maximum_blocks, logical_pages);
+
+    std::vector<std::uint16_t> host_keys(128ULL * 64 * logical_pages, 0);
+    fill_monotonic_block_keys(host_keys, complete_blocks);
+    poisoned.load_keys(host_keys, device);
+    clean.load_keys(host_keys, device);
+
+    std::int32_t count_clean = -1;
+    std::int32_t count_poisoned = -1;
+    std::array<std::int32_t, 512> ids_clean{};
+    std::array<std::int32_t, 512> ids_poisoned{};
+
+    clean.workspace.reset();
+    CUDA_CHECK(cudaMemsetAsync(clean.workspace.base(), 0, clean.workspace.capacity(),
+                               device.stream));
+    clean.run(device, token, maximum_blocks, maximum_blocks, count_clean, ids_clean);
+
+    poisoned.workspace.reset();
+    CUDA_CHECK(cudaMemsetAsync(poisoned.workspace.base(), 0xFF, poisoned.workspace.capacity(),
+                               device.stream));
+    poisoned.set_token(token);
+    poisoned.launch(maximum_blocks, maximum_blocks, device.stream);
+    drain_all_streams();
+    poisoned.selected_count.copy_to_host(&count_poisoned, sizeof(count_poisoned));
+    poisoned.selected_blocks.copy_to_host(ids_poisoned.data(), sizeof(ids_poisoned));
+
+    if (count_clean != 512 || count_poisoned != 512) {
+        std::cerr << "FAIL: NaN sentinel count clean=" << count_clean
+                  << " poisoned=" << count_poisoned << "\n";
+        return false;
+    }
+    double id_energy = 0.0;
+    for (std::int32_t i = 0; i < 512; ++i) {
+        if (ids_poisoned[static_cast<std::size_t>(i)] >= complete_blocks) {
+            std::cerr << "FAIL: NaN sentinel selected padded id[" << i
+                      << "]=" << ids_poisoned[static_cast<std::size_t>(i)]
+                      << " >= complete_blocks=" << complete_blocks << "\n";
+            return false;
+        }
+        if (ids_poisoned[static_cast<std::size_t>(i)] != ids_clean[static_cast<std::size_t>(i)]) {
+            std::cerr << "FAIL: NaN sentinel selection mismatch at " << i
+                      << " poisoned=" << ids_poisoned[static_cast<std::size_t>(i)]
+                      << " clean=" << ids_clean[static_cast<std::size_t>(i)] << "\n";
+            return false;
+        }
+        id_energy += static_cast<double>(ids_clean[static_cast<std::size_t>(i)]) *
+                     static_cast<double>(ids_clean[static_cast<std::size_t>(i)]);
+    }
+    if (!(id_energy > 0.0) || !std::isfinite(id_energy) || ids_clean[0] == ids_clean[1]) {
+        std::cerr << "FAIL: NaN sentinel comparison was vacuous (energy=" << id_energy
+                  << " id0=" << ids_clean[0] << " id1=" << ids_clean[1] << ")\n";
+        return false;
+    }
+    std::cout << "PASS: test_padded_score_nan_sentinel complete_blocks=" << complete_blocks
+              << " id0=" << ids_clean[0] << " energy=" << id_energy << "\n";
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -1102,6 +1167,10 @@ int main() {
 
     if (!test_long_context_topk(device)) {
         std::cerr << "FAIL: test_long_context_topk failed\n";
+        return 1;
+    }
+    if (!test_padded_score_nan_sentinel(device)) {
+        std::cerr << "FAIL: test_padded_score_nan_sentinel failed\n";
         return 1;
     }
 

@@ -1495,11 +1495,13 @@ int test_measure_cuda_graph_footprint(ninfer::DeviceContext& device) {
         }
         std::cout << "Total measured delta (8 graphs): "
                   << (total_footprint / (1024.0 * 1024.0)) << " MiB (" << total_footprint << " bytes)\n";
-        std::cout << "Configured allowance for B=8: " << (8ULL * 24) << " MiB ("
-                  << (8ULL * 24ULL * 1024ULL * 1024ULL) << " bytes)\n";
+        const auto buckets = flash_next_decode_graph_buckets(512 / 4);
+        std::cout << "Configured allowance for B=8, n_buckets=" << buckets.count << ": "
+                  << (8ULL * buckets.count * 24) << " MiB ("
+                  << (8ULL * buckets.count * 24ULL * 1024ULL * 1024ULL) << " bytes)\n";
         std::cout << "Note: cudaMemGetInfo reports OS-level device allocations; CUDA graph exec structures\n"
                   << "are serviced from driver-internal memory pools that do not alter physical OS page\n"
-                  << "counters on small synthetic models. The 192 MiB allowance provides a conservative bound.\n";
+                  << "counters on small synthetic models. The allowance is 24 MiB * max_concurrency * n_buckets.\n";
         std::cout << "------------------------------------------------------------\n";
         std::cout << "PASS: test_measure_cuda_graph_footprint\n";
         return 0;
@@ -1861,6 +1863,323 @@ int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device) {
     }
 }
 
+bool logits_bit_identical_nonvacuous(ninfer::DeviceContext& device, const ninfer::Tensor& a,
+                                     const ninfer::Tensor& b, std::uint32_t batch,
+                                     const char* label) {
+    const std::size_t n = 248'320ULL * batch;
+    std::vector<std::uint16_t> ha(n), hb(n);
+    device.synchronize();
+    CUDA_CHECK(cudaMemcpy(ha.data(), a.data, n * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hb.data(), b.data, n * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+    double base_sq = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const float fa = bf16_to_float(ha[i]);
+        const float fb = bf16_to_float(hb[i]);
+        if (!std::isfinite(fa) || !std::isfinite(fb)) {
+            std::cerr << "FAIL: " << label << " non-finite logit at " << i << "\n";
+            return false;
+        }
+        if (ha[i] != hb[i]) {
+            std::cerr << "FAIL: " << label << " bit-mismatch at " << i << " a=0x" << std::hex
+                      << ha[i] << " b=0x" << hb[i] << std::dec << "\n";
+            return false;
+        }
+        base_sq += static_cast<double>(fa) * static_cast<double>(fa);
+    }
+    if (!(base_sq > 0.0) || !std::isfinite(base_sq)) {
+        std::cerr << "FAIL: " << label << " vacuous logits base_sq=" << base_sq << "\n";
+        return false;
+    }
+    return true;
+}
+
+int test_decode_graph_bucket_key_layout(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+        auto synthetic_model = make_synthetic_model(device);
+
+        FlashNextRuntimeConfig cfg{
+            .max_concurrency     = 2,
+            .max_context         = 8192,
+            .state_slot_capacity = 4,
+            .prefill_chunk       = 1024,
+            .use_cuda_graph      = true,
+        };
+        const auto curve = flash_next_capacity_curve(cfg);
+        auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+        FlashNextRuntimeAllocation alloc(plan);
+        alloc.initialize(device.stream);
+        FlashNextTextExecutor exec(synthetic_model.view, ple_meta, device, alloc);
+
+        const auto& family = exec.decode_graphs();
+        if (family.buckets.count != 2 || family.buckets.blocks[0] != 512 ||
+            family.buckets.blocks[1] != 2048) {
+            std::cerr << "FAIL: 8192-token buckets expected {512,2048} got count="
+                      << family.buckets.count << "\n";
+            return 1;
+        }
+        if (family.topologies.size() != 2) {
+            std::cerr << "FAIL: startup should capture only the smallest bucket for B=1..2, got "
+                      << family.topologies.size() << " topologies\n";
+            return 1;
+        }
+        for (const auto& topology : family.topologies) {
+            if (topology.bucket_index != 0 || topology.batch_size < 1 || topology.batch_size > 2) {
+                std::cerr << "FAIL: startup topology B=" << topology.batch_size
+                          << " bucket_index=" << topology.bucket_index << " (expected bucket 0)\n";
+                return 1;
+            }
+            const auto want = flash_next_decode_graph_topology_class(topology.batch_size, 0);
+            if (topology.topology_class != want) {
+                std::cerr << "FAIL: topology_class=" << topology.topology_class
+                          << " expected=" << want << "\n";
+                return 1;
+            }
+        }
+        for (const auto& profile : family.profiles) {
+            if (profile.bucket_index != 0 || profile.bucket_blocks != 512 ||
+                profile.topology_class !=
+                    flash_next_decode_graph_topology_class(profile.batch_size, profile.bucket_index)) {
+                std::cerr << "FAIL: profile key layout B=" << profile.batch_size
+                          << " bucket=" << profile.bucket_index
+                          << " blocks=" << profile.bucket_blocks
+                          << " class=" << profile.topology_class << "\n";
+                return 1;
+            }
+        }
+        std::cout << "PASS: test_decode_graph_bucket_key_layout topologies="
+                  << family.topologies.size()
+                  << " key=(batch_size, bucket_index) topology_class=(bucket_index<<8)|batch_size\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_decode_graph_bucket_key_layout exception: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+int test_cuda_graph_bucketed_decode(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+        auto synthetic_model = make_synthetic_model(device);
+
+        auto make_plan = [](bool use_cuda_graph) {
+            FlashNextRuntimeConfig cfg{
+                .max_concurrency     = 1,
+                .max_context         = 8192,
+                .state_slot_capacity = 2,
+                .prefill_chunk       = 2048,
+                .use_cuda_graph      = use_cuda_graph,
+            };
+            const auto curve = flash_next_capacity_curve(cfg);
+            return finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+        };
+        auto plan_graph  = make_plan(true);
+        auto plan_eager  = make_plan(false);
+        auto plan_live   = make_plan(false);
+        auto plan_graph2 = make_plan(true);
+
+        FlashNextRuntimeAllocation alloc_graph(plan_graph);
+        FlashNextRuntimeAllocation alloc_eager(plan_eager);
+        FlashNextRuntimeAllocation alloc_live(plan_live);
+        FlashNextRuntimeAllocation alloc_graph2(plan_graph2);
+        alloc_graph.initialize(device.stream);
+        alloc_eager.initialize(device.stream);
+        alloc_live.initialize(device.stream);
+        alloc_graph2.initialize(device.stream);
+
+        FlashNextTextExecutor exec_graph(synthetic_model.view, ple_meta, device, alloc_graph);
+        FlashNextTextExecutor exec_eager(synthetic_model.view, ple_meta, device, alloc_eager);
+        FlashNextTextExecutor exec_live(synthetic_model.view, ple_meta, device, alloc_live);
+        FlashNextTextExecutor exec_graph2(synthetic_model.view, ple_meta, device, alloc_graph2);
+        exec_eager.set_use_cuda_graph(false);
+        exec_live.set_use_cuda_graph(false);
+
+        if (exec_graph.decode_graphs().topologies.size() != 1 ||
+            exec_graph.decode_graphs().topologies[0].bucket_index != 0) {
+            std::cerr << "FAIL: graph executor did not start with a single identity-bucket capture\n";
+            return 1;
+        }
+
+        auto lane_g  = exec_graph.allocate_lane();
+        auto lane_e  = exec_eager.allocate_lane();
+        auto lane_l  = exec_live.allocate_lane();
+        auto lane_g2 = exec_graph2.allocate_lane();
+
+        // Short-context identity bucket: graph vs eager(bucket) vs eager(live) plus run-to-run.
+        for (std::int32_t step = 0; step < 8; ++step) {
+            LaneStepRequest rg{.handle = lane_g,
+                               .token_id = 100 + step,
+                               .token_index = step,
+                               .mrope_positions = {step, step, step},
+                               .sampling = {.temperature = 0.0F, .top_p = 1.0F}};
+            LaneStepRequest re = rg;
+            re.handle          = lane_e;
+            LaneStepRequest rl = rg;
+            rl.handle          = lane_l;
+            LaneStepRequest rg2 = rg;
+            rg2.handle          = lane_g2;
+
+            auto round_g  = exec_graph.execute_round(std::span(&rg, 1));
+            auto round_e  = exec_eager.execute_round(std::span(&re, 1));
+            const std::int32_t live_blocks = (step + 1) / 4;
+            auto round_l  = exec_live.execute_round_eager(std::span(&rl, 1), live_blocks);
+            auto round_g2 = exec_graph2.execute_round(std::span(&rg2, 1));
+
+            if (round_g.sampled_tokens()[0] != round_e.sampled_tokens()[0] ||
+                round_g.sampled_tokens()[0] != round_l.sampled_tokens()[0] ||
+                round_g.sampled_tokens()[0] != round_g2.sampled_tokens()[0]) {
+                std::cerr << "FAIL: identity-bucket token mismatch at step=" << step
+                          << " graph=" << round_g.sampled_tokens()[0]
+                          << " eager=" << round_e.sampled_tokens()[0]
+                          << " live=" << round_l.sampled_tokens()[0]
+                          << " graph2=" << round_g2.sampled_tokens()[0] << "\n";
+                return 1;
+            }
+            if (!logits_bit_identical_nonvacuous(device, round_g.logits(), round_e.logits(), 1,
+                                                 "identity graph vs eager") ||
+                !logits_bit_identical_nonvacuous(device, round_g.logits(), round_l.logits(), 1,
+                                                 "identity graph vs live") ||
+                !logits_bit_identical_nonvacuous(device, round_g.logits(), round_g2.logits(), 1,
+                                                 "identity run-to-run")) {
+                return 1;
+            }
+            std::vector<LaneCommitDecision> accept = {{.accept = true}};
+            round_g.commit(accept);
+            round_e.commit(accept);
+            round_l.commit(accept);
+            round_g2.commit(accept);
+            device.synchronize();
+        }
+
+        exec_graph.release_lane(lane_g);
+        exec_eager.release_lane(lane_e);
+        exec_live.release_lane(lane_l);
+        exec_graph2.release_lane(lane_g2);
+
+        lane_g = exec_graph.allocate_lane();
+        lane_e = exec_eager.allocate_lane();
+        lane_l = exec_live.allocate_lane();
+
+        constexpr std::int32_t kPrefill = 2048;
+        std::vector<std::int32_t> tokens(kPrefill);
+        std::vector<std::array<std::int32_t, 3>> positions(kPrefill);
+        for (std::int32_t t = 0; t < kPrefill; ++t) {
+            tokens[t]    = 200 + t;
+            positions[t] = {t, t, t};
+        }
+        auto prefill_one = [&](FlashNextTextExecutor& exec, LaneHandle lane) {
+            auto pr = exec.execute_prefill_chunk(lane, tokens, positions, 0);
+            std::vector<LaneCommitDecision> accept = {{.accept = true}};
+            pr.commit(accept);
+            device.synchronize();
+        };
+        prefill_one(exec_graph, lane_g);
+        prefill_one(exec_eager, lane_e);
+        prefill_one(exec_live, lane_l);
+
+        if (exec_graph.decode_graphs().topologies.size() != 1) {
+            std::cerr << "FAIL: prefill must not capture a larger decode bucket, topologies="
+                      << exec_graph.decode_graphs().topologies.size() << "\n";
+            return 1;
+        }
+
+        bool saw_identity = false;
+        bool saw_topk     = false;
+        for (std::int32_t step = kPrefill; step < kPrefill + 8; ++step) {
+            const std::int32_t live_blocks = (step + 1) / 4;
+            LaneStepRequest rg{.handle = lane_g,
+                               .token_id = 300 + step,
+                               .token_index = step,
+                               .mrope_positions = {step, step, step},
+                               .sampling = {.temperature = 0.0F, .top_p = 1.0F}};
+            LaneStepRequest re = rg;
+            re.handle          = lane_e;
+            LaneStepRequest rl = rg;
+            rl.handle          = lane_l;
+
+            auto round_g = exec_graph.execute_round(std::span(&rg, 1));
+            auto round_e = exec_eager.execute_round(std::span(&re, 1));
+            auto round_l = exec_live.execute_round_eager(std::span(&rl, 1), live_blocks);
+
+            if (live_blocks <= 512) { saw_identity = true; }
+            if (live_blocks > 512) { saw_topk = true; }
+
+            if (round_g.sampled_tokens()[0] != round_e.sampled_tokens()[0] ||
+                round_g.sampled_tokens()[0] != round_l.sampled_tokens()[0]) {
+                std::cerr << "FAIL: three-way token mismatch at token_index=" << step
+                          << " live_blocks=" << live_blocks
+                          << " graph=" << round_g.sampled_tokens()[0]
+                          << " eager=" << round_e.sampled_tokens()[0]
+                          << " live=" << round_l.sampled_tokens()[0] << "\n";
+                return 1;
+            }
+            if (!logits_bit_identical_nonvacuous(device, round_g.logits(), round_e.logits(), 1,
+                                                 "bucket graph vs eager") ||
+                !logits_bit_identical_nonvacuous(device, round_g.logits(), round_l.logits(), 1,
+                                                 "bucket graph vs live frontier")) {
+                std::cerr << " at token_index=" << step << " live_blocks=" << live_blocks << "\n";
+                return 1;
+            }
+            std::vector<LaneCommitDecision> accept = {{.accept = true}};
+            round_g.commit(accept);
+            round_e.commit(accept);
+            round_l.commit(accept);
+            device.synchronize();
+        }
+
+        if (!saw_identity || !saw_topk) {
+            std::cerr << "FAIL: crossing test did not cover both sides of the 512-block boundary\n";
+            return 1;
+        }
+        if (exec_graph.decode_graphs().topologies.size() != 2) {
+            std::cerr << "FAIL: expected lazy capture of bucket 1, topologies="
+                      << exec_graph.decode_graphs().topologies.size() << "\n";
+            return 1;
+        }
+        bool saw_bucket1 = false;
+        for (const auto& topology : exec_graph.decode_graphs().topologies) {
+            if (topology.bucket_index == 1 && topology.batch_size == 1 &&
+                topology.topology_class == flash_next_decode_graph_topology_class(1, 1)) {
+                saw_bucket1 = true;
+            }
+        }
+        if (!saw_bucket1) {
+            std::cerr << "FAIL: missing explicit bucket_index=1 topology after crossing\n";
+            return 1;
+        }
+        if (!exec_graph.last_lazy_capture_milliseconds().has_value() ||
+            !(exec_graph.last_lazy_capture_milliseconds().value() > 0.0)) {
+            std::cerr << "FAIL: lazy capture latency was not recorded\n";
+            return 1;
+        }
+        if (exec_graph.decode_graph_pinned_eager(1, 1)) {
+            std::cerr << "FAIL: bucket 1 was pinned to eager after a successful capture\n";
+            return 1;
+        }
+
+        std::cout << "PASS: test_cuda_graph_bucketed_decode lazy_capture_ms="
+                  << exec_graph.last_lazy_capture_milliseconds().value() << "\n";
+        exec_graph.release_lane(lane_g);
+        exec_eager.release_lane(lane_e);
+        exec_live.release_lane(lane_l);
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_cuda_graph_bucketed_decode exception: " << e.what() << "\n";
+        return 1;
+    } catch (...) {
+        std::cerr << "test_cuda_graph_bucketed_decode unknown exception\n";
+        return 1;
+    }
+}
+
 } // namespace
 
 int main() {
@@ -1883,6 +2202,8 @@ int main() {
     if (test_prefill_chunk_executor(device) != 0) return 1;
     if (test_prefill_chunk_workspace_envelope(device) != 0) return 1;
     if (test_cuda_graph_decode_equivalence(device) != 0) return 1;
+    if (test_decode_graph_bucket_key_layout(device) != 0) return 1;
+    if (test_cuda_graph_bucketed_decode(device) != 0) return 1;
     if (test_cuda_graph_frontier_masking_and_churn(device) != 0) return 1;
     if (test_measure_cuda_graph_footprint(device) != 0) return 1;
     if (test_cuda_graph_timing_benchmark(device) != 0) return 1;

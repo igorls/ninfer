@@ -101,6 +101,12 @@ public:
     [[nodiscard]] std::int32_t current_source_slot(std::uint32_t row_index) const;
     [[nodiscard]] std::int32_t current_destination_slot(std::uint32_t row_index) const;
 
+    [[nodiscard]] void* persistent_base() noexcept { return storage_->p; }
+    [[nodiscard]] const void* persistent_base() const noexcept { return storage_->p; }
+    [[nodiscard]] std::size_t persistent_bytes() const noexcept {
+        return plan_.total_device_bytes - plan_.workspace_bytes - plan_.cuda_graph_allowance_bytes;
+    }
+
 private:
     FlashNextRuntimePlan plan_;
     std::unique_ptr<DeviceBuffer> storage_;

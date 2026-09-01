@@ -22,8 +22,10 @@ flash_next_qsa_indexer_workspace_capacity_bytes(std::int32_t maximum_blocks, std
 
 // Updates the current raw-key/compressed-block state and returns the best complete block IDs.
 // The incomplete visible tail is implicit in token_indices and is not included in selected_blocks.
-// active_blocks is the host-known round frontier, covers every row's complete block count, and is
-// bounded by the startup-fixed maximum_blocks capacity.
+// active_blocks is the host-selected decode envelope (the CUDA-graph context bucket, or the
+// live complete-block frontier on the eager test hook). It covers every row's complete block
+// count and is bounded by the startup-fixed maximum_blocks capacity. Padded score slots in
+// [complete_blocks, active_blocks) are written -inf so they cannot enter the TopK set.
 // When active_blocks <= 512 every complete block is selected: the indexer publishes the identity
 // 0..complete_blocks-1 (padded with -1) and skips scoring and selection. The selected SET
 // matches the sorted path; the published order is identity rather than score-descending.

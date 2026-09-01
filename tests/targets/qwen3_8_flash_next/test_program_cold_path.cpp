@@ -336,6 +336,29 @@ int test_plan_request_validations(ninfer::DeviceContext& device) {
         failures += 1;
     }
 
+    FlashNextRuntimeConfig cfg_graph_8192{
+        .max_concurrency = 4,
+        .max_context     = 8192,
+        .prefill_chunk   = 1024,
+        .use_cuda_graph  = true,
+    };
+    const auto curve_8192 = flash_next_capacity_curve(cfg_graph_8192);
+    auto plan_8192 =
+        finalize_flash_next_runtime_plan(cfg_graph_8192, curve_8192.minimum_main_page_groups);
+    const auto buckets_8192 = flash_next_decode_graph_buckets(plan_8192.maximum_blocks);
+    if (buckets_8192.count != 2 || buckets_8192.blocks[0] != 512 ||
+        buckets_8192.blocks[1] != 2048) {
+        std::cerr << "Expected max_context=8192 buckets {512, 2048}, got count="
+                  << buckets_8192.count << "\n";
+        failures += 1;
+    }
+    const std::size_t expected_8192 = 4ULL * 2ULL * 24ULL * 1024ULL * 1024ULL;
+    if (plan_8192.cuda_graph_allowance_bytes != expected_8192) {
+        std::cerr << "Expected 192 MiB cuda_graph_allowance_bytes for 4 * 2 buckets, got "
+                  << plan_8192.cuda_graph_allowance_bytes << "\n";
+        failures += 1;
+    }
+
     FlashNextRuntimeConfig cfg_graph_off{
         .max_concurrency = 4,
         .max_context     = 512,

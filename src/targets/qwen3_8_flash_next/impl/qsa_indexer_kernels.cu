@@ -3,7 +3,6 @@
 #include "core/device.h"
 #include "ops/common/warp.cuh"
 
-#include <cub/device/device_radix_sort.cuh>
 #include <cub/device/device_segmented_radix_sort.cuh>
 #include <cub/device/device_topk.cuh>
 #include <cuda/__execution/determinism.h>
@@ -169,6 +168,8 @@ __global__ void score_blocks_kernel(const __nv_bfloat16* __restrict__ query,
     const int lane                 = tid & 31;
     const int complete_blocks      = (token_indices[batch] + 1) / 4;
     const std::int64_t score_index = static_cast<std::int64_t>(batch) * active_blocks + block;
+    // Padded slots in [complete_blocks, active_blocks) must be written, not skipped.
+    // Stale NaN ranks highest under the G5 packed-key order and would enter the TopK set.
     if (block >= complete_blocks) {
         if (tid == 0) { scores[score_index] = -__int_as_float(0x7F800000); }
         return;
@@ -315,22 +316,9 @@ std::size_t topk_temp_bytes(int num_items, int k) {
     return bytes;
 }
 
-std::size_t packed_sort512_temp_bytes() {
-    std::size_t bytes     = 0;
-    const auto* keys_in   = reinterpret_cast<const std::uint64_t*>(std::uintptr_t{0x1000});
-    auto* keys_out        = reinterpret_cast<std::uint64_t*>(std::uintptr_t{0x2000});
-    const auto* values_in = reinterpret_cast<const std::int32_t*>(std::uintptr_t{0x3000});
-    auto* values_out      = reinterpret_cast<std::int32_t*>(std::uintptr_t{0x4000});
-    CUDA_CHECK(cub::DeviceRadixSort::SortPairsDescending(nullptr, bytes, keys_in, keys_out,
-                                                         values_in, values_out, kSelectedBlocks, 0,
-                                                         64, nullptr));
-    return bytes;
-}
-
 void select_top512_topk(const float* scores, const std::int32_t* ids, std::uint64_t* packed_keys,
-                        std::uint64_t* packed_selected, std::uint64_t* packed_sorted,
-                        std::int32_t* topk_ids, std::int32_t* sorted_topk_ids, std::int32_t* offsets,
-                        void* temp, std::size_t temp_capacity, int active_blocks, int batch,
+                        std::uint64_t* packed_selected, std::int32_t* topk_ids, void* temp,
+                        std::size_t temp_capacity, int active_blocks, int batch,
                         cudaStream_t stream) {
     constexpr int threads = 256;
     const int items       = active_blocks * batch;
@@ -347,9 +335,6 @@ void select_top512_topk(const float* scores, const std::int32_t* ids, std::uint6
     }
     bitonic_sort_512_descending<<<batch, kSelectedBlocks, 0, stream>>>(packed_selected, topk_ids);
     CUDA_CHECK(cudaGetLastError());
-    (void)packed_sorted;
-    (void)sorted_topk_ids;
-    (void)offsets;
 }
 
 } // namespace
@@ -365,8 +350,7 @@ std::size_t flash_next_qsa_indexer_sort_temp_bytes(std::int32_t maximum_blocks,
     CUDA_CHECK(sort_pairs_descending(nullptr, sort_bytes, keys_in, keys_out, values_in, values_out,
                                      maximum_blocks * batch, batch, offsets, nullptr));
     const std::size_t topk_bytes = topk_temp_bytes(maximum_blocks, kSelectedBlocks);
-    const std::size_t sort512    = packed_sort512_temp_bytes();
-    return std::max(sort_bytes, std::max(topk_bytes, sort512));
+    return std::max(sort_bytes, topk_bytes);
 }
 
 void flash_next_qsa_indexer_launch(const Tensor& token_indices, const Tensor& mrope_positions,
@@ -431,10 +415,7 @@ void flash_next_qsa_indexer_launch(const Tensor& token_indices, const Tensor& mr
         static_cast<const std::int32_t*>(scratch.ids.data),
         static_cast<std::uint64_t*>(scratch.packed_keys.data),
         static_cast<std::uint64_t*>(scratch.packed_selected.data),
-        static_cast<std::uint64_t*>(scratch.packed_sorted.data),
-        static_cast<std::int32_t*>(scratch.topk_ids.data),
-        static_cast<std::int32_t*>(scratch.sorted_ids.data),
-        static_cast<std::int32_t*>(scratch.offsets.data), scratch.sort_temp.data,
+        static_cast<std::int32_t*>(scratch.topk_ids.data), scratch.sort_temp.data,
         scratch.sort_temp.bytes, active_blocks, batch, stream);
     publish_compact_selection_kernel<<<batch, 256, 0, stream>>>(
         static_cast<const std::int32_t*>(scratch.topk_ids.data),
@@ -665,10 +646,7 @@ void flash_next_qsa_indexer_prefill_launch(
             static_cast<const std::int32_t*>(scratch.ids.data),
             static_cast<std::uint64_t*>(scratch.packed_keys.data),
             static_cast<std::uint64_t*>(scratch.packed_selected.data),
-            static_cast<std::uint64_t*>(scratch.packed_sorted.data),
-            static_cast<std::int32_t*>(scratch.topk_ids.data),
-            static_cast<std::int32_t*>(scratch.sorted_ids.data),
-            static_cast<std::int32_t*>(scratch.offsets.data), scratch.sort_temp.data,
+            static_cast<std::int32_t*>(scratch.topk_ids.data), scratch.sort_temp.data,
             scratch.sort_temp.bytes, active_blocks, current_tile, stream);
 
         publish_compact_selection_kernel<<<current_tile, 256, 0, stream>>>(

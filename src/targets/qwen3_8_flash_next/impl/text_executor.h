@@ -26,19 +26,24 @@ class FlashNextTextExecutor;
 
 struct DecodeGraphProfile {
     std::uint32_t batch_size             = 1;
+    std::uint32_t bucket_index           = 0; // explicit integer; not derived from frontiers
+    std::uint32_t bucket_blocks          = 0;
     std::uint32_t min_execution_frontier = 0;
     std::uint32_t max_execution_frontier = 0;
-    std::uint32_t topology_class         = 0;
+    std::uint32_t topology_class         = 0; // (bucket_index << 8) | batch_size
     DecodeGraphDefinition definition;
 };
 
 struct DecodeGraphTopology {
-    std::uint32_t topology_class = 0;
+    std::uint32_t topology_class = 0; // (bucket_index << 8) | batch_size
+    std::uint32_t batch_size     = 0;
+    std::uint32_t bucket_index   = 0; // explicit integer field
     DecodeGraphExecutable executable;
     std::optional<std::size_t> installed_profile;
 };
 
 struct DecodeGraphFamily {
+    FlashNextDecodeGraphBuckets buckets;
     std::vector<DecodeGraphProfile> profiles;
     std::vector<DecodeGraphTopology> topologies;
 };
@@ -164,9 +169,21 @@ public:
     [[nodiscard]] bool use_cuda_graph() const noexcept { return use_cuda_graph_; }
     void set_use_cuda_graph(bool enable) noexcept { use_cuda_graph_ = enable; }
     [[nodiscard]] const DecodeGraphFamily& decode_graphs() const noexcept { return decode_graphs_; }
+    [[nodiscard]] std::optional<double> last_lazy_capture_milliseconds() const noexcept {
+        return last_lazy_capture_ms_;
+    }
+    [[nodiscard]] bool decode_graph_pinned_eager(std::uint32_t batch_size,
+                                                 std::uint32_t bucket_index) const noexcept;
 
     void instantiate_graphs();
-    void execute_round_body(std::uint32_t batch_size, const FlashNextDecodeStateSink* sink);
+    void execute_round_body(std::uint32_t batch_size, std::int32_t active_blocks,
+                            const FlashNextDecodeStateSink* sink);
+
+    // Production execute_round always uses the selected bucket envelope. Tests use this to
+    // run eager decode with an explicit indexer envelope (live frontier).
+    [[nodiscard]] PendingRound execute_round_eager(std::span<const LaneStepRequest> requests,
+                                                   std::int32_t active_blocks,
+                                                   const FlashNextDecodeStateSink* sink = nullptr);
 
 private:
     friend class PendingRound;
@@ -191,6 +208,27 @@ private:
     std::uint32_t pending_prefill_lane_                = 0;
     std::int32_t pending_prefill_initial_active_slot_  = 0;
     std::int32_t pending_prefill_initial_standby_slot_ = 0;
+
+    std::optional<double> last_lazy_capture_ms_;
+    std::uint8_t graph_capture_failures_[8][kFlashNextDecodeGraphMaxBuckets]{};
+    bool graph_pinned_eager_[8][kFlashNextDecodeGraphMaxBuckets]{};
+    std::unique_ptr<DeviceBuffer> lazy_capture_scratch_;
+
+    enum class LazyCaptureOutcome { Installed, NeedEager };
+
+    [[nodiscard]] DecodeGraphTopology* find_topology(std::uint32_t batch_size,
+                                                     std::uint32_t bucket_index) noexcept;
+    [[nodiscard]] const DecodeGraphTopology* find_topology(std::uint32_t batch_size,
+                                                           std::uint32_t bucket_index) const noexcept;
+    bool install_captured_graph(std::uint32_t batch_size, std::uint32_t bucket_index,
+                                std::int32_t bucket_blocks);
+    LazyCaptureOutcome try_lazy_capture(std::uint32_t batch_size, std::uint32_t bucket_index,
+                                        std::int32_t bucket_blocks);
+    [[nodiscard]] PendingRound
+    finish_prepared_round(std::span<const LaneStepRequest> requests,
+                          FlashNextLaneLedger::PreparedRound prepared,
+                          const FlashNextDecodeStateSink* sink, bool force_eager,
+                          std::int32_t active_blocks);
 
     void commit_transaction(std::uint64_t tx_id, std::span<const LaneCommitDecision> decisions);
     void abort_transaction(std::uint64_t tx_id) noexcept;

@@ -7,13 +7,15 @@
 #include "ninfer/ops/scatter.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <string>
-#include <vector>
+#include <exception>
 #include <stdexcept>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
@@ -121,9 +123,12 @@ FlashNextTextExecutor::FlashNextTextExecutor(const TextModelView& model,
 }
 
 void FlashNextTextExecutor::instantiate_graphs() {
+    decode_graphs_.buckets = flash_next_decode_graph_buckets(alloc_.plan().maximum_blocks);
     if (!use_cuda_graph_ || model_.token_embedding.payload == nullptr) { return; }
+    if (decode_graphs_.buckets.count == 0) { return; }
 
     const std::uint32_t max_concurrency = alloc_.plan().config.max_concurrency;
+    const auto small_blocks = static_cast<std::int32_t>(decode_graphs_.buckets.blocks[0]);
     decode_graphs_.profiles.clear();
     decode_graphs_.topologies.clear();
     decode_graphs_.profiles.reserve(max_concurrency);
@@ -135,37 +140,16 @@ void FlashNextTextExecutor::instantiate_graphs() {
 
     pending_custom_embeddings_.clear();
     for (std::uint32_t B = 1; B <= max_concurrency; ++B) {
-        // 1. Eager warm round for module materialization
-        execute_round_body(B, nullptr);
+        // Startup captures the smallest bucket only. Larger buckets are lazy.
+        execute_round_body(B, small_blocks, nullptr);
         device_.synchronize();
 
-        // 2. Capture graph definition
-        DecodeGraphProfile profile;
-        profile.batch_size             = B;
-        profile.min_execution_frontier = 0;
-        profile.max_execution_frontier = alloc_.plan().maximum_blocks;
-        profile.topology_class         = B;
-
-        profile.definition.capture(device_.stream, [this, B] {
-            execute_round_body(B, nullptr);
-        });
-
-        if (!profile.definition.ready()) {
-            throw std::runtime_error("FlashNextTextExecutor: failed to capture decode graph for B=" +
-                                     std::to_string(B));
+        if (!install_captured_graph(B, 0, small_blocks)) {
+            throw std::runtime_error(
+                "FlashNextTextExecutor: failed to capture decode graph for B=" + std::to_string(B) +
+                " bucket=0 blocks=" + std::to_string(small_blocks));
         }
-
-        decode_graphs_.profiles.push_back(std::move(profile));
-
-        // 3. Instantiate and upload executable
-        DecodeGraphTopology topology;
-        topology.topology_class    = B;
-        topology.executable.instantiate(decode_graphs_.profiles.back().definition);
-        topology.installed_profile = decode_graphs_.profiles.size() - 1;
-        topology.executable.upload(device_.stream);
         device_.synchronize();
-
-        decode_graphs_.topologies.push_back(std::move(topology));
     }
 }
 
@@ -200,8 +184,130 @@ std::size_t FlashNextTextExecutor::active_lanes_count() const noexcept {
     return ledger_.active_lanes_count();
 }
 
+bool FlashNextTextExecutor::decode_graph_pinned_eager(std::uint32_t batch_size,
+                                                      std::uint32_t bucket_index) const noexcept {
+    if (batch_size < 1 || batch_size > 8 || bucket_index >= kFlashNextDecodeGraphMaxBuckets) {
+        return false;
+    }
+    return graph_pinned_eager_[batch_size - 1][bucket_index];
+}
+
+DecodeGraphTopology* FlashNextTextExecutor::find_topology(std::uint32_t batch_size,
+                                                          std::uint32_t bucket_index) noexcept {
+    for (auto& topology : decode_graphs_.topologies) {
+        if (topology.batch_size == batch_size && topology.bucket_index == bucket_index) {
+            return &topology;
+        }
+    }
+    return nullptr;
+}
+
+const DecodeGraphTopology*
+FlashNextTextExecutor::find_topology(std::uint32_t batch_size,
+                                     std::uint32_t bucket_index) const noexcept {
+    for (const auto& topology : decode_graphs_.topologies) {
+        if (topology.batch_size == batch_size && topology.bucket_index == bucket_index) {
+            return &topology;
+        }
+    }
+    return nullptr;
+}
+
+bool FlashNextTextExecutor::install_captured_graph(std::uint32_t batch_size,
+                                                   std::uint32_t bucket_index,
+                                                   std::int32_t bucket_blocks) {
+    DecodeGraphProfile profile;
+    profile.batch_size             = batch_size;
+    profile.bucket_index           = bucket_index;
+    profile.bucket_blocks          = static_cast<std::uint32_t>(bucket_blocks);
+    profile.min_execution_frontier = 0;
+    profile.max_execution_frontier = static_cast<std::uint32_t>(bucket_blocks);
+    profile.topology_class = flash_next_decode_graph_topology_class(batch_size, bucket_index);
+
+    profile.definition.capture(device_.stream, [this, batch_size, bucket_blocks] {
+        execute_round_body(batch_size, bucket_blocks, nullptr);
+    });
+    if (!profile.definition.ready()) { return false; }
+
+    DecodeGraphTopology topology;
+    topology.topology_class = profile.topology_class;
+    topology.batch_size     = batch_size;
+    topology.bucket_index   = bucket_index;
+    topology.executable.instantiate(profile.definition);
+    decode_graphs_.profiles.push_back(std::move(profile));
+    topology.installed_profile = decode_graphs_.profiles.size() - 1;
+    topology.executable.upload(device_.stream);
+    decode_graphs_.topologies.push_back(std::move(topology));
+    return true;
+}
+
+FlashNextTextExecutor::LazyCaptureOutcome
+FlashNextTextExecutor::try_lazy_capture(std::uint32_t batch_size, std::uint32_t bucket_index,
+                                        std::int32_t bucket_blocks) {
+    const std::uint32_t bslot = batch_size - 1;
+    if (graph_pinned_eager_[bslot][bucket_index]) { return LazyCaptureOutcome::NeedEager; }
+
+    // Dummy warmup+capture mutates persistent decode state. Snapshot/restore so the
+    // production round can launch the new graph against the live KV/ingress.
+    const std::size_t persistent_bytes = alloc_.persistent_bytes();
+    if (!lazy_capture_scratch_ || lazy_capture_scratch_->bytes < persistent_bytes) {
+        lazy_capture_scratch_ = std::make_unique<DeviceBuffer>(persistent_bytes);
+    }
+    const std::size_t ple_bytes =
+        static_cast<std::size_t>(alloc_.plan().config.max_concurrency) * 2'560 *
+        sizeof(std::uint16_t);
+    std::vector<std::byte> saved_ple(ple_bytes);
+    std::memcpy(saved_ple.data(), ple_pipeline_.fixed_host_buffer(), ple_bytes);
+    const FlashNextDecodeIngress saved_ing = *alloc_.host_ingress();
+    CUDA_CHECK(cudaMemcpyAsync(lazy_capture_scratch_->p, alloc_.persistent_base(), persistent_bytes,
+                               cudaMemcpyDeviceToDevice, device_.stream));
+
+    bool installed = false;
+    const auto t0  = std::chrono::steady_clock::now();
+    try {
+        std::memset(alloc_.host_ingress(), 0, sizeof(FlashNextDecodeIngress));
+        std::memset(const_cast<void*>(ple_pipeline_.fixed_host_buffer()), 0, ple_bytes);
+        execute_round_body(batch_size, bucket_blocks, nullptr);
+        device_.synchronize();
+        if (!install_captured_graph(batch_size, bucket_index, bucket_blocks)) {
+            throw std::runtime_error("capture produced an empty graph definition");
+        }
+        const auto t1 = std::chrono::steady_clock::now();
+        last_lazy_capture_ms_ = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        graph_capture_failures_[bslot][bucket_index] = 0;
+        installed = true;
+    } catch (const std::exception& ex) {
+        graph_capture_failures_[bslot][bucket_index] =
+            static_cast<std::uint8_t>(graph_capture_failures_[bslot][bucket_index] + 1);
+        std::fprintf(stderr,
+                     "FlashNextTextExecutor: CUDA graph capture failed for B=%u bucket=%u "
+                     "blocks=%d (attempt %u): %s\n",
+                     batch_size, bucket_index, bucket_blocks,
+                     static_cast<unsigned>(graph_capture_failures_[bslot][bucket_index]),
+                     ex.what());
+        if (graph_capture_failures_[bslot][bucket_index] >= 2) {
+            graph_pinned_eager_[bslot][bucket_index] = true;
+            std::fprintf(stderr,
+                         "FlashNextTextExecutor: pinning B=%u bucket=%u to permanent eager decode\n",
+                         batch_size, bucket_index);
+        }
+    }
+
+    CUDA_CHECK(cudaMemcpyAsync(alloc_.persistent_base(), lazy_capture_scratch_->p, persistent_bytes,
+                               cudaMemcpyDeviceToDevice, device_.stream));
+    *alloc_.host_ingress() = saved_ing;
+    std::memcpy(const_cast<void*>(ple_pipeline_.fixed_host_buffer()), saved_ple.data(), ple_bytes);
+    return installed ? LazyCaptureOutcome::Installed : LazyCaptureOutcome::NeedEager;
+}
+
 void FlashNextTextExecutor::execute_round_body(std::uint32_t batch_size,
+                                              std::int32_t active_blocks,
                                               const FlashNextDecodeStateSink* sink) {
+    if (active_blocks < 0 ||
+        static_cast<std::uint32_t>(active_blocks) > alloc_.plan().maximum_blocks) {
+        throw std::invalid_argument(
+            "FlashNextTextExecutor: active_blocks must be in [0, maximum_blocks]");
+    }
     alloc_.workspace().reset();
 
     // 1. Single captured H2D memcpy of pinned ingress
@@ -249,8 +355,8 @@ void FlashNextTextExecutor::execute_round_body(std::uint32_t batch_size,
 
     const auto max_blocks = static_cast<std::int32_t>(alloc_.plan().maximum_blocks);
     flash_next_text_decode_core(model_, embedding, token_indices, mrope_positions, table_rows,
-                                source_slots, destination_slots, gathered_ple,
-                                max_blocks, max_blocks, alloc_.state_view(), alloc_.workspace(),
+                                source_slots, destination_slots, gathered_ple, max_blocks,
+                                active_blocks, alloc_.state_view(), alloc_.workspace(),
                                 final_hidden, logits, device_.stream, sink);
 
     // 5. Sampler
@@ -292,7 +398,49 @@ PendingRound FlashNextTextExecutor::execute_round(std::span<const LaneStepReques
     }
 
     auto prepared = ledger_.begin_round(requests, ple_metadata_);
+    const std::uint32_t bucket_index =
+        flash_next_decode_graph_select_bucket(decode_graphs_.buckets, prepared.max_active_blocks);
+    const auto bucket_blocks = static_cast<std::int32_t>(decode_graphs_.buckets.blocks[bucket_index]);
+    return finish_prepared_round(requests, std::move(prepared), sink, false, bucket_blocks);
+}
 
+PendingRound FlashNextTextExecutor::execute_round_eager(std::span<const LaneStepRequest> requests,
+                                                        std::int32_t active_blocks,
+                                                        const FlashNextDecodeStateSink* sink) {
+    for (const auto& req : requests) {
+        if (req.handle.owner() != this) {
+            throw std::invalid_argument(
+                "FlashNextTextExecutor: cross-executor or invalid owner handle");
+        }
+        if (req.custom_embedding != nullptr &&
+            (req.custom_embedding->dtype != DType::BF16 || req.custom_embedding->ne[0] != 2'560 ||
+             !req.custom_embedding->is_contiguous())) {
+            throw std::invalid_argument(
+                "FlashNextTextExecutor: custom embedding must be a contiguous BF16 [2560] column");
+        }
+    }
+
+    const auto batch_size = static_cast<std::uint32_t>(requests.size());
+    if (batch_size == 0 || batch_size > alloc_.plan().config.max_concurrency) {
+        throw std::invalid_argument("FlashNextTextExecutor: invalid round batch size");
+    }
+    if (round_in_flight_) {
+        throw std::logic_error(
+            "FlashNextTextExecutor: cannot start round while previous round is in flight");
+    }
+    if (active_blocks < 0 ||
+        static_cast<std::uint32_t>(active_blocks) > alloc_.plan().maximum_blocks) {
+        throw std::invalid_argument("FlashNextTextExecutor: active_blocks outside maximum_blocks");
+    }
+
+    auto prepared = ledger_.begin_round(requests, ple_metadata_);
+    return finish_prepared_round(requests, std::move(prepared), sink, true, active_blocks);
+}
+
+PendingRound FlashNextTextExecutor::finish_prepared_round(
+    std::span<const LaneStepRequest> requests, FlashNextLaneLedger::PreparedRound prepared,
+    const FlashNextDecodeStateSink* sink, bool force_eager, std::int32_t active_blocks) {
+    const auto batch_size = static_cast<std::uint32_t>(requests.size());
     try {
         pending_is_prefill_chunk_ = false;
 
@@ -328,16 +476,30 @@ PendingRound FlashNextTextExecutor::execute_round(std::span<const LaneStepReques
             pending_custom_embeddings_[i] = requests[i].custom_embedding;
             has_custom = has_custom || requests[i].custom_embedding != nullptr;
         }
-        if (use_cuda_graph_ && sink == nullptr && !has_custom && !decode_graphs_.topologies.empty()) {
-            if (batch_size - 1 >= decode_graphs_.topologies.size()) {
-                throw std::logic_error(
-                    "FlashNextTextExecutor: graph topology not available for batch size");
+
+        const std::uint32_t bucket_index = flash_next_decode_graph_select_bucket(
+            decode_graphs_.buckets, active_blocks);
+        bool ran = false;
+        if (!force_eager && use_cuda_graph_ && sink == nullptr && !has_custom &&
+            model_.token_embedding.payload != nullptr && decode_graphs_.buckets.count > 0) {
+            if (auto* topology = find_topology(batch_size, bucket_index);
+                topology != nullptr && topology->executable.ready()) {
+                topology->executable.launch(device_.stream);
+                ran = true;
+            } else if (!graph_pinned_eager_[batch_size - 1][bucket_index]) {
+                const auto outcome = try_lazy_capture(batch_size, bucket_index, active_blocks);
+                if (outcome == LazyCaptureOutcome::Installed) {
+                    auto* topology = find_topology(batch_size, bucket_index);
+                    if (topology == nullptr || !topology->executable.ready()) {
+                        throw std::logic_error(
+                            "FlashNextTextExecutor: lazy capture installed without a ready topology");
+                    }
+                    topology->executable.launch(device_.stream);
+                    ran = true;
+                }
             }
-            auto& topology = decode_graphs_.topologies[batch_size - 1];
-            topology.executable.launch(device_.stream);
-        } else {
-            execute_round_body(batch_size, sink);
         }
+        if (!ran) { execute_round_body(batch_size, active_blocks, sink); }
 
         // 5. Complete round on event wait
         round_completion_.record(device_.stream);

@@ -13,12 +13,9 @@ struct FlashNextQsaIndexerWorkspace {
     Tensor projected;
     Tensor query;
     Tensor scores;
-    Tensor sorted_scores;
     Tensor ids;
-    Tensor sorted_ids;
     Tensor packed_keys;
     Tensor packed_selected;
-    Tensor packed_sorted;
     Tensor topk_ids;
     Tensor offsets;
     DeviceSpan sort_temp;
@@ -43,12 +40,9 @@ allocate_flash_next_qsa_indexer_workspace(Arena& arena, std::int32_t maximum_blo
         .projected       = arena.alloc(DType::BF16, {640, tokens}, 256),
         .query           = arena.alloc(DType::BF16, {128, 4, tokens}, 256),
         .scores          = arena.alloc(DType::FP32, {maximum_blocks, tile_size}, 256),
-        .sorted_scores   = arena.alloc(DType::FP32, {maximum_blocks, tile_size}, 256),
         .ids             = arena.alloc(DType::I32, {maximum_blocks, tile_size}, 256),
-        .sorted_ids      = arena.alloc(DType::I32, {maximum_blocks, tile_size}, 256),
         .packed_keys     = arena.alloc(DType::I64, {maximum_blocks, tile_size}, 256),
         .packed_selected = arena.alloc(DType::I64, {512, tile_size}, 256),
-        .packed_sorted   = arena.alloc(DType::I64, {512, tile_size}, 256),
         .topk_ids        = arena.alloc(DType::I32, {512, tile_size}, 256),
         .offsets         = arena.alloc(DType::I32, {tile_size + 1}, 16),
         .sort_temp       = arena.alloc_bytes(sort_temp_bytes, 256),

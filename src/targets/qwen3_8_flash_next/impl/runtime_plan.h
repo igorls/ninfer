@@ -5,6 +5,7 @@
 #include "runtime/contract/types.h"
 #include "targets/qwen3_8_flash_next/impl/model_view.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -49,6 +50,55 @@ inline constexpr std::size_t kRecurrentStateBytesPerSlot =
     kQsaRawPositionsBytesPerSlot;
 
 inline constexpr std::uint32_t kPrefillChunkAlignment = 128;
+
+// Decode CUDA-graph context buckets. Token envelopes 2048 / 8192 / 32768 plus the
+// startup-fixed max_context slot. Candidates at or above maximum_blocks are dropped
+// except the final slot, so max_context=8192 dedups to {512, 2048} blocks.
+inline constexpr std::uint32_t kFlashNextDecodeGraphBucketTokenEnvelopes[3] = {2048u, 8192u,
+                                                                              32768u};
+inline constexpr std::uint32_t kFlashNextDecodeGraphMaxBuckets              = 4;
+inline constexpr std::size_t kFlashNextDecodeGraphBytesPerCapture =
+    24ULL * 1024ULL * 1024ULL;
+
+struct FlashNextDecodeGraphBuckets {
+    std::array<std::uint32_t, kFlashNextDecodeGraphMaxBuckets> blocks{};
+    std::uint32_t count = 0;
+};
+
+// topology_class packs an explicit integer key: bits [7:0] = batch_size (1..8),
+// bits [15:8] = bucket_index (0..3). Lookups must use this field (or the stored
+// bucket_index) and must not derive the bucket from frontier envelopes.
+[[nodiscard]] inline constexpr std::uint32_t
+flash_next_decode_graph_topology_class(std::uint32_t batch_size,
+                                       std::uint32_t bucket_index) noexcept {
+    return (bucket_index << 8) | batch_size;
+}
+
+[[nodiscard]] inline FlashNextDecodeGraphBuckets
+flash_next_decode_graph_buckets(std::uint32_t maximum_blocks) {
+    FlashNextDecodeGraphBuckets out{};
+    if (maximum_blocks == 0) { return out; }
+    for (std::uint32_t tokens : kFlashNextDecodeGraphBucketTokenEnvelopes) {
+        const std::uint32_t blocks = (tokens + kBlockTokens - 1u) / kBlockTokens;
+        if (blocks >= maximum_blocks) { continue; }
+        if (out.count > 0 && out.blocks[out.count - 1] == blocks) { continue; }
+        out.blocks[out.count++] = blocks;
+    }
+    if (out.count == 0 || out.blocks[out.count - 1] != maximum_blocks) {
+        out.blocks[out.count++] = maximum_blocks;
+    }
+    return out;
+}
+
+[[nodiscard]] inline std::uint32_t
+flash_next_decode_graph_select_bucket(const FlashNextDecodeGraphBuckets& buckets,
+                                      std::int32_t active_blocks) {
+    const auto need = static_cast<std::uint32_t>(std::max<std::int32_t>(active_blocks, 0));
+    for (std::uint32_t i = 0; i < buckets.count; ++i) {
+        if (buckets.blocks[i] >= need) { return i; }
+    }
+    return buckets.count == 0 ? 0 : buckets.count - 1;
+}
 
 // Fixed-address pinned ingress structure copied by a single captured cudaMemcpyAsync
 struct FlashNextDecodeIngress {

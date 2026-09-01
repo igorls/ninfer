@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -64,6 +65,70 @@ int test_constants_and_math() {
     }
 
     std::cout << "PASS: test_constants_and_math\n";
+    return 0;
+}
+
+int test_decode_graph_buckets() {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+
+    auto expect = [](std::uint32_t maximum_blocks, std::initializer_list<std::uint32_t> want,
+                     const char* label) {
+        const auto got = flash_next_decode_graph_buckets(maximum_blocks);
+        if (got.count != want.size()) {
+            std::cerr << "FAIL: " << label << " bucket count=" << got.count
+                      << " expected=" << want.size() << "\n";
+            return false;
+        }
+        std::uint32_t i = 0;
+        for (std::uint32_t w : want) {
+            if (got.blocks[i] != w) {
+                std::cerr << "FAIL: " << label << " bucket[" << i << "]=" << got.blocks[i]
+                          << " expected=" << w << "\n";
+                return false;
+            }
+            ++i;
+        }
+        return true;
+    };
+
+    if (!expect(128, {128u}, "max_context=512 / 128 blocks")) { return 1; }
+    if (!expect(512, {512u}, "max_context=2048 / 512 blocks")) { return 1; }
+    if (!expect(1024, {512u, 1024u}, "max_context=4096")) { return 1; }
+    if (!expect(2048, {512u, 2048u}, "max_context=8192")) { return 1; }
+    if (!expect(8192, {512u, 2048u, 8192u}, "max_context=32768")) { return 1; }
+    if (!expect(65536, {512u, 2048u, 8192u, 65536u}, "max_context=262144")) { return 1; }
+
+    const auto b8192 = flash_next_decode_graph_buckets(2048);
+    if (flash_next_decode_graph_select_bucket(b8192, 0) != 0 ||
+        flash_next_decode_graph_select_bucket(b8192, 512) != 0 ||
+        flash_next_decode_graph_select_bucket(b8192, 513) != 1 ||
+        flash_next_decode_graph_select_bucket(b8192, 2048) != 1) {
+        std::cerr << "FAIL: 8192-token bucket selection at the 512-block boundary\n";
+        return 1;
+    }
+    if (flash_next_decode_graph_topology_class(1, 0) != 1u ||
+        flash_next_decode_graph_topology_class(8, 1) != ((1u << 8) | 8u) ||
+        flash_next_decode_graph_topology_class(1, 0) ==
+            flash_next_decode_graph_topology_class(1, 1)) {
+        std::cerr << "FAIL: topology_class must encode bucket_index explicitly\n";
+        return 1;
+    }
+
+    FlashNextRuntimeConfig cfg8192{
+        .max_concurrency = 4,
+        .max_context     = 8192,
+        .prefill_chunk   = 1024,
+        .use_cuda_graph  = true,
+    };
+    const auto plan8192 = finalize_flash_next_runtime_plan(
+        cfg8192, flash_next_capacity_curve(cfg8192).minimum_main_page_groups);
+    if (plan8192.cuda_graph_allowance_bytes != 4ULL * 2ULL * 24ULL * 1024ULL * 1024ULL) {
+        std::cerr << "FAIL: max_context=8192 allowance expected 192 MiB got "
+                  << plan8192.cuda_graph_allowance_bytes << "\n";
+        return 1;
+    }
+
+    std::cout << "PASS: test_decode_graph_buckets\n";
     return 0;
 }
 
@@ -331,6 +396,7 @@ int test_runtime_allocation_and_slots(ninfer::DeviceContext& device) {
 int main() {
     // 1. CPU tests run unconditionally without requiring a CUDA device
     if (test_constants_and_math() != 0) return 1;
+    if (test_decode_graph_buckets() != 0) return 1;
     if (test_capacity_curve_and_finalize() != 0) return 1;
 
     // 2. CUDA device tests run only when a CUDA device is available
