@@ -477,7 +477,7 @@ int test_continuation_lifecycle_and_reuse(ninfer::DeviceContext& device) {
 
     ninfer::runtime::ContextMachineCostModel cost_model{};
     auto candidate1 = program.inspect_admission(
-        prompt1, base_plan1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+        prompt1, base_plan1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     failures += check(candidate1.has_value(), "Turn 1 admission must succeed");
     failures += check(candidate1->summary().prefix_reuse_path == ninfer::PrefixReusePath::Root,
                       "Turn 1 reuse path must be Root");
@@ -564,7 +564,7 @@ int test_continuation_lifecycle_and_reuse(ninfer::DeviceContext& device) {
     std::fflush(stdout);
 
     auto candidate2 = program.inspect_admission(
-        prompt2, base_plan2, ninfer::runtime::LaneId(0), &cont_handle, nullptr, std::nullopt, false, cost_model);
+        prompt2, base_plan2, ninfer::runtime::LaneId(0), &cont_handle, nullptr, std::nullopt, false);
     failures += check(candidate2.has_value(), "Turn 2 admission must succeed");
     failures += check(candidate2->summary().reusable_prompt_tokens == 16,
                       "Turn 2 reusable prompt tokens must be 16");
@@ -654,7 +654,7 @@ int test_continuation_mismatch_fallback(ninfer::DeviceContext& device) {
 
     ninfer::runtime::ContextMachineCostModel cost_model{};
     auto candidate1 = program.inspect_admission(
-        prompt1, base_plan1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+        prompt1, base_plan1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     auto resource_plan1 = program.seal_identity(*candidate1, prompt1);
 
     std::atomic<bool> flag{false};
@@ -676,11 +676,11 @@ int test_continuation_mismatch_fallback(ninfer::DeviceContext& device) {
     auto base_plan2                               = program.plan_request(prompt2, exec_options);
 
     auto candidate2 = program.inspect_admission(
-        prompt2, base_plan2, ninfer::runtime::LaneId(0), &cont, nullptr, std::nullopt, false, cost_model);
+        prompt2, base_plan2, ninfer::runtime::LaneId(0), &cont, nullptr, std::nullopt, false);
     failures += check(!candidate2.has_value(), "Admission on divergent prompt with mismatching source must return nullopt");
 
     auto candidate_root = program.inspect_admission(
-        prompt2, base_plan2, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+        prompt2, base_plan2, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     failures += check(candidate_root.has_value(), "Admission on root fallback must succeed");
     if (candidate_root.has_value()) {
         failures += check(candidate_root->summary().reusable_prompt_tokens == 0,
@@ -744,7 +744,7 @@ int test_continuation_lru_eviction(ninfer::DeviceContext& device) {
         const auto prompt = make_prompt(tokens, true);
         auto base_plan    = program.plan_request(prompt, exec_options);
         auto candidate    = program.inspect_admission(
-            prompt, base_plan, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+            prompt, base_plan, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
         failures += check(candidate.has_value(), "Admission must succeed");
 
         std::optional<ResourcePlan> res_plan;
@@ -753,13 +753,15 @@ int test_continuation_lru_eviction(ninfer::DeviceContext& device) {
         } else {
             // Request 2 plans eviction of LRU continuation 0 via pressure planning
             std::vector<const ContinuationHandle*> owners = {&continuations[0], &continuations[1]};
-            std::vector<std::uint32_t> owner_ordinals = {0, 1};
+            std::vector<ninfer::runtime::PlanningOwnerId> owner_ids = {ninfer::runtime::PlanningOwnerId{0}, ninfer::runtime::PlanningOwnerId{1}};
             const AdmissionCandidate* cand_ptr = &*candidate;
-            auto session = program.begin_pressure_planning(cost_model, std::span(&cand_ptr, 1), owners, owner_ordinals, {}, {});
-            auto prep = session.prepare_expansion(session.identity_target(*candidate));
+            std::array cand_ids{ninfer::runtime::PlanningCandidateId{0}};
+            auto session = program.begin_pressure_planning(std::span(&cand_ptr, 1), cand_ids, owners, owner_ids, {}, {});
+            auto prep = session.prepare_expansion(session.identity_target(cand_ids[0]));
             auto view = session.commit_expansion(std::move(prep));
             failures += check(!view.children.empty(), "Expansion must provide children");
-            res_plan = session.seal(view.children[0], prompt);
+            auto assessed = session.assess(view.children[0]);
+            res_plan = session.seal(std::move(assessed), prompt);
         }
         failures += check(res_plan.has_value(), "Resource plan must be created");
 
@@ -798,7 +800,7 @@ int test_continuation_lru_eviction(ninfer::DeviceContext& device) {
     const auto prompt0 = make_prompt(req0_tokens, true);
     auto base0         = program.plan_request(prompt0, exec_options);
     auto cand0         = program.inspect_admission(
-        prompt0, base0, ninfer::runtime::LaneId(0), &continuations[0], nullptr, std::nullopt, false, cost_model);
+        prompt0, base0, ninfer::runtime::LaneId(0), &continuations[0], nullptr, std::nullopt, false);
     failures += check(!cand0.has_value(),
                       "Evicted continuation must return nullopt on inspection");
 
@@ -888,7 +890,7 @@ int test_turn_closure_checkpoint_and_multi_turn_reuse(ninfer::DeviceContext& dev
 
     auto base1 = program.plan_request(prompt1, exec_options);
     auto cand1 = program.inspect_admission(
-        prompt1, base1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+        prompt1, base1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     failures += check(cand1.has_value(), "Turn 1 admission must succeed");
     auto res1 = program.seal_identity(*cand1, prompt1);
 
@@ -973,7 +975,7 @@ int test_turn_closure_checkpoint_and_multi_turn_reuse(ninfer::DeviceContext& dev
     auto base2 = program.plan_request(prompt2, exec_options);
     std::printf("  [Turn 2] Inspecting admission...\n");
     auto cand2 = program.inspect_admission(
-        prompt2, base2, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false, cost_model);
+        prompt2, base2, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false);
     failures += check(cand2.has_value(), "Turn 2 admission with TurnClosure must succeed");
     if (cand2.has_value()) {
         failures += check(cand2->summary().reusable_prompt_tokens == 16,
@@ -1035,7 +1037,7 @@ int test_turn_closure_checkpoint_and_multi_turn_reuse(ninfer::DeviceContext& dev
     const auto prompt_fill = make_prompt(fill_tokens, true);
     auto base_fill = program.plan_request(prompt_fill, exec_options);
     auto cand_fill = program.inspect_admission(
-        prompt_fill, base_fill, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+        prompt_fill, base_fill, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     failures += check(cand_fill.has_value(), "Pool fill admission must succeed");
     auto res_fill = program.seal_identity(*cand_fill, prompt_fill);
     (void)program.start_resource_transaction(std::move(*res_fill), make_prompt(fill_tokens, true), cancellation);
@@ -1055,7 +1057,7 @@ int test_turn_closure_checkpoint_and_multi_turn_reuse(ninfer::DeviceContext& dev
     std::printf("  [Turn 3] Resuming from same TurnClosure after pool fill...\n");
     auto base3 = program.plan_request(prompt2, exec_options);
     auto cand3 = program.inspect_admission(
-        prompt2, base3, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false, cost_model);
+        prompt2, base3, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false);
     failures += check(cand3.has_value(), "Turn 3 admission with TurnClosure must succeed");
     if (cand3.has_value()) {
         failures += check(cand3->summary().reusable_prompt_tokens == 16,
@@ -1110,7 +1112,7 @@ int test_turn_closure_checkpoint_and_multi_turn_reuse(ninfer::DeviceContext& dev
         const auto prompt_skip = make_prompt(skip_tokens, true, 12);
         auto base_skip = program.plan_request(prompt_skip, exec_options);
         auto cand_skip = program.inspect_admission(
-            prompt_skip, base_skip, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+            prompt_skip, base_skip, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
         failures += check(cand_skip.has_value(), "Skip test admission must succeed");
         auto res_skip = program.seal_identity(*cand_skip, prompt_skip);
         (void)program.start_resource_transaction(std::move(*res_skip), make_prompt(skip_tokens, true, 12), cancellation);
@@ -1144,7 +1146,7 @@ int test_turn_closure_checkpoint_and_multi_turn_reuse(ninfer::DeviceContext& dev
         const auto prompt_nobound = make_prompt(nobound_tokens, true, std::nullopt);
         auto base_nobound = program.plan_request(prompt_nobound, exec_options);
         auto cand_nobound = program.inspect_admission(
-            prompt_nobound, base_nobound, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+            prompt_nobound, base_nobound, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
         failures += check(cand_nobound.has_value(), "No-boundary admission must succeed");
         auto res_nobound = program.seal_identity(*cand_nobound, prompt_nobound);
         (void)program.start_resource_transaction(std::move(*res_nobound), make_prompt(nobound_tokens, true, std::nullopt), cancellation);
@@ -1216,7 +1218,7 @@ int test_turn_closure_chain_retention(ninfer::DeviceContext& device) {
     for (std::size_t i = 0; i < 20; ++i) { t1_tokens[i] = static_cast<ninfer::TokenId>(1000 + i); }
     const auto prompt1 = make_prompt(t1_tokens, true, 12);
     auto base1 = program.plan_request(prompt1, exec_options);
-    auto cand1 = program.inspect_admission(prompt1, base1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto cand1 = program.inspect_admission(prompt1, base1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     failures += check(cand1.has_value(), "T1 admission must succeed");
     auto res1 = program.seal_identity(*cand1, prompt1);
     (void)program.start_resource_transaction(std::move(*res1), make_prompt(t1_tokens, true, 12), cancellation);
@@ -1245,12 +1247,12 @@ int test_turn_closure_chain_retention(ninfer::DeviceContext& device) {
     for (std::size_t i = 20; i < 40; ++i) { t2_tokens[i] = static_cast<ninfer::TokenId>(2000 + i); }
     const auto prompt2 = make_prompt(t2_tokens, true, 30);
     auto base2 = program.plan_request(prompt2, exec_options);
-    auto cand2 = program.inspect_admission(prompt2, base2, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false, cost_model);
+    auto cand2 = program.inspect_admission(prompt2, base2, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false);
     failures += check(cand2.has_value(), "T2 admission must succeed against T1 continuation");
     if (cand2.has_value()) {
         failures += check(cand2->summary().reusable_prompt_tokens == 12, "T2 reusable prompt tokens must be 12");
         failures += check(cand2->summary().prefix_reuse_path == PrefixReusePath::PrivateTurnClosure, "T2 reuse path must be PrivateTurnClosure");
-        failures += check(cand2->identity_assessment().source_disposition == runtime::ClaimDisposition::Retained,
+        failures += check(cand2->identity_assessment().source_mode == runtime::PrivateSourceMode::Retain,
                           "T2 source disposition must be Retained for TurnClosure");
     }
     auto res2 = program.seal_identity(*cand2, prompt2);
@@ -1280,12 +1282,12 @@ int test_turn_closure_chain_retention(ninfer::DeviceContext& device) {
     for (std::size_t i = 40; i < 60; ++i) { t3_tokens[i] = static_cast<ninfer::TokenId>(3000 + i); }
     const auto prompt3 = make_prompt(t3_tokens, true, 50);
     auto base3 = program.plan_request(prompt3, exec_options);
-    auto cand3 = program.inspect_admission(prompt3, base3, ninfer::runtime::LaneId(0), &*fin2.continuation, nullptr, std::nullopt, false, cost_model);
+    auto cand3 = program.inspect_admission(prompt3, base3, ninfer::runtime::LaneId(0), &*fin2.continuation, nullptr, std::nullopt, false);
     failures += check(cand3.has_value(), "T3 admission must succeed against T2 continuation");
     if (cand3.has_value()) {
         failures += check(cand3->summary().reusable_prompt_tokens == 30, "T3 reusable prompt tokens must be 30");
         failures += check(cand3->summary().prefix_reuse_path == PrefixReusePath::PrivateTurnClosure, "T3 reuse path must be PrivateTurnClosure");
-        failures += check(cand3->identity_assessment().source_disposition == runtime::ClaimDisposition::Retained,
+        failures += check(cand3->identity_assessment().source_mode == runtime::PrivateSourceMode::Retain,
                           "T3 source disposition must be Retained for TurnClosure");
     }
     auto res3 = program.seal_identity(*cand3, prompt3);
@@ -1317,7 +1319,7 @@ int test_turn_closure_chain_retention(ninfer::DeviceContext& device) {
     auto base2_rep = program.plan_request(prompt2_rep, exec_options);
 
     // Test admission with source = T3 continuation (which is descendant of T2, which is descendant of T1)
-    auto cand2_rep_from_t3 = program.inspect_admission(prompt2_rep, base2_rep, ninfer::runtime::LaneId(0), &*fin3.continuation, nullptr, std::nullopt, false, cost_model);
+    auto cand2_rep_from_t3 = program.inspect_admission(prompt2_rep, base2_rep, ninfer::runtime::LaneId(0), &*fin3.continuation, nullptr, std::nullopt, false);
     failures += check(cand2_rep_from_t3.has_value(), "T2 repeated admission against T3 continuation must succeed");
     if (cand2_rep_from_t3.has_value()) {
         failures += check(cand2_rep_from_t3->summary().reusable_prompt_tokens == 12,
@@ -1327,7 +1329,7 @@ int test_turn_closure_chain_retention(ninfer::DeviceContext& device) {
     }
 
     // Test admission with source = T1 continuation
-    auto cand2_rep_from_t1 = program.inspect_admission(prompt2_rep, base2_rep, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false, cost_model);
+    auto cand2_rep_from_t1 = program.inspect_admission(prompt2_rep, base2_rep, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false);
     failures += check(cand2_rep_from_t1.has_value(), "T2 repeated admission against T1 continuation must succeed");
     if (cand2_rep_from_t1.has_value()) {
         failures += check(cand2_rep_from_t1->summary().reusable_prompt_tokens == 12,
@@ -1410,7 +1412,7 @@ int test_turn2_resumed_vs_scratch_divergence(ninfer::DeviceContext& device) {
     for (std::size_t i = 0; i < 24; ++i) { t1_tokens[i] = static_cast<ninfer::TokenId>(500 + i); }
     const auto prompt1 = make_prompt(t1_tokens, true, 16);
     auto base1 = program.plan_request(prompt1, exec_options);
-    auto cand1 = program.inspect_admission(prompt1, base1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto cand1 = program.inspect_admission(prompt1, base1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     failures += check(cand1.has_value(), "T1 admission must succeed");
     auto res1 = program.seal_identity(*cand1, prompt1);
     (void)program.start_resource_transaction(std::move(*res1), make_prompt(t1_tokens, true, 16), cancellation);
@@ -1438,7 +1440,7 @@ int test_turn2_resumed_vs_scratch_divergence(ninfer::DeviceContext& device) {
     for (std::size_t i = 24; i < 48; ++i) { t2_tokens[i] = static_cast<ninfer::TokenId>(600 + i); }
     const auto prompt2_res = make_prompt(t2_tokens, true, 36);
     auto base2_res = program.plan_request(prompt2_res, exec_options);
-    auto cand2_res = program.inspect_admission(prompt2_res, base2_res, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false, cost_model);
+    auto cand2_res = program.inspect_admission(prompt2_res, base2_res, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false);
     failures += check(cand2_res.has_value(), "T2 resumed admission must succeed");
     failures += check(cand2_res->summary().reusable_prompt_tokens == 16, "T2 resumed reusable tokens must be 16");
     auto res2_res = program.seal_identity(*cand2_res, prompt2_res);
@@ -1475,7 +1477,7 @@ int test_turn2_resumed_vs_scratch_divergence(ninfer::DeviceContext& device) {
     // 3. Turn 2 From Scratch: exact same 48 tokens
     const auto prompt2_scr = make_prompt(t2_tokens, false, std::nullopt);
     auto base2_scr = program.plan_request(prompt2_scr, exec_options);
-    auto cand2_scr = program.inspect_admission(prompt2_scr, base2_scr, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto cand2_scr = program.inspect_admission(prompt2_scr, base2_scr, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     failures += check(cand2_scr.has_value(), "T2 scratch admission must succeed");
     auto res2_scr = program.seal_identity(*cand2_scr, prompt2_scr);
     (void)program.start_resource_transaction(std::move(*res2_scr), make_prompt(t2_tokens, false, std::nullopt), cancellation);
@@ -1580,7 +1582,7 @@ int test_state_slot_capacity_saturation_and_eviction(ninfer::DeviceContext& devi
     for (std::size_t i = 0; i < 20; ++i) { r1_tokens[i] = static_cast<ninfer::TokenId>(100 + i); }
     const auto prompt1 = make_prompt(r1_tokens, true, 12);
     auto base1 = program.plan_request(prompt1, exec_options);
-    auto cand1 = program.inspect_admission(prompt1, base1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto cand1 = program.inspect_admission(prompt1, base1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     failures += check(cand1.has_value(), "R1 admission must succeed");
     auto res1 = program.seal_identity(*cand1, prompt1);
     (void)program.start_resource_transaction(std::move(*res1), make_prompt(r1_tokens, true, 12), cancellation);
@@ -1608,7 +1610,7 @@ int test_state_slot_capacity_saturation_and_eviction(ninfer::DeviceContext& devi
     for (std::size_t i = 0; i < 24; ++i) { r2_tokens[i] = static_cast<ninfer::TokenId>(200 + i); }
     const auto prompt2 = make_prompt(r2_tokens, true, 16);
     auto base2 = program.plan_request(prompt2, exec_options);
-    auto cand2 = program.inspect_admission(prompt2, base2, ninfer::runtime::LaneId(1), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto cand2 = program.inspect_admission(prompt2, base2, ninfer::runtime::LaneId(1), nullptr, nullptr, std::nullopt, false);
     failures += check(cand2.has_value(), "R2 admission must succeed on Lane 1");
     auto res2 = program.seal_identity(*cand2, prompt2);
     (void)program.start_resource_transaction(std::move(*res2), make_prompt(r2_tokens, true, 16), cancellation);
@@ -1645,7 +1647,7 @@ int test_state_slot_capacity_saturation_and_eviction(ninfer::DeviceContext& devi
     for (std::size_t i = 0; i < 30; ++i) { r3_tokens[i] = static_cast<ninfer::TokenId>(300 + i); }
     const auto prompt3 = make_prompt(r3_tokens, true, 20);
     auto base3 = program.plan_request(prompt3, exec_options);
-    auto cand3 = program.inspect_admission(prompt3, base3, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto cand3 = program.inspect_admission(prompt3, base3, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     failures += check(cand3.has_value(), "R3 admission must succeed");
 
     std::vector<ContinuationHandle> current_handles_r3;
@@ -1664,9 +1666,13 @@ int test_state_slot_capacity_saturation_and_eviction(ninfer::DeviceContext& devi
     std::optional<ResourcePlan> res3;
     {
         const AdmissionCandidate* cand3_ptr = &*cand3;
-        auto session_r3 = program.begin_pressure_planning(cost_model, std::span(&cand3_ptr, 1), owners_r3, ordinals_r3, {}, {});
-        auto root_max3 = session_r3.root_maximal_target(*cand3);
-        res3 = session_r3.seal(root_max3, prompt3);
+        std::array cand_ids{ninfer::runtime::PlanningCandidateId{0}};
+        std::vector<ninfer::runtime::PlanningOwnerId> owner_ids;
+        for (auto o : ordinals_r3) owner_ids.push_back(ninfer::runtime::PlanningOwnerId{o});
+        auto session_r3 = program.begin_pressure_planning(std::span(&cand3_ptr, 1), cand_ids, owners_r3, owner_ids, {}, {});
+        auto root_max3 = session_r3.root_maximal_target(cand_ids[0]);
+        auto assessed3 = session_r3.assess(root_max3);
+        res3 = session_r3.seal(std::move(assessed3), prompt3);
     }
     failures += check(res3.has_value(), "R3 pressure seal must succeed");
     (void)program.start_resource_transaction(std::move(*res3), make_prompt(r3_tokens, true, 20), cancellation);
@@ -1697,7 +1703,7 @@ int test_state_slot_capacity_saturation_and_eviction(ninfer::DeviceContext& devi
     for (std::size_t i = 20; i < 40; ++i) { r4_tokens[i] = static_cast<ninfer::TokenId>(400 + i); }
     const auto prompt4 = make_prompt(r4_tokens, true, 30);
     auto base4 = program.plan_request(prompt4, exec_options);
-    auto cand4 = program.inspect_admission(prompt4, base4, ninfer::runtime::LaneId(1), &*fin3.continuation, nullptr, std::nullopt, false, cost_model);
+    auto cand4 = program.inspect_admission(prompt4, base4, ninfer::runtime::LaneId(1), &*fin3.continuation, nullptr, std::nullopt, false);
     failures += check(cand4.has_value(), "R4 admission must succeed");
 
     std::vector<ContinuationHandle> current_handles_r4;
@@ -1716,9 +1722,13 @@ int test_state_slot_capacity_saturation_and_eviction(ninfer::DeviceContext& devi
     std::optional<ResourcePlan> res4;
     if (!owners_r4.empty()) {
         const AdmissionCandidate* cand4_ptr = &*cand4;
-        auto session_r4 = program.begin_pressure_planning(cost_model, std::span(&cand4_ptr, 1), owners_r4, ordinals_r4, {}, {});
-        auto root_max4 = session_r4.root_maximal_target(*cand4);
-        res4 = session_r4.seal(root_max4, prompt4);
+        std::array cand_ids{ninfer::runtime::PlanningCandidateId{0}};
+        std::vector<ninfer::runtime::PlanningOwnerId> owner_ids;
+        for (auto o : ordinals_r4) owner_ids.push_back(ninfer::runtime::PlanningOwnerId{o});
+        auto session_r4 = program.begin_pressure_planning(std::span(&cand4_ptr, 1), cand_ids, owners_r4, owner_ids, {}, {});
+        auto root_max4 = session_r4.root_maximal_target(cand_ids[0]);
+        auto assessed4 = session_r4.assess(root_max4);
+        res4 = session_r4.seal(std::move(assessed4), prompt4);
     } else {
         res4 = program.seal_identity(*cand4, prompt4);
     }
@@ -1798,7 +1808,7 @@ int test_small_pool_page_pressure_eviction(ninfer::DeviceContext& device) {
     for (std::size_t i = 0; i < 300; ++i) { tokens_a[i] = static_cast<ninfer::TokenId>(1000 + i); }
     const auto prompt_a = make_prompt(tokens_a, true);
     auto base_a = program.plan_request(prompt_a, exec_options);
-    auto cand_a = program.inspect_admission(prompt_a, base_a, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto cand_a = program.inspect_admission(prompt_a, base_a, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     failures += check(cand_a.has_value(), "Admission A must succeed");
     auto res_a = program.seal_identity(*cand_a, prompt_a);
     (void)program.start_resource_transaction(std::move(*res_a), make_prompt(tokens_a, true), cancellation);
@@ -1816,7 +1826,7 @@ int test_small_pool_page_pressure_eviction(ninfer::DeviceContext& device) {
     for (std::size_t i = 0; i < 300; ++i) { tokens_b[i] = static_cast<ninfer::TokenId>(2000 + i); }
     const auto prompt_b = make_prompt(tokens_b, true);
     auto base_b = program.plan_request(prompt_b, exec_options);
-    auto cand_b = program.inspect_admission(prompt_b, base_b, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto cand_b = program.inspect_admission(prompt_b, base_b, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     failures += check(cand_b.has_value(), "Admission B must succeed");
     auto res_b = program.seal_identity(*cand_b, prompt_b);
     (void)program.start_resource_transaction(std::move(*res_b), make_prompt(tokens_b, true), cancellation);
@@ -1838,7 +1848,7 @@ int test_small_pool_page_pressure_eviction(ninfer::DeviceContext& device) {
     for (std::size_t i = 0; i < 300; ++i) { tokens_1[i] = static_cast<ninfer::TokenId>(3000 + i); }
     const auto prompt_1 = make_prompt(tokens_1, true);
     auto base_1 = program.plan_request(prompt_1, exec_options);
-    auto cand_1 = program.inspect_admission(prompt_1, base_1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto cand_1 = program.inspect_admission(prompt_1, base_1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     failures += check(cand_1.has_value(), "Admission 1 must succeed under page pressure");
     if (cand_1.has_value()) {
         // Identity semantics: no evictions. With every group held by the catalog the identity
@@ -1866,9 +1876,13 @@ int test_small_pool_page_pressure_eviction(ninfer::DeviceContext& device) {
     std::optional<ResourcePlan> res_1;
     {
         const AdmissionCandidate* cand_1_ptr = &*cand_1;
-        auto session_1 = program.begin_pressure_planning(cost_model, std::span(&cand_1_ptr, 1), owners, ordinals, {}, {});
-        auto root_max1 = session_1.root_maximal_target(*cand_1);
-        res_1 = session_1.seal(root_max1, prompt_1);
+        std::array cand_ids{ninfer::runtime::PlanningCandidateId{0}};
+        std::vector<ninfer::runtime::PlanningOwnerId> owner_ids;
+        for (auto o : ordinals) owner_ids.push_back(ninfer::runtime::PlanningOwnerId{o});
+        auto session_1 = program.begin_pressure_planning(std::span(&cand_1_ptr, 1), cand_ids, owners, owner_ids, {}, {});
+        auto root_max1 = session_1.root_maximal_target(cand_ids[0]);
+        auto assessed1 = session_1.assess(root_max1);
+        res_1 = session_1.seal(std::move(assessed1), prompt_1);
     }
     failures += check(res_1.has_value(), "Admission 1 pressure seal must succeed");
     (void)program.start_resource_transaction(std::move(*res_1), make_prompt(tokens_1, true), cancellation);
@@ -1879,7 +1893,7 @@ int test_small_pool_page_pressure_eviction(ninfer::DeviceContext& device) {
     program.finalize_context_transaction();
 
     // Now with Checkpoints A and B evicted and 4 page groups free, admit Request 2
-    auto cand_2 = program.inspect_admission(prompt_2, base_2, ninfer::runtime::LaneId(1), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto cand_2 = program.inspect_admission(prompt_2, base_2, ninfer::runtime::LaneId(1), nullptr, nullptr, std::nullopt, false);
     failures += check(cand_2.has_value(), "Admission 2 must succeed under page pressure");
     if (cand_2.has_value()) {
         failures += check(cand_2->identity_assessment().physical_status == ninfer::runtime::MaterializationPhysicalStatus::Feasible,
@@ -1979,7 +1993,7 @@ int test_repeated_8way_batches_over_full_catalog(ninfer::DeviceContext& device) 
             }
             const auto prompt = make_prompt(tokens, true);
             auto base = program.plan_request(prompt, exec_options);
-            auto cand = program.inspect_admission(prompt, base, ninfer::runtime::LaneId(lane), nullptr, nullptr, std::nullopt, false, cost_model);
+            auto cand = program.inspect_admission(prompt, base, ninfer::runtime::LaneId(lane), nullptr, nullptr, std::nullopt, false);
             failures += check(cand.has_value(), "Admission in 8-way batch must succeed");
 
             std::optional<ResourcePlan> res;
@@ -2001,11 +2015,15 @@ int test_repeated_8way_batches_over_full_catalog(ninfer::DeviceContext& device) 
                 for (const auto& h : current_catalog_handles) { owners.push_back(&h); }
 
                 const AdmissionCandidate* cand_ptr = &*cand;
-                auto session = program.begin_pressure_planning(cost_model, std::span(&cand_ptr, 1), owners, owner_ordinals, {}, {});
-                auto prep = session.prepare_expansion(session.identity_target(*cand));
+                std::array cand_ids{ninfer::runtime::PlanningCandidateId{0}};
+                std::vector<ninfer::runtime::PlanningOwnerId> owner_ids;
+                for (auto o : owner_ordinals) owner_ids.push_back(ninfer::runtime::PlanningOwnerId{o});
+                auto session = program.begin_pressure_planning(std::span(&cand_ptr, 1), cand_ids, owners, owner_ids, {}, {});
+                auto prep = session.prepare_expansion(session.identity_target(cand_ids[0]));
                 auto view = session.commit_expansion(std::move(prep));
                 failures += check(!view.children.empty(), "Expansion must provide children");
-                res = session.seal(view.children[0], prompt);
+                auto assessed = session.assess(view.children[0]);
+                res = session.seal(std::move(assessed), prompt);
             }
             failures += check(res.has_value(), "Resource plan must be created");
             (void)program.start_resource_transaction(std::move(*res), make_prompt(tokens, true), cancellation);
@@ -2111,7 +2129,7 @@ int test_resumed_checkpoint_not_evicted_while_lane_runs(ninfer::DeviceContext& d
     for (std::size_t i = 0; i < 48; ++i) { t1_tokens[i] = static_cast<ninfer::TokenId>(500 + i); }
     const auto prompt1 = make_prompt(t1_tokens, true, 32);
     auto base1 = program.plan_request(prompt1, exec_options);
-    auto cand1 = program.inspect_admission(prompt1, base1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto cand1 = program.inspect_admission(prompt1, base1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     auto res1 = program.seal_identity(*cand1, prompt1);
     (void)program.start_resource_transaction(std::move(*res1), make_prompt(t1_tokens, true, 32), cancellation);
     auto prog1 = program.progress_context_transaction(cancellation);
@@ -2148,7 +2166,7 @@ int test_resumed_checkpoint_not_evicted_while_lane_runs(ninfer::DeviceContext& d
     for (std::size_t i = 32; i < 64; ++i) { t2_tokens[i] = static_cast<ninfer::TokenId>(600 + i); }
     const auto prompt2 = make_prompt(t2_tokens, true);
     auto base2 = program.plan_request(prompt2, exec_options);
-    auto cand2 = program.inspect_admission(prompt2, base2, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false, cost_model);
+    auto cand2 = program.inspect_admission(prompt2, base2, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false);
     failures += check(cand2.has_value(), "Turn 2 admission against TurnClosure must succeed");
     auto res2 = program.seal_identity(*cand2, prompt2);
     (void)program.start_resource_transaction(std::move(*res2), make_prompt(t2_tokens, true), cancellation);
@@ -2168,7 +2186,7 @@ int test_resumed_checkpoint_not_evicted_while_lane_runs(ninfer::DeviceContext& d
     for (std::size_t i = 0; i < 64; ++i) { t3_tokens[i] = static_cast<ninfer::TokenId>(700 + i); }
     const auto prompt3 = make_prompt(t3_tokens, true);
     auto base3 = program.plan_request(prompt3, exec_options);
-    auto cand3 = program.inspect_admission(prompt3, base3, ninfer::runtime::LaneId(1), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto cand3 = program.inspect_admission(prompt3, base3, ninfer::runtime::LaneId(1), nullptr, nullptr, std::nullopt, false);
     auto res3 = program.seal_identity(*cand3, prompt3);
     (void)program.start_resource_transaction(std::move(*res3), make_prompt(t3_tokens, true), cancellation);
     auto prog3 = program.progress_context_transaction(cancellation);
@@ -2247,7 +2265,7 @@ int test_materialization_planner_call_sequence(ninfer::DeviceContext& device) {
         for (std::size_t i = 0; i < 16; ++i) { tokens[i] = static_cast<ninfer::TokenId>(req * 100 + i); }
         const auto prompt = make_prompt(tokens, true);
         auto base = program.plan_request(prompt, exec_options);
-        auto cand = program.inspect_admission(prompt, base, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+        auto cand = program.inspect_admission(prompt, base, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
         failures += check(cand.has_value(), "Fill admission must succeed");
         auto res = program.seal_identity(*cand, prompt);
         (void)program.start_resource_transaction(std::move(*res), make_prompt(tokens, true), cancellation);
@@ -2271,7 +2289,7 @@ int test_materialization_planner_call_sequence(ninfer::DeviceContext& device) {
     for (std::size_t i = 0; i < 16; ++i) { r5_tokens[i] = static_cast<ninfer::TokenId>(500 + i); }
     const auto prompt5 = make_prompt(r5_tokens, true);
     auto base5 = program.plan_request(prompt5, exec_options);
-    auto cand5 = program.inspect_admission(prompt5, base5, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto cand5 = program.inspect_admission(prompt5, base5, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     failures += check(cand5.has_value(), "Admission 5 must succeed");
 
     std::vector<const ContinuationHandle*> owners;
@@ -2285,22 +2303,25 @@ int test_materialization_planner_call_sequence(ninfer::DeviceContext& device) {
     {
         // begin_pressure_planning
         const AdmissionCandidate* cand5_ptr = &*cand5;
-        auto session = program.begin_pressure_planning(cost_model, std::span(&cand5_ptr, 1), owners, owner_ordinals, {}, {});
+        std::array cand_ids{ninfer::runtime::PlanningCandidateId{0}};
+        std::vector<ninfer::runtime::PlanningOwnerId> owner_ids;
+        for (auto o : owner_ordinals) owner_ids.push_back(ninfer::runtime::PlanningOwnerId{o});
+        auto session = program.begin_pressure_planning(std::span(&cand5_ptr, 1), cand_ids, owners, owner_ids, {}, {});
 
         // root_maximal_target -> assess
-        auto root_max = session.root_maximal_target(*cand5);
+        auto root_max = session.root_maximal_target(cand_ids[0]);
         auto assess_max = session.assess(root_max);
-        failures += check(assess_max.physical_status == ninfer::runtime::MaterializationPhysicalStatus::Feasible,
+        failures += check(assess_max.assessment().physical_status == ninfer::runtime::MaterializationPhysicalStatus::Feasible,
                           "Root maximal physical status must be Feasible");
-        failures += check(assess_max.owner_outcomes.size() == 4,
+        failures += check(assess_max.assessment().owner_outcomes.size() == 4,
                           "Root maximal must evict all 4 non-protected owners");
         for (std::size_t i = 0; i < 4; ++i) {
-            failures += check(assess_max.owner_outcomes[i].disposition == ninfer::runtime::ClaimDisposition::Evicted,
+            failures += check(assess_max.assessment().owner_outcomes[i].disposition == ninfer::runtime::VictimDisposition::Evicted,
                               "Owner outcome must be Evicted");
         }
 
         // identity_target -> prepare_expansion -> commit_expansion
-        auto ident = session.identity_target(*cand5);
+        auto ident = session.identity_target(cand_ids[0]);
         auto prep = session.prepare_expansion(ident);
         failures += check(prep.new_canonical_count() == 4, "Prepared expansion must have 4 new canonical targets");
         auto view = session.commit_expansion(std::move(prep));
@@ -2308,15 +2329,15 @@ int test_materialization_planner_call_sequence(ninfer::DeviceContext& device) {
 
         // Assess child 0 (evicts only owner 0)
         auto assess_child0 = session.assess(view.children[0]);
-        failures += check(assess_child0.owner_outcomes.size() == 1,
+        failures += check(assess_child0.assessment().owner_outcomes.size() == 1,
                           "Child 0 assessment must have 1 owner outcome");
-        failures += check(assess_child0.owner_outcomes[0].owner_ordinal == 0,
+        failures += check(assess_child0.assessment().owner_outcomes[0].owner == ninfer::runtime::PlanningOwnerId{0},
                           "Child 0 must evict owner ordinal 0");
-        failures += check(assess_child0.owner_outcomes[0].disposition == ninfer::runtime::ClaimDisposition::Evicted,
+        failures += check(assess_child0.assessment().owner_outcomes[0].disposition == ninfer::runtime::VictimDisposition::Evicted,
                           "Child 0 outcome must be Evicted");
 
         // seal
-        sealed_plan = session.seal(view.children[0], prompt5);
+        sealed_plan = session.seal(std::move(assess_child0), prompt5);
     }
     failures += check(sealed_plan.has_value(), "Sealed plan must be valid");
 
@@ -2330,7 +2351,7 @@ int test_materialization_planner_call_sequence(ninfer::DeviceContext& device) {
     if (mat != nullptr) {
         failures += check(mat->victims.size() == 1, "Must have exactly 1 victim in MaterializationResult");
         if (mat->victims.size() == 1) {
-            failures += check(mat->victims[0].disposition == ninfer::runtime::ClaimDisposition::Evicted,
+            failures += check(mat->victims[0].disposition == ninfer::runtime::VictimDisposition::Evicted,
                               "Victim disposition must be Evicted");
             failures += check(mat->victims[0].pressure_committed == true,
                               "Victim must have pressure_committed == true");
@@ -2407,7 +2428,7 @@ int test_resume_from_endpoint_consumes_pair(ninfer::DeviceContext& device) {
 
     auto base1 = program.plan_request(prompt1, exec_options);
     auto cand1 = program.inspect_admission(
-        prompt1, base1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+        prompt1, base1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     failures += check(cand1.has_value(), "Turn 1 admission must succeed");
     auto res1 = program.seal_identity(*cand1, prompt1);
 
@@ -2452,12 +2473,12 @@ int test_resume_from_endpoint_consumes_pair(ninfer::DeviceContext& device) {
     auto base2 = program.plan_request(prompt2, exec_options);
 
     auto cand2 = program.inspect_admission(
-        prompt2, base2, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false, cost_model);
+        prompt2, base2, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false);
     failures += check(cand2.has_value(), "Turn 2 admission must succeed");
     if (cand2.has_value()) {
         failures += check(cand2->summary().prefix_reuse_path == ninfer::PrefixReusePath::PrivateEndpoint,
                           "Turn 2 prefix reuse path must be PrivateEndpoint");
-        failures += check(cand2->identity_assessment().source_disposition == ninfer::runtime::ClaimDisposition::ConsumedToActive,
+        failures += check(cand2->identity_assessment().source_mode == ninfer::runtime::PrivateSourceMode::ConsumeToActive,
                           "Turn 2 source disposition must be ConsumedToActive");
     }
 

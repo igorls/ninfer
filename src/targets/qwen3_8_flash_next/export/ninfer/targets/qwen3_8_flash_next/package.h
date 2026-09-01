@@ -86,9 +86,11 @@ struct Package {
     using CacheSessionKey            = qwen3_6::PreparedSessionKey;
     using ContinuationSummary        = qwen3_6::ContinuationSummary;
     using SharedPrefixSummary        = qwen3_6::SharedPrefixSummary;
-    using PressurePlanningSession    = qwen3_8_flash_next::PressurePlanningSession;
-    using PressureTargetHandle       = qwen3_6::PressureTargetHandle;
-    using CapturePressurePlan        = qwen3_8_flash_next::CapturePressurePlan;
+    using PressurePlanningSession        = qwen3_8_flash_next::PressurePlanningSession;
+    using PressureTargetHandle           = qwen3_6::PressureTargetHandle;
+    using AssessedPressureTarget         = qwen3_8_flash_next::AssessedPressureTarget;
+    using CapturePressurePlan            = qwen3_8_flash_next::CapturePressurePlan;
+    using CapturePressurePlanningSession = qwen3_8_flash_next::CapturePressurePlanningSession;
     using MaterializationResult      = qwen3_8_flash_next::MaterializationResult;
     using ContextTransactionProgress = qwen3_8_flash_next::ContextTransactionProgress;
     using CaptureAssessment          = qwen3_6::CaptureAssessment;
@@ -115,7 +117,8 @@ struct Package {
                                                                const EngineOptions& options,
                                                                WeightsProfile weights_profile);
     [[nodiscard]] static std::unique_ptr<Program>
-    create_program(const LoadedModel& model, SequencePlan&& plan, DeviceContext& device);
+    create_program(const LoadedModel& model, SequencePlan&& plan, DeviceContext& device,
+                   const StartupObserver& startup_observer = {});
 };
 
 } // namespace targets::qwen3_8_flash_next

@@ -428,7 +428,7 @@ int test_soak_concurrency_and_admission_curve(ninfer::DeviceContext& device) {
                 exec_options.requested_output_tokens = 16;
                 auto base_plan = prog.plan_request(prompt, exec_options);
 
-                auto inspect = prog.inspect_admission(prompt, base_plan, ninfer::runtime::LaneId(i), nullptr, nullptr, std::nullopt, false, cost_model);
+                auto inspect = prog.inspect_admission(prompt, base_plan, ninfer::runtime::LaneId(i), nullptr, nullptr, std::nullopt, false);
                 if (inspect.has_value() &&
                     inspect->identity_assessment().physical_status == runtime::MaterializationPhysicalStatus::Feasible) {
                     auto res_plan = prog.seal_identity(*inspect, prompt);
@@ -477,7 +477,7 @@ int test_soak_concurrency_and_admission_curve(ninfer::DeviceContext& device) {
                 exec_options.requested_output_tokens = 16;
                 auto base_plan = prog.plan_request(prompt, exec_options);
 
-                auto inspect = prog.inspect_admission(prompt, base_plan, ninfer::runtime::LaneId(i), nullptr, nullptr, std::nullopt, false, cost_model);
+                auto inspect = prog.inspect_admission(prompt, base_plan, ninfer::runtime::LaneId(i), nullptr, nullptr, std::nullopt, false);
                 if (inspect.has_value() &&
                     inspect->identity_assessment().physical_status == runtime::MaterializationPhysicalStatus::Feasible) {
                     auto res_plan = prog.seal_identity(*inspect, prompt);
@@ -548,7 +548,7 @@ int test_soak_pressure_eviction_and_determinism(ninfer::DeviceContext& device) {
     exec_options.requested_output_tokens = 16;
     auto base_a = prog.plan_request(pa, exec_options);
 
-    auto insp_a = prog.inspect_admission(pa, base_a, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto insp_a = prog.inspect_admission(pa, base_a, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     if (!insp_a.has_value() || insp_a->identity_assessment().physical_status != runtime::MaterializationPhysicalStatus::Feasible) {
         std::fprintf(stderr, "FAIL: Could not admit initial sequence A\n");
         return 1;
@@ -594,18 +594,19 @@ int test_soak_pressure_eviction_and_determinism(ninfer::DeviceContext& device) {
     auto pb = make_prompt(prompt_b);
     auto base_b = prog.plan_request(pb, exec_options);
 
-    auto insp_b = prog.inspect_admission(pb, base_b, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto insp_b = prog.inspect_admission(pb, base_b, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     std::printf("  [Sequence B Arrival] Identity status: %s\n",
                 insp_b->identity_assessment().physical_status == runtime::MaterializationPhysicalStatus::Feasible ? "Feasible" : "Infeasible");
 
     std::vector<const ContinuationHandle*> owners = {&handle_a};
-    std::vector<std::uint32_t> ordinals = {0};
+    std::vector<ninfer::runtime::PlanningOwnerId> ordinals = {ninfer::runtime::PlanningOwnerId{0}};
     const AdmissionCandidate* cand_b_ptr = &*insp_b;
+    std::array cand_ids{ninfer::runtime::PlanningCandidateId{0}};
 
-    auto pressure_sess = prog.begin_pressure_planning(cost_model, std::span(&cand_b_ptr, 1), owners, ordinals, {}, {});
+    auto pressure_sess = prog.begin_pressure_planning(std::span(&cand_b_ptr, 1), cand_ids, owners, ordinals, {}, {});
 
     // Test Task 1 guided_closure_target, guidance, retain_assessment
-    auto guided_target = pressure_sess.guided_closure_target(*insp_b, ordinals);
+    auto guided_target = pressure_sess.guided_closure_target(cand_ids[0], ordinals);
     if (!guided_target.has_value()) {
         std::fprintf(stderr, "FAIL: guided_closure_target could not find eviction target\n");
         return 1;
@@ -621,15 +622,15 @@ int test_soak_pressure_eviction_and_determinism(ninfer::DeviceContext& device) {
 
     auto assess = pressure_sess.assess(*guided_target);
     std::printf("  [Pressure Assessment] Status: %s, Degradation: %u\n",
-                assess.physical_status == runtime::MaterializationPhysicalStatus::Feasible ? "Feasible" : "Infeasible",
-                assess.degradation_units);
+                assess.assessment().physical_status == runtime::MaterializationPhysicalStatus::Feasible ? "Feasible" : "Infeasible",
+                assess.assessment().degradation_units);
 
-    if (check(assess.physical_status == runtime::MaterializationPhysicalStatus::Feasible,
+    if (check(assess.assessment().physical_status == runtime::MaterializationPhysicalStatus::Feasible,
               "Pressure assessment must be Feasible after evicting A")) {
         return 1;
     }
 
-    auto sealed_plan_b = pressure_sess.seal(*guided_target, pb);
+    auto sealed_plan_b = pressure_sess.seal(std::move(assess), pb);
     if (!sealed_plan_b.has_value()) {
         std::fprintf(stderr, "FAIL: Could not seal pressure plan for B\n");
         return 1;
@@ -659,7 +660,7 @@ int test_soak_pressure_eviction_and_determinism(ninfer::DeviceContext& device) {
 
     // 3. Now re-admit Sequence A from prompt to verify exact token determinism
     std::printf("  [Sequence A Resume] Re-prefilling sequence A to verify token determinism...\n");
-    auto insp_a2 = prog.inspect_admission(pa, base_a, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto insp_a2 = prog.inspect_admission(pa, base_a, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     auto res_plan_a2 = prog.seal_identity(*insp_a2, pa);
     (void)prog.start_resource_transaction(std::move(*res_plan_a2), make_prompt(prompt_a), cancellation);
     auto prog_a2 = prog.progress_context_transaction(cancellation);
@@ -734,7 +735,7 @@ int test_soak_multiturn_conversations_and_leaks(ninfer::DeviceContext& device) {
         auto base_plan = prog.plan_request(prompt, exec_options);
 
         const ContinuationHandle* src = previous_turn_closure.has_value() ? &*previous_turn_closure : nullptr;
-        auto insp = prog.inspect_admission(prompt, base_plan, ninfer::runtime::LaneId(0), src, nullptr, std::nullopt, false, cost_model);
+        auto insp = prog.inspect_admission(prompt, base_plan, ninfer::runtime::LaneId(0), src, nullptr, std::nullopt, false);
 
         if (!insp.has_value()) {
             std::fprintf(stderr, "FAIL: Turn %d inspect_admission returned nullopt\n", turn);
@@ -847,7 +848,7 @@ int test_soak_pool_exhaustion_failure_mode(ninfer::DeviceContext& device) {
 
     // Saturate both 2 lanes with 500-token requests (2 * 2 = 4 page groups)
     for (int i = 0; i < 2; ++i) {
-        auto insp = prog.inspect_admission(prompt, base_plan, ninfer::runtime::LaneId(i), nullptr, nullptr, std::nullopt, false, cost_model);
+        auto insp = prog.inspect_admission(prompt, base_plan, ninfer::runtime::LaneId(i), nullptr, nullptr, std::nullopt, false);
         if (!insp.has_value() || insp->identity_assessment().physical_status != runtime::MaterializationPhysicalStatus::Feasible) {
             std::fprintf(stderr, "FAIL: Could not admit sequence %d in saturation phase\n", i);
             return 1;
@@ -879,7 +880,7 @@ int test_soak_pool_exhaustion_failure_mode(ninfer::DeviceContext& device) {
 
     // Now attempt to admit a 3rd sequence when no groups remain and no continuations are evictable
     std::printf("  [Attempting 3rd Sequence Admission] Checking inspect_admission...\n");
-    auto overflow_insp = prog.inspect_admission(prompt, base_plan, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto overflow_insp = prog.inspect_admission(prompt, base_plan, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
 
     if (check(overflow_insp.has_value(), "inspect_admission should return candidate")) {
         return 1;

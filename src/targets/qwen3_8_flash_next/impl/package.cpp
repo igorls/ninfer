@@ -149,13 +149,14 @@ Package::SequencePlanner Package::make_sequence_planner(DeviceContext& device,
         .use_cuda_graph        = options.use_cuda_graph,
         .vision_enabled        = options.enable_vision,
         .max_vision_tokens     = 4096,
-        .use_qsa_prefill_mma   = options.use_qsa_prefill_mma,
     };
     return SequencePlanner(std::make_unique<detail::SequencePlannerImpl>(config));
 }
 
 std::unique_ptr<Package::Program>
-Package::create_program(const LoadedModel& model, SequencePlan&& plan, DeviceContext& device) {
+Package::create_program(const LoadedModel& model, SequencePlan&& plan, DeviceContext& device,
+                       const StartupObserver& startup_observer) {
+    (void)startup_observer;
     if (model.impl_ == nullptr) { throw std::invalid_argument("loaded model is empty"); }
     if (plan.impl_ == nullptr) { throw std::invalid_argument("sequence plan is empty"); }
 

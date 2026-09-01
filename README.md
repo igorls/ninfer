@@ -94,9 +94,14 @@ Run a one-shot CLI request with a 32,768-token allocation:
   --lm-head-draft
 ```
 
-Answer content is written to stdout. Loading progress, reasoning, timings, throughput, memory, and
-speculative-decoding statistics are written to stderr. Use `--messages FILE` and `--vision` for
-structured image/video input; see the [CLI guide](docs/cli.md) and [committed examples](examples/cli/).
+Answer content is written to stdout. Structured startup/runtime-error records and the CLI-owned
+reasoning, timing, throughput, memory, and speculative-decoding report are written to stderr;
+reasoning and the result report remain unprefixed product output. On a terminal, weight
+materialization additionally uses one transient progress line. Redirected stderr receives only
+persistent structured phase records, including rate-limited progress for long loads. Option and
+local input errors remain direct command diagnostics. Use `--messages FILE` and `--vision` for
+structured image/video input; see the [CLI guide](docs/cli.md) and
+[committed examples](examples/cli/).
 
 ## Resource-aware long-context reuse
 
@@ -139,6 +144,7 @@ in the performance document.
 | Qwen3.6-35B-A3B `groupwise-int` | 15,544.3 tok/s | 5,157.1 tok/s | 770.9 tok/s |
 | Qwen3.6-27B `groupwise-int` | 3,218.1 tok/s | 1,614.8 tok/s | 193.0 tok/s |
 | Qwen3.6-27B `nvfp4` | 11,191.5 tok/s | 2,510.6 tok/s | 252.2 tok/s |
+| Qwen3.8-27B `groupwise-int` | 3,274.7 tok/s | 1,609.7 tok/s | 224.4 tok/s |
 | Qwen3.8-27B `nvfp4` | 8,340.4 tok/s | 2,203.1 tok/s | 219.8 tok/s |
 
 ## Evaluation
@@ -217,12 +223,18 @@ All registered model IDs support:
 - image, multi-image, video, and mixed multimodal messages;
 - chunked prefill, exact-batch CUDA Graph decode, and startup-bounded batched decode;
 - MTP speculative decoding with draft windows from one to five;
-- BF16, INT8 group-64, and row-scaled FP8 E4M3 KV storage;
+- BF16, INT8 group-64, row-scaled FP8 E4M3, NVFP4 group-16, and asymmetric K8V4 KV storage;
 - offline causal-perplexity scoring with the same Text model and selectable KV storage;
 - private and shared exact-prefix reuse with Device/Host State and KV retention;
 - model-aware sampling defaults and explicit sampler overrides;
 - OpenAI Responses Core, OpenAI Chat Completions, and Anthropic Messages, including streaming,
   tools, local response state, token counting, and usage accounting.
+
+The exact low-bit KV selectors are `--kv-dtype nvfp4` (144-byte K and V vectors) and
+`--kv-dtype k8v4` (258-byte FP8 K plus 144-byte NVFP4 V vectors), all for D256. These runtime
+cache choices are independent of the registered artifact's weight format. NVFP4 attention does
+not quantize Q: prompt and small-T use FP16 rotated Q and exactly expanded FP16 K with FP32 QK
+accumulation; K8V4 retains its FP8 Q/K path.
 
 The 35B-A3B target additionally supports text-only DFlash with draft windows from one to fifteen.
 

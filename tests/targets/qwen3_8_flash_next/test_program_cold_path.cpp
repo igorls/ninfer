@@ -92,7 +92,7 @@ int test_program_lifecycle(ninfer::DeviceContext& device) {
     Program program(std::move(program_impl));
 
     // Check initial state
-    failures += check(program.resource_revision() == 1, "Initial resource revision must be 1");
+    failures += check(program.resource_revision().value == 1, "Initial resource revision must be 1");
     failures += check(program.physical_usage().device_state_slots == 0,
                       "Initial active state slots must be 0");
     failures += check(!program.has_context_transaction(),
@@ -119,7 +119,7 @@ int test_program_lifecycle(ninfer::DeviceContext& device) {
     // 4. Admission Inspection 1
     ninfer::runtime::ContextMachineCostModel cost_model{};
     auto candidate1 = program.inspect_admission(
-        prompt1, base_plan1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+        prompt1, base_plan1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     failures += check(candidate1.has_value(), "Admission candidate 1 must be present");
     failures += check(
         candidate1->identity_assessment().physical_status ==
@@ -129,7 +129,7 @@ int test_program_lifecycle(ninfer::DeviceContext& device) {
     // 5. Seal Identity 1
     auto resource_plan1 = program.seal_identity(*candidate1, prompt1);
     failures += check(resource_plan1.has_value(), "Resource plan 1 must be present");
-    failures += check(resource_plan1->resource_revision() == 1, "Resource plan revision mismatch");
+    failures += check(resource_plan1->resource_revision().value == 1, "Resource plan revision mismatch");
 
     // 6. Start Resource Transaction 1
     std::atomic<bool> flag1{false};
@@ -141,7 +141,7 @@ int test_program_lifecycle(ninfer::DeviceContext& device) {
         "start_resource_transaction must return Reserved");
     failures += check(program.has_context_transaction(),
                       "has_context_transaction must be true after start");
-    failures += check(program.resource_revision() == 2,
+    failures += check(program.resource_revision().value == 2,
                       "resource_revision must increment to 2 after lane allocation");
 
     // 7. Progress Context Transaction 1
@@ -164,7 +164,7 @@ int test_program_lifecycle(ninfer::DeviceContext& device) {
     const auto prompt2 = make_dummy_prompt(20);
     auto base_plan2    = program.plan_request(prompt2, exec_options);
     auto candidate2    = program.inspect_admission(
-        prompt2, base_plan2, ninfer::runtime::LaneId(1), nullptr, nullptr, std::nullopt, false, cost_model);
+        prompt2, base_plan2, ninfer::runtime::LaneId(1), nullptr, nullptr, std::nullopt, false);
     failures += check(
         candidate2->identity_assessment().physical_status ==
             ninfer::runtime::MaterializationPhysicalStatus::Feasible,
@@ -176,7 +176,7 @@ int test_program_lifecycle(ninfer::DeviceContext& device) {
     failures += check(
         reserve_status2 == ninfer::runtime::ContextTransactionReserveStatus::Reserved,
         "start_resource_transaction 2 must return Reserved");
-    failures += check(program.resource_revision() == 3,
+    failures += check(program.resource_revision().value == 3,
                       "resource_revision must increment to 3 after 2nd lane allocation");
 
     auto progress2 = program.progress_context_transaction(cancellation1);
@@ -191,7 +191,7 @@ int test_program_lifecycle(ninfer::DeviceContext& device) {
     const auto prompt3 = make_dummy_prompt(10);
     auto base_plan3    = program.plan_request(prompt3, exec_options);
     auto candidate3    = program.inspect_admission(
-        prompt3, base_plan3, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+        prompt3, base_plan3, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     failures += check(
         candidate3->identity_assessment().physical_status ==
             ninfer::runtime::MaterializationPhysicalStatus::Infeasible,
@@ -206,7 +206,7 @@ int test_program_lifecycle(ninfer::DeviceContext& device) {
     auto finish1 = program.finish(seq1);
     failures += check(finish1.status == ninfer::runtime::ConsumeStatus::Consumed,
                       "finish seq1 status must be Consumed");
-    failures += check(program.resource_revision() == 4,
+    failures += check(program.resource_revision().value == 4,
                       "resource_revision must increment to 4 after releasing lane 0");
     failures += check(program.physical_usage().device_state_slots == 1,
                       "Active state slots must be 1 after finishing seq1");
@@ -217,7 +217,7 @@ int test_program_lifecycle(ninfer::DeviceContext& device) {
     auto finish2 = program.finish(seq2);
     failures += check(finish2.status == ninfer::runtime::ConsumeStatus::Consumed,
                       "finish seq2 status must be Consumed");
-    failures += check(program.resource_revision() == 5,
+    failures += check(program.resource_revision().value == 5,
                       "resource_revision must increment to 5 after releasing lane 1");
     failures += check(program.physical_usage().device_state_slots == 0,
                       "Active state slots must be 0 after finishing seq2");

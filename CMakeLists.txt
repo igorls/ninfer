@@ -128,6 +128,12 @@ endif()
 find_package(Threads REQUIRED)
 add_compile_definitions(NINFER_BUILD_MEDIA_ENABLED=$<BOOL:${NINFER_BUILD_MEDIA}>)
 
+if(NINFER_BUILD_APPS OR BUILD_TESTING)
+  # Product operational logging is an offline, repository-pinned dependency. Core-only builds do
+  # not configure or link it.
+  add_subdirectory(third_party/spdlog)
+endif()
+
 # --- Subdirectories ----------------------------------------------------------
 add_subdirectory(src)
 if(NINFER_BUILD_APPS)

@@ -1340,7 +1340,7 @@ int run_continuation_check(const ReferenceToolOptions& opts) {
     exec_options.requested_output_tokens = 1;
     auto base_t1 = program.plan_request(prepared_t1, exec_options);
     ninfer::runtime::ContextMachineCostModel cost_model{};
-    auto cand_t1 = program.inspect_admission(prepared_t1, base_t1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto cand_t1 = program.inspect_admission(prepared_t1, base_t1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     if (!cand_t1) { throw std::runtime_error("Turn 1 admission failed"); }
     auto res_t1 = program.seal_identity(*cand_t1, prepared_t1);
     (void)program.start_resource_transaction(std::move(*res_t1), std::move(prepared_t1), cancellation);
@@ -1417,7 +1417,7 @@ int run_continuation_check(const ReferenceToolOptions& opts) {
 
     // 7. Execute Turn 2 Resumed (Prefill + N Decode Rounds)
     auto base_t2_res = program.plan_request(prepared_t2_resumed, exec_options);
-    auto cand_t2_res = program.inspect_admission(prepared_t2_resumed, base_t2_res, ninfer::runtime::LaneId(0), &cont_t1, nullptr, std::nullopt, false, cost_model);
+    auto cand_t2_res = program.inspect_admission(prepared_t2_resumed, base_t2_res, ninfer::runtime::LaneId(0), &cont_t1, nullptr, std::nullopt, false);
     if (!cand_t2_res) { throw std::runtime_error("Turn 2 resumed admission failed"); }
     const std::uint32_t reused_tokens = cand_t2_res->summary().reusable_prompt_tokens;
     auto res_t2 = program.seal_identity(*cand_t2_res, prepared_t2_resumed);
@@ -1464,7 +1464,7 @@ int run_continuation_check(const ReferenceToolOptions& opts) {
     // 8. Execute Turn 2 From Scratch (Prefill + N Decode Rounds)
     auto prepared_t2_scratch = frontend.prepare(std::move(input_t2));
     auto base_t2_scr = program.plan_request(prepared_t2_scratch, exec_options);
-    auto cand_t2_scr = program.inspect_admission(prepared_t2_scratch, base_t2_scr, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+    auto cand_t2_scr = program.inspect_admission(prepared_t2_scratch, base_t2_scr, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     if (!cand_t2_scr) { throw std::runtime_error("Turn 2 scratch admission failed"); }
     auto res_t2_scr = program.seal_identity(*cand_t2_scr, prepared_t2_scratch);
     (void)program.start_resource_transaction(std::move(*res_t2_scr), std::move(prepared_t2_scratch), cancellation);

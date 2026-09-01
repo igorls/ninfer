@@ -347,9 +347,10 @@ std::optional<HostKVAllocationRecipe> HostKVArena::plan_after_releases(
     for (std::size_t index = 0; index < proposed_releases.size(); ++index) {
         const HostKVAllocationHandle handle = proposed_releases[index];
         if (!valid_handle(handle) ||
-            std::find(proposed_releases.begin(),
-                      proposed_releases.begin() + static_cast<std::ptrdiff_t>(index),
-                      handle) != proposed_releases.begin() + static_cast<std::ptrdiff_t>(index)) {
+            std::find_if(proposed_releases.begin(),
+                         proposed_releases.begin() + static_cast<std::ptrdiff_t>(index),
+                         [&](const auto& item) { return item == handle; }) !=
+                proposed_releases.begin() + static_cast<std::ptrdiff_t>(index)) {
             return std::nullopt;
         }
         const Descriptor& descriptor = descriptors_[handle.descriptor_];

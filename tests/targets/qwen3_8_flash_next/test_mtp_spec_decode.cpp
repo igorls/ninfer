@@ -716,7 +716,7 @@ int test_speculative_turn_closure_interaction(ninfer::DeviceContext& device,
 
         auto base1 = program1.plan_request(prompt1, exec_options);
         auto cand1 = program1.inspect_admission(
-            prompt1, base1, runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+            prompt1, base1, runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
         if (!cand1.has_value()) {
             std::cerr << "FAIL: Session 1 admission failed\n";
             return 1;
@@ -784,7 +784,7 @@ int test_speculative_turn_closure_interaction(ninfer::DeviceContext& device,
 
         auto base2 = program1.plan_request(prompt2, exec_options);
         auto cand2 = program1.inspect_admission(
-            prompt2, base2, runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false, cost_model);
+            prompt2, base2, runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false);
         if (!cand2.has_value() || cand2->summary().reusable_prompt_tokens != 16) {
             std::cerr << "FAIL: Session 2 TurnClosure admission failed\n";
             return 1;
@@ -835,7 +835,7 @@ int test_speculative_turn_closure_interaction(ninfer::DeviceContext& device,
 
         auto base_plan = program_base.plan_request(prompt2, exec_options);
         auto cand_base = program_base.inspect_admission(
-            prompt2, base_plan, runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+            prompt2, base_plan, runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
         auto res_base = program_base.seal_identity(*cand_base, prompt2);
         program_base.start_resource_transaction(std::move(*res_base), make_prompt(turn2_tokens, true),
                                                 cancellation);

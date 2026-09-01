@@ -64,12 +64,12 @@ StandaloneLoadedModel::StandaloneLoadedModel(BindingPlan plan, artifact::Materia
 
 StandaloneLoadedModel StandaloneLoadedModel::load(const artifact::Reader& reader, DeviceContext& device,
                                                   LoadFeatures features, LoadQuantization quantization,
-                                                  artifact::LoadProgress* progress) {
+                                                  const StartupObserver& startup_observer) {
     validate_identity(reader.identity());
 
     artifact::Binder binder(reader);
     auto load_plan    = bind_artifact(binder, features);
-    auto materialized = artifact::materialize(reader, load_plan.materialization, device, progress);
+    auto materialized = artifact::materialize(reader, load_plan.materialization, device, &startup_observer);
 
     return StandaloneLoadedModel(std::move(load_plan.bindings), std::move(materialized),
                                  quantization);
@@ -79,9 +79,9 @@ StandaloneLoadedModel StandaloneLoadedModel::load_from_file(const std::filesyste
                                                             DeviceContext& device,
                                                             LoadFeatures features,
                                                             LoadQuantization quantization,
-                                                            artifact::LoadProgress* progress) {
+                                                            const StartupObserver& startup_observer) {
     const artifact::Reader reader(path);
-    return load(reader, device, features, quantization, progress);
+    return load(reader, device, features, quantization, startup_observer);
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

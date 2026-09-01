@@ -647,7 +647,7 @@ int test_program_vision_request_and_chunk_clipping(DeviceContext& device) {
     std::cout << "Step 5: admitting..." << std::endl;
     ninfer::runtime::ContextMachineCostModel cost_model{};
     auto candidate = program.inspect_admission(
-        prompt, base_plan, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false, cost_model);
+        prompt, base_plan, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     if (!candidate.has_value()) {
         std::cerr << "candidate not present" << std::endl;
         return 1;
@@ -776,8 +776,7 @@ bool g16_admit(Program& program, ninfer::targets::qwen3_6::PreparedPrompt& promp
     auto base_plan                       = program.plan_request(prompt, exec_options);
     ninfer::runtime::ContextMachineCostModel cost_model{};
     auto candidate = program.inspect_admission(
-        prompt, base_plan, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false,
-        cost_model);
+        prompt, base_plan, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
     if (!candidate.has_value()) {
         std::cerr << "G16 admit: candidate missing\n";
         return false;

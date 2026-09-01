@@ -63,15 +63,15 @@ public:
 
     [[nodiscard]] static StandaloneLoadedModel load(const artifact::Reader& reader,
                                                     DeviceContext& device,
-                                                    LoadFeatures features            = {},
-                                                    LoadQuantization quantization    = {},
-                                                    artifact::LoadProgress* progress = nullptr);
+                                                    LoadFeatures features                  = {},
+                                                    LoadQuantization quantization          = {},
+                                                    const StartupObserver& startup_observer = {});
 
     [[nodiscard]] static StandaloneLoadedModel
     load_from_file(const std::filesystem::path& path, DeviceContext& device,
-                   LoadFeatures features            = {},
-                   LoadQuantization quantization    = {},
-                   artifact::LoadProgress* progress = nullptr);
+                   LoadFeatures features                  = {},
+                   LoadQuantization quantization          = {},
+                   const StartupObserver& startup_observer = {});
 
     [[nodiscard]] const TextModelView& text_view() const noexcept { return data_->text; }
 

@@ -56,7 +56,7 @@ public:
 
 struct PressurePlanningOwner {
     const ContinuationHandle* handle = nullptr;
-    std::uint32_t ordinal = 0;
+    runtime::PlanningOwnerId owner_id{};
     std::uint32_t continuation_index = 0;
     std::uint64_t generation = 0;
 };
@@ -72,38 +72,41 @@ class PressurePlanningSessionImpl {
 public:
     PressurePlanningSessionImpl(
         ProgramImpl& program,
-        const runtime::ContextMachineCostModel& cost,
         std::span<const AdmissionCandidate* const> candidates,
+        std::span<const runtime::PlanningCandidateId> candidate_ids,
         std::span<const ContinuationHandle* const> private_owners,
-        std::span<const std::uint32_t> private_owner_ordinals,
+        std::span<const runtime::PlanningOwnerId> private_owner_ids,
         std::span<const SharedPrefixHandle* const> shared_owners,
-        std::span<const std::uint32_t> shared_owner_ordinals);
+        std::span<const runtime::PlanningOwnerId> shared_owner_ids);
 
     ~PressurePlanningSessionImpl() noexcept;
 
     [[nodiscard]] bool valid(PressureTargetHandle target) const noexcept;
-    [[nodiscard]] std::uint32_t candidate_index(const AdmissionCandidate& candidate) const;
+    [[nodiscard]] std::uint32_t candidate_index(runtime::PlanningCandidateId candidate) const;
 
-    [[nodiscard]] PressureTargetHandle identity_target(const AdmissionCandidate& candidate) const;
-    [[nodiscard]] PressureTargetHandle root_maximal_target(const AdmissionCandidate& root_candidate);
-    [[nodiscard]] runtime::PressureTargetAssessment assess(PressureTargetHandle target);
+    [[nodiscard]] PressureTargetHandle identity_target(runtime::PlanningCandidateId candidate) const;
+    [[nodiscard]] PressureTargetHandle root_maximal_target(runtime::PlanningCandidateId root_candidate);
     [[nodiscard]] runtime::PressureTargetGuidance guidance(PressureTargetHandle target);
+    [[nodiscard]] AssessedPressureTarget assess(PressureTargetHandle target);
     void retain_assessment(PressureTargetHandle target);
     [[nodiscard]] std::optional<PressureTargetHandle>
-    guided_closure_target(const AdmissionCandidate& candidate,
-                          std::span<const std::uint32_t> preferred_owner_ordinals);
+    guided_closure_target(runtime::PlanningCandidateId candidate,
+                          std::span<const runtime::PlanningOwnerId> preferred_owner_ids);
     [[nodiscard]] PreparedPressureExpansion prepare_expansion(PressureTargetHandle parent);
     [[nodiscard]] PressureExpansionView commit_expansion(PreparedPressureExpansion&& prepared);
     void discard_expansion(PreparedPressureExpansion&& prepared) noexcept;
-    [[nodiscard]] std::optional<ResourcePlan> seal(PressureTargetHandle target,
-                                                  const qwen3_6::PreparedPrompt& prompt);
+    [[nodiscard]] std::optional<ResourcePlan>
+    seal(AssessedPressureTarget&& assessed, const qwen3_6::PreparedPrompt& prompt,
+         runtime::FinalScheduleIntent intent);
+    [[nodiscard]] std::optional<CapturePressurePlan>
+    seal_capture(AssessedPressureTarget&& assessed);
 
     ProgramImpl* program_ = nullptr;
-    const runtime::ContextMachineCostModel* machine_cost_ = nullptr;
     std::uint64_t resource_revision_ = 0;
     std::uint32_t session_generation_ = 0;
 
     std::vector<const AdmissionCandidate*> candidates_;
+    std::vector<runtime::PlanningCandidateId> candidate_ids_;
     std::vector<PressurePlanningOwner> owners_;
     std::vector<PressurePlanningTargetNode> targets_;
 
@@ -252,7 +255,7 @@ public:
     std::optional<runtime::LaneId> transaction_lane_;
     std::optional<std::uint64_t> transaction_epoch_;
     bool transaction_has_source_ = false;
-    runtime::ClaimDisposition transaction_source_disposition_ = runtime::ClaimDisposition::ConsumedToActive;
+    runtime::PrivateSourceMode transaction_source_mode_ = runtime::PrivateSourceMode::ConsumeToActive;
 
     bool is_capture_transaction_ = false;
     ActiveCaptureResult pending_capture_result_;
