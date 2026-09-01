@@ -128,6 +128,53 @@ int test_decode_graph_buckets() {
         return 1;
     }
 
+    FlashNextRuntimeConfig cfg64k{
+        .max_concurrency = 1,
+        .max_context     = 65536,
+        .prefill_chunk   = 2048,
+        .use_cuda_graph  = true,
+    };
+    const auto curve64k = flash_next_capacity_curve(cfg64k);
+    if (curve64k.minimum_main_page_groups != 256 || curve64k.maximum_main_page_groups != 256) {
+        std::cerr << "FAIL: 64k B=1 groups min/max expected 256 got " << curve64k.minimum_main_page_groups
+                  << "/" << curve64k.maximum_main_page_groups << "\n";
+        return 1;
+    }
+    const auto plan64k = finalize_flash_next_runtime_plan(cfg64k, curve64k.minimum_main_page_groups);
+    const auto b64k    = flash_next_decode_graph_buckets(plan64k.maximum_blocks);
+    if (plan64k.maximum_blocks != 16384 || plan64k.main_page_groups != 256 || b64k.count != 4 ||
+        b64k.blocks[0] != 512 || b64k.blocks[1] != 2048 || b64k.blocks[2] != 8192 ||
+        b64k.blocks[3] != 16384) {
+        std::cerr << "FAIL: 64k plan blocks/groups/buckets mismatch blocks=" << plan64k.maximum_blocks
+                  << " groups=" << plan64k.main_page_groups << " n_buckets=" << b64k.count << "\n";
+        return 1;
+    }
+    if (plan64k.cuda_graph_allowance_bytes != 4ULL * 24ULL * 1024ULL * 1024ULL) {
+        std::cerr << "FAIL: 64k graph allowance expected 96 MiB got "
+                  << plan64k.cuda_graph_allowance_bytes << "\n";
+        return 1;
+    }
+    if (plan64k.state_slots != 2) {
+        std::cerr << "FAIL: 64k state_slots expected 2 got " << plan64k.state_slots << "\n";
+        return 1;
+    }
+    const double kv_mib =
+        static_cast<double>(plan64k.attention_kv_bytes + plan64k.indexer_block_keys_bytes) / 1048576.0;
+    const double rec_mib  = static_cast<double>(plan64k.recurrent_state_bytes) / 1048576.0;
+    const double graph_mib = static_cast<double>(plan64k.cuda_graph_allowance_bytes) / 1048576.0;
+    const double ws_mib    = static_cast<double>(plan64k.workspace_bytes) / 1048576.0;
+    const double tot_mib   = static_cast<double>(plan64k.total_device_bytes) / 1048576.0;
+    std::cout << "G8 PLAN 64k predicted vs actual (B=1, 256 groups):\n";
+    std::cout << "  KV        predicted 1584.0 MiB  actual " << kv_mib << " MiB\n";
+    std::cout << "  recurrent predicted  220.6 MiB  actual " << rec_mib << " MiB\n";
+    std::cout << "  graphs    predicted   96.0 MiB  actual " << graph_mib << " MiB\n";
+    std::cout << "  workspace (not in predicted table) actual " << ws_mib << " MiB\n";
+    std::cout << "  total_device_bytes actual " << tot_mib << " MiB (" << plan64k.total_device_bytes
+              << " bytes)\n";
+    std::cout << "  buckets {512, 2048, 8192, 16384} groups=" << plan64k.main_page_groups
+              << " maximum_blocks=" << plan64k.maximum_blocks << " state_slots=" << plan64k.state_slots
+              << "\n";
+
     std::cout << "PASS: test_decode_graph_buckets\n";
     return 0;
 }
@@ -391,6 +438,29 @@ int test_runtime_allocation_and_slots(ninfer::DeviceContext& device) {
     return 0;
 }
 
+int test_64k_allocation(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency = 1,
+        .max_context     = 65536,
+        .prefill_chunk   = 2048,
+        .use_cuda_graph  = true,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan        = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
+    FlashNextRuntimeAllocation alloc(plan);
+    alloc.initialize(device.stream);
+    device.synchronize();
+    std::cout << "G8 64k allocation succeeded total_device_bytes=" << plan.total_device_bytes
+              << " workspace_bytes=" << plan.workspace_bytes << "\n";
+    if (plan.workspace_bytes >= 2ULL * 1024ULL * 1024ULL * 1024ULL) {
+        std::cerr << "ANOMALY: workspace_bytes crosses 2 GiB: " << plan.workspace_bytes << "\n";
+        return 1;
+    }
+    std::cout << "PASS: test_64k_allocation\n";
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -410,6 +480,7 @@ int main() {
 
     ninfer::DeviceContext device(0);
     if (test_runtime_allocation_and_slots(device) != 0) return 1;
+    if (test_64k_allocation(device) != 0) return 1;
 
     std::cout << "OK Flash-Next Runtime Foundation\n";
     return 0;

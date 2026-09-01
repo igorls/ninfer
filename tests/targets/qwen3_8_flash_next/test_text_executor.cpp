@@ -13,13 +13,16 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <random>
@@ -2180,9 +2183,779 @@ int test_cuda_graph_bucketed_decode(ninfer::DeviceContext& device) {
     }
 }
 
+ninfer::targets::qwen3_8_flash_next::detail::FlashNextRuntimeConfig
+g8_runtime_config(bool use_cuda_graph) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    return FlashNextRuntimeConfig{
+        .max_concurrency     = 1,
+        .max_context         = 65536,
+        .state_slot_capacity = 2,
+        .prefill_chunk       = 2048,
+        .use_cuda_graph      = use_cuda_graph,
+    };
+}
+
+void g8_prefill_one(ninfer::targets::qwen3_8_flash_next::detail::FlashNextTextExecutor& exec,
+                    ninfer::targets::qwen3_8_flash_next::detail::LaneHandle lane, std::int32_t first,
+                    std::int32_t T, ninfer::DeviceContext& device, double* ms_out) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    std::vector<std::int32_t> tokens(static_cast<std::size_t>(T));
+    std::vector<std::array<std::int32_t, 3>> positions(static_cast<std::size_t>(T));
+    for (std::int32_t t = 0; t < T; ++t) {
+        const std::int32_t idx = first + t;
+        tokens[static_cast<std::size_t>(t)]    = 100 + (idx & 1023);
+        positions[static_cast<std::size_t>(t)] = {idx, idx, idx};
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    auto pr       = exec.execute_prefill_chunk(lane, tokens, positions, first);
+    std::vector<LaneCommitDecision> accept = {{.accept = true}};
+    pr.commit(accept);
+    device.synchronize();
+    const auto t1 = std::chrono::steady_clock::now();
+    if (ms_out != nullptr) {
+        *ms_out = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    }
+}
+
+int test_g8_admission_cpu() {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency     = 2,
+        .max_context         = 65536,
+        .state_slot_capacity = 4,
+        .prefill_chunk       = 2048,
+        .use_cuda_graph      = false,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    std::cout << "G8 admission curve min_groups=" << curve.minimum_main_page_groups
+              << " max_groups=" << curve.maximum_main_page_groups << "\n";
+    if (curve.minimum_main_page_groups != 256 || curve.maximum_main_page_groups != 512) {
+        std::cerr << "FAIL: B=2 64k groups expected min=256 max=512\n";
+        return 1;
+    }
+    auto plan = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
+    if (plan.main_page_groups != 256) {
+        std::cerr << "FAIL: selected groups expected 256 got " << plan.main_page_groups << "\n";
+        return 1;
+    }
+    FlashNextLaneLedger ledger(plan);
+    PleIndexMetadata ple_meta{};
+    ple_meta.multipliers = {1, 2, 3};
+    ple_meta.head_offsets.fill(0);
+    ple_meta.head_vocab_sizes.fill(1);
+    auto lane0 = ledger.allocate_lane();
+    auto lane1 = ledger.allocate_lane();
+    std::vector<std::int32_t> full(65536, 100);
+    auto prep0 = ledger.begin_prefill_chunk(lane0, full, 0, ple_meta);
+    ledger.abort_prefill_chunk(prep0.transaction_id);
+    std::cout << "G8 admission: lane0 64k-span reservation, available="
+              << ledger.available_physical_groups() << "\n";
+    if (ledger.available_physical_groups() != 0) {
+        std::cerr << "ANOMALY: expected 0 free groups after a 64k-span lane0 reservation, got "
+                  << ledger.available_physical_groups() << "\n";
+        return 1;
+    }
+    try {
+        std::vector<std::int32_t> one{100};
+        (void)ledger.begin_prefill_chunk(lane1, one, 0, ple_meta);
+        std::cerr << "ANOMALY: lane1 64k-pool begin_prefill at t=0 succeeded with 0 free groups\n";
+        return 1;
+    } catch (const std::runtime_error& ex) {
+        std::cout << "G8 admission: lane1 rejected verbatim: " << ex.what() << "\n";
+    }
+    std::cout << "G8 admission note: inspect_admission eviction is engine-owned (M1); "
+                 "ledger at 256 groups/B=1-equivalent pool is exactly one 64k sequence. "
+                 "A second live 64k occupant is infeasible without engine pressure eviction.\n";
+    std::cout << "PASS: test_g8_admission_cpu\n";
+    return 0;
+}
+
+int test_g8_decode_crossing(ninfer::DeviceContext& device, std::int32_t cross_tokens) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+        auto synthetic_model = make_synthetic_model(device);
+        auto make_plan       = [](bool graphs) {
+            const auto cfg   = g8_runtime_config(graphs);
+            const auto curve = flash_next_capacity_curve(cfg);
+            return finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
+        };
+        auto plan_g = make_plan(true);
+        auto plan_e = make_plan(false);
+        FlashNextRuntimeAllocation alloc_g(plan_g);
+        FlashNextRuntimeAllocation alloc_e(plan_e);
+        FlashNextRuntimeAllocation alloc_l(plan_e);
+        alloc_g.initialize(device.stream);
+        alloc_e.initialize(device.stream);
+        alloc_l.initialize(device.stream);
+        FlashNextTextExecutor exec_g(synthetic_model.view, ple_meta, device, alloc_g);
+        FlashNextTextExecutor exec_e(synthetic_model.view, ple_meta, device, alloc_e);
+        FlashNextTextExecutor exec_l(synthetic_model.view, ple_meta, device, alloc_l);
+        exec_e.set_use_cuda_graph(false);
+        exec_l.set_use_cuda_graph(false);
+        auto lane_g = exec_g.allocate_lane();
+        auto lane_e = exec_e.allocate_lane();
+        auto lane_l = exec_l.allocate_lane();
+        constexpr std::int32_t kChunk = 2048;
+        for (std::int32_t first = 0; first < cross_tokens; first += kChunk) {
+            g8_prefill_one(exec_g, lane_g, first, kChunk, device, nullptr);
+            g8_prefill_one(exec_e, lane_e, first, kChunk, device, nullptr);
+            g8_prefill_one(exec_l, lane_l, first, kChunk, device, nullptr);
+        }
+        bool saw_lo = false;
+        bool saw_hi = false;
+        for (std::int32_t step = cross_tokens; step < cross_tokens + 6; ++step) {
+            const std::int32_t live_blocks = (step + 1) / 4;
+            LaneStepRequest rg{.handle          = lane_g,
+                               .token_id        = 300 + step,
+                               .token_index     = step,
+                               .mrope_positions = {step, step, step},
+                               .sampling        = {.temperature = 0.0F, .top_p = 1.0F}};
+            LaneStepRequest re = rg;
+            re.handle          = lane_e;
+            LaneStepRequest rl = rg;
+            rl.handle          = lane_l;
+            auto round_g       = exec_g.execute_round(std::span(&rg, 1));
+            auto round_e       = exec_e.execute_round(std::span(&re, 1));
+            auto round_l       = exec_l.execute_round_eager(std::span(&rl, 1), live_blocks);
+            if (live_blocks * 4 <= cross_tokens) { saw_lo = true; }
+            if (live_blocks * 4 > cross_tokens) { saw_hi = true; }
+            if (round_g.sampled_tokens()[0] != round_e.sampled_tokens()[0] ||
+                round_g.sampled_tokens()[0] != round_l.sampled_tokens()[0]) {
+                std::cerr << "FAIL: G8 three-way token mismatch at token_index=" << step
+                          << " live_blocks=" << live_blocks << "\n";
+                return 1;
+            }
+            if (!logits_bit_identical_nonvacuous(device, round_g.logits(), round_e.logits(), 1,
+                                                 "g8 graph vs eager") ||
+                !logits_bit_identical_nonvacuous(device, round_g.logits(), round_l.logits(), 1,
+                                                 "g8 graph vs live")) {
+                std::cerr << " at token_index=" << step << "\n";
+                return 1;
+            }
+            std::vector<LaneCommitDecision> accept = {{.accept = true}};
+            round_g.commit(accept);
+            round_e.commit(accept);
+            round_l.commit(accept);
+            device.synchronize();
+        }
+        if (!saw_lo || !saw_hi) {
+            std::cerr << "FAIL: G8 decode did not cover both sides of " << cross_tokens << "\n";
+            return 1;
+        }
+        std::cout << "PASS: test_g8_decode_crossing tokens=" << cross_tokens << "\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_g8_decode_crossing exception: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+int test_g8_prefill_soak(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+        auto synthetic_model = make_synthetic_model(device);
+        const auto cfg       = g8_runtime_config(true);
+        const auto curve     = flash_next_capacity_curve(cfg);
+        auto plan            = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
+        const std::size_t ws_cap = flash_next_text_prefill_workspace_capacity_bytes(
+            static_cast<std::int32_t>(plan.maximum_blocks), 2048);
+        std::cout << "G8 prefill workspace capacity T=2048 N=16384: " << ws_cap << " bytes ("
+                  << (static_cast<double>(ws_cap) / 1048576.0) << " MiB)\n";
+        if (ws_cap >= 2ULL * 1024ULL * 1024ULL * 1024ULL) {
+            std::cerr << "ANOMALY: prefill workspace crosses 2 GiB\n";
+            return 1;
+        }
+        auto run_once = [&](std::vector<double>& times, std::vector<std::uint16_t>& hidden) {
+            FlashNextRuntimeAllocation alloc(plan);
+            alloc.initialize(device.stream);
+            FlashNextTextExecutor exec(synthetic_model.view, ple_meta, device, alloc);
+            auto lane              = exec.allocate_lane();
+            constexpr int kChunks  = 32;
+            constexpr int kChunk   = 2048;
+            times.assign(kChunks, 0);
+            bool saw_identity = false;
+            bool saw_sort     = false;
+            for (int c = 0; c < kChunks; ++c) {
+                const std::int32_t first    = c * kChunk;
+                const std::int32_t complete = (first + kChunk) / 4;
+                const char* arm = complete <= 512 ? "identity" : "sort";
+                if (complete <= 512) { saw_identity = true; }
+                else { saw_sort = true; }
+                g8_prefill_one(exec, lane, first, kChunk, device, &times[static_cast<std::size_t>(c)]);
+                const std::size_t peak = alloc.workspace().peak_used();
+                const std::size_t cap  = alloc.workspace().capacity();
+                std::cout << "  chunk " << c << " first=" << first << " complete_blocks=" << complete
+                          << " arm=" << arm << " ms=" << times[static_cast<std::size_t>(c)]
+                          << " ws_peak=" << peak << " / " << cap << "\n";
+                if (peak > cap) {
+                    std::cerr << "FAIL: workspace peak exceeds capacity at chunk " << c << "\n";
+                    return 1;
+                }
+            }
+            if (!saw_identity || !saw_sort) {
+                std::cerr << "FAIL: soak did not observe identity-to-sort transition\n";
+                return 1;
+            }
+            hidden.assign(2560, 0);
+            CUDA_CHECK(cudaMemcpy(hidden.data(), alloc.round_tensors().final_hidden.data,
+                                  hidden.size() * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+            exec.release_lane(lane);
+            return 0;
+        };
+        std::vector<double> times_a, times_b;
+        std::vector<std::uint16_t> hid_a, hid_b;
+        if (run_once(times_a, hid_a) != 0) { return 1; }
+        if (run_once(times_b, hid_b) != 0) { return 1; }
+        if (hid_a.size() != hid_b.size() ||
+            std::memcmp(hid_a.data(), hid_b.data(), hid_a.size() * sizeof(std::uint16_t)) != 0) {
+            std::cerr << "FAIL: two full 64k prefills were not bitwise identical on final_hidden\n";
+            return 1;
+        }
+        double energy = 0.0;
+        for (auto v : hid_a) {
+            const float f = bf16_to_float(v);
+            if (!std::isfinite(f)) {
+                std::cerr << "FAIL: non-finite final_hidden\n";
+                return 1;
+            }
+            energy += static_cast<double>(f) * static_cast<double>(f);
+        }
+        if (!(energy > 0.0)) {
+            std::cerr << "FAIL: vacuous final_hidden energy\n";
+            return 1;
+        }
+        std::cout << "G8 prefill soak two-run hidden energy=" << energy << " bitwise match\n";
+        std::cout << "PASS: test_g8_prefill_soak\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_g8_prefill_soak exception: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+struct BitCompare {
+    std::size_t mismatches = 0;
+    std::size_t first      = static_cast<std::size_t>(-1);
+    std::uint16_t a        = 0;
+    std::uint16_t b        = 0;
+    double base_sq         = 0.0;
+    int nonfinite          = 0;
+};
+
+BitCompare compare_bf16_host(const std::vector<std::uint16_t>& a,
+                             const std::vector<std::uint16_t>& b) {
+    BitCompare out;
+    const std::size_t n = std::min(a.size(), b.size());
+    if (a.size() != b.size()) { out.mismatches = static_cast<std::size_t>(-1); }
+    for (std::size_t i = 0; i < n; ++i) {
+        const float fa = bf16_to_float(a[i]);
+        const float fb = bf16_to_float(b[i]);
+        if (!std::isfinite(fa) || !std::isfinite(fb)) { ++out.nonfinite; }
+        out.base_sq += static_cast<double>(fa) * static_cast<double>(fa);
+        if (a[i] != b[i]) {
+            if (out.mismatches == 0) {
+                out.first = i;
+                out.a     = a[i];
+                out.b     = b[i];
+            }
+            ++out.mismatches;
+        }
+    }
+    return out;
+}
+
+void copy_bf16(ninfer::DeviceContext& device, const ninfer::Tensor& t, std::size_t n,
+               std::vector<std::uint16_t>& host) {
+    host.assign(n, 0);
+    device.synchronize();
+    CUDA_CHECK(cudaMemcpy(host.data(), t.data, n * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+}
+
+void print_bit_compare(const char* label, const BitCompare& c) {
+    std::cout << "  " << label << " mismatches=" << c.mismatches << " nonfinite=" << c.nonfinite
+              << " base_sq=" << c.base_sq;
+    if (c.mismatches > 0 && c.mismatches != static_cast<std::size_t>(-1)) {
+        std::cout << " first[" << c.first << "] a=0x" << std::hex << c.a << " b=0x" << c.b
+                  << std::dec;
+    }
+    std::cout << "\n";
+}
+
+const char* graph_node_type_name(cudaGraphNodeType t) {
+    switch (t) {
+    case cudaGraphNodeTypeKernel:
+        return "Kernel";
+    case cudaGraphNodeTypeMemcpy:
+        return "Memcpy";
+    case cudaGraphNodeTypeMemset:
+        return "Memset";
+    case cudaGraphNodeTypeHost:
+        return "Host";
+    case cudaGraphNodeTypeGraph:
+        return "Graph";
+    case cudaGraphNodeTypeEmpty:
+        return "Empty";
+    case cudaGraphNodeTypeWaitEvent:
+        return "WaitEvent";
+    case cudaGraphNodeTypeEventRecord:
+        return "EventRecord";
+    default:
+        return "Other";
+    }
+}
+
+struct KernelSig {
+    const void* func = nullptr;
+    unsigned gx = 0, gy = 0, gz = 0;
+    unsigned bx = 0, by = 0, bz = 0;
+    unsigned shared = 0;
+};
+
+void dump_cuda_graph(const char* label, cudaGraph_t graph, std::vector<KernelSig>& kernels) {
+    kernels.clear();
+    if (graph == nullptr) {
+        std::cout << "G8 graph " << label << " native=null\n";
+        return;
+    }
+    std::size_t n = 0;
+    CUDA_CHECK(cudaGraphGetNodes(graph, nullptr, &n));
+    std::vector<cudaGraphNode_t> nodes(n);
+    if (n > 0) { CUDA_CHECK(cudaGraphGetNodes(graph, nodes.data(), &n)); }
+    int type_hist[16]{};
+    int memcpy_nodes = 0;
+    std::cout << "G8 graph " << label << " nodes=" << n << "\n";
+    for (std::size_t i = 0; i < n; ++i) {
+        cudaGraphNodeType t{};
+        CUDA_CHECK(cudaGraphNodeGetType(nodes[i], &t));
+        const int ti = static_cast<int>(t);
+        if (ti >= 0 && ti < 16) { ++type_hist[ti]; }
+        if (t == cudaGraphNodeTypeKernel) {
+            cudaKernelNodeParams p{};
+            CUDA_CHECK(cudaGraphKernelNodeGetParams(nodes[i], &p));
+            KernelSig s;
+            s.func   = p.func;
+            s.gx     = p.gridDim.x;
+            s.gy     = p.gridDim.y;
+            s.gz     = p.gridDim.z;
+            s.bx     = p.blockDim.x;
+            s.by     = p.blockDim.y;
+            s.bz     = p.blockDim.z;
+            s.shared = p.sharedMemBytes;
+            kernels.push_back(s);
+        } else if (t == cudaGraphNodeTypeMemcpy) {
+            ++memcpy_nodes;
+            cudaMemcpy3DParms mp{};
+            CUDA_CHECK(cudaGraphMemcpyNodeGetParams(nodes[i], &mp));
+            const std::size_t bytes = static_cast<std::size_t>(mp.extent.width) *
+                                      static_cast<std::size_t>(mp.extent.height) *
+                                      static_cast<std::size_t>(mp.extent.depth);
+            std::cout << "    memcpy[" << memcpy_nodes - 1 << "] bytes=" << bytes
+                      << " kind=" << static_cast<int>(mp.kind) << "\n";
+        }
+    }
+    for (int ti = 0; ti < 16; ++ti) {
+        if (type_hist[ti] > 0) {
+            std::cout << "    type " << graph_node_type_name(static_cast<cudaGraphNodeType>(ti))
+                      << " (" << ti << ") count=" << type_hist[ti] << "\n";
+        }
+    }
+    std::cout << "    kernel_count=" << kernels.size() << "\n";
+    unsigned max_gx = 0;
+    int wide = 0;
+    for (std::size_t i = 0; i < kernels.size(); ++i) {
+        const auto& k = kernels[i];
+        if (k.gx > max_gx) { max_gx = k.gx; }
+        if (k.gx >= 512) { ++wide; }
+    }
+    std::cout << "    kernels_with_grid.x>=512=" << wide << " max_grid.x=" << max_gx
+              << " (identity-bucket must not launch 16384-wide score)\n";
+}
+
+int diff_kernel_sigs(const char* a_label, const std::vector<KernelSig>& a, const char* b_label,
+                     const std::vector<KernelSig>& b) {
+    std::cout << "G8 kernel-sig diff " << a_label << " (" << a.size() << ") vs " << b_label << " ("
+              << b.size() << ")\n";
+    if (a.size() != b.size()) {
+        std::cout << "  COUNT MISMATCH\n";
+        return 1;
+    }
+    int diffs = 0;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        const bool same = a[i].func == b[i].func && a[i].gx == b[i].gx && a[i].gy == b[i].gy &&
+                          a[i].gz == b[i].gz && a[i].bx == b[i].bx && a[i].by == b[i].by &&
+                          a[i].bz == b[i].bz && a[i].shared == b[i].shared;
+        if (!same) {
+            ++diffs;
+            std::cout << "  kernel[" << i << "] " << a_label << " func=" << a[i].func
+                      << " grid=" << a[i].gx << "," << a[i].gy << "," << a[i].gz
+                      << " block=" << a[i].bx << "," << a[i].by << "," << a[i].bz
+                      << " shared=" << a[i].shared << "\n";
+            std::cout << "  kernel[" << i << "] " << b_label << " func=" << b[i].func
+                      << " grid=" << b[i].gx << "," << b[i].gy << "," << b[i].gz
+                      << " block=" << b[i].bx << "," << b[i].by << "," << b[i].bz
+                      << " shared=" << b[i].shared << "\n";
+        }
+    }
+    std::cout << "  signature_diffs=" << diffs << "\n";
+    return diffs;
+}
+
+cudaGraph_t bucket0_native(const ninfer::targets::qwen3_8_flash_next::detail::DecodeGraphFamily& family) {
+    for (const auto& profile : family.profiles) {
+        if (profile.batch_size == 1 && profile.bucket_index == 0 && profile.definition.ready()) {
+            return profile.definition.native();
+        }
+    }
+    return nullptr;
+}
+
+int test_g8_graph_node_diff(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+        auto synthetic_model = make_synthetic_model(device);
+
+        auto make_exec = [&](std::int32_t max_context) {
+            FlashNextRuntimeConfig cfg{
+                .max_concurrency     = 1,
+                .max_context         = static_cast<std::uint32_t>(max_context),
+                .state_slot_capacity = 2,
+                .prefill_chunk       = 2048,
+                .use_cuda_graph      = true,
+            };
+            const auto curve = flash_next_capacity_curve(cfg);
+            auto plan        = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
+            auto alloc       = std::make_unique<FlashNextRuntimeAllocation>(plan);
+            alloc->initialize(device.stream);
+            auto exec = std::make_unique<FlashNextTextExecutor>(synthetic_model.view, ple_meta,
+                                                                device, *alloc);
+            return std::make_pair(std::move(alloc), std::move(exec));
+        };
+
+        auto [alloc_8k, exec_8k]   = make_exec(8192);
+        std::vector<KernelSig> k8k;
+        dump_cuda_graph("max_context=8192 bucket0", bucket0_native(exec_8k->decode_graphs()), k8k);
+        exec_8k.reset();
+        alloc_8k.reset();
+
+        auto [alloc_64k, exec_64k] = make_exec(65536);
+        std::vector<KernelSig> k64k;
+        dump_cuda_graph("max_context=65536 bucket0", bucket0_native(exec_64k->decode_graphs()), k64k);
+        const int diffs = diff_kernel_sigs("8192", k8k, "65536", k64k);
+        std::cout << "G8 note: captured kernelParams include cache.block_tables.ne[0] "
+                     "(indexer_logical_pages = ceil(max_context/256): 32 vs 256) and "
+                     "workspace tensors sized to maximum_blocks (2048 vs 16384) even on the "
+                     "identity path. Those integer/pointer args are not in KernelSig.\n";
+        std::cout << (diffs == 0 ? "PASS" : "ANOMALY")
+                  << ": test_g8_graph_node_diff signature_diffs=" << diffs << "\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_g8_graph_node_diff exception: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+int test_g8_decode_characterization(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+        auto synthetic_model = make_synthetic_model(device);
+        auto make_plan       = [](bool graphs) {
+            const auto cfg   = g8_runtime_config(graphs);
+            const auto curve = flash_next_capacity_curve(cfg);
+            return finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
+        };
+        auto plan_g = make_plan(true);
+        auto plan_e = make_plan(false);
+        FlashNextRuntimeAllocation alloc_g(plan_g);
+        FlashNextRuntimeAllocation alloc_e(plan_e);
+        FlashNextRuntimeAllocation alloc_l(plan_e);
+        alloc_g.initialize(device.stream);
+        alloc_e.initialize(device.stream);
+        alloc_l.initialize(device.stream);
+        FlashNextTextExecutor exec_g(synthetic_model.view, ple_meta, device, alloc_g);
+        FlashNextTextExecutor exec_e(synthetic_model.view, ple_meta, device, alloc_e);
+        FlashNextTextExecutor exec_l(synthetic_model.view, ple_meta, device, alloc_l);
+        exec_e.set_use_cuda_graph(false);
+        exec_l.set_use_cuda_graph(false);
+        auto lane_g = exec_g.allocate_lane();
+        auto lane_e = exec_e.allocate_lane();
+        auto lane_l = exec_l.allocate_lane();
+        g8_prefill_one(exec_g, lane_g, 0, 2048, device, nullptr);
+        g8_prefill_one(exec_e, lane_e, 0, 2048, device, nullptr);
+        g8_prefill_one(exec_l, lane_l, 0, 2048, device, nullptr);
+
+        std::vector<std::uint16_t> pre_g, pre_e, pre_l;
+        copy_bf16(device, alloc_g.round_tensors().final_hidden, 2560, pre_g);
+        copy_bf16(device, alloc_e.round_tensors().final_hidden, 2560, pre_e);
+        copy_bf16(device, alloc_l.round_tensors().final_hidden, 2560, pre_l);
+        const auto pre_ge = compare_bf16_host(pre_g, pre_e);
+        const auto pre_el = compare_bf16_host(pre_e, pre_l);
+        print_bit_compare("prefill-only graph vs eager-bucket hidden", pre_ge);
+        print_bit_compare("prefill-only eager-bucket vs eager-live hidden", pre_el);
+        if (pre_ge.mismatches > 0 || pre_el.mismatches > 0) {
+            std::cout << "  diagnosis: independent identity prefills already diverge — decode "
+                         "three-way is not comparing equal KV.\n";
+        } else {
+            std::cout << "  diagnosis: identity prefills bitwise match; decode-path divergence "
+                         "is not inherited from prefill KV.\n";
+        }
+
+        constexpr int kRepeats            = 5;
+        constexpr std::int32_t kStep      = 2048;
+        constexpr std::int32_t kLiveBlocks = (kStep + 1) / 4;
+        std::cout << "G8 char at token_index=" << kStep << " live_blocks=" << kLiveBlocks
+                  << " (identity bucket under max_context=65536)\n";
+
+        auto one_round = [&](FlashNextTextExecutor& exec, LaneHandle lane, bool live,
+                             std::vector<std::uint16_t>& logits, std::vector<std::uint16_t>& hidden,
+                             std::int32_t& token) {
+            LaneStepRequest req{.handle          = lane,
+                                .token_id        = 300 + kStep,
+                                .token_index     = kStep,
+                                .mrope_positions = {kStep, kStep, kStep},
+                                .sampling        = {.temperature = 0.0F, .top_p = 1.0F}};
+            auto round = live ? exec.execute_round_eager(std::span(&req, 1), kLiveBlocks)
+                              : exec.execute_round(std::span(&req, 1));
+            token      = round.sampled_tokens()[0];
+            copy_bf16(device, round.logits(), 248320, logits);
+            copy_bf16(device, round.final_hidden(), 2560, hidden);
+            // Abort (PendingRound destructor) rolls back the ledger only. Decode wrote the
+            // destination slot; the next repeat still reads the prefill source slot.
+        };
+
+        std::vector<std::vector<std::uint16_t>> g_logits(kRepeats), e_logits(kRepeats),
+            l_logits(kRepeats);
+        std::vector<std::vector<std::uint16_t>> g_hidden(kRepeats), e_hidden(kRepeats),
+            l_hidden(kRepeats);
+        std::array<std::int32_t, kRepeats> g_tok{}, e_tok{}, l_tok{};
+        for (int r = 0; r < kRepeats; ++r) {
+            one_round(exec_g, lane_g, false, g_logits[static_cast<std::size_t>(r)],
+                      g_hidden[static_cast<std::size_t>(r)], g_tok[static_cast<std::size_t>(r)]);
+            one_round(exec_e, lane_e, false, e_logits[static_cast<std::size_t>(r)],
+                      e_hidden[static_cast<std::size_t>(r)], e_tok[static_cast<std::size_t>(r)]);
+            one_round(exec_l, lane_l, true, l_logits[static_cast<std::size_t>(r)],
+                      l_hidden[static_cast<std::size_t>(r)], l_tok[static_cast<std::size_t>(r)]);
+        }
+
+        auto stability = [](const std::vector<std::vector<std::uint16_t>>& runs, const char* label) {
+            bool ok = true;
+            for (int r = 1; r < static_cast<int>(runs.size()); ++r) {
+                const auto c = compare_bf16_host(runs[0], runs[static_cast<std::size_t>(r)]);
+                std::cout << "  " << label << " run0 vs run" << r;
+                print_bit_compare("", c);
+                if (c.mismatches != 0 || c.nonfinite != 0 || !(c.base_sq > 0.0)) { ok = false; }
+            }
+            return ok;
+        };
+
+        const bool g_stable = stability(g_logits, "graph logits");
+        const bool e_stable = stability(e_logits, "eager-bucket logits");
+        const bool l_stable = stability(l_logits, "eager-live logits");
+        (void)stability(g_hidden, "graph hidden");
+        (void)stability(e_hidden, "eager-bucket hidden");
+        (void)stability(l_hidden, "eager-live hidden");
+
+        const auto ge = compare_bf16_host(g_logits[0], e_logits[0]);
+        const auto gl = compare_bf16_host(g_logits[0], l_logits[0]);
+        const auto el = compare_bf16_host(e_logits[0], l_logits[0]);
+        const auto geh = compare_bf16_host(g_hidden[0], e_hidden[0]);
+        const auto elh = compare_bf16_host(e_hidden[0], l_hidden[0]);
+        print_bit_compare("graph vs eager-bucket logits", ge);
+        print_bit_compare("graph vs eager-live logits", gl);
+        print_bit_compare("eager-bucket vs eager-live logits", el);
+        print_bit_compare("graph vs eager-bucket hidden", geh);
+        print_bit_compare("eager-bucket vs eager-live hidden", elh);
+        std::cout << "  greedy tokens graph=" << g_tok[0] << " eager=" << e_tok[0]
+                  << " live=" << l_tok[0] << "\n";
+        bool tok_match = true;
+        for (int r = 0; r < kRepeats; ++r) {
+            if (g_tok[static_cast<std::size_t>(r)] != g_tok[0] ||
+                e_tok[static_cast<std::size_t>(r)] != e_tok[0] ||
+                l_tok[static_cast<std::size_t>(r)] != l_tok[0] || g_tok[0] != e_tok[0] ||
+                g_tok[0] != l_tok[0]) {
+                tok_match = false;
+            }
+        }
+        std::cout << "  graph_logits_stable=" << (g_stable ? "yes" : "NO")
+                  << " eager_stable=" << (e_stable ? "yes" : "NO")
+                  << " live_stable=" << (l_stable ? "yes" : "NO")
+                  << " greedy_match=" << (tok_match ? "yes" : "NO") << "\n";
+        if (ge.mismatches > 0 && g_stable && e_stable) {
+            std::cout << "  diagnosis: graph leg internally stable, eager leg internally stable, "
+                         "same first-mismatch bits across the pair — frozen capture-vs-eager "
+                         "ordering, not a race.\n";
+        }
+        if (el.mismatches == 0 && ge.mismatches > 0) {
+            std::cout << "  diagnosis: eager-bucket == eager-live bitwise; graph is the odd leg.\n";
+        }
+        if (!(ge.base_sq > 0.0) || ge.nonfinite != 0) {
+            std::cerr << "FAIL: characterization comparison vacuous or non-finite\n";
+            return 1;
+        }
+        std::cout << "PASS: test_g8_decode_characterization (report; 1-ULP not papered over)\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_g8_decode_characterization exception: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+std::uint64_t fnv1a_64(const void* data, std::size_t n) {
+    auto h              = 14695981039346656037ULL;
+    const auto* bytes   = static_cast<const std::uint8_t*>(data);
+    for (std::size_t i = 0; i < n; ++i) {
+        h ^= bytes[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+struct StageChecksum {
+    std::string name;
+    std::uint64_t hash = 0;
+    std::size_t bytes  = 0;
+    double energy      = 0.0;
+    int nonzero        = 0;
+};
+
+int test_g8_stage_checksum(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+        auto synthetic_model = make_synthetic_model(device);
+        const auto cfg       = g8_runtime_config(false);
+        const auto curve     = flash_next_capacity_curve(cfg);
+        auto plan            = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
+
+        auto run_one = [&](std::vector<StageChecksum>& stages) {
+            stages.clear();
+            FlashNextRuntimeAllocation alloc(plan);
+            alloc.initialize(device.stream);
+            FlashNextTextExecutor exec(synthetic_model.view, ple_meta, device, alloc);
+            exec.set_use_cuda_graph(false);
+            auto lane = exec.allocate_lane();
+            std::vector<std::byte> host(64ULL * 1024ULL * 1024ULL);
+            FlashNextDecodeStateSink sink;
+            sink.on_state = [&](std::string_view name, const ninfer::Tensor& tensor) {
+                const std::int64_t n0 = tensor.ne[0] > 0 ? tensor.ne[0] : 1;
+                const std::int64_t n1 = tensor.ne[1] > 0 ? tensor.ne[1] : 1;
+                const std::int64_t n2 = tensor.ne[2] > 0 ? tensor.ne[2] : 1;
+                const std::int64_t n3 = tensor.ne[3] > 0 ? tensor.ne[3] : 1;
+                const std::size_t elems =
+                    static_cast<std::size_t>(n0) * static_cast<std::size_t>(n1) *
+                    static_cast<std::size_t>(n2) * static_cast<std::size_t>(n3);
+                const std::size_t bytes = elems * ninfer::dtype_size(tensor.dtype);
+                if (bytes > host.size()) { host.resize(bytes); }
+                CUDA_CHECK(cudaMemcpy(host.data(), tensor.data, bytes, cudaMemcpyDeviceToHost));
+                StageChecksum s;
+                s.name  = std::string(name);
+                s.hash  = fnv1a_64(host.data(), bytes);
+                s.bytes = bytes;
+                if (tensor.dtype == ninfer::DType::BF16) {
+                    const auto* v = reinterpret_cast<const std::uint16_t*>(host.data());
+                    for (std::size_t i = 0; i < elems; ++i) {
+                        const float f = bf16_to_float(v[i]);
+                        if (v[i] != 0) { ++s.nonzero; }
+                        s.energy += static_cast<double>(f) * static_cast<double>(f);
+                    }
+                } else {
+                    const auto* b = host.data();
+                    for (std::size_t i = 0; i < bytes; ++i) {
+                        if (static_cast<unsigned char>(b[i]) != 0) { ++s.nonzero; }
+                    }
+                }
+                stages.push_back(std::move(s));
+            };
+            constexpr std::int32_t T = 2048;
+            std::vector<std::int32_t> tokens(static_cast<std::size_t>(T));
+            std::vector<std::array<std::int32_t, 3>> positions(static_cast<std::size_t>(T));
+            for (std::int32_t t = 0; t < T; ++t) {
+                tokens[static_cast<std::size_t>(t)]    = 100 + (t & 1023);
+                positions[static_cast<std::size_t>(t)] = {t, t, t};
+            }
+            auto pr = exec.execute_prefill_chunk(lane, tokens, positions, 0, &sink);
+            std::vector<LaneCommitDecision> accept = {{.accept = true}};
+            pr.commit(accept);
+            device.synchronize();
+            exec.release_lane(lane);
+        };
+
+        std::vector<StageChecksum> a, b;
+        run_one(a);
+        run_one(b);
+        std::cout << "G8 stage checksum chunk0 T=2048 identity eager-only stages=" << a.size()
+                  << " vs " << b.size() << "\n";
+        if (a.size() != b.size() || a.empty()) {
+            std::cerr << "FAIL: stage count mismatch or empty\n";
+            return 1;
+        }
+        int first = -1;
+        int diffs = 0;
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            const bool same = a[i].name == b[i].name && a[i].hash == b[i].hash &&
+                              a[i].bytes == b[i].bytes;
+            if (!same) {
+                if (first < 0) { first = static_cast<int>(i); }
+                ++diffs;
+                if (diffs <= 12) {
+                    std::cout << "  DIFF[" << i << "] " << a[i].name << " hash_a=0x" << std::hex
+                              << a[i].hash << " hash_b=0x" << b[i].hash << std::dec
+                              << " bytes=" << a[i].bytes << " energy_a=" << a[i].energy
+                              << " energy_b=" << b[i].energy << " nonzero_a=" << a[i].nonzero
+                              << " nonzero_b=" << b[i].nonzero << "\n";
+                }
+            }
+        }
+        if (first < 0) {
+            std::cout << "  all " << a.size() << " stages bitwise identical (eager-only chunk 0)\n";
+            if (!(a.back().energy > 0.0) && a.back().nonzero == 0) {
+                std::cerr << "FAIL: vacuous stage checksums\n";
+                return 1;
+            }
+        } else {
+            if (diffs > 12) {
+                std::cout << "  ... " << (diffs - 12) << " further diffs omitted\n";
+            }
+            std::cout << "  first_diff_index=" << first << " name=" << a[static_cast<std::size_t>(first)].name
+                      << " diffs=" << diffs << " / " << a.size() << "\n";
+            std::cout << "  preceding match:";
+            for (int i = 0; i < first; ++i) {
+                std::cout << " " << a[static_cast<std::size_t>(i)].name;
+            }
+            std::cout << "\n";
+        }
+        std::cout << "PASS: test_g8_stage_checksum (report)\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_g8_stage_checksum exception: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    const std::string mode = argc >= 2 ? argv[1] : std::string{};
+    if (mode == "g8-admission") { return test_g8_admission_cpu(); }
+
     if (test_ledger_cpu() != 0) return 1;
     if (test_ledger_prefill_chunk_cpu() != 0) return 1;
     if (test_ple_boundary_lifecycle_cpu() != 0) return 1;
@@ -2196,6 +2969,14 @@ int main() {
     CUDA_CHECK(count_error);
 
     ninfer::DeviceContext device(0);
+
+    if (mode == "g8-decode-2048") { return test_g8_decode_crossing(device, 2048); }
+    if (mode == "g8-decode-8192") { return test_g8_decode_crossing(device, 8192); }
+    if (mode == "g8-decode-32768") { return test_g8_decode_crossing(device, 32768); }
+    if (mode == "g8-prefill") { return test_g8_prefill_soak(device); }
+    if (mode == "g8-char") { return test_g8_decode_characterization(device); }
+    if (mode == "g8-graph-nodes") { return test_g8_graph_node_diff(device); }
+    if (mode == "g8-stage-checksum") { return test_g8_stage_checksum(device); }
 
     if (test_cuda_ledger_and_executor(device) != 0) return 1;
     if (test_finite_model_stages(device) != 0) return 1;

@@ -850,7 +850,7 @@ bool test_fully_selected_identity_bypass(ninfer::DeviceContext& device, float& u
 }
 
 bool test_long_context_topk(ninfer::DeviceContext& device) {
-    constexpr std::array<std::int32_t, 4> ns{513, 1024, 4096, 8192};
+    constexpr std::array<std::int32_t, 5> ns{513, 1024, 4096, 8192, 16384};
     constexpr std::int32_t unique_high = 400;
     constexpr int kIters               = 30;
     std::cout << "\n=== G5 long-context indexer top-512 ===\n";
@@ -998,6 +998,100 @@ bool test_padded_score_nan_sentinel(ninfer::DeviceContext& device) {
     }
     std::cout << "PASS: test_padded_score_nan_sentinel complete_blocks=" << complete_blocks
               << " id0=" << ids_clean[0] << " energy=" << id_energy << "\n";
+    return true;
+}
+
+// G8 STEER 2 CHECK 3: the G6 NaN sentinel applied to the PREFILL select arm at a 64k
+// envelope (active_blocks = maximum_blocks = 16384, complete_blocks = 600 so the sort
+// path is taken). Poison the whole workspace with 0xFF before the public prefill_chunk.
+bool test_prefill_padded_score_nan_sentinel(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    constexpr std::int32_t maximum_blocks  = 16384;
+    constexpr std::int32_t logical_pages   = 256;
+    constexpr std::int32_t complete_blocks = 600;
+    constexpr std::int32_t token           = complete_blocks * 4 - 1;
+    IndexerProbe poisoned(maximum_blocks, logical_pages);
+    IndexerProbe clean(maximum_blocks, logical_pages);
+
+    std::vector<std::uint16_t> host_keys(128ULL * 64 * logical_pages, 0);
+    fill_monotonic_block_keys(host_keys, complete_blocks);
+    poisoned.load_keys(host_keys, device);
+    clean.load_keys(host_keys, device);
+
+    auto run_prefill = [&](IndexerProbe& probe, std::int32_t& count,
+                           std::array<std::int32_t, 512>& ids) {
+        probe.set_token(token);
+        drain_all_streams();
+        flash_next_qsa_indexer_prefill_chunk(
+            probe.input_view, probe.weights, probe.token_view, probe.position_view, 0, 0, 0,
+            probe.cache, maximum_blocks, probe.workspace, probe.selected_view, probe.count_view,
+            device.stream);
+        drain_all_streams();
+        probe.selected_count.copy_to_host(&count, sizeof(count));
+        probe.selected_blocks.copy_to_host(ids.data(), sizeof(ids));
+    };
+
+    std::int32_t count_clean = -1;
+    std::int32_t count_poisoned = -1;
+    std::array<std::int32_t, 512> ids_clean{};
+    std::array<std::int32_t, 512> ids_poisoned{};
+
+    clean.workspace.reset();
+    CUDA_CHECK(cudaMemsetAsync(clean.workspace.base(), 0, clean.workspace.capacity(),
+                               device.stream));
+    run_prefill(clean, count_clean, ids_clean);
+
+    poisoned.workspace.reset();
+    CUDA_CHECK(cudaMemsetAsync(poisoned.workspace.base(), 0xFF, poisoned.workspace.capacity(),
+                               device.stream));
+    run_prefill(poisoned, count_poisoned, ids_poisoned);
+
+    if (count_clean != 512 || count_poisoned != 512) {
+        std::cerr << "FAIL: prefill NaN sentinel count clean=" << count_clean
+                  << " poisoned=" << count_poisoned << "\n";
+        return false;
+    }
+    double id_energy = 0.0;
+    std::int32_t padded_hits = 0;
+    for (std::int32_t i = 0; i < 512; ++i) {
+        if (ids_poisoned[static_cast<std::size_t>(i)] >= complete_blocks) {
+            ++padded_hits;
+            std::cerr << "FAIL: prefill NaN sentinel selected padded id[" << i
+                      << "]=" << ids_poisoned[static_cast<std::size_t>(i)]
+                      << " >= complete_blocks=" << complete_blocks << "\n";
+            return false;
+        }
+        if (ids_poisoned[static_cast<std::size_t>(i)] != ids_clean[static_cast<std::size_t>(i)]) {
+            std::cerr << "FAIL: prefill NaN sentinel selection mismatch at " << i
+                      << " poisoned=" << ids_poisoned[static_cast<std::size_t>(i)]
+                      << " clean=" << ids_clean[static_cast<std::size_t>(i)] << "\n";
+            return false;
+        }
+        id_energy += static_cast<double>(ids_clean[static_cast<std::size_t>(i)]) *
+                     static_cast<double>(ids_clean[static_cast<std::size_t>(i)]);
+    }
+    if (!(id_energy > 0.0) || !std::isfinite(id_energy) || ids_clean[0] == ids_clean[1] ||
+        padded_hits != 0) {
+        std::cerr << "FAIL: prefill NaN sentinel comparison was vacuous (energy=" << id_energy
+                  << " id0=" << ids_clean[0] << " id1=" << ids_clean[1]
+                  << " padded_hits=" << padded_hits << ")\n";
+        return false;
+    }
+
+    std::int32_t count_again = -1;
+    std::array<std::int32_t, 512> ids_again{};
+    clean.workspace.reset();
+    CUDA_CHECK(cudaMemsetAsync(clean.workspace.base(), 0, clean.workspace.capacity(),
+                               device.stream));
+    run_prefill(clean, count_again, ids_again);
+    if (count_again != 512 || std::memcmp(ids_clean.data(), ids_again.data(), sizeof(ids_clean)) != 0) {
+        std::cerr << "FAIL: prefill select arm was not run-to-run identical at envelope=16384\n";
+        return false;
+    }
+
+    std::cout << "PASS: test_prefill_padded_score_nan_sentinel envelope=" << maximum_blocks
+              << " complete_blocks=" << complete_blocks << " id0=" << ids_clean[0]
+              << " energy=" << id_energy << " padded_hits=0 run-to-run identical\n";
     return true;
 }
 
@@ -1230,6 +1324,10 @@ int main() {
     }
     if (!test_padded_score_nan_sentinel(device)) {
         std::cerr << "FAIL: test_padded_score_nan_sentinel failed\n";
+        return 1;
+    }
+    if (!test_prefill_padded_score_nan_sentinel(device)) {
+        std::cerr << "FAIL: test_prefill_padded_score_nan_sentinel failed\n";
         return 1;
     }
     if (!test_prefill_decode_select_equivalence(device)) {

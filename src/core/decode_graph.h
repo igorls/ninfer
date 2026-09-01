@@ -19,6 +19,8 @@ public:
     void capture(cudaStream_t stream, const std::function<void()>& body);
     [[nodiscard]] bool ready() const noexcept;
     void reset() noexcept;
+    // Characterization/tests: inspect captured nodes (grid/block/func). Not a product API.
+    [[nodiscard]] cudaGraph_t native() const noexcept { return graph_; }
 
 private:
     friend class DecodeGraphExecutable;
