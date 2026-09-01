@@ -37,6 +37,9 @@ __device__ __forceinline__ float warp_max(float x, unsigned mask = kFullWarpMask
     return x;
 }
 
+// Block sum. The result is valid in warp 0 (and in every thread when Warps==1).
+// Trailing __syncthreads() so a caller may reuse `sums` immediately; without it a
+// late reader of sums[lane] can race a subsequent write (the PLE helper bug class).
 template <int BlockSize>
 __device__ __forceinline__ float block_reduce_sum(float x, float* sums) {
     static_assert(BlockSize >= kWarpSize && BlockSize <= 1024);
@@ -53,6 +56,7 @@ __device__ __forceinline__ float block_reduce_sum(float x, float* sums) {
 
     x = threadIdx.x < Warps ? sums[lane] : 0.0f;
     if (warp == 0) { x = warp_reduce_sum<Warps>(x); }
+    __syncthreads();
     return x;
 }
 

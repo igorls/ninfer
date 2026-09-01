@@ -2950,6 +2950,77 @@ int test_g8_stage_checksum(ninfer::DeviceContext& device) {
     }
 }
 
+int test_g9_prefill_determinism(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+        auto synthetic_model = make_synthetic_model(device);
+        FlashNextRuntimeConfig cfg{
+            .max_concurrency     = 1,
+            .max_context         = 8192,
+            .state_slot_capacity = 2,
+            .prefill_chunk       = 2048,
+            .use_cuda_graph      = true,
+        };
+        const auto curve = flash_next_capacity_curve(cfg);
+        auto plan        = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
+        auto run_once    = [&](std::vector<std::uint16_t>& hidden) {
+            FlashNextRuntimeAllocation alloc(plan);
+            alloc.initialize(device.stream);
+            FlashNextTextExecutor exec(synthetic_model.view, ple_meta, device, alloc);
+            auto lane             = exec.allocate_lane();
+            constexpr int kChunks = 3;
+            constexpr int kChunk  = 2048;
+            for (int c = 0; c < kChunks; ++c) {
+                g8_prefill_one(exec, lane, c * kChunk, kChunk, device, nullptr);
+            }
+            hidden.assign(2560, 0);
+            CUDA_CHECK(cudaMemcpy(hidden.data(), alloc.round_tensors().final_hidden.data,
+                                  hidden.size() * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+            exec.release_lane(lane);
+        };
+        std::vector<std::uint16_t> hid_a, hid_b;
+        run_once(hid_a);
+        run_once(hid_b);
+        if (hid_a.size() != hid_b.size() ||
+            std::memcmp(hid_a.data(), hid_b.data(), hid_a.size() * sizeof(std::uint16_t)) != 0) {
+            std::cerr << "FAIL: G9 two-run 3x2048 prefill was not bitwise identical on final_hidden\n";
+            std::size_t first = static_cast<std::size_t>(-1);
+            for (std::size_t i = 0; i < hid_a.size(); ++i) {
+                if (hid_a[i] != hid_b[i]) {
+                    first = i;
+                    break;
+                }
+            }
+            std::cerr << "  first mismatch idx=" << first << " a=0x" << std::hex
+                      << (first < hid_a.size() ? hid_a[first] : 0) << " b=0x"
+                      << (first < hid_b.size() ? hid_b[first] : 0) << std::dec << "\n";
+            return 1;
+        }
+        double energy = 0.0;
+        int nonfinite = 0;
+        for (auto v : hid_a) {
+            const float f = bf16_to_float(v);
+            if (!std::isfinite(f)) { ++nonfinite; }
+            energy += static_cast<double>(f) * static_cast<double>(f);
+        }
+        if (nonfinite != 0 || !(energy > 0.0) || !std::isfinite(energy)) {
+            std::cerr << "FAIL: G9 two-run gate vacuous or non-finite energy=" << energy
+                      << " nonfinite=" << nonfinite << "\n";
+            return 1;
+        }
+        std::cout << "PASS: test_g9_prefill_determinism 3x2048 two-run hidden energy=" << energy
+                  << " bitwise match\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_g9_prefill_determinism exception: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2977,6 +3048,7 @@ int main(int argc, char** argv) {
     if (mode == "g8-char") { return test_g8_decode_characterization(device); }
     if (mode == "g8-graph-nodes") { return test_g8_graph_node_diff(device); }
     if (mode == "g8-stage-checksum") { return test_g8_stage_checksum(device); }
+    if (mode == "g9-gate") { return test_g9_prefill_determinism(device); }
 
     if (test_cuda_ledger_and_executor(device) != 0) return 1;
     if (test_finite_model_stages(device) != 0) return 1;
@@ -2989,6 +3061,7 @@ int main(int argc, char** argv) {
     if (test_measure_cuda_graph_footprint(device) != 0) return 1;
     if (test_cuda_graph_timing_benchmark(device) != 0) return 1;
     if (test_prefill_chunk_timing_benchmark(device) != 0) return 1;
+    if (test_g9_prefill_determinism(device) != 0) return 1;
 
     std::cout << "OK Flash-Next Text Executor\n";
     return 0;

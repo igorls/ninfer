@@ -37,7 +37,9 @@ __device__ __forceinline__ float block_reduce_sum_broadcast(float val, float* sh
         if (lane == 0) { shared_mem[0] = warp_sum; }
     }
     __syncthreads();
-    return shared_mem[0];
+    const float total = shared_mem[0];
+    __syncthreads();
+    return total;
 }
 
 __global__ void ple_gate_norm_kernel(

@@ -624,8 +624,7 @@ void flash_next_qsa_indexer_prefill_launch(
         static_cast<__nv_bfloat16*>(scratch.query.data), tokens);
     CUDA_CHECK(cudaGetLastError());
 
-    const int tile_size     = flash_next_qsa_indexer_tile_size(maximum_blocks, tokens);
-    const int active_blocks = maximum_blocks;
+    const int tile_size = flash_next_qsa_indexer_tile_size(maximum_blocks, tokens);
 
     for (int t_start = 0; t_start < tokens; t_start += tile_size) {
         const int current_tile = min(tile_size, tokens - t_start);
@@ -643,8 +642,11 @@ void flash_next_qsa_indexer_prefill_launch(
             continue;
         }
 
-        constexpr int threads = 256;
-        const int items       = active_blocks * current_tile;
+        // Eager prefill is not captured: score/sort the live complete-block frontier, not the
+        // plan envelope. Workspace remains sized to maximum_blocks.
+        const int active_blocks = min(maximum_blocks, tile_complete);
+        constexpr int threads   = 256;
+        const int items         = active_blocks * current_tile;
 
         initialize_sort_kernel<<<(items + threads - 1) / threads, threads, 0, stream>>>(
             static_cast<std::int32_t*>(scratch.ids.data),
