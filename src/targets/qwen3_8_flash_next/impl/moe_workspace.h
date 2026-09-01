@@ -21,6 +21,8 @@ struct FlashNextMoeWorkspace {
     Tensor grouped_tokens;
     Tensor grouped_paths;
     Tensor grouped_experts;
+    Tensor token_to_pos;
+    Tensor staged_down;
     Tensor down_intermediate;
     Tensor task_counter;
     // Prefill NVFP4 MMA activation quantization buffers (tokens > 8)
@@ -48,7 +50,12 @@ FlashNextMoeWorkspace allocate_flash_next_moe_workspace(Arena& arena, std::int32
         out.grouped_tokens    = arena.alloc(DType::I32, {10 * tokens}, 16);
         out.grouped_paths     = arena.alloc(DType::I32, {10 * tokens}, 16);
         out.grouped_experts   = arena.alloc(DType::I32, {10 * tokens}, 16);
-        out.down_intermediate = arena.alloc(DType::FP32, {2'560, 10, tokens}, 256);
+        out.token_to_pos      = arena.alloc(DType::I32, {10 * tokens}, 16);
+        if (tokens >= 512) {
+            out.staged_down   = arena.alloc(DType::BF16, {2'560, 10 * tokens}, 256);
+        } else {
+            out.down_intermediate = arena.alloc(DType::FP32, {2'560, 10, tokens}, 256);
+        }
         out.task_counter      = arena.alloc(DType::I32, {4}, 16);
         out.act_codes         = arena.alloc(DType::U8, {1'280, tokens}, 256);
         out.act_scales        = arena.alloc(DType::U8, {160, tokens}, 256);
