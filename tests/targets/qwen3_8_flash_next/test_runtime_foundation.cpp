@@ -1,7 +1,11 @@
 #include "core/arena.h"
 #include "core/device.h"
+#include "core/layout.h"
+#include "targets/qwen3_8_flash_next/impl/qsa_indexer_kernels.h"
+#include "targets/qwen3_8_flash_next/impl/qsa_indexer_workspace.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_state.h"
+#include "targets/qwen3_8_flash_next/impl/text_decode.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode_state.h"
 
 #include <cuda_runtime.h>
@@ -10,6 +14,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -174,6 +179,76 @@ int test_decode_graph_buckets() {
     std::cout << "  buckets {512, 2048, 8192, 16384} groups=" << plan64k.main_page_groups
               << " maximum_blocks=" << plan64k.maximum_blocks << " state_slots=" << plan64k.state_slots
               << "\n";
+
+    FlashNextRuntimeConfig cfg256k{
+        .max_concurrency = 1,
+        .max_context     = 262144,
+        .prefill_chunk   = 2048,
+        .use_cuda_graph  = true,
+    };
+    const auto curve256k = flash_next_capacity_curve(cfg256k);
+    if (curve256k.minimum_main_page_groups != 1024 || curve256k.maximum_main_page_groups != 1024) {
+        std::cerr << "FAIL: 256k B=1 groups min/max expected 1024 got "
+                  << curve256k.minimum_main_page_groups << "/" << curve256k.maximum_main_page_groups
+                  << "\n";
+        return 1;
+    }
+    const auto plan256k =
+        finalize_flash_next_runtime_plan(cfg256k, curve256k.minimum_main_page_groups);
+    const auto b256k = flash_next_decode_graph_buckets(plan256k.maximum_blocks);
+    if (plan256k.maximum_blocks != 65536 || plan256k.main_page_groups != 1024 || b256k.count != 4 ||
+        b256k.blocks[0] != 512 || b256k.blocks[1] != 2048 || b256k.blocks[2] != 8192 ||
+        b256k.blocks[3] != 65536 || plan256k.attention_logical_pages != 4096 ||
+        plan256k.indexer_logical_pages != 1024 || plan256k.resolved_tokens != 262144) {
+        std::cerr << "FAIL: 256k plan blocks/groups/buckets mismatch blocks="
+                  << plan256k.maximum_blocks << " groups=" << plan256k.main_page_groups
+                  << " n_buckets=" << b256k.count << " att_log=" << plan256k.attention_logical_pages
+                  << " idx_log=" << plan256k.indexer_logical_pages << "\n";
+        return 1;
+    }
+    if (plan256k.cuda_graph_allowance_bytes != 4ULL * 24ULL * 1024ULL * 1024ULL) {
+        std::cerr << "FAIL: 256k graph allowance expected 96 MiB got "
+                  << plan256k.cuda_graph_allowance_bytes << "\n";
+        return 1;
+    }
+    if (plan256k.state_slots != 2) {
+        std::cerr << "FAIL: 256k state_slots expected 2 got " << plan256k.state_slots << "\n";
+        return 1;
+    }
+    const std::int32_t tile_64k =
+        flash_next_qsa_indexer_tile_size(static_cast<std::int32_t>(plan64k.maximum_blocks), 2048);
+    const std::int32_t tile_256k =
+        flash_next_qsa_indexer_tile_size(static_cast<std::int32_t>(plan256k.maximum_blocks), 2048);
+    std::cout << "G14 tile_size(16384, 2048)=" << tile_64k
+              << " tiles_per_2048_chunk=" << (2048 + tile_64k - 1) / tile_64k << "\n";
+    std::cout << "G14 tile_size(65536, 2048)=" << tile_256k
+              << " tiles_per_2048_chunk=" << (2048 + tile_256k - 1) / tile_256k << "\n";
+    if (tile_64k != 1024 || tile_256k != 256) {
+        std::cerr << "FAIL: expected tile_size 1024 at 64k and 256 at 256k\n";
+        return 1;
+    }
+    const double kv256 =
+        static_cast<double>(plan256k.attention_kv_bytes + plan256k.indexer_block_keys_bytes) /
+        1048576.0;
+    const double rec256  = static_cast<double>(plan256k.recurrent_state_bytes) / 1048576.0;
+    const double graph256 = static_cast<double>(plan256k.cuda_graph_allowance_bytes) / 1048576.0;
+    const double ws256    = static_cast<double>(plan256k.workspace_bytes) / 1048576.0;
+    const double tot256   = static_cast<double>(plan256k.total_device_bytes) / 1048576.0;
+    std::cout << "G14 PLAN 256k predicted vs actual (B=1, 1024 groups):\n";
+    std::cout << "  KV        predicted 6336.0 MiB  actual " << kv256 << " MiB\n";
+    std::cout << "  recurrent predicted  220.6 MiB  actual " << rec256 << " MiB\n";
+    std::cout << "  graphs    predicted   96.0 MiB  actual " << graph256 << " MiB\n";
+    std::cout << "  workspace (not in predicted table) actual " << ws256 << " MiB ("
+              << plan256k.workspace_bytes << " bytes)\n";
+    std::cout << "  total_device_bytes actual " << tot256 << " MiB (" << plan256k.total_device_bytes
+              << " bytes)\n";
+    std::cout << "  buckets {512, 2048, 8192, 65536} groups=" << plan256k.main_page_groups
+              << " maximum_blocks=" << plan256k.maximum_blocks
+              << " state_slots=" << plan256k.state_slots << "\n";
+    std::cout << "  decode bucket at 64k-depth (16384 blocks)="
+              << flash_next_decode_graph_select_bucket(b256k, 16384)
+              << " envelope=" << b256k.blocks[flash_next_decode_graph_select_bucket(b256k, 16384)]
+              << " (no 16384 slot under a 256k plan)\n";
 
     std::cout << "PASS: test_decode_graph_buckets\n";
     return 0;
@@ -461,6 +536,154 @@ int test_64k_allocation(ninfer::DeviceContext& device) {
     return 0;
 }
 
+bool g14_fits_i32(std::int64_t value, const char* line) {
+    const bool ok = value >= static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::min()) &&
+                    value <= static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max());
+    std::cout << "  " << line << " value=" << value << (ok ? " fits int32\n" : " DOES NOT FIT int32\n");
+    return ok;
+}
+
+int test_g14_int32_audit() {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    constexpr std::int32_t kN    = 65536;
+    constexpr std::int32_t kT    = 2048;
+    const std::int32_t tile      = flash_next_qsa_indexer_tile_size(kN, kT);
+    const std::int64_t items_tile = static_cast<std::int64_t>(kN) * tile;
+    const std::int64_t items_uncapped =
+        static_cast<std::int64_t>(kN) * kT; // if tile_size did not shrink
+    std::cout << "G14 INT32 AUDIT at maximum_blocks=65536 tile=" << tile << " tokens=" << kT << "\n";
+    bool ok = true;
+    ok = g14_fits_i32(items_tile,
+                      "qsa_indexer_kernels.cu:748 const int items = active_blocks * current_tile") &&
+         ok;
+    ok = g14_fits_i32(items_uncapped,
+                      "uncapped items = 65536 * 2048 (tile_size prevents this launch shape)") &&
+         ok;
+    ok = g14_fits_i32(static_cast<std::int64_t>(tile) * kN,
+                      "qsa_indexer_kernels.cu:156 offsets[index] = index * active_blocks "
+                      "(index<=tile)") &&
+         ok;
+    ok = g14_fits_i32(static_cast<std::int64_t>(kN) * 1,
+                      "qsa_indexer_kernels.cu:154 decode items = active_blocks * batch_size B=1") &&
+         ok;
+    ok = g14_fits_i32(static_cast<std::int64_t>(kN) * 8,
+                      "decode items at B=8 envelope") &&
+         ok;
+    ok = g14_fits_i32(262143, "token_index up to max_context-1") && ok;
+    ok = g14_fits_i32(0 * 1024 + 1023,
+                      "indexer block_tables[table_row * logical_pages + logical_page] B=1") &&
+         ok;
+    ok = g14_fits_i32(0 * 4096 + 4095,
+                      "attention block_tables[table_row * logical_pages + logical_page] B=1") &&
+         ok;
+    ok = g14_fits_i32(1023 * 4 + 3, "lane_ledger.cpp log_att_page = log_group * 4 + s") && ok;
+    ok = g14_fits_i32(static_cast<std::int64_t>(tile - 1) * kN + (kN - 1),
+                      "score write tok * active_blocks + blk (stored as int64 at "
+                      "qsa_indexer_kernels.cu:665)") &&
+         ok;
+    ok = g14_fits_i32(static_cast<std::int64_t>(kN) * tile * 4,
+                      "scores FP32 bytes = N * tile * 4 (size_t path, quoted as 32-bit risk)") &&
+         ok;
+    const std::int64_t packed_bytes = static_cast<std::int64_t>(kN) * tile * 8;
+    std::cout << "  packed_keys I64 bytes=" << packed_bytes
+              << (packed_bytes >= (1LL << 31) ? " crosses 2 GiB in a 32-bit intermediate\n"
+                                              : " under 2 GiB\n");
+    if (packed_bytes >= (1LL << 31)) { ok = false; }
+    if (tile != 256 || items_tile != 16777216LL || items_uncapped != 134217728LL) {
+        std::cerr << "FAIL: G14 int32 fixture tile/items mismatch tile=" << tile
+                  << " items_tile=" << items_tile << "\n";
+        return 1;
+    }
+    if (!ok) {
+        std::cerr << "FAIL: G14 int32 audit found a value that does not fit int32\n";
+        return 1;
+    }
+    std::cout << "PASS: test_g14_int32_audit\n";
+    return 0;
+}
+
+void g14_dump_tensor(const char* name, const ninfer::Tensor& tensor) {
+    std::cout << "  " << name << " ne=[" << tensor.ne[0] << "," << tensor.ne[1] << "," << tensor.ne[2]
+              << "," << tensor.ne[3] << "] bytes=" << tensor.bytes() << "\n";
+}
+
+int test_g14_workspace_dump(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    (void)device;
+    constexpr std::int32_t kN = 65536;
+    constexpr std::int32_t kT = 2048;
+    const std::int32_t tile   = flash_next_qsa_indexer_tile_size(kN, kT);
+    const std::size_t sort_temp =
+        flash_next_qsa_indexer_sort_temp_bytes(kN, tile);
+    ninfer::WorkspaceLayoutBuilder layout;
+    auto scratch =
+        allocate_flash_next_qsa_indexer_workspace(layout, kN, kT, tile, sort_temp);
+    std::cout << "G14 INDEXER WORKSPACE N=65536 tokens=2048 tile=" << tile << "\n";
+    g14_dump_tensor("projected", scratch.projected);
+    g14_dump_tensor("query", scratch.query);
+    g14_dump_tensor("scores", scratch.scores);
+    g14_dump_tensor("sorted_scores", scratch.sorted_scores);
+    g14_dump_tensor("ids", scratch.ids);
+    g14_dump_tensor("sorted_ids", scratch.sorted_ids);
+    g14_dump_tensor("packed_keys", scratch.packed_keys);
+    g14_dump_tensor("packed_selected", scratch.packed_selected);
+    g14_dump_tensor("topk_ids", scratch.topk_ids);
+    g14_dump_tensor("offsets", scratch.offsets);
+    std::cout << "  sort_temp bytes=" << sort_temp << " span=" << scratch.sort_temp.bytes << "\n";
+    std::cout << "  indexer_layout_peak=" << layout.peak_bytes(256) << "\n";
+
+    const std::size_t prefill_ws = flash_next_text_prefill_workspace_capacity_bytes(kN, kT);
+    const std::size_t decode_ws  = flash_next_text_decode_workspace_capacity_bytes(kN, 1);
+    std::cout << "G14 prefill workspace capacity T=2048 N=65536: " << prefill_ws << " bytes ("
+              << (static_cast<double>(prefill_ws) / 1048576.0) << " MiB)\n";
+    std::cout << "G14 decode workspace capacity B=1 N=65536: " << decode_ws << " bytes ("
+              << (static_cast<double>(decode_ws) / 1048576.0) << " MiB)\n";
+    if (prefill_ws >= 2ULL * 1024ULL * 1024ULL * 1024ULL ||
+        decode_ws >= 2ULL * 1024ULL * 1024ULL * 1024ULL) {
+        std::cerr << "ANOMALY: workspace crosses 2 GiB\n";
+        return 1;
+    }
+    const std::int32_t tile64 = flash_next_qsa_indexer_tile_size(16384, kT);
+    const std::size_t prefill64 =
+        flash_next_text_prefill_workspace_capacity_bytes(16384, kT);
+    std::cout << "G14 64k comparison tile=" << tile64 << " prefill_ws=" << prefill64 << " bytes ("
+              << (static_cast<double>(prefill64) / 1048576.0) << " MiB)\n";
+    std::cout << "PASS: test_g14_workspace_dump\n";
+    return 0;
+}
+
+int test_256k_allocation(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency = 1,
+        .max_context     = 262144,
+        .prefill_chunk   = 2048,
+        .use_cuda_graph  = true,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan        = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
+    std::cout << "G14 256k allocation begin total_device_bytes=" << plan.total_device_bytes
+              << " workspace_bytes=" << plan.workspace_bytes << "\n";
+    FlashNextRuntimeAllocation alloc(plan);
+    alloc.initialize(device.stream);
+    device.synchronize();
+    const std::size_t peak = alloc.workspace().peak_used();
+    const std::size_t cap  = alloc.workspace().capacity();
+    std::cout << "G14 256k allocation succeeded total_device_bytes=" << plan.total_device_bytes
+              << " workspace peak_used=" << peak << " / " << cap << "\n";
+    if (plan.workspace_bytes >= 2ULL * 1024ULL * 1024ULL * 1024ULL) {
+        std::cerr << "ANOMALY: workspace_bytes crosses 2 GiB: " << plan.workspace_bytes << "\n";
+        return 1;
+    }
+    if (cap < plan.workspace_bytes) {
+        std::cerr << "FAIL: allocated workspace capacity " << cap << " < plan " << plan.workspace_bytes
+                  << "\n";
+        return 1;
+    }
+    std::cout << "PASS: test_256k_allocation\n";
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -468,6 +691,7 @@ int main() {
     if (test_constants_and_math() != 0) return 1;
     if (test_decode_graph_buckets() != 0) return 1;
     if (test_capacity_curve_and_finalize() != 0) return 1;
+    if (test_g14_int32_audit() != 0) return 1;
 
     // 2. CUDA device tests run only when a CUDA device is available
     int device_count              = 0;
@@ -481,6 +705,8 @@ int main() {
     ninfer::DeviceContext device(0);
     if (test_runtime_allocation_and_slots(device) != 0) return 1;
     if (test_64k_allocation(device) != 0) return 1;
+    if (test_g14_workspace_dump(device) != 0) return 1;
+    if (test_256k_allocation(device) != 0) return 1;
 
     std::cout << "OK Flash-Next Runtime Foundation\n";
     return 0;

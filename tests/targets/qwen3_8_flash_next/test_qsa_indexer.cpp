@@ -1,5 +1,6 @@
 #include "core/arena.h"
 #include "core/device.h"
+#include "core/layout.h"
 #include "ninfer/ops/linear.h"
 #include "targets/qwen3_8_flash_next/impl/qsa_indexer.h"
 #include "targets/qwen3_8_flash_next/impl/qsa_indexer_kernels.h"
@@ -15,6 +16,7 @@
 #include <cstring>
 #include <iostream>
 #include <random>
+#include <string>
 #include <vector>
 
 namespace {
@@ -1539,9 +1541,113 @@ bool test_prefill_score_gemm_vs_host_oracle(ninfer::DeviceContext& device, std::
     return true;
 }
 
+bool test_g14_prefill_indexer_cost(ninfer::DeviceContext& device, std::int32_t n,
+                                   std::int32_t tokens, std::int32_t first_token) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    const std::int32_t logical_pages = (n + 63) / 64;
+    const std::int32_t tile          = flash_next_qsa_indexer_tile_size(n, tokens);
+    const int n_tiles                = (tokens + tile - 1) / tile;
+    ninfer::DeviceBuffer input(2'560ULL * static_cast<std::size_t>(tokens) * 2);
+    ninfer::DeviceBuffer projection(640ULL * 2'560 * 2);
+    ninfer::DeviceBuffer query_norm(128 * 2);
+    ninfer::DeviceBuffer key_norm(128 * 2);
+    ninfer::DeviceBuffer block_keys(128ULL * 64 * static_cast<std::size_t>(logical_pages) * 2);
+    ninfer::DeviceBuffer block_tables(static_cast<std::size_t>(logical_pages) * sizeof(std::int32_t));
+    ninfer::DeviceBuffer raw_keys(128ULL * 4 * 2);
+    ninfer::DeviceBuffer raw_positions(3ULL * 4 * sizeof(std::int32_t));
+    ninfer::DeviceBuffer token_index(static_cast<std::size_t>(tokens) * sizeof(std::int32_t));
+    ninfer::DeviceBuffer mrope_positions(static_cast<std::size_t>(tokens) * 3 * sizeof(std::int32_t));
+    ninfer::DeviceBuffer selected_blocks(512ULL * static_cast<std::size_t>(tokens) *
+                                         sizeof(std::int32_t));
+    ninfer::DeviceBuffer selected_count(static_cast<std::size_t>(tokens) * sizeof(std::int32_t));
+
+    std::vector<std::uint16_t> input_values(2'560ULL * static_cast<std::size_t>(tokens), 0);
+    std::vector<std::uint16_t> projection_values(640ULL * 2'560, 0);
+    input_values[0] = 0x3F80U;
+    for (std::int32_t row = 0; row < 640; ++row) {
+        projection_values[static_cast<std::size_t>(row) * 2'560] = 0x3F80U;
+    }
+    input.copy_from_host(input_values.data(), input_values.size() * 2);
+    projection.copy_from_host(projection_values.data(), projection_values.size() * 2);
+    query_norm.fill(0);
+    key_norm.fill(0);
+    raw_keys.fill(0);
+    raw_positions.fill(0);
+    std::vector<std::int32_t> page_ids(static_cast<std::size_t>(logical_pages));
+    for (std::int32_t page = 0; page < logical_pages; ++page) {
+        page_ids[static_cast<std::size_t>(page)] = page;
+    }
+    block_tables.copy_from_host(page_ids.data(), page_ids.size() * sizeof(std::int32_t));
+    std::vector<std::int32_t> tokens_host(static_cast<std::size_t>(tokens));
+    std::vector<std::int32_t> pos_host(static_cast<std::size_t>(tokens) * 3);
+    for (std::int32_t t = 0; t < tokens; ++t) {
+        tokens_host[static_cast<std::size_t>(t)] = first_token + t;
+        pos_host[static_cast<std::size_t>(t)] = first_token + t;
+        pos_host[static_cast<std::size_t>(tokens + t)] = first_token + t;
+        pos_host[static_cast<std::size_t>(2 * tokens + t)] = first_token + t;
+    }
+    token_index.copy_from_host(tokens_host.data(), tokens_host.size() * sizeof(std::int32_t));
+    mrope_positions.copy_from_host(pos_host.data(), pos_host.size() * sizeof(std::int32_t));
+    std::vector<std::uint16_t> host_keys(128ULL * 64 * static_cast<std::size_t>(logical_pages), 0);
+    fill_monotonic_block_keys(host_keys, n);
+    block_keys.copy_from_host(host_keys.data(), host_keys.size() * 2);
+
+    AttentionWeights weights{};
+    weights.indexer_query_key  = bf16_weight(projection.p, 640, 2'560);
+    weights.indexer_query_norm = ninfer::Tensor(query_norm.p, ninfer::DType::BF16, {128});
+    weights.indexer_key_norm   = ninfer::Tensor(key_norm.p, ninfer::DType::BF16, {128});
+    QsaIndexerCacheView cache{
+        .block_keys    = ninfer::Tensor(block_keys.p, ninfer::DType::BF16, {128, 64, logical_pages}),
+        .block_tables  = ninfer::Tensor(block_tables.p, ninfer::DType::I32, {logical_pages, 1}),
+        .raw_keys      = ninfer::Tensor(raw_keys.p, ninfer::DType::BF16, {128, 4, 1}),
+        .raw_positions = ninfer::Tensor(raw_positions.p, ninfer::DType::I32, {3, 4, 1}),
+    };
+    ninfer::Tensor input_view(input.p, ninfer::DType::BF16, {2'560, tokens});
+    ninfer::Tensor token_view(token_index.p, ninfer::DType::I32, {tokens});
+    ninfer::Tensor position_view(mrope_positions.p, ninfer::DType::I32, {tokens, 3});
+    ninfer::Tensor selected_view(selected_blocks.p, ninfer::DType::I32, {512, tokens});
+    ninfer::Tensor count_view(selected_count.p, ninfer::DType::I32, {tokens});
+    const std::size_t sort_temp = flash_next_qsa_indexer_sort_temp_bytes(n, tile);
+    ninfer::WorkspaceLayoutBuilder layout;
+    (void)allocate_flash_next_qsa_indexer_workspace(layout, n, tokens, tile, sort_temp);
+    ninfer::WorkspaceArena workspace(layout.peak_bytes(256) + 32ULL * 1024 * 1024);
+    auto scratch =
+        allocate_flash_next_qsa_indexer_workspace(workspace, n, tokens, tile, sort_temp);
+    ninfer::ops::linear(input_view, weights.indexer_query_key, scratch.projected, device.stream);
+    drain_all_streams();
+
+    auto launch_once = [&]() {
+        flash_next_qsa_indexer_prefill_launch(token_view, position_view, 0, 0, 0,
+                                              weights.indexer_query_norm, weights.indexer_key_norm,
+                                              cache, scratch, n, selected_view, count_view,
+                                              device.stream);
+    };
+    launch_once();
+    drain_all_streams();
+    constexpr int kIters = 5;
+    cudaEvent_t start = nullptr;
+    cudaEvent_t stop  = nullptr;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    CUDA_CHECK(cudaEventRecord(start, device.stream));
+    for (int i = 0; i < kIters; ++i) { launch_once(); }
+    CUDA_CHECK(cudaEventRecord(stop, device.stream));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+    float ms = 0.0F;
+    CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    const float layer_ms = ms / static_cast<float>(kIters);
+    std::cout << "G14 INDEXER prefill_launch n=" << n << " tokens=" << tokens
+              << " first=" << first_token << " tile=" << tile << " n_tiles=" << n_tiles
+              << " items_per_tile=" << (static_cast<long long>(n) * tile)
+              << " layer_ms=" << layer_ms << " 12-layer_ms=" << (12.0F * layer_ms) << "\n";
+    return true;
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
     int device_count              = 0;
     const cudaError_t count_error = cudaGetDeviceCount(&device_count);
@@ -1551,9 +1657,18 @@ int main() {
     }
     CUDA_CHECK(count_error);
 
+    ninfer::DeviceContext device(0);
+    if (argc >= 2 && std::string(argv[1]) == "g14-sort") {
+        const bool only64  = argc >= 3 && std::string(argv[2]) == "16384";
+        const bool only256 = argc >= 3 && std::string(argv[2]) == "65536";
+        if (!only256 && !test_g14_prefill_indexer_cost(device, 16384, 2048, 63488)) { return 1; }
+        if (!only64 && !test_g14_prefill_indexer_cost(device, 65536, 2048, 260096)) { return 1; }
+        std::cout << "PASS: test_g14_prefill_indexer_cost\n";
+        return 0;
+    }
+
     constexpr std::int32_t maximum_blocks = 513;
     constexpr std::int32_t logical_pages  = 9;
-    ninfer::DeviceContext device(0);
     ninfer::DeviceBuffer input(2'560ULL * 8 * 2);
     ninfer::DeviceBuffer small_t_output(640ULL * 8 * 2);
     ninfer::DeviceBuffer projection(640ULL * 2'560 * 2);

@@ -6,6 +6,7 @@
 #include "targets/qwen3_8_flash_next/impl/ple_table.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_state.h"
+#include "targets/qwen3_8_flash_next/impl/qsa_indexer_workspace.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode_workspace.h"
 #include "targets/qwen3_8_flash_next/impl/text_executor.h"
@@ -17,6 +18,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -3021,11 +3023,333 @@ int test_g9_prefill_determinism(ninfer::DeviceContext& device) {
     }
 }
 
+ninfer::targets::qwen3_8_flash_next::detail::FlashNextRuntimeConfig
+g14_runtime_config(bool use_cuda_graph) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    return FlashNextRuntimeConfig{
+        .max_concurrency     = 1,
+        .max_context         = 262144,
+        .state_slot_capacity = 2,
+        .prefill_chunk       = 2048,
+        .use_cuda_graph      = use_cuda_graph,
+    };
+}
+
+int test_g14_admission_cpu() {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency     = 2,
+        .max_context         = 262144,
+        .state_slot_capacity = 4,
+        .prefill_chunk       = 2048,
+        .use_cuda_graph      = false,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    std::cout << "G14 admission curve min_groups=" << curve.minimum_main_page_groups
+              << " max_groups=" << curve.maximum_main_page_groups << "\n";
+    if (curve.minimum_main_page_groups != 1024 || curve.maximum_main_page_groups != 2048) {
+        std::cerr << "FAIL: B=2 256k groups expected min=1024 max=2048\n";
+        return 1;
+    }
+    auto plan = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
+    if (plan.main_page_groups != 1024) {
+        std::cerr << "FAIL: selected groups expected 1024 got " << plan.main_page_groups << "\n";
+        return 1;
+    }
+    FlashNextLaneLedger ledger(plan);
+    PleIndexMetadata ple_meta{};
+    ple_meta.multipliers = {1, 2, 3};
+    ple_meta.head_offsets.fill(0);
+    ple_meta.head_vocab_sizes.fill(1);
+    auto lane0 = ledger.allocate_lane();
+    auto lane1 = ledger.allocate_lane();
+    std::vector<std::int32_t> full(262144, 100);
+    auto prep0 = ledger.begin_prefill_chunk(lane0, full, 0, ple_meta);
+    ledger.abort_prefill_chunk(prep0.transaction_id);
+    std::cout << "G14 admission: lane0 256k-span reservation, available="
+              << ledger.available_physical_groups() << "\n";
+    if (ledger.available_physical_groups() != 0) {
+        std::cerr << "ANOMALY: expected 0 free groups after a 256k-span lane0 reservation, got "
+                  << ledger.available_physical_groups() << "\n";
+        return 1;
+    }
+    try {
+        std::vector<std::int32_t> one{100};
+        (void)ledger.begin_prefill_chunk(lane1, one, 0, ple_meta);
+        std::cerr << "ANOMALY: lane1 256k-pool begin_prefill at t=0 succeeded with 0 free groups\n";
+        return 1;
+    } catch (const std::runtime_error& ex) {
+        std::cout << "G14 admission: lane1 rejected verbatim: " << ex.what() << "\n";
+    }
+    std::cout << "G14 admission note: ledger at 1024 groups/B=1-equivalent pool is exactly one "
+                 "256k sequence. A second live 256k occupant is infeasible without engine "
+                 "pressure eviction.\n";
+    std::cout << "PASS: test_g14_admission_cpu\n";
+    return 0;
+}
+
+void g14_time_decode_rounds(ninfer::targets::qwen3_8_flash_next::detail::FlashNextTextExecutor& exec,
+                            ninfer::targets::qwen3_8_flash_next::detail::LaneHandle lane,
+                            const ninfer::targets::qwen3_8_flash_next::detail::FlashNextRuntimePlan&
+                                plan,
+                            std::int32_t token_index, ninfer::DeviceContext& device, const char* label) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    const std::int32_t live_blocks = (token_index + 1) / 4;
+    const auto buckets             = flash_next_decode_graph_buckets(plan.maximum_blocks);
+    const auto bucket              = flash_next_decode_graph_select_bucket(buckets, live_blocks);
+    const char* arm                = live_blocks <= 512 ? "identity" : "topk";
+    auto make_req                  = [&]() {
+        return LaneStepRequest{.handle          = lane,
+                               .token_id        = 300 + token_index,
+                               .token_index     = token_index,
+                               .mrope_positions = {token_index, token_index, token_index},
+                               .sampling        = {.temperature = 0.0F, .top_p = 1.0F}};
+    };
+    {
+        auto req   = make_req();
+        auto round = exec.execute_round(std::span(&req, 1));
+        (void)round.sampled_tokens()[0];
+        if (!logits_bit_identical_nonvacuous(device, round.logits(), round.logits(), 1,
+                                             "g14 decode self-energy")) {
+            throw std::runtime_error("g14 decode logits vacuous or non-finite");
+        }
+    }
+    device.synchronize();
+    cudaEvent_t ev0 = nullptr;
+    cudaEvent_t ev1 = nullptr;
+    CUDA_CHECK(cudaEventCreate(&ev0));
+    CUDA_CHECK(cudaEventCreate(&ev1));
+    constexpr int kRepeats = 5;
+    double sum_wall        = 0.0;
+    double sum_gpu         = 0.0;
+    double min_gpu         = 1e300;
+    for (int i = 0; i < kRepeats; ++i) {
+        auto req = make_req();
+        const auto t0 = std::chrono::steady_clock::now();
+        CUDA_CHECK(cudaEventRecord(ev0, device.stream));
+        auto round = exec.execute_round(std::span(&req, 1));
+        (void)round.sampled_tokens()[0];
+        CUDA_CHECK(cudaEventRecord(ev1, device.stream));
+        CUDA_CHECK(cudaEventSynchronize(ev1));
+        float gpu_ms = 0.0F;
+        CUDA_CHECK(cudaEventElapsedTime(&gpu_ms, ev0, ev1));
+        const double wall_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        sum_wall += wall_ms;
+        sum_gpu += static_cast<double>(gpu_ms);
+        min_gpu = std::min(min_gpu, static_cast<double>(gpu_ms));
+        std::cout << "  decode[" << i << "] " << label << " token_index=" << token_index
+                  << " live_blocks=" << live_blocks << " bucket=" << bucket
+                  << " envelope=" << buckets.blocks[bucket] << " arm=" << arm
+                  << " wall_ms=" << wall_ms << " gpu_ms=" << gpu_ms << "\n";
+    }
+    CUDA_CHECK(cudaEventDestroy(ev0));
+    CUDA_CHECK(cudaEventDestroy(ev1));
+    std::cout << "G14 DECODE " << label << " mean_wall_ms=" << (sum_wall / kRepeats)
+              << " mean_gpu_ms=" << (sum_gpu / kRepeats) << " min_gpu_ms=" << min_gpu
+              << " live_blocks=" << live_blocks << " bucket=" << bucket
+              << " envelope=" << buckets.blocks[bucket] << " arm=" << arm << "\n";
+}
+
+int test_g14_prefill_and_decode(ninfer::DeviceContext& device, int chunks) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        if (chunks < 1 || chunks > 128) {
+            std::cerr << "FAIL: g14 chunks must be in [1,128]\n";
+            return 1;
+        }
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+        auto synthetic_model = make_synthetic_model(device);
+        const auto cfg       = g14_runtime_config(true);
+        const auto curve     = flash_next_capacity_curve(cfg);
+        auto plan            = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
+        const std::int32_t tile =
+            flash_next_qsa_indexer_tile_size(static_cast<std::int32_t>(plan.maximum_blocks), 2048);
+        const std::size_t ws_cap = flash_next_text_prefill_workspace_capacity_bytes(
+            static_cast<std::int32_t>(plan.maximum_blocks), 2048);
+        std::cout << "G14 prefill plan groups=" << plan.main_page_groups
+                  << " maximum_blocks=" << plan.maximum_blocks << " tile=" << tile
+                  << " tiles_per_chunk=" << (2048 + tile - 1) / tile << " ws_cap=" << ws_cap
+                  << " (" << (static_cast<double>(ws_cap) / 1048576.0) << " MiB)\n";
+        FlashNextRuntimeAllocation alloc(plan);
+        alloc.initialize(device.stream);
+        FlashNextTextExecutor exec(synthetic_model.view, ple_meta, device, alloc);
+        auto lane                 = exec.allocate_lane();
+        constexpr int kChunk      = 2048;
+        const auto soak_t0        = std::chrono::steady_clock::now();
+        auto is_report            = [](int c) {
+            return c == 0 || c == 31 || c == 63 || c == 95 || c == 127;
+        };
+        auto is_decode_depth = [](int c) { return c == 0 || c == 31 || c == 126; };
+        for (int c = 0; c < chunks; ++c) {
+            const std::int32_t first    = c * kChunk;
+            const std::int32_t complete = (first + kChunk) / 4;
+            const char* arm             = complete <= 512 ? "identity" : "sort";
+            double ms                   = 0.0;
+            g8_prefill_one(exec, lane, first, kChunk, device, &ms);
+            const std::size_t peak = alloc.workspace().peak_used();
+            const std::size_t cap  = alloc.workspace().capacity();
+            const double elapsed =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - soak_t0).count();
+            if (is_report(c) || c + 1 == chunks) {
+                std::cout << "  chunk " << c << " first=" << first << " complete_blocks=" << complete
+                          << " arm=" << arm << " ms=" << ms << " ws_peak=" << peak << " / " << cap
+                          << " elapsed_s=" << elapsed << "\n";
+            }
+            if (peak > cap) {
+                std::cerr << "FAIL: workspace peak exceeds capacity at chunk " << c << "\n";
+                return 1;
+            }
+            if (is_decode_depth(c) && first + kChunk < static_cast<std::int32_t>(plan.config.max_context)) {
+                char label[64];
+                std::snprintf(label, sizeof(label), "after-chunk-%d", c);
+                g14_time_decode_rounds(exec, lane, plan, first + kChunk, device, label);
+            }
+            if (elapsed > 180.0) {
+                std::cout << "G14 STOP before watchdog: elapsed_s=" << elapsed << " last_chunk=" << c
+                          << "\n";
+                break;
+            }
+        }
+        std::vector<std::uint16_t> hidden(2560, 0);
+        CUDA_CHECK(cudaMemcpy(hidden.data(), alloc.round_tensors().final_hidden.data,
+                              hidden.size() * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+        double energy = 0.0;
+        int nonfinite = 0;
+        for (auto v : hidden) {
+            const float f = bf16_to_float(v);
+            if (!std::isfinite(f)) { ++nonfinite; }
+            energy += static_cast<double>(f) * static_cast<double>(f);
+        }
+        if (nonfinite != 0 || !(energy > 0.0) || !std::isfinite(energy)) {
+            std::cerr << "FAIL: g14 prefill hidden vacuous energy=" << energy
+                      << " nonfinite=" << nonfinite << "\n";
+            return 1;
+        }
+        std::cout << "G14 prefill hidden energy=" << energy << "\n";
+        exec.release_lane(lane);
+        std::cout << "PASS: test_g14_prefill_and_decode chunks=" << chunks << "\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_g14_prefill_and_decode exception: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+int test_g14_decode_ladder(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+        auto synthetic_model = make_synthetic_model(device);
+
+        auto run_at = [&](std::uint32_t max_context, std::int32_t prefill_tokens, const char* label) {
+            FlashNextRuntimeConfig cfg{
+                .max_concurrency     = 1,
+                .max_context         = max_context,
+                .state_slot_capacity = 2,
+                .prefill_chunk       = 2048,
+                .use_cuda_graph      = true,
+            };
+            const auto curve = flash_next_capacity_curve(cfg);
+            auto plan        = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
+            const auto buckets = flash_next_decode_graph_buckets(plan.maximum_blocks);
+            const std::int32_t live = (prefill_tokens + 1) / 4;
+            const auto bucket       = flash_next_decode_graph_select_bucket(buckets, live);
+            std::cout << "G14 LADDER " << label << " max_context=" << max_context
+                      << " prefill_tokens=" << prefill_tokens << " live_blocks=" << live
+                      << " bucket=" << bucket << " envelope=" << buckets.blocks[bucket]
+                      << " n_buckets=" << buckets.count << "\n";
+            FlashNextRuntimeAllocation alloc(plan);
+            alloc.initialize(device.stream);
+            FlashNextTextExecutor exec(synthetic_model.view, ple_meta, device, alloc);
+            auto lane = exec.allocate_lane();
+            constexpr int kChunk = 2048;
+            for (std::int32_t first = 0; first < prefill_tokens; first += kChunk) {
+                g8_prefill_one(exec, lane, first, kChunk, device, nullptr);
+            }
+            g14_time_decode_rounds(exec, lane, plan, prefill_tokens, device, label);
+            exec.release_lane(lane);
+        };
+
+        // Exact 32k tokens = 8192 blocks: both plans should hit the 8192 rung.
+        run_at(262144, 32768, "256k-plan-32k-tokens");
+        run_at(65536, 32768, "64k-plan-32k-tokens");
+        // First token past the 8192-block rung: 17 chunks = 34816 tokens, 8704 blocks.
+        run_at(262144, 34816, "256k-plan-34k-tokens-hole");
+        run_at(65536, 34816, "64k-plan-34k-tokens");
+        std::cout << "PASS: test_g14_decode_ladder\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_g14_decode_ladder exception: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+int test_g14_determinism(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+        auto synthetic_model = make_synthetic_model(device);
+        const auto cfg       = g14_runtime_config(true);
+        const auto curve     = flash_next_capacity_curve(cfg);
+        auto plan            = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
+        auto run_once        = [&](std::vector<std::uint16_t>& hidden) {
+            FlashNextRuntimeAllocation alloc(plan);
+            alloc.initialize(device.stream);
+            FlashNextTextExecutor exec(synthetic_model.view, ple_meta, device, alloc);
+            auto lane = exec.allocate_lane();
+            for (int c = 0; c < 3; ++c) {
+                g8_prefill_one(exec, lane, c * 2048, 2048, device, nullptr);
+            }
+            hidden.assign(2560, 0);
+            CUDA_CHECK(cudaMemcpy(hidden.data(), alloc.round_tensors().final_hidden.data,
+                                  hidden.size() * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+            exec.release_lane(lane);
+        };
+        std::vector<std::uint16_t> hid_a, hid_b;
+        run_once(hid_a);
+        run_once(hid_b);
+        if (hid_a.size() != hid_b.size() ||
+            std::memcmp(hid_a.data(), hid_b.data(), hid_a.size() * sizeof(std::uint16_t)) != 0) {
+            std::cerr << "FAIL: G14 two-run 3x2048 on 256k plan was not bitwise identical\n";
+            return 1;
+        }
+        double energy = 0.0;
+        int nonfinite = 0;
+        for (auto v : hid_a) {
+            const float f = bf16_to_float(v);
+            if (!std::isfinite(f)) { ++nonfinite; }
+            energy += static_cast<double>(f) * static_cast<double>(f);
+        }
+        if (nonfinite != 0 || !(energy > 0.0) || !std::isfinite(energy)) {
+            std::cerr << "FAIL: G14 two-run vacuous energy=" << energy << " nonfinite=" << nonfinite
+                      << "\n";
+            return 1;
+        }
+        std::cout << "PASS: test_g14_determinism 3x2048 two-run hidden energy=" << energy
+                  << " bitwise match\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_g14_determinism exception: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     const std::string mode = argc >= 2 ? argv[1] : std::string{};
     if (mode == "g8-admission") { return test_g8_admission_cpu(); }
+    if (mode == "g14-admission") { return test_g14_admission_cpu(); }
 
     if (test_ledger_cpu() != 0) return 1;
     if (test_ledger_prefill_chunk_cpu() != 0) return 1;
@@ -3049,6 +3373,10 @@ int main(int argc, char** argv) {
     if (mode == "g8-graph-nodes") { return test_g8_graph_node_diff(device); }
     if (mode == "g8-stage-checksum") { return test_g8_stage_checksum(device); }
     if (mode == "g9-gate") { return test_g9_prefill_determinism(device); }
+    if (mode == "g14-prefill") { return test_g14_prefill_and_decode(device, 128); }
+    if (mode == "g14-prefill-32") { return test_g14_prefill_and_decode(device, 32); }
+    if (mode == "g14-det") { return test_g14_determinism(device); }
+    if (mode == "g14-ladder") { return test_g14_decode_ladder(device); }
 
     if (test_cuda_ledger_and_executor(device) != 0) return 1;
     if (test_finite_model_stages(device) != 0) return 1;
