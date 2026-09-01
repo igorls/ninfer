@@ -379,6 +379,158 @@ bool test_prefill_vs_decode_equivalence(ninfer::DeviceContext& device) {
     return true;
 }
 
+int test_g17_prefill_mma(ninfer::DeviceContext& device,
+                         ninfer::targets::qwen3_8_flash_next::detail::AttentionWeights& weights) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    constexpr std::int32_t input_dim = 2'560;
+    std::uniform_real_distribution<float> dist(-0.4f, 0.4f);
+
+    auto run_t = [&](std::int32_t T, bool use_mma, std::vector<std::uint16_t>& host_out,
+                     int timed_iters, float& ms_out) -> int {
+        std::mt19937 rng(0xC17u + static_cast<unsigned>(T));
+        const std::int32_t first           = 0;
+        const std::int32_t physical_pages  = std::max(8, (T + 63) / 64 + 2);
+        const std::int32_t logical_pages   = physical_pages;
+        std::vector<std::uint16_t> host_in(static_cast<std::size_t>(input_dim) * T);
+        for (auto& v : host_in) { v = float_to_bf16(dist(rng)); }
+        std::vector<std::int32_t> host_pos(3 * T);
+        std::vector<std::int32_t> host_tok(T);
+        std::vector<std::int32_t> host_sel(512 * T, -1);
+        std::vector<std::int32_t> host_cnt(T);
+        for (std::int32_t t = 0; t < T; ++t) {
+            host_tok[t]             = first + t;
+            host_pos[0 * T + t]     = first + t;
+            host_pos[1 * T + t]     = first + t;
+            host_pos[2 * T + t]     = first + t;
+            const int complete      = (first + t + 1) / 4;
+            const int count         = std::min(complete, 512);
+            host_cnt[t]             = count;
+            for (int k = 0; k < count; ++k) { host_sel[t * 512 + k] = k; }
+        }
+        ninfer::DeviceBuffer in_b(host_in.size() * 2);
+        ninfer::DeviceBuffer out_b(host_in.size() * 2);
+        ninfer::DeviceBuffer tok_b(T * 4);
+        ninfer::DeviceBuffer pos_b(3 * T * 4);
+        ninfer::DeviceBuffer sel_b(512 * T * 4);
+        ninfer::DeviceBuffer cnt_b(T * 4);
+        ninfer::DeviceBuffer key_pages(256ULL * 64 * 2 * physical_pages * 2);
+        ninfer::DeviceBuffer value_pages(256ULL * 64 * 2 * physical_pages * 2);
+        ninfer::DeviceBuffer block_tables(logical_pages * 4);
+        std::vector<std::uint16_t> init_kv(256ULL * 64 * 2 * physical_pages);
+        for (auto& v : init_kv) { v = float_to_bf16(dist(rng)); }
+        std::vector<std::int32_t> pages(logical_pages);
+        for (std::int32_t p = 0; p < logical_pages; ++p) { pages[p] = p; }
+        in_b.copy_from_host(host_in.data(), host_in.size() * 2);
+        tok_b.copy_from_host(host_tok.data(), host_tok.size() * 4);
+        pos_b.copy_from_host(host_pos.data(), host_pos.size() * 4);
+        sel_b.copy_from_host(host_sel.data(), host_sel.size() * 4);
+        cnt_b.copy_from_host(host_cnt.data(), host_cnt.size() * 4);
+        key_pages.copy_from_host(init_kv.data(), init_kv.size() * 2);
+        value_pages.copy_from_host(init_kv.data(), init_kv.size() * 2);
+        block_tables.copy_from_host(pages.data(), pages.size() * 4);
+        device.synchronize();
+        QsaAttentionCacheView cache{
+            .key_pages    = ninfer::Tensor(key_pages.p, ninfer::DType::BF16,
+                                           {256, 64, 2, physical_pages}),
+            .value_pages  = ninfer::Tensor(value_pages.p, ninfer::DType::BF16,
+                                           {256, 64, 2, physical_pages}),
+            .block_tables = ninfer::Tensor(block_tables.p, ninfer::DType::I32, {logical_pages, 1}),
+        };
+        ninfer::Tensor tin(in_b.p, ninfer::DType::BF16, {input_dim, T});
+        ninfer::Tensor tout(out_b.p, ninfer::DType::BF16, {input_dim, T});
+        ninfer::Tensor ttok(tok_b.p, ninfer::DType::I32, {T});
+        ninfer::Tensor tpos(pos_b.p, ninfer::DType::I32, {T, 3});
+        ninfer::Tensor tsel(sel_b.p, ninfer::DType::I32, {512, T});
+        ninfer::Tensor tcnt(cnt_b.p, ninfer::DType::I32, {T});
+        ninfer::WorkspaceArena ws(flash_next_qsa_attention_workspace_capacity_bytes(T));
+        flash_next_qsa_attention_prefill_chunk(tin, weights, ttok, tpos, 0, tsel, tcnt, cache, ws,
+                                               tout, device.stream, {}, use_mma);
+        device.synchronize();
+        host_out.resize(host_in.size());
+        out_b.copy_to_host(host_out.data(), host_out.size() * 2);
+        if (timed_iters > 0) {
+            for (int i = 0; i < 2; ++i) {
+                flash_next_qsa_attention_prefill_chunk(tin, weights, ttok, tpos, 0, tsel, tcnt,
+                                                       cache, ws, tout, device.stream, {}, use_mma);
+            }
+            device.synchronize();
+            cudaEvent_t start, stop;
+            CUDA_CHECK(cudaEventCreate(&start));
+            CUDA_CHECK(cudaEventCreate(&stop));
+            CUDA_CHECK(cudaEventRecord(start, device.stream));
+            for (int i = 0; i < timed_iters; ++i) {
+                flash_next_qsa_attention_prefill_chunk(tin, weights, ttok, tpos, 0, tsel, tcnt,
+                                                       cache, ws, tout, device.stream, {}, use_mma);
+            }
+            CUDA_CHECK(cudaEventRecord(stop, device.stream));
+            CUDA_CHECK(cudaEventSynchronize(stop));
+            CUDA_CHECK(cudaEventElapsedTime(&ms_out, start, stop));
+            ms_out /= static_cast<float>(timed_iters);
+            CUDA_CHECK(cudaEventDestroy(start));
+            CUDA_CHECK(cudaEventDestroy(stop));
+        }
+        return 0;
+    };
+
+    for (std::int32_t T : {128, 512, 2048}) {
+        std::vector<std::uint16_t> old_out, mma_a, mma_b;
+        float unused = 0.0f;
+        if (run_t(T, false, old_out, 0, unused) != 0) { return 1; }
+        if (run_t(T, true, mma_a, 0, unused) != 0) { return 1; }
+        if (run_t(T, true, mma_b, 0, unused) != 0) { return 1; }
+        if (mma_a != mma_b) {
+            std::cerr << "G17 two-run bitwise mismatch at T=" << T << "\n";
+            return 1;
+        }
+        double diff_sq = 0.0, base_sq = 0.0, max_abs = 0.0;
+        int nan = 0, nonzero = 0;
+        for (std::size_t i = 0; i < old_out.size(); ++i) {
+            const float a = bf16_to_float(old_out[i]);
+            const float b = bf16_to_float(mma_a[i]);
+            if (!std::isfinite(a) || !std::isfinite(b)) {
+                ++nan;
+                continue;
+            }
+            if ((old_out[i] & 0x7FFFU) != 0) { ++nonzero; }
+            const double d = static_cast<double>(a) - static_cast<double>(b);
+            diff_sq += d * d;
+            base_sq += static_cast<double>(a) * a;
+            max_abs = std::max(max_abs, std::abs(d));
+        }
+        if (nan != 0 || base_sq <= 0.0 || nonzero == 0) {
+            std::cerr << "G17 vacuous/nonfinite T=" << T << " nan=" << nan << " base_sq=" << base_sq
+                      << " nonzero=" << nonzero << "\n";
+            return 1;
+        }
+        const double rel = std::sqrt(diff_sq / base_sq);
+        std::cout << "G17 T=" << T << " rel-L2=" << rel << " max_abs=" << max_abs
+                  << " two-run bitwise OK nonzero=" << nonzero << "\n";
+    }
+
+    std::cout << "G17 prefill_chunk wall (includes QGKV+out linear):\n";
+    float t_old[4] = {};
+    float t_mma[4] = {};
+    const std::int32_t sweep[] = {512, 1024, 2048, 4096};
+    for (int i = 0; i < 4; ++i) {
+        std::vector<std::uint16_t> dummy;
+        const int iters = sweep[i] >= 2048 ? 5 : 10;
+        if (run_t(sweep[i], false, dummy, iters, t_old[i]) != 0) { return 1; }
+        if (run_t(sweep[i], true, dummy, iters, t_mma[i]) != 0) { return 1; }
+        std::cout << "  T=" << sweep[i] << " old=" << t_old[i] << " ms mma=" << t_mma[i] << " ms\n";
+    }
+    auto exponent = [](float a, float b, float t0, float t1) {
+        return std::log(b / a) / std::log(t1 / t0);
+    };
+    std::cout << "G17 exponent T=1024/512 old=" << exponent(t_old[0], t_old[1], 512, 1024)
+              << " mma=" << exponent(t_mma[0], t_mma[1], 512, 1024) << "\n";
+    std::cout << "G17 exponent T=2048/1024 old=" << exponent(t_old[1], t_old[2], 1024, 2048)
+              << " mma=" << exponent(t_mma[1], t_mma[2], 1024, 2048) << "\n";
+    std::cout << "G17 exponent T=4096/2048 old=" << exponent(t_old[2], t_old[3], 2048, 4096)
+              << " mma=" << exponent(t_mma[2], t_mma[3], 2048, 4096) << "\n";
+    std::cout << "PASS: test_g17_prefill_mma\n";
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -578,6 +730,11 @@ int main() {
 
     if (!test_prefill_vs_decode_equivalence(device)) {
         std::cerr << "FAIL: test_prefill_vs_decode_equivalence failed\n";
+        return 1;
+    }
+
+    if (test_g17_prefill_mma(device, weights) != 0) {
+        std::cerr << "FAIL: test_g17_prefill_mma\n";
         return 1;
     }
 

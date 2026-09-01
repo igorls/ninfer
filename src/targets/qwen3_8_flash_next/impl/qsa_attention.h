@@ -34,6 +34,7 @@ void flash_next_qsa_attention_prefill_chunk(
     const Tensor& input, const AttentionWeights& weights, const Tensor& token_indices,
     const Tensor& mrope_positions, std::int32_t table_row, const Tensor& selected_blocks,
     const Tensor& selected_counts, QsaAttentionCacheView cache, WorkspaceArena& workspace,
-    Tensor& output, cudaStream_t stream, const QsaStageEmitter& emit = {});
+    Tensor& output, cudaStream_t stream, const QsaStageEmitter& emit = {},
+    bool use_mma = false);
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

@@ -126,6 +126,8 @@ struct FlashNextRuntimeConfig {
     bool use_cuda_graph                    = true;
     bool vision_enabled                    = false;
     std::uint32_t max_vision_tokens        = 4096;
+    // Prefill QSA attention: GQA tiled MMA (12 query heads share each KV tile). Default off.
+    bool use_qsa_prefill_mma               = false;
 };
 
 struct FlashNextRuntimePlan {

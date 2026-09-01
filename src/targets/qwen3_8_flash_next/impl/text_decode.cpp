@@ -342,7 +342,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                                    const Tensor& gathered_ple_embedding, std::int32_t maximum_blocks,
                                    FlashNextDecodeStateView state, WorkspaceArena& workspace,
                                    Tensor& final_hidden, Tensor& logits, cudaStream_t stream,
-                                   const FlashNextDecodeStateSink* sink) {
+                                   const FlashNextDecodeStateSink* sink, bool use_qsa_prefill_mma) {
     const std::int32_t tokens      = embedding.ne[1];
     const std::int32_t state_slots = state.ple_convolution_states.ne[2];
     if (tokens <= 0 || maximum_blocks <= 0 || maximum_blocks > 65'536 || table_row < 0 ||
@@ -421,7 +421,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                 round_ws.block_input, model.full_attention[qsa_idx], token_indices,
                 mrope_positions, table_row, round_ws.selected_blocks,
                 round_ws.selected_counts, state.qsa_attention_caches[qsa_idx],
-                workspace, round_ws.block_output, stream, qsa_emit);
+                workspace, round_ws.block_output, stream, qsa_emit, use_qsa_prefill_mma);
         } else {
             const std::size_t gdn_idx = gdn_ordinal(layer);
             flash_next_gdn_prefill_chunk(round_ws.block_input, model.gdn[gdn_idx], source_slot,

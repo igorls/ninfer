@@ -704,7 +704,7 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
             static_cast<std::int32_t>(lane), initial_active_slot, initial_standby_slot,
             gathered_ple, static_cast<std::int32_t>(alloc_.plan().maximum_blocks),
             alloc_.state_view(), alloc_.workspace(), final_hidden, logits, device_.stream,
-            effective_sink);
+            effective_sink, alloc_.plan().config.use_qsa_prefill_mma);
 
         round_in_flight_ = true;
         Tensor hyper_hidden(alloc_.round_tensors().hyper_hidden.data, DType::BF16, {10'240, 1});
