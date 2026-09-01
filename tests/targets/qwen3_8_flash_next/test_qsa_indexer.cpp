@@ -1097,23 +1097,16 @@ bool test_prefill_padded_score_nan_sentinel(ninfer::DeviceContext& device) {
 
 bool test_prefill_decode_select_equivalence(ninfer::DeviceContext& device) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
-    const std::int32_t ns[] = {513, 1024};
-    for (std::int32_t n : ns) {
-        const std::int32_t logical_pages = (n + 63) / 64;
-        IndexerProbe decode_probe(n, logical_pages);
-        IndexerProbe prefill_probe(n, logical_pages);
-        std::vector<std::uint16_t> host_keys(128ULL * 64 * logical_pages, 0);
-        fill_monotonic_block_keys(host_keys, n);
-        decode_probe.load_keys(host_keys, device);
-        prefill_probe.load_keys(host_keys, device);
-
+    const std::int32_t ns[] = {513, 1024, 4096, 16384};
+    constexpr std::int32_t unique_high = 400;
+    auto compare_one = [&](IndexerProbe& decode_probe, IndexerProbe& prefill_probe,
+                           std::int32_t n, const char* fixture) {
         const std::int32_t token = n * 4 - 1;
         std::int32_t count_decode = -1;
         std::int32_t count_prefill = -1;
         std::array<std::int32_t, 512> ids_decode{};
         std::array<std::int32_t, 512> ids_prefill{};
         decode_probe.run(device, token, n, n, count_decode, ids_decode);
-
         prefill_probe.set_token(token);
         drain_all_streams();
         flash_next_qsa_indexer_prefill_chunk(
@@ -1123,10 +1116,9 @@ bool test_prefill_decode_select_equivalence(ninfer::DeviceContext& device) {
         drain_all_streams();
         prefill_probe.selected_count.copy_to_host(&count_prefill, sizeof(count_prefill));
         prefill_probe.selected_blocks.copy_to_host(ids_prefill.data(), sizeof(ids_prefill));
-
         if (count_decode != 512 || count_prefill != 512) {
             std::cerr << "FAIL: prefill-vs-decode count decode=" << count_decode
-                      << " prefill=" << count_prefill << " at N=" << n << "\n";
+                      << " prefill=" << count_prefill << " at N=" << n << " " << fixture << "\n";
             return false;
         }
         double energy = 0.0;
@@ -1135,20 +1127,41 @@ bool test_prefill_decode_select_equivalence(ninfer::DeviceContext& device) {
                 std::cerr << "FAIL: prefill-vs-decode id[" << i
                           << "] decode=" << ids_decode[static_cast<std::size_t>(i)]
                           << " prefill=" << ids_prefill[static_cast<std::size_t>(i)] << " at N=" << n
-                          << "\n";
+                          << " " << fixture << "\n";
                 return false;
             }
             energy += static_cast<double>(ids_decode[static_cast<std::size_t>(i)]) *
                       static_cast<double>(ids_decode[static_cast<std::size_t>(i)]);
         }
-        if (!(energy > 0.0) || !std::isfinite(energy) ||
-            ids_decode[0] == ids_decode[1]) {
-            std::cerr << "FAIL: prefill-vs-decode comparison vacuous at N=" << n
+        if (!(energy > 0.0) || !std::isfinite(energy) || ids_decode[0] == ids_decode[1]) {
+            std::cerr << "FAIL: prefill-vs-decode comparison vacuous at N=" << n << " " << fixture
                       << " energy=" << energy << "\n";
             return false;
         }
-        std::cout << "  N=" << n << " prefill==decode id0=" << ids_decode[0]
+        std::cout << "  N=" << n << " " << fixture << " prefill==decode id0=" << ids_decode[0]
                   << " energy=" << energy << "\n";
+        return true;
+    };
+    for (std::int32_t n : ns) {
+        const std::int32_t logical_pages = (n + 63) / 64;
+        IndexerProbe decode_probe(n, logical_pages);
+        IndexerProbe prefill_probe(n, logical_pages);
+        std::vector<std::uint16_t> host_keys(128ULL * 64 * logical_pages, 0);
+
+        fill_monotonic_block_keys(host_keys, n);
+        decode_probe.load_keys(host_keys, device);
+        prefill_probe.load_keys(host_keys, device);
+        if (!compare_one(decode_probe, prefill_probe, n, "monotonic")) { return false; }
+
+        fill_equal_block_keys(host_keys, n);
+        decode_probe.load_keys(host_keys, device);
+        prefill_probe.load_keys(host_keys, device);
+        if (!compare_one(decode_probe, prefill_probe, n, "equal-keys")) { return false; }
+
+        fill_tie_band_block_keys(host_keys, n, unique_high);
+        decode_probe.load_keys(host_keys, device);
+        prefill_probe.load_keys(host_keys, device);
+        if (!compare_one(decode_probe, prefill_probe, n, "tie-band")) { return false; }
     }
     std::cout << "PASS: test_prefill_decode_select_equivalence\n";
     return true;
