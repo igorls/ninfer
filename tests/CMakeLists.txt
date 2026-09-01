@@ -367,6 +367,17 @@ target_include_directories(ninfer_qwen3_8_flash_next_continuation_lifecycle_test
 set_tests_properties(ninfer_qwen3_8_flash_next_continuation_lifecycle_test
   PROPERTIES SKIP_RETURN_CODE 77)
 
+ninfer_add_test(ninfer_qwen3_8_flash_next_soak_load_admission_eviction_test
+  SOURCES targets/qwen3_8_flash_next/test_soak_load_admission_eviction.cpp
+  LIBRARIES ninfer_qwen3_8_flash_next ninfer_engine)
+target_include_directories(ninfer_qwen3_8_flash_next_soak_load_admission_eviction_test PRIVATE
+  ${PROJECT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_8_flash_next/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
+set_tests_properties(ninfer_qwen3_8_flash_next_soak_load_admission_eviction_test
+  PROPERTIES SKIP_RETURN_CODE 77)
+
 
 # Product protocol contracts.
 ninfer_add_test(ninfer_openai_schema_test

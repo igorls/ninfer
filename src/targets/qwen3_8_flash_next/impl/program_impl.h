@@ -87,6 +87,11 @@ public:
     [[nodiscard]] PressureTargetHandle identity_target(const AdmissionCandidate& candidate) const;
     [[nodiscard]] PressureTargetHandle root_maximal_target(const AdmissionCandidate& root_candidate);
     [[nodiscard]] runtime::PressureTargetAssessment assess(PressureTargetHandle target);
+    [[nodiscard]] runtime::PressureTargetGuidance guidance(PressureTargetHandle target);
+    void retain_assessment(PressureTargetHandle target);
+    [[nodiscard]] std::optional<PressureTargetHandle>
+    guided_closure_target(const AdmissionCandidate& candidate,
+                          std::span<const std::uint32_t> preferred_owner_ordinals);
     [[nodiscard]] PreparedPressureExpansion prepare_expansion(PressureTargetHandle parent);
     [[nodiscard]] PressureExpansionView commit_expansion(PreparedPressureExpansion&& prepared);
     void discard_expansion(PreparedPressureExpansion&& prepared) noexcept;
@@ -105,7 +110,9 @@ public:
     std::vector<PressurePlanningTargetNode> expansion_scratch_;
     std::vector<PressureTargetHandle> committed_children_;
     std::vector<runtime::PressureOwnerOutcome> assessment_outcomes_;
+    std::vector<runtime::PressureOwnerOutcome> guidance_outcomes_;
     std::vector<runtime::PressureCheckpointRecoveryImpact> assessment_impacts_;
+    std::uint32_t retained_target_idx_ = std::numeric_limits<std::uint32_t>::max();
     std::uint32_t scratch_generation_ = 0;
     std::uint32_t scratch_parent_index_ = 0;
     std::uint32_t scratch_new_count_ = 0;

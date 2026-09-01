@@ -376,6 +376,11 @@ public:
     [[nodiscard]] PressureTargetHandle
     root_maximal_target(const AdmissionCandidate& root_candidate);
     [[nodiscard]] runtime::PressureTargetAssessment assess(PressureTargetHandle target);
+    [[nodiscard]] runtime::PressureTargetGuidance guidance(PressureTargetHandle target);
+    void retain_assessment(PressureTargetHandle target);
+    [[nodiscard]] std::optional<PressureTargetHandle>
+    guided_closure_target(const AdmissionCandidate& candidate,
+                          std::span<const std::uint32_t> preferred_owner_ordinals);
     [[nodiscard]] PreparedPressureExpansion prepare_expansion(PressureTargetHandle parent);
     [[nodiscard]] PressureExpansionView
     commit_expansion(PreparedPressureExpansion&& prepared);
