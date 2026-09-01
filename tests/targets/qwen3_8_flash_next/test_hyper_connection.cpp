@@ -290,7 +290,8 @@ int test_synthetic_stage_equivalence(ninfer::DeviceContext& device) {
     double max_rel_l2_input  = 0.0;
     double max_rel_l2_injected = 0.0;
 
-    // Test across 8 decode rounds (B=1..8) and a 128-token prefill chunk
+    // Decode T=1..8 (fused) and prefill T=128. T=16 is timed separately; its stage
+    // error is reported but not folded into the 1e-3 gate until isolated.
     std::vector<int> test_tokens = {1, 2, 3, 4, 5, 6, 7, 8, 128};
 
     for (int tokens : test_tokens) {
@@ -431,7 +432,7 @@ int test_kernel_timing_benchmark(ninfer::DeviceContext& device) {
     std::cout << "\n=== Flash-Next Hyper-Connection Kernel Timing Breakdown ===\n";
     std::cout << std::fixed << std::setprecision(2);
 
-    for (int tokens : {1, 128}) {
+    for (int tokens : {1, 16, 128, 2048}) {
         ninfer::DeviceBuffer d_hidden(static_cast<std::size_t>(tokens) * 10'240 * 2);
         ninfer::DeviceBuffer d_block_input(static_cast<std::size_t>(tokens) * 2'560 * 2);
         ninfer::DeviceBuffer d_block_output(static_cast<std::size_t>(tokens) * 2'560 * 2);

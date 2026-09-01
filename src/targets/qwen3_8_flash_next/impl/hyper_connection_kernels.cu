@@ -330,26 +330,48 @@ group_norm_prefill_kernel(
     }
 }
 
-// Fused MMA Output Tile for Down-Projection (applies SiLU(acc * 0.25) in epilogue)
-struct Bf16HyperDownMmaOutputTile {
-    __nv_bfloat16* low_rank;
+// Split-K MMA writes per-split FP32 partials. SiLU is applied after a fixed-order
+// reduction over splits (no atomics).
+struct Bf16HyperDownSplitOutputTile {
+    float* partials;
+    std::int32_t tokens;
 
     __device__ __forceinline__ void store(std::int32_t row, std::int32_t token,
                                           float accumulator) const {
         if (row < kLowRank) {
-            low_rank[static_cast<std::int64_t>(token) * kLowRank + row] =
-                __float2bfloat16_rn(ops::silu(accumulator * 0.25F));
+            const int split = static_cast<int>(blockIdx.y);
+            partials[(static_cast<std::int64_t>(split) * tokens + token) * kLowRank + row] =
+                accumulator;
         }
     }
 };
 
-struct Bf16HyperDownMmaOutput {
-    __nv_bfloat16* low_rank;
+struct Bf16HyperDownSplitOutput {
+    float* partials;
+    std::int32_t tokens;
 
-    __device__ __forceinline__ Bf16HyperDownMmaOutputTile tile(std::int32_t) const {
-        return {low_rank};
+    __device__ __forceinline__ Bf16HyperDownSplitOutputTile tile(std::int32_t) const {
+        return {partials, tokens};
     }
 };
+
+template <int SplitK>
+__global__ __launch_bounds__(256) void down_splitk_reduce_kernel(const float* __restrict__ partials,
+                                                                __nv_bfloat16* __restrict__ low_rank,
+                                                                int tokens) {
+    const int idx = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) +
+                    static_cast<int>(threadIdx.x);
+    const int n = tokens * kLowRank;
+    if (idx >= n) { return; }
+    const int token = idx / kLowRank;
+    const int row   = idx - token * kLowRank;
+    float sum       = 0.0F;
+#pragma unroll
+    for (int split = 0; split < SplitK; ++split) {
+        sum += partials[(static_cast<std::int64_t>(split) * tokens + token) * kLowRank + row];
+    }
+    low_rank[idx] = __float2bfloat16_rn(ops::silu(sum * 0.25F));
+}
 
 // Streamlined Injection Gate: 1 CTA per token (4 warps = 4 streams, zero inter-warp sync)
 __global__ void __launch_bounds__(128)
@@ -445,6 +467,8 @@ up_reduction_vectorized_kernel(
 }
 
 // Down & Up MMA Geometries and Schedules
+// Prefill down-projection is N=320 x T. A 32x32 tile yields only 40 CTAs at T=128 on 188 SMs.
+// Split-K=4 keeps that tile and launches 160 CTAs. Decode T<=8 stays on the fused path.
 using DownGeom    = ops::detail::Bf16GemvGeometry<320, 10240>;
 using DownSched   = ops::detail::Bf16MmaSchedule<32, 32, 256, 16, 16, 2, 2, ops::Cache::cg, ops::Cache::cg,
                                                  ops::detail::Bf16MmaFragmentPipeline::PingPong,
@@ -454,6 +478,40 @@ using UpGeom      = ops::detail::Bf16GemvGeometry<10240, 320>;
 using UpSched     = ops::detail::Bf16MmaSchedule<64, 64, 64, 32, 32, 2, 2, ops::Cache::cg, ops::Cache::cg,
                                                  ops::detail::Bf16MmaFragmentPipeline::PingPong,
                                                  ops::detail::Bf16MmaRaster::TokenFast>;
+
+template <bool FullTokens>
+void launch_down_prefill(const __nv_bfloat16* x, const __nv_bfloat16* weight, float* partials,
+                         __nv_bfloat16* low_rank, int tokens, cudaStream_t stream) {
+    Bf16HyperDownSplitOutput out_down{partials, tokens};
+    const int tiles_m_down = 320 / DownSched::kBlockRows;
+    const int tiles_n_down = (tokens + DownSched::kBlockCols - 1) / DownSched::kBlockCols;
+    const int blocks_down  = tiles_m_down * tiles_n_down;
+    static const cudaError_t attr_down = cudaFuncSetAttribute(
+        ops::detail::bf16_gemm_mma_kernel<DownGeom, DownSched, FullTokens, Bf16HyperDownSplitOutput,
+                                          kHyperDownSplitK>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, DownSched::kSharedBytes);
+    CUDA_CHECK(attr_down);
+    ops::detail::bf16_gemm_mma_kernel<DownGeom, DownSched, FullTokens, Bf16HyperDownSplitOutput,
+                                      kHyperDownSplitK>
+        <<<dim3(blocks_down, kHyperDownSplitK), DownSched::kThreads, DownSched::kSharedBytes,
+           stream>>>(x, weight, out_down, tokens);
+    CUDA_CHECK(cudaGetLastError());
+    constexpr int kReduceThreads = 256;
+    const int reduce_blocks      = (tokens * kLowRank + kReduceThreads - 1) / kReduceThreads;
+    down_splitk_reduce_kernel<kHyperDownSplitK>
+        <<<reduce_blocks, kReduceThreads, 0, stream>>>(partials, low_rank, tokens);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_down_prefill_dispatch(const __nv_bfloat16* x, const __nv_bfloat16* weight,
+                                  float* partials, __nv_bfloat16* low_rank, int tokens,
+                                  cudaStream_t stream) {
+    if ((tokens % DownSched::kBlockCols) == 0) {
+        launch_down_prefill<true>(x, weight, partials, low_rank, tokens, stream);
+    } else {
+        launch_down_prefill<false>(x, weight, partials, low_rank, tokens, stream);
+    }
+}
 
 } // namespace
 
@@ -494,22 +552,12 @@ void flash_next_hyper_prepare_launch(const Tensor& hidden, const HyperConnection
             static_cast<__nv_bfloat16*>(scratch.normalized.data), tokens);
         CUDA_CHECK(cudaGetLastError());
 
-        // 2. Down-Projection via Tensor Core MMA with Fused SiLU Epilogue
-        Bf16HyperDownMmaOutput out_down{static_cast<__nv_bfloat16*>(scratch.low_rank.data)};
-        const int tiles_m_down = 320 / DownSched::kBlockRows;
-        const int tiles_n_down = (tokens + DownSched::kBlockCols - 1) / DownSched::kBlockCols;
-        const int blocks_down  = tiles_m_down * tiles_n_down;
-
-        static const cudaError_t attr_down = cudaFuncSetAttribute(
-            ops::detail::bf16_gemm_mma_kernel<DownGeom, DownSched, true, Bf16HyperDownMmaOutput>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, DownSched::kSharedBytes);
-        CUDA_CHECK(attr_down);
-
-        ops::detail::bf16_gemm_mma_kernel<DownGeom, DownSched, true><<<blocks_down, DownSched::kThreads, DownSched::kSharedBytes, stream>>>(
+        // 2. Down-Projection via Tensor Core MMA, Split-K=4, then SiLU reduce
+        launch_down_prefill_dispatch(
             static_cast<const __nv_bfloat16*>(scratch.normalized.data),
             static_cast<const __nv_bfloat16*>(weights.input_mix_down.qdata),
-            out_down, tokens);
-        CUDA_CHECK(cudaGetLastError());
+            static_cast<float*>(scratch.down_split.data),
+            static_cast<__nv_bfloat16*>(scratch.low_rank.data), tokens, stream);
 
         // 3. Injection Gates
         injection_gate_prefill_kernel<<<tokens, 128, 0, stream>>>(
@@ -581,22 +629,12 @@ void flash_next_hyper_mix_launch(const Tensor& hidden, const HyperMixerWeights& 
             static_cast<__nv_bfloat16*>(scratch.normalized.data), tokens);
         CUDA_CHECK(cudaGetLastError());
 
-        // 2. Down-Projection via Tensor Core MMA
-        Bf16HyperDownMmaOutput out_down{static_cast<__nv_bfloat16*>(scratch.low_rank.data)};
-        const int tiles_m_down = 320 / DownSched::kBlockRows;
-        const int tiles_n_down = (tokens + DownSched::kBlockCols - 1) / DownSched::kBlockCols;
-        const int blocks_down  = tiles_m_down * tiles_n_down;
-
-        static const cudaError_t attr_down = cudaFuncSetAttribute(
-            ops::detail::bf16_gemm_mma_kernel<DownGeom, DownSched, true, Bf16HyperDownMmaOutput>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, DownSched::kSharedBytes);
-        CUDA_CHECK(attr_down);
-
-        ops::detail::bf16_gemm_mma_kernel<DownGeom, DownSched, true><<<blocks_down, DownSched::kThreads, DownSched::kSharedBytes, stream>>>(
+        // 2. Down-Projection via Tensor Core MMA, Split-K=4, then SiLU reduce
+        launch_down_prefill_dispatch(
             static_cast<const __nv_bfloat16*>(scratch.normalized.data),
             static_cast<const __nv_bfloat16*>(weights.input_mix_down.qdata),
-            out_down, tokens);
-        CUDA_CHECK(cudaGetLastError());
+            static_cast<float*>(scratch.down_split.data),
+            static_cast<__nv_bfloat16*>(scratch.low_rank.data), tokens, stream);
 
         // 3. Up-Projection via Tensor Core MMA
         ops::detail::Bf16MmaContiguousOutput out_up{
