@@ -93,7 +93,7 @@ struct MtpModelView {
     HyperConnectionWeights attention_hyper;
     AttentionWeights attention;
     HyperConnectionWeights mlp_hyper;
-    MoeBf16Weights moe;
+    MoeWeights moe;
     Tensor embedding_norm;
     Tensor hidden_norm;
 };

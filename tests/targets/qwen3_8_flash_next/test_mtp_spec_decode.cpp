@@ -350,19 +350,27 @@ SyntheticModel make_synthetic_model(ninfer::DeviceContext& device) {
     mtp_view.moe.shared_gate        = make_bf16_weight(640, 2'560);
     mtp_view.moe.shared_up          = make_bf16_weight(640, 2'560);
     mtp_view.moe.shared_gate_weight = make_bf16_weight_from(model.shared_gate_weight_buf, 1, 2'560);
-    mtp_view.moe.expert_gate_up     = Bf16ExpertBankView{
-        .data              = static_cast<const std::byte*>(model.big_bf16_buf.p),
-        .experts           = 512,
-        .rows              = 1'280,
-        .columns           = 2'560,
-        .bytes_per_expert  = 1'280ULL * 2'560 * 2,
+    // Sequence 12: the MTP draft expert bank is NVFP4 (same view type as the
+    // text layers), so the synthetic draft head reuses the text-layer banks.
+    mtp_view.moe.expert_gate_up     = Nvfp4ExpertBankView{
+        .codes                  = static_cast<const std::byte*>(model.big_nvfp4_gate_codes_buf.p),
+        .scales                 = static_cast<const std::byte*>(model.big_nvfp4_gate_scales_buf.p),
+        .weight_scale_divisors  = static_cast<const float*>(model.big_divisors_buf.p),
+        .experts                = 512,
+        .rows                   = 1'280,
+        .columns                = 2'560,
+        .code_bytes_per_expert  = gate_code_bytes_per_expert,
+        .scale_bytes_per_expert = gate_scale_bytes_per_expert,
     };
-    mtp_view.moe.expert_down        = Bf16ExpertBankView{
-        .data              = static_cast<const std::byte*>(model.big_bf16_buf.p),
-        .experts           = 512,
-        .rows              = 2'560,
-        .columns           = 640,
-        .bytes_per_expert  = 2'560ULL * 640 * 2,
+    mtp_view.moe.expert_down        = Nvfp4ExpertBankView{
+        .codes                  = static_cast<const std::byte*>(model.big_nvfp4_down_codes_buf.p),
+        .scales                 = static_cast<const std::byte*>(model.big_nvfp4_down_scales_buf.p),
+        .weight_scale_divisors  = static_cast<const float*>(model.big_divisors_buf.p),
+        .experts                = 512,
+        .rows                   = 2'560,
+        .columns                = 640,
+        .code_bytes_per_expert  = down_code_bytes_per_expert,
+        .scale_bytes_per_expert = down_scale_bytes_per_expert,
     };
 
     model.view.mtp = mtp_view;

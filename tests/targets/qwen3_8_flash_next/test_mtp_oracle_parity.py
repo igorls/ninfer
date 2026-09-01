@@ -236,7 +236,7 @@ def run_parity_test(ninfer_exe: str, dump_dir: str):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--ninfer-exe', default=r'P:\NInfer.gemini\build\tests\ninfer_qwen3_8_flash_next_mtp_test.exe')
-    parser.add_argument('--dump-dir', default=r'P:\dumps\mtp_parity')
+    parser.add_argument('--ninfer-exe', default=r'E:\NInfer.gemini2\build\tests\ninfer_qwen3_8_flash_next_mtp_test.exe')
+    parser.add_argument('--dump-dir', default=r'E:\NInfer.gemini2\build\dumps\mtp_parity')
     args = parser.parse_args()
     sys.exit(run_parity_test(args.ninfer_exe, args.dump_dir))

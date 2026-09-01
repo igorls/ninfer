@@ -25,6 +25,8 @@ public:
 
     artifact::MaterializedArtifact backing;
     DeviceBuffer output_head_fp8;
+    DeviceBuffer mtp_expert_gate_up_nvfp4;
+    DeviceBuffer mtp_expert_down_nvfp4;
     qwen3_6::FrontendResources frontend;
     TextModelView text;
     std::optional<VisionModelView> vision;

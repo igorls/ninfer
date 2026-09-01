@@ -9,6 +9,7 @@ add_library(ninfer_qwen3_8_flash_next STATIC
   impl/load/bindings.cpp
   impl/load/loader.cpp
   impl/load/materialized.cpp
+  impl/load/quantize_nvfp4_expert_bank.cu
   impl/load/quantize_output_head.cu
   impl/moe.cpp
   impl/moe_kernels.cu

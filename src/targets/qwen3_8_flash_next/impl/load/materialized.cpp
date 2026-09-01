@@ -2,6 +2,7 @@
 
 #include "artifact/typed_binding.h"
 #include "core/device.h"
+#include "targets/qwen3_8_flash_next/impl/load/quantize_nvfp4_expert_bank.h"
 #include "targets/qwen3_8_flash_next/impl/load/quantize_output_head.h"
 
 #include <stdexcept>
@@ -148,7 +149,10 @@ AttentionWeights load_mtp_attention(const AttentionPlan& plan,
     };
 }
 
-MoeBf16Weights load_mtp_moe(const MoePlan& plan, const artifact::MaterializedArtifact& backing) {
+MoeWeights load_mtp_moe(const MoePlan& plan, const artifact::MaterializedArtifact& backing,
+                        void* expert_gate_up_nvfp4, void* expert_down_nvfp4) {
+    const std::size_t gate_bytes = flash_next_nvfp4_expert_bank_payload_bytes(512, 1'280, 2'560);
+    const std::size_t down_bytes = flash_next_nvfp4_expert_bank_payload_bytes(512, 2'560, 640);
     return {
         .router             = bf16_weight(backing, plan.router, 512, 2'560),
         .shared_down        = bf16_weight(backing, plan.shared_down, 2'560, 640),
@@ -156,13 +160,14 @@ MoeBf16Weights load_mtp_moe(const MoePlan& plan, const artifact::MaterializedArt
         .shared_up          = bf16_weight(backing, plan.shared_up, 640, 2'560),
         .shared_gate_weight = bf16_weight(backing, plan.shared_gate_weight, 1, 2'560),
         .expert_gate_up =
-            materialized_bf16_expert_bank_view(backing, plan.expert_gate_up, 512, 1'280, 2'560),
+            make_nvfp4_expert_bank_view(expert_gate_up_nvfp4, gate_bytes, 512, 1'280, 2'560),
         .expert_down =
-            materialized_bf16_expert_bank_view(backing, plan.expert_down, 512, 2'560, 640),
+            make_nvfp4_expert_bank_view(expert_down_nvfp4, down_bytes, 512, 2'560, 640),
     };
 }
 
-MtpModelView load_mtp(const MtpPlan& plan, const artifact::MaterializedArtifact& backing) {
+MtpModelView load_mtp(const MtpPlan& plan, const artifact::MaterializedArtifact& backing,
+                      void* expert_gate_up_nvfp4, void* expert_down_nvfp4) {
     return {
         .embedding_projection = bf16_weight(backing, plan.embedding_projection, 2'560, 2'560),
         .hidden_projection    = bf16_weight(backing, plan.hidden_projection, 2'560, 2'560),
@@ -170,7 +175,7 @@ MtpModelView load_mtp(const MtpPlan& plan, const artifact::MaterializedArtifact&
         .attention_hyper      = load_hyper(plan.attention_hyper, backing),
         .attention            = load_mtp_attention(plan.attention, backing),
         .mlp_hyper            = load_hyper(plan.mlp_hyper, backing),
-        .moe                  = load_mtp_moe(plan.moe, backing),
+        .moe                  = load_mtp_moe(plan.moe, backing, expert_gate_up_nvfp4, expert_down_nvfp4),
         .embedding_norm       = bf16_tensor(backing, plan.embedding_norm, {2'560}),
         .hidden_norm          = bf16_tensor(backing, plan.hidden_norm, {10'240}),
     };
@@ -214,7 +219,23 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
     }
     text.final_mixer = load_mixer(plan.final_mixer, backing);
 
-    if (plan.features.mtp) { text.mtp = load_mtp(plan.mtp, backing); }
+    if (plan.features.mtp) {
+        mtp_expert_gate_up_nvfp4 =
+            DeviceBuffer(flash_next_nvfp4_expert_bank_payload_bytes(512, 1'280, 2'560));
+        mtp_expert_down_nvfp4 =
+            DeviceBuffer(flash_next_nvfp4_expert_bank_payload_bytes(512, 2'560, 640));
+
+        const void* bf16_gate_up = backing.device_data(plan.mtp.moe.expert_gate_up);
+        const void* bf16_down    = backing.device_data(plan.mtp.moe.expert_down);
+
+        quantize_bf16_expert_bank_to_nvfp4(bf16_gate_up, mtp_expert_gate_up_nvfp4.p, 512, 1'280, 2'560,
+                                           cudaStream_t{});
+        quantize_bf16_expert_bank_to_nvfp4(bf16_down, mtp_expert_down_nvfp4.p, 512, 2'560, 640,
+                                           cudaStream_t{});
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        text.mtp = load_mtp(plan.mtp, backing, mtp_expert_gate_up_nvfp4.p, mtp_expert_down_nvfp4.p);
+    }
     if (plan.features.vision) { vision = load_vision(plan.vision, backing); }
 }
 

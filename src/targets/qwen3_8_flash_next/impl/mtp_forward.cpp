@@ -168,8 +168,8 @@ void flash_next_mtp_step(const TextModelView& model, const Tensor& input_embeddi
     flash_next_hyper_prepare(mtp_hyper_hidden, mtp.mlp_hyper, hyper_scratch, mlp_in, stream);
     emit_state("mtp_mlp_block_input", mlp_in);
 
-    // 8. BF16 MoE evaluation
-    flash_next_moe_bf16(mlp_in, mtp.moe, mlp_out, workspace, stream);
+    // 8. NVFP4 MoE evaluation
+    flash_next_moe(mlp_in, mtp.moe, mlp_out, workspace, stream);
     emit_state("mtp_mlp_block_output", mlp_out);
 
     // 9. MLP hyper inject
