@@ -1926,6 +1926,89 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
         throw std::logic_error("cannot decode while a pending round is uncommitted");
     }
 
+    // Speculative path: single sequence (B == 1) with speculative decoding enabled
+    if (B == 1 && impl_->plan_.config.speculative_draft_tokens > 0 &&
+        impl_->has_mtp()) {
+        const auto& seq = sequences[0];
+        if (seq.owner() != this) {
+            throw std::logic_error("SequenceHandle does not belong to this Program");
+        }
+        const std::uint32_t lane_idx = seq.lane().value;
+        if (lane_idx >= impl_->plan_.config.max_concurrency) {
+            throw std::out_of_range("sequence lane out of range");
+        }
+        auto& st = impl_->lane_states_[lane_idx];
+        if (!st.active || st.epoch != seq.epoch()) {
+            throw std::logic_error("sequence lane is not active or epoch mismatch");
+        }
+
+        const std::uint32_t K =
+            std::min<std::uint32_t>(4U, impl_->plan_.config.speculative_draft_tokens);
+
+        // If draft tokens are not already prepared, draft them from current state
+        if (st.draft_tokens.empty()) {
+            st.draft_tokens.resize(K);
+            Tensor last_hidden = impl_->allocation_.round_tensors().hyper_hidden.slice(1, 0, 1);
+            std::array<std::int32_t, 3> mrope_pos = {st.last_token_pos, st.last_token_pos,
+                                                     st.last_token_pos};
+            impl_->executor_.draft_mtp_tokens(st.lane_handle, st.last_token_id, st.last_token_index,
+                                              mrope_pos, last_hidden, K, st.draft_tokens);
+        }
+
+        const std::int32_t last_token_index =
+            st.last_token_index + static_cast<std::int32_t>(st.draft_tokens.size());
+        const std::size_t req_groups =
+            static_cast<std::size_t>(last_token_index /
+                                     static_cast<std::int32_t>(detail::kMainPageGroupTokens)) +
+            1U;
+        const std::size_t owned = impl_->executor_.lane_physical_groups(st.lane_handle).size();
+        if (req_groups > owned) {
+            impl_->ensure_physical_groups_available(req_groups - owned);
+        }
+
+        std::array<std::int32_t, 3> first_mrope_pos = {st.last_token_pos, st.last_token_pos,
+                                                       st.last_token_pos};
+        impl_->pending_round_ = impl_->executor_.execute_speculative_verify_round(
+            st.lane_handle, st.last_token_id, st.draft_tokens, st.last_token_index, first_mrope_pos,
+            st.sampling_config);
+
+        const auto sampled = impl_->pending_round_.sampled_tokens();
+
+        // Verification loop: compare sampled[k] with draft_tokens[k]
+        std::vector<std::int32_t> accepted;
+        accepted.reserve(st.draft_tokens.size() + 1);
+
+        bool mismatch = false;
+        for (std::size_t k = 0; k < st.draft_tokens.size(); ++k) {
+            const std::int32_t target_tok = sampled[k];
+            accepted.push_back(target_tok);
+            if (target_tok != st.draft_tokens[k]) {
+                mismatch = true;
+                break;
+            }
+        }
+        if (!mismatch && sampled.size() > st.draft_tokens.size()) {
+            accepted.push_back(sampled[st.draft_tokens.size()]);
+        }
+
+        st.pending_accepted_tokens = accepted;
+
+        impl_->pending_batch_tokens_.resize(accepted.size());
+        for (std::size_t i = 0; i < accepted.size(); ++i) {
+            impl_->pending_batch_tokens_[i] = static_cast<TokenId>(accepted[i]);
+        }
+        impl_->pending_batch_row_counts_.resize(1);
+        impl_->pending_batch_row_counts_[0] = static_cast<std::int32_t>(accepted.size());
+
+        const auto exec_timing = timing.finish();
+        return ContractAccess::make_pending(
+            this, impl_->pending_round_.valid() ? 1 : 0, sequences,
+            std::span(impl_->pending_batch_tokens_.data(), accepted.size()),
+            std::span(impl_->pending_batch_row_counts_.data(), 1),
+            static_cast<std::uint32_t>(accepted.size()), exec_timing);
+    }
+
+    // Standard non-speculative path
     std::vector<detail::LaneStepRequest> requests(B);
     std::vector<std::uint32_t> lane_indices(B);
 
@@ -2056,41 +2139,70 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
         throw std::invalid_argument("decisions size mismatch with pending rows");
     }
 
-    std::vector<detail::LaneCommitDecision> lane_decisions(B);
     CommitResult result;
     result.row_count = B;
 
-    for (std::size_t b = 0; b < B; ++b) {
-        const auto& dec          = decisions[b];
-        lane_decisions[b].accept = (dec.accepted_tokens > 0);
+    // Check if we are in speculative decode mode for B=1
+    bool is_speculative = false;
+    if (B == 1) {
+        const std::uint32_t lane_idx = rows[0].lane().value;
+        const auto& st               = impl_->lane_states_[lane_idx];
+        if (st.active && !st.pending_accepted_tokens.empty()) {
+            is_speculative = true;
+        }
     }
 
-    if (impl_->pending_round_.valid()) {
-        impl_->pending_round_.commit(lane_decisions);
-    }
-
-    for (std::size_t b = 0; b < B; ++b) {
-        const auto& seq              = rows[b];
-        const auto& dec              = decisions[b];
+    if (is_speculative) {
+        const auto& seq              = rows[0];
+        const auto& dec              = decisions[0];
         const std::uint32_t lane_idx = seq.lane().value;
         auto& st                     = impl_->lane_states_[lane_idx];
 
         if (dec.accepted_tokens > 0) {
-            const TokenId sampled = pending.tokens()[b];
-            st.prompt_tokens.push_back(sampled);
-            st.prefix_digests.append_generated(std::span(&sampled, 1), 0);
-            st.committed_frontier += 1;
-            st.last_token_id      = static_cast<std::int32_t>(sampled);
-            st.last_token_pos += 1;
-            st.last_token_index += 1;
-            ++st.total_generated_tokens;
+            // Commit accepted tokens via speculative commit
+            if (impl_->pending_round_.valid()) {
+                impl_->pending_round_.commit_speculative(lane_idx, st.pending_accepted_tokens);
+            }
+
+            for (const auto tok_i32 : st.pending_accepted_tokens) {
+                const TokenId sampled = static_cast<TokenId>(tok_i32);
+                st.prompt_tokens.push_back(sampled);
+                st.prefix_digests.append_generated(std::span(&sampled, 1), 0);
+                st.last_token_id = tok_i32;
+                st.last_token_pos += 1;
+                st.last_token_index += 1;
+                st.committed_frontier += 1;
+                st.total_generated_tokens += 1;
+            }
+
+            // Draft new MTP tokens for the next round if not terminal
+            st.draft_tokens.clear();
+            if (!dec.terminal && impl_->plan_.config.speculative_draft_tokens > 0 &&
+                impl_->has_mtp()) {
+                const std::uint32_t K =
+                    std::min<std::uint32_t>(4U, impl_->plan_.config.speculative_draft_tokens);
+                st.draft_tokens.resize(K);
+                Tensor last_hidden = impl_->allocation_.round_tensors().hyper_hidden.slice(
+                    1, static_cast<std::int32_t>(st.pending_accepted_tokens.size() - 1), 1);
+                std::array<std::int32_t, 3> mrope_pos = {st.last_token_pos, st.last_token_pos,
+                                                         st.last_token_pos};
+                impl_->executor_.draft_mtp_tokens(st.lane_handle, st.last_token_id,
+                                                  st.last_token_index, mrope_pos, last_hidden, K,
+                                                  st.draft_tokens);
+            }
+            st.pending_accepted_tokens.clear();
 
             if (dec.terminal) {
-                result.rows[b].disposition = runtime::CommitDisposition::Finishable;
+                result.rows[0].disposition = runtime::CommitDisposition::Finishable;
             } else {
-                result.rows[b].disposition = runtime::CommitDisposition::Active;
+                result.rows[0].disposition = runtime::CommitDisposition::Active;
             }
         } else {
+            st.draft_tokens.clear();
+            st.pending_accepted_tokens.clear();
+            if (impl_->pending_round_.valid()) {
+                impl_->pending_round_.abort();
+            }
             impl_->drop_unpublished_turn_closure(st);
             impl_->executor_.release_lane(st.lane_handle);
             st.active   = false;
@@ -2100,7 +2212,70 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
             st.turn_closure_continuation_index.reset();
             st.pending_capture_offer = 0;
             ++impl_->resource_revision_;
-            result.rows[b].disposition = runtime::CommitDisposition::CancelledReleased;
+            result.rows[0].disposition = runtime::CommitDisposition::CancelledReleased;
+        }
+    } else {
+        // Standard non-speculative path (or prefill commit, or B > 1)
+        std::vector<detail::LaneCommitDecision> lane_decisions(B);
+        for (std::size_t b = 0; b < B; ++b) {
+            lane_decisions[b].accept = (decisions[b].accepted_tokens > 0);
+        }
+
+        if (impl_->pending_round_.valid()) {
+            impl_->pending_round_.commit(lane_decisions);
+        }
+
+        for (std::size_t b = 0; b < B; ++b) {
+            const auto& seq              = rows[b];
+            const auto& dec              = decisions[b];
+            const std::uint32_t lane_idx = seq.lane().value;
+            auto& st                     = impl_->lane_states_[lane_idx];
+
+            if (dec.accepted_tokens > 0) {
+                const TokenId sampled = pending.tokens()[b];
+                st.prompt_tokens.push_back(sampled);
+                st.prefix_digests.append_generated(std::span(&sampled, 1), 0);
+                st.committed_frontier += 1;
+                st.last_token_id      = static_cast<std::int32_t>(sampled);
+                st.last_token_pos += 1;
+                st.last_token_index += 1;
+                ++st.total_generated_tokens;
+
+                // If speculative drafting is configured, draft tokens after prefill completion or standard round
+                st.draft_tokens.clear();
+                if (!dec.terminal && impl_->plan_.config.speculative_draft_tokens > 0 &&
+                    impl_->has_mtp()) {
+                    const std::uint32_t K =
+                        std::min<std::uint32_t>(4U, impl_->plan_.config.speculative_draft_tokens);
+                    st.draft_tokens.resize(K);
+                    Tensor last_hidden = impl_->allocation_.round_tensors().hyper_hidden.slice(
+                        1, static_cast<std::int32_t>(b), 1);
+                    std::array<std::int32_t, 3> mrope_pos = {st.last_token_pos, st.last_token_pos,
+                                                             st.last_token_pos};
+                    impl_->executor_.draft_mtp_tokens(st.lane_handle, st.last_token_id,
+                                                      st.last_token_index, mrope_pos, last_hidden,
+                                                      K, st.draft_tokens);
+                }
+
+                if (dec.terminal) {
+                    result.rows[b].disposition = runtime::CommitDisposition::Finishable;
+                } else {
+                    result.rows[b].disposition = runtime::CommitDisposition::Active;
+                }
+            } else {
+                st.draft_tokens.clear();
+                st.pending_accepted_tokens.clear();
+                impl_->drop_unpublished_turn_closure(st);
+                impl_->executor_.release_lane(st.lane_handle);
+                st.active   = false;
+                st.finished = true;
+                st.reused_from_continuation_index.reset();
+                st.reused_from_continuation_generation.reset();
+                st.turn_closure_continuation_index.reset();
+                st.pending_capture_offer = 0;
+                ++impl_->resource_revision_;
+                result.rows[b].disposition = runtime::CommitDisposition::CancelledReleased;
+            }
         }
     }
 

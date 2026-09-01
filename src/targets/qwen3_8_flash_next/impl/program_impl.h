@@ -174,6 +174,8 @@ struct LaneState {
     bool publish_continuation = false;
     bool prefill_completed = false;
     bool finished          = false;
+    std::vector<std::int32_t> draft_tokens;
+    std::vector<std::int32_t> pending_accepted_tokens;
     qwen3_6::detail::PrefixShortlistDigests prefix_digests;
     std::optional<std::uint32_t> turn_closure_continuation_index;
     std::uint64_t pending_capture_offer = 0;
@@ -215,6 +217,9 @@ public:
     [[nodiscard]] std::uint32_t published_checkpoints_of(std::size_t slot_idx) const noexcept;
     [[nodiscard]] std::uint32_t reserved_unowned_groups() const noexcept;
     void drop_unpublished_turn_closure(LaneState& st);
+    [[nodiscard]] bool has_mtp() const noexcept {
+        return (model_data_ != nullptr ? model_data_->text : text_override_).mtp.has_value();
+    }
 
     std::uint32_t pressure_planning_generation_ = 0;
     bool pressure_planning_active_ = false;

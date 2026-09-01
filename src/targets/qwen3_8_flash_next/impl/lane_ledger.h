@@ -109,6 +109,12 @@ public:
     [[nodiscard]] PreparedRound begin_round(std::span<const LaneStepRequest> requests,
                                             const PleIndexMetadata& ple_meta);
 
+    [[nodiscard]] PreparedRound begin_speculative_round(LaneHandle handle,
+                                                        std::int32_t anchor_token_id,
+                                                        std::span<const std::int32_t> draft_tokens,
+                                                        std::int32_t first_token_index,
+                                                        const PleIndexMetadata& ple_meta);
+
     [[nodiscard]] PreparedRound begin_prefill_chunk(LaneHandle handle,
                                                     std::span<const std::int32_t> token_ids,
                                                     std::int32_t first_token_index,
@@ -122,6 +128,9 @@ public:
     // frontier/history.
     void commit_round(std::uint64_t tx_id, std::span<const LaneCommitDecision> decisions,
                       FlashNextRuntimeAllocation& alloc, cudaStream_t stream);
+    void commit_speculative_round(std::uint64_t tx_id,
+                                  std::span<const std::int32_t> accepted_tokens,
+                                  FlashNextRuntimeAllocation& alloc, cudaStream_t stream);
     void commit_prefill_chunk(std::uint64_t tx_id, FlashNextRuntimeAllocation& alloc,
                               cudaStream_t stream);
 

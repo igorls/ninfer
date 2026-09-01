@@ -49,14 +49,20 @@ void validate_config_invariants(const FlashNextRuntimeConfig& config,
             std::to_string(kPrefillChunkAlignment) + " and <= max_context (" +
             std::to_string(config.max_context) + ")");
     }
+    if (config.speculative_draft_tokens > 4) {
+        throw std::invalid_argument("Flash-Next speculative_draft_tokens must be in [0, 4]");
+    }
 
-    const std::uint32_t min_state_slots = 2U * config.max_concurrency + config.continuation_capacity;
+    const std::uint32_t slots_per_lane =
+        config.speculative_draft_tokens > 0 ? (config.speculative_draft_tokens + 1U) : 2U;
+    const std::uint32_t min_state_slots =
+        slots_per_lane * config.max_concurrency + config.continuation_capacity;
     resolved_state_slots = config.state_slot_capacity;
     if (resolved_state_slots == 0) {
         resolved_state_slots = min_state_slots;
     } else if (resolved_state_slots < min_state_slots || resolved_state_slots > 64) {
         throw std::invalid_argument(
-            "Flash-Next state_slot_capacity must be in [2 * max_concurrency + continuation_capacity (" +
+            "Flash-Next state_slot_capacity must be in [slots_per_lane * max_concurrency + continuation_capacity (" +
             std::to_string(min_state_slots) + "), 64]");
     }
 }
@@ -94,16 +100,22 @@ compute_fixed_base_bytes(const FlashNextRuntimeConfig& config, std::uint32_t res
                                           checked_mul(12ULL, single_raw_pos))));
 
     // 3. Round buffers (pinned/device ingress & egress, plus gathered PLE, hidden, logits)
+    const std::uint32_t round_batch_tokens =
+        std::max(config.max_concurrency,
+                 config.speculative_draft_tokens > 0 ? (config.speculative_draft_tokens + 1U) : 1U);
+
     round_tensors_bytes = checked_add(
         checked_align_up_256(sizeof(FlashNextDecodeIngress)),
         checked_add(
             checked_align_up_256(sizeof(FlashNextDecodeEgress)),
             checked_add(
-                checked_align_up_256(2'560ULL * config.max_concurrency * sizeof(std::uint16_t)),
+                checked_align_up_256(2'560ULL * round_batch_tokens * sizeof(std::uint16_t)),
                 checked_add(
-                    checked_align_up_256(2'560ULL * config.max_concurrency * sizeof(std::uint16_t)),
-                    checked_align_up_256(248'320ULL * config.max_concurrency *
-                                         sizeof(std::uint16_t))))));
+                    checked_align_up_256(2'560ULL * round_batch_tokens * sizeof(std::uint16_t)),
+                    checked_add(
+                        checked_align_up_256(10'240ULL * round_batch_tokens * sizeof(std::uint16_t)),
+                        checked_align_up_256(248'320ULL * round_batch_tokens *
+                                             sizeof(std::uint16_t)))))));
 
     // 4. Text decode and prefill workspace peak
     const std::size_t decode_workspace =

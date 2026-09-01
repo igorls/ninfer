@@ -78,6 +78,7 @@ inline TemporaryArtifact write_fixture(const Json& directory, std::string_view s
     output.write(reinterpret_cast<const char*>(file.data()),
                  static_cast<std::streamsize>(file.size()));
     if (!output) { throw std::runtime_error("failed to write artifact fixture"); }
+    output.close();
     return {std::move(path)};
 }
 

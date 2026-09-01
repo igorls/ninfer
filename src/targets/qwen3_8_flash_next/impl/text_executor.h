@@ -65,15 +65,19 @@ public:
     [[nodiscard]] std::uint32_t batch_size() const;
     [[nodiscard]] Tensor logits() const;
     [[nodiscard]] Tensor final_hidden() const;
+    [[nodiscard]] Tensor hyper_hidden() const;
     [[nodiscard]] std::span<const std::int32_t> sampled_tokens() const;
 
     void commit(std::span<const LaneCommitDecision> decisions);
+    void commit_speculative(std::uint32_t lane_index,
+                            std::span<const std::int32_t> accepted_tokens);
     void abort() noexcept;
 
 private:
     friend class FlashNextTextExecutor;
     PendingRound(FlashNextTextExecutor* owner, std::uint64_t transaction_id,
                  std::uint32_t batch_size, Tensor logits, Tensor final_hidden,
+                 Tensor hyper_hidden,
                  std::span<const std::int32_t> sampled_tokens = {}) noexcept;
 
     FlashNextTextExecutor* owner_ = nullptr;
@@ -81,6 +85,7 @@ private:
     std::uint32_t batch_size_     = 0;
     Tensor logits_{};
     Tensor final_hidden_{};
+    Tensor hyper_hidden_{};
     std::array<std::int32_t, 8> sampled_tokens_{};
 };
 
@@ -155,6 +160,17 @@ public:
                                              const FlashNextDecodeStateSink* sink = nullptr);
 
     [[nodiscard]] PendingRound
+    execute_speculative_verify_round(LaneHandle handle, std::int32_t anchor_token_id,
+                                     std::span<const std::int32_t> draft_tokens,
+                                     std::int32_t first_token_index,
+                                     std::array<std::int32_t, 3> first_mrope_position,
+                                     const ops::SamplingConfig& sampling);
+
+    void draft_mtp_tokens(LaneHandle handle, std::int32_t token_id, std::int32_t token_index,
+                          std::array<std::int32_t, 3> mrope_pos, const Tensor& backbone_hidden,
+                          std::uint32_t draft_count, std::span<std::int32_t> out_draft_tokens);
+
+    [[nodiscard]] PendingRound
     execute_prefill_chunk(LaneHandle handle, std::span<const std::int32_t> token_ids,
                           std::span<const std::array<std::int32_t, 3>> positions,
                           std::int32_t first_token_index,
@@ -214,6 +230,17 @@ private:
     bool graph_pinned_eager_[8][kFlashNextDecodeGraphMaxBuckets]{};
     std::unique_ptr<DeviceBuffer> lazy_capture_scratch_;
 
+    // MTP draft buffers & cache
+    std::unique_ptr<DeviceBuffer> mtp_key_pages_;
+    std::unique_ptr<DeviceBuffer> mtp_value_pages_;
+    std::optional<QsaAttentionCacheView> mtp_cache_;
+    std::unique_ptr<WorkspaceArena> mtp_workspace_;
+    std::unique_ptr<DeviceBuffer> mtp_selected_blocks_;
+    std::unique_ptr<DeviceBuffer> mtp_selected_counts_;
+    std::unique_ptr<DeviceBuffer> mtp_draft_logits_;
+    std::unique_ptr<DeviceBuffer> mtp_draft_tokens_;
+    std::unique_ptr<DeviceBuffer> mtp_input_embedding_;
+
     enum class LazyCaptureOutcome { Installed, NeedEager };
 
     [[nodiscard]] DecodeGraphTopology* find_topology(std::uint32_t batch_size,
@@ -231,6 +258,8 @@ private:
                           std::int32_t active_blocks);
 
     void commit_transaction(std::uint64_t tx_id, std::span<const LaneCommitDecision> decisions);
+    void commit_speculative_transaction(std::uint64_t tx_id, std::uint32_t lane_index,
+                                        std::span<const std::int32_t> accepted_tokens);
     void abort_transaction(std::uint64_t tx_id) noexcept;
 };
 

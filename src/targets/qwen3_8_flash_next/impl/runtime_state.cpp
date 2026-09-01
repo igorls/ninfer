@@ -52,11 +52,15 @@ FlashNextRuntimeAllocation::FlashNextRuntimeAllocation(FlashNextRuntimePlan plan
     validate_plan_match(plan_);
 
     const std::uint32_t concurrency = plan_.config.max_concurrency;
+    slots_per_lane_ =
+        plan_.config.speculative_draft_tokens > 0 ? (plan_.config.speculative_draft_tokens + 1U) : 2U;
+    host_ring_offsets_.assign(concurrency, 0U);
     host_active_slots_.resize(concurrency);
     host_standby_slots_.resize(concurrency);
     for (std::uint32_t b = 0; b < concurrency; ++b) {
-        host_active_slots_[b]  = static_cast<std::int32_t>(2U * b);
-        host_standby_slots_[b] = static_cast<std::int32_t>(2U * b + 1U);
+        const std::uint32_t base_slot = b * slots_per_lane_;
+        host_active_slots_[b]         = static_cast<std::int32_t>(base_slot);
+        host_standby_slots_[b]        = static_cast<std::int32_t>(base_slot + (1U % slots_per_lane_));
     }
 
     const std::size_t persistent_bytes =
@@ -170,50 +174,58 @@ void FlashNextRuntimeAllocation::materialize_views() {
     device_egress_ = cur;
     cur += align_up_256(sizeof(FlashNextDecodeEgress));
 
+    const std::uint32_t round_batch_tokens =
+        std::max(concurrency,
+                 plan_.config.speculative_draft_tokens > 0 ? (plan_.config.speculative_draft_tokens + 1U) : 1U);
+
     round_tensors_.token_ids =
         Tensor(static_cast<std::byte*>(device_ingress_) + offsetof(FlashNextDecodeIngress, token_ids),
-               DType::I32, {static_cast<std::int32_t>(concurrency)});
+               DType::I32, {static_cast<std::int32_t>(round_batch_tokens)});
 
     round_tensors_.token_indices =
         Tensor(static_cast<std::byte*>(device_ingress_) +
                    offsetof(FlashNextDecodeIngress, token_indices),
-               DType::I32, {static_cast<std::int32_t>(concurrency)});
+               DType::I32, {static_cast<std::int32_t>(round_batch_tokens)});
 
     round_tensors_.mrope_positions =
         Tensor(static_cast<std::byte*>(device_ingress_) +
                    offsetof(FlashNextDecodeIngress, mrope_positions),
-               DType::I32, {static_cast<std::int32_t>(concurrency), 3});
+               DType::I32, {static_cast<std::int32_t>(round_batch_tokens), 3});
 
     round_tensors_.table_rows =
         Tensor(static_cast<std::byte*>(device_ingress_) + offsetof(FlashNextDecodeIngress, table_rows),
-               DType::I32, {static_cast<std::int32_t>(concurrency)});
+               DType::I32, {static_cast<std::int32_t>(round_batch_tokens)});
 
     round_tensors_.source_slots =
         Tensor(static_cast<std::byte*>(device_ingress_) +
                    offsetof(FlashNextDecodeIngress, source_slots),
-               DType::I32, {static_cast<std::int32_t>(concurrency)});
+               DType::I32, {static_cast<std::int32_t>(round_batch_tokens)});
 
     round_tensors_.destination_slots =
         Tensor(static_cast<std::byte*>(device_ingress_) +
                    offsetof(FlashNextDecodeIngress, destination_slots),
-               DType::I32, {static_cast<std::int32_t>(concurrency)});
+               DType::I32, {static_cast<std::int32_t>(round_batch_tokens)});
 
     round_tensors_.sampled_tokens =
         Tensor(static_cast<std::byte*>(device_egress_) +
                    offsetof(FlashNextDecodeEgress, sampled_tokens),
-               DType::I32, {static_cast<std::int32_t>(concurrency)});
+               DType::I32, {static_cast<std::int32_t>(round_batch_tokens)});
 
     round_tensors_.gathered_ple_embedding =
-        Tensor(cur, DType::BF16, {2'560, static_cast<std::int32_t>(concurrency)});
-    cur += align_up_256(2'560ULL * concurrency * sizeof(std::uint16_t));
+        Tensor(cur, DType::BF16, {2'560, static_cast<std::int32_t>(round_batch_tokens)});
+    cur += align_up_256(2'560ULL * round_batch_tokens * sizeof(std::uint16_t));
 
     round_tensors_.final_hidden =
-        Tensor(cur, DType::BF16, {2'560, static_cast<std::int32_t>(concurrency)});
-    cur += align_up_256(2'560ULL * concurrency * sizeof(std::uint16_t));
+        Tensor(cur, DType::BF16, {2'560, static_cast<std::int32_t>(round_batch_tokens)});
+    cur += align_up_256(2'560ULL * round_batch_tokens * sizeof(std::uint16_t));
+
+    round_tensors_.hyper_hidden =
+        Tensor(cur, DType::BF16, {10'240, static_cast<std::int32_t>(round_batch_tokens)});
+    cur += align_up_256(10'240ULL * round_batch_tokens * sizeof(std::uint16_t));
 
     round_tensors_.logits =
-        Tensor(cur, DType::BF16, {248'320, static_cast<std::int32_t>(concurrency)});
-    cur += align_up_256(248'320ULL * concurrency * sizeof(std::uint16_t));
+        Tensor(cur, DType::BF16, {248'320, static_cast<std::int32_t>(round_batch_tokens)});
+    cur += align_up_256(248'320ULL * round_batch_tokens * sizeof(std::uint16_t));
 
     const auto used_bytes = static_cast<std::size_t>(cur - static_cast<std::byte*>(storage_->p));
     if (used_bytes > storage_->bytes) {
@@ -228,11 +240,7 @@ void FlashNextRuntimeAllocation::initialize(cudaStream_t stream) {
 }
 
 void FlashNextRuntimeAllocation::commit_row_slot(std::uint32_t row_index, cudaStream_t stream) {
-    if (row_index >= plan_.config.max_concurrency) {
-        throw std::out_of_range("row_index exceeds max_concurrency");
-    }
-    std::swap(host_active_slots_[row_index], host_standby_slots_[row_index]);
-    sync_slots_to_device(stream);
+    advance_lane_slot(row_index, 1U, stream);
 }
 
 void FlashNextRuntimeAllocation::commit_slots(std::span<const std::uint32_t> accepted_lanes,
@@ -248,10 +256,25 @@ void FlashNextRuntimeAllocation::commit_slots(std::span<const std::uint32_t> acc
         }
         seen_mask |= (1U << lane);
     }
-    // All validated — perform swaps
+    // All validated — advance each lane
     for (const auto lane : accepted_lanes) {
-        std::swap(host_active_slots_[lane], host_standby_slots_[lane]);
+        advance_lane_slot(lane, 1U, stream);
     }
+}
+
+void FlashNextRuntimeAllocation::advance_lane_slot(std::uint32_t lane_index,
+                                                  std::uint32_t step_count,
+                                                  cudaStream_t stream) {
+    if (lane_index >= plan_.config.max_concurrency) {
+        throw std::out_of_range("advance_lane_slot: lane_index exceeds max_concurrency");
+    }
+    host_ring_offsets_[lane_index] =
+        (host_ring_offsets_[lane_index] + step_count) % slots_per_lane_;
+    const std::uint32_t base_slot = lane_index * slots_per_lane_;
+    host_active_slots_[lane_index] =
+        static_cast<std::int32_t>(base_slot + host_ring_offsets_[lane_index]);
+    host_standby_slots_[lane_index] =
+        static_cast<std::int32_t>(base_slot + ((host_ring_offsets_[lane_index] + 1U) % slots_per_lane_));
     sync_slots_to_device(stream);
 }
 
@@ -264,6 +287,11 @@ void FlashNextRuntimeAllocation::restore_lane_slots(std::uint32_t lane_index,
     }
     host_active_slots_[lane_index]  = active_slot;
     host_standby_slots_[lane_index] = standby_slot;
+    const std::uint32_t base_slot   = lane_index * slots_per_lane_;
+    if (active_slot >= static_cast<std::int32_t>(base_slot) &&
+        active_slot < static_cast<std::int32_t>(base_slot + slots_per_lane_)) {
+        host_ring_offsets_[lane_index] = static_cast<std::uint32_t>(active_slot - base_slot);
+    }
     sync_slots_to_device(stream);
 }
 
@@ -302,8 +330,13 @@ void FlashNextRuntimeAllocation::zero_lane_slots(std::uint32_t lane_index, cudaS
     if (lane_index >= plan_.config.max_concurrency) {
         throw std::out_of_range("lane_index exceeds max_concurrency");
     }
-    zero_slot(static_cast<std::uint32_t>(host_active_slots_[lane_index]), stream);
-    zero_slot(static_cast<std::uint32_t>(host_standby_slots_[lane_index]), stream);
+    const std::uint32_t base_slot = lane_index * slots_per_lane_;
+    for (std::uint32_t s = 0; s < slots_per_lane_; ++s) {
+        zero_slot(base_slot + s, stream);
+    }
+    host_ring_offsets_[lane_index]  = 0U;
+    host_active_slots_[lane_index]  = static_cast<std::int32_t>(base_slot);
+    host_standby_slots_[lane_index] = static_cast<std::int32_t>(base_slot + (1U % slots_per_lane_));
 }
 
 void FlashNextRuntimeAllocation::copy_state_slot(std::uint32_t src_slot, std::uint32_t dst_slot,
@@ -378,6 +411,16 @@ std::int32_t FlashNextRuntimeAllocation::current_destination_slot(std::uint32_t 
         throw std::out_of_range("row_index exceeds max_concurrency");
     }
     return host_standby_slots_[row_index];
+}
+
+std::int32_t FlashNextRuntimeAllocation::lane_ring_slot(std::uint32_t lane_index,
+                                                        std::uint32_t step_offset) const {
+    if (lane_index >= plan_.config.max_concurrency) {
+        throw std::out_of_range("lane_ring_slot: lane_index exceeds max_concurrency");
+    }
+    const std::uint32_t base_slot = lane_index * slots_per_lane_;
+    const std::uint32_t offset    = (host_ring_offsets_[lane_index] + step_offset) % slots_per_lane_;
+    return static_cast<std::int32_t>(base_slot + offset);
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

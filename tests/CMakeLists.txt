@@ -290,6 +290,18 @@ ninfer_add_test(ninfer_qwen3_8_flash_next_mtp_test
   LIBRARIES ninfer_qwen3_8_flash_next)
 set_tests_properties(ninfer_qwen3_8_flash_next_mtp_test
   PROPERTIES SKIP_RETURN_CODE 77)
+
+ninfer_add_test(ninfer_qwen3_8_flash_next_mtp_spec_decode_test
+  SOURCES targets/qwen3_8_flash_next/test_mtp_spec_decode.cpp
+  LIBRARIES ninfer_qwen3_8_flash_next ninfer_engine)
+target_include_directories(ninfer_qwen3_8_flash_next_mtp_spec_decode_test PRIVATE
+  ${PROJECT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_8_flash_next
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_8_flash_next/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
+set_tests_properties(ninfer_qwen3_8_flash_next_mtp_spec_decode_test
+  PROPERTIES SKIP_RETURN_CODE 77)
 ninfer_add_test(ninfer_qwen3_8_flash_next_loader_test
   SOURCES
     targets/qwen3_8_flash_next/test_loader.cpp

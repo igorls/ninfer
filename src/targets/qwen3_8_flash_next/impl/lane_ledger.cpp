@@ -611,4 +611,125 @@ void FlashNextLaneLedger::sync_tables_if_dirty(FlashNextRuntimeAllocation& alloc
     block_tables_dirty_ = false;
 }
 
+FlashNextLaneLedger::PreparedRound
+FlashNextLaneLedger::begin_speculative_round(LaneHandle handle,
+                                             std::int32_t anchor_token_id,
+                                             std::span<const std::int32_t> draft_tokens,
+                                             std::int32_t first_token_index,
+                                             const PleIndexMetadata& ple_meta) {
+    if (has_pending_batch_) {
+        throw std::logic_error(
+            "FlashNextLaneLedger: cannot begin speculative round with pending transaction");
+    }
+    validate_handle(handle, LaneState::Active);
+
+    const auto num_tokens    = static_cast<std::uint32_t>(1U + draft_tokens.size());
+    const std::uint32_t lane = handle.lane_index();
+    if (first_token_index != lanes_[lane].committed_frontier) {
+        throw std::invalid_argument(
+            "FlashNextLaneLedger: first_token_index must match committed frontier");
+    }
+    if (first_token_index < 0 ||
+        static_cast<std::uint64_t>(first_token_index) + num_tokens > plan_.config.max_context) {
+        throw std::out_of_range("FlashNextLaneLedger: speculative round exceeds max_context");
+    }
+    if (current_transaction_id_ == std::numeric_limits<std::uint64_t>::max()) {
+        throw std::overflow_error("FlashNextLaneLedger: transaction id overflow");
+    }
+
+    const std::int32_t last_token_index =
+        first_token_index + static_cast<std::int32_t>(num_tokens) - 1;
+    const std::size_t req_groups =
+        static_cast<std::size_t>(last_token_index /
+                                 static_cast<std::int32_t>(kMainPageGroupTokens)) +
+        1U;
+    auto& owned_groups           = lane_physical_groups_[lane];
+    previous_group_counts_[lane] = owned_groups.size();
+
+    if (req_groups > owned_groups.size()) {
+        const std::size_t total_needed = req_groups - owned_groups.size();
+        if (total_needed > free_physical_groups_.size()) {
+            throw std::runtime_error("FlashNextLaneLedger: physical page group capacity exhausted");
+        }
+        while (owned_groups.size() < req_groups) {
+            const auto phys_group = free_physical_groups_.back();
+            free_physical_groups_.pop_back();
+            if (phys_group < physical_group_refcounts_.size()) {
+                physical_group_refcounts_[phys_group] = 1;
+            }
+
+            const auto log_group = static_cast<std::uint32_t>(owned_groups.size());
+            owned_groups.push_back(phys_group);
+
+            for (std::uint32_t s = 0; s < 4U; ++s) {
+                const auto log_att_page = log_group * 4U + s;
+                if (log_att_page < plan_.attention_logical_pages) {
+                    host_attention_table_[static_cast<std::size_t>(lane) *
+                                              plan_.attention_logical_pages +
+                                          log_att_page] =
+                        static_cast<std::int32_t>(phys_group * 4U + s);
+                }
+            }
+            if (log_group < plan_.indexer_logical_pages) {
+                host_indexer_table_[static_cast<std::size_t>(lane) * plan_.indexer_logical_pages +
+                                    log_group] = static_cast<std::int32_t>(phys_group);
+            }
+            block_tables_dirty_ = true;
+        }
+    }
+
+    std::vector<std::array<std::int64_t, 16>> ple_indices_vec;
+    ple_indices_vec.reserve(num_tokens);
+
+    PleTokenHistory simulated_history = lanes_[lane].history;
+    for (std::uint32_t t = 0; t < num_tokens; ++t) {
+        const std::int32_t cur_token = (t == 0) ? anchor_token_id : draft_tokens[t - 1];
+        std::array<std::int64_t, 16> token_indices = ple_indices(ple_meta, simulated_history, cur_token);
+        ple_indices_vec.push_back(token_indices);
+        simulated_history.commit(cur_token);
+    }
+
+    const std::int32_t max_active_blocks =
+        std::min(static_cast<std::int32_t>(plan_.maximum_blocks), (last_token_index + 1) / 4);
+
+    current_transaction_id_ += 1;
+    pending_requests_.clear();
+    pending_requests_.push_back(LaneStepRequest{.handle = handle, .token_id = anchor_token_id, .token_index = first_token_index});
+    for (std::size_t d = 0; d < draft_tokens.size(); ++d) {
+        pending_requests_.push_back(LaneStepRequest{
+            .handle = handle,
+            .token_id = draft_tokens[d],
+            .token_index = first_token_index + static_cast<std::int32_t>(d + 1)
+        });
+    }
+    pending_lane_indices_ = {lane};
+    has_pending_batch_    = true;
+
+    return PreparedRound{current_transaction_id_, max_active_blocks, std::move(ple_indices_vec)};
+}
+
+void FlashNextLaneLedger::commit_speculative_round(std::uint64_t tx_id,
+                                                   std::span<const std::int32_t> accepted_tokens,
+                                                   FlashNextRuntimeAllocation& alloc,
+                                                   cudaStream_t stream) {
+    if (!has_pending_batch_ || tx_id != current_transaction_id_) {
+        throw std::logic_error("FlashNextLaneLedger: invalid or stale speculative transaction commit");
+    }
+    const auto lane = pending_lane_indices_[0];
+
+    if (!accepted_tokens.empty()) {
+        alloc.advance_lane_slot(lane, static_cast<std::uint32_t>(accepted_tokens.size()), stream);
+    }
+
+    for (const auto tok : accepted_tokens) {
+        lanes_[lane].history.commit(tok);
+    }
+    lanes_[lane].committed_frontier += static_cast<std::int32_t>(accepted_tokens.size());
+    lanes_[lane].state = LaneState::Active;
+
+    has_pending_batch_ = false;
+    pending_requests_.clear();
+    pending_lane_indices_.clear();
+}
+
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

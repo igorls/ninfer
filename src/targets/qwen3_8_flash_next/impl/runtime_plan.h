@@ -117,14 +117,15 @@ struct FlashNextDecodeEgress {
 };
 
 struct FlashNextRuntimeConfig {
-    std::uint32_t max_concurrency     = 1;    // 1..8
-    std::uint32_t max_context         = 4096; // in tokens: 1..262144
-    std::uint32_t state_slot_capacity = 0;    // 0 -> default 2 * max_concurrency + continuation_capacity
-    std::uint32_t continuation_capacity = 0;  // Checkpoint cache slot capacity
-    std::uint32_t prefill_chunk       = 1024; // nonzero multiple of 128, <= max_context
-    bool use_cuda_graph               = true;
-    bool vision_enabled               = false;
-    std::uint32_t max_vision_tokens   = 4096;
+    std::uint32_t max_concurrency          = 1;    // 1..8
+    std::uint32_t max_context              = 4096; // in tokens: 1..262144
+    std::uint32_t state_slot_capacity      = 0;    // 0 -> default (slots_per_lane * max_concurrency + continuation_capacity)
+    std::uint32_t continuation_capacity    = 0;  // Checkpoint cache slot capacity
+    std::uint32_t prefill_chunk            = 1024; // nonzero multiple of 128, <= max_context
+    std::uint32_t speculative_draft_tokens = 0;    // 0 -> speculative decoding off; K in [1, 4]
+    bool use_cuda_graph                    = true;
+    bool vision_enabled                    = false;
+    std::uint32_t max_vision_tokens        = 4096;
 };
 
 struct FlashNextRuntimePlan {

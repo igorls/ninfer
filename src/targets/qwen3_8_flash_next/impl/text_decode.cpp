@@ -194,7 +194,8 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                                  const Tensor& gathered_ple_embedding, std::int32_t maximum_blocks,
                                  std::int32_t active_blocks, FlashNextDecodeStateView state,
                                  WorkspaceArena& workspace, Tensor& final_hidden, Tensor& logits,
-                                 cudaStream_t stream, const FlashNextDecodeStateSink* sink) {
+                                 cudaStream_t stream, const FlashNextDecodeStateSink* sink,
+                                 Tensor* out_hyper_hidden) {
     const std::int32_t batch       = embedding.ne[1];
     const std::int32_t state_slots = state.ple_convolution_states.ne[2];
     if (batch <= 0 || batch > 8 || maximum_blocks <= 0 || maximum_blocks > 65'536 ||
@@ -299,6 +300,12 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
     flash_next_hyper_mix(round_ws.hyper_hidden, model.final_mixer, round_ws.hyper_scratch,
                          final_hidden, stream);
     emit_state("final_hidden", final_hidden);
+
+    if (out_hyper_hidden != nullptr && out_hyper_hidden->data != nullptr) {
+        CUDA_CHECK(cudaMemcpyAsync(out_hyper_hidden->data, round_ws.hyper_hidden.data,
+                                   10'240ULL * batch * sizeof(std::uint16_t),
+                                   cudaMemcpyDeviceToDevice, stream));
+    }
 
     // 4. Output head linear projection -> logits [248320, B]
     ops::linear(final_hidden, model.output_head, logits, ops::LinearPolicy::A16Only, workspace,

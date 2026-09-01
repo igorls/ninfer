@@ -19,16 +19,17 @@
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
 struct FlashNextRoundTensors {
-    Tensor token_ids;              // I32 [max_concurrency]
-    Tensor token_indices;          // I32 [max_concurrency]
-    Tensor mrope_positions;        // I32 [max_concurrency, 3]
-    Tensor table_rows;             // I32 [max_concurrency]
-    Tensor source_slots;           // I32 [max_concurrency]
-    Tensor destination_slots;      // I32 [max_concurrency]
-    Tensor sampled_tokens;         // I32 [max_concurrency]
-    Tensor gathered_ple_embedding; // BF16 [2560, max_concurrency]
-    Tensor final_hidden;           // BF16 [2560, max_concurrency]
-    Tensor logits;                 // BF16 [248320, max_concurrency]
+    Tensor token_ids;              // I32 [round_batch_tokens]
+    Tensor token_indices;          // I32 [round_batch_tokens]
+    Tensor mrope_positions;        // I32 [round_batch_tokens, 3]
+    Tensor table_rows;             // I32 [round_batch_tokens]
+    Tensor source_slots;           // I32 [round_batch_tokens]
+    Tensor destination_slots;      // I32 [round_batch_tokens]
+    Tensor sampled_tokens;         // I32 [round_batch_tokens]
+    Tensor gathered_ple_embedding; // BF16 [2560, round_batch_tokens]
+    Tensor final_hidden;           // BF16 [2560, round_batch_tokens]
+    Tensor hyper_hidden;           // BF16 [10240, round_batch_tokens]
+    Tensor logits;                 // BF16 [248320, round_batch_tokens]
 };
 
 class FlashNextRuntimeAllocation {
@@ -89,6 +90,7 @@ public:
     // Swaps active (source) and standby (destination) slot for row b in [0, max_concurrency).
     void commit_row_slot(std::uint32_t row_index, cudaStream_t stream);
     void commit_slots(std::span<const std::uint32_t> accepted_lanes, cudaStream_t stream);
+    void advance_lane_slot(std::uint32_t lane_index, std::uint32_t step_count, cudaStream_t stream);
     void restore_lane_slots(std::uint32_t lane_index, std::int32_t active_slot,
                             std::int32_t standby_slot, cudaStream_t stream);
     void sync_slots_to_device(cudaStream_t stream);
@@ -100,6 +102,8 @@ public:
 
     [[nodiscard]] std::int32_t current_source_slot(std::uint32_t row_index) const;
     [[nodiscard]] std::int32_t current_destination_slot(std::uint32_t row_index) const;
+    [[nodiscard]] std::int32_t lane_ring_slot(std::uint32_t lane_index,
+                                              std::uint32_t step_offset) const;
 
     [[nodiscard]] void* persistent_base() noexcept { return storage_->p; }
     [[nodiscard]] const void* persistent_base() const noexcept { return storage_->p; }
@@ -121,6 +125,8 @@ private:
     FlashNextRoundTensors round_tensors_{};
 
     // Slot pair for each concurrency row: active (source) and standby (destination)
+    std::uint32_t slots_per_lane_ = 2;
+    std::vector<std::uint32_t> host_ring_offsets_;
     std::vector<std::int32_t> host_active_slots_;
     std::vector<std::int32_t> host_standby_slots_;
 
