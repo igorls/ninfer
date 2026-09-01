@@ -2,6 +2,8 @@
 #include "core/device.h"
 #include "ninfer/ops/linear.h"
 #include "targets/qwen3_8_flash_next/impl/qsa_indexer.h"
+#include "targets/qwen3_8_flash_next/impl/qsa_indexer_kernels.h"
+#include "targets/qwen3_8_flash_next/impl/qsa_indexer_workspace.h"
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -22,6 +24,16 @@ using ninfer::targets::qwen3_8_flash_next::detail::QsaIndexerCacheView;
 using ninfer::targets::qwen3_8_flash_next::detail::flash_next_qsa_indexer_decode;
 using ninfer::targets::qwen3_8_flash_next::detail::flash_next_qsa_indexer_prefill_chunk;
 using ninfer::targets::qwen3_8_flash_next::detail::flash_next_qsa_indexer_workspace_capacity_bytes;
+using ninfer::targets::qwen3_8_flash_next::detail::flash_next_qsa_indexer_prefill_launch;
+using ninfer::targets::qwen3_8_flash_next::detail::flash_next_qsa_indexer_sort_temp_bytes;
+using ninfer::targets::qwen3_8_flash_next::detail::flash_next_qsa_indexer_tile_size;
+using ninfer::targets::qwen3_8_flash_next::detail::allocate_flash_next_qsa_indexer_workspace;
+
+float bf16_bits_to_float(std::uint16_t bits) {
+    __nv_bfloat16 raw{};
+    std::memcpy(&raw, &bits, sizeof(bits));
+    return __bfloat162float(raw);
+}
 
 std::uint16_t float_to_bf16(float value) {
     const __nv_bfloat16 raw = __float2bfloat16_rn(value);
@@ -1188,6 +1200,258 @@ bool test_prefill_decode_select_equivalence(ninfer::DeviceContext& device) {
     return true;
 }
 
+// G12: complete_blocks must be applied per token column inside one BN=64 GEMM tile.
+// token_index 2044..2107 => complete_blocks 511..527. A per-CTA (tile-max) mask would
+// let early tokens select later blocks that are not yet complete for them.
+bool test_prefill_per_token_complete_threshold(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    constexpr std::int32_t tokens          = 64;
+    constexpr std::int32_t first_token     = 2044;
+    constexpr std::int32_t last_token      = first_token + tokens - 1;
+    constexpr std::int32_t first_complete  = (first_token + 1) / 4;
+    constexpr std::int32_t last_complete   = (last_token + 1) / 4;
+    constexpr std::int32_t maximum_blocks  = 1024;
+    constexpr std::int32_t logical_pages   = (maximum_blocks + 63) / 64;
+    static_assert(first_complete == 511 && last_complete == 527);
+    static_assert(last_token == 2107);
+
+    ninfer::DeviceBuffer input(2'560ULL * tokens * 2);
+    ninfer::DeviceBuffer projection(640ULL * 2'560 * 2);
+    ninfer::DeviceBuffer query_norm(128 * 2);
+    ninfer::DeviceBuffer key_norm(128 * 2);
+    ninfer::DeviceBuffer block_keys(128ULL * 64 * logical_pages * 2);
+    ninfer::DeviceBuffer block_tables(static_cast<std::size_t>(logical_pages) * sizeof(std::int32_t));
+    ninfer::DeviceBuffer raw_keys(128ULL * 4 * 2);
+    ninfer::DeviceBuffer raw_positions(3ULL * 4 * sizeof(std::int32_t));
+    ninfer::DeviceBuffer token_index(static_cast<std::size_t>(tokens) * sizeof(std::int32_t));
+    ninfer::DeviceBuffer mrope_positions(static_cast<std::size_t>(tokens) * 3 * sizeof(std::int32_t));
+    ninfer::DeviceBuffer selected_blocks(512ULL * tokens * sizeof(std::int32_t));
+    ninfer::DeviceBuffer selected_count(static_cast<std::size_t>(tokens) * sizeof(std::int32_t));
+
+    std::vector<std::uint16_t> input_values(2'560ULL * tokens, 0);
+    for (std::int32_t t = 0; t < tokens; ++t) {
+        input_values[static_cast<std::size_t>(t) * 2'560] = 0x3F80U;
+    }
+    input.copy_from_host(input_values.data(), input_values.size() * 2);
+    std::vector<std::uint16_t> projection_values(640ULL * 2'560, 0);
+    for (std::int32_t row = 0; row < 640; ++row) {
+        projection_values[static_cast<std::size_t>(row) * 2'560] = 0x3F80U;
+    }
+    projection.copy_from_host(projection_values.data(), projection_values.size() * 2);
+    query_norm.fill(0);
+    key_norm.fill(0);
+    raw_keys.fill(0);
+    raw_positions.fill(0);
+    std::vector<std::int32_t> page_ids(static_cast<std::size_t>(logical_pages));
+    for (std::int32_t page = 0; page < logical_pages; ++page) { page_ids[static_cast<std::size_t>(page)] = page; }
+    block_tables.copy_from_host(page_ids.data(), page_ids.size() * sizeof(std::int32_t));
+    std::vector<std::int32_t> token_values(static_cast<std::size_t>(tokens));
+    std::vector<std::int32_t> pos_values(static_cast<std::size_t>(tokens) * 3);
+    for (std::int32_t t = 0; t < tokens; ++t) {
+        token_values[static_cast<std::size_t>(t)] = first_token + t;
+        pos_values[static_cast<std::size_t>(t)] = first_token + t;
+        pos_values[static_cast<std::size_t>(tokens + t)] = first_token + t;
+        pos_values[static_cast<std::size_t>(2 * tokens + t)] = first_token + t;
+    }
+    token_index.copy_from_host(token_values.data(), token_values.size() * sizeof(std::int32_t));
+    mrope_positions.copy_from_host(pos_values.data(), pos_values.size() * sizeof(std::int32_t));
+
+    std::vector<std::uint16_t> host_keys(128ULL * 64 * logical_pages, 0);
+    fill_monotonic_block_keys(host_keys, last_complete);
+    block_keys.copy_from_host(host_keys.data(), host_keys.size() * 2);
+
+    AttentionWeights weights{};
+    weights.indexer_query_key  = bf16_weight(projection.p, 640, 2'560);
+    weights.indexer_query_norm = ninfer::Tensor(query_norm.p, ninfer::DType::BF16, {128});
+    weights.indexer_key_norm   = ninfer::Tensor(key_norm.p, ninfer::DType::BF16, {128});
+    QsaIndexerCacheView cache{
+        .block_keys    = ninfer::Tensor(block_keys.p, ninfer::DType::BF16, {128, 64, logical_pages}),
+        .block_tables  = ninfer::Tensor(block_tables.p, ninfer::DType::I32, {logical_pages, 1}),
+        .raw_keys      = ninfer::Tensor(raw_keys.p, ninfer::DType::BF16, {128, 4, 1}),
+        .raw_positions = ninfer::Tensor(raw_positions.p, ninfer::DType::I32, {3, 4, 1}),
+    };
+    ninfer::Tensor input_view(input.p, ninfer::DType::BF16, {2'560, tokens});
+    ninfer::Tensor token_view(token_index.p, ninfer::DType::I32, {tokens});
+    ninfer::Tensor position_view(mrope_positions.p, ninfer::DType::I32, {tokens, 3});
+    ninfer::Tensor selected_view(selected_blocks.p, ninfer::DType::I32, {512, tokens});
+    ninfer::Tensor count_view(selected_count.p, ninfer::DType::I32, {tokens});
+    ninfer::WorkspaceArena workspace(256ULL * 1024 * 1024);
+    CUDA_CHECK(cudaMemsetAsync(workspace.base(), 0xFF, workspace.capacity(), device.stream));
+    drain_all_streams();
+    flash_next_qsa_indexer_prefill_chunk(input_view, weights, token_view, position_view, 0, 0, 0,
+                                         cache, maximum_blocks, workspace, selected_view,
+                                         count_view, device.stream);
+    drain_all_streams();
+
+    std::vector<std::int32_t> counts(static_cast<std::size_t>(tokens), -1);
+    std::vector<std::int32_t> ids(512ULL * tokens, -2);
+    selected_count.copy_to_host(counts.data(), counts.size() * sizeof(std::int32_t));
+    selected_blocks.copy_to_host(ids.data(), ids.size() * sizeof(std::int32_t));
+
+    double energy = 0.0;
+    int oob = 0;
+    int saw_low = 0;
+    int saw_high = 0;
+    for (std::int32_t t = 0; t < tokens; ++t) {
+        const std::int32_t complete = (first_token + t + 1) / 4;
+        const std::int32_t want     = std::min(complete, 512);
+        if (complete == first_complete) { ++saw_low; }
+        if (complete == last_complete) { ++saw_high; }
+        if (counts[static_cast<std::size_t>(t)] != want) {
+            std::cerr << "FAIL: per-token sentinel count[" << t << "]=" << counts[static_cast<std::size_t>(t)]
+                      << " want=" << want << " complete=" << complete << "\n";
+            return false;
+        }
+        for (std::int32_t i = 0; i < 512; ++i) {
+            const std::int32_t id = ids[static_cast<std::size_t>(t) * 512 + static_cast<std::size_t>(i)];
+            if (i < want) {
+                if (id < 0 || id >= complete) {
+                    ++oob;
+                    std::cerr << "FAIL: per-token sentinel token=" << (first_token + t)
+                              << " complete=" << complete << " id[" << i << "]=" << id << "\n";
+                    return false;
+                }
+                energy += static_cast<double>(id) * static_cast<double>(id);
+            } else if (id != -1) {
+                std::cerr << "FAIL: per-token sentinel pad token=" << (first_token + t)
+                          << " id[" << i << "]=" << id << "\n";
+                return false;
+            }
+        }
+    }
+    if (saw_low == 0 || saw_high == 0 || !(energy > 0.0) || !std::isfinite(energy) || oob != 0) {
+        std::cerr << "FAIL: per-token sentinel vacuous energy=" << energy << " saw_low=" << saw_low
+                  << " saw_high=" << saw_high << "\n";
+        return false;
+    }
+    std::cout << "PASS: test_prefill_per_token_complete_threshold tokens=" << first_token << ".."
+              << last_token << " complete=" << first_complete << ".." << last_complete
+              << " energy=" << energy << " oob=0\n";
+    return true;
+}
+
+bool test_prefill_score_gemm_vs_host_oracle(ninfer::DeviceContext& device, std::int32_t n) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    const std::int32_t tokens         = 1;
+    const std::int32_t logical_pages  = (n + 63) / 64;
+    const std::int32_t token          = n * 4 - 1;
+    ninfer::DeviceBuffer input(2'560ULL * 2);
+    ninfer::DeviceBuffer projection(640ULL * 2'560 * 2);
+    ninfer::DeviceBuffer query_norm(128 * 2);
+    ninfer::DeviceBuffer key_norm(128 * 2);
+    ninfer::DeviceBuffer block_keys(128ULL * 64 * static_cast<std::size_t>(logical_pages) * 2);
+    ninfer::DeviceBuffer block_tables(static_cast<std::size_t>(logical_pages) * sizeof(std::int32_t));
+    ninfer::DeviceBuffer raw_keys(128ULL * 4 * 2);
+    ninfer::DeviceBuffer raw_positions(3ULL * 4 * sizeof(std::int32_t));
+    ninfer::DeviceBuffer token_index(sizeof(std::int32_t));
+    ninfer::DeviceBuffer mrope_positions(3 * sizeof(std::int32_t));
+    ninfer::DeviceBuffer selected_blocks(512 * sizeof(std::int32_t));
+    ninfer::DeviceBuffer selected_count(sizeof(std::int32_t));
+
+    std::vector<std::uint16_t> input_values(2'560, 0);
+    input_values[0] = 0x3F80U;
+    input.copy_from_host(input_values.data(), input_values.size() * 2);
+    std::vector<std::uint16_t> projection_values(640ULL * 2'560, 0);
+    for (std::int32_t row = 0; row < 640; ++row) {
+        projection_values[static_cast<std::size_t>(row) * 2'560] = 0x3F80U;
+    }
+    projection.copy_from_host(projection_values.data(), projection_values.size() * 2);
+    query_norm.fill(0);
+    key_norm.fill(0);
+    raw_keys.fill(0);
+    raw_positions.fill(0);
+    std::vector<std::int32_t> page_ids(static_cast<std::size_t>(logical_pages));
+    for (std::int32_t page = 0; page < logical_pages; ++page) {
+        page_ids[static_cast<std::size_t>(page)] = page;
+    }
+    block_tables.copy_from_host(page_ids.data(), page_ids.size() * sizeof(std::int32_t));
+    token_index.copy_from_host(&token, sizeof(token));
+    constexpr std::array<std::int32_t, 3> zero_pos{};
+    mrope_positions.copy_from_host(zero_pos.data(), sizeof(zero_pos));
+    std::vector<std::uint16_t> host_keys(128ULL * 64 * static_cast<std::size_t>(logical_pages), 0);
+    fill_monotonic_block_keys(host_keys, n);
+    block_keys.copy_from_host(host_keys.data(), host_keys.size() * 2);
+
+    AttentionWeights weights{};
+    weights.indexer_query_key  = bf16_weight(projection.p, 640, 2'560);
+    weights.indexer_query_norm = ninfer::Tensor(query_norm.p, ninfer::DType::BF16, {128});
+    weights.indexer_key_norm   = ninfer::Tensor(key_norm.p, ninfer::DType::BF16, {128});
+    QsaIndexerCacheView cache{
+        .block_keys    = ninfer::Tensor(block_keys.p, ninfer::DType::BF16, {128, 64, logical_pages}),
+        .block_tables  = ninfer::Tensor(block_tables.p, ninfer::DType::I32, {logical_pages, 1}),
+        .raw_keys      = ninfer::Tensor(raw_keys.p, ninfer::DType::BF16, {128, 4, 1}),
+        .raw_positions = ninfer::Tensor(raw_positions.p, ninfer::DType::I32, {3, 4, 1}),
+    };
+    ninfer::Tensor input_view(input.p, ninfer::DType::BF16, {2'560, 1});
+    ninfer::Tensor token_view(token_index.p, ninfer::DType::I32, {1});
+    ninfer::Tensor position_view(mrope_positions.p, ninfer::DType::I32, {1, 3});
+    ninfer::Tensor selected_view(selected_blocks.p, ninfer::DType::I32, {512, 1});
+    ninfer::Tensor count_view(selected_count.p, ninfer::DType::I32, {1});
+    ninfer::WorkspaceArena workspace(flash_next_qsa_indexer_workspace_capacity_bytes(n, 1) +
+                                     32ULL * 1024 * 1024);
+    const std::int32_t tile_size = flash_next_qsa_indexer_tile_size(n, tokens);
+    const std::size_t sort_temp  = flash_next_qsa_indexer_sort_temp_bytes(n, tile_size);
+    auto scratch = allocate_flash_next_qsa_indexer_workspace(workspace, n, tokens, tile_size,
+                                                             sort_temp);
+    ninfer::ops::linear(input_view, weights.indexer_query_key, scratch.projected, device.stream);
+    flash_next_qsa_indexer_prefill_launch(token_view, position_view, 0, 0, 0,
+                                          weights.indexer_query_norm, weights.indexer_key_norm,
+                                          cache, scratch, n, selected_view, count_view,
+                                          device.stream);
+    drain_all_streams();
+
+    std::vector<float> gemm_scores(static_cast<std::size_t>(n));
+    std::vector<std::uint16_t> host_query(128ULL * 4);
+    CUDA_CHECK(cudaMemcpy(gemm_scores.data(), scratch.scores.data,
+                          static_cast<std::size_t>(n) * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(host_query.data(), scratch.query.data, host_query.size() * 2,
+                          cudaMemcpyDeviceToHost));
+    block_keys.copy_to_host(host_keys.data(), host_keys.size() * 2);
+
+    constexpr float kIndexerScaling = 0.08838834764831845F;
+    double num = 0.0;
+    double den = 0.0;
+    double max_abs = 0.0;
+    int compared = 0;
+    for (std::int32_t block = 0; block < n; ++block) {
+        const std::int32_t page   = block / 64;
+        const std::int32_t offset = block % 64;
+        const std::size_t key_i =
+            static_cast<std::size_t>(page) * 64ULL * 128ULL + static_cast<std::size_t>(offset) * 128ULL;
+        float score = 0.0F;
+        for (int head = 0; head < 4; ++head) {
+            float dot = 0.0F;
+            for (int dim = 0; dim < 128; ++dim) {
+                const float q = bf16_bits_to_float(
+                    host_query[static_cast<std::size_t>(head) * 128 + static_cast<std::size_t>(dim)]);
+                const float k = bf16_bits_to_float(host_keys[key_i + static_cast<std::size_t>(dim)]);
+                dot += q * k;
+            }
+            score += std::max(dot, 0.0F);
+        }
+        score *= kIndexerScaling;
+        const float got = gemm_scores[static_cast<std::size_t>(block)];
+        if (!std::isfinite(got) || !std::isfinite(score)) {
+            std::cerr << "FAIL: non-finite score N=" << n << " block=" << block << " gemm=" << got
+                      << " host=" << score << "\n";
+            return false;
+        }
+        const double d = static_cast<double>(got) - static_cast<double>(score);
+        num += d * d;
+        den += static_cast<double>(score) * static_cast<double>(score);
+        max_abs = std::max(max_abs, std::abs(d));
+        ++compared;
+    }
+    if (compared != n || !(den > 0.0) || !std::isfinite(den) || !std::isfinite(num)) {
+        std::cerr << "FAIL: score oracle vacuous N=" << n << " den=" << den << "\n";
+        return false;
+    }
+    const double rel_l2 = std::sqrt(num / den);
+    std::cout << "  N=" << n << " GEMM vs host-sequential-FP32 rel-L2=" << rel_l2
+              << " max_abs=" << max_abs << " compared=" << compared << " den=" << den << "\n";
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -1368,6 +1632,17 @@ int main() {
         std::cerr << "FAIL: test_prefill_decode_select_equivalence failed\n";
         return 1;
     }
+    if (!test_prefill_per_token_complete_threshold(device)) {
+        std::cerr << "FAIL: test_prefill_per_token_complete_threshold failed\n";
+        return 1;
+    }
+    std::cout << "\n=== G12 score GEMM vs host sequential FP32 ===\n";
+    if (!test_prefill_score_gemm_vs_host_oracle(device, 1024) ||
+        !test_prefill_score_gemm_vs_host_oracle(device, 16384)) {
+        std::cerr << "FAIL: test_prefill_score_gemm_vs_host_oracle failed\n";
+        return 1;
+    }
+    std::cout << "PASS: test_prefill_score_gemm_vs_host_oracle\n";
 
     std::cout << "PASS: test_qsa_indexer\n";
     return 0;
