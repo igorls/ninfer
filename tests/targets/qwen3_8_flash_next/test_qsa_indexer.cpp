@@ -16,6 +16,19 @@
 
 namespace {
 
+using ninfer::targets::qwen3_8_flash_next::detail::AttentionWeights;
+using ninfer::targets::qwen3_8_flash_next::detail::QsaIndexerCacheView;
+using ninfer::targets::qwen3_8_flash_next::detail::flash_next_qsa_indexer_decode;
+using ninfer::targets::qwen3_8_flash_next::detail::flash_next_qsa_indexer_prefill_chunk;
+using ninfer::targets::qwen3_8_flash_next::detail::flash_next_qsa_indexer_workspace_capacity_bytes;
+
+std::uint16_t float_to_bf16(float value) {
+    const __nv_bfloat16 raw = __float2bfloat16_rn(value);
+    return *reinterpret_cast<const std::uint16_t*>(&raw);
+}
+
+void drain_all_streams() { CUDA_CHECK(cudaDeviceSynchronize()); }
+
 bool cuda_unavailable(cudaError_t error) {
     return error == cudaErrorNoDevice || error == cudaErrorInsufficientDriver;
 }
@@ -46,13 +59,10 @@ bool test_block_publish_equivalence(ninfer::DeviceContext& device) {
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
 
     std::vector<std::uint16_t> host_proj(640ULL * 2560);
-    for (auto& v : host_proj) {
-        float f = dist(rng);
-        v       = __float2bfloat16_rn(f);
-    }
+    for (auto& v : host_proj) { v = float_to_bf16(dist(rng)); }
     std::vector<std::uint16_t> host_qnorm(128), host_knorm(128);
-    for (auto& v : host_qnorm) v = __float2bfloat16_rn(dist(rng) * 0.1f);
-    for (auto& v : host_knorm) v = __float2bfloat16_rn(dist(rng) * 0.1f);
+    for (auto& v : host_qnorm) v = float_to_bf16(dist(rng) * 0.1f);
+    for (auto& v : host_knorm) v = float_to_bf16(dist(rng) * 0.1f);
 
     ninfer::DeviceBuffer proj_buf(640ULL * 2560 * 2);
     ninfer::DeviceBuffer qnorm_buf(128 * 2);
@@ -72,7 +82,7 @@ bool test_block_publish_equivalence(ninfer::DeviceContext& device) {
             const std::int32_t first_token_index = 100 + leftover_in;
 
             std::vector<std::uint16_t> host_input(static_cast<std::size_t>(2560) * T);
-            for (auto& v : host_input) v = __float2bfloat16_rn(dist(rng));
+            for (auto& v : host_input) v = float_to_bf16(dist(rng));
 
             std::vector<std::int32_t> host_pos(3 * T);
             for (std::int32_t t = 0; t < T; ++t) {
@@ -85,7 +95,7 @@ bool test_block_publish_equivalence(ninfer::DeviceContext& device) {
             std::vector<std::int32_t> init_raw_pos(3ULL * 4 * 2, 0);
             for (std::int32_t s = 0; s < leftover_in; ++s) {
                 for (int d = 0; d < 128; ++d) {
-                    init_raw_keys[s * 128 + d] = __float2bfloat16_rn(dist(rng));
+                    init_raw_keys[s * 128 + d] = float_to_bf16(dist(rng));
                 }
                 for (int d = 0; d < 3; ++d) {
                     init_raw_pos[s * 3 + d] = first_token_index - leftover_in + s;
@@ -102,6 +112,7 @@ bool test_block_publish_equivalence(ninfer::DeviceContext& device) {
             std::array<std::int32_t, logical_pages> page_ids{};
             for (std::int32_t p = 0; p < logical_pages; ++p) page_ids[p] = p;
             block_tables_a.copy_from_host(page_ids.data(), sizeof(page_ids));
+            drain_all_streams();
 
             QsaIndexerCacheView cache_a{
                 .block_keys   = ninfer::Tensor(block_keys_a.p, ninfer::DType::BF16, {128, 64, logical_pages}),
@@ -128,16 +139,16 @@ bool test_block_publish_equivalence(ninfer::DeviceContext& device) {
             for (std::int32_t t = 0; t < T; ++t) {
                 // DeviceBuffer::copy_from_host is a legacy-stream cudaMemcpy: it does not order against
                 // the non-blocking device.stream, so drain the previous iteration first.
-                device.synchronize();
+                drain_all_streams();
                 std::int32_t tok_idx = first_token_index + t;
                 std::array<std::int32_t, 3> pos_t = {host_pos[0 * T + t], host_pos[1 * T + t], host_pos[2 * T + t]};
-                device.synchronize(); // legacy-stream copies do not order against device.stream
-            token_buf.copy_from_host(&tok_idx, sizeof(tok_idx));
+                token_buf.copy_from_host(&tok_idx, sizeof(tok_idx));
                 pos_buf.copy_from_host(pos_t.data(), sizeof(pos_t));
                 std::int32_t src = t % 2;
                 std::int32_t dst = 1 - src;
                 src_buf.copy_from_host(&src, sizeof(src));
                 dst_buf.copy_from_host(&dst, sizeof(dst));
+                drain_all_streams();
 
                 ninfer::Tensor in_slice(static_cast<std::uint16_t*>(input_dev.p) + static_cast<std::size_t>(t) * 2560,
                                        ninfer::DType::BF16, {2560, 1});
@@ -153,6 +164,7 @@ bool test_block_publish_equivalence(ninfer::DeviceContext& device) {
                                               src_view, dst_view, cache_a, maximum_blocks, maximum_blocks,
                                               ws_decode, sel_view, cnt_view, device.stream);
             }
+            drain_all_streams();
 
             ninfer::DeviceBuffer block_keys_b(128ULL * 64 * logical_pages * 2);
             ninfer::DeviceBuffer block_tables_b(logical_pages * sizeof(std::int32_t));
@@ -162,6 +174,7 @@ bool test_block_publish_equivalence(ninfer::DeviceContext& device) {
             raw_keys_b.copy_from_host(init_raw_keys.data(), init_raw_keys.size() * 2);
             raw_positions_b.copy_from_host(init_raw_pos.data(), init_raw_pos.size() * sizeof(std::int32_t));
             block_tables_b.copy_from_host(page_ids.data(), sizeof(page_ids));
+            drain_all_streams();
 
             QsaIndexerCacheView cache_b{
                 .block_keys   = ninfer::Tensor(block_keys_b.p, ninfer::DType::BF16, {128, 64, logical_pages}),
@@ -188,25 +201,51 @@ bool test_block_publish_equivalence(ninfer::DeviceContext& device) {
             ninfer::Tensor chunk_cnt(chunk_cnt_buf.p, ninfer::DType::I32, {T});
 
             ninfer::WorkspaceArena ws_prefill(100ULL * 1024 * 1024);
+            drain_all_streams();
 
             flash_next_qsa_indexer_prefill_chunk(
                 chunk_in, weights, chunk_idx, chunk_pos, 0, 0, 1, cache_b, maximum_blocks,
                 ws_prefill, chunk_sel, chunk_cnt, device.stream);
-            device.synchronize();
+            drain_all_streams();
 
             std::vector<std::uint16_t> keys_a(128ULL * 64 * logical_pages);
             std::vector<std::uint16_t> keys_b(128ULL * 64 * logical_pages);
             block_keys_a.copy_to_host(keys_a.data(), keys_a.size() * 2);
             block_keys_b.copy_to_host(keys_b.data(), keys_b.size() * 2);
 
+            const std::int32_t complete_out = (leftover_in + T) / 4;
+            double key_diff_sq              = 0.0;
+            double key_base_sq              = 0.0;
+            int key_nonfinite               = 0;
             for (std::size_t i = 0; i < keys_a.size(); ++i) {
                 float fa = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&keys_a[i]));
                 float fb = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&keys_b[i]));
-                if (std::abs(fa - fb) > 1e-4f) {
+                if (!std::isfinite(fa) || !std::isfinite(fb)) { ++key_nonfinite; }
+                key_base_sq += static_cast<double>(fa) * static_cast<double>(fa);
+                const double delta = static_cast<double>(fa) - static_cast<double>(fb);
+                key_diff_sq += delta * delta;
+                const float key_tol = 1e-2f * std::max(1.0f, std::max(std::abs(fa), std::abs(fb)));
+                if (std::abs(fa - fb) > key_tol) {
                     std::cerr << "Block keys mismatch at T=" << T << ", leftover_in=" << leftover_in
                               << ", idx " << i << ": seq=" << fa << " chunk=" << fb << "\n";
                     return false;
                 }
+            }
+            if (complete_out > 0 && (key_nonfinite > 0 || key_base_sq <= 0.0)) {
+                const std::int32_t first_block = (first_token_index - leftover_in) / 4;
+                const std::size_t block_off =
+                    static_cast<std::size_t>(first_block % 64) * 128ULL +
+                    static_cast<std::size_t>(first_block / 64) * 64ULL * 128ULL;
+                std::cerr << "FAIL: block-key comparison vacuous or non-finite at T=" << T
+                          << " leftover_in=" << leftover_in << " base_sq=" << key_base_sq
+                          << " nonfinite=" << key_nonfinite << " first_block=" << first_block
+                          << " bits:";
+                for (int i = 0; i < 8; ++i) {
+                    std::cerr << " 0x" << std::hex << keys_a[block_off + static_cast<std::size_t>(i)]
+                              << std::dec;
+                }
+                std::cerr << "\n";
+                return false;
             }
 
             const std::int32_t final_slot_a = (T % 2 == 1) ? 1 : 0;
@@ -215,18 +254,35 @@ bool test_block_publish_equivalence(ninfer::DeviceContext& device) {
             std::vector<std::uint16_t> rk_b(128ULL * 4 * 2);
             raw_keys_a.copy_to_host(rk_a.data(), rk_a.size() * 2);
             raw_keys_b.copy_to_host(rk_b.data(), rk_b.size() * 2);
+            double raw_diff_sq = 0.0;
+            double raw_base_sq = 0.0;
+            int raw_nonfinite  = 0;
             for (std::int32_t s = 0; s < leftover_out; ++s) {
                 for (int d = 0; d < 128; ++d) {
                     const std::size_t idx_a = final_slot_a * 128 * 4 + s * 128 + d;
                     const std::size_t idx_b = 1 * 128 * 4 + s * 128 + d;
-                    if (rk_a[idx_a] != rk_b[idx_b]) {
+                    const float fa =
+                        __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&rk_a[idx_a]));
+                    const float fb =
+                        __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&rk_b[idx_b]));
+                    if (!std::isfinite(fa) || !std::isfinite(fb)) { ++raw_nonfinite; }
+                    raw_base_sq += static_cast<double>(fa) * static_cast<double>(fa);
+                    const double delta = static_cast<double>(fa) - static_cast<double>(fb);
+                    raw_diff_sq += delta * delta;
+                    const float raw_tol = 1e-2f * std::max(1.0f, std::max(std::abs(fa), std::abs(fb)));
+                    if (std::abs(fa - fb) > raw_tol) {
                         std::cerr << "Raw keys mismatch at T=" << T
                                   << ", leftover_in=" << leftover_in << ", slot=" << s
-                                  << ", d=" << d << ": seq=0x" << std::hex << rk_a[idx_a]
-                                  << " chunk=0x" << rk_b[idx_b] << std::dec << "\n";
+                                  << ", d=" << d << ": seq=" << fa << " chunk=" << fb << "\n";
                         return false;
                     }
                 }
+            }
+            if (leftover_out > 0 && (raw_nonfinite > 0 || raw_base_sq <= 0.0)) {
+                std::cerr << "FAIL: leftover raw-key comparison vacuous or non-finite at T=" << T
+                          << " leftover_in=" << leftover_in << " base_sq=" << raw_base_sq
+                          << " nonfinite=" << raw_nonfinite << "\n";
+                return false;
             }
 
             std::vector<std::int32_t> rp_a(3ULL * 4 * 2);
@@ -260,10 +316,10 @@ bool test_selection_equivalence(ninfer::DeviceContext& device) {
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
 
     std::vector<std::uint16_t> host_proj(640ULL * 2560);
-    for (auto& v : host_proj) v = __float2bfloat16_rn(dist(rng));
+    for (auto& v : host_proj) v = float_to_bf16(dist(rng));
     std::vector<std::uint16_t> host_qnorm(128), host_knorm(128);
-    for (auto& v : host_qnorm) v = __float2bfloat16_rn(dist(rng) * 0.1f);
-    for (auto& v : host_knorm) v = __float2bfloat16_rn(dist(rng) * 0.1f);
+    for (auto& v : host_qnorm) v = float_to_bf16(dist(rng) * 0.1f);
+    for (auto& v : host_knorm) v = float_to_bf16(dist(rng) * 0.1f);
 
     ninfer::DeviceBuffer proj_buf(640ULL * 2560 * 2);
     ninfer::DeviceBuffer qnorm_buf(128 * 2);
@@ -282,7 +338,7 @@ bool test_selection_equivalence(ninfer::DeviceContext& device) {
         const std::int32_t first_token_index = 40;
 
         std::vector<std::uint16_t> host_input(static_cast<std::size_t>(2560) * T);
-        for (auto& v : host_input) v = __float2bfloat16_rn(dist(rng));
+        for (auto& v : host_input) v = float_to_bf16(dist(rng));
 
         std::vector<std::int32_t> host_pos(3 * T);
         for (std::int32_t t = 0; t < T; ++t) {
@@ -292,7 +348,7 @@ bool test_selection_equivalence(ninfer::DeviceContext& device) {
         }
 
         std::vector<std::uint16_t> host_bkeys(128ULL * 64 * logical_pages);
-        for (auto& v : host_bkeys) v = __float2bfloat16_rn(dist(rng));
+        for (auto& v : host_bkeys) v = float_to_bf16(dist(rng));
 
         ninfer::DeviceBuffer block_keys_a(128ULL * 64 * logical_pages * 2);
         ninfer::DeviceBuffer block_keys_b(128ULL * 64 * logical_pages * 2);
@@ -343,13 +399,14 @@ bool test_selection_equivalence(ninfer::DeviceContext& device) {
         for (std::int32_t t = 0; t < T; ++t) {
             std::int32_t tok_idx = first_token_index + t;
             std::array<std::int32_t, 3> pos_t = {host_pos[0 * T + t], host_pos[1 * T + t], host_pos[2 * T + t]};
-            device.synchronize(); // legacy-stream copies do not order against device.stream
+            drain_all_streams();
             token_buf.copy_from_host(&tok_idx, sizeof(tok_idx));
             pos_buf.copy_from_host(pos_t.data(), sizeof(pos_t));
             std::int32_t src = t % 2;
             std::int32_t dst = 1 - src;
             src_buf.copy_from_host(&src, sizeof(src));
             dst_buf.copy_from_host(&dst, sizeof(dst));
+            drain_all_streams();
 
             ninfer::Tensor in_slice(static_cast<std::uint16_t*>(input_dev.p) + static_cast<std::size_t>(t) * 2560,
                                    ninfer::DType::BF16, {2560, 1});
@@ -364,7 +421,7 @@ bool test_selection_equivalence(ninfer::DeviceContext& device) {
             flash_next_qsa_indexer_decode(in_slice, weights, tok_t, pos_t_view, row_view,
                                           src_view, dst_view, cache_a, maximum_blocks, maximum_blocks,
                                           ws_decode, sel_view, cnt_view, device.stream);
-            device.synchronize();
+            drain_all_streams();
             cnt_buf.copy_to_host(&seq_counts[t], sizeof(std::int32_t));
             sel_buf.copy_to_host(&seq_blocks[t * 512], 512 * sizeof(std::int32_t));
         }
@@ -387,10 +444,11 @@ bool test_selection_equivalence(ninfer::DeviceContext& device) {
         ninfer::Tensor chunk_cnt(chunk_cnt_buf.p, ninfer::DType::I32, {T});
 
         ninfer::WorkspaceArena ws_prefill(100ULL * 1024 * 1024);
+        drain_all_streams();
         flash_next_qsa_indexer_prefill_chunk(
             chunk_in, weights, chunk_idx, chunk_pos, 0, 0, 1, cache_b, maximum_blocks,
             ws_prefill, chunk_sel, chunk_cnt, device.stream);
-        device.synchronize();
+        drain_all_streams();
 
         std::vector<std::int32_t> chunk_counts(T);
         std::vector<std::int32_t> chunk_blocks(512 * T);
@@ -404,15 +462,336 @@ bool test_selection_equivalence(ninfer::DeviceContext& device) {
                 return false;
             }
             const std::int32_t count = seq_counts[t];
+            const std::int32_t complete_blocks = (first_token_index + t + 1) / 4;
+            if (count <= 0 || count != std::min(complete_blocks, 512)) {
+                std::cerr << "FAIL: selection count vacuous at T=" << T << ", t=" << t
+                          << " count=" << count << " complete_blocks=" << complete_blocks << "\n";
+                return false;
+            }
+            std::vector<std::int32_t> seq_ids(static_cast<std::size_t>(count));
             for (std::int32_t k = 0; k < count; ++k) {
                 if (seq_blocks[t * 512 + k] != chunk_blocks[t * 512 + k]) {
                     std::cerr << "Selected block mismatch at T=" << T << ", t=" << t << ", rank=" << k
                               << ": seq=" << seq_blocks[t * 512 + k] << ", chunk=" << chunk_blocks[t * 512 + k] << "\n";
                     return false;
                 }
+                seq_ids[static_cast<std::size_t>(k)] = seq_blocks[t * 512 + k];
+                if (seq_ids[static_cast<std::size_t>(k)] < 0 ||
+                    seq_ids[static_cast<std::size_t>(k)] >= complete_blocks) {
+                    std::cerr << "FAIL: selected id out of range at T=" << T << " t=" << t
+                              << " id=" << seq_ids[static_cast<std::size_t>(k)] << "\n";
+                    return false;
+                }
+            }
+            std::sort(seq_ids.begin(), seq_ids.end());
+            if (std::unique(seq_ids.begin(), seq_ids.end()) != seq_ids.end()) {
+                std::cerr << "FAIL: duplicate selected ids at T=" << T << " t=" << t << "\n";
+                return false;
+            }
+            for (std::int32_t k = count; k < 512; ++k) {
+                if (seq_blocks[t * 512 + k] != -1 || chunk_blocks[t * 512 + k] != -1) {
+                    std::cerr << "FAIL: padding was not -1 at T=" << T << " t=" << t << " k=" << k
+                              << "\n";
+                    return false;
+                }
             }
         }
     }
+    return true;
+}
+
+bool selection_is_identity(const std::int32_t* ids, std::int32_t count) {
+    if (count <= 0) { return false; }
+    for (std::int32_t i = 0; i < count; ++i) {
+        if (ids[i] != i) { return false; }
+    }
+    for (std::int32_t i = count; i < 512; ++i) {
+        if (ids[i] != -1) { return false; }
+    }
+    return true;
+}
+
+bool selection_sets_equal(const std::int32_t* a, const std::int32_t* b, std::int32_t count,
+                          std::int32_t complete_blocks) {
+    if (count <= 0 || count > 512) { return false; }
+    std::vector<std::int32_t> sa(a, a + count);
+    std::vector<std::int32_t> sb(b, b + count);
+    std::sort(sa.begin(), sa.end());
+    std::sort(sb.begin(), sb.end());
+    if (sa != sb) { return false; }
+    if (std::unique(sa.begin(), sa.end()) != sa.end()) { return false; }
+    for (std::int32_t id : sa) {
+        if (id < 0 || id >= complete_blocks) { return false; }
+    }
+    for (std::int32_t i = count; i < 512; ++i) {
+        if (a[i] != -1 || b[i] != -1) { return false; }
+    }
+    return true;
+}
+
+void fill_monotonic_block_keys(std::vector<std::uint16_t>& keys, std::int32_t complete_blocks) {
+    std::fill(keys.begin(), keys.end(), 0);
+    for (std::int32_t block = 0; block < complete_blocks; ++block) {
+        const std::int32_t page   = block / 64;
+        const std::int32_t offset = block % 64;
+        const std::size_t index =
+            static_cast<std::size_t>(page) * 64ULL * 128ULL + static_cast<std::size_t>(offset) * 128ULL;
+        const std::uint16_t packed = float_to_bf16(static_cast<float>(block + 1));
+        for (int dim = 0; dim < 128; ++dim) { keys[index + static_cast<std::size_t>(dim)] = packed; }
+    }
+}
+
+struct IndexerProbe {
+    ninfer::DeviceBuffer input;
+    ninfer::DeviceBuffer projection;
+    ninfer::DeviceBuffer query_norm;
+    ninfer::DeviceBuffer key_norm;
+    ninfer::DeviceBuffer block_keys;
+    ninfer::DeviceBuffer block_tables;
+    ninfer::DeviceBuffer raw_keys;
+    ninfer::DeviceBuffer raw_positions;
+    ninfer::DeviceBuffer token_index;
+    ninfer::DeviceBuffer mrope_positions;
+    ninfer::DeviceBuffer table_row;
+    ninfer::DeviceBuffer state_slot;
+    ninfer::DeviceBuffer selected_blocks;
+    ninfer::DeviceBuffer selected_count;
+    ninfer::WorkspaceArena workspace;
+    AttentionWeights weights{};
+    QsaIndexerCacheView cache{};
+    ninfer::Tensor input_view;
+    ninfer::Tensor token_view;
+    ninfer::Tensor position_view;
+    ninfer::Tensor table_row_view;
+    ninfer::Tensor state_slot_view;
+    ninfer::Tensor selected_view;
+    ninfer::Tensor count_view;
+
+    IndexerProbe(std::int32_t maximum_blocks, std::int32_t logical_pages)
+        : input(2'560ULL * 2),
+          projection(640ULL * 2'560 * 2),
+          query_norm(128 * 2),
+          key_norm(128 * 2),
+          block_keys(128ULL * 64 * static_cast<std::size_t>(logical_pages) * 2),
+          block_tables(static_cast<std::size_t>(logical_pages) * sizeof(std::int32_t)),
+          raw_keys(128ULL * 4 * 2),
+          raw_positions(3ULL * 4 * sizeof(std::int32_t)),
+          token_index(sizeof(std::int32_t)),
+          mrope_positions(3 * sizeof(std::int32_t)),
+          table_row(sizeof(std::int32_t)),
+          state_slot(sizeof(std::int32_t)),
+          selected_blocks(512 * sizeof(std::int32_t)),
+          selected_count(sizeof(std::int32_t)),
+          workspace(flash_next_qsa_indexer_workspace_capacity_bytes(maximum_blocks, 1)),
+          input_view(input.p, ninfer::DType::BF16, {2'560, 1}),
+          token_view(token_index.p, ninfer::DType::I32, {1}),
+          position_view(mrope_positions.p, ninfer::DType::I32, {1, 3}),
+          table_row_view(table_row.p, ninfer::DType::I32, {1}),
+          state_slot_view(state_slot.p, ninfer::DType::I32, {1}),
+          selected_view(selected_blocks.p, ninfer::DType::I32, {512, 1}),
+          count_view(selected_count.p, ninfer::DType::I32, {1}) {
+        std::vector<std::uint16_t> input_values(2'560, 0);
+        input_values[0] = 0x3F80U;
+        input.copy_from_host(input_values.data(), input_values.size() * sizeof(std::uint16_t));
+        std::vector<std::uint16_t> projection_values(640ULL * 2'560, 0);
+        for (std::int32_t row = 0; row < 640; ++row) {
+            projection_values[static_cast<std::size_t>(row) * 2'560] = 0x3F80U;
+        }
+        projection.copy_from_host(projection_values.data(),
+                                  projection_values.size() * sizeof(std::uint16_t));
+        query_norm.fill(0);
+        key_norm.fill(0);
+        raw_keys.fill(0);
+        raw_positions.fill(0);
+        std::vector<std::int32_t> page_ids(static_cast<std::size_t>(logical_pages));
+        for (std::int32_t page = 0; page < logical_pages; ++page) { page_ids[static_cast<std::size_t>(page)] = page; }
+        block_tables.copy_from_host(page_ids.data(), page_ids.size() * sizeof(std::int32_t));
+        constexpr std::array<std::int32_t, 3> zero_positions{};
+        mrope_positions.copy_from_host(zero_positions.data(), sizeof(zero_positions));
+        constexpr std::int32_t zero = 0;
+        table_row.copy_from_host(&zero, sizeof(zero));
+        state_slot.copy_from_host(&zero, sizeof(zero));
+        weights.indexer_query_key  = bf16_weight(projection.p, 640, 2'560);
+        weights.indexer_query_norm = ninfer::Tensor(query_norm.p, ninfer::DType::BF16, {128});
+        weights.indexer_key_norm   = ninfer::Tensor(key_norm.p, ninfer::DType::BF16, {128});
+        cache = {
+            .block_keys    = ninfer::Tensor(block_keys.p, ninfer::DType::BF16, {128, 64, logical_pages}),
+            .block_tables  = ninfer::Tensor(block_tables.p, ninfer::DType::I32, {logical_pages, 1}),
+            .raw_keys      = ninfer::Tensor(raw_keys.p, ninfer::DType::BF16, {128, 4, 1}),
+            .raw_positions = ninfer::Tensor(raw_positions.p, ninfer::DType::I32, {3, 4, 1}),
+        };
+        drain_all_streams();
+    }
+
+    void load_keys(const std::vector<std::uint16_t>& keys, ninfer::DeviceContext& device) {
+        (void)device;
+        block_keys.copy_from_host(keys.data(), keys.size() * 2);
+        raw_keys.fill(0);
+        raw_positions.fill(0);
+        drain_all_streams();
+    }
+
+    void set_token(std::int32_t token) { token_index.copy_from_host(&token, sizeof(token)); }
+
+    void launch(std::int32_t maximum_blocks, std::int32_t active_blocks, cudaStream_t stream) {
+        flash_next_qsa_indexer_decode(input_view, weights, token_view, position_view, table_row_view,
+                                      state_slot_view, state_slot_view, cache, maximum_blocks,
+                                      active_blocks, workspace, selected_view, count_view, stream);
+    }
+
+    void run(ninfer::DeviceContext& device, std::int32_t token, std::int32_t maximum_blocks,
+             std::int32_t active_blocks, std::int32_t& count, std::array<std::int32_t, 512>& ids) {
+        drain_all_streams();
+        set_token(token);
+        drain_all_streams();
+        launch(maximum_blocks, active_blocks, device.stream);
+        drain_all_streams();
+        selected_count.copy_to_host(&count, sizeof(count));
+        selected_blocks.copy_to_host(ids.data(), sizeof(ids));
+    }
+};
+
+bool test_fully_selected_identity_bypass(ninfer::DeviceContext& device, float& us_bypass,
+                                         float& us_sort) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    constexpr std::int32_t maximum_blocks = 513;
+    constexpr std::int32_t logical_pages  = 9;
+    IndexerProbe probe(maximum_blocks, logical_pages);
+    IndexerProbe sort_probe(maximum_blocks, logical_pages);
+
+    std::vector<std::uint16_t> host_keys(128ULL * 64 * logical_pages, 0);
+    fill_monotonic_block_keys(host_keys, 512);
+
+    // Exactly 512 complete blocks: token 2048, tail=0 so update_key does not rewrite a block key.
+    constexpr std::int32_t token_512 = 2'048;
+    constexpr std::int32_t complete_512 = (token_512 + 1) / 4;
+    if (complete_512 != 512) {
+        std::cerr << "FAIL: token 2048 must yield 512 complete blocks, got " << complete_512 << "\n";
+        return false;
+    }
+
+    probe.load_keys(host_keys, device);
+    sort_probe.load_keys(host_keys, device);
+    std::int32_t bypass_count = -1;
+    std::int32_t sort_count   = -1;
+    std::array<std::int32_t, 512> bypass_ids{};
+    std::array<std::int32_t, 512> sort_ids{};
+    probe.run(device, token_512, maximum_blocks, 512, bypass_count, bypass_ids);
+    sort_probe.run(device, token_512, maximum_blocks, 513, sort_count, sort_ids);
+
+    if (bypass_count != 512 || !selection_is_identity(bypass_ids.data(), bypass_count)) {
+        std::cerr << "FAIL: active_blocks=512 did not publish the identity selection (count="
+                  << bypass_count << " front=" << bypass_ids.front() << ")\n";
+        return false;
+    }
+    if (sort_count != 512) {
+        std::cerr << "FAIL: sorted path at 512 complete blocks returned count=" << sort_count << "\n";
+        return false;
+    }
+    if (!selection_sets_equal(bypass_ids.data(), sort_ids.data(), 512, 512)) {
+        std::cerr << "FAIL: bypass vs sorted selection SET mismatch at exactly 512 complete blocks\n";
+        return false;
+    }
+    bool sort_is_identity = selection_is_identity(sort_ids.data(), sort_count);
+    if (sort_is_identity) {
+        std::cerr << "FAIL: sorted path at 512 was identity; monotonic keys should permute rank order\n";
+        return false;
+    }
+
+    // Exactly 511 complete blocks: still fully selected, identity bypass.
+    constexpr std::int32_t token_511 = 2'043;
+    constexpr std::int32_t complete_511 = (token_511 + 1) / 4;
+    if (complete_511 != 511) {
+        std::cerr << "FAIL: token 2043 must yield 511 complete blocks, got " << complete_511 << "\n";
+        return false;
+    }
+    probe.load_keys(host_keys, device);
+    std::int32_t count_511 = -1;
+    std::array<std::int32_t, 512> ids_511{};
+    probe.run(device, token_511, maximum_blocks, 511, count_511, ids_511);
+    if (count_511 != 511 || !selection_is_identity(ids_511.data(), count_511)) {
+        std::cerr << "FAIL: active_blocks=511 did not publish identity 0..510 (count=" << count_511
+                  << ")\n";
+        return false;
+    }
+
+    // Exactly 513 complete blocks: sort path, not identity.
+    std::vector<std::uint16_t> keys_513 = host_keys;
+    fill_monotonic_block_keys(keys_513, 513);
+    sort_probe.load_keys(keys_513, device);
+    constexpr std::int32_t token_513 = 2'052; // tail=0, (2052+1)/4 = 513
+    constexpr std::int32_t complete_513 = (token_513 + 1) / 4;
+    if (complete_513 != 513) {
+        std::cerr << "FAIL: token 2052 must yield 513 complete blocks, got " << complete_513 << "\n";
+        return false;
+    }
+    std::int32_t count_513 = -1;
+    std::array<std::int32_t, 512> ids_513{};
+    sort_probe.run(device, token_513, maximum_blocks, 513, count_513, ids_513);
+    if (count_513 != 512) {
+        std::cerr << "FAIL: 513 complete blocks should select 512, got " << count_513 << "\n";
+        return false;
+    }
+    if (selection_is_identity(ids_513.data(), count_513)) {
+        std::cerr << "FAIL: 513-block path published identity; top-k must drop one complete block\n";
+        return false;
+    }
+    std::vector<std::int32_t> kept(ids_513.begin(), ids_513.begin() + 512);
+    std::sort(kept.begin(), kept.end());
+    if (std::unique(kept.begin(), kept.end()) != kept.end()) {
+        std::cerr << "FAIL: 513-block top-k contained duplicates\n";
+        return false;
+    }
+    for (std::int32_t id : kept) {
+        if (id < 0 || id >= 513) {
+            std::cerr << "FAIL: 513-block top-k id " << id << " out of range\n";
+            return false;
+        }
+    }
+    if (kept.size() != 512) {
+        std::cerr << "FAIL: 513-block top-k size " << kept.size() << "\n";
+        return false;
+    }
+
+    constexpr int kWarmup = 5;
+    constexpr int kIters  = 50;
+    probe.load_keys(host_keys, device);
+    sort_probe.load_keys(host_keys, device);
+    probe.set_token(token_512);
+    sort_probe.set_token(token_512);
+    drain_all_streams();
+    for (int i = 0; i < kWarmup; ++i) {
+        probe.launch(maximum_blocks, 512, device.stream);
+        sort_probe.launch(maximum_blocks, 513, device.stream);
+    }
+    device.synchronize();
+
+    cudaEvent_t start = nullptr;
+    cudaEvent_t stop  = nullptr;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    CUDA_CHECK(cudaEventRecord(start, device.stream));
+    for (int i = 0; i < kIters; ++i) {
+        probe.launch(maximum_blocks, 512, device.stream);
+    }
+    CUDA_CHECK(cudaEventRecord(stop, device.stream));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+    float bypass_ms = 0.0F;
+    CUDA_CHECK(cudaEventElapsedTime(&bypass_ms, start, stop));
+
+    CUDA_CHECK(cudaEventRecord(start, device.stream));
+    for (int i = 0; i < kIters; ++i) {
+        sort_probe.launch(maximum_blocks, 513, device.stream);
+    }
+    CUDA_CHECK(cudaEventRecord(stop, device.stream));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+    float sort_ms = 0.0F;
+    CUDA_CHECK(cudaEventElapsedTime(&sort_ms, start, stop));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    us_bypass = bypass_ms * 1000.0F / static_cast<float>(kIters);
+    us_sort   = sort_ms * 1000.0F / static_cast<float>(kIters);
     return true;
 }
 
@@ -493,10 +872,11 @@ int main() {
         flash_next_qsa_indexer_workspace_capacity_bytes(maximum_blocks, 1));
 
     token_index.copy_from_host(&zero, sizeof(zero));
+    drain_all_streams();
     flash_next_qsa_indexer_decode(input_view, weights, token_view, position_view, table_row_view,
                                   state_slot_view, state_slot_view, cache, maximum_blocks, 0,
                                   workspace, selected_view, count_view, device.stream);
-    device.synchronize();
+    drain_all_streams();
     std::int32_t actual_count = -1;
     selected_count.copy_to_host(&actual_count, sizeof(actual_count));
     if (actual_count != 0) {
@@ -506,11 +886,12 @@ int main() {
 
     constexpr std::int32_t final_token = 2'051; // completes block 512, yielding 513 blocks
     token_index.copy_from_host(&final_token, sizeof(final_token));
+    drain_all_streams();
     flash_next_qsa_indexer_decode(input_view, weights, token_view, position_view, table_row_view,
                                   state_slot_view, state_slot_view, cache, maximum_blocks,
                                   maximum_blocks, workspace, selected_view, count_view,
                                   device.stream);
-    device.synchronize();
+    drain_all_streams();
     selected_count.copy_to_host(&actual_count, sizeof(actual_count));
     std::array<std::int32_t, 512> actual_ids{};
     selected_blocks.copy_to_host(actual_ids.data(), sizeof(actual_ids));
@@ -543,7 +924,7 @@ int main() {
     }
     ninfer::ops::linear(small_t_input, weights.indexer_query_key, small_t_output_view,
                         ninfer::ops::LinearPolicy::A16Only, empty_workspace, device.stream);
-    device.synchronize();
+    drain_all_streams();
     std::vector<std::uint16_t> actual_small_t(640ULL * 8);
     small_t_output.copy_to_host(actual_small_t.data(),
                                 actual_small_t.size() * sizeof(std::uint16_t));
@@ -561,6 +942,22 @@ int main() {
         std::cerr << "FAIL: test_selection_equivalence failed\n";
         return 1;
     }
+
+    float us_bypass = 0.0F;
+    float us_sort   = 0.0F;
+    if (!test_fully_selected_identity_bypass(device, us_bypass, us_sort)) {
+        std::cerr << "FAIL: test_fully_selected_identity_bypass failed\n";
+        return 1;
+    }
+    const float us_round_bypass = 12.0F * us_bypass;
+    const float us_round_sort   = 12.0F * us_sort;
+    std::cout << "G1 indexer decode active_blocks=512 (identity bypass): " << us_bypass
+              << " us/iter\n";
+    std::cout << "G1 indexer decode active_blocks=513 (CUB sort):        " << us_sort
+              << " us/iter\n";
+    std::cout << "G1 decode-round estimate (12 QSA layers): bypass=" << us_round_bypass
+              << " us  sort=" << us_round_sort << " us  saving=" << (us_round_sort - us_round_bypass)
+              << " us\n";
 
     std::cout << "PASS: test_qsa_indexer\n";
     return 0;

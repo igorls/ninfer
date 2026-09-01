@@ -24,6 +24,9 @@ flash_next_qsa_indexer_workspace_capacity_bytes(std::int32_t maximum_blocks, std
 // The incomplete visible tail is implicit in token_indices and is not included in selected_blocks.
 // active_blocks is the host-known round frontier, covers every row's complete block count, and is
 // bounded by the startup-fixed maximum_blocks capacity.
+// When active_blocks <= 512 every complete block is selected: the indexer publishes the identity
+// 0..complete_blocks-1 (padded with -1) and skips scoring and the segmented sort. The selected SET
+// matches the sorted path; the published order is identity rather than score-descending.
 void flash_next_qsa_indexer_decode(const Tensor& input, const AttentionWeights& weights,
                                    const Tensor& token_indices, const Tensor& mrope_positions,
                                    const Tensor& table_rows, const Tensor& source_state_slots,

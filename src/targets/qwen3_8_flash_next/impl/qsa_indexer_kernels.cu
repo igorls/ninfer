@@ -206,6 +206,22 @@ __global__ void publish_selection_kernel(const std::int32_t* __restrict__ sorted
     }
 }
 
+// Exact fully-selected fast path: every complete block is kept, so the selection is the identity.
+// Launched only when the host-known complete-block envelope is <= kSelectedBlocks.
+__global__ void publish_identity_selection_kernel(const std::int32_t* __restrict__ token_indices,
+                                                  std::int32_t* __restrict__ selected_blocks,
+                                                  std::int32_t* __restrict__ selected_counts) {
+    const int row             = static_cast<int>(blockIdx.x);
+    const int tid             = static_cast<int>(threadIdx.x);
+    const int complete_blocks = (token_indices[row] + 1) / 4;
+    const int count           = min(complete_blocks, kSelectedBlocks);
+    if (tid == 0) { selected_counts[row] = count; }
+    for (int index = tid; index < kSelectedBlocks; index += static_cast<int>(blockDim.x)) {
+        selected_blocks[static_cast<std::int64_t>(row) * kSelectedBlocks + index] =
+            index < count ? index : -1;
+    }
+}
+
 cudaError_t sort_pairs_descending(void* temp, std::size_t& temp_bytes, const float* keys_in,
                                   float* keys_out, const std::int32_t* values_in,
                                   std::int32_t* values_out, int items, int segments,
@@ -238,12 +254,6 @@ void flash_next_qsa_indexer_launch(const Tensor& token_indices, const Tensor& mr
                                    Tensor& selected_blocks, Tensor& selected_counts,
                                    cudaStream_t stream) {
     const int batch = token_indices.ne[0];
-    prepare_query_kernel<<<dim3(kQueryHeads, batch), kHeadDim, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(scratch.projected.data),
-        static_cast<const __nv_bfloat16*>(query_norm.data),
-        static_cast<const std::int32_t*>(mrope_positions.data),
-        static_cast<__nv_bfloat16*>(scratch.query.data), batch);
-    CUDA_CHECK(cudaGetLastError());
     update_key_kernel<<<batch, kHeadDim, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(scratch.projected.data),
         static_cast<const __nv_bfloat16*>(key_norm.data),
@@ -264,6 +274,21 @@ void flash_next_qsa_indexer_launch(const Tensor& token_indices, const Tensor& mr
         return;
     }
 
+    if (active_blocks <= kSelectedBlocks) {
+        publish_identity_selection_kernel<<<batch, 256, 0, stream>>>(
+            static_cast<const std::int32_t*>(token_indices.data),
+            static_cast<std::int32_t*>(selected_blocks.data),
+            static_cast<std::int32_t*>(selected_counts.data));
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
+
+    prepare_query_kernel<<<dim3(kQueryHeads, batch), kHeadDim, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(scratch.projected.data),
+        static_cast<const __nv_bfloat16*>(query_norm.data),
+        static_cast<const std::int32_t*>(mrope_positions.data),
+        static_cast<__nv_bfloat16*>(scratch.query.data), batch);
+    CUDA_CHECK(cudaGetLastError());
     constexpr int threads = 256;
     const int items       = active_blocks * batch;
     initialize_sort_kernel<<<(items + threads - 1) / threads, threads, 0, stream>>>(
@@ -466,13 +491,6 @@ void flash_next_qsa_indexer_prefill_launch(
     std::int32_t maximum_blocks, Tensor& selected_blocks, Tensor& selected_counts,
     cudaStream_t stream) {
     const int tokens = token_indices.ne[0];
-    prepare_query_kernel<<<dim3(kQueryHeads, tokens), kHeadDim, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(scratch.projected.data),
-        static_cast<const __nv_bfloat16*>(query_norm.data),
-        static_cast<const std::int32_t*>(mrope_positions.data),
-        static_cast<__nv_bfloat16*>(scratch.query.data), tokens);
-    CUDA_CHECK(cudaGetLastError());
-
     const int max_complete_blocks = (tokens + 3) / 4;
     if (max_complete_blocks > 0) {
         indexer_publish_complete_blocks_chunk_kernel<<<max_complete_blocks, kHeadDim, 0, stream>>>(
@@ -494,6 +512,22 @@ void flash_next_qsa_indexer_prefill_launch(
         static_cast<const std::int32_t*>(mrope_positions.data), source_state_slot,
         destination_state_slot, static_cast<__nv_bfloat16*>(cache.raw_keys.data),
         static_cast<std::int32_t*>(cache.raw_positions.data), tokens);
+    CUDA_CHECK(cudaGetLastError());
+
+    if (maximum_blocks <= kSelectedBlocks) {
+        publish_identity_selection_kernel<<<tokens, 256, 0, stream>>>(
+            static_cast<const std::int32_t*>(token_indices.data),
+            static_cast<std::int32_t*>(selected_blocks.data),
+            static_cast<std::int32_t*>(selected_counts.data));
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
+
+    prepare_query_kernel<<<dim3(kQueryHeads, tokens), kHeadDim, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(scratch.projected.data),
+        static_cast<const __nv_bfloat16*>(query_norm.data),
+        static_cast<const std::int32_t*>(mrope_positions.data),
+        static_cast<__nv_bfloat16*>(scratch.query.data), tokens);
     CUDA_CHECK(cudaGetLastError());
 
     const int tile_size     = flash_next_qsa_indexer_tile_size(maximum_blocks, tokens);
