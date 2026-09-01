@@ -49,15 +49,75 @@ ninfer::Weight bf16_weight(void* data, std::int32_t rows, std::int32_t columns) 
     return out;
 }
 
-double relative_l2_error(const std::vector<float>& act, const std::vector<float>& exp) {
+struct RelL2Stats {
+    double rel         = 0.0;
+    double base_sq     = 0.0;
+    double act_sq      = 0.0;
+    double dot         = 0.0;
+    double max_abs_act = 0.0;
+    double max_abs_ref = 0.0;
+    int n              = 0;
+    int nfinite        = 0;
+    int nnan           = 0;
+    int nzero          = 0;
+};
+
+RelL2Stats rel_l2_stats(const float* act, const float* ref, std::size_t n) {
+    RelL2Stats s;
+    s.n = static_cast<int>(n);
     double diff_sq = 0.0;
-    double exp_sq  = 0.0;
-    for (std::size_t i = 0; i < act.size(); ++i) {
-        double d = static_cast<double>(act[i]) - static_cast<double>(exp[i]);
+    for (std::size_t i = 0; i < n; ++i) {
+        const double a = static_cast<double>(act[i]);
+        const double e = static_cast<double>(ref[i]);
+        if (!std::isfinite(a) || !std::isfinite(e)) {
+            ++s.nnan;
+            continue;
+        }
+        ++s.nfinite;
+        if (a == 0.0) {
+            ++s.nzero;
+        }
+        s.act_sq += a * a;
+        s.base_sq += e * e;
+        s.dot += a * e;
+        const double d = a - e;
         diff_sq += d * d;
-        exp_sq  += static_cast<double>(exp[i]) * static_cast<double>(exp[i]);
+        s.max_abs_act = std::max(s.max_abs_act, std::abs(a));
+        s.max_abs_ref = std::max(s.max_abs_ref, std::abs(e));
     }
-    return std::sqrt(diff_sq) / (std::sqrt(exp_sq) + 1.0e-12);
+    if (s.base_sq > 0.0) {
+        s.rel = std::sqrt(diff_sq / s.base_sq);
+    } else if (diff_sq > 0.0) {
+        s.rel = std::sqrt(diff_sq);
+    }
+    return s;
+}
+
+void print_rel_l2_stats(const char* label, const RelL2Stats& s) {
+    const double corr =
+        (s.act_sq > 0.0 && s.base_sq > 0.0) ? (s.dot / std::sqrt(s.act_sq * s.base_sq)) : 0.0;
+    std::cout << "    " << label << ": rel-L2=" << s.rel << " base_sq=" << s.base_sq
+              << " act_sq=" << s.act_sq << " corr=" << corr << " nfinite=" << s.nfinite << "/" << s.n
+              << " nnan=" << s.nnan << " nzero=" << s.nzero << " max_abs_act=" << s.max_abs_act
+              << " max_abs_ref=" << s.max_abs_ref << "\n";
+}
+
+bool accept_stage(const char* stage, int tokens, const RelL2Stats& s, double* max_rel,
+                  double tolerance) {
+    if (s.nnan > 0 || s.nfinite != s.n || s.base_sq <= 0.0 || !std::isfinite(s.rel) ||
+        !std::isfinite(s.base_sq)) {
+        std::cerr << "VACUOUS/NaN: T=" << tokens << " " << stage << " nnan=" << s.nnan
+                  << " nfinite=" << s.nfinite << "/" << s.n << " base_sq=" << s.base_sq
+                  << " rel=" << s.rel << "\n";
+        return false;
+    }
+    *max_rel = std::max(*max_rel, s.rel);
+    if (s.rel > tolerance) {
+        std::cerr << "FAIL: T=" << tokens << " " << stage << " rel-L2=" << s.rel << " exceeds "
+                  << tolerance << " (base_sq=" << s.base_sq << ")\n";
+        return false;
+    }
+    return true;
 }
 
 struct HyperReferenceOutput {
@@ -290,9 +350,14 @@ int test_synthetic_stage_equivalence(ninfer::DeviceContext& device) {
     double max_rel_l2_input  = 0.0;
     double max_rel_l2_injected = 0.0;
 
-    // Decode T=1..8 (fused) and prefill T=128. T=16 is timed separately; its stage
-    // error is reported but not folded into the 1e-3 gate until isolated.
-    std::vector<int> test_tokens = {1, 2, 3, 4, 5, 6, 7, 8, 128};
+    // Decode T=1..8 (fused). Prefill: T=16 one partial 32-col down tile + partial 64-col
+    // up tile; T=48 one full down tile + one partial; T=119 production chunk tail
+    // (three full 32-col tiles + 23-token partial); T=128 exact down and up tiles.
+    std::vector<int> test_tokens = {1, 2, 3, 4, 5, 6, 7, 8, 16, 48, 119, 128};
+    constexpr double kMaxRelL2Tolerance = 1.0e-3;
+
+    std::cout << "\n--- Flash-Next Hyper-Connection per-T stage rel-L2 ---\n";
+    std::cout << std::scientific << std::setprecision(6);
 
     for (int tokens : test_tokens) {
         std::vector<float> h_hidden_f(static_cast<std::size_t>(tokens) * 10'240);
@@ -325,6 +390,15 @@ int test_synthetic_stage_equivalence(ninfer::DeviceContext& device) {
         ninfer::WorkspaceArena workspace(flash_next_hyper_workspace_capacity_bytes(1, tokens));
         auto scope                      = workspace.scope();
         FlashNextHyperWorkspace scratch = allocate_flash_next_hyper_workspace(workspace, tokens);
+        CUDA_CHECK(cudaMemsetAsync(scratch.low_rank.data, 0xFF,
+                                   static_cast<std::size_t>(tokens) * 320U * 2U, device.stream));
+        CUDA_CHECK(cudaMemsetAsync(scratch.up_gemm.data, 0xFF,
+                                   static_cast<std::size_t>(tokens) * 10'240U * 2U, device.stream));
+        CUDA_CHECK(cudaMemsetAsync(scratch.down_split.data, 0xFF,
+                                   static_cast<std::size_t>(tokens) * 320U * 4U * sizeof(float),
+                                   device.stream));
+        CUDA_CHECK(cudaMemsetAsync(d_block_input.p, 0xFF,
+                                   static_cast<std::size_t>(tokens) * 2'560U * 2U, device.stream));
 
         ninfer::Tensor hidden_view(d_hidden.p, ninfer::DType::BF16, {10'240, tokens});
         ninfer::Tensor input_view(d_block_input.p, ninfer::DType::BF16, {2'560, tokens});
@@ -334,46 +408,48 @@ int test_synthetic_stage_equivalence(ninfer::DeviceContext& device) {
         flash_next_hyper_inject(output_view, scratch.injection, hidden_view, device.stream);
         device.synchronize();
 
-        // Readback and compare stage by stage
-        // Stage 1: normalized
+        auto to_float = [](const std::vector<std::uint16_t>& bits) {
+            std::vector<float> out(bits.size());
+            for (std::size_t i = 0; i < bits.size(); ++i) {
+                out[i] = bf16_to_float(bits[i]);
+            }
+            return out;
+        };
+
         std::vector<std::uint16_t> act_norm_bf(static_cast<std::size_t>(tokens) * 10'240);
-        CUDA_CHECK(cudaMemcpy(act_norm_bf.data(), scratch.normalized.data, act_norm_bf.size() * 2, cudaMemcpyDeviceToHost));
-        std::vector<float> act_norm_f(act_norm_bf.size());
-        for (std::size_t i = 0; i < act_norm_bf.size(); ++i) { act_norm_f[i] = bf16_to_float(act_norm_bf[i]); }
-        double err_norm = relative_l2_error(act_norm_f, ref.normalized);
-        max_rel_l2_norm = std::max(max_rel_l2_norm, err_norm);
+        CUDA_CHECK(cudaMemcpy(act_norm_bf.data(), scratch.normalized.data, act_norm_bf.size() * 2,
+                              cudaMemcpyDeviceToHost));
+        const std::vector<float> act_norm_f = to_float(act_norm_bf);
+        const RelL2Stats err_norm =
+            rel_l2_stats(act_norm_f.data(), ref.normalized.data(), act_norm_f.size());
 
-        // Stage 2: low_rank
         std::vector<std::uint16_t> act_lr_bf(static_cast<std::size_t>(tokens) * 320);
-        CUDA_CHECK(cudaMemcpy(act_lr_bf.data(), scratch.low_rank.data, act_lr_bf.size() * 2, cudaMemcpyDeviceToHost));
-        std::vector<float> act_lr_f(act_lr_bf.size());
-        for (std::size_t i = 0; i < act_lr_bf.size(); ++i) { act_lr_f[i] = bf16_to_float(act_lr_bf[i]); }
-        double err_lr = relative_l2_error(act_lr_f, ref.low_rank);
-        max_rel_l2_lr = std::max(max_rel_l2_lr, err_lr);
+        CUDA_CHECK(cudaMemcpy(act_lr_bf.data(), scratch.low_rank.data, act_lr_bf.size() * 2,
+                              cudaMemcpyDeviceToHost));
+        const std::vector<float> act_lr_f = to_float(act_lr_bf);
+        const RelL2Stats err_lr =
+            rel_l2_stats(act_lr_f.data(), ref.low_rank.data(), act_lr_f.size());
 
-        // Stage 3: injection
         std::vector<float> act_inj_f(static_cast<std::size_t>(tokens) * 4);
-        CUDA_CHECK(cudaMemcpy(act_inj_f.data(), scratch.injection.data, act_inj_f.size() * sizeof(float), cudaMemcpyDeviceToHost));
-        double err_inj = relative_l2_error(act_inj_f, ref.injection);
-        max_rel_l2_inj = std::max(max_rel_l2_inj, err_inj);
+        CUDA_CHECK(cudaMemcpy(act_inj_f.data(), scratch.injection.data,
+                              act_inj_f.size() * sizeof(float), cudaMemcpyDeviceToHost));
+        const RelL2Stats err_inj =
+            rel_l2_stats(act_inj_f.data(), ref.injection.data(), act_inj_f.size());
 
-        // Stage 4: block_input
         std::vector<std::uint16_t> act_in_bf(static_cast<std::size_t>(tokens) * 2'560);
-        CUDA_CHECK(cudaMemcpy(act_in_bf.data(), input_view.data, act_in_bf.size() * 2, cudaMemcpyDeviceToHost));
-        std::vector<float> act_in_f(act_in_bf.size());
-        for (std::size_t i = 0; i < act_in_bf.size(); ++i) { act_in_f[i] = bf16_to_float(act_in_bf[i]); }
-        double err_in = relative_l2_error(act_in_f, ref.block_input);
-        max_rel_l2_input = std::max(max_rel_l2_input, err_in);
+        CUDA_CHECK(cudaMemcpy(act_in_bf.data(), input_view.data, act_in_bf.size() * 2,
+                              cudaMemcpyDeviceToHost));
+        std::vector<float> act_in_f = to_float(act_in_bf);
+        const RelL2Stats err_in =
+            rel_l2_stats(act_in_f.data(), ref.block_input.data(), act_in_f.size());
 
-        // Stage 5: hidden after inject
         std::vector<std::uint16_t> act_hid_bf(static_cast<std::size_t>(tokens) * 10'240);
-        CUDA_CHECK(cudaMemcpy(act_hid_bf.data(), hidden_view.data, act_hid_bf.size() * 2, cudaMemcpyDeviceToHost));
-        std::vector<float> act_hid_f(act_hid_bf.size());
-        for (std::size_t i = 0; i < act_hid_bf.size(); ++i) { act_hid_f[i] = bf16_to_float(act_hid_bf[i]); }
-        double err_hid = relative_l2_error(act_hid_f, ref.hidden_injected);
-        max_rel_l2_injected = std::max(max_rel_l2_injected, err_hid);
+        CUDA_CHECK(cudaMemcpy(act_hid_bf.data(), hidden_view.data, act_hid_bf.size() * 2,
+                              cudaMemcpyDeviceToHost));
+        const std::vector<float> act_hid_f = to_float(act_hid_bf);
+        const RelL2Stats err_hid =
+            rel_l2_stats(act_hid_f.data(), ref.hidden_injected.data(), act_hid_f.size());
 
-        // Stage 6: final mixer (no inject)
         const HyperMixerWeights mixer{
             .norm           = weights.norm,
             .input_mix_down = weights.input_mix_down,
@@ -381,12 +457,45 @@ int test_synthetic_stage_equivalence(ninfer::DeviceContext& device) {
         };
         flash_next_hyper_mix(hidden_view, mixer, scratch, input_view, device.stream);
         device.synchronize();
-        CUDA_CHECK(cudaMemcpy(act_in_bf.data(), input_view.data, act_in_bf.size() * 2, cudaMemcpyDeviceToHost));
-        for (std::size_t i = 0; i < act_in_bf.size(); ++i) { act_in_f[i] = bf16_to_float(act_in_bf[i]); }
-        // Compute ref mixer output on injected hidden
-        auto ref_mix = evaluate_reference(tokens, act_hid_f, h_norm_f, h_down_f, h_up_f, h_inject_f, h_output_f);
-        double err_mix = relative_l2_error(act_in_f, ref_mix.block_input);
-        max_rel_l2_input = std::max(max_rel_l2_input, err_mix);
+        CUDA_CHECK(cudaMemcpy(act_in_bf.data(), input_view.data, act_in_bf.size() * 2,
+                              cudaMemcpyDeviceToHost));
+        act_in_f = to_float(act_in_bf);
+        auto ref_mix = evaluate_reference(tokens, act_hid_f, h_norm_f, h_down_f, h_up_f, h_inject_f,
+                                          h_output_f);
+        const RelL2Stats err_mix =
+            rel_l2_stats(act_in_f.data(), ref_mix.block_input.data(), act_in_f.size());
+
+        std::cout << "  T=" << tokens << " down%32=" << (tokens % 32) << " up%64=" << (tokens % 64)
+                  << " norm=" << err_norm.rel << " down=" << err_lr.rel << " inj=" << err_inj.rel
+                  << " input=" << err_in.rel << " hid=" << err_hid.rel << " mix=" << err_mix.rel
+                  << " down_base_sq=" << err_lr.base_sq << "\n";
+
+        if (!accept_stage("group_norm", tokens, err_norm, &max_rel_l2_norm, kMaxRelL2Tolerance) ||
+            !accept_stage("low_rank", tokens, err_lr, &max_rel_l2_lr, kMaxRelL2Tolerance) ||
+            !accept_stage("injection", tokens, err_inj, &max_rel_l2_inj, kMaxRelL2Tolerance) ||
+            !accept_stage("block_input", tokens, err_in, &max_rel_l2_input, kMaxRelL2Tolerance) ||
+            !accept_stage("hidden_injected", tokens, err_hid, &max_rel_l2_injected,
+                          kMaxRelL2Tolerance) ||
+            !accept_stage("mixer_block_input", tokens, err_mix, &max_rel_l2_input,
+                          kMaxRelL2Tolerance)) {
+            return 1;
+        }
+
+        if (tokens == 48) {
+            const RelL2Stats full_tile =
+                rel_l2_stats(act_lr_f.data(), ref.low_rank.data(), 32ULL * 320ULL);
+            const RelL2Stats partial_tile =
+                rel_l2_stats(act_lr_f.data() + 32ULL * 320ULL, ref.low_rank.data() + 32ULL * 320ULL,
+                             16ULL * 320ULL);
+            print_rel_l2_stats("T=48 low_rank tokens[0,32) full 32-tile", full_tile);
+            print_rel_l2_stats("T=48 low_rank tokens[32,48) partial 16-tile", partial_tile);
+            if (!accept_stage("low_rank_full_tile", tokens, full_tile, &max_rel_l2_lr,
+                              kMaxRelL2Tolerance) ||
+                !accept_stage("low_rank_partial_tile", tokens, partial_tile, &max_rel_l2_lr,
+                              kMaxRelL2Tolerance)) {
+                return 1;
+            }
+        }
     }
 
     std::cout << "\n--- Flash-Next Fused Hyper-Connection vs Reference (rel-L2 Maxima) ---\n";
@@ -398,7 +507,6 @@ int test_synthetic_stage_equivalence(ninfer::DeviceContext& device) {
     std::cout << "  Stage 5 (inject     -> hidden)     : " << max_rel_l2_injected << "\n";
     std::cout << "----------------------------------------------------------------------\n";
 
-    constexpr double kMaxRelL2Tolerance = 1.0e-3;
     if (max_rel_l2_norm > kMaxRelL2Tolerance || max_rel_l2_lr > kMaxRelL2Tolerance ||
         max_rel_l2_inj > kMaxRelL2Tolerance || max_rel_l2_input > kMaxRelL2Tolerance ||
         max_rel_l2_injected > kMaxRelL2Tolerance) {

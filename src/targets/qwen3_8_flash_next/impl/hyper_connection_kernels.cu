@@ -513,6 +513,33 @@ void launch_down_prefill_dispatch(const __nv_bfloat16* x, const __nv_bfloat16* w
     }
 }
 
+template <bool FullTokens>
+void launch_up_prefill(const __nv_bfloat16* low_rank, const __nv_bfloat16* weight,
+                       __nv_bfloat16* up_gemm, int tokens, cudaStream_t stream) {
+    ops::detail::Bf16MmaContiguousOutput out_up{up_gemm, 10240};
+    const int tiles_m_up = 10240 / UpSched::kBlockRows;
+    const int tiles_n_up = (tokens + UpSched::kBlockCols - 1) / UpSched::kBlockCols;
+    const int blocks_up  = tiles_m_up * tiles_n_up;
+    static const cudaError_t attr_up = cudaFuncSetAttribute(
+        ops::detail::bf16_gemm_mma_kernel<UpGeom, UpSched, FullTokens,
+                                          ops::detail::Bf16MmaContiguousOutput>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, UpSched::kSharedBytes);
+    CUDA_CHECK(attr_up);
+    ops::detail::bf16_gemm_mma_kernel<UpGeom, UpSched, FullTokens>
+        <<<blocks_up, UpSched::kThreads, UpSched::kSharedBytes, stream>>>(low_rank, weight, out_up,
+                                                                         tokens);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_up_prefill_dispatch(const __nv_bfloat16* low_rank, const __nv_bfloat16* weight,
+                                __nv_bfloat16* up_gemm, int tokens, cudaStream_t stream) {
+    if ((tokens % UpSched::kBlockCols) == 0) {
+        launch_up_prefill<true>(low_rank, weight, up_gemm, tokens, stream);
+    } else {
+        launch_up_prefill<false>(low_rank, weight, up_gemm, tokens, stream);
+    }
+}
+
 } // namespace
 
 void flash_next_hyper_prepare_launch(const Tensor& hidden, const HyperConnectionWeights& weights,
@@ -566,23 +593,12 @@ void flash_next_hyper_prepare_launch(const Tensor& hidden, const HyperConnection
             static_cast<float*>(scratch.injection.data), tokens);
         CUDA_CHECK(cudaGetLastError());
 
-        // 4. Up-Projection via Tensor Core MMA
-        ops::detail::Bf16MmaContiguousOutput out_up{
-            static_cast<__nv_bfloat16*>(scratch.up_gemm.data), 10240};
-        const int tiles_m_up = 10240 / UpSched::kBlockRows;
-        const int tiles_n_up = (tokens + UpSched::kBlockCols - 1) / UpSched::kBlockCols;
-        const int blocks_up  = tiles_m_up * tiles_n_up;
-
-        static const cudaError_t attr_up = cudaFuncSetAttribute(
-            ops::detail::bf16_gemm_mma_kernel<UpGeom, UpSched, true, ops::detail::Bf16MmaContiguousOutput>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, UpSched::kSharedBytes);
-        CUDA_CHECK(attr_up);
-
-        ops::detail::bf16_gemm_mma_kernel<UpGeom, UpSched, true><<<blocks_up, UpSched::kThreads, UpSched::kSharedBytes, stream>>>(
+        // 4. Up-Projection via Tensor Core MMA. FullTokens=true is exact only when
+        // T % 64 == 0; otherwise the 64-col tile would store past up_gemm.
+        launch_up_prefill_dispatch(
             static_cast<const __nv_bfloat16*>(scratch.low_rank.data),
             static_cast<const __nv_bfloat16*>(weights.input_mix_up.qdata),
-            out_up, tokens);
-        CUDA_CHECK(cudaGetLastError());
+            static_cast<__nv_bfloat16*>(scratch.up_gemm.data), tokens, stream);
 
         // 5. Up Reduction & 4-Stream Average
         up_reduction_vectorized_kernel<<<tokens, 256, 0, stream>>>(
@@ -636,23 +652,11 @@ void flash_next_hyper_mix_launch(const Tensor& hidden, const HyperMixerWeights& 
             static_cast<float*>(scratch.down_split.data),
             static_cast<__nv_bfloat16*>(scratch.low_rank.data), tokens, stream);
 
-        // 3. Up-Projection via Tensor Core MMA
-        ops::detail::Bf16MmaContiguousOutput out_up{
-            static_cast<__nv_bfloat16*>(scratch.up_gemm.data), 10240};
-        const int tiles_m_up = 10240 / UpSched::kBlockRows;
-        const int tiles_n_up = (tokens + UpSched::kBlockCols - 1) / UpSched::kBlockCols;
-        const int blocks_up  = tiles_m_up * tiles_n_up;
-
-        static const cudaError_t attr_up = cudaFuncSetAttribute(
-            ops::detail::bf16_gemm_mma_kernel<UpGeom, UpSched, true, ops::detail::Bf16MmaContiguousOutput>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, UpSched::kSharedBytes);
-        CUDA_CHECK(attr_up);
-
-        ops::detail::bf16_gemm_mma_kernel<UpGeom, UpSched, true><<<blocks_up, UpSched::kThreads, UpSched::kSharedBytes, stream>>>(
+        // 3. Up-Projection via Tensor Core MMA (same FullTokens rule as prepare)
+        launch_up_prefill_dispatch(
             static_cast<const __nv_bfloat16*>(scratch.low_rank.data),
             static_cast<const __nv_bfloat16*>(weights.input_mix_up.qdata),
-            out_up, tokens);
-        CUDA_CHECK(cudaGetLastError());
+            static_cast<__nv_bfloat16*>(scratch.up_gemm.data), tokens, stream);
 
         // 4. Up Reduction & 4-Stream Average
         up_reduction_vectorized_kernel<<<tokens, 256, 0, stream>>>(
