@@ -1330,7 +1330,16 @@ bool test_prefill_per_token_complete_threshold(ninfer::DeviceContext& device) {
     return true;
 }
 
-bool test_prefill_score_gemm_vs_host_oracle(ninfer::DeviceContext& device, std::int32_t n) {
+std::uint32_t host_float_ascending_bits(float value) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const std::uint32_t mask =
+        (static_cast<std::int32_t>(bits) < 0) ? 0xFFFFFFFFu : 0x80000000u;
+    return bits ^ mask;
+}
+
+bool test_prefill_score_gemm_vs_host_oracle(ninfer::DeviceContext& device, std::int32_t n,
+                                            bool random_inputs) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
     const std::int32_t tokens         = 1;
     const std::int32_t logical_pages  = (n + 63) / 64;
@@ -1349,15 +1358,26 @@ bool test_prefill_score_gemm_vs_host_oracle(ninfer::DeviceContext& device, std::
     ninfer::DeviceBuffer selected_count(sizeof(std::int32_t));
 
     std::vector<std::uint16_t> input_values(2'560, 0);
-    input_values[0] = 0x3F80U;
-    input.copy_from_host(input_values.data(), input_values.size() * 2);
     std::vector<std::uint16_t> projection_values(640ULL * 2'560, 0);
-    for (std::int32_t row = 0; row < 640; ++row) {
-        projection_values[static_cast<std::size_t>(row) * 2'560] = 0x3F80U;
+    std::vector<std::uint16_t> qnorm_values(128, 0);
+    std::vector<std::uint16_t> knorm_values(128, 0);
+    if (random_inputs) {
+        std::mt19937 rng(20260901u + static_cast<unsigned>(n));
+        std::uniform_real_distribution<float> dist(-1.25F, 1.25F);
+        for (auto& v : input_values) { v = float_to_bf16(dist(rng)); }
+        for (auto& v : projection_values) { v = float_to_bf16(dist(rng)); }
+        for (auto& v : qnorm_values) { v = float_to_bf16(dist(rng) * 0.1F); }
+        for (auto& v : knorm_values) { v = float_to_bf16(dist(rng) * 0.1F); }
+    } else {
+        input_values[0] = 0x3F80U;
+        for (std::int32_t row = 0; row < 640; ++row) {
+            projection_values[static_cast<std::size_t>(row) * 2'560] = 0x3F80U;
+        }
     }
+    input.copy_from_host(input_values.data(), input_values.size() * 2);
     projection.copy_from_host(projection_values.data(), projection_values.size() * 2);
-    query_norm.fill(0);
-    key_norm.fill(0);
+    query_norm.copy_from_host(qnorm_values.data(), qnorm_values.size() * 2);
+    key_norm.copy_from_host(knorm_values.data(), knorm_values.size() * 2);
     raw_keys.fill(0);
     raw_positions.fill(0);
     std::vector<std::int32_t> page_ids(static_cast<std::size_t>(logical_pages));
@@ -1369,7 +1389,22 @@ bool test_prefill_score_gemm_vs_host_oracle(ninfer::DeviceContext& device, std::
     constexpr std::array<std::int32_t, 3> zero_pos{};
     mrope_positions.copy_from_host(zero_pos.data(), sizeof(zero_pos));
     std::vector<std::uint16_t> host_keys(128ULL * 64 * static_cast<std::size_t>(logical_pages), 0);
-    fill_monotonic_block_keys(host_keys, n);
+    if (random_inputs) {
+        std::mt19937 rng(20260901u + 17u + static_cast<unsigned>(n));
+        std::uniform_real_distribution<float> dist(-1.25F, 1.25F);
+        for (std::int32_t block = 0; block < n; ++block) {
+            const std::int32_t page   = block / 64;
+            const std::int32_t offset = block % 64;
+            const std::size_t index =
+                static_cast<std::size_t>(page) * 64ULL * 128ULL +
+                static_cast<std::size_t>(offset) * 128ULL;
+            for (int dim = 0; dim < 128; ++dim) {
+                host_keys[index + static_cast<std::size_t>(dim)] = float_to_bf16(dist(rng));
+            }
+        }
+    } else {
+        fill_monotonic_block_keys(host_keys, n);
+    }
     block_keys.copy_from_host(host_keys.data(), host_keys.size() * 2);
 
     AttentionWeights weights{};
@@ -1447,8 +1482,60 @@ bool test_prefill_score_gemm_vs_host_oracle(ninfer::DeviceContext& device, std::
         return false;
     }
     const double rel_l2 = std::sqrt(num / den);
-    std::cout << "  N=" << n << " GEMM vs host-sequential-FP32 rel-L2=" << rel_l2
-              << " max_abs=" << max_abs << " compared=" << compared << " den=" << den << "\n";
+    std::vector<std::pair<std::uint64_t, std::int32_t>> ranked(static_cast<std::size_t>(n));
+    for (std::int32_t block = 0; block < n; ++block) {
+        float score = 0.0F;
+        const std::int32_t page   = block / 64;
+        const std::int32_t offset = block % 64;
+        const std::size_t key_i =
+            static_cast<std::size_t>(page) * 64ULL * 128ULL + static_cast<std::size_t>(offset) * 128ULL;
+        for (int head = 0; head < 4; ++head) {
+            float dot = 0.0F;
+            for (int dim = 0; dim < 128; ++dim) {
+                const float q = bf16_bits_to_float(
+                    host_query[static_cast<std::size_t>(head) * 128 + static_cast<std::size_t>(dim)]);
+                const float k = bf16_bits_to_float(host_keys[key_i + static_cast<std::size_t>(dim)]);
+                dot += q * k;
+            }
+            score += std::max(dot, 0.0F);
+        }
+        score *= kIndexerScaling;
+        const std::uint32_t rank = host_float_ascending_bits(score);
+        const std::uint32_t tie  = ~static_cast<std::uint32_t>(block);
+        ranked[static_cast<std::size_t>(block)] = {
+            (static_cast<std::uint64_t>(rank) << 32) | tie, block};
+    }
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+    std::array<std::int32_t, 512> host_top{};
+    std::array<std::int32_t, 512> gemm_top{};
+    std::int32_t gemm_count = -1;
+    selected_count.copy_to_host(&gemm_count, sizeof(gemm_count));
+    selected_blocks.copy_to_host(gemm_top.data(), sizeof(gemm_top));
+    if (gemm_count != 512) {
+        std::cerr << "FAIL: GEMM select count=" << gemm_count << " at N=" << n << "\n";
+        return false;
+    }
+    for (std::int32_t i = 0; i < 512; ++i) {
+        host_top[static_cast<std::size_t>(i)] = ranked[static_cast<std::size_t>(i)].second;
+    }
+    std::array<std::int32_t, 512> host_set = host_top;
+    std::array<std::int32_t, 512> gemm_set = gemm_top;
+    std::sort(host_set.begin(), host_set.end());
+    std::sort(gemm_set.begin(), gemm_set.end());
+    const bool set_match =
+        std::memcmp(host_set.data(), gemm_set.data(), sizeof(host_set)) == 0;
+    int order_mismatches = 0;
+    for (std::int32_t i = 0; i < 512; ++i) {
+        if (host_top[static_cast<std::size_t>(i)] != gemm_top[static_cast<std::size_t>(i)]) {
+            ++order_mismatches;
+        }
+    }
+    const char* label = random_inputs ? "random-bf16" : "monotonic";
+    std::cout << "  N=" << n << " " << label << " GEMM vs host-sequential-FP32 rel-L2=" << rel_l2
+              << " max_abs=" << max_abs << " compared=" << compared << " den=" << den
+              << " SET=" << (set_match ? "exact" : "DIFF") << " order_mismatches=" << order_mismatches
+              << "\n";
     return true;
 }
 
@@ -1637,8 +1724,10 @@ int main() {
         return 1;
     }
     std::cout << "\n=== G12 score GEMM vs host sequential FP32 ===\n";
-    if (!test_prefill_score_gemm_vs_host_oracle(device, 1024) ||
-        !test_prefill_score_gemm_vs_host_oracle(device, 16384)) {
+    if (!test_prefill_score_gemm_vs_host_oracle(device, 1024, false) ||
+        !test_prefill_score_gemm_vs_host_oracle(device, 16384, false) ||
+        !test_prefill_score_gemm_vs_host_oracle(device, 1024, true) ||
+        !test_prefill_score_gemm_vs_host_oracle(device, 16384, true)) {
         std::cerr << "FAIL: test_prefill_score_gemm_vs_host_oracle failed\n";
         return 1;
     }
