@@ -57,8 +57,14 @@ FlashNextPreflightReport preflight_text_file(const std::filesystem::path& path,
 StandaloneLoadedModel::StandaloneLoadedModel(BindingPlan plan, artifact::MaterializedArtifact materialized)
     : data_(std::make_unique<LoadedModelData>(std::move(plan), std::move(materialized))) {}
 
+StandaloneLoadedModel::StandaloneLoadedModel(BindingPlan plan, artifact::MaterializedArtifact materialized,
+                                             LoadQuantization quantization)
+    : data_(std::make_unique<LoadedModelData>(std::move(plan), std::move(materialized),
+                                              quantization.output_head_fp8)) {}
+
 StandaloneLoadedModel StandaloneLoadedModel::load(const artifact::Reader& reader, DeviceContext& device,
-                                                  LoadFeatures features, artifact::LoadProgress* progress) {
+                                                  LoadFeatures features, LoadQuantization quantization,
+                                                  artifact::LoadProgress* progress) {
     validate_identity(reader.identity());
     if (features.mtp) {
         throw std::invalid_argument(
@@ -69,13 +75,17 @@ StandaloneLoadedModel StandaloneLoadedModel::load(const artifact::Reader& reader
     auto load_plan    = bind_artifact(binder, features);
     auto materialized = artifact::materialize(reader, load_plan.materialization, device, progress);
 
-    return StandaloneLoadedModel(std::move(load_plan.bindings), std::move(materialized));
+    return StandaloneLoadedModel(std::move(load_plan.bindings), std::move(materialized),
+                                 quantization);
 }
 
-StandaloneLoadedModel StandaloneLoadedModel::load_from_file(const std::filesystem::path& path, DeviceContext& device,
-                                                            LoadFeatures features, artifact::LoadProgress* progress) {
+StandaloneLoadedModel StandaloneLoadedModel::load_from_file(const std::filesystem::path& path,
+                                                            DeviceContext& device,
+                                                            LoadFeatures features,
+                                                            LoadQuantization quantization,
+                                                            artifact::LoadProgress* progress) {
     const artifact::Reader reader(path);
-    return load(reader, device, features, progress);
+    return load(reader, device, features, quantization, progress);
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

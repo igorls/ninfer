@@ -1,6 +1,8 @@
 #pragma once
 
 #include "artifact/materializer.h"
+#include "core/arena.h"
+#include "core/tensor.h"
 #include "targets/qwen3_8_flash_next/impl/load/bindings.h"
 #include "targets/qwen3_8_flash_next/impl/model_view.h"
 
@@ -13,7 +15,8 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 
 class LoadedModelData {
 public:
-    LoadedModelData(BindingPlan plan, artifact::MaterializedArtifact materialized);
+    LoadedModelData(BindingPlan plan, artifact::MaterializedArtifact materialized,
+                    bool quantize_output_head_fp8 = false);
 
     LoadedModelData(const LoadedModelData&)            = delete;
     LoadedModelData& operator=(const LoadedModelData&) = delete;
@@ -21,6 +24,7 @@ public:
     LoadedModelData& operator=(LoadedModelData&&)      = delete;
 
     artifact::MaterializedArtifact backing;
+    DeviceBuffer output_head_fp8;
     qwen3_6::FrontendResources frontend;
     TextModelView text;
     std::optional<VisionModelView> vision;

@@ -66,7 +66,7 @@ enum class LinearPolicy : std::uint8_t {
  *
  * `{[14336,5120], [16384,5120], [34816,5120], [248320,5120], [5120,6144], [5120,17408]}`.
  * F32-scale
- * FP8 registers the Flash-Next problems `{[13312,2560], [16384,2560], [2560,6144]}`.
+ * FP8 registers the Flash-Next problems `{[13312,2560], [16384,2560], [2560,6144], [248320,2560]}`.
  * Both accept
  * every positive T. BF16_CTRL additionally registers the Flash-Next indexer
  * `[640,2560]`, PLE key

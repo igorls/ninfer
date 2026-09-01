@@ -1,6 +1,8 @@
 #include "targets/qwen3_8_flash_next/impl/load/materialized.h"
 
 #include "artifact/typed_binding.h"
+#include "core/device.h"
+#include "targets/qwen3_8_flash_next/impl/load/quantize_output_head.h"
 
 #include <stdexcept>
 #include <utility>
@@ -135,7 +137,8 @@ VisionModelView load_vision(const VisionPlan& plan, const artifact::Materialized
 
 } // namespace
 
-LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifact materialized)
+LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifact materialized,
+                                 bool quantize_output_head_fp8)
     : backing(std::move(materialized)) {
     if (plan.features.mtp) {
         throw std::invalid_argument(
@@ -164,6 +167,14 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
     }
     text.ple         = load_ple(plan.ple, backing);
     text.output_head = bf16_weight(backing, plan.output_head, 248'320, 2'560);
+    if (quantize_output_head_fp8) {
+        output_head_fp8 = DeviceBuffer(flash_next_fp8_output_head_payload_bytes());
+        Weight fp8_head{};
+        quantize_bf16_output_head_to_fp8_e4m3_row_f32s(text.output_head, output_head_fp8, fp8_head,
+                                                       cudaStream_t{});
+        CUDA_CHECK(cudaDeviceSynchronize());
+        text.output_head = fp8_head;
+    }
     text.final_mixer = load_mixer(plan.final_mixer, backing);
 
     if (plan.features.vision) { vision = load_vision(plan.vision, backing); }

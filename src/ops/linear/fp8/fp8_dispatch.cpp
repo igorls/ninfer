@@ -27,7 +27,7 @@ Fp8LinearRoute resolve_route(std::int32_t output_rows, std::int32_t input_rows, 
     if (policy == LinearPolicy::A16Only) { return Fp8LinearRoute::A16; }
     // A permissive policy does not require a lower-precision route. Vocabulary logits retain
     // BF16 activation compute for every policy, matching the existing Q6/W8 output heads.
-    if (problem == Fp8Problem::Vocabulary &&
+    if ((problem == Fp8Problem::Vocabulary || problem == Fp8Problem::FlashNextVocabulary) &&
         (policy == LinearPolicy::AllowA8 || policy == LinearPolicy::AllowA4)) {
         return Fp8LinearRoute::A16;
     }
@@ -43,6 +43,7 @@ Fp8LinearRoute resolve_route(std::int32_t output_rows, std::int32_t input_rows, 
     case Fp8Problem::MlpGateUp:
         return tokens == 1 || tokens >= 5 ? Fp8LinearRoute::A8 : Fp8LinearRoute::A16;
     case Fp8Problem::Vocabulary:
+    case Fp8Problem::FlashNextVocabulary:
         return Fp8LinearRoute::A16;
     case Fp8Problem::Residual6144:
     case Fp8Problem::Residual17408:
@@ -92,6 +93,7 @@ bool interval_uses_a8(Fp8Problem problem, LinearPolicy policy, std::int32_t min_
     case Fp8Problem::MlpGateUp:
         return min_tokens == 1 || max_tokens >= 5;
     case Fp8Problem::Vocabulary:
+    case Fp8Problem::FlashNextVocabulary:
         return false;
     case Fp8Problem::Residual6144:
     case Fp8Problem::Residual17408:

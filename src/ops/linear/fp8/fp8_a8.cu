@@ -151,6 +151,10 @@ void launch_fp8_a8(const Tensor& x, const Weight& weight, Tensor& out, Fp8A8Work
         launch_problem<Fp8MlpGateUpGeometry>(weight, out, workspace, tokens, stream);
         return;
     case Fp8Problem::Vocabulary:
+    case Fp8Problem::FlashNextVocabulary:
+    case Fp8Problem::FlashNextAttnInput:
+    case Fp8Problem::FlashNextGdnInput:
+    case Fp8Problem::FlashNextResidual:
         break;
     case Fp8Problem::Residual6144:
         launch_problem<Fp8Residual6144Geometry>(weight, out, workspace, tokens, stream);

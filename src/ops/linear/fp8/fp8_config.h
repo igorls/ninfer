@@ -125,9 +125,10 @@ using Fp8MlpGateUpGeometry          = Fp8Geometry<34816, 5120>;
 using Fp8VocabularyGeometry         = Fp8Geometry<248320, 5120>;
 using Fp8Residual6144Geometry       = Fp8Geometry<5120, 6144>;
 using Fp8Residual17408Geometry      = Fp8Geometry<5120, 17408>;
-using Fp8FlashNextAttnInputGeometry = Fp8Geometry<13312, 2560>;
-using Fp8FlashNextGdnInputGeometry  = Fp8Geometry<16384, 2560>;
-using Fp8FlashNextResidualGeometry  = Fp8Geometry<2560, 6144>;
+using Fp8FlashNextAttnInputGeometry     = Fp8Geometry<13312, 2560>;
+using Fp8FlashNextGdnInputGeometry      = Fp8Geometry<16384, 2560>;
+using Fp8FlashNextResidualGeometry      = Fp8Geometry<2560, 6144>;
+using Fp8FlashNextVocabularyGeometry    = Fp8Geometry<248320, 2560>;
 using Fp8Activation2560Geometry     = Fp8ActivationGeometry<2560>;
 using Fp8Activation5120Geometry     = Fp8ActivationGeometry<5120>;
 using Fp8Activation6144Geometry     = Fp8ActivationGeometry<6144>;
@@ -163,6 +164,7 @@ enum class Fp8Problem : std::uint8_t {
     FlashNextAttnInput,
     FlashNextGdnInput,
     FlashNextResidual,
+    FlashNextVocabulary,
 };
 
 inline constexpr bool is_fp8_bf16_linear_problem(std::int32_t output_rows,
@@ -187,7 +189,9 @@ inline constexpr bool is_fp8_f32_linear_problem(std::int32_t output_rows, std::i
            (output_rows == Fp8FlashNextGdnInputGeometry::kOutputRows &&
             input_rows == Fp8FlashNextGdnInputGeometry::kInputRows) ||
            (output_rows == Fp8FlashNextResidualGeometry::kOutputRows &&
-            input_rows == Fp8FlashNextResidualGeometry::kInputRows);
+            input_rows == Fp8FlashNextResidualGeometry::kInputRows) ||
+           (output_rows == Fp8FlashNextVocabularyGeometry::kOutputRows &&
+            input_rows == Fp8FlashNextVocabularyGeometry::kInputRows);
 }
 
 inline constexpr bool is_fp8_linear_problem(std::int32_t output_rows, std::int32_t input_rows) {
@@ -231,6 +235,10 @@ inline Fp8Problem resolve_fp8_problem(std::int32_t output_rows, std::int32_t inp
     if (output_rows == Fp8FlashNextResidualGeometry::kOutputRows &&
         input_rows == Fp8FlashNextResidualGeometry::kInputRows) {
         return Fp8Problem::FlashNextResidual;
+    }
+    if (output_rows == Fp8FlashNextVocabularyGeometry::kOutputRows &&
+        input_rows == Fp8FlashNextVocabularyGeometry::kInputRows) {
+        return Fp8Problem::FlashNextVocabulary;
     }
     throw std::invalid_argument("unsupported FP8 problem");
 }
@@ -280,6 +288,11 @@ struct Fp8LinearDecodeProductionSchedule<Fp8FlashNextResidualGeometry> {
     using Type = Fp8GemvSchedule<8, 2, 8, 4, Fp8CodeCache::Default, 2, 2>;
 };
 
+template <>
+struct Fp8LinearDecodeProductionSchedule<Fp8FlashNextVocabularyGeometry> {
+    using Type = Fp8GemvSchedule<8, 2, 8, 4, Fp8CodeCache::Default, 2, 2>;
+};
+
 inline constexpr std::int32_t kFp8FirstSmallT = 2;
 inline constexpr std::int32_t kFp8LastSmallT  = 24;
 
@@ -310,6 +323,9 @@ inline constexpr std::int32_t kFp8LinearSmallTMax<Fp8FlashNextGdnInputGeometry> 
 template <>
 inline constexpr std::int32_t kFp8LinearSmallTMax<Fp8FlashNextResidualGeometry> = 8;
 
+template <>
+inline constexpr std::int32_t kFp8LinearSmallTMax<Fp8FlashNextVocabularyGeometry> = 8;
+
 inline std::int32_t fp8_linear_small_t_max(Fp8Problem problem) {
     switch (problem) {
     case Fp8Problem::AttnInput:
@@ -330,6 +346,8 @@ inline std::int32_t fp8_linear_small_t_max(Fp8Problem problem) {
         return kFp8LinearSmallTMax<Fp8FlashNextGdnInputGeometry>;
     case Fp8Problem::FlashNextResidual:
         return kFp8LinearSmallTMax<Fp8FlashNextResidualGeometry>;
+    case Fp8Problem::FlashNextVocabulary:
+        return kFp8LinearSmallTMax<Fp8FlashNextVocabularyGeometry>;
     }
     throw std::logic_error("FP8 vocabulary uses its A16 MMA route");
 }
@@ -429,6 +447,14 @@ struct Fp8LinearSmallTProductionSchedule<Fp8FlashNextGdnInputGeometry, ActiveTok
 
 template <int ActiveTokens>
 struct Fp8LinearSmallTProductionSchedule<Fp8FlashNextResidualGeometry, ActiveTokens> {
+    static_assert(ActiveTokens >= kFp8FirstSmallT && ActiveTokens <= 8);
+    using Type =
+        Fp8SmallTSchedule<8, 2, 16, ActiveTokens, 1, Fp8SmallTActivationAccess::TokenPacked,
+                          Fp8CodeCache::Default, 1, Fp8SmallTBlockOrder::RowsContiguous, 1>;
+};
+
+template <int ActiveTokens>
+struct Fp8LinearSmallTProductionSchedule<Fp8FlashNextVocabularyGeometry, ActiveTokens> {
     static_assert(ActiveTokens >= kFp8FirstSmallT && ActiveTokens <= 8);
     using Type =
         Fp8SmallTSchedule<8, 2, 16, ActiveTokens, 1, Fp8SmallTActivationAccess::TokenPacked,

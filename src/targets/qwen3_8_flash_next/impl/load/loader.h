@@ -29,6 +29,10 @@ inline constexpr std::string_view kExpectedIdentity = "qwen3.8-flash-next/mixed-
 
 void validate_identity(const artifact::ArtifactIdentity& identity);
 
+struct LoadQuantization {
+    bool output_head_fp8 = false;
+};
+
 struct FlashNextPreflightReport {
     artifact::ArtifactIdentity identity;
     std::uint64_t file_bytes                     = 0;
@@ -60,11 +64,13 @@ public:
     [[nodiscard]] static StandaloneLoadedModel load(const artifact::Reader& reader,
                                                     DeviceContext& device,
                                                     LoadFeatures features            = {},
+                                                    LoadQuantization quantization    = {},
                                                     artifact::LoadProgress* progress = nullptr);
 
     [[nodiscard]] static StandaloneLoadedModel
     load_from_file(const std::filesystem::path& path, DeviceContext& device,
                    LoadFeatures features            = {},
+                   LoadQuantization quantization    = {},
                    artifact::LoadProgress* progress = nullptr);
 
     [[nodiscard]] const TextModelView& text_view() const noexcept { return data_->text; }
@@ -95,6 +101,8 @@ public:
 
 private:
     StandaloneLoadedModel(BindingPlan plan, artifact::MaterializedArtifact materialized);
+    StandaloneLoadedModel(BindingPlan plan, artifact::MaterializedArtifact materialized,
+                          LoadQuantization quantization);
 
     std::unique_ptr<LoadedModelData> data_;
     PleIndexMetadata ple_metadata_{kPleIndexMetadata};
