@@ -3,6 +3,7 @@
 #include "core/arena.h"
 #include "core/tensor.h"
 
+#include <algorithm>
 #include <cstdint>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
@@ -21,6 +22,8 @@ struct FlashNextMoeWorkspace {
     Tensor grouped_tokens;
     Tensor grouped_paths;
     Tensor grouped_experts;
+    Tensor token_to_pos;
+    Tensor staged_down;
     Tensor down_intermediate;
     Tensor task_counter;
     // Prefill NVFP4 MMA activation quantization buffers (tokens > 8)
@@ -48,7 +51,19 @@ FlashNextMoeWorkspace allocate_flash_next_moe_workspace(Arena& arena, std::int32
         out.grouped_tokens    = arena.alloc(DType::I32, {10 * tokens}, 16);
         out.grouped_paths     = arena.alloc(DType::I32, {10 * tokens}, 16);
         out.grouped_experts   = arena.alloc(DType::I32, {10 * tokens}, 16);
-        out.down_intermediate = arena.alloc(DType::FP32, {2'560, 10, tokens}, 256);
+        out.token_to_pos      = arena.alloc(DType::I32, {10 * tokens}, 16);
+        if (tokens >= 512) {
+            // MMA arm: BF16 staged routed outputs [2560, 10 * tokens], reduced in fixed order.
+            // The envelope is computed by calling this with the chunk capacity, but a tail chunk
+            // of 9..511 tokens takes the SIMT arm and carves an FP32 [2560, 10, T] intermediate,
+            // which is larger than the BF16 staging when tokens < 1022. Pad the staging so the
+            // envelope covers the worst SIMT tail (T = 511) at every capacity.
+            constexpr std::int32_t kSimtTailColumns = 10 * 511 * 2; // FP32 [2560,10,511] in BF16 columns
+            const std::int32_t staged_columns       = std::max(10 * tokens, kSimtTailColumns);
+            out.staged_down   = arena.alloc(DType::BF16, {2'560, staged_columns}, 256);
+        } else {
+            out.down_intermediate = arena.alloc(DType::FP32, {2'560, 10, tokens}, 256);
+        }
         out.task_counter      = arena.alloc(DType::I32, {4}, 16);
         out.act_codes         = arena.alloc(DType::U8, {1'280, tokens}, 256);
         out.act_scales        = arena.alloc(DType::U8, {160, tokens}, 256);

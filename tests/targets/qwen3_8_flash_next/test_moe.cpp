@@ -1,5 +1,6 @@
 #include "core/arena.h"
 #include "core/device.h"
+#include "core/layout.h"
 #include "targets/qwen3_8_flash_next/impl/moe.h"
 #include "targets/qwen3_8_flash_next/impl/moe_kernels.h"
 #include "targets/qwen3_8_flash_next/impl/moe_route.h"
@@ -401,6 +402,41 @@ int test_prefill_equivalence_and_benchmark(ninfer::DeviceContext& device) {
 
 } // namespace
 
+// Sequence 14 envelope guard: the MoE workspace envelope is computed once at the chunk capacity,
+// but a tail chunk of 9..511 tokens takes the SIMT arm and carves an FP32 [2560, 10, T]
+// intermediate instead of the BF16 [2560, 10 * T] staging. Every SIMT tail must fit inside the
+// envelope at every capacity. Non-vacuous: at capacity 512 the unpadded staging (26.2 MB) is
+// smaller than the T=511 FP32 intermediate (52.3 MB), so this test fails without the pad.
+int test_prefill_workspace_envelope_covers_simt_tail() {
+    using ninfer::targets::qwen3_8_flash_next::detail::allocate_flash_next_moe_workspace;
+    using ninfer::targets::qwen3_8_flash_next::detail::flash_next_moe_workspace_capacity_bytes;
+    const std::array<std::int32_t, 5> capacities = {512, 768, 1024, 2048, 4096};
+    const std::array<std::int32_t, 4> tails      = {9, 256, 511, 512};
+    int checked = 0;
+    for (const std::int32_t capacity : capacities) {
+        const std::size_t envelope = flash_next_moe_workspace_capacity_bytes(1, capacity);
+        for (const std::int32_t tail : tails) {
+            const std::int32_t tokens = std::min(tail, capacity);
+            ninfer::WorkspaceLayoutBuilder layout;
+            (void)allocate_flash_next_moe_workspace(layout, tokens);
+            const std::size_t need = layout.peak_bytes(256);
+            if (need > envelope) {
+                std::cerr << "FAILED: MoE workspace envelope for capacity " << capacity << " ("
+                          << envelope << " bytes) does not cover a " << tokens
+                          << "-token chunk (" << need << " bytes)\n";
+                return 1;
+            }
+            ++checked;
+        }
+    }
+    if (checked != 20) {
+        std::cerr << "FAILED: envelope test checked " << checked << " cases, expected 20\n";
+        return 1;
+    }
+    std::cout << "  envelope covers SIMT tails at capacities 512..4096 (" << checked << " cases)\n";
+    return 0;
+}
+
 int main() {
     int device_count              = 0;
     const cudaError_t count_error = cudaGetDeviceCount(&device_count);
@@ -418,6 +454,11 @@ int main() {
     }
     std::cout << "PASS: test_decode_basic_unit\n";
 
+    if (test_prefill_workspace_envelope_covers_simt_tail() != 0) {
+        std::cerr << "FAILED: test_prefill_workspace_envelope_covers_simt_tail\n";
+        return 1;
+    }
+    std::cout << "PASS: test_prefill_workspace_envelope_covers_simt_tail\n";
     if (test_prefill_equivalence_and_benchmark(device) != 0) {
         std::cerr << "FAILED: test_prefill_equivalence_and_benchmark\n";
         return 1;

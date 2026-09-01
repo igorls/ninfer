@@ -180,6 +180,7 @@ __global__ void flash_next_moe_prefill_build_groups_kernel(
     std::int32_t* __restrict__ grouped_tokens,
     std::int32_t* __restrict__ grouped_paths,
     std::int32_t* __restrict__ grouped_experts,
+    std::int32_t* __restrict__ token_to_pos,
     std::int32_t* __restrict__ task_counter,
     int tokens) {
     const int tid = static_cast<int>(threadIdx.x);
@@ -279,6 +280,9 @@ __global__ void flash_next_moe_prefill_build_groups_kernel(
         grouped_tokens[pos]  = i / kTopK;
         grouped_paths[pos]   = i % kTopK;
         grouped_experts[pos] = expert;
+        if (token_to_pos != nullptr) {
+            token_to_pos[i]  = pos;
+        }
     }
 }
 
@@ -829,7 +833,7 @@ __global__ __launch_bounds__(256, 4) void flash_next_moe_prefill_down_kernel(
     }
 }
 
-// Step 4b: Grouped Expert Down GEMM (Native NVFP4 Tensor Core MMA)
+// Step 4b: Grouped Expert Down GEMM (Native NVFP4 Tensor Core MMA with Fused Routing Alpha Epilogue)
 // Tile: 64 output rows x 16 tokens per CTA (2 warps along M x 2 warps along N, 2 sub-tiles along M)
 // CTA: 128 threads (4 warps).
 // Shared memory: 20480 + 2560 (weights) + 5120 + 640 (activations) = 28800 bytes (28.125 KB <= 48 KB hardware limit)
@@ -843,12 +847,13 @@ __global__ __launch_bounds__(128, 4) void flash_next_moe_prefill_down_mma_kernel
     const std::int32_t* __restrict__ active_count_ptr,
     const std::int32_t* __restrict__ grouped_tokens,
     const std::int32_t* __restrict__ grouped_paths,
+    const float* __restrict__ alpha_weights,        // [10, tokens]
     const std::uint8_t* __restrict__ expert_codes,
     const std::uint8_t* __restrict__ expert_scales,
     const float* __restrict__ expert_divisors,
     std::uint64_t code_stride,
     std::uint64_t scale_stride,
-    float* __restrict__ down_intermediate) {
+    __nv_bfloat16* __restrict__ staged_down) {      // [10 * tokens, 2560]
 
     const int total_active = active_count_ptr[0];
     const int active_idx   = static_cast<int>(blockIdx.y);
@@ -875,7 +880,7 @@ __global__ __launch_bounds__(128, 4) void flash_next_moe_prefill_down_mma_kernel
     const auto* exp_codes  = expert_codes + static_cast<std::uint64_t>(expert) * code_stride;
     const auto* exp_scales = expert_scales + static_cast<std::uint64_t>(expert) * scale_stride;
     const int offset       = expert_offsets[expert];
-    const float alpha      = 1.0F / expert_divisors[expert];
+    const float inv_div    = 1.0F / expert_divisors[expert];
 
     // Cooperatively load 64 rows of Down weights (20480 bytes) across all 128 threads (10 iterations)
     #pragma unroll
@@ -986,18 +991,20 @@ __global__ __launch_bounds__(128, 4) void flash_next_moe_prefill_down_mma_kernel
                 const int row1 = row0 + 8;
 
                 if (tok0 < cur_batch) {
-                    const int pos = offset + t_base + tok0;
-                    const int tok = grouped_tokens[pos];
+                    const int pos  = offset + t_base + tok0;
+                    const int tok  = grouped_tokens[pos];
                     const int path = grouped_paths[pos];
-                    down_intermediate[(static_cast<std::int64_t>(tok) * kHidden + row0) * kTopK + path] = accumulators[0] * alpha;
-                    down_intermediate[(static_cast<std::int64_t>(tok) * kHidden + row1) * kTopK + path] = accumulators[2] * alpha;
+                    const float w  = alpha_weights[tok * kTopK + path] * inv_div;
+                    staged_down[static_cast<std::int64_t>(pos) * kHidden + row0] = __float2bfloat16_rn(accumulators[0] * w);
+                    staged_down[static_cast<std::int64_t>(pos) * kHidden + row1] = __float2bfloat16_rn(accumulators[2] * w);
                 }
                 if (tok1 < cur_batch) {
-                    const int pos = offset + t_base + tok1;
-                    const int tok = grouped_tokens[pos];
+                    const int pos  = offset + t_base + tok1;
+                    const int tok  = grouped_tokens[pos];
                     const int path = grouped_paths[pos];
-                    down_intermediate[(static_cast<std::int64_t>(tok) * kHidden + row0) * kTopK + path] = accumulators[1] * alpha;
-                    down_intermediate[(static_cast<std::int64_t>(tok) * kHidden + row1) * kTopK + path] = accumulators[3] * alpha;
+                    const float w  = alpha_weights[tok * kTopK + path] * inv_div;
+                    staged_down[static_cast<std::int64_t>(pos) * kHidden + row0] = __float2bfloat16_rn(accumulators[1] * w);
+                    staged_down[static_cast<std::int64_t>(pos) * kHidden + row1] = __float2bfloat16_rn(accumulators[3] * w);
                 }
             }
         }
@@ -1005,7 +1012,147 @@ __global__ __launch_bounds__(128, 4) void flash_next_moe_prefill_down_mma_kernel
     }
 }
 
-// Step 5: Prefill Shared Expert Down & Routed Path Reduction (Vectorized 128-bit loads)
+// Step 5: Prefill Shared Expert Down MMA Kernel (Tensor Core BF16 / fast MMA)
+// Computes SharedDown(2560 x 640) * activations_shared(640 x tokens) and scales by shared_scale[token],
+// initializing the layer output (BF16 [2560, tokens]).
+// Grid: (kHidden / 64, (tokens + 15) / 16)
+// Threads: 128 (4 warps).
+__global__ __launch_bounds__(128, 4) void flash_next_moe_prefill_shared_down_mma_kernel(
+    const __nv_bfloat16* __restrict__ shared_down,
+    const __nv_bfloat16* __restrict__ activations,
+    const float* __restrict__ shared_scale,
+    __nv_bfloat16* __restrict__ output,
+    int tokens) {
+
+    const int row_base   = static_cast<int>(blockIdx.x) * 64;
+    const int token_base = static_cast<int>(blockIdx.y) * 16;
+    if (row_base >= kHidden || token_base >= tokens) { return; }
+
+    const int tid    = static_cast<int>(threadIdx.x);
+    const int warp   = tid >> 5;
+    const int warp_m = warp >> 1; // 0 or 1 (rows 0..31 or rows 32..63)
+    const int warp_n = warp & 1;  // 0 or 1 (tokens 0..7 or tokens 8..15)
+    const int lane   = tid & 31;
+
+    __shared__ alignas(16) __nv_bfloat16 s_w[64 * 128]; // 16 KB
+    __shared__ alignas(16) __nv_bfloat16 s_x[16 * 128]; // 4 KB
+
+    float accum[2][4] = {}; // [sub_m][4 accumulators]
+    const int t_offset = token_base + warp_n * 8;
+
+    for (int k_stage = 0; k_stage < 5; ++k_stage) {
+        const int k_base = k_stage * 128;
+
+        // Load 64 rows x 128 cols weights (8192 elements = 16384 bytes)
+        #pragma unroll
+        for (int i = tid * 8; i < 64 * 128; i += 128 * 8) {
+            const int r = i / 128;
+            const int c = i % 128;
+            *reinterpret_cast<uint4*>(&s_w[r * 128 + c]) =
+                *reinterpret_cast<const uint4*>(&shared_down[static_cast<std::int64_t>(row_base + r) * kIntermediate + k_base + c]);
+        }
+
+        // Load 16 tokens x 128 cols activations (2048 elements = 4096 bytes)
+        #pragma unroll
+        for (int i = tid * 8; i < 16 * 128; i += 128 * 8) {
+            const int tok_idx = i / 128;
+            const int c       = i % 128;
+            const int tok     = token_base + tok_idx;
+            if (tok < tokens) {
+                const auto* src = activations + (static_cast<std::int64_t>(tok) * kPaths + kTopK) * kIntermediate + k_base + c;
+                *reinterpret_cast<uint4*>(&s_x[tok_idx * 128 + c]) =
+                    *reinterpret_cast<const uint4*>(src);
+            } else {
+                *reinterpret_cast<uint4*>(&s_x[tok_idx * 128 + c]) = make_uint4(0, 0, 0, 0);
+            }
+        }
+        __syncthreads();
+
+        // Compute 32 rows x 8 tokens for this warp
+        #pragma unroll
+        for (int sub_m = 0; sub_m < 2; ++sub_m) {
+            const int r_local0 = warp_m * 32 + sub_m * 16 + (lane >> 2);
+            const int r_local1 = r_local0 + 8;
+            const int tok0_local = warp_n * 8 + 2 * (lane & 3);
+            const int tok1_local = tok0_local + 1;
+
+            #pragma unroll
+            for (int k_idx = 0; k_idx < 128; k_idx += 2) {
+                const float2 w0 = ops::bf16x2_bits_to_float2(*reinterpret_cast<const uint32_t*>(&s_w[r_local0 * 128 + k_idx]));
+                const float2 w1 = ops::bf16x2_bits_to_float2(*reinterpret_cast<const uint32_t*>(&s_w[r_local1 * 128 + k_idx]));
+                const float2 x0 = ops::bf16x2_bits_to_float2(*reinterpret_cast<const uint32_t*>(&s_x[tok0_local * 128 + k_idx]));
+                const float2 x1 = ops::bf16x2_bits_to_float2(*reinterpret_cast<const uint32_t*>(&s_x[tok1_local * 128 + k_idx]));
+
+                accum[sub_m][0] = fmaf(w0.x, x0.x, fmaf(w0.y, x0.y, accum[sub_m][0]));
+                accum[sub_m][1] = fmaf(w0.x, x1.x, fmaf(w0.y, x1.y, accum[sub_m][1]));
+                accum[sub_m][2] = fmaf(w1.x, x0.x, fmaf(w1.y, x0.y, accum[sub_m][2]));
+                accum[sub_m][3] = fmaf(w1.x, x1.x, fmaf(w1.y, x1.y, accum[sub_m][3]));
+            }
+        }
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for (int sub_m = 0; sub_m < 2; ++sub_m) {
+        const int row0 = row_base + warp_m * 32 + sub_m * 16 + (lane >> 2);
+        const int row1 = row0 + 8;
+        const int tok0 = t_offset + 2 * (lane & 3);
+        const int tok1 = tok0 + 1;
+
+        if (tok0 < tokens) {
+            const float s_scale0 = shared_scale[tok0];
+            output[static_cast<std::int64_t>(tok0) * kHidden + row0] = __float2bfloat16_rn(accum[sub_m][0] * s_scale0);
+            output[static_cast<std::int64_t>(tok0) * kHidden + row1] = __float2bfloat16_rn(accum[sub_m][2] * s_scale0);
+        }
+        if (tok1 < tokens) {
+            const float s_scale1 = shared_scale[tok1];
+            output[static_cast<std::int64_t>(tok1) * kHidden + row0] = __float2bfloat16_rn(accum[sub_m][1] * s_scale1);
+            output[static_cast<std::int64_t>(tok1) * kHidden + row1] = __float2bfloat16_rn(accum[sub_m][3] * s_scale1);
+        }
+    }
+}
+
+// Step 6: Fused Fixed-Order FP32 Warp-Tile Reduction Kernel
+// Sums SharedDown base + 10 routed paths in strictly fixed sequential order p = 0..9
+// Grid: (kHidden / 64, (tokens + 15) / 16)
+// Threads: 128 (4 warps).
+__global__ __launch_bounds__(128, 4) void flash_next_moe_prefill_down_reduce_fused_kernel(
+    const std::int32_t* __restrict__ token_to_pos,
+    const __nv_bfloat16* __restrict__ staged_down,
+    __nv_bfloat16* __restrict__ output,
+    int tokens) {
+
+    const int row_base   = static_cast<int>(blockIdx.x) * 64;
+    const int token_base = static_cast<int>(blockIdx.y) * 16;
+    if (row_base >= kHidden || token_base >= tokens) { return; }
+
+    const int tid = static_cast<int>(threadIdx.x);
+
+    #pragma unroll
+    for (int item = 0; item < 8; ++item) {
+        const int local_idx = tid * 8 + item;
+        const int r_off     = local_idx >> 4; // 0..63
+        const int t_off     = local_idx & 15; // 0..15
+        const int tok       = token_base + t_off;
+        const int row       = row_base + r_off;
+
+        if (tok < tokens) {
+            const auto* base_ptr = output + static_cast<std::int64_t>(tok) * kHidden + row;
+            float sum = __bfloat162float(*base_ptr);
+
+            #pragma unroll
+            for (int p = 0; p < 10; ++p) {
+                const int pos = token_to_pos[tok * 10 + p];
+                const float v = __bfloat162float(staged_down[static_cast<std::int64_t>(pos) * kHidden + row]);
+                sum += v;
+            }
+
+            output[static_cast<std::int64_t>(tok) * kHidden + row] = __float2bfloat16_rn(sum);
+        }
+    }
+}
+
+// Step 5 (SIMT fallback): Prefill Shared Expert Down & Routed Path Reduction (Vectorized 128-bit loads for T < 512)
 // CTA: 256 threads (8 warps). Each warp processes 1 row -> 8 rows per CTA.
 // Grid.x = 2560 / 8 = 320, Grid.y = (tokens + 7) / 8.
 __global__ void flash_next_moe_prefill_down_reduce_kernel(
@@ -1204,6 +1351,7 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
             static_cast<std::int32_t*>(workspace.grouped_tokens.data),
             static_cast<std::int32_t*>(workspace.grouped_paths.data),
             static_cast<std::int32_t*>(workspace.grouped_experts.data),
+            static_cast<std::int32_t*>(workspace.token_to_pos.data),
             static_cast<std::int32_t*>(workspace.task_counter.data),
             tokens);
         CUDA_CHECK(cudaGetLastError());
@@ -1270,7 +1418,17 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
                     down_act_rows, 1.0F);
             CUDA_CHECK(cudaGetLastError());
 
-            // 6. Grouped Down GEMM (Native NVFP4 Tensor Core MMA)
+            // 6. Shared Down MMA: SharedDown(2560 x 640) * activations[:, 10, :] * shared_scale -> output
+            const dim3 shared_down_grid(kHidden / 64, (static_cast<unsigned>(tokens) + 15) / 16);
+            flash_next_moe_prefill_shared_down_mma_kernel<<<shared_down_grid, 128, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(weights.shared_down.qdata),
+                static_cast<const __nv_bfloat16*>(workspace.activations.data),
+                static_cast<const float*>(workspace.shared_scale.data),
+                static_cast<__nv_bfloat16*>(output.data),
+                tokens);
+            CUDA_CHECK(cudaGetLastError());
+
+            // 7. Grouped Down GEMM (Native NVFP4 Tensor Core MMA with Fused Routing Alpha Epilogue)
             const dim3 down_grid(kHidden / 64, 512);
             flash_next_moe_prefill_down_mma_kernel<<<down_grid, 128, 0, stream>>>(
                 static_cast<const std::uint8_t*>(workspace.down_act_codes.data),
@@ -1281,12 +1439,22 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
                 static_cast<const std::int32_t*>(workspace.active_count.data),
                 static_cast<const std::int32_t*>(workspace.grouped_tokens.data),
                 static_cast<const std::int32_t*>(workspace.grouped_paths.data),
+                static_cast<const float*>(workspace.alpha.data),
                 reinterpret_cast<const std::uint8_t*>(weights.expert_down.codes),
                 reinterpret_cast<const std::uint8_t*>(weights.expert_down.scales),
                 weights.expert_down.weight_scale_divisors,
                 weights.expert_down.code_bytes_per_expert,
                 weights.expert_down.scale_bytes_per_expert,
-                static_cast<float*>(workspace.down_intermediate.data));
+                static_cast<__nv_bfloat16*>(workspace.staged_down.data));
+            CUDA_CHECK(cudaGetLastError());
+
+            // 8. Fused Fixed-Order FP32 Warp-Tile Reduction Kernel
+            const dim3 reduce_grid(kHidden / 64, (static_cast<unsigned>(tokens) + 15) / 16);
+            flash_next_moe_prefill_down_reduce_fused_kernel<<<reduce_grid, 128, 0, stream>>>(
+                static_cast<const std::int32_t*>(workspace.token_to_pos.data),
+                static_cast<const __nv_bfloat16*>(workspace.staged_down.data),
+                static_cast<__nv_bfloat16*>(output.data),
+                tokens);
             CUDA_CHECK(cudaGetLastError());
         } else {
             // Small tokens (8 < tokens < 512): SIMT W4A16 route (avoids quant overhead)
@@ -1337,20 +1505,20 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
                 weights.expert_down.scale_bytes_per_expert,
                 static_cast<float*>(workspace.down_intermediate.data));
             CUDA_CHECK(cudaGetLastError());
-        }
 
-        // 7. Shared Down & Top-K weighted reduction (same for both arms)
-        const dim3 reduce_grid(kHidden / 8, (static_cast<unsigned>(tokens) + 7) / 8);
-        flash_next_moe_prefill_down_reduce_kernel<<<reduce_grid, 256, 0, stream>>>(
-            static_cast<const std::int32_t*>(workspace.ids.data),
-            static_cast<const float*>(workspace.alpha.data),
-            static_cast<const float*>(workspace.shared_scale.data),
-            static_cast<const __nv_bfloat16*>(workspace.activations.data),
-            static_cast<float*>(workspace.down_intermediate.data),
-            static_cast<const __nv_bfloat16*>(weights.shared_down.qdata),
-            static_cast<__nv_bfloat16*>(output.data),
-            tokens);
-        CUDA_CHECK(cudaGetLastError());
+            // 5. Shared Down & Top-K weighted reduction (SIMT)
+            const dim3 reduce_grid(kHidden / 8, (static_cast<unsigned>(tokens) + 7) / 8);
+            flash_next_moe_prefill_down_reduce_kernel<<<reduce_grid, 256, 0, stream>>>(
+                static_cast<const std::int32_t*>(workspace.ids.data),
+                static_cast<const float*>(workspace.alpha.data),
+                static_cast<const float*>(workspace.shared_scale.data),
+                static_cast<const __nv_bfloat16*>(workspace.activations.data),
+                static_cast<float*>(workspace.down_intermediate.data),
+                static_cast<const __nv_bfloat16*>(weights.shared_down.qdata),
+                static_cast<__nv_bfloat16*>(output.data),
+                tokens);
+            CUDA_CHECK(cudaGetLastError());
+        }
     }
 }
 
