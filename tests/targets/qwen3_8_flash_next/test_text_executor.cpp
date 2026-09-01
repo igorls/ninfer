@@ -65,6 +65,7 @@ struct SyntheticFlashNextModel {
     ninfer::DeviceBuffer big_nvfp4_down_codes_buf;
     ninfer::DeviceBuffer big_nvfp4_down_scales_buf;
     ninfer::DeviceBuffer big_divisors_buf;
+    ninfer::DeviceBuffer per_layer_bf16_buf;
 
     std::vector<std::byte> ple_table_data;
     ninfer::targets::qwen3_8_flash_next::detail::TextModelView view;
@@ -74,18 +75,57 @@ SyntheticFlashNextModel make_synthetic_model(ninfer::DeviceContext& device) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
     SyntheticFlashNextModel model;
     std::mt19937 rng(42);
+    std::uniform_real_distribution<float> dist_embed(-0.05f, 0.05f);
     std::uniform_real_distribution<float> dist_bf16(-0.02f, 0.02f);
-    std::uniform_real_distribution<float> dist_norm(0.98f, 1.02f);
+    std::uniform_real_distribution<float> dist_router(-0.10f, 0.10f);
+    std::uniform_real_distribution<float> dist_norm(0.99f, 1.01f);
 
     // 1. Generic BF16 weights (token_embedding, output_head, linear projections)
     constexpr std::uint64_t kOutputHeadBytes = 248'320ULL * 2'560 * 2;
     model.big_bf16_buf = ninfer::DeviceBuffer(kOutputHeadBytes);
     constexpr std::size_t kChunkFloats = 2'560 * 1024;
     std::vector<std::uint16_t> h_bf16(kChunkFloats);
-    for (auto& v : h_bf16) { v = float_to_bf16(dist_bf16(rng)); }
     for (std::size_t off = 0; off < kOutputHeadBytes; off += h_bf16.size() * sizeof(std::uint16_t)) {
+        for (auto& v : h_bf16) { v = float_to_bf16(dist_embed(rng)); }
         std::size_t chunk = std::min<std::size_t>(h_bf16.size() * sizeof(std::uint16_t), kOutputHeadBytes - off);
         model.big_bf16_buf.copy_from_host(h_bf16.data(), chunk, off);
+    }
+
+    // 1b. Per-layer distinct weights across all 48 layers (hyper projections, router, shared expert)
+    constexpr std::uint64_t kAttnDownFloats   = 320ULL * 10'240;
+    constexpr std::uint64_t kAttnUpFloats     = 10'240ULL * 320;
+    constexpr std::uint64_t kMlpDownFloats    = 320ULL * 10'240;
+    constexpr std::uint64_t kMlpUpFloats      = 10'240ULL * 320;
+    constexpr std::uint64_t kRouterFloats     = 512ULL * 2'560;
+    constexpr std::uint64_t kSharedDownFloats = 2'560ULL * 640;
+    constexpr std::uint64_t kSharedGateFloats = 640ULL * 2'560;
+    constexpr std::uint64_t kSharedUpFloats   = 640ULL * 2'560;
+
+    constexpr std::uint64_t kLayerTotalFloats =
+        kAttnDownFloats + kAttnUpFloats + kMlpDownFloats + kMlpUpFloats +
+        kRouterFloats + kSharedDownFloats + kSharedGateFloats + kSharedUpFloats;
+
+    constexpr std::uint64_t kAllLayersFloats = 48ULL * kLayerTotalFloats;
+    constexpr std::uint64_t kAllLayersBytes  = kAllLayersFloats * sizeof(std::uint16_t);
+    model.per_layer_bf16_buf = ninfer::DeviceBuffer(kAllLayersBytes);
+    std::vector<std::uint16_t> h_layer(kLayerTotalFloats);
+    std::uniform_real_distribution<float> dist_mix(-0.025f, 0.025f);
+    std::uniform_real_distribution<float> dist_moe_router(-0.10f, 0.10f);
+    std::uniform_real_distribution<float> dist_shared(-0.025f, 0.025f);
+
+    for (std::size_t l = 0; l < 48; ++l) {
+        std::size_t cur = 0;
+        for (std::size_t i = 0; i < kAttnDownFloats + kAttnUpFloats + kMlpDownFloats + kMlpUpFloats; ++i) {
+            h_layer[cur++] = float_to_bf16(dist_mix(rng));
+        }
+        for (std::size_t i = 0; i < kRouterFloats; ++i) {
+            h_layer[cur++] = float_to_bf16(dist_moe_router(rng));
+        }
+        for (std::size_t i = 0; i < kSharedDownFloats + kSharedGateFloats + kSharedUpFloats; ++i) {
+            h_layer[cur++] = float_to_bf16(dist_shared(rng));
+        }
+        model.per_layer_bf16_buf.copy_from_host(
+            h_layer.data(), kLayerTotalFloats * sizeof(std::uint16_t), l * kLayerTotalFloats * sizeof(std::uint16_t));
     }
 
     // 2. RMSNorm weights (~1.0)
@@ -121,14 +161,15 @@ SyntheticFlashNextModel make_synthetic_model(ninfer::DeviceContext& device) {
     model.ple_conv_buf = ninfer::DeviceBuffer(10'240 * 4 * sizeof(std::uint16_t));
     model.ple_conv_buf.copy_from_host(h_ple_conv.data(), h_ple_conv.size() * sizeof(std::uint16_t));
 
-    // 5. Shared gate weight and hyper injection
+    // 5. Shared gate weight and hyper injection (zero-mean to prevent DC bias drift)
+    std::uniform_real_distribution<float> dist_inject(-0.05f, 0.05f);
     std::vector<std::uint16_t> h_sgw(2'560);
-    for (auto& v : h_sgw) { v = float_to_bf16(0.1f); }
+    for (auto& v : h_sgw) { v = float_to_bf16(dist_inject(rng)); }
     model.shared_gate_weight_buf = ninfer::DeviceBuffer(2'560 * sizeof(std::uint16_t));
     model.shared_gate_weight_buf.copy_from_host(h_sgw.data(), h_sgw.size() * sizeof(std::uint16_t));
 
     std::vector<std::uint16_t> h_inject(4 * 10'240);
-    for (auto& v : h_inject) { v = float_to_bf16(0.25f); }
+    for (auto& v : h_inject) { v = float_to_bf16(dist_inject(rng)); }
     model.inject_buf = ninfer::DeviceBuffer(4 * 10'240 * sizeof(std::uint16_t));
     model.inject_buf.copy_from_host(h_inject.data(), h_inject.size() * sizeof(std::uint16_t));
 
@@ -153,7 +194,7 @@ SyntheticFlashNextModel make_synthetic_model(ninfer::DeviceContext& device) {
     init_fp8_buf(model.fp8_qgkv_buf, 13'312, 2'560, 1.0f / std::sqrt(2'560.0f));
     init_fp8_buf(model.fp8_out_buf, 2'560, 6'144, 1.0f / std::sqrt(6'144.0f));
 
-    // 7. NVFP4 Expert Banks
+    // 7. NVFP4 Expert Banks (zero-mean symmetric signs to prevent directional drift)
     constexpr std::uint64_t gate_code_bytes_per_expert  = 1'280ULL * 2'560 / 2;
     constexpr std::uint64_t gate_scale_bytes_per_expert = 1'280ULL * 2'560 / 16;
     constexpr std::uint64_t down_code_bytes_per_expert  = 2'560ULL * 640 / 2;
@@ -167,8 +208,12 @@ SyntheticFlashNextModel make_synthetic_model(ninfer::DeviceContext& device) {
 
     std::vector<std::uint8_t> h_fp4(1024 * 1024);
     for (auto& b : h_fp4) {
-        const auto low  = static_cast<std::uint8_t>(1 + (rng() % 3));
-        const auto high = static_cast<std::uint8_t>(1 + (rng() % 3));
+        const auto s_low    = (rng() % 2) ? 0x8U : 0x0U;
+        const auto s_high   = (rng() % 2) ? 0x8U : 0x0U;
+        const auto val_low  = static_cast<std::uint8_t>(1 + (rng() % 3));
+        const auto val_high = static_cast<std::uint8_t>(1 + (rng() % 3));
+        const auto low      = static_cast<std::uint8_t>(s_low | val_low);
+        const auto high     = static_cast<std::uint8_t>(s_high | val_high);
         b = static_cast<std::uint8_t>((high << 4) | low);
     }
     for (std::size_t off = 0; off < model.big_nvfp4_gate_codes_buf.bytes; off += h_fp4.size()) {
@@ -204,11 +249,11 @@ SyntheticFlashNextModel make_synthetic_model(ninfer::DeviceContext& device) {
         shard = make_ple_shard_view(model.ple_table_data, rows, width);
     }
 
-    auto make_bf16_weight_from = [](ninfer::DeviceBuffer& buf, std::int32_t rows, std::int32_t cols) {
+    auto make_bf16_weight_from = [](ninfer::DeviceBuffer& buf, std::int32_t rows, std::int32_t cols, std::size_t byte_offset = 0) {
         ninfer::Weight w{};
-        w.payload         = buf.p;
+        w.payload         = static_cast<std::byte*>(buf.p) + byte_offset;
         w.payload_bytes   = static_cast<std::uint64_t>(rows) * cols * 2;
-        w.qdata           = buf.p;
+        w.qdata           = static_cast<std::byte*>(buf.p) + byte_offset;
         w.qtype           = ninfer::QType::BF16_CTRL;
         w.layout          = ninfer::QuantLayout::Contiguous;
         w.n               = rows;
@@ -276,20 +321,31 @@ SyntheticFlashNextModel make_synthetic_model(ninfer::DeviceContext& device) {
 
     for (std::size_t l = 0; l < 48; ++l) {
         auto& layer = model.view.layers[l];
+        std::uint64_t off = l * kLayerTotalFloats;
+
         layer.attention_hyper.block_inject   = make_bf16_weight_from(model.inject_buf, 4, 10'240);
         layer.attention_hyper.norm           = ninfer::Tensor(model.norm_bf16_buf.p, ninfer::DType::BF16, {10'240});
-        layer.attention_hyper.input_mix_down = make_bf16_weight(320, 10'240);
-        layer.attention_hyper.input_mix_up   = make_bf16_weight(10'240, 320);
+        layer.attention_hyper.input_mix_down = make_bf16_weight_from(model.per_layer_bf16_buf, 320, 10'240, off * sizeof(std::uint16_t));
+        off += kAttnDownFloats;
+        layer.attention_hyper.input_mix_up   = make_bf16_weight_from(model.per_layer_bf16_buf, 10'240, 320, off * sizeof(std::uint16_t));
+        off += kAttnUpFloats;
 
         layer.mlp_hyper.block_inject   = make_bf16_weight_from(model.inject_buf, 4, 10'240);
         layer.mlp_hyper.norm           = ninfer::Tensor(model.norm_bf16_buf.p, ninfer::DType::BF16, {10'240});
-        layer.mlp_hyper.input_mix_down = make_bf16_weight(320, 10'240);
-        layer.mlp_hyper.input_mix_up   = make_bf16_weight(10'240, 320);
+        layer.mlp_hyper.input_mix_down = make_bf16_weight_from(model.per_layer_bf16_buf, 320, 10'240, off * sizeof(std::uint16_t));
+        off += kMlpDownFloats;
+        layer.mlp_hyper.input_mix_up   = make_bf16_weight_from(model.per_layer_bf16_buf, 10'240, 320, off * sizeof(std::uint16_t));
+        off += kMlpUpFloats;
 
-        layer.moe.router             = make_bf16_weight(512, 2'560);
-        layer.moe.shared_down        = make_bf16_weight(2'560, 640);
-        layer.moe.shared_gate        = make_bf16_weight(640, 2'560);
-        layer.moe.shared_up          = make_bf16_weight(640, 2'560);
+        layer.moe.router             = make_bf16_weight_from(model.per_layer_bf16_buf, 512, 2'560, off * sizeof(std::uint16_t));
+        off += kRouterFloats;
+        layer.moe.shared_down        = make_bf16_weight_from(model.per_layer_bf16_buf, 2'560, 640, off * sizeof(std::uint16_t));
+        off += kSharedDownFloats;
+        layer.moe.shared_gate        = make_bf16_weight_from(model.per_layer_bf16_buf, 640, 2'560, off * sizeof(std::uint16_t));
+        off += kSharedGateFloats;
+        layer.moe.shared_up          = make_bf16_weight_from(model.per_layer_bf16_buf, 640, 2'560, off * sizeof(std::uint16_t));
+        off += kSharedUpFloats;
+
         layer.moe.shared_gate_weight = make_bf16_weight_from(model.shared_gate_weight_buf, 1, 2'560);
         layer.moe.expert_gate_up     = Nvfp4ExpertBankView{
             .codes                  = static_cast<const std::byte*>(model.big_nvfp4_gate_codes_buf.p),

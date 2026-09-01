@@ -5,8 +5,13 @@
 #include "targets/qwen3_8_flash_next/impl/moe_route.h"
 #include "targets/qwen3_8_flash_next/impl/moe_workspace.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <stdexcept>
+#include <vector>
+
+#include "core/device.h"
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 namespace {
@@ -72,6 +77,35 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
     flash_next_route(input, weights.router, weights.shared_gate_weight, scratch.scores, scratch.ids,
                      scratch.alpha, scratch.shared_scale, stream);
     flash_next_moe_kernels_launch(input, weights, scratch, output, stream);
+
+    static const char* trace_routing_env = std::getenv("NINFER_FLASH_NEXT_TRACE_ROUTING");
+    if (trace_routing_env != nullptr && trace_routing_env[0] != '\0' && tokens >= 512) {
+        static int s_route_call = 0;
+        int h_active = 0;
+        cudaMemcpyAsync(&h_active, scratch.active_count.data, sizeof(int), cudaMemcpyDeviceToHost, stream);
+        std::vector<int> h_counts(512);
+        cudaMemcpyAsync(h_counts.data(), scratch.expert_counts.data, 512 * sizeof(int), cudaMemcpyDeviceToHost, stream);
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        int max_grp = 0, min_grp = 999999, sum_grp = 0;
+        for (int e = 0; e < 512; ++e) {
+            if (h_counts[e] > 0) {
+                max_grp = std::max(max_grp, h_counts[e]);
+                min_grp = std::min(min_grp, h_counts[e]);
+                sum_grp += h_counts[e];
+            }
+        }
+        int layer_idx = (s_route_call++) % 48;
+        if (layer_idx == 0) {
+            std::fprintf(stderr, "\n--- MoE Routing Trace (T=%d) ---\n", tokens);
+            std::fprintf(stderr, "Layer | Active Experts | %% Active | Min Group | Avg Group | Max Group\n");
+            std::fprintf(stderr, "------+----------------+----------+-----------+-----------+----------\n");
+        }
+        std::fprintf(stderr, " L%02d  |   %3d / 512    |  %5.1f%%  |    %3d    |   %5.1f   |    %3d   \n",
+                     layer_idx, h_active, h_active * 100.0f / 512.0f, min_grp, (float)sum_grp / h_active, max_grp);
+        if (layer_idx == 47) {
+            std::fprintf(stderr, "-----------------------------------------------------------------\n\n");
+        }
+    }
 }
 
 void flash_next_moe_bf16(const Tensor& input, const MoeBf16Weights& weights, Tensor& output,
