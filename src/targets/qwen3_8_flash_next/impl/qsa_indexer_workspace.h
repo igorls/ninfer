@@ -3,6 +3,7 @@
 #include "core/arena.h"
 #include "core/tensor.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 
@@ -15,6 +16,10 @@ struct FlashNextQsaIndexerWorkspace {
     Tensor sorted_scores;
     Tensor ids;
     Tensor sorted_ids;
+    Tensor packed_keys;
+    Tensor packed_selected;
+    Tensor packed_sorted;
+    Tensor topk_ids;
     Tensor offsets;
     DeviceSpan sort_temp;
 };
@@ -35,14 +40,18 @@ allocate_flash_next_qsa_indexer_workspace(Arena& arena, std::int32_t maximum_blo
                                           std::int32_t tokens, std::int32_t tile_size,
                                           std::size_t sort_temp_bytes) {
     return {
-        .projected     = arena.alloc(DType::BF16, {640, tokens}, 256),
-        .query         = arena.alloc(DType::BF16, {128, 4, tokens}, 256),
-        .scores        = arena.alloc(DType::FP32, {maximum_blocks, tile_size}, 256),
-        .sorted_scores = arena.alloc(DType::FP32, {maximum_blocks, tile_size}, 256),
-        .ids           = arena.alloc(DType::I32, {maximum_blocks, tile_size}, 256),
-        .sorted_ids    = arena.alloc(DType::I32, {maximum_blocks, tile_size}, 256),
-        .offsets       = arena.alloc(DType::I32, {tile_size + 1}, 16),
-        .sort_temp     = arena.alloc_bytes(sort_temp_bytes, 256),
+        .projected       = arena.alloc(DType::BF16, {640, tokens}, 256),
+        .query           = arena.alloc(DType::BF16, {128, 4, tokens}, 256),
+        .scores          = arena.alloc(DType::FP32, {maximum_blocks, tile_size}, 256),
+        .sorted_scores   = arena.alloc(DType::FP32, {maximum_blocks, tile_size}, 256),
+        .ids             = arena.alloc(DType::I32, {maximum_blocks, tile_size}, 256),
+        .sorted_ids      = arena.alloc(DType::I32, {maximum_blocks, tile_size}, 256),
+        .packed_keys     = arena.alloc(DType::I64, {maximum_blocks, tile_size}, 256),
+        .packed_selected = arena.alloc(DType::I64, {512, tile_size}, 256),
+        .packed_sorted   = arena.alloc(DType::I64, {512, tile_size}, 256),
+        .topk_ids        = arena.alloc(DType::I32, {512, tile_size}, 256),
+        .offsets         = arena.alloc(DType::I32, {tile_size + 1}, 16),
+        .sort_temp       = arena.alloc_bytes(sort_temp_bytes, 256),
     };
 }
 

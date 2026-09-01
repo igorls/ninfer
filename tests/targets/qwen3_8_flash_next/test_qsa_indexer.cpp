@@ -10,6 +10,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <random>
 #include <vector>
@@ -529,6 +530,59 @@ bool selection_sets_equal(const std::int32_t* a, const std::int32_t* b, std::int
     return true;
 }
 
+void fill_equal_block_keys(std::vector<std::uint16_t>& keys, std::int32_t complete_blocks) {
+    std::fill(keys.begin(), keys.end(), 0);
+    const std::uint16_t packed = float_to_bf16(1.0F);
+    for (std::int32_t block = 0; block < complete_blocks; ++block) {
+        const std::int32_t page   = block / 64;
+        const std::int32_t offset = block % 64;
+        const std::size_t index =
+            static_cast<std::size_t>(page) * 64ULL * 128ULL + static_cast<std::size_t>(offset) * 128ULL;
+        for (int dim = 0; dim < 128; ++dim) { keys[index + static_cast<std::size_t>(dim)] = packed; }
+    }
+}
+
+void fill_tie_band_block_keys(std::vector<std::uint16_t>& keys, std::int32_t complete_blocks,
+                              std::int32_t unique_high) {
+    std::fill(keys.begin(), keys.end(), 0);
+    const std::uint16_t medium = float_to_bf16(0.0F);
+    for (std::int32_t block = 0; block < complete_blocks; ++block) {
+        const std::int32_t page   = block / 64;
+        const std::int32_t offset = block % 64;
+        const std::size_t index =
+            static_cast<std::size_t>(page) * 64ULL * 128ULL + static_cast<std::size_t>(offset) * 128ULL;
+        const std::uint16_t packed =
+            block < unique_high ? float_to_bf16(static_cast<float>(block + 1)) : medium;
+        for (int dim = 0; dim < 128; ++dim) { keys[index + static_cast<std::size_t>(dim)] = packed; }
+    }
+}
+
+void expected_tie_band_order(std::array<std::int32_t, 512>& expected, std::int32_t unique_high) {
+    std::int32_t out = 0;
+    for (std::int32_t block = unique_high - 1; block >= 0; --block) {
+        expected[static_cast<std::size_t>(out++)] = block;
+    }
+    for (std::int32_t block = unique_high; out < 512; ++block) {
+        expected[static_cast<std::size_t>(out++)] = block;
+    }
+}
+
+bool selection_matches(const std::int32_t* actual, const std::int32_t* expected, std::int32_t count,
+                       const char* label) {
+    if (count != 512) {
+        std::cerr << "FAIL: " << label << " count=" << count << " (vacuous or wrong)\n";
+        return false;
+    }
+    for (std::int32_t i = 0; i < 512; ++i) {
+        if (actual[i] != expected[i]) {
+            std::cerr << "FAIL: " << label << " id[" << i << "]=" << actual[i]
+                      << " expected=" << expected[i] << "\n";
+            return false;
+        }
+    }
+    return true;
+}
+
 void fill_monotonic_block_keys(std::vector<std::uint16_t>& keys, std::int32_t complete_blocks) {
     std::fill(keys.begin(), keys.end(), 0);
     for (std::int32_t block = 0; block < complete_blocks; ++block) {
@@ -795,6 +849,93 @@ bool test_fully_selected_identity_bypass(ninfer::DeviceContext& device, float& u
     return true;
 }
 
+bool test_long_context_topk(ninfer::DeviceContext& device) {
+    constexpr std::array<std::int32_t, 4> ns{513, 1024, 4096, 8192};
+    constexpr std::int32_t unique_high = 400;
+    constexpr int kIters               = 30;
+    std::cout << "\n=== G5 long-context indexer top-512 ===\n";
+    for (std::int32_t n : ns) {
+        const std::int32_t logical_pages = (n + 63) / 64;
+        const std::int32_t token         = 4 * n; // tail=0, complete_blocks = n
+        IndexerProbe probe(n, logical_pages);
+        std::vector<std::uint16_t> keys(128ULL * 64 * static_cast<std::size_t>(logical_pages), 0);
+
+        fill_equal_block_keys(keys, n);
+        probe.load_keys(keys, device);
+        std::int32_t count = -1;
+        std::array<std::int32_t, 512> ids{};
+        probe.run(device, token, n, n, count, ids);
+        std::array<std::int32_t, 512> equal_expected{};
+        for (std::int32_t i = 0; i < 512; ++i) { equal_expected[static_cast<std::size_t>(i)] = i; }
+        if (!selection_matches(ids.data(), equal_expected.data(), count, "equal-keys")) {
+            std::cerr << " at N=" << n << "\n";
+            return false;
+        }
+        std::array<std::int32_t, 512> ids_again{};
+        std::int32_t count_again = -1;
+        probe.run(device, token, n, n, count_again, ids_again);
+        if (count_again != count || std::memcmp(ids.data(), ids_again.data(), sizeof(ids)) != 0) {
+            std::cerr << "FAIL: equal-keys path was not run-to-run identical at N=" << n << "\n";
+            return false;
+        }
+
+        fill_tie_band_block_keys(keys, n, unique_high);
+        probe.load_keys(keys, device);
+        probe.run(device, token, n, n, count, ids);
+        if (count != 512) {
+            std::cerr << "FAIL: tie-band count=" << count << " at N=" << n << "\n";
+            return false;
+        }
+        std::vector<std::int32_t> unique_prefix(ids.begin(), ids.begin() + unique_high);
+        std::sort(unique_prefix.begin(), unique_prefix.end());
+        for (std::int32_t i = 0; i < unique_high; ++i) {
+            if (unique_prefix[static_cast<std::size_t>(i)] != i) {
+                std::cerr << "FAIL: tie-band unique-high SET at N=" << n << " missing " << i << "\n";
+                return false;
+            }
+        }
+        for (std::int32_t i = 0; i < 512 - unique_high; ++i) {
+            const std::int32_t got = ids[static_cast<std::size_t>(unique_high + i)];
+            const std::int32_t exp = unique_high + i;
+            if (got != exp) {
+                std::cerr << "FAIL: tie-band tail id[" << (unique_high + i) << "]=" << got
+                          << " expected=" << exp << " at N=" << n << "\n";
+                return false;
+            }
+        }
+        probe.run(device, token, n, n, count_again, ids_again);
+        if (count_again != 512 || std::memcmp(ids.data(), ids_again.data(), sizeof(ids)) != 0) {
+            std::cerr << "FAIL: tie-band path was not run-to-run identical at N=" << n << "\n";
+            return false;
+        }
+        if (ids[0] == 0 && ids[1] == 0) {
+            std::cerr << "FAIL: vacuous tie-band selection at N=" << n << "\n";
+            return false;
+        }
+
+        drain_all_streams();
+        for (int i = 0; i < 5; ++i) { probe.launch(n, n, device.stream); }
+        device.synchronize();
+        cudaEvent_t start = nullptr;
+        cudaEvent_t stop  = nullptr;
+        CUDA_CHECK(cudaEventCreate(&start));
+        CUDA_CHECK(cudaEventCreate(&stop));
+        CUDA_CHECK(cudaEventRecord(start, device.stream));
+        for (int i = 0; i < kIters; ++i) { probe.launch(n, n, device.stream); }
+        CUDA_CHECK(cudaEventRecord(stop, device.stream));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        float ms = 0.0F;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        CUDA_CHECK(cudaEventDestroy(start));
+        CUDA_CHECK(cudaEventDestroy(stop));
+        const float us_topk = ms * 1000.0F / static_cast<float>(kIters);
+        std::cout << "  N=" << n << " indexer(topk)=" << us_topk
+                  << " us  12-layer round=" << (12.0F * us_topk) << " us\n";
+    }
+    std::cout << "PASS: test_long_context_topk\n";
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -953,11 +1094,16 @@ int main() {
     const float us_round_sort   = 12.0F * us_sort;
     std::cout << "G1 indexer decode active_blocks=512 (identity bypass): " << us_bypass
               << " us/iter\n";
-    std::cout << "G1 indexer decode active_blocks=513 (CUB sort):        " << us_sort
+    std::cout << "G1 indexer decode active_blocks=513 (long-context select): " << us_sort
               << " us/iter\n";
     std::cout << "G1 decode-round estimate (12 QSA layers): bypass=" << us_round_bypass
               << " us  sort=" << us_round_sort << " us  saving=" << (us_round_sort - us_round_bypass)
               << " us\n";
+
+    if (!test_long_context_topk(device)) {
+        std::cerr << "FAIL: test_long_context_topk failed\n";
+        return 1;
+    }
 
     std::cout << "PASS: test_qsa_indexer\n";
     return 0;
