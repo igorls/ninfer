@@ -1012,12 +1012,12 @@ __global__ __launch_bounds__(128, 4) void flash_next_moe_prefill_down_mma_kernel
     }
 }
 
-// Step 5: Prefill Shared Expert Down MMA Kernel (Tensor Core BF16 / fast MMA)
+// Step 5: Prefill Shared Expert Down FMA Kernel (BF16 SIMT FMA)
 // Computes SharedDown(2560 x 640) * activations_shared(640 x tokens) and scales by shared_scale[token],
 // initializing the layer output (BF16 [2560, tokens]).
 // Grid: (kHidden / 64, (tokens + 15) / 16)
 // Threads: 128 (4 warps).
-__global__ __launch_bounds__(128, 4) void flash_next_moe_prefill_shared_down_mma_kernel(
+__global__ __launch_bounds__(128, 4) void flash_next_moe_prefill_shared_down_kernel(
     const __nv_bfloat16* __restrict__ shared_down,
     const __nv_bfloat16* __restrict__ activations,
     const float* __restrict__ shared_scale,
@@ -1418,9 +1418,9 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
                     down_act_rows, 1.0F);
             CUDA_CHECK(cudaGetLastError());
 
-            // 6. Shared Down MMA: SharedDown(2560 x 640) * activations[:, 10, :] * shared_scale -> output
+            // 6. Shared Down FMA: SharedDown(2560 x 640) * activations[:, 10, :] * shared_scale -> output
             const dim3 shared_down_grid(kHidden / 64, (static_cast<unsigned>(tokens) + 15) / 16);
-            flash_next_moe_prefill_shared_down_mma_kernel<<<shared_down_grid, 128, 0, stream>>>(
+            flash_next_moe_prefill_shared_down_kernel<<<shared_down_grid, 128, 0, stream>>>(
                 static_cast<const __nv_bfloat16*>(weights.shared_down.qdata),
                 static_cast<const __nv_bfloat16*>(workspace.activations.data),
                 static_cast<const float*>(workspace.shared_scale.data),

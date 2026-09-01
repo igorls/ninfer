@@ -5,8 +5,13 @@
 #include "targets/qwen3_8_flash_next/impl/moe_route.h"
 #include "targets/qwen3_8_flash_next/impl/moe_workspace.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <stdexcept>
+#include <vector>
+
+#include "core/device.h"
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 namespace {
