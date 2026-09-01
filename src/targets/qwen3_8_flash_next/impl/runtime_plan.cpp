@@ -3,6 +3,9 @@
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 
@@ -203,6 +206,14 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
     FlashNextRuntimePlan plan{};
     plan.config                     = config;
     plan.config.state_slot_capacity = resolved_state_slots;
+    if (const char* env = std::getenv("NINFER_FLASH_NEXT_QSA_PREFILL_MMA");
+        env != nullptr && env[0] != '\0') {
+        plan.config.use_qsa_prefill_mma =
+            !(std::strcmp(env, "0") == 0 || std::strcmp(env, "off") == 0 ||
+              std::strcmp(env, "false") == 0);
+    }
+    std::fprintf(stderr, "qsa_prefill_mma=%s\n",
+                 plan.config.use_qsa_prefill_mma ? "on" : "off");
     plan.main_page_groups           = selected_main_page_groups;
     plan.resolved_tokens =
         checked_mul<std::uint32_t>(selected_main_page_groups, kMainPageGroupTokens);

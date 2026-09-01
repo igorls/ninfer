@@ -149,6 +149,7 @@ Package::SequencePlanner Package::make_sequence_planner(DeviceContext& device,
         .use_cuda_graph        = options.use_cuda_graph,
         .vision_enabled        = options.enable_vision,
         .max_vision_tokens     = 4096,
+        .use_qsa_prefill_mma   = options.use_qsa_prefill_mma,
     };
     return SequencePlanner(std::make_unique<detail::SequencePlannerImpl>(config));
 }

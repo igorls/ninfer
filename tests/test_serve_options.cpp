@@ -33,6 +33,8 @@ int main() {
     failures +=
         check(!defaults.preserve_thinking, "thinking history is unexpectedly preserved by default");
     failures += check(!defaults.enable_vision, "Vision is not disabled by default");
+    failures += check(!defaults.use_qsa_prefill_mma,
+                      "QSA prefill MMA is not disabled by default");
     failures += check(defaults.request_log_jsonl.empty(),
                       "request JSONL logging is not disabled by default");
     failures += check(defaults.context_cost_presets.empty(),
@@ -125,6 +127,7 @@ int main() {
                                            "model.ninfer",
                                            "--no-prefix-reuse",
                                            "--vision",
+                                           "--qsa-prefill-mma",
                                            "--max-concurrency",
                                            "4",
                                            "--max-pending-requests",
@@ -150,6 +153,7 @@ int main() {
                           configured.context_cache.host_kv_capacity_bytes == 0,
                       "root-only server mode retained default Host capacities");
     failures += check(configured.enable_vision, "--vision did not enable Vision");
+    failures += check(configured.use_qsa_prefill_mma, "--qsa-prefill-mma did not enable MMA prefill");
     failures +=
         check(configured.preserve_thinking, "--preserve-thinking did not reach serving options");
     failures +=

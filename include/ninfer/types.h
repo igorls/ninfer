@@ -122,6 +122,8 @@ struct EngineOptions {
     std::uint32_t media_preprocess_threads = 0;
     bool enable_vision                     = false;
     bool use_cuda_graph                    = true;
+    // Flash-Next only. Default off keeps the scalar QSA prefill attention kernel.
+    bool use_qsa_prefill_mma               = false;
     // Flash-Next only. Default off keeps the BF16 output head and byte-identical serving.
     bool quantize_output_head_fp8 = false;
     ContextCacheOptions context_cache;
