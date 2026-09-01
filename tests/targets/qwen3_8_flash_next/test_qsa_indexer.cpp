@@ -1001,6 +1001,65 @@ bool test_padded_score_nan_sentinel(ninfer::DeviceContext& device) {
     return true;
 }
 
+bool test_prefill_decode_select_equivalence(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    const std::int32_t ns[] = {513, 1024};
+    for (std::int32_t n : ns) {
+        const std::int32_t logical_pages = (n + 63) / 64;
+        IndexerProbe decode_probe(n, logical_pages);
+        IndexerProbe prefill_probe(n, logical_pages);
+        std::vector<std::uint16_t> host_keys(128ULL * 64 * logical_pages, 0);
+        fill_monotonic_block_keys(host_keys, n);
+        decode_probe.load_keys(host_keys, device);
+        prefill_probe.load_keys(host_keys, device);
+
+        const std::int32_t token = n * 4 - 1;
+        std::int32_t count_decode = -1;
+        std::int32_t count_prefill = -1;
+        std::array<std::int32_t, 512> ids_decode{};
+        std::array<std::int32_t, 512> ids_prefill{};
+        decode_probe.run(device, token, n, n, count_decode, ids_decode);
+
+        prefill_probe.set_token(token);
+        drain_all_streams();
+        flash_next_qsa_indexer_prefill_chunk(
+            prefill_probe.input_view, prefill_probe.weights, prefill_probe.token_view,
+            prefill_probe.position_view, 0, 0, 0, prefill_probe.cache, n, prefill_probe.workspace,
+            prefill_probe.selected_view, prefill_probe.count_view, device.stream);
+        drain_all_streams();
+        prefill_probe.selected_count.copy_to_host(&count_prefill, sizeof(count_prefill));
+        prefill_probe.selected_blocks.copy_to_host(ids_prefill.data(), sizeof(ids_prefill));
+
+        if (count_decode != 512 || count_prefill != 512) {
+            std::cerr << "FAIL: prefill-vs-decode count decode=" << count_decode
+                      << " prefill=" << count_prefill << " at N=" << n << "\n";
+            return false;
+        }
+        double energy = 0.0;
+        for (std::int32_t i = 0; i < 512; ++i) {
+            if (ids_decode[static_cast<std::size_t>(i)] != ids_prefill[static_cast<std::size_t>(i)]) {
+                std::cerr << "FAIL: prefill-vs-decode id[" << i
+                          << "] decode=" << ids_decode[static_cast<std::size_t>(i)]
+                          << " prefill=" << ids_prefill[static_cast<std::size_t>(i)] << " at N=" << n
+                          << "\n";
+                return false;
+            }
+            energy += static_cast<double>(ids_decode[static_cast<std::size_t>(i)]) *
+                      static_cast<double>(ids_decode[static_cast<std::size_t>(i)]);
+        }
+        if (!(energy > 0.0) || !std::isfinite(energy) ||
+            ids_decode[0] == ids_decode[1]) {
+            std::cerr << "FAIL: prefill-vs-decode comparison vacuous at N=" << n
+                      << " energy=" << energy << "\n";
+            return false;
+        }
+        std::cout << "  N=" << n << " prefill==decode id0=" << ids_decode[0]
+                  << " energy=" << energy << "\n";
+    }
+    std::cout << "PASS: test_prefill_decode_select_equivalence\n";
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -1171,6 +1230,10 @@ int main() {
     }
     if (!test_padded_score_nan_sentinel(device)) {
         std::cerr << "FAIL: test_padded_score_nan_sentinel failed\n";
+        return 1;
+    }
+    if (!test_prefill_decode_select_equivalence(device)) {
+        std::cerr << "FAIL: test_prefill_decode_select_equivalence failed\n";
         return 1;
     }
 

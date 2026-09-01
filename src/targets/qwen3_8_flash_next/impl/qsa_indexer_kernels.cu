@@ -276,7 +276,8 @@ __global__ void bitonic_sort_512_descending(std::uint64_t* keys, std::int32_t* i
 __global__ void publish_compact_selection_kernel(const std::int32_t* __restrict__ selected_ids,
                                                  const std::int32_t* __restrict__ token_indices,
                                                  std::int32_t* __restrict__ selected_blocks,
-                                                 std::int32_t* __restrict__ selected_counts) {
+                                                 std::int32_t* __restrict__ selected_counts,
+                                                 int id_stride) {
     const int row             = static_cast<int>(blockIdx.x);
     const int tid             = static_cast<int>(threadIdx.x);
     const int complete_blocks = (token_indices[row] + 1) / 4;
@@ -284,8 +285,7 @@ __global__ void publish_compact_selection_kernel(const std::int32_t* __restrict_
     if (tid == 0) { selected_counts[row] = count; }
     for (int index = tid; index < kSelectedBlocks; index += static_cast<int>(blockDim.x)) {
         selected_blocks[static_cast<std::int64_t>(row) * kSelectedBlocks + index] =
-            index < count ? selected_ids[static_cast<std::int64_t>(row) * kSelectedBlocks + index]
-                          : -1;
+            index < count ? selected_ids[static_cast<std::int64_t>(row) * id_stride + index] : -1;
     }
 }
 
@@ -421,7 +421,7 @@ void flash_next_qsa_indexer_launch(const Tensor& token_indices, const Tensor& mr
         static_cast<const std::int32_t*>(scratch.topk_ids.data),
         static_cast<const std::int32_t*>(token_indices.data),
         static_cast<std::int32_t*>(selected_blocks.data),
-        static_cast<std::int32_t*>(selected_counts.data));
+        static_cast<std::int32_t*>(selected_counts.data), kSelectedBlocks);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -603,7 +603,12 @@ void flash_next_qsa_indexer_prefill_launch(
         static_cast<std::int32_t*>(cache.raw_positions.data), tokens);
     CUDA_CHECK(cudaGetLastError());
 
-    if (maximum_blocks <= kSelectedBlocks) {
+    std::int32_t first_token_index = 0;
+    CUDA_CHECK(cudaMemcpyAsync(&first_token_index, token_indices.data, sizeof(first_token_index),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    const int chunk_complete_blocks = (first_token_index + tokens) / 4;
+    if (maximum_blocks <= kSelectedBlocks || chunk_complete_blocks <= kSelectedBlocks) {
         publish_identity_selection_kernel<<<tokens, 256, 0, stream>>>(
             static_cast<const std::int32_t*>(token_indices.data),
             static_cast<std::int32_t*>(selected_blocks.data),
@@ -624,8 +629,22 @@ void flash_next_qsa_indexer_prefill_launch(
 
     for (int t_start = 0; t_start < tokens; t_start += tile_size) {
         const int current_tile = min(tile_size, tokens - t_start);
-        constexpr int threads  = 256;
-        const int items        = active_blocks * current_tile;
+        const int tile_last    = first_token_index + t_start + current_tile - 1;
+        const int tile_complete = (tile_last + 1) / 4;
+        auto* tile_token_indices =
+            static_cast<const std::int32_t*>(token_indices.data) + t_start;
+        auto* tile_selected = static_cast<std::int32_t*>(selected_blocks.data) +
+                              static_cast<std::int64_t>(t_start) * kSelectedBlocks;
+        auto* tile_counts = static_cast<std::int32_t*>(selected_counts.data) + t_start;
+        if (tile_complete <= kSelectedBlocks) {
+            publish_identity_selection_kernel<<<current_tile, 256, 0, stream>>>(
+                tile_token_indices, tile_selected, tile_counts);
+            CUDA_CHECK(cudaGetLastError());
+            continue;
+        }
+
+        constexpr int threads = 256;
+        const int items       = active_blocks * current_tile;
 
         initialize_sort_kernel<<<(items + threads - 1) / threads, threads, 0, stream>>>(
             static_cast<std::int32_t*>(scratch.ids.data),
@@ -637,24 +656,21 @@ void flash_next_qsa_indexer_prefill_launch(
                 static_cast<std::int64_t>(t_start) * kQueryHeads * kHeadDim,
             static_cast<const __nv_bfloat16*>(cache.block_keys.data),
             static_cast<const std::int32_t*>(cache.block_tables.data), table_row,
-            static_cast<const std::int32_t*>(token_indices.data) + t_start, cache.block_tables.ne[0],
-            active_blocks, static_cast<float*>(scratch.scores.data));
+            tile_token_indices, cache.block_tables.ne[0], active_blocks,
+            static_cast<float*>(scratch.scores.data));
         CUDA_CHECK(cudaGetLastError());
 
-        select_top512_topk(
-            static_cast<const float*>(scratch.scores.data),
+        std::size_t temp_bytes = scratch.sort_temp.bytes;
+        CUDA_CHECK(sort_pairs_descending(
+            scratch.sort_temp.data, temp_bytes, static_cast<const float*>(scratch.scores.data),
+            static_cast<float*>(scratch.sorted_scores.data),
             static_cast<const std::int32_t*>(scratch.ids.data),
-            static_cast<std::uint64_t*>(scratch.packed_keys.data),
-            static_cast<std::uint64_t*>(scratch.packed_selected.data),
-            static_cast<std::int32_t*>(scratch.topk_ids.data), scratch.sort_temp.data,
-            scratch.sort_temp.bytes, active_blocks, current_tile, stream);
+            static_cast<std::int32_t*>(scratch.sorted_ids.data), items, current_tile,
+            static_cast<const std::int32_t*>(scratch.offsets.data), stream));
 
         publish_compact_selection_kernel<<<current_tile, 256, 0, stream>>>(
-            static_cast<const std::int32_t*>(scratch.topk_ids.data),
-            static_cast<const std::int32_t*>(token_indices.data) + t_start,
-            static_cast<std::int32_t*>(selected_blocks.data) +
-                static_cast<std::int64_t>(t_start) * kSelectedBlocks,
-            static_cast<std::int32_t*>(selected_counts.data) + t_start);
+            static_cast<const std::int32_t*>(scratch.sorted_ids.data), tile_token_indices,
+            tile_selected, tile_counts, active_blocks);
         CUDA_CHECK(cudaGetLastError());
     }
 }

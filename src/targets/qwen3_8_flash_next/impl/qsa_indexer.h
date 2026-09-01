@@ -45,5 +45,9 @@ void flash_next_qsa_indexer_prefill_chunk(
     std::int32_t destination_state_slot, QsaIndexerCacheView cache, std::int32_t maximum_blocks,
     WorkspaceArena& workspace, Tensor& selected_blocks, Tensor& selected_counts,
     cudaStream_t stream);
+// Prefill selection: identity when the chunk (or tile) max complete_blocks <= 512, otherwise
+// one DeviceSegmentedRadixSort::SortPairsDescending per tile. Decode keeps packed-key DeviceTopK.
+// Identity publishes 0..complete-1 (G1 order). Segmented sort publishes the same SET and
+// score-descending ORDER as decode TopK.
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail
