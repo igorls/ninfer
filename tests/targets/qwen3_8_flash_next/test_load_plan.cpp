@@ -31,10 +31,10 @@ int main() {
         binder, {.vision = true, .mtp = true});
 
     const auto& materialization = plan.materialization;
-    if (materialization.object_count != 1'566 || materialization.device_objects.size() != 1'429 ||
+    if (materialization.object_count != 1'566 || materialization.device_objects.size() != 1'427 ||
         materialization.mapped_tensor_objects.size() != 131 ||
-        materialization.host_objects.size() != 6 ||
-        materialization.device_capacity_bytes != 81'285'117'440ULL) {
+        materialization.host_objects.size() != 8 ||
+        materialization.device_capacity_bytes != 76'251'952'640ULL) {
         std::cerr << "unexpected Flash-Next load plan: objects=" << materialization.object_count
                   << " device=" << materialization.device_objects.size()
                   << " mapped=" << materialization.mapped_tensor_objects.size()

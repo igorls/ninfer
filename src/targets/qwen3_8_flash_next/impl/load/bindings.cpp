@@ -95,24 +95,40 @@ HyperMixerPlan bind_mixer(artifact::Binder& binder, const std::string& prefix,
     };
 }
 
+artifact::ObjectHandle bind_optional_host(artifact::Binder& binder, std::string_view name,
+                                          NumericFormat format, StorageLayout layout,
+                                          std::initializer_list<std::uint64_t> shape, bool enabled) {
+    if (!enabled) return {};
+    const artifact::ObjectHandle handle = binder.require_tensor(name, format, layout, shape);
+    binder.retain_on_host(handle);
+    return handle;
+}
+
 MoePlan bind_moe(artifact::Binder& binder, const std::string& prefix, NumericFormat expert_format,
-                 bool enabled = true) {
+                 bool enabled = true, bool retain_experts_on_host = false) {
     const auto bf16 = [&](std::string_view suffix, std::initializer_list<std::uint64_t> shape) {
         return bind_optional_device(binder, prefix + std::string(suffix), NumericFormat::BF16,
                                     kBf16Layout, shape, enabled);
     };
     const StorageLayout expert_layout =
         expert_format == NumericFormat::NVFP4 ? kExpertLayout : kBf16Layout;
+    const auto bind_expert = [&](std::string_view suffix, std::initializer_list<std::uint64_t> shape) {
+        if (!enabled) return artifact::ObjectHandle{};
+        if (retain_experts_on_host) {
+            return bind_optional_host(binder, prefix + std::string(suffix), expert_format,
+                                      expert_layout, shape, enabled);
+        }
+        return bind_optional_device(binder, prefix + std::string(suffix), expert_format,
+                                    expert_layout, shape, enabled);
+    };
     return {
         .router             = bf16("router", {512, 2'560}),
         .shared_down        = bf16("shared_expert/down", {2'560, 640}),
         .shared_gate        = bf16("shared_expert/gate", {640, 2'560}),
         .shared_up          = bf16("shared_expert/up", {640, 2'560}),
         .shared_gate_weight = bf16("shared_expert_gate", {1, 2'560}),
-        .expert_gate_up = bind_optional_device(binder, prefix + "experts/gate_up", expert_format,
-                                               expert_layout, {512, 1'280, 2'560}, enabled),
-        .expert_down    = bind_optional_device(binder, prefix + "experts/down", expert_format,
-                                               expert_layout, {512, 2'560, 640}, enabled),
+        .expert_gate_up     = bind_expert("experts/gate_up", {512, 1'280, 2'560}),
+        .expert_down        = bind_expert("experts/down", {512, 2'560, 640}),
     };
 }
 
@@ -198,7 +214,8 @@ MtpPlan bind_mtp(artifact::Binder& binder, bool enabled) {
         binder, "mtp/hidden_projection", NumericFormat::BF16, kBf16Layout, {2'560, 2'560}, enabled);
     out.mixer           = bind_mixer(binder, "mtp/hyper_connection/", enabled);
     out.attention_hyper = bind_hyper(binder, "mtp/layer/attention/hyper_connection/", enabled);
-    out.moe             = bind_moe(binder, "mtp/layer/mlp/", NumericFormat::BF16, enabled);
+    out.moe             = bind_moe(binder, "mtp/layer/mlp/", NumericFormat::BF16, enabled,
+                                   /*retain_experts_on_host=*/true);
     out.mlp_hyper       = bind_hyper(binder, "mtp/layer/mlp/hyper_connection/", enabled);
     out.attention = bind_attention(binder, "mtp/layer/attention/", NumericFormat::BF16, enabled);
     out.embedding_norm = bind_optional_device(binder, "mtp/embedding_norm", NumericFormat::BF16,

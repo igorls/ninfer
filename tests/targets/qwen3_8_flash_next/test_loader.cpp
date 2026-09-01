@@ -381,10 +381,10 @@ int test_real_artifact_full_binding_if_available() {
         tensor_bytes += object.bytes;
     }
 
-    if (tensor_bytes != 81'285'103'328ULL ||
-        full_plan.materialization.device_capacity_bytes != 81'285'117'440ULL ||
-        full_plan.materialization.device_objects.size() != 1'429 ||
-        full_plan.materialization.host_objects.size() != 6 ||
+    if (tensor_bytes != 76'251'938'528ULL ||
+        full_plan.materialization.device_capacity_bytes != 76'251'952'640ULL ||
+        full_plan.materialization.device_objects.size() != 1'427 ||
+        full_plan.materialization.host_objects.size() != 8 ||
         full_plan.materialization.mapped_tensor_objects.size() != 131) {
         std::cerr << "Full artifact binding inventory mismatch\n";
         return 1;

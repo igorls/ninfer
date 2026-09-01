@@ -210,14 +210,18 @@ int test_mtp_nvfp4_quantizer_unit(ninfer::DeviceContext& device) {
     // 2. Dequantization oracle and representable error verification
     const std::uint64_t code_plane_bytes   = total_elements / 2;
     const std::uint64_t scale_plane_offset = (code_plane_bytes + 255U) & ~std::uint64_t{255U};
+    const std::uint64_t scale_plane_bytes  = total_elements / 16;
+    const std::uint64_t weight_div_offset  = scale_plane_offset + scale_plane_bytes;
     const auto* codes                      = host_out1.data();
     const auto* scales                     = host_out1.data() + scale_plane_offset;
+    const auto* divisors = reinterpret_cast<const float*>(host_out1.data() + weight_div_offset);
     const int groups_per_row               = cols / 16;
     const int k_tiles                      = cols / 64;
 
     double diff_sq = 0.0;
     double base_sq = 0.0;
     for (int e = 0; e < experts; ++e) {
+        const float divisor = divisors[e];
         for (int r = 0; r < rows; ++r) {
             for (int c = 0; c < cols; ++c) {
                 const std::size_t flat_idx = (static_cast<std::size_t>(e) * rows + r) * cols + c;
@@ -243,7 +247,7 @@ int test_mtp_nvfp4_quantizer_unit(ninfer::DeviceContext& device) {
                     static_cast<std::size_t>(e) * (rows * groups_per_row) + exp_scale_off;
                 const std::uint8_t scale_val = scales[scale_off];
 
-                const float dequant = cpu_decode_e2m1(nibble) * cpu_decode_e4m3fn(scale_val);
+                const float dequant = (cpu_decode_e2m1(nibble) * cpu_decode_e4m3fn(scale_val)) / divisor;
                 const float diff    = original - dequant;
                 diff_sq += diff * diff;
                 base_sq += original * original;
