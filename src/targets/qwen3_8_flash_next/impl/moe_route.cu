@@ -1,6 +1,7 @@
 #include "targets/qwen3_8_flash_next/impl/moe_route.h"
 
 #include "core/device.h"
+#include "targets/qwen3_8_flash_next/impl/moe_shared_kernels.h"
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -276,6 +277,8 @@ void flash_next_route(const Tensor& input, const Weight& router, const Weight& s
             static_cast<const __nv_bfloat16*>(shared_gate.qdata),
             static_cast<float*>(score_workspace.data), tokens);
         CUDA_CHECK(cudaGetLastError());
+    } else if (flash_next_moe_shared_mma_enabled()) {
+        flash_next_route_projection_mma(input, router, shared_gate, score_workspace, stream);
     } else {
         const dim3 grid((kExperts + 1 + 31) / 32, (static_cast<unsigned>(tokens) + 15) / 16);
         route_prefill_projection_kernel<<<grid, 256, 0, stream>>>(

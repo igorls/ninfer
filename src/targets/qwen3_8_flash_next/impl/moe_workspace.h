@@ -31,6 +31,8 @@ struct FlashNextMoeWorkspace {
     Tensor act_scales;
     Tensor down_act_codes;
     Tensor down_act_scales;
+    // Packed BF16 [1280, T] = gate[640,T] | shared-act[640,T] for the MMA shared path.
+    Tensor shared_gemm;
 };
 
 template <class Arena>
@@ -69,6 +71,7 @@ FlashNextMoeWorkspace allocate_flash_next_moe_workspace(Arena& arena, std::int32
         out.act_scales        = arena.alloc(DType::U8, {160, tokens}, 256);
         out.down_act_codes    = arena.alloc(DType::U8, {320, 11 * tokens}, 256);
         out.down_act_scales   = arena.alloc(DType::U8, {40, 11 * tokens}, 256);
+        out.shared_gemm       = arena.alloc(DType::BF16, {640, 2 * tokens}, 256);
     }
     return out;
 }

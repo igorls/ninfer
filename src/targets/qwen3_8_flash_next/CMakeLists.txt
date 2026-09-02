@@ -14,6 +14,7 @@ add_library(ninfer_qwen3_8_flash_next STATIC
   impl/moe.cpp
   impl/moe_kernels.cu
   impl/moe_route.cu
+  impl/moe_shared_kernels.cu
   impl/mtp_forward.cpp
   impl/mtp_forward_kernels.cu
   impl/package.cpp

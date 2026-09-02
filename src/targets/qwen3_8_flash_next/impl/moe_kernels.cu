@@ -9,6 +9,7 @@
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_gemv.cuh"
 #include "ops/linear/nvfp4/nvfp4_w4a4_mma.cuh"
+#include "targets/qwen3_8_flash_next/impl/moe_shared_kernels.h"
 #include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
 
 #include <cuda_bf16.h>
@@ -1342,34 +1343,47 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
         CUDA_CHECK(cudaGetLastError());
     } else {
         // Prefill path (tokens > 8): Group tokens by expert, load weights once per chunk
-        // 1. Group tokens by expert and build active expert list (1 CTA scan)
-        flash_next_moe_prefill_build_groups_kernel<<<1, 512, 0, stream>>>(
-            static_cast<const std::int32_t*>(workspace.ids.data),
-            static_cast<std::int32_t*>(workspace.expert_counts.data),
-            static_cast<std::int32_t*>(workspace.expert_offsets.data),
-            static_cast<std::int32_t*>(workspace.active_expert_ids.data),
-            static_cast<std::int32_t*>(workspace.active_count.data),
-            static_cast<std::int32_t*>(workspace.grouped_tokens.data),
-            static_cast<std::int32_t*>(workspace.grouped_paths.data),
-            static_cast<std::int32_t*>(workspace.grouped_experts.data),
-            static_cast<std::int32_t*>(workspace.token_to_pos.data),
-            static_cast<std::int32_t*>(workspace.task_counter.data),
-            tokens);
-        CUDA_CHECK(cudaGetLastError());
+        // 1. Group tokens by expert and build active expert list
+        if (flash_next_moe_shared_mma_enabled()) {
+            flash_next_moe_prefill_build_groups_mma(
+                workspace.ids, workspace.expert_counts, workspace.expert_offsets,
+                workspace.active_expert_ids, workspace.active_count, workspace.grouped_tokens,
+                workspace.grouped_paths, workspace.grouped_experts, workspace.token_to_pos,
+                workspace.task_counter, tokens, stream);
+        } else {
+            flash_next_moe_prefill_build_groups_kernel<<<1, 512, 0, stream>>>(
+                static_cast<const std::int32_t*>(workspace.ids.data),
+                static_cast<std::int32_t*>(workspace.expert_counts.data),
+                static_cast<std::int32_t*>(workspace.expert_offsets.data),
+                static_cast<std::int32_t*>(workspace.active_expert_ids.data),
+                static_cast<std::int32_t*>(workspace.active_count.data),
+                static_cast<std::int32_t*>(workspace.grouped_tokens.data),
+                static_cast<std::int32_t*>(workspace.grouped_paths.data),
+                static_cast<std::int32_t*>(workspace.grouped_experts.data),
+                static_cast<std::int32_t*>(workspace.token_to_pos.data),
+                static_cast<std::int32_t*>(workspace.task_counter.data),
+                tokens);
+            CUDA_CHECK(cudaGetLastError());
+        }
         stage_ledger_record(stream, FlashNextStageId::MoE_Grouping);
 
         if (tokens >= kMmaPrefillThreshold) {
             // Large tokens: Native NVFP4 Tensor Core MMA route
-            // 2. Shared expert gate & up (8 pairs per CTA -> 80 blocks)
-            // Reads original BF16 input and writes to activations path kTopK (10). Completely disjoint from routed MMA.
-            const dim3 shared_grid(kIntermediate / 8, (static_cast<unsigned>(tokens) + 7) / 8);
-            flash_next_moe_prefill_shared_gate_up_kernel<<<shared_grid, 256, 0, stream>>>(
-                static_cast<const __nv_bfloat16*>(input.data),
-                static_cast<const __nv_bfloat16*>(weights.shared_gate.qdata),
-                static_cast<const __nv_bfloat16*>(weights.shared_up.qdata),
-                static_cast<__nv_bfloat16*>(workspace.activations.data),
-                tokens);
-            CUDA_CHECK(cudaGetLastError());
+            // 2. Shared expert gate & up. Completely disjoint from routed MMA.
+            if (flash_next_moe_shared_mma_enabled()) {
+                flash_next_moe_prefill_shared_gate_up_mma(
+                    input, weights.shared_gate, weights.shared_up, workspace.activations,
+                    workspace.shared_gemm, tokens, stream);
+            } else {
+                const dim3 shared_grid(kIntermediate / 8, (static_cast<unsigned>(tokens) + 7) / 8);
+                flash_next_moe_prefill_shared_gate_up_kernel<<<shared_grid, 256, 0, stream>>>(
+                    static_cast<const __nv_bfloat16*>(input.data),
+                    static_cast<const __nv_bfloat16*>(weights.shared_gate.qdata),
+                    static_cast<const __nv_bfloat16*>(weights.shared_up.qdata),
+                    static_cast<__nv_bfloat16*>(workspace.activations.data),
+                    tokens);
+                CUDA_CHECK(cudaGetLastError());
+            }
             stage_ledger_record(stream, FlashNextStageId::MoE_SharedGateUp);
 
             // 3. Quantize input activations X -> NVFP4
@@ -1423,15 +1437,21 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
             CUDA_CHECK(cudaGetLastError());
             stage_ledger_record(stream, FlashNextStageId::MoE_QuantDown);
 
-            // 6. Shared Down FMA: SharedDown(2560 x 640) * activations[:, 10, :] * shared_scale -> output
-            const dim3 shared_down_grid(kHidden / 64, (static_cast<unsigned>(tokens) + 15) / 16);
-            flash_next_moe_prefill_shared_down_kernel<<<shared_down_grid, 128, 0, stream>>>(
-                static_cast<const __nv_bfloat16*>(weights.shared_down.qdata),
-                static_cast<const __nv_bfloat16*>(workspace.activations.data),
-                static_cast<const float*>(workspace.shared_scale.data),
-                static_cast<__nv_bfloat16*>(output.data),
-                tokens);
-            CUDA_CHECK(cudaGetLastError());
+            // 6. Shared Down: SharedDown(2560 x 640) * shared_act * shared_scale -> output base
+            if (flash_next_moe_shared_mma_enabled()) {
+                flash_next_moe_prefill_shared_down_mma(weights.shared_down, workspace.shared_gemm,
+                                                       workspace.shared_scale, output, tokens,
+                                                       stream);
+            } else {
+                const dim3 shared_down_grid(kHidden / 64, (static_cast<unsigned>(tokens) + 15) / 16);
+                flash_next_moe_prefill_shared_down_kernel<<<shared_down_grid, 128, 0, stream>>>(
+                    static_cast<const __nv_bfloat16*>(weights.shared_down.qdata),
+                    static_cast<const __nv_bfloat16*>(workspace.activations.data),
+                    static_cast<const float*>(workspace.shared_scale.data),
+                    static_cast<__nv_bfloat16*>(output.data),
+                    tokens);
+                CUDA_CHECK(cudaGetLastError());
+            }
             stage_ledger_record(stream, FlashNextStageId::MoE_SharedDown);
 
             // 7. Grouped Down GEMM (Native NVFP4 Tensor Core MMA with Fused Routing Alpha Epilogue)
@@ -1486,15 +1506,21 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
             CUDA_CHECK(cudaGetLastError());
             stage_ledger_record(stream, FlashNextStageId::MoE_RoutedGateUp);
 
-            // 3. Shared expert gate & up (8 pairs per CTA -> 80 blocks)
-            const dim3 shared_grid(kIntermediate / 8, (static_cast<unsigned>(tokens) + 7) / 8);
-            flash_next_moe_prefill_shared_gate_up_kernel<<<shared_grid, 256, 0, stream>>>(
-                static_cast<const __nv_bfloat16*>(input.data),
-                static_cast<const __nv_bfloat16*>(weights.shared_gate.qdata),
-                static_cast<const __nv_bfloat16*>(weights.shared_up.qdata),
-                static_cast<__nv_bfloat16*>(workspace.activations.data),
-                tokens);
-            CUDA_CHECK(cudaGetLastError());
+            // 3. Shared expert gate & up
+            if (flash_next_moe_shared_mma_enabled()) {
+                flash_next_moe_prefill_shared_gate_up_mma(
+                    input, weights.shared_gate, weights.shared_up, workspace.activations,
+                    workspace.shared_gemm, tokens, stream);
+            } else {
+                const dim3 shared_grid(kIntermediate / 8, (static_cast<unsigned>(tokens) + 7) / 8);
+                flash_next_moe_prefill_shared_gate_up_kernel<<<shared_grid, 256, 0, stream>>>(
+                    static_cast<const __nv_bfloat16*>(input.data),
+                    static_cast<const __nv_bfloat16*>(weights.shared_gate.qdata),
+                    static_cast<const __nv_bfloat16*>(weights.shared_up.qdata),
+                    static_cast<__nv_bfloat16*>(workspace.activations.data),
+                    tokens);
+                CUDA_CHECK(cudaGetLastError());
+            }
             stage_ledger_record(stream, FlashNextStageId::MoE_SharedGateUp);
 
             // 4. Grouped Down GEMM (SIMT W4A16)

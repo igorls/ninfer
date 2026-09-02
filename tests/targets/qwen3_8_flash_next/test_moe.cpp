@@ -14,6 +14,8 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -339,6 +341,51 @@ int test_prefill_equivalence_and_benchmark(ninfer::DeviceContext& device) {
                          scratch.alpha, scratch.shared_scale, device.stream);
         flash_next_moe_kernels_launch(in_view, weights, scratch, out_prefill_view, device.stream);
         device.synchronize();
+
+        if (tokens >= 512) {
+            const std::size_t id_bytes =
+                static_cast<std::size_t>(tokens) * 10U * sizeof(std::int32_t);
+            std::vector<std::int32_t> ids_old(static_cast<std::size_t>(tokens) * 10U);
+            std::vector<std::int32_t> ids_new(ids_old.size());
+#ifdef _WIN32
+            (void)_putenv_s("NINFER_FLASH_NEXT_MOE_SHARED_MMA", "0");
+#else
+            (void)setenv("NINFER_FLASH_NEXT_MOE_SHARED_MMA", "0", 1);
+#endif
+            flash_next_route(in_view, weights.router, weights.shared_gate_weight, scratch.scores,
+                             scratch.ids, scratch.alpha, scratch.shared_scale, device.stream);
+            device.synchronize();
+            CUDA_CHECK(cudaMemcpy(ids_old.data(), scratch.ids.data, id_bytes,
+                                  cudaMemcpyDeviceToHost));
+#ifdef _WIN32
+            (void)_putenv_s("NINFER_FLASH_NEXT_MOE_SHARED_MMA", "1");
+#else
+            (void)setenv("NINFER_FLASH_NEXT_MOE_SHARED_MMA", "1", 1);
+#endif
+            flash_next_route(in_view, weights.router, weights.shared_gate_weight, scratch.scores,
+                             scratch.ids, scratch.alpha, scratch.shared_scale, device.stream);
+            device.synchronize();
+            CUDA_CHECK(cudaMemcpy(ids_new.data(), scratch.ids.data, id_bytes,
+                                  cudaMemcpyDeviceToHost));
+            int nonzero = 0;
+            int flips   = 0;
+            for (std::size_t i = 0; i < ids_old.size(); ++i) {
+                if (ids_old[i] != 0) { ++nonzero; }
+                if (ids_old[i] != ids_new[i]) { ++flips; }
+            }
+            if (nonzero == 0) {
+                std::cerr << "FAILED: route-id compare vacuous at T=" << tokens << "\n";
+                return 1;
+            }
+            if (flips != 0) {
+                std::cerr << "FAILED: MMA router flipped " << flips << " of " << ids_old.size()
+                          << " top-10 slots at T=" << tokens << " (nonzero=" << nonzero << ")\n";
+                return 1;
+            }
+            std::cout << "  Tokens T=" << tokens
+                      << " router ids bitwise identical vs scalar (slots=" << ids_old.size()
+                      << " nonzero=" << nonzero << ")\n";
+        }
 
         const int kIters = (tokens >= 2048) ? 10 : 50;
         cudaEventRecord(ev_start, device.stream);
