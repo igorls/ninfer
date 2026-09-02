@@ -98,9 +98,16 @@ HyperMixerPlan bind_mixer(artifact::Binder& binder, const std::string& prefix,
 artifact::ObjectHandle bind_optional_host(artifact::Binder& binder, std::string_view name,
                                           NumericFormat format, StorageLayout layout,
                                           std::initializer_list<std::uint64_t> shape, bool enabled) {
-    if (!enabled) return {};
+    // Every artifact object must be consumed by the target even when its feature is off,
+    // exactly as bind_optional_device does; otherwise Binder::finish() rejects the artifact
+    // ("artifact object was not consumed by the selected target"). Found in production
+    // window 5 on the real artifact: sequence 12b returned early here and every serve failed.
     const artifact::ObjectHandle handle = binder.require_tensor(name, format, layout, shape);
-    binder.retain_on_host(handle);
+    if (enabled) {
+        binder.retain_mapped_tensor(handle); // tensors are file-mapped on the host (like the PLE shards); retain_on_host is for resources only
+    } else {
+        binder.validate_only(handle);
+    }
     return handle;
 }
 
@@ -113,7 +120,6 @@ MoePlan bind_moe(artifact::Binder& binder, const std::string& prefix, NumericFor
     const StorageLayout expert_layout =
         expert_format == NumericFormat::NVFP4 ? kExpertLayout : kBf16Layout;
     const auto bind_expert = [&](std::string_view suffix, std::initializer_list<std::uint64_t> shape) {
-        if (!enabled) return artifact::ObjectHandle{};
         if (retain_experts_on_host) {
             return bind_optional_host(binder, prefix + std::string(suffix), expert_format,
                                       expert_layout, shape, enabled);

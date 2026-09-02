@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdlib>
 #include <filesystem>
+#include <exception>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -340,17 +341,25 @@ int test_real_artifact_preflight_if_available() {
                   << report.planned_mapped_tensors_count << "\n";
         return 1;
     }
-    if (report.runtime_plan.total_device_bytes != 623'181'056ULL) {
-        std::cerr << "Preflight runtime total_device_bytes mismatch: expected 623181056 got "
+    // Pinned runtime-plan size on the real artifact at this configuration. It moves whenever the
+    // prefill/decode workspace layout changes and must be updated deliberately, with the reason:
+    //   e67974b5 (2026-08-29, 5c-2 chunked prefill)      623'181'056
+    //   29c9fa76 + 12b binding fix (2026-09-02)          705'037'568  (+78 MiB: sequences 9a-9t, 11,
+    //                                                     14, G17, G20 workspace changes since)
+    if (report.runtime_plan.total_device_bytes != 705'037'568ULL) {
+        std::cerr << "Preflight runtime total_device_bytes mismatch: expected 705037568 got "
                   << report.runtime_plan.total_device_bytes << "\n";
         return 1;
     }
     if (report.runtime_plan.attention_kv_bytes != 100'663'296ULL ||
         report.runtime_plan.indexer_block_keys_bytes != 3'145'728ULL ||
         report.runtime_plan.recurrent_state_bytes != 231'312'384ULL ||
-        report.runtime_plan.workspace_bytes != 287'550'720ULL) {
-        std::cerr << "Preflight runtime plan sub-allocations mismatch: workspace_bytes="
-                  << report.runtime_plan.workspace_bytes << " expected 287550720\n";
+        report.runtime_plan.workspace_bytes != 319'055'616ULL) { // workspace 287'550'720 at e67974b5 -> 319'055'616 at 29c9fa76 (prefill workspace changes since 2026-08-29)
+        std::cerr << "Preflight runtime plan sub-allocations mismatch: attention_kv_bytes="
+                  << report.runtime_plan.attention_kv_bytes << " indexer_block_keys_bytes="
+                  << report.runtime_plan.indexer_block_keys_bytes << " recurrent_state_bytes="
+                  << report.runtime_plan.recurrent_state_bytes << " workspace_bytes="
+                  << report.runtime_plan.workspace_bytes << " (pinned 100663296 / 3145728 / 231312384 / 319055616)\n";
         return 1;
     }
 
@@ -384,8 +393,8 @@ int test_real_artifact_full_binding_if_available() {
     if (tensor_bytes != 76'251'938'528ULL ||
         full_plan.materialization.device_capacity_bytes != 76'251'952'640ULL ||
         full_plan.materialization.device_objects.size() != 1'427 ||
-        full_plan.materialization.host_objects.size() != 8 ||
-        full_plan.materialization.mapped_tensor_objects.size() != 131) {
+        full_plan.materialization.host_objects.size() != 6 ||   // the MTP banks are mapped tensors, not host resources
+        full_plan.materialization.mapped_tensor_objects.size() != 133) { // 131 PLE + 2 MTP expert banks
         std::cerr << "Full artifact binding inventory mismatch\n";
         return 1;
     }
@@ -455,9 +464,20 @@ int main() {
     if (test_ple_metadata_observable_behavior() != 0) return 1;
     if (test_preflight_memory_accounting() != 0) return 1;
     if (test_options_parser_validation() != 0) return 1;
-    if (test_real_artifact_preflight_if_available() != 0) return 1;
-    if (test_real_artifact_text_and_vision_plan_if_available() != 0) return 1;
-    if (test_real_artifact_full_binding_if_available() != 0) return 1;
+    // The real-artifact tests build plans only (no materialization) and run beside a resident
+    // production model; report any exception instead of aborting so the failing step is visible.
+    try {
+        std::cout << std::flush;
+        if (test_real_artifact_preflight_if_available() != 0) return 1;
+        std::cout << "PASS: test_real_artifact_preflight (or skipped)\n" << std::flush;
+        if (test_real_artifact_text_and_vision_plan_if_available() != 0) return 1;
+        std::cout << "PASS: test_real_artifact_text_and_vision_plan (or skipped)\n" << std::flush;
+        if (test_real_artifact_full_binding_if_available() != 0) return 1;
+        std::cout << "PASS: test_real_artifact_full_binding (or skipped)\n" << std::flush;
+    } catch (const std::exception& e) {
+        std::cerr << "FAILED: real-artifact test threw: " << e.what() << "\n";
+        return 1;
+    }
 
     std::cout << "OK Flash-Next Native Loader Tests\n";
     return 0;

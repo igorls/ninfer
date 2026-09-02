@@ -225,8 +225,8 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
         mtp_expert_down_nvfp4 =
             DeviceBuffer(flash_next_nvfp4_expert_bank_payload_bytes(512, 2'560, 640));
 
-        const auto gate_up_bytes = backing.resource_bytes(plan.mtp.moe.expert_gate_up);
-        const auto down_bytes    = backing.resource_bytes(plan.mtp.moe.expert_down);
+        const auto gate_up_bytes = backing.mapped_tensor_bytes(plan.mtp.moe.expert_gate_up);
+        const auto down_bytes    = backing.mapped_tensor_bytes(plan.mtp.moe.expert_down);
 
         quantize_bf16_expert_bank_to_nvfp4(gate_up_bytes.data(), mtp_expert_gate_up_nvfp4.p, 512,
                                            1'280, 2'560, cudaStream_t{});
