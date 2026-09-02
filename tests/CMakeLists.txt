@@ -26,15 +26,16 @@ function(ninfer_add_test name)
       NINFER_PYTHON_EXECUTABLE="${Python3_EXECUTABLE}")
   endif()
   add_test(NAME ${name} COMMAND ${name})
+  set_property(TEST ${name} PROPERTY SKIP_RETURN_CODE 77)
   if(WIN32)
-    set_tests_properties(${name} PROPERTIES
+    set_property(TEST ${name} PROPERTY
       ENVIRONMENT "PATH=P:/third_party/ffmpeg/ffmpeg-master-latest-win64-gpl-shared/bin\\;P:/third_party/curl-inst/bin\\;C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.3/bin\\;$ENV{PATH}")
   endif()
 endfunction()
 
 function(ninfer_add_op_test name)
   ninfer_add_test(${name} ${ARGN})
-  set_tests_properties(${name} PROPERTIES SKIP_RETURN_CODE 77)
+  set_property(TEST ${name} PROPERTY SKIP_RETURN_CODE 77)
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(${name} PRIVATE
       $<$<COMPILE_LANGUAGE:CXX>:-fno-fast-math>
@@ -189,8 +190,6 @@ ninfer_add_test(ninfer_qwen3_8_flash_next_load_plan_test
   LIBRARIES ninfer_qwen3_8_flash_next ninfer_engine)
 target_include_directories(ninfer_qwen3_8_flash_next_load_plan_test PRIVATE
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_8_flash_next)
-set_tests_properties(ninfer_qwen3_8_flash_next_load_plan_test
-  PROPERTIES SKIP_RETURN_CODE 77)
 ninfer_add_test(ninfer_qwen3_8_flash_next_ple_index_test
   SOURCES targets/qwen3_8_flash_next/test_ple_index.cpp
   LIBRARIES ninfer_qwen3_8_flash_next)

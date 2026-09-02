@@ -1,3 +1,5 @@
+#include "synthetic_fixture.h"
+
 #include "artifact/reader.h"
 #include "targets/qwen3_8_flash_next/impl/load/bindings.h"
 #include "targets/qwen3_8_flash_next/impl/load/loader.h"
@@ -289,191 +291,258 @@ int test_options_parser_validation() {
 }
 
 int test_real_artifact_preflight_if_available() {
-    const char* env_path = std::getenv("NINFER_QWEN3_8_FLASH_NEXT_WEIGHTS");
-    std::filesystem::path path =
-        env_path != nullptr && *env_path != '\0'
-            ? std::filesystem::path(env_path)
-            : std::filesystem::path(
-                  "" /* real-artifact cases run only when NINFER_WEIGHTS is set explicitly */);
+    try {
+        const char* env_path = std::getenv("NINFER_QWEN3_8_FLASH_NEXT_WEIGHTS");
+        std::filesystem::path path =
+            env_path != nullptr && *env_path != '\0'
+                ? std::filesystem::path(env_path)
+                : std::filesystem::path(
+                      "" /* real-artifact cases run only when NINFER_WEIGHTS is set explicitly */);
 
-    if (!std::filesystem::is_regular_file(path)) {
-        std::cout << "SKIP: Real artifact preflight (artifact not present at " << path << ")\n";
+        if (!std::filesystem::is_regular_file(path)) {
+            std::cout << "SKIP: Real artifact preflight (artifact not present at " << path << ")\n";
+            return 0;
+        }
+
+        FlashNextRuntimeConfig cfg{
+            .max_concurrency     = 1,
+            .max_context         = 4096,
+            .state_slot_capacity = 2,
+        };
+
+        const auto report = preflight_text_file(path, cfg);
+
+        // Exact delivered contract verification
+        if (report.identity.model_id != kExpectedModelId ||
+            report.identity.weights_id != kExpectedWeightsId) {
+            std::cerr << "Report identity mismatch: " << report.identity.model_id << "/"
+                      << report.identity.weights_id << "\n";
+            return 1;
+        }
+        if (report.file_bytes != 113'298'397'952ULL) {
+            std::cerr << "Preflight file_bytes mismatch: expected 113298397952 got "
+                      << report.file_bytes << "\n";
+            return 1;
+        }
+        if (report.planned_device_weights_bytes != 75'172'951'040ULL) {
+            std::cerr << "Preflight planned_device_weights_bytes mismatch: expected 75172951040 got "
+                      << report.planned_device_weights_bytes << "\n";
+            return 1;
+        }
+        if (report.planned_device_tensors_count != 1067) {
+            std::cerr << "Preflight planned_device_tensors_count mismatch: expected 1067 got "
+                      << report.planned_device_tensors_count << "\n";
+            return 1;
+        }
+        if (report.planned_retained_resources_count != 6) {
+            std::cerr << "Preflight planned_retained_resources_count mismatch: expected 6 got "
+                      << report.planned_retained_resources_count << "\n";
+            return 1;
+        }
+        if (report.planned_mapped_tensors_count != 131) { // 128 shards + 3 embedding metadata tensors
+            std::cerr << "Preflight planned_mapped_tensors_count mismatch: expected 131 got "
+                      << report.planned_mapped_tensors_count << "\n";
+            return 1;
+        }
+        if (report.runtime_plan.workspace_bytes != 319'055'616ULL ||
+            report.runtime_plan.attention_kv_bytes != 100'663'296ULL ||
+            report.runtime_plan.indexer_block_keys_bytes != 3'145'728ULL ||
+            report.runtime_plan.recurrent_state_bytes != 231'312'384ULL) {
+            std::cerr << "Preflight runtime plan sub-allocations mismatch: workspace_bytes="
+                      << report.runtime_plan.workspace_bytes << " expected 319055616\n";
+            return 1;
+        }
+        if (report.runtime_plan.total_device_bytes != 705'037'568ULL) {
+            std::cerr << "Preflight runtime total_device_bytes mismatch: expected 705037568 got "
+                      << report.runtime_plan.total_device_bytes << "\n";
+            return 1;
+        }
+
+        std::cout << "PASS: test_real_artifact_preflight\n";
         return 0;
-    }
-
-    FlashNextRuntimeConfig cfg{
-        .max_concurrency     = 1,
-        .max_context         = 4096,
-        .state_slot_capacity = 2,
-    };
-
-    const auto report = preflight_text_file(path, cfg);
-
-    // Exact delivered contract verification
-    if (report.identity.model_id != kExpectedModelId ||
-        report.identity.weights_id != kExpectedWeightsId) {
-        std::cerr << "Report identity mismatch: " << report.identity.model_id << "/"
-                  << report.identity.weights_id << "\n";
+    } catch (const std::exception& ex) {
+        std::cerr << "FAILED test_real_artifact_preflight: " << ex.what() << "\n";
         return 1;
     }
-    if (report.file_bytes != 113'298'397'952ULL) {
-        std::cerr << "Preflight file_bytes mismatch: expected 113298397952 got "
-                  << report.file_bytes << "\n";
-        return 1;
-    }
-    if (report.planned_device_weights_bytes != 75'172'951'040ULL) {
-        std::cerr << "Preflight planned_device_weights_bytes mismatch: expected 75172951040 got "
-                  << report.planned_device_weights_bytes << "\n";
-        return 1;
-    }
-    if (report.planned_device_tensors_count != 1067) {
-        std::cerr << "Preflight planned_device_tensors_count mismatch: expected 1067 got "
-                  << report.planned_device_tensors_count << "\n";
-        return 1;
-    }
-    if (report.planned_retained_resources_count != 6) {
-        std::cerr << "Preflight planned_retained_resources_count mismatch: expected 6 got "
-                  << report.planned_retained_resources_count << "\n";
-        return 1;
-    }
-    if (report.planned_mapped_tensors_count != 131) { // 128 shards + 3 embedding metadata tensors
-        std::cerr << "Preflight planned_mapped_tensors_count mismatch: expected 131 got "
-                  << report.planned_mapped_tensors_count << "\n";
-        return 1;
-    }
-    // Pinned runtime-plan size on the real artifact at this configuration. It moves whenever the
-    // prefill/decode workspace layout changes and must be updated deliberately, with the reason:
-    //   e67974b5 (2026-08-29, 5c-2 chunked prefill)      623'181'056
-    //   29c9fa76 + 12b binding fix (2026-09-02)          705'037'568  (+78 MiB: sequences 9a-9t, 11,
-    //                                                     14, G17, G20 workspace changes since)
-    if (report.runtime_plan.total_device_bytes != 705'037'568ULL) {
-        std::cerr << "Preflight runtime total_device_bytes mismatch: expected 705037568 got "
-                  << report.runtime_plan.total_device_bytes << "\n";
-        return 1;
-    }
-    if (report.runtime_plan.attention_kv_bytes != 100'663'296ULL ||
-        report.runtime_plan.indexer_block_keys_bytes != 3'145'728ULL ||
-        report.runtime_plan.recurrent_state_bytes != 231'312'384ULL ||
-        report.runtime_plan.workspace_bytes != 319'055'616ULL) { // workspace 287'550'720 at e67974b5 -> 319'055'616 at 29c9fa76 (prefill workspace changes since 2026-08-29)
-        std::cerr << "Preflight runtime plan sub-allocations mismatch: attention_kv_bytes="
-                  << report.runtime_plan.attention_kv_bytes << " indexer_block_keys_bytes="
-                  << report.runtime_plan.indexer_block_keys_bytes << " recurrent_state_bytes="
-                  << report.runtime_plan.recurrent_state_bytes << " workspace_bytes="
-                  << report.runtime_plan.workspace_bytes << " (pinned 100663296 / 3145728 / 231312384 / 319055616)\n";
-        return 1;
-    }
-
-    std::cout << "PASS: test_real_artifact_preflight\n";
-    return 0;
 }
 
 int test_real_artifact_full_binding_if_available() {
-    const char* env_path = std::getenv("NINFER_QWEN3_8_FLASH_NEXT_WEIGHTS");
-    const std::filesystem::path path =
-        env_path != nullptr && *env_path != '\0'
-            ? std::filesystem::path(env_path)
-            : std::filesystem::path(
-                  "" /* real-artifact cases run only when NINFER_WEIGHTS is set explicitly */);
+    try {
+        const char* env_path = std::getenv("NINFER_QWEN3_8_FLASH_NEXT_WEIGHTS");
+        const std::filesystem::path path =
+            env_path != nullptr && *env_path != '\0'
+                ? std::filesystem::path(env_path)
+                : std::filesystem::path(
+                      "" /* real-artifact cases run only when NINFER_WEIGHTS is set explicitly */);
 
-    if (!std::filesystem::is_regular_file(path)) {
-        std::cout << "SKIP: Real artifact full binding (artifact not present at " << path << ")\n";
+        if (!std::filesystem::is_regular_file(path)) {
+            std::cout << "SKIP: Real artifact full binding (artifact not present at " << path << ")\n";
+            return 0;
+        }
+
+        const ninfer::artifact::Reader reader(path);
+        validate_identity(reader.identity());
+        ninfer::artifact::Binder binder(reader);
+        const auto full_plan = bind_artifact(binder, LoadFeatures{.vision = true, .mtp = true});
+
+        std::uint64_t tensor_bytes = 0;
+        for (const auto& object : full_plan.materialization.device_objects) {
+            tensor_bytes += object.bytes;
+        }
+
+        if (tensor_bytes != 76'251'938'528ULL ||
+            full_plan.materialization.device_capacity_bytes != 76'251'952'640ULL ||
+            full_plan.materialization.device_objects.size() != 1'427 ||
+            full_plan.materialization.host_objects.size() != 6 || // the MTP banks are mapped tensors, not host resources
+            full_plan.materialization.mapped_tensor_objects.size() != 133) { // 131 PLE + 2 MTP expert banks
+            std::cerr << "Full artifact binding inventory mismatch: tensor_bytes=" << tensor_bytes
+                      << " dev_cap=" << full_plan.materialization.device_capacity_bytes
+                      << " dev_objs=" << full_plan.materialization.device_objects.size()
+                      << " host_objs=" << full_plan.materialization.host_objects.size()
+                      << " mapped_objs=" << full_plan.materialization.mapped_tensor_objects.size() << "\n";
+            return 1;
+        }
+
+        std::cout << "PASS: test_real_artifact_full_binding\n";
         return 0;
-    }
-
-    const ninfer::artifact::Reader reader(path);
-    validate_identity(reader.identity());
-    ninfer::artifact::Binder binder(reader);
-    const auto full_plan = bind_artifact(binder, LoadFeatures{.vision = true, .mtp = true});
-
-    std::uint64_t tensor_bytes = 0;
-    for (const auto& object : full_plan.materialization.device_objects) {
-        tensor_bytes += object.bytes;
-    }
-
-    if (tensor_bytes != 76'251'938'528ULL ||
-        full_plan.materialization.device_capacity_bytes != 76'251'952'640ULL ||
-        full_plan.materialization.device_objects.size() != 1'427 ||
-        full_plan.materialization.host_objects.size() != 6 ||   // the MTP banks are mapped tensors, not host resources
-        full_plan.materialization.mapped_tensor_objects.size() != 133) { // 131 PLE + 2 MTP expert banks
-        std::cerr << "Full artifact binding inventory mismatch\n";
+    } catch (const std::exception& ex) {
+        std::cerr << "FAILED test_real_artifact_full_binding: " << ex.what() << "\n";
         return 1;
     }
-
-    std::cout << "PASS: test_real_artifact_full_binding\n";
-    return 0;
 }
 
 int test_real_artifact_text_and_vision_plan_if_available() {
-    const char* env_path = std::getenv("NINFER_QWEN3_8_FLASH_NEXT_WEIGHTS");
-    const std::filesystem::path path =
-        env_path != nullptr && *env_path != '\0'
-            ? std::filesystem::path(env_path)
-            : std::filesystem::path(
-                  "" /* real-artifact cases run only when NINFER_WEIGHTS is set explicitly */);
+    try {
+        const char* env_path = std::getenv("NINFER_QWEN3_8_FLASH_NEXT_WEIGHTS");
+        const std::filesystem::path path =
+            env_path != nullptr && *env_path != '\0'
+                ? std::filesystem::path(env_path)
+                : std::filesystem::path(
+                      "" /* real-artifact cases run only when NINFER_WEIGHTS is set explicitly */);
 
-    if (!std::filesystem::is_regular_file(path)) {
-        std::cout << "SKIP: Real artifact text+vision plan (artifact not present at " << path
-                  << ")\n";
+        if (!std::filesystem::is_regular_file(path)) {
+            std::cout << "SKIP: Real artifact text+vision plan (artifact not present at " << path
+                      << ")\n";
+            return 0;
+        }
+
+        const ninfer::artifact::Reader reader(path);
+        validate_identity(reader.identity());
+        ninfer::artifact::Binder binder(reader);
+        const auto tv_plan = bind_artifact(binder, LoadFeatures{.vision = true, .mtp = false});
+
+        std::uint64_t tensor_bytes = 0;
+        for (const auto& object : tv_plan.materialization.device_objects) {
+            tensor_bytes += object.bytes;
+        }
+
+        if (tv_plan.materialization.device_objects.size() != 1'400) {
+            std::cerr << "Text+Vision device_objects count mismatch: expected 1400, got "
+                      << tv_plan.materialization.device_objects.size() << "\n";
+            return 1;
+        }
+        if (tv_plan.materialization.host_objects.size() != 6) {
+            std::cerr << "Text+Vision host_objects count mismatch: expected 6, got "
+                      << tv_plan.materialization.host_objects.size() << "\n";
+            return 1;
+        }
+        if (tv_plan.materialization.mapped_tensor_objects.size() != 131) {
+            std::cerr << "Text+Vision mapped_tensor_objects count mismatch: expected 131, got "
+                      << tv_plan.materialization.mapped_tensor_objects.size() << "\n";
+            return 1;
+        }
+
+        constexpr std::uint64_t kExpectedTvTensorBytes = 76'070'801'632ULL;
+        constexpr std::uint64_t kExpectedTvArenaBytes  = 76'070'815'744ULL;
+        if (tensor_bytes != kExpectedTvTensorBytes ||
+            tv_plan.materialization.device_capacity_bytes != kExpectedTvArenaBytes) {
+            std::cerr << "Text+Vision tensor bytes mismatch: expected " << kExpectedTvTensorBytes
+                      << " bytes (" << kExpectedTvArenaBytes << " arena), got " << tensor_bytes
+                      << " bytes (" << tv_plan.materialization.device_capacity_bytes << " arena)\n";
+            return 1;
+        }
+
+        std::cout << "PASS: test_real_artifact_text_and_vision_plan\n";
         return 0;
-    }
-
-    const ninfer::artifact::Reader reader(path);
-    validate_identity(reader.identity());
-    ninfer::artifact::Binder binder(reader);
-    const auto tv_plan = bind_artifact(binder, LoadFeatures{.vision = true, .mtp = false});
-
-    std::uint64_t tensor_bytes = 0;
-    for (const auto& object : tv_plan.materialization.device_objects) {
-        tensor_bytes += object.bytes;
-    }
-
-    if (tv_plan.materialization.device_objects.size() != 1'400) {
-        std::cerr << "Text+Vision device_objects count mismatch: expected 1400, got "
-                  << tv_plan.materialization.device_objects.size() << "\n";
+    } catch (const std::exception& ex) {
+        std::cerr << "FAILED test_real_artifact_text_and_vision_plan: " << ex.what() << "\n";
         return 1;
     }
-    if (tv_plan.materialization.host_objects.size() != 6) {
-        std::cerr << "Text+Vision host_objects count mismatch: expected 6, got "
-                  << tv_plan.materialization.host_objects.size() << "\n";
-        return 1;
-    }
-    if (tv_plan.materialization.mapped_tensor_objects.size() != 131) {
-        std::cerr << "Text+Vision mapped_tensor_objects count mismatch: expected 131, got "
-                  << tv_plan.materialization.mapped_tensor_objects.size() << "\n";
-        return 1;
-    }
+}
 
-    constexpr std::uint64_t kExpectedTvTensorBytes = 76'070'801'632ULL;
-    constexpr std::uint64_t kExpectedTvArenaBytes  = 76'070'815'744ULL;
-    if (tensor_bytes != kExpectedTvTensorBytes ||
-        tv_plan.materialization.device_capacity_bytes != kExpectedTvArenaBytes) {
-        std::cerr << "Text+Vision tensor bytes mismatch: expected " << kExpectedTvTensorBytes
-                  << " bytes (" << kExpectedTvArenaBytes << " arena), got " << tensor_bytes
-                  << " bytes (" << tv_plan.materialization.device_capacity_bytes << " arena)\n";
+int test_synthetic_artifact_plan_mtp_features() {
+    try {
+        const auto fixture =
+            ninfer::test::flash_next_fixture::create_flash_next_synthetic_artifact(
+                "loader_synthetic_mtp");
+        const ninfer::artifact::Reader reader(fixture.path);
+
+        // 1. MTP disabled (vision=true, mtp=false)
+        {
+            ninfer::artifact::Binder binder(reader);
+            const auto plan = bind_artifact(binder, LoadFeatures{.vision = true, .mtp = false});
+            const auto& m   = plan.materialization;
+
+            if (m.object_count != 1'566 || m.device_objects.size() != 1'400 ||
+                m.mapped_tensor_objects.size() != 131 || m.host_objects.size() != 6 ||
+                m.device_capacity_bytes != 76'070'815'744ULL) {
+                std::cerr << "Synthetic vision-only (mtp off) inventory mismatch: dev_objs="
+                          << m.device_objects.size() << " host_objs=" << m.host_objects.size()
+                          << " mapped=" << m.mapped_tensor_objects.size()
+                          << " dev_cap=" << m.device_capacity_bytes << "\n";
+                return 1;
+            }
+            if (!plan.bindings.features.vision || plan.bindings.features.mtp) {
+                std::cerr << "Synthetic features mismatch on mtp=false\n";
+                return 1;
+            }
+        }
+
+        // 2. MTP enabled (vision=true, mtp=true)
+        {
+            ninfer::artifact::Binder binder(reader);
+            const auto plan = bind_artifact(binder, LoadFeatures{.vision = true, .mtp = true});
+            const auto& m   = plan.materialization;
+
+            if (m.object_count != 1'566 || m.device_objects.size() != 1'427 ||
+                m.mapped_tensor_objects.size() != 133 || m.host_objects.size() != 6 ||
+                m.device_capacity_bytes != 76'251'952'640ULL) {
+                std::cerr << "Synthetic full (mtp on) inventory mismatch: dev_objs="
+                          << m.device_objects.size() << " host_objs=" << m.host_objects.size()
+                          << " mapped=" << m.mapped_tensor_objects.size()
+                          << " dev_cap=" << m.device_capacity_bytes << "\n";
+                return 1;
+            }
+            if (!plan.bindings.features.vision || !plan.bindings.features.mtp) {
+                std::cerr << "Synthetic features mismatch on mtp=true\n";
+                return 1;
+            }
+        }
+
+        std::cout << "PASS: test_synthetic_artifact_plan_mtp_features\n";
+        return 0;
+    } catch (const std::exception& ex) {
+        std::cerr << "FAILED test_synthetic_artifact_plan_mtp_features: " << ex.what() << "\n";
         return 1;
     }
-
-    std::cout << "PASS: test_real_artifact_text_and_vision_plan\n";
-    return 0;
 }
 
 } // namespace
 
 int main() {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
     if (test_identity_validation() != 0) return 1;
     if (test_ple_metadata_observable_behavior() != 0) return 1;
     if (test_preflight_memory_accounting() != 0) return 1;
     if (test_options_parser_validation() != 0) return 1;
-    // The real-artifact tests build plans only (no materialization) and run beside a resident
-    // production model; report any exception instead of aborting so the failing step is visible.
+    if (test_synthetic_artifact_plan_mtp_features() != 0) return 1;
+
     try {
         std::cout << std::flush;
         if (test_real_artifact_preflight_if_available() != 0) return 1;
-        std::cout << "PASS: test_real_artifact_preflight (or skipped)\n" << std::flush;
         if (test_real_artifact_text_and_vision_plan_if_available() != 0) return 1;
-        std::cout << "PASS: test_real_artifact_text_and_vision_plan (or skipped)\n" << std::flush;
         if (test_real_artifact_full_binding_if_available() != 0) return 1;
-        std::cout << "PASS: test_real_artifact_full_binding (or skipped)\n" << std::flush;
     } catch (const std::exception& e) {
         std::cerr << "FAILED: real-artifact test threw: " << e.what() << "\n";
         return 1;
