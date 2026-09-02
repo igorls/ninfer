@@ -73,6 +73,15 @@ void set_residual_splitk_env(int split_k) {
 #endif
 }
 
+void set_prefill_host_sync_env(bool restore_old) {
+    const char* value = restore_old ? "1" : "0";
+#ifdef _WIN32
+    (void)_putenv_s("NINFER_FLASH_NEXT_PREFILL_HOST_SYNC", value);
+#else
+    (void)setenv("NINFER_FLASH_NEXT_PREFILL_HOST_SYNC", value, 1);
+#endif
+}
+
 struct PrefillBenchStats {
     float min_ms    = 0.0F;
     float median_ms = 0.0F;
@@ -1913,7 +1922,8 @@ int test_cuda_graph_timing_benchmark(ninfer::DeviceContext& device) {
     }
 }
 
-int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device, bool mode_ab) {
+int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device, bool mode_ab,
+                                        bool host_sync_ab = false) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
     try {
         PleIndexMetadata ple_meta{};
@@ -1923,14 +1933,15 @@ int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device, bool mode
 
         auto synthetic_model = make_synthetic_model(device);
 
-        const bool interleaved_ab = prefill_bench_ab_requested(mode_ab);
+        const bool interleaved_ab = prefill_bench_ab_requested(mode_ab) || host_sync_ab;
         const int bench_iters     = prefill_bench_iters();
         const int warmup_s        = prefill_bench_warmup_s(interleaved_ab);
         std::cout << "--- Prefill Chunk Performance & Host CPU Benchmark (Synthetic Model) ---\n";
         std::cout << "NINFER_PREFILL_BENCH_ITERS=" << bench_iters
                   << " WARMUP_S=" << warmup_s
                   << " AB=" << (interleaved_ab ? "1" : "0")
-                  << " (one plan/executor; split-K read at each residual A8 launch)\n";
+                  << (host_sync_ab ? " kind=host-sync" : " kind=residual-splitk")
+                  << " (one plan/executor; env reread at each launch)\n";
 
         const std::vector<std::int32_t> chunk_sizes =
             interleaved_ab ? std::vector<std::int32_t>{2048, 128} : std::vector<std::int32_t>{128, 2048};
@@ -1983,7 +1994,11 @@ int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device, bool mode
 
             const int run_warmup = (!warmed && warmup_s > 0) ? warmup_s : 0;
             if (run_warmup > 0) {
-                set_residual_splitk_env(4);
+                if (host_sync_ab) {
+                    set_prefill_host_sync_env(false);
+                } else {
+                    set_residual_splitk_env(4);
+                }
                 const auto warm_t0 = std::chrono::steady_clock::now();
                 int warm_chunks    = 0;
                 while (std::chrono::duration<double>(std::chrono::steady_clock::now() - warm_t0)
@@ -1993,10 +2008,39 @@ int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device, bool mode
                 }
                 warmed = true;
                 std::cout << "  T=" << T << " warmup " << run_warmup << " s (" << warm_chunks
-                          << " chunks, splitk=4)\n";
+                          << " chunks, "
+                          << (host_sync_ab ? "host_sync=0" : "splitk=4") << ")\n";
             }
 
-            if (interleaved_ab) {
+            if (interleaved_ab && host_sync_ab) {
+                set_prefill_host_sync_env(true);
+                (void)time_one_chunk_ms();
+                set_prefill_host_sync_env(false);
+                (void)time_one_chunk_ms();
+                std::vector<float> samples_old(static_cast<std::size_t>(bench_iters));
+                std::vector<float> samples_new(static_cast<std::size_t>(bench_iters));
+                for (int i = 0; i < bench_iters; ++i) {
+                    set_prefill_host_sync_env(true);
+                    samples_old[static_cast<std::size_t>(i)] = time_one_chunk_ms();
+                    set_prefill_host_sync_env(false);
+                    samples_new[static_cast<std::size_t>(i)] = time_one_chunk_ms();
+                }
+                const PrefillBenchStats s_old = prefill_bench_stats(samples_old);
+                const PrefillBenchStats s_new = prefill_bench_stats(samples_new);
+                const float paired            = s_old.median_ms - s_new.median_ms;
+                std::cout << std::fixed << std::setprecision(3);
+                std::cout << "  Prefill T=" << T << " AB n=" << bench_iters
+                          << " paired_median_delta=" << paired
+                          << " ms (host_sync=1 minus host_sync=0; + = new path faster)\n";
+                std::cout << "    arm host_sync=1 min=" << s_old.min_ms
+                          << " median=" << s_old.median_ms << " max=" << s_old.max_ms
+                          << " mean=" << s_old.mean_ms
+                          << " span=" << (s_old.max_ms - s_old.min_ms) << " ms\n";
+                std::cout << "    arm host_sync=0 min=" << s_new.min_ms
+                          << " median=" << s_new.median_ms << " max=" << s_new.max_ms
+                          << " mean=" << s_new.mean_ms
+                          << " span=" << (s_new.max_ms - s_new.min_ms) << " ms\n";
+            } else if (interleaved_ab) {
                 set_residual_splitk_env(4);
                 (void)time_one_chunk_ms();
                 set_residual_splitk_env(1);
@@ -3602,6 +3646,9 @@ int main(int argc, char** argv) {
     if (mode == "stage-ledger-smoke") { return test_stage_ledger_smoke(device); }
     if (mode == "prefill-timing") { return test_prefill_chunk_timing_benchmark(device, false); }
     if (mode == "prefill-timing-ab") { return test_prefill_chunk_timing_benchmark(device, true); }
+    if (mode == "prefill-timing-host-sync-ab") {
+        return test_prefill_chunk_timing_benchmark(device, true, true);
+    }
     if (mode == "g14-prefill") { return test_g14_prefill_and_decode(device, 128); }
     if (mode == "g14-prefill-32") { return test_g14_prefill_and_decode(device, 32); }
     if (mode == "g14-det") { return test_g14_determinism(device); }

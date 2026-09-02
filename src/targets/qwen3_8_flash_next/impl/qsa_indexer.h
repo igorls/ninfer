@@ -43,10 +43,13 @@ void flash_next_qsa_indexer_prefill_chunk(
     const Tensor& input, const AttentionWeights& weights, const Tensor& token_indices,
     const Tensor& mrope_positions, std::int32_t table_row, std::int32_t source_state_slot,
     std::int32_t destination_state_slot, QsaIndexerCacheView cache, std::int32_t maximum_blocks,
-    WorkspaceArena& workspace, Tensor& selected_blocks, Tensor& selected_counts,
-    cudaStream_t stream);
+    std::int32_t first_token_index, WorkspaceArena& workspace, Tensor& selected_blocks,
+    Tensor& selected_counts, cudaStream_t stream);
 // Prefill selection: identity when the chunk (or tile) max complete_blocks <= 512, otherwise
 // one DeviceSegmentedRadixSort::SortPairsDescending per tile. Decode keeps packed-key DeviceTopK.
+// first_token_index is a host scalar (token_indices[0]); the default path uses it to choose
+// identity vs score/sort with no D2H. NINFER_FLASH_NEXT_PREFILL_HOST_SYNC=1 restores the
+// previous D2H+cudaStreamSynchronize decision.
 // Prefill scoring is a tiled bf16 MMA GEMM (BM=64 x BN=64, house m16n8k16); decode scoring
 // stays the per-(block,token) warp-reduce kernel. MMA vs warp_reduce_sum is a declared
 // numerics change: ranking SET is preserved where score gaps exceed MMA rounding; two-run

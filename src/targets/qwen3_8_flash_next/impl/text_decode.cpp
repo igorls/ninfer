@@ -217,6 +217,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
 
     auto emit_state = [&](std::string_view name, const Tensor& tensor) {
         if (sink && sink->on_state) {
+            // Diagnostic sink only (TRACE_STAGES / test dumper); decode path, not prefill chunk.
             CUDA_CHECK(cudaStreamSynchronize(stream));
             sink->on_state(name, tensor);
         }
@@ -341,13 +342,14 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                                    std::int32_t table_row, std::int32_t source_slot,
                                    std::int32_t destination_slot,
                                    const Tensor& gathered_ple_embedding, std::int32_t maximum_blocks,
-                                   FlashNextDecodeStateView state, WorkspaceArena& workspace,
-                                   Tensor& final_hidden, Tensor& logits, cudaStream_t stream,
-                                   const FlashNextDecodeStateSink* sink, bool use_qsa_prefill_mma) {
+                                   std::int32_t first_token_index, FlashNextDecodeStateView state,
+                                   WorkspaceArena& workspace, Tensor& final_hidden, Tensor& logits,
+                                   cudaStream_t stream, const FlashNextDecodeStateSink* sink,
+                                   bool use_qsa_prefill_mma) {
     const std::int32_t tokens      = embedding.ne[1];
     const std::int32_t state_slots = state.ple_convolution_states.ne[2];
-    if (tokens <= 0 || maximum_blocks <= 0 || maximum_blocks > 65'536 || table_row < 0 ||
-        source_slot < 0 || source_slot >= state_slots || destination_slot < 0 ||
+    if (tokens <= 0 || maximum_blocks <= 0 || maximum_blocks > 65'536 || first_token_index < 0 ||
+        table_row < 0 || source_slot < 0 || source_slot >= state_slots || destination_slot < 0 ||
         destination_slot >= state_slots ||
         !exact_tensor(embedding, DType::BF16, 2'560, tokens) ||
         !exact_tensor(token_indices, DType::I32, tokens) ||
@@ -366,6 +368,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
 
     auto emit_state = [&](std::string_view name, const Tensor& tensor) {
         if (sink && sink->on_state) {
+            // Diagnostic sink only (TRACE_STAGES / test dumper): device tensor must be idle.
             CUDA_CHECK(cudaStreamSynchronize(stream));
             sink->on_state(name, tensor);
         }
@@ -413,7 +416,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
             flash_next_qsa_indexer_prefill_chunk(
                 round_ws.block_input, model.full_attention[qsa_idx], token_indices,
                 mrope_positions, table_row, source_slot, destination_slot,
-                state.qsa_indexer_caches[qsa_idx], maximum_blocks, workspace,
+                state.qsa_indexer_caches[qsa_idx], maximum_blocks, first_token_index, workspace,
                 round_ws.selected_blocks, round_ws.selected_counts, stream);
             emit_state(prefix + "selected_counts", round_ws.selected_counts);
             emit_state(prefix + "selected_blocks", round_ws.selected_blocks);

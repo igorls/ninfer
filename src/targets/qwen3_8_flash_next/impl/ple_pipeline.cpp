@@ -142,6 +142,7 @@ void PleGatherPipeline::enqueue_copy(Ticket&& ticket, Tensor& output) {
     }
     slot.work.clear();
     const std::size_t bytes = ticket.tokens_ * kPleCompressedTokenBytes;
+    // Payload H2D of gathered PLE rows; not a host control-flow round-trip.
     slot.ordering.record(device_.stream);
     slot.ordering.wait(device_.transfer_stream);
     CUDA_CHECK(cudaMemcpyAsync(slot.device_compressed.p, slot.buffer.data(), bytes,

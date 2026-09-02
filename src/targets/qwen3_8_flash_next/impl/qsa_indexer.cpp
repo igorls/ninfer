@@ -99,8 +99,8 @@ void flash_next_qsa_indexer_prefill_chunk(
     const Tensor& input, const AttentionWeights& weights, const Tensor& token_indices,
     const Tensor& mrope_positions, std::int32_t table_row, std::int32_t source_state_slot,
     std::int32_t destination_state_slot, QsaIndexerCacheView cache, std::int32_t maximum_blocks,
-    WorkspaceArena& workspace, Tensor& selected_blocks, Tensor& selected_counts,
-    cudaStream_t stream) {
+    std::int32_t first_token_index, WorkspaceArena& workspace, Tensor& selected_blocks,
+    Tensor& selected_counts, cudaStream_t stream) {
     const std::int32_t tokens        = input.ne[1];
     const std::int32_t logical_pages = cache.block_tables.ne[0];
     if (maximum_blocks <= 0 || maximum_blocks > 65'536 ||
@@ -127,7 +127,8 @@ void flash_next_qsa_indexer_prefill_chunk(
         cache.raw_positions.ne[2] != cache.raw_keys.ne[2] || cache.raw_positions.ne[3] != 1 ||
         !cache.raw_positions.is_contiguous() || !aligned_to(cache.raw_positions.data, 16) ||
         !exact_tensor(selected_blocks, DType::I32, 512, tokens) ||
-        !exact_tensor(selected_counts, DType::I32, tokens) || stream == nullptr) {
+        !exact_tensor(selected_counts, DType::I32, tokens) || first_token_index < 0 ||
+        stream == nullptr) {
         throw std::invalid_argument(
             "Flash-Next QSA indexer prefill chunk received an invalid exact target view");
     }
@@ -143,7 +144,7 @@ void flash_next_qsa_indexer_prefill_chunk(
     flash_next_qsa_indexer_prefill_launch(
         token_indices, mrope_positions, table_row, source_state_slot, destination_state_slot,
         weights.indexer_query_norm, weights.indexer_key_norm, cache, scratch, maximum_blocks,
-        selected_blocks, selected_counts, stream);
+        first_token_index, selected_blocks, selected_counts, stream);
     stage_ledger_record(stream, FlashNextStageId::QSA_IndexerScoreSelect);
 }
 

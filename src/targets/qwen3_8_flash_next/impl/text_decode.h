@@ -48,8 +48,9 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                                    std::int32_t table_row, std::int32_t source_slot,
                                    std::int32_t destination_slot,
                                    const Tensor& gathered_ple_embedding, std::int32_t maximum_blocks,
-                                   FlashNextDecodeStateView state, WorkspaceArena& workspace,
-                                   Tensor& final_hidden, Tensor& logits, cudaStream_t stream,
+                                   std::int32_t first_token_index, FlashNextDecodeStateView state,
+                                   WorkspaceArena& workspace, Tensor& final_hidden, Tensor& logits,
+                                   cudaStream_t stream,
                                    const FlashNextDecodeStateSink* sink = nullptr,
                                    bool use_qsa_prefill_mma            = false);
 

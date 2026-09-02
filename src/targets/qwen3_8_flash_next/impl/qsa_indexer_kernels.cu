@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
@@ -676,8 +677,8 @@ void flash_next_qsa_indexer_prefill_launch(
     const Tensor& token_indices, const Tensor& mrope_positions, std::int32_t table_row,
     std::int32_t source_state_slot, std::int32_t destination_state_slot, const Tensor& query_norm,
     const Tensor& key_norm, QsaIndexerCacheView cache, FlashNextQsaIndexerWorkspace& scratch,
-    std::int32_t maximum_blocks, Tensor& selected_blocks, Tensor& selected_counts,
-    cudaStream_t stream) {
+    std::int32_t maximum_blocks, std::int32_t first_token_index, Tensor& selected_blocks,
+    Tensor& selected_counts, cudaStream_t stream) {
     const int tokens = token_indices.ne[0];
     const int max_complete_blocks = (tokens + 3) / 4;
     if (max_complete_blocks > 0) {
@@ -702,11 +703,15 @@ void flash_next_qsa_indexer_prefill_launch(
         static_cast<std::int32_t*>(cache.raw_positions.data), tokens);
     CUDA_CHECK(cudaGetLastError());
 
-    std::int32_t first_token_index = 0;
-    CUDA_CHECK(cudaMemcpyAsync(&first_token_index, token_indices.data, sizeof(first_token_index),
-                               cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    const int chunk_complete_blocks = (first_token_index + tokens) / 4;
+    std::int32_t resolved_first = first_token_index;
+    const char* restore         = std::getenv("NINFER_FLASH_NEXT_PREFILL_HOST_SYNC");
+    const bool host_sync = restore != nullptr && restore[0] == '1' && restore[1] == '\0';
+    if (host_sync) {
+        CUDA_CHECK(cudaMemcpyAsync(&resolved_first, token_indices.data, sizeof(resolved_first),
+                                   cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+    }
+    const int chunk_complete_blocks = (resolved_first + tokens) / 4;
     if (maximum_blocks <= kSelectedBlocks || chunk_complete_blocks <= kSelectedBlocks) {
         publish_identity_selection_kernel<<<tokens, 256, 0, stream>>>(
             static_cast<const std::int32_t*>(token_indices.data),

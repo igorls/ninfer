@@ -220,7 +220,7 @@ bool test_block_publish_equivalence(ninfer::DeviceContext& device) {
 
             flash_next_qsa_indexer_prefill_chunk(
                 chunk_in, weights, chunk_idx, chunk_pos, 0, 0, 1, cache_b, maximum_blocks,
-                ws_prefill, chunk_sel, chunk_cnt, device.stream);
+                first_token_index, ws_prefill, chunk_sel, chunk_cnt, device.stream);
             drain_all_streams();
 
             std::vector<std::uint16_t> keys_a(128ULL * 64 * logical_pages);
@@ -462,7 +462,7 @@ bool test_selection_equivalence(ninfer::DeviceContext& device) {
         drain_all_streams();
         flash_next_qsa_indexer_prefill_chunk(
             chunk_in, weights, chunk_idx, chunk_pos, 0, 0, 1, cache_b, maximum_blocks,
-            ws_prefill, chunk_sel, chunk_cnt, device.stream);
+            first_token_index, ws_prefill, chunk_sel, chunk_cnt, device.stream);
         drain_all_streams();
 
         std::vector<std::int32_t> chunk_counts(T);
@@ -1038,8 +1038,8 @@ bool test_prefill_padded_score_nan_sentinel(ninfer::DeviceContext& device) {
         drain_all_streams();
         flash_next_qsa_indexer_prefill_chunk(
             probe.input_view, probe.weights, probe.token_view, probe.position_view, 0, 0, 0,
-            probe.cache, maximum_blocks, probe.workspace, probe.selected_view, probe.count_view,
-            device.stream);
+            probe.cache, maximum_blocks, token, probe.workspace, probe.selected_view,
+            probe.count_view, device.stream);
         drain_all_streams();
         probe.selected_count.copy_to_host(&count, sizeof(count));
         probe.selected_blocks.copy_to_host(ids.data(), sizeof(ids));
@@ -1125,8 +1125,9 @@ bool test_prefill_decode_select_equivalence(ninfer::DeviceContext& device) {
         drain_all_streams();
         flash_next_qsa_indexer_prefill_chunk(
             prefill_probe.input_view, prefill_probe.weights, prefill_probe.token_view,
-            prefill_probe.position_view, 0, 0, 0, prefill_probe.cache, n, prefill_probe.workspace,
-            prefill_probe.selected_view, prefill_probe.count_view, device.stream);
+            prefill_probe.position_view, 0, 0, 0, prefill_probe.cache, n, token,
+            prefill_probe.workspace, prefill_probe.selected_view, prefill_probe.count_view,
+            device.stream);
         drain_all_streams();
         prefill_probe.selected_count.copy_to_host(&count_prefill, sizeof(count_prefill));
         prefill_probe.selected_blocks.copy_to_host(ids_prefill.data(), sizeof(ids_prefill));
@@ -1281,8 +1282,8 @@ bool test_prefill_per_token_complete_threshold(ninfer::DeviceContext& device) {
     CUDA_CHECK(cudaMemsetAsync(workspace.base(), 0xFF, workspace.capacity(), device.stream));
     drain_all_streams();
     flash_next_qsa_indexer_prefill_chunk(input_view, weights, token_view, position_view, 0, 0, 0,
-                                         cache, maximum_blocks, workspace, selected_view,
-                                         count_view, device.stream);
+                                         cache, maximum_blocks, first_token, workspace,
+                                         selected_view, count_view, device.stream);
     drain_all_streams();
 
     std::vector<std::int32_t> counts(static_cast<std::size_t>(tokens), -1);
@@ -1433,7 +1434,7 @@ bool test_prefill_score_gemm_vs_host_oracle(ninfer::DeviceContext& device, std::
     ninfer::ops::linear(input_view, weights.indexer_query_key, scratch.projected, device.stream);
     flash_next_qsa_indexer_prefill_launch(token_view, position_view, 0, 0, 0,
                                           weights.indexer_query_norm, weights.indexer_key_norm,
-                                          cache, scratch, n, selected_view, count_view,
+                                          cache, scratch, n, token, selected_view, count_view,
                                           device.stream);
     drain_all_streams();
 
@@ -1619,8 +1620,8 @@ bool test_g14_prefill_indexer_cost(ninfer::DeviceContext& device, std::int32_t n
     auto launch_once = [&]() {
         flash_next_qsa_indexer_prefill_launch(token_view, position_view, 0, 0, 0,
                                               weights.indexer_query_norm, weights.indexer_key_norm,
-                                              cache, scratch, n, selected_view, count_view,
-                                              device.stream);
+                                              cache, scratch, n, first_token, selected_view,
+                                              count_view, device.stream);
     };
     launch_once();
     drain_all_streams();

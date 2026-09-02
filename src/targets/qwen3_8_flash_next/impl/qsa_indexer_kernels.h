@@ -24,7 +24,7 @@ void flash_next_qsa_indexer_prefill_launch(
     const Tensor& token_indices, const Tensor& mrope_positions, std::int32_t table_row,
     std::int32_t source_state_slot, std::int32_t destination_state_slot, const Tensor& query_norm,
     const Tensor& key_norm, QsaIndexerCacheView cache, FlashNextQsaIndexerWorkspace& scratch,
-    std::int32_t maximum_blocks, Tensor& selected_blocks, Tensor& selected_counts,
-    cudaStream_t stream);
+    std::int32_t maximum_blocks, std::int32_t first_token_index, Tensor& selected_blocks,
+    Tensor& selected_counts, cudaStream_t stream);
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

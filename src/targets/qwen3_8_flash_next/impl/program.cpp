@@ -101,6 +101,7 @@ void ProgramImpl::sample_tokens(const Tensor& logits,
                 static_cast<const ops::SamplingConfig*>(device_sampling_configs_.p), pos_tensor,
                 ops::kSamplePurposeDecode, sampling_workspace_, device_.stream);
 
+    // Decode/serve sampled-token D2H; not on the prefill chunk path.
     CUDA_CHECK(cudaMemcpyAsync(out_tokens.data(), device_sampled_tokens_.p,
                                B * sizeof(std::int32_t), cudaMemcpyDeviceToHost,
                                device_.stream));

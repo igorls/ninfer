@@ -651,6 +651,7 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
             host_flat_positions[2 * num_tokens + t] = positions[t][2];
         }
 
+        // Payload H2D of chunk token ids/indices/positions; not a host decision round-trip.
         CUDA_CHECK(cudaMemcpyAsync(dev_token_ids.data, token_ids.data(),
                                    num_tokens * sizeof(std::int32_t), cudaMemcpyHostToDevice,
                                    device_.stream));
@@ -707,8 +708,8 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
             model_, embedding, dev_token_indices, dev_mrope_positions,
             static_cast<std::int32_t>(lane), initial_active_slot, initial_standby_slot,
             gathered_ple, static_cast<std::int32_t>(alloc_.plan().maximum_blocks),
-            alloc_.state_view(), alloc_.workspace(), final_hidden, logits, device_.stream,
-            effective_sink, alloc_.plan().config.use_qsa_prefill_mma);
+            first_token_index, alloc_.state_view(), alloc_.workspace(), final_hidden, logits,
+            device_.stream, effective_sink, alloc_.plan().config.use_qsa_prefill_mma);
 
         round_in_flight_ = true;
         Tensor hyper_hidden(alloc_.round_tensors().hyper_hidden.data, DType::BF16, {10'240, 1});
