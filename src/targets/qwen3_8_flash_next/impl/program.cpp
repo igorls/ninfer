@@ -575,14 +575,18 @@ AssessedPressureTarget PressurePlanningSessionImpl::assess(PressureTargetHandle 
     assessment_outcomes_.clear();
     assessment_outcomes_.reserve(owners_.size());
     assessment_impacts_.clear();
+    assessment_recovery_work_.clear();
+    assessment_impacts_.reserve(owners_.size() * 2);
+    assessment_recovery_work_.reserve(owners_.size() * 2);
     std::uint32_t total_degradation = 0;
     std::uint32_t total_dropped = 0;
     std::uint64_t projection_work = 1;
 
     for (std::size_t i = 0; i < owners_.size(); ++i) {
         if (node.owner_evicted[i] == 1) {
+            const std::size_t slot_idx = owners_[i].continuation_index;
             // The Engine validates this against continuation_checkpoint_count(entry.summary).
-            const std::uint32_t dropped = program_->published_checkpoints_of(owners_[i].continuation_index);
+            const std::uint32_t dropped = program_->published_checkpoints_of(slot_idx);
             assessment_outcomes_.push_back(runtime::PressureOwnerOutcome{
                 .owner = owners_[i].owner_id,
                 .disposition = runtime::VictimDisposition::Evicted,
@@ -592,7 +596,63 @@ AssessedPressureTarget PressurePlanningSessionImpl::assess(PressureTargetHandle 
             total_degradation += 1;
             total_dropped += dropped;
             projection_work += 1;
+
+            if (slot_idx < program_->continuation_slots_.size()) {
+                const auto& slot = program_->continuation_slots_[slot_idx];
+
+                // 1. Endpoint checkpoint impact (SessionEndpoint)
+                const std::uint32_t endpoint_frontier =
+                    slot.committed_frontier > 0 ? static_cast<std::uint32_t>(slot.committed_frontier) : 0U;
+                runtime::CheckpointRef endpoint_ref{
+                    .kind = slot.kind,
+                    .frontier = endpoint_frontier,
+                    .ordinal = 0,
+                };
+                runtime::CheckpointRecoveryAlternativeWork endpoint_work{};
+                endpoint_work.prefill = runtime::make_prefill_work(
+                    0, endpoint_frontier, 0, 0, program_->plan_.config.prefill_chunk);
+                endpoint_work.transfers = {};
+                assessment_recovery_work_.push_back(endpoint_work);
+                assessment_impacts_.push_back(runtime::PressureCheckpointRecoveryImpact{
+                    .owner = owners_[i].owner_id,
+                    .checkpoint = endpoint_ref,
+                    .target_recovery_work = {},
+                    .survives = false,
+                });
+
+                // 2. Paired TurnClosure checkpoint impact (if published as rewrite)
+                if (dropped >= 2 && slot.paired_rewrite_slot.has_value()) {
+                    const std::uint32_t turn_idx = *slot.paired_rewrite_slot;
+                    if (turn_idx < program_->continuation_slots_.size()) {
+                        const auto& turn_slot = program_->continuation_slots_[turn_idx];
+                        const std::uint32_t turn_frontier =
+                            turn_slot.committed_frontier > 0 ? static_cast<std::uint32_t>(turn_slot.committed_frontier) : 0U;
+                        runtime::CheckpointRef rewrite_ref{
+                            .kind = runtime::CheckpointKind::TurnClosure,
+                            .frontier = turn_frontier,
+                            .ordinal = 0,
+                        };
+                        runtime::CheckpointRecoveryAlternativeWork rewrite_work{};
+                        rewrite_work.prefill = runtime::make_prefill_work(
+                            0, turn_frontier, 0, 0, program_->plan_.config.prefill_chunk);
+                        rewrite_work.transfers = {};
+                        assessment_recovery_work_.push_back(rewrite_work);
+                        assessment_impacts_.push_back(runtime::PressureCheckpointRecoveryImpact{
+                            .owner = owners_[i].owner_id,
+                            .checkpoint = rewrite_ref,
+                            .target_recovery_work = {},
+                            .survives = false,
+                        });
+                    }
+                }
+            }
         }
+    }
+
+    // Bind spans into assessment_recovery_work_ after all elements are inserted
+    for (std::size_t k = 0; k < assessment_impacts_.size(); ++k) {
+        assessment_impacts_[k].target_recovery_work =
+            std::span<const runtime::CheckpointRecoveryAlternativeWork>(&assessment_recovery_work_[k], 1);
     }
 
     runtime::MaterializationPhysicalStatus status = runtime::MaterializationPhysicalStatus::Infeasible;

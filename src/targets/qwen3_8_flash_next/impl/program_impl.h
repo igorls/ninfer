@@ -115,6 +115,7 @@ public:
     std::vector<runtime::PressureOwnerOutcome> assessment_outcomes_;
     std::vector<runtime::PressureOwnerOutcome> guidance_outcomes_;
     std::vector<runtime::PressureCheckpointRecoveryImpact> assessment_impacts_;
+    std::vector<runtime::CheckpointRecoveryAlternativeWork> assessment_recovery_work_;
     std::uint32_t retained_target_idx_ = std::numeric_limits<std::uint32_t>::max();
     std::uint32_t scratch_generation_ = 0;
     std::uint32_t scratch_parent_index_ = 0;
