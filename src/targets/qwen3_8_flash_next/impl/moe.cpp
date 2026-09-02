@@ -4,6 +4,7 @@
 #include "targets/qwen3_8_flash_next/impl/moe_kernels.h"
 #include "targets/qwen3_8_flash_next/impl/moe_route.h"
 #include "targets/qwen3_8_flash_next/impl/moe_workspace.h"
+#include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -76,6 +77,7 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
     FlashNextMoeWorkspace scratch = allocate_flash_next_moe_workspace(workspace, tokens);
     flash_next_route(input, weights.router, weights.shared_gate_weight, scratch.scores, scratch.ids,
                      scratch.alpha, scratch.shared_scale, stream);
+    stage_ledger_record(stream, FlashNextStageId::MoE_Router);
     flash_next_moe_kernels_launch(input, weights, scratch, output, stream);
 
     static const char* trace_routing_env = std::getenv("NINFER_FLASH_NEXT_TRACE_ROUTING");

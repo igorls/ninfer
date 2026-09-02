@@ -29,6 +29,7 @@ add_library(ninfer_qwen3_8_flash_next STATIC
   impl/qsa_indexer_kernels.cu
   impl/runtime_plan.cpp
   impl/runtime_state.cpp
+  impl/stage_ledger.cpp
   impl/text_decode.cpp
   impl/text_decode_kernels.cu
   impl/text_executor.cpp

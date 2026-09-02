@@ -8,6 +8,7 @@
 #include "core/layout.h"
 #include "targets/qwen3_8_flash_next/impl/gdn_kernels.h"
 #include "targets/qwen3_8_flash_next/impl/gdn_workspace.h"
+#include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
 
 #include <cmath>
 #include <cstdint>
@@ -161,6 +162,7 @@ void flash_next_gdn_prefill_chunk(const Tensor& input, const GdnWeights& weights
     // 1. Projection -> scratch.projected [16384, T]
     ops::linear(input, weights.query_key_value_z, scratch.projected, linear_policy, workspace,
                 stream);
+    stage_ledger_record(stream, FlashNextStageId::GDN_QkvzProjection);
 
     // 2. Causal conv on rows [0, 10240)
     ops::extract_bf16_columns(scratch.projected, 0, scratch.conv_in, stream);
@@ -176,9 +178,11 @@ void flash_next_gdn_prefill_chunk(const Tensor& input, const GdnWeights& weights
 
     // Extract z from rows [10240, 16384) of scratch.projected
     ops::extract_bf16_columns(scratch.projected, 10'240, scratch.z, stream);
+    stage_ledger_record(stream, FlashNextStageId::GDN_ConvExtracts);
 
     // 3. Controls -> g [48, T], beta [48, T]
     flash_next_gdn_controls_launch(input, weights, scratch, stream);
+    stage_ledger_record(stream, FlashNextStageId::GDN_Controls);
 
     // 4. Gated DeltaNet distinct-state recurrence
     Tensor query            = scratch.query.view({128, 16, tokens});
@@ -190,12 +194,27 @@ void flash_next_gdn_prefill_chunk(const Tensor& input, const GdnWeights& weights
     Tensor ssm_in           = ssm_states.slice(3, source_slot, 1).view({128, 128, 48});
     Tensor ssm_out          = ssm_states.slice(3, destination_slot, 1).view({128, 128, 48});
 
+    ops::detail::gated_delta_net::chunked::GdnChunkedStageHook gdn_hook{};
+    if (FlashNextStageLedger::is_enabled()) {
+        gdn_hook.record_stage = [](void*, int stage_id, cudaStream_t s) {
+            if (stage_id == 0) {
+                stage_ledger_record(s, FlashNextStageId::GDN_Recurrence_PrepareWyWu);
+            } else if (stage_id == 1) {
+                stage_ledger_record(s, FlashNextStageId::GDN_Recurrence_StatePassing);
+            } else if (stage_id == 2) {
+                stage_ledger_record(s, FlashNextStageId::GDN_Recurrence_Output);
+            }
+        };
+    }
     ops::gated_delta_net(query, key, value, g, beta, 1.0F / std::sqrt(128.0F), true, workspace,
-                         ssm_in, ssm_out, recurrent_output, stream);
+                         ssm_in, ssm_out, recurrent_output, stream,
+                         FlashNextStageLedger::is_enabled() ? &gdn_hook : nullptr);
 
     // 5. Output gate & projection
     flash_next_gdn_output_gate_launch(scratch, weights.norm, stream);
+    stage_ledger_record(stream, FlashNextStageId::GDN_OutputGate);
     ops::linear(scratch.gated_output, weights.output, output, linear_policy, workspace, stream);
+    stage_ledger_record(stream, FlashNextStageId::GDN_OutputProjection);
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

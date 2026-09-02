@@ -7,6 +7,7 @@
 #include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_state.h"
 #include "targets/qwen3_8_flash_next/impl/qsa_indexer_workspace.h"
+#include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode_workspace.h"
 #include "targets/qwen3_8_flash_next/impl/text_executor.h"
@@ -3526,6 +3527,49 @@ int test_g14_determinism(ninfer::DeviceContext& device) {
     }
 }
 
+int test_stage_ledger_smoke(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+        auto synthetic_model = make_synthetic_model(device);
+        FlashNextRuntimeConfig cfg{
+            .max_concurrency     = 1,
+            .max_context         = 4096,
+            .state_slot_capacity = 2,
+            .prefill_chunk       = 2048,
+            .use_cuda_graph      = false,
+        };
+        const auto curve = flash_next_capacity_curve(cfg);
+        auto plan        = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
+        FlashNextRuntimeAllocation alloc(plan);
+        alloc.initialize(device.stream);
+        FlashNextTextExecutor exec(synthetic_model.view, ple_meta, device, alloc);
+        auto lane = exec.allocate_lane();
+        g8_prefill_one(exec, lane, 0, 2048, device, nullptr);
+        exec.release_lane(lane);
+
+        if (FlashNextStageLedger::is_enabled()) {
+            const auto stats = FlashNextStageLedger::instance().last_stats();
+            if (stats.total_chunk_ms <= 0.0f || stats.sum_accounted_ms <= 0.0f) {
+                std::cerr << "FAIL: stage ledger non-positive timing\n";
+                return 1;
+            }
+            if (stats.accounted_pct < 95.0f || stats.residual_pct >= 5.0f || stats.residual_pct < -5.0f) {
+                std::cerr << "FAIL: stage ledger residual out of range: " << stats.residual_pct << "%\n";
+                return 1;
+            }
+        }
+        std::cout << "PASS: test_stage_ledger_smoke\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_stage_ledger_smoke exception: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -3555,6 +3599,7 @@ int main(int argc, char** argv) {
     if (mode == "g8-graph-nodes") { return test_g8_graph_node_diff(device); }
     if (mode == "g8-stage-checksum") { return test_g8_stage_checksum(device); }
     if (mode == "g9-gate") { return test_g9_prefill_determinism(device); }
+    if (mode == "stage-ledger-smoke") { return test_stage_ledger_smoke(device); }
     if (mode == "prefill-timing") { return test_prefill_chunk_timing_benchmark(device, false); }
     if (mode == "prefill-timing-ab") { return test_prefill_chunk_timing_benchmark(device, true); }
     if (mode == "g14-prefill") { return test_g14_prefill_and_decode(device, 128); }
@@ -3573,6 +3618,7 @@ int main(int argc, char** argv) {
     if (test_measure_cuda_graph_footprint(device) != 0) return 1;
     if (test_cuda_graph_timing_benchmark(device) != 0) return 1;
     if (test_prefill_chunk_timing_benchmark(device, false) != 0) return 1;
+    if (test_stage_ledger_smoke(device) != 0) return 1;
     if (test_g9_prefill_determinism(device) != 0) return 1;
 
     std::cout << "OK Flash-Next Text Executor\n";

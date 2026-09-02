@@ -5,6 +5,7 @@
 #include "core/layout.h"
 #include "targets/qwen3_8_flash_next/impl/qsa_attention_kernels.h"
 #include "targets/qwen3_8_flash_next/impl/qsa_attention_workspace.h"
+#include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -161,10 +162,12 @@ void flash_next_qsa_attention_prefill_chunk(
         tokens >= 16 ? ops::LinearPolicy::AllowA8 : ops::LinearPolicy::A16Only;
     ops::linear(input, weights.query_gate_key_value, scratch.projected, linear_policy, workspace,
                 stream);
+    stage_ledger_record(stream, FlashNextStageId::QSA_Projection);
     if (emit) { emit("qsa_projected", scratch.projected); }
     flash_next_qsa_attention_prefill_launch(token_indices, mrope_positions, table_row, selected_blocks,
                                             selected_counts, weights.query_norm, weights.key_norm,
                                             cache, scratch, stream, use_mma);
+    stage_ledger_record(stream, FlashNextStageId::QSA_MainAttention);
     if (emit) {
         emit("qsa_query", scratch.query);
         emit("qsa_gate", scratch.gate);
@@ -174,6 +177,7 @@ void flash_next_qsa_attention_prefill_chunk(
         emit("qsa_gated", scratch.gated);
     }
     ops::linear(scratch.gated, weights.output, output, linear_policy, workspace, stream);
+    stage_ledger_record(stream, FlashNextStageId::QSA_OutputProjection);
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

@@ -14,6 +14,7 @@
 #include "targets/qwen3_8_flash_next/impl/qsa_attention.h"
 #include "targets/qwen3_8_flash_next/impl/qsa_indexer.h"
 #include "targets/qwen3_8_flash_next/impl/qsa_indexer_kernels.h"
+#include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode_kernels.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode_workspace.h"
 
@@ -378,6 +379,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
 
     // 1. Repeat embedding into 4 hyperconnection streams
     repeat_embedding_to_hyper_streams(embedding, round_ws.hyper_hidden, stream);
+    stage_ledger_record(stream, FlashNextStageId::Preamble_EmbeddingStaging);
     emit_state("hyper_init", round_ws.hyper_hidden);
 
     // 2. 48-layer execution loop
@@ -395,12 +397,14 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                                          round_ws.ple_injection, stream);
             emit_state("ple_injection", round_ws.ple_injection);
             ops::residual_add(round_ws.ple_injection, round_ws.hyper_hidden, stream);
+            stage_ledger_record(stream, FlashNextStageId::PLE_Injection);
             emit_state("hyper_after_ple", round_ws.hyper_hidden);
         }
 
         // Attention hyper prepare -> block_input [2560, T]
         flash_next_hyper_prepare(round_ws.hyper_hidden, model.layers[layer].attention_hyper,
                                  round_ws.hyper_scratch, round_ws.block_input, stream);
+        stage_ledger_record(stream, FlashNextStageId::Hyper_PrepareAttn);
         emit_state(prefix + "attn_block_input", round_ws.block_input);
 
         // Execute QSA or GDN attention
@@ -434,11 +438,13 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
         // Attention hyper inject
         flash_next_hyper_inject(round_ws.block_output, round_ws.hyper_scratch.injection,
                                 round_ws.hyper_hidden, stream);
+        stage_ledger_record(stream, FlashNextStageId::Hyper_InjectAttn);
         emit_state(prefix + "hyper_after_attn", round_ws.hyper_hidden);
 
         // MLP hyper prepare -> block_input [2560, T]
         flash_next_hyper_prepare(round_ws.hyper_hidden, model.layers[layer].mlp_hyper,
                                  round_ws.hyper_scratch, round_ws.block_input, stream);
+        stage_ledger_record(stream, FlashNextStageId::Hyper_PrepareMlp);
         emit_state(prefix + "mlp_block_input", round_ws.block_input);
 
         // MoE
@@ -449,6 +455,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
         // MLP hyper inject
         flash_next_hyper_inject(round_ws.block_output, round_ws.hyper_scratch.injection,
                                 round_ws.hyper_hidden, stream);
+        stage_ledger_record(stream, FlashNextStageId::Hyper_InjectMlp);
         emit_state(prefix + "hyper_after_mlp", round_ws.hyper_hidden);
     }
 
@@ -461,7 +468,10 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
     // 4. Output head linear projection -> logits [248320, 1]
     ops::linear(final_hidden, model.output_head, logits, ops::LinearPolicy::A16Only, workspace,
                 stream);
+    stage_ledger_record(stream, FlashNextStageId::Final_NormHead);
     emit_state("logits", logits);
+
+    FlashNextStageLedger::instance().finish_chunk(stream);
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

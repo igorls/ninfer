@@ -5,6 +5,7 @@
 #include "core/layout.h"
 #include "targets/qwen3_8_flash_next/impl/qsa_indexer_kernels.h"
 #include "targets/qwen3_8_flash_next/impl/qsa_indexer_workspace.h"
+#include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
 
 #include <cstdint>
 #include <stdexcept>
@@ -138,10 +139,12 @@ void flash_next_qsa_indexer_prefill_chunk(
     FlashNextQsaIndexerWorkspace scratch = allocate_flash_next_qsa_indexer_workspace(
         workspace, maximum_blocks, tokens, tile_size, sort_temp);
     ops::linear(input, weights.indexer_query_key, scratch.projected, stream);
+    stage_ledger_record(stream, FlashNextStageId::QSA_Projection);
     flash_next_qsa_indexer_prefill_launch(
         token_indices, mrope_positions, table_row, source_state_slot, destination_state_slot,
         weights.indexer_query_norm, weights.indexer_key_norm, cache, scratch, maximum_blocks,
         selected_blocks, selected_counts, stream);
+    stage_ledger_record(stream, FlashNextStageId::QSA_IndexerScoreSelect);
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

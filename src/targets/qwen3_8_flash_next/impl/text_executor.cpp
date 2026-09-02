@@ -1,6 +1,7 @@
 #include "targets/qwen3_8_flash_next/impl/text_executor.h"
 
 #include "targets/qwen3_8_flash_next/impl/mtp_forward.h"
+#include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode_workspace.h"
 #include "ninfer/ops/embedding.h"
@@ -620,6 +621,8 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
         // Sync table updates if dirty
         ledger_.sync_tables_if_dirty(alloc_, device_.stream);
 
+        FlashNextStageLedger::instance().begin_chunk(device_.stream, static_cast<std::int32_t>(num_tokens));
+
         // 1. Gather all 16*T PLE rows for the chunk at once
         PleTokenHistory temp_history = ledger_.lane_history(handle);
         std::vector<std::array<std::int64_t, 16>> chunk_ple_indices(num_tokens);
@@ -671,6 +674,7 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
             Tensor indices_slice = staging.visual_indices.slice(0, 0, count);
             ops::scatter(*visual_embeddings, indices_slice, embedding, device_.stream);
         }
+        stage_ledger_record(device_.stream, FlashNextStageId::Preamble_EmbeddingStaging);
 
         // 4. Output tensors
         Tensor logits(alloc_.round_tensors().logits.data, DType::BF16, {248'320, 1});

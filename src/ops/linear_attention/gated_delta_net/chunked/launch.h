@@ -18,6 +18,11 @@
 
 namespace ninfer::ops::detail::gated_delta_net::chunked {
 
+struct GdnChunkedStageHook {
+    void (*record_stage)(void* user_data, int stage_id, cudaStream_t stream) = nullptr;
+    void* user_data = nullptr;
+};
+
 inline constexpr std::size_t kWorkspaceAlign = 256;
 
 struct workspace_layout {

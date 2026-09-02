@@ -9,6 +9,7 @@
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_gemv.cuh"
 #include "ops/linear/nvfp4/nvfp4_w4a4_mma.cuh"
+#include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -1355,10 +1356,10 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
             static_cast<std::int32_t*>(workspace.task_counter.data),
             tokens);
         CUDA_CHECK(cudaGetLastError());
+        stage_ledger_record(stream, FlashNextStageId::MoE_Grouping);
 
         if (tokens >= kMmaPrefillThreshold) {
             // Large tokens: Native NVFP4 Tensor Core MMA route
-            // 2. Quantize input activations X -> NVFP4
             // 2. Shared expert gate & up (8 pairs per CTA -> 80 blocks)
             // Reads original BF16 input and writes to activations path kTopK (10). Completely disjoint from routed MMA.
             const dim3 shared_grid(kIntermediate / 8, (static_cast<unsigned>(tokens) + 7) / 8);
@@ -1369,6 +1370,7 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
                 static_cast<__nv_bfloat16*>(workspace.activations.data),
                 tokens);
             CUDA_CHECK(cudaGetLastError());
+            stage_ledger_record(stream, FlashNextStageId::MoE_SharedGateUp);
 
             // 3. Quantize input activations X -> NVFP4
             constexpr int kActThreads = 256;
@@ -1380,6 +1382,7 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
                     static_cast<std::uint8_t*>(workspace.act_scales.data),
                     tokens, 1.0F);
             CUDA_CHECK(cudaGetLastError());
+            stage_ledger_record(stream, FlashNextStageId::MoE_QuantInput);
 
             // 4. Grouped Expert Gate & Up (Native NVFP4 Tensor Core MMA)
             static const bool s_mma_smem_init = []() {
@@ -1406,6 +1409,7 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
                 weights.expert_gate_up.scale_bytes_per_expert,
                 static_cast<__nv_bfloat16*>(workspace.activations.data));
             CUDA_CHECK(cudaGetLastError());
+            stage_ledger_record(stream, FlashNextStageId::MoE_RoutedGateUp);
 
             // 5. Quantize intermediate activations -> NVFP4
             const int down_act_rows = tokens * kPaths;
@@ -1417,6 +1421,7 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
                     static_cast<std::uint8_t*>(workspace.down_act_scales.data),
                     down_act_rows, 1.0F);
             CUDA_CHECK(cudaGetLastError());
+            stage_ledger_record(stream, FlashNextStageId::MoE_QuantDown);
 
             // 6. Shared Down FMA: SharedDown(2560 x 640) * activations[:, 10, :] * shared_scale -> output
             const dim3 shared_down_grid(kHidden / 64, (static_cast<unsigned>(tokens) + 15) / 16);
@@ -1427,6 +1432,7 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
                 static_cast<__nv_bfloat16*>(output.data),
                 tokens);
             CUDA_CHECK(cudaGetLastError());
+            stage_ledger_record(stream, FlashNextStageId::MoE_SharedDown);
 
             // 7. Grouped Down GEMM (Native NVFP4 Tensor Core MMA with Fused Routing Alpha Epilogue)
             const dim3 down_grid(kHidden / 64, 512);
@@ -1447,6 +1453,7 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
                 weights.expert_down.scale_bytes_per_expert,
                 static_cast<__nv_bfloat16*>(workspace.staged_down.data));
             CUDA_CHECK(cudaGetLastError());
+            stage_ledger_record(stream, FlashNextStageId::MoE_RoutedDown);
 
             // 8. Fused Fixed-Order FP32 Warp-Tile Reduction Kernel
             const dim3 reduce_grid(kHidden / 64, (static_cast<unsigned>(tokens) + 15) / 16);
@@ -1456,6 +1463,7 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
                 static_cast<__nv_bfloat16*>(output.data),
                 tokens);
             CUDA_CHECK(cudaGetLastError());
+            stage_ledger_record(stream, FlashNextStageId::MoE_Reduce);
         } else {
             // Small tokens (8 < tokens < 512): SIMT W4A16 route (avoids quant overhead)
             // 2. Grouped Expert Gate & Up (SIMT W4A16)
@@ -1476,6 +1484,7 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
                 weights.expert_gate_up.scale_bytes_per_expert,
                 static_cast<__nv_bfloat16*>(workspace.activations.data));
             CUDA_CHECK(cudaGetLastError());
+            stage_ledger_record(stream, FlashNextStageId::MoE_RoutedGateUp);
 
             // 3. Shared expert gate & up (8 pairs per CTA -> 80 blocks)
             const dim3 shared_grid(kIntermediate / 8, (static_cast<unsigned>(tokens) + 7) / 8);
@@ -1486,6 +1495,7 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
                 static_cast<__nv_bfloat16*>(workspace.activations.data),
                 tokens);
             CUDA_CHECK(cudaGetLastError());
+            stage_ledger_record(stream, FlashNextStageId::MoE_SharedGateUp);
 
             // 4. Grouped Down GEMM (SIMT W4A16)
             constexpr int kDownGridY = 8;
@@ -1505,6 +1515,7 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
                 weights.expert_down.scale_bytes_per_expert,
                 static_cast<float*>(workspace.down_intermediate.data));
             CUDA_CHECK(cudaGetLastError());
+            stage_ledger_record(stream, FlashNextStageId::MoE_RoutedDown);
 
             // 5. Shared Down & Top-K weighted reduction (SIMT)
             const dim3 reduce_grid(kHidden / 8, (static_cast<unsigned>(tokens) + 7) / 8);
@@ -1518,6 +1529,7 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
                 static_cast<__nv_bfloat16*>(output.data),
                 tokens);
             CUDA_CHECK(cudaGetLastError());
+            stage_ledger_record(stream, FlashNextStageId::MoE_Reduce);
         }
     }
 }
