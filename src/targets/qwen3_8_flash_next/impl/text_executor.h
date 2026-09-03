@@ -165,6 +165,13 @@ public:
     [[nodiscard]] PendingRound execute_round(std::span<const LaneStepRequest> requests,
                                              const FlashNextDecodeStateSink* sink = nullptr);
 
+    // Consumes the accumulated blocking-wait time from the last round, in nanoseconds.
+    [[nodiscard]] std::uint64_t take_round_device_wait_ns() noexcept {
+        const std::uint64_t value = round_device_wait_ns_;
+        round_device_wait_ns_     = 0;
+        return value;
+    }
+
     [[nodiscard]] PendingRound
     execute_speculative_verify_round(LaneHandle handle, std::int32_t anchor_token_id,
                                      std::span<const std::int32_t> draft_tokens,
@@ -222,6 +229,9 @@ private:
     DecodeGraphFamily decode_graphs_;
     WorkspaceArena sampling_workspace_;
     CudaCompletionEvent round_completion_;
+    // Nanoseconds spent blocked in round_completion_.synchronize() since the last take.
+    // Program reclassifies this out of the host bucket; see ExecutionTimingRecorder.
+    std::uint64_t round_device_wait_ns_ = 0;
     bool round_in_flight_ = false;
     // Eager-only: custom embedding columns for the round being built (never captured).
     std::vector<const Tensor*> pending_custom_embeddings_;

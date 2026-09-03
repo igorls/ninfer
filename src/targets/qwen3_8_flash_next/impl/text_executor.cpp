@@ -565,7 +565,14 @@ PendingRound FlashNextTextExecutor::finish_prepared_round(
 
         // 5. Complete round on event wait
         round_completion_.record(device_.stream);
-        round_completion_.synchronize();
+        {
+            const auto wait_started = std::chrono::steady_clock::now();
+            round_completion_.synchronize();
+            round_device_wait_ns_ += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - wait_started)
+                    .count());
+        }
 
         // 6. Copy sampled tokens from pinned host egress
         std::array<std::int32_t, 8> sampled_tokens{};
@@ -861,7 +868,14 @@ PendingRound FlashNextTextExecutor::execute_speculative_verify_round(
                                    device_.stream));
 
         round_completion_.record(device_.stream);
-        round_completion_.synchronize();
+        {
+            const auto wait_started = std::chrono::steady_clock::now();
+            round_completion_.synchronize();
+            round_device_wait_ns_ += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - wait_started)
+                    .count());
+        }
 
         std::array<std::int32_t, 8> sampled_tokens_host{};
         const auto* host_egr = alloc_.host_egress();

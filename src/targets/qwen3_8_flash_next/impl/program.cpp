@@ -1867,6 +1867,9 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
                 : PrefixReusePath::Root;
         progress.processed_prompt_tokens      = 0;
         progress.complete                     = true;
+        // Attribute the round's blocking device stall to the wait bucket rather than
+        // leaving it in the submit residual. See ExecutionTimingRecorder.
+        timing.reclassify_submit_as_wait(impl_->executor_.take_round_device_wait_ns());
         progress.timing                       = timing.finish();
         progress.pending                      = ContractAccess::make_pending(
             this, 1, std::span(&sequence, 1),
@@ -1991,6 +1994,9 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
                 : PrefixReusePath::Root;
         progress.processed_prompt_tokens      = chunk_size;
         progress.complete                     = false;
+        // Attribute the round's blocking device stall to the wait bucket rather than
+        // leaving it in the submit residual. See ExecutionTimingRecorder.
+        timing.reclassify_submit_as_wait(impl_->executor_.take_round_device_wait_ns());
         progress.timing                       = timing.finish();
 
         if (is_capture_split) {
@@ -2029,6 +2035,9 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
                 : PrefixReusePath::Root;
         progress.processed_prompt_tokens      = chunk_size;
         progress.complete                     = false;
+        // Attribute the round's blocking device stall to the wait bucket rather than
+        // leaving it in the submit residual. See ExecutionTimingRecorder.
+        timing.reclassify_submit_as_wait(impl_->executor_.take_round_device_wait_ns());
         progress.timing                       = timing.finish();
         progress.capture                      = ContractAccess::make_capture_offer(
             this, sequence.lane(), sequence.epoch(), capture_id);
@@ -2070,6 +2079,9 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
             : PrefixReusePath::Root;
     progress.processed_prompt_tokens      = chunk_size;
     progress.complete                     = true;
+    // Attribute the round's blocking device stall to the wait bucket rather than
+    // leaving it in the submit residual. See ExecutionTimingRecorder.
+    timing.reclassify_submit_as_wait(impl_->executor_.take_round_device_wait_ns());
     progress.timing                       = timing.finish();
     progress.pending                      = ContractAccess::make_pending(
         this, 1, std::span(&sequence, 1),
@@ -2343,6 +2355,9 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
         impl_->pending_batch_row_counts_.resize(1);
         impl_->pending_batch_row_counts_[0] = static_cast<std::int32_t>(accepted.size());
 
+        // Attribute the round's blocking device stall to the wait bucket rather than
+        // leaving it in the submit residual. See ExecutionTimingRecorder.
+        timing.reclassify_submit_as_wait(impl_->executor_.take_round_device_wait_ns());
         const auto exec_timing = timing.finish();
         return ContractAccess::make_pending(
             this, impl_->pending_round_.valid() ? 1 : 0, sequences,
@@ -2405,6 +2420,9 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
         impl_->pending_batch_row_counts_[b] = 1;
     }
 
+    // Attribute the round's blocking device stall to the wait bucket rather than
+    // leaving it in the submit residual. See ExecutionTimingRecorder.
+    timing.reclassify_submit_as_wait(impl_->executor_.take_round_device_wait_ns());
     const auto exec_timing = timing.finish();
     return ContractAccess::make_pending(
         this, impl_->pending_round_.valid() ? 1 : 0, sequences,
@@ -2466,6 +2484,9 @@ Program::append_forced_tokens(std::span<const SequenceHandle> sequences,
         }
     }
 
+    // Attribute the round's blocking device stall to the wait bucket rather than
+    // leaving it in the submit residual. See ExecutionTimingRecorder.
+    timing.reclassify_submit_as_wait(impl_->executor_.take_round_device_wait_ns());
     return timing.finish();
 }
 
@@ -2623,6 +2644,9 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
     }
 
     ContractAccess::consume(pending);
+    // Attribute the round's blocking device stall to the wait bucket rather than
+    // leaving it in the submit residual. See ExecutionTimingRecorder.
+    timing.reclassify_submit_as_wait(impl_->executor_.take_round_device_wait_ns());
     result.timing = timing.finish();
     return result;
 }
