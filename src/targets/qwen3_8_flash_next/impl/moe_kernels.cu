@@ -43,13 +43,52 @@ template <int K>
 __device__ __forceinline__ void dot_bf16_pair(const __nv_bfloat16* x, const __nv_bfloat16* first,
                                               const __nv_bfloat16* second, float& first_result,
                                               float& second_result) {
-    const int lane   = static_cast<int>(threadIdx.x) & 31;
+    const int lane = static_cast<int>(threadIdx.x) & 31;
+    const auto* x_u4      = reinterpret_cast<const uint4*>(x);
+    const auto* first_u4  = reinterpret_cast<const uint4*>(first);
+    const auto* second_u4 = reinterpret_cast<const uint4*>(second);
     float first_sum  = 0.0F;
     float second_sum = 0.0F;
-    for (int column = lane; column < K; column += 32) {
-        const float value = __bfloat162float(x[column]);
-        first_sum         = fmaf(__bfloat162float(first[column]), value, first_sum);
-        second_sum        = fmaf(__bfloat162float(second[column]), value, second_sum);
+    constexpr int kIters = K / (32 * 8); // 2560 / 256 = 10
+    #pragma unroll
+    for (int iter = 0; iter < kIters; ++iter) {
+        const int idx = iter * 32 + lane;
+        const uint4 xv = x_u4[idx];
+        const uint4 fv = first_u4[idx];
+        const uint4 sv = second_u4[idx];
+
+        const float2 x0 = ops::bf16x2_bits_to_float2(xv.x);
+        const float2 x1 = ops::bf16x2_bits_to_float2(xv.y);
+        const float2 x2 = ops::bf16x2_bits_to_float2(xv.z);
+        const float2 x3 = ops::bf16x2_bits_to_float2(xv.w);
+
+        const float2 f0 = ops::bf16x2_bits_to_float2(fv.x);
+        const float2 f1 = ops::bf16x2_bits_to_float2(fv.y);
+        const float2 f2 = ops::bf16x2_bits_to_float2(fv.z);
+        const float2 f3 = ops::bf16x2_bits_to_float2(fv.w);
+
+        const float2 s0 = ops::bf16x2_bits_to_float2(sv.x);
+        const float2 s1 = ops::bf16x2_bits_to_float2(sv.y);
+        const float2 s2 = ops::bf16x2_bits_to_float2(sv.z);
+        const float2 s3 = ops::bf16x2_bits_to_float2(sv.w);
+
+        first_sum = fmaf(f0.x, x0.x, first_sum);
+        first_sum = fmaf(f0.y, x0.y, first_sum);
+        first_sum = fmaf(f1.x, x1.x, first_sum);
+        first_sum = fmaf(f1.y, x1.y, first_sum);
+        first_sum = fmaf(f2.x, x2.x, first_sum);
+        first_sum = fmaf(f2.y, x2.y, first_sum);
+        first_sum = fmaf(f3.x, x3.x, first_sum);
+        first_sum = fmaf(f3.y, x3.y, first_sum);
+
+        second_sum = fmaf(s0.x, x0.x, second_sum);
+        second_sum = fmaf(s0.y, x0.y, second_sum);
+        second_sum = fmaf(s1.x, x1.x, second_sum);
+        second_sum = fmaf(s1.y, x1.y, second_sum);
+        second_sum = fmaf(s2.x, x2.x, second_sum);
+        second_sum = fmaf(s2.y, x2.y, second_sum);
+        second_sum = fmaf(s3.x, x3.x, second_sum);
+        second_sum = fmaf(s3.y, x3.y, second_sum);
     }
     first_result  = ops::warp_reduce_sum(first_sum);
     second_result = ops::warp_reduce_sum(second_sum);
@@ -72,30 +111,153 @@ __global__ void flash_next_moe_gate_up_kernel(
     const float* __restrict__ expert_divisors, std::uint64_t code_stride,
     std::uint64_t scale_stride, const __nv_bfloat16* __restrict__ shared_gate,
     const __nv_bfloat16* __restrict__ shared_up, __nv_bfloat16* __restrict__ activations) {
-    __shared__ ops::detail::Nvfp4GemvSharedStorage<GateGeometry, GateSchedule> shared;
     const int token = static_cast<int>(blockIdx.y);
     const int path  = static_cast<int>(blockIdx.z);
     const int warp  = static_cast<int>(threadIdx.x) >> 5;
     const int lane  = static_cast<int>(threadIdx.x) & 31;
-    const int row   = static_cast<int>(blockIdx.x) * GateSchedule::kWarpsPerCta + warp;
+    const int row   = static_cast<int>(blockIdx.x) * 8 + warp;
     if (row >= kIntermediate) { return; }
+
     const auto* x = input + static_cast<std::int64_t>(token) * kHidden;
-    float gate    = 0.0F;
-    float up      = 0.0F;
+    float gate = 0.0F;
+    float up   = 0.0F;
+
     if (path < kTopK) {
         const int expert    = ids[token * kTopK + path];
         const auto* codes   = expert_codes + static_cast<std::uint64_t>(expert) * code_stride;
         const auto* scales  = expert_scales + static_cast<std::uint64_t>(expert) * scale_stride;
         const float inverse = 1.0F / expert_divisors[expert];
-        const int parent_rows[GateSchedule::kRowsPerWarp] = {row, row + kIntermediate};
-        float accumulators[GateSchedule::kRowsPerWarp][GateSchedule::kAccumulatorChains] = {};
-        ops::detail::compute_nvfp4_rows<GateGeometry, GateSchedule>(
-            x, codes, scales, shared, inverse, parent_rows, warp * GateSchedule::kRowsPerWarp, lane,
-            accumulators);
-#pragma unroll
-        for (int chain = 0; chain < GateSchedule::kAccumulatorChains; ++chain) {
-            gate += accumulators[0][chain];
-            up += accumulators[1][chain];
+
+        const int row_gate = row;
+        const int row_up   = row + kIntermediate;
+
+        const int m_tile_gate       = row_gate / 128;
+        const int row_inner_gate    = row_gate % 128;
+        const int row_mod32_gate    = row_inner_gate & 31;
+        const int row_quartile_gate = row_inner_gate >> 5;
+        const std::int64_t scale_base_gate =
+            static_cast<std::int64_t>(m_tile_gate * 160) * 512 +
+            row_mod32_gate * 16 + row_quartile_gate * 4;
+
+        const int m_tile_up       = row_up / 128;
+        const int row_inner_up    = row_up % 128;
+        const int row_mod32_up    = row_inner_up & 31;
+        const int row_quartile_up = row_inner_up >> 5;
+        const std::int64_t scale_base_up =
+            static_cast<std::int64_t>(m_tile_up * 160) * 512 +
+            row_mod32_up * 16 + row_quartile_up * 4;
+
+        const auto* codes_gate = codes + static_cast<std::int64_t>(row_gate) * 1280;
+        const auto* codes_up   = codes + static_cast<std::int64_t>(row_up) * 1280;
+
+        float gate_acc[4] = {0.0F, 0.0F, 0.0F, 0.0F};
+        float up_acc[4]   = {0.0F, 0.0F, 0.0F, 0.0F};
+
+        #pragma unroll
+        for (int phase = 0; phase < 5; ++phase) {
+            // 1. Cooperative Scale Load via Warp Shuffle (Lanes 0..7 load gate scales, Lanes 8..15 load up scales)
+            std::uint32_t my_scale_word = 0;
+            if (lane < 8) {
+                const std::int64_t off = scale_base_gate + static_cast<std::int64_t>(phase * 8 + lane) * 512;
+                my_scale_word = *reinterpret_cast<const std::uint32_t*>(scales + off);
+            } else if (lane < 16) {
+                const std::int64_t off = scale_base_up + static_cast<std::int64_t>(phase * 8 + (lane - 8)) * 512;
+                my_scale_word = *reinterpret_cast<const std::uint32_t*>(scales + off);
+            }
+
+            const std::uint32_t gate_word = __shfl_sync(0xFFFFFFFFU, my_scale_word, lane >> 2);
+            const std::uint32_t up_word   = __shfl_sync(0xFFFFFFFFU, my_scale_word, 8 + (lane >> 2));
+
+            const std::uint8_t scale_byte_gate = static_cast<std::uint8_t>(gate_word >> ((lane & 3) * 8));
+            const std::uint8_t scale_byte_up   = static_cast<std::uint8_t>(up_word >> ((lane & 3) * 8));
+
+            const float coef_gate = ops::detail::decode_nvfp4_e4m3(scale_byte_gate) * inverse;
+            const float coef_up   = ops::detail::decode_nvfp4_e4m3(scale_byte_up) * inverse;
+
+            // 2. Vectorized 128-bit Activation Load (1 load of 16 bytes = 8 BF16s per thread)
+            const auto* x_vec_ptr = reinterpret_cast<const uint4*>(x + phase * 512);
+            const uint4 act_raw = x_vec_ptr[lane];
+            const float2 act[4] = {
+                ops::bf16x2_bits_to_float2(act_raw.x),
+                ops::bf16x2_bits_to_float2(act_raw.y),
+                ops::bf16x2_bits_to_float2(act_raw.z),
+                ops::bf16x2_bits_to_float2(act_raw.w)
+            };
+
+            // 3. Vectorized 64-bit Code Loads (8 bytes for gate, 8 bytes for up)
+            const auto* code_gate_ptr = reinterpret_cast<const uint2*>(codes_gate + phase * 256);
+            const auto* code_up_ptr   = reinterpret_cast<const uint2*>(codes_up + phase * 256);
+            const uint2 cg = code_gate_ptr[lane];
+            const uint2 cu = code_up_ptr[lane];
+
+            const float2 dw_gate[8] = {
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(cg.x)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(cg.x >> 8)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(cg.x >> 16)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(cg.x >> 24)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(cg.y)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(cg.y >> 8)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(cg.y >> 16)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(cg.y >> 24))
+            };
+
+            const float2 dw_up[8] = {
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(cu.x)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(cu.x >> 8)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(cu.x >> 16)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(cu.x >> 24)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(cu.y)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(cu.y >> 8)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(cu.y >> 16)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(cu.y >> 24))
+            };
+
+            // 4. Compute 16 FMAs for Gate and 16 FMAs for Up preserving the 4 accumulator chains
+            gate_acc[0] = fmaf(dw_gate[0].x * coef_gate, act[0].x, gate_acc[0]);
+            gate_acc[1] = fmaf(dw_gate[0].y * coef_gate, act[0].y, gate_acc[1]);
+            gate_acc[2] = fmaf(dw_gate[1].x * coef_gate, act[0].x, gate_acc[2]);
+            gate_acc[3] = fmaf(dw_gate[1].y * coef_gate, act[0].y, gate_acc[3]);
+
+            gate_acc[0] = fmaf(dw_gate[2].x * coef_gate, act[1].x, gate_acc[0]);
+            gate_acc[1] = fmaf(dw_gate[2].y * coef_gate, act[1].y, gate_acc[1]);
+            gate_acc[2] = fmaf(dw_gate[3].x * coef_gate, act[1].x, gate_acc[2]);
+            gate_acc[3] = fmaf(dw_gate[3].y * coef_gate, act[1].y, gate_acc[3]);
+
+            gate_acc[0] = fmaf(dw_gate[4].x * coef_gate, act[2].x, gate_acc[0]);
+            gate_acc[1] = fmaf(dw_gate[4].y * coef_gate, act[2].y, gate_acc[1]);
+            gate_acc[2] = fmaf(dw_gate[5].x * coef_gate, act[2].x, gate_acc[2]);
+            gate_acc[3] = fmaf(dw_gate[5].y * coef_gate, act[2].y, gate_acc[3]);
+
+            gate_acc[0] = fmaf(dw_gate[6].x * coef_gate, act[3].x, gate_acc[0]);
+            gate_acc[1] = fmaf(dw_gate[6].y * coef_gate, act[3].y, gate_acc[1]);
+            gate_acc[2] = fmaf(dw_gate[7].x * coef_gate, act[3].x, gate_acc[2]);
+            gate_acc[3] = fmaf(dw_gate[7].y * coef_gate, act[3].y, gate_acc[3]);
+
+            up_acc[0] = fmaf(dw_up[0].x * coef_up, act[0].x, up_acc[0]);
+            up_acc[1] = fmaf(dw_up[0].y * coef_up, act[0].y, up_acc[1]);
+            up_acc[2] = fmaf(dw_up[1].x * coef_up, act[0].x, up_acc[2]);
+            up_acc[3] = fmaf(dw_up[1].y * coef_up, act[0].y, up_acc[3]);
+
+            up_acc[0] = fmaf(dw_up[2].x * coef_up, act[1].x, up_acc[0]);
+            up_acc[1] = fmaf(dw_up[2].y * coef_up, act[1].y, up_acc[1]);
+            up_acc[2] = fmaf(dw_up[3].x * coef_up, act[1].x, up_acc[2]);
+            up_acc[3] = fmaf(dw_up[3].y * coef_up, act[1].y, up_acc[3]);
+
+            up_acc[0] = fmaf(dw_up[4].x * coef_up, act[2].x, up_acc[0]);
+            up_acc[1] = fmaf(dw_up[4].y * coef_up, act[2].y, up_acc[1]);
+            up_acc[2] = fmaf(dw_up[5].x * coef_up, act[2].x, up_acc[2]);
+            up_acc[3] = fmaf(dw_up[5].y * coef_up, act[2].y, up_acc[3]);
+
+            up_acc[0] = fmaf(dw_up[6].x * coef_up, act[3].x, up_acc[0]);
+            up_acc[1] = fmaf(dw_up[6].y * coef_up, act[3].y, up_acc[1]);
+            up_acc[2] = fmaf(dw_up[7].x * coef_up, act[3].x, up_acc[2]);
+            up_acc[3] = fmaf(dw_up[7].y * coef_up, act[3].y, up_acc[3]);
+        }
+
+        #pragma unroll
+        for (int chain = 0; chain < 4; ++chain) {
+            gate += gate_acc[chain];
+            up   += up_acc[chain];
         }
         gate = ops::warp_reduce_sum(gate);
         up   = ops::warp_reduce_sum(up);
@@ -103,6 +265,7 @@ __global__ void flash_next_moe_gate_up_kernel(
         dot_bf16_pair<kHidden>(x, shared_gate + static_cast<std::int64_t>(row) * kHidden,
                                shared_up + static_cast<std::int64_t>(row) * kHidden, gate, up);
     }
+
     if (lane == 0) {
         activations[(static_cast<std::int64_t>(token) * kPaths + path) * kIntermediate + row] =
             __float2bfloat16_rn(ops::silu(gate) * up);
