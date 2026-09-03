@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -237,6 +239,28 @@ ParsedToolCallOutput fallback(const std::string& text) {
     return out;
 }
 
+// Every fallback path throws away calls the model did emit and hands the raw
+// <tool_call> markup back as prose, which an agent client reports as an empty
+// response. Naming the path turns that into a diagnosable event instead of a
+// silent one.
+ParsedToolCallOutput fallback(const std::string& text, const char* reason) {
+    std::fprintf(stderr, "tool_call_parse_fallback reason=%s bytes=%zu\n", reason, text.size());
+    return fallback(text);
+}
+
+// A model that narrates after its call ("...now let me read the file") loses
+// every parsed call under the strict rule. Other OpenAI-compatible servers keep
+// the calls and treat the surrounding text as content. Dropping was a deliberate
+// decision here (tests/test_tool_call_parser.cpp asserts it), so the tolerant
+// behaviour is opt-in rather than a silent reversal.
+// Read every call rather than latching in a function-local static: this runs at
+// most once per generated response, and a latched read cannot be toggled by a
+// test (or by anything else) after the first parse in the process.
+bool allow_trailing_text_after_tool_calls() {
+    const char* env = std::getenv("NINFER_TOOL_CALLS_ALLOW_TRAILING_TEXT");
+    return env != nullptr && env[0] == '1' && env[1] == '\0';
+}
+
 } // namespace
 
 std::shared_ptr<const ToolCallOutputContract>
@@ -270,20 +294,29 @@ ParsedToolCallOutput parse_qwen_tool_call_output(const std::string& text,
     while (pos < text.size()) {
         skip_ws(text, pos);
         if (pos >= text.size()) { break; }
-        if (!starts_with_at(text, pos, kToolOpen)) { return fallback(text); }
+        if (!starts_with_at(text, pos, kToolOpen)) {
+            if (!out.tool_calls.empty() && allow_trailing_text_after_tool_calls()) {
+                const std::string_view suffix = std::string_view(text).substr(pos);
+                if (!out.content.empty()) { out.content.append("\n"); }
+                out.content.append(suffix);
+                out.is_tool_call_response = true;
+                return out;
+            }
+            return fallback(text, "trailing_text_after_tool_call");
+        }
         const std::size_t inner_begin = pos + kToolOpen.size();
         const std::size_t close       = text.find(kToolClose, inner_begin);
-        if (close == std::string::npos) { return fallback(text); }
+        if (close == std::string::npos) { return fallback(text, "unterminated_tool_call"); }
         GeneratedToolCall call;
         if (!parse_one_tool_call(std::string_view(text).substr(inner_begin, close - inner_begin),
                                  max_tool_name_length, contracts, call)) {
-            return fallback(text);
+            return fallback(text, "malformed_tool_call_body");
         }
         out.tool_calls.push_back(std::move(call));
         pos = close + kToolClose.size();
     }
 
-    if (out.tool_calls.empty()) { return fallback(text); }
+    if (out.tool_calls.empty()) { return fallback(text, "no_calls_extracted"); }
     out.is_tool_call_response = true;
     return out;
 }

@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <span>
@@ -20,6 +21,16 @@ int fail(const std::string& message) {
 }
 
 int check(bool condition, const std::string& message) { return condition ? 0 : fail(message); }
+
+// The tolerant path is process-latched, so the tests drive it through the same
+// environment variable the server uses.
+void set_allow_trailing_text(bool on) {
+#ifdef _WIN32
+    (void)_putenv_s("NINFER_TOOL_CALLS_ALLOW_TRAILING_TEXT", on ? "1" : "0");
+#else
+    (void)setenv("NINFER_TOOL_CALLS_ALLOW_TRAILING_TEXT", on ? "1" : "0", 1);
+#endif
+}
 
 fi::ToolArgumentTypeContracts contracts_for(const std::string& tool_name, Json properties) {
     const std::string definition =
@@ -344,12 +355,62 @@ int test_incremental_filter_fallback() {
 
 } // namespace
 
+int test_trailing_text_opt_in_keeps_calls() {
+    // A coding agent narrating after its call is the shape that broke a live
+    // VS Code session: the strict rule dropped the call and handed the raw
+    // markup back as prose, which the client reported as an empty response.
+    const std::string text = "I will check the weather.\n"
+                             "<tool_call>\n"
+                             "<function=get_weather>\n"
+                             "<parameter=city>\nParis\n</parameter>\n"
+                             "</function>\n"
+                             "</tool_call>\n"
+                             "Then I will summarise it for you.";
+    int failures = 0;
+
+    const fi::ParsedToolCallOutput strict =
+        fi::parse_qwen_tool_call_output(text, 64, kNoTypeContracts);
+    failures += check(!strict.is_tool_call_response, "default stays strict for trailing text");
+    failures += check(strict.tool_calls.empty(), "default drops the call");
+
+    set_allow_trailing_text(true);
+    const fi::ParsedToolCallOutput tolerant =
+        fi::parse_qwen_tool_call_output(text, 64, kNoTypeContracts);
+    set_allow_trailing_text(false);
+    failures += check(tolerant.is_tool_call_response, "opt-in keeps it a tool response");
+    failures += check(tolerant.tool_calls.size() == 1, "opt-in keeps the call");
+    failures += check(tolerant.tool_calls[0].name == "get_weather", "opt-in parses the name");
+    failures += check(tolerant.content.find("I will check the weather.") != std::string::npos,
+                      "opt-in keeps the prefix");
+    failures += check(tolerant.content.find("Then I will summarise it") != std::string::npos,
+                      "opt-in keeps the narration as content");
+    failures += check(tolerant.content.find("<tool_call>") == std::string::npos,
+                      "opt-in never leaks markup into content");
+    return failures;
+}
+
+int test_trailing_text_opt_in_does_not_rescue_malformed() {
+    // Tolerance must not invent calls: an unterminated block still falls back,
+    // because accepting it could execute arguments the model never finished.
+    const std::string text = "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n";
+    set_allow_trailing_text(true);
+    const fi::ParsedToolCallOutput parsed =
+        fi::parse_qwen_tool_call_output(text, 64, kNoTypeContracts);
+    set_allow_trailing_text(false);
+    int failures = 0;
+    failures += check(!parsed.is_tool_call_response, "unterminated stays a fallback");
+    failures += check(parsed.tool_calls.empty(), "unterminated yields no calls");
+    return failures;
+}
+
 int main() {
     int failures = 0;
     failures += test_single_call();
     failures += test_multiple_calls_and_json_values();
     failures += test_malformed_falls_back_to_text();
     failures += test_suffix_after_tool_falls_back_to_text();
+    failures += test_trailing_text_opt_in_keeps_calls();
+    failures += test_trailing_text_opt_in_does_not_rescue_malformed();
     failures += test_configured_name_limit();
     failures += test_declared_strings_are_not_json_sniffed();
     failures += test_declared_non_string_values_are_json_decoded();
