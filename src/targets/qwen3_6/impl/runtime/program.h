@@ -273,9 +273,19 @@ template <>
 AdmissionCandidate<NINFER_QWEN36_VARIANT>::AdmissionCandidate(AdmissionCandidate&&) noexcept =
     default;
 
+// Defined out of line with an explicit body rather than `= default`. MSVC treats a
+// defaulted explicit specialization as inline and emits it only in a translation unit
+// that odr-uses it. Nothing in variant.cpp assigns one of these, so `= default` emits no
+// symbol at all, while engine.cpp odr-uses the operator through std::optional and sees
+// only the declaration in the exported header. The result is an unresolved external that
+// breaks every link that constructs a ninfer::Engine, ninfer-serve included. The sibling
+// wrappers in api_impl.h are written this way for the same reason. Do not simplify back.
 template <>
 AdmissionCandidate<NINFER_QWEN36_VARIANT>&
-AdmissionCandidate<NINFER_QWEN36_VARIANT>::operator=(AdmissionCandidate&&) noexcept = default;
+AdmissionCandidate<NINFER_QWEN36_VARIANT>::operator=(AdmissionCandidate&& other) noexcept {
+    impl_ = std::move(other.impl_);
+    return *this;
+}
 
 template <>
 AdmissionCandidate<NINFER_QWEN36_VARIANT>::~AdmissionCandidate() = default;
@@ -291,8 +301,11 @@ CapturePressureCandidate<NINFER_QWEN36_VARIANT>::CapturePressureCandidate(
 
 template <>
 CapturePressureCandidate<NINFER_QWEN36_VARIANT>&
-CapturePressureCandidate<NINFER_QWEN36_VARIANT>::operator=(CapturePressureCandidate&&) noexcept =
-    default;
+CapturePressureCandidate<NINFER_QWEN36_VARIANT>::operator=(
+    CapturePressureCandidate&& other) noexcept {
+    impl_ = std::move(other.impl_);
+    return *this;
+}
 
 template <>
 CapturePressureCandidate<NINFER_QWEN36_VARIANT>::~CapturePressureCandidate() = default;

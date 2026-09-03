@@ -159,9 +159,16 @@ template <>
 CapturePressurePlanningSession<Variant>::CapturePressurePlanningSession(
     CapturePressurePlanningSession&&) noexcept = default;
 
+// Out of line with a body for the reason spelled out in program.h: a defaulted explicit
+// specialization emits no symbol unless the defining translation unit odr-uses it. Nothing
+// assigns one of these today, so this is the latent form of the same link break.
 template <>
 CapturePressurePlanningSession<Variant>& CapturePressurePlanningSession<Variant>::operator=(
-    CapturePressurePlanningSession&&) noexcept = default;
+    CapturePressurePlanningSession&& other) noexcept {
+    candidate_ = std::move(other.candidate_);
+    session_   = std::move(other.session_);
+    return *this;
+}
 
 template <>
 CapturePressurePlanningSession<Variant>::~CapturePressurePlanningSession() = default;
