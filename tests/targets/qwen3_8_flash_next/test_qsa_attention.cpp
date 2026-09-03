@@ -505,6 +505,14 @@ int test_g17_prefill_mma(ninfer::DeviceContext& device,
         const double rel = std::sqrt(diff_sq / base_sq);
         std::cout << "G17 T=" << T << " rel-L2=" << rel << " max_abs=" << max_abs
                   << " two-run bitwise OK nonzero=" << nonzero << "\n";
+        // Current MMA kernel is bitwise with the scalar path (rel-L2=0). A schedule
+        // that is only rounding P to BF16 should sit near 1e-3; 0.5 is a defect.
+        constexpr double kMmaScalarRelL2Gate = 1.0e-3;
+        if (rel > kMmaScalarRelL2Gate) {
+            std::cerr << "FAIL: G17 T=" << T << " MMA vs scalar rel-L2=" << rel
+                      << " exceeds " << kMmaScalarRelL2Gate << "\n";
+            return 1;
+        }
     }
 
     std::cout << "G17 prefill_chunk wall (includes QGKV+out linear):\n";

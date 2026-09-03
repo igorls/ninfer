@@ -10,6 +10,8 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 namespace {
@@ -814,6 +816,245 @@ void qsa_prefill_sparse_attention_mma_kernel(
     }
 }
 
+// G24: QK on all 4 warps (split 64-key N-tiles), PV as m16n8k16 over staged V.
+// BN stays 64 so the online-softmax tile and FP32 order match the G17 kernel.
+// P is rounded to BF16 after the FP32 rescale; that rounding is declared.
+__global__ __launch_bounds__(kMmaThreads)
+void qsa_prefill_sparse_attention_mma_sched_kernel(
+    const __nv_bfloat16* __restrict__ query, const std::int32_t* __restrict__ token_indices,
+    int table_row, const std::int32_t* __restrict__ selected_blocks,
+    const std::int32_t* __restrict__ selected_counts, const std::int32_t* __restrict__ block_tables,
+    int logical_pages, const __nv_bfloat16* __restrict__ key_pages,
+    const __nv_bfloat16* __restrict__ value_pages, __nv_bfloat16* __restrict__ output) {
+    using ops::cp_async_zfill;
+    using ops::cp_commit;
+    using ops::cp_wait;
+    using ops::ldmatrix_x2;
+    using ops::ldmatrix_x2_t;
+    using ops::ldmatrix_x4;
+    using ops::mma_bf16;
+    using ops::smem_addr;
+    using ops::detail::gemm_swz64;
+    using Cache = ops::Cache;
+
+    __shared__ __align__(16) __nv_bfloat16 Qs[kMmaHeads * kHeadDim];
+    __shared__ __align__(16) __nv_bfloat16 Ks[kMmaBN * kHeadDim];
+    __shared__ __align__(16) __nv_bfloat16 Vs[kMmaBN * kHeadDim];
+    __shared__ float s_scores[kMmaHeads * kMmaBN];
+    __shared__ __align__(16) __nv_bfloat16 Ps[kMmaHeads * kMmaBN];
+    __shared__ float s_prior_scale[kMmaHeads];
+    __shared__ float s_chunk_scale[kMmaHeads];
+    __shared__ float s_inv_sum[kMmaHeads];
+
+    const int tid     = static_cast<int>(threadIdx.x);
+    const int warp    = tid >> 5;
+    const int lane    = tid & 31;
+    const int kv_head = static_cast<int>(blockIdx.x);
+    const int token   = static_cast<int>(blockIdx.y);
+    const int q0      = kv_head * kHeadsPerKv;
+
+    const int token_index     = token_indices[token];
+    const int complete_blocks = (token_index + 1) / 4;
+    const int tail_count      = (token_index + 1) & 3;
+    const int selected_count  = selected_counts[token];
+    const int total           = selected_count * 4 + tail_count;
+    const auto* selected      = selected_blocks + static_cast<std::int64_t>(token) * kSelectedBlocks;
+    const bool is_dense = (complete_blocks <= kSelectedBlocks && selected_count == complete_blocks);
+    const auto* block_table_row = block_tables + table_row * logical_pages;
+
+    const auto* q_base =
+        query + static_cast<std::int64_t>(token) * kQueryHeads * kHeadDim + q0 * kHeadDim;
+    for (int item = tid; item < kMmaHeads * (kHeadDim / 8); item += kMmaThreads) {
+        const int row = item / (kHeadDim / 8);
+        const int k8  = item - row * (kHeadDim / 8);
+        auto* dst     = &Qs[row * kHeadDim + gemm_swz64(row, k8 * 8)];
+        const bool valid = row < kHeadsPerKv;
+        const __nv_bfloat16* src = q_base + (valid ? row : 0) * kHeadDim + k8 * 8;
+        cp_async_zfill<16, Cache::cg>(dst, src, valid ? 16 : 0);
+    }
+    cp_commit();
+    cp_wait<0>();
+    __syncthreads();
+
+    if (tid < kMmaHeads) {
+        s_prior_scale[tid] = 1.0F;
+        s_chunk_scale[tid] = 0.0F;
+        s_inv_sum[tid]     = 0.0F;
+    }
+    float running_max[3] = {-__int_as_float(0x7F800000), -__int_as_float(0x7F800000),
+                            -__int_as_float(0x7F800000)};
+    float running_sum[3] = {};
+    constexpr int kPvNTiles = 8;
+    float oc[kPvNTiles][4]  = {};
+
+    const int a_mat    = lane >> 3;
+    const int a_rin    = lane & 7;
+    const int a_rowoff = a_rin + ((a_mat & 1) << 3);
+    const int a_coloff = (a_mat >> 1) << 3;
+    const int b_rin    = lane & 7;
+    const int b_koff   = ((lane >> 3) & 1) << 3;
+    const int arow     = a_rowoff;
+    const int gid      = lane >> 2;
+    const int lid      = lane & 3;
+    const int r0       = gid;
+    const int r1       = r0 + 8;
+
+    for (int start = 0; start < total; start += kMmaBN) {
+        const int count = min(kMmaBN, total - start);
+        for (int item = tid; item < kMmaBN * (kHeadDim / 8); item += kMmaThreads) {
+            const int row = item / (kHeadDim / 8);
+            const int k8  = item - row * (kHeadDim / 8);
+            auto* kdst    = &Ks[row * kHeadDim + gemm_swz64(row, k8 * 8)];
+            auto* vdst    = &Vs[row * kHeadDim + gemm_swz64(row, k8 * 8)]; // same K swizzle; PV uses ldmatrix.trans
+            const bool valid = row < count;
+            int cand = 0;
+            if (valid) {
+                cand = is_dense ? (start + row)
+                                : selected_token(start + row, selected_count, complete_blocks,
+                                                 selected);
+            }
+            const int phys = valid ? block_table_row[cand / kPageTokens] : 0;
+            const std::int64_t kv_off =
+                ((static_cast<std::int64_t>(phys) * kKvHeads + kv_head) * kPageTokens +
+                 (valid ? (cand % kPageTokens) : 0)) *
+                    kHeadDim +
+                k8 * 8;
+            cp_async_zfill<16, Cache::cg>(kdst, key_pages + kv_off, valid ? 16 : 0);
+            cp_async_zfill<16, Cache::cg>(vdst, value_pages + kv_off, valid ? 16 : 0);
+        }
+        cp_commit();
+        cp_wait<0>();
+        __syncthreads();
+
+        float tile_score[2][4] = {};
+        const int nt0          = warp * 2;
+#pragma unroll
+        for (int ki = 0; ki < kHeadDim / 16; ++ki) {
+            unsigned af[4];
+            ldmatrix_x4(af[0], af[1], af[2], af[3],
+                        smem_addr(&Qs[arow * kHeadDim + gemm_swz64(arow, ki * 16 + a_coloff)]));
+#pragma unroll
+            for (int nt_i = 0; nt_i < 2; ++nt_i) {
+                unsigned bf[2];
+                const int nt   = nt0 + nt_i;
+                const int brow = nt * 8 + b_rin;
+                ldmatrix_x2(bf[0], bf[1],
+                            smem_addr(&Ks[brow * kHeadDim + gemm_swz64(brow, ki * 16 + b_koff)]));
+                mma_bf16(tile_score[nt_i][0], tile_score[nt_i][1], tile_score[nt_i][2],
+                         tile_score[nt_i][3], af[0], af[1], af[2], af[3], bf[0], bf[1]);
+            }
+        }
+#pragma unroll
+        for (int nt_i = 0; nt_i < 2; ++nt_i) {
+            const int nt = nt0 + nt_i;
+            const int c0 = nt * 8 + 2 * lid;
+            const int c1 = c0 + 1;
+            auto store = [&](int head, int col, float value) {
+                const float ninf = -__int_as_float(0x7F800000);
+                s_scores[head * kMmaBN + col] =
+                    (head < kHeadsPerKv && col < count) ? value * kScale : ninf;
+            };
+            store(r0, c0, tile_score[nt_i][0]);
+            store(r0, c1, tile_score[nt_i][1]);
+            store(r1, c0, tile_score[nt_i][2]);
+            store(r1, c1, tile_score[nt_i][3]);
+        }
+        __syncthreads();
+
+#pragma unroll
+        for (int hi = 0; hi < 3; ++hi) {
+            const int head = warp + hi * kMmaWarps;
+            float hmax     = -__int_as_float(0x7F800000);
+            for (int col = lane; col < kMmaBN; col += 32) {
+                hmax = fmaxf(hmax, s_scores[head * kMmaBN + col]);
+            }
+#pragma unroll
+            for (int off = 16; off > 0; off >>= 1) {
+                hmax = fmaxf(hmax, __shfl_xor_sync(0xFFFFFFFF, hmax, off));
+            }
+            float hsum = 0.0F;
+            for (int col = lane; col < kMmaBN; col += 32) {
+                const float p = expf(s_scores[head * kMmaBN + col] - hmax);
+                s_scores[head * kMmaBN + col] = p;
+                hsum += p;
+            }
+#pragma unroll
+            for (int off = 16; off > 0; off >>= 1) {
+                hsum += __shfl_xor_sync(0xFFFFFFFF, hsum, off);
+            }
+            const float next_max    = fmaxf(running_max[hi], hmax);
+            const float prior_scale = running_sum[hi] == 0.0F ? 0.0F : expf(running_max[hi] - next_max);
+            const float chunk_scale = expf(hmax - next_max);
+            running_sum[hi]         = running_sum[hi] * prior_scale + hsum * chunk_scale;
+            running_max[hi]         = next_max;
+            if (lane == 0) {
+                s_prior_scale[head] = prior_scale;
+                s_chunk_scale[head] = chunk_scale;
+                s_inv_sum[head]     = 1.0F / running_sum[hi];
+            }
+        }
+        __syncthreads();
+
+        // P as A: gemm_swz64 over row stride kMmaBN. V stays [key][dim] swizzled like K;
+        // B is ldmatrix_x2_t with krow covering both 8-key groups of the 16-key K-tile.
+        for (int item = tid; item < kMmaHeads * kMmaBN; item += kMmaThreads) {
+            const int h = item / kMmaBN;
+            const int c = item - h * kMmaBN;
+            const float p =
+                (h < kHeadsPerKv && c < count) ? s_scores[h * kMmaBN + c] * s_chunk_scale[h] : 0.0F;
+            Ps[h * kMmaBN + gemm_swz64(h, c)] = __float2bfloat16_rn(p);
+        }
+        __syncthreads();
+
+#pragma unroll
+        for (int nt = 0; nt < kPvNTiles; ++nt) {
+            oc[nt][0] *= s_prior_scale[r0];
+            oc[nt][1] *= s_prior_scale[r0];
+            oc[nt][2] *= s_prior_scale[r1];
+            oc[nt][3] *= s_prior_scale[r1];
+        }
+#pragma unroll
+        for (int ki = 0; ki < kMmaBN / 16; ++ki) {
+            unsigned af[4];
+            ldmatrix_x4(af[0], af[1], af[2], af[3],
+                        smem_addr(&Ps[arow * kMmaBN + gemm_swz64(arow, ki * 16 + a_coloff)]));
+#pragma unroll
+            for (int nt = 0; nt < kPvNTiles; ++nt) {
+                unsigned bf[2];
+                const int dim0 = (warp * kPvNTiles + nt) * 8;
+                const int krow = ki * 16 + (lane & 7) + (((lane >> 3) & 1) << 3);
+                ldmatrix_x2_t(bf[0], bf[1],
+                              smem_addr(&Vs[krow * kHeadDim + gemm_swz64(krow, dim0)]));
+                mma_bf16(oc[nt][0], oc[nt][1], oc[nt][2], oc[nt][3], af[0], af[1], af[2], af[3],
+                         bf[0], bf[1]);
+            }
+        }
+        __syncthreads();
+    }
+
+#pragma unroll
+    for (int nt = 0; nt < kPvNTiles; ++nt) {
+        const int d0 = (warp * kPvNTiles + nt) * 8 + 2 * lid;
+        const int d1 = d0 + 1;
+        auto store = [&](int head, int dim, float value) {
+            if (head >= kHeadsPerKv) { return; }
+            auto* out_ptr = output + static_cast<std::int64_t>(token) * kQueryHeads * kHeadDim +
+                            (q0 + head) * kHeadDim + dim;
+            *out_ptr = __float2bfloat16_rn(value * s_inv_sum[head]);
+        };
+        store(r0, d0, oc[nt][0]);
+        store(r0, d1, oc[nt][1]);
+        store(r1, d0, oc[nt][2]);
+        store(r1, d1, oc[nt][3]);
+    }
+}
+
+bool flash_next_qsa_mma_sched_new() {
+    const char* env = std::getenv("NINFER_FLASH_NEXT_QSA_MMA_SCHED");
+    if (env == nullptr || env[0] == '\0') { return false; }
+    return std::strcmp(env, "new") == 0 || (env[0] == '1' && env[1] == '\0');
+}
+
 void flash_next_qsa_attention_prefill_launch(
     const Tensor& token_indices, const Tensor& mrope_positions, std::int32_t table_row,
     const Tensor& selected_blocks, const Tensor& selected_counts, const Tensor& query_norm,
@@ -840,15 +1081,25 @@ void flash_next_qsa_attention_prefill_launch(
         static_cast<__nv_bfloat16*>(scratch.value.data), tokens);
     CUDA_CHECK(cudaGetLastError());
     if (use_mma) {
-        qsa_prefill_sparse_attention_mma_kernel<<<dim3(kKvHeads, tokens), kMmaThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(scratch.query.data),
-            static_cast<const std::int32_t*>(token_indices.data), table_row,
-            static_cast<const std::int32_t*>(selected_blocks.data),
-            static_cast<const std::int32_t*>(selected_counts.data),
-            static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
-            static_cast<const __nv_bfloat16*>(cache.key_pages.data),
-            static_cast<const __nv_bfloat16*>(cache.value_pages.data),
-            static_cast<__nv_bfloat16*>(scratch.attended.data));
+        const auto* q_ptr  = static_cast<const __nv_bfloat16*>(scratch.query.data);
+        const auto* ti_ptr = static_cast<const std::int32_t*>(token_indices.data);
+        const auto* sb_ptr = static_cast<const std::int32_t*>(selected_blocks.data);
+        const auto* sc_ptr = static_cast<const std::int32_t*>(selected_counts.data);
+        const auto* bt_ptr = static_cast<const std::int32_t*>(cache.block_tables.data);
+        const auto* k_ptr  = static_cast<const __nv_bfloat16*>(cache.key_pages.data);
+        const auto* v_ptr  = static_cast<const __nv_bfloat16*>(cache.value_pages.data);
+        auto* att_ptr      = static_cast<__nv_bfloat16*>(scratch.attended.data);
+        if (flash_next_qsa_mma_sched_new()) {
+            qsa_prefill_sparse_attention_mma_sched_kernel<<<dim3(kKvHeads, tokens), kMmaThreads, 0,
+                                                            stream>>>(
+                q_ptr, ti_ptr, table_row, sb_ptr, sc_ptr, bt_ptr, cache.block_tables.ne[0], k_ptr,
+                v_ptr, att_ptr);
+        } else {
+            qsa_prefill_sparse_attention_mma_kernel<<<dim3(kKvHeads, tokens), kMmaThreads, 0,
+                                                      stream>>>(
+                q_ptr, ti_ptr, table_row, sb_ptr, sc_ptr, bt_ptr, cache.block_tables.ne[0], k_ptr,
+                v_ptr, att_ptr);
+        }
     } else {
         constexpr int kPrefillWarps   = 4;
         constexpr int kPrefillThreads = kPrefillWarps * 32;
