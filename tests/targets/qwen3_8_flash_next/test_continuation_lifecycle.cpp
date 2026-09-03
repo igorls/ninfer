@@ -2521,6 +2521,205 @@ int test_resume_from_endpoint_consumes_pair(ninfer::DeviceContext& device) {
     return failures;
 }
 
+int test_continuation_capacity_saturation_and_lru_reuse(ninfer::DeviceContext& device) {
+    std::printf("[RUN] test_continuation_capacity_saturation_and_lru_reuse\n");
+    std::fflush(stdout);
+    int failures = 0;
+    auto model    = make_synthetic_model(device);
+    auto ple_meta = make_synthetic_ple_meta();
+
+    // 8 lanes, 2048 context, 4 continuation slots
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency       = 8,
+        .max_context           = 2048,
+        .state_slot_capacity   = 0,
+        .continuation_capacity = 4,
+        .prefill_chunk         = 256,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+
+    auto program_impl = std::make_unique<ProgramImpl>(nullptr, plan, device, model.view, std::nullopt, ple_meta);
+    Program program(std::move(program_impl));
+
+    ninfer::runtime::ResolvedExecutionOptions exec_options{};
+    exec_options.requested_output_tokens = 8;
+    exec_options.allow_prefix_reuse      = true;
+    std::atomic<bool> flag{false};
+    ninfer::runtime::CancellationFlagView cancellation{&flag};
+
+    auto run_request = [&](const std::vector<ninfer::TokenId>& tokens, std::optional<uint32_t> boundary,
+                           const ContinuationHandle* source = nullptr) -> std::pair<std::optional<ContinuationHandle>, uint32_t> {
+        const auto prompt = make_prompt(tokens, true, boundary);
+        auto base = program.plan_request(prompt, exec_options);
+        auto cand = program.inspect_admission(prompt, base, ninfer::runtime::LaneId(0), source, nullptr, std::nullopt, false);
+        if (!cand.has_value()) return {std::nullopt, 0};
+        uint32_t reused = cand->summary().reusable_prompt_tokens;
+        auto res = program.seal_identity(*cand, prompt);
+        if (!res.has_value()) return {std::nullopt, 0};
+        (void)program.start_resource_transaction(std::move(*res), make_prompt(tokens, true, boundary), cancellation);
+        auto prog = program.progress_context_transaction(cancellation);
+        auto* mat = std::get_if<MaterializationResult>(&prog);
+        if (!mat || !mat->published) return {std::nullopt, 0};
+        SequenceHandle seq = mat->published->sequence;
+        program.finalize_context_transaction();
+
+        // Advance prefill
+        auto p = program.advance_prefill(seq);
+        while (!p.complete) {
+            if (p.capture.has_value()) {
+                auto assess = program.inspect_capture(*p.capture, nullptr, nullptr, std::nullopt);
+                if (assess.physically_feasible) {
+                    auto stat = program.reserve_active_capture(std::move(*p.capture), nullptr, nullptr, std::nullopt, cancellation);
+                    if (stat == ninfer::runtime::ContextTransactionReserveStatus::Reserved) {
+                        (void)program.progress_context_transaction(cancellation);
+                        program.finalize_context_transaction();
+                    }
+                } else {
+                    program.skip_capture(std::move(*p.capture));
+                }
+            }
+            p = program.advance_prefill(seq);
+        }
+        std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = true}}};
+        if (p.pending.has_value()) {
+            (void)program.commit(std::move(*p.pending), commit_dec);
+        }
+        FinishResult fin = program.finish(seq);
+        return {std::move(fin.continuation), reused};
+    };
+
+    // Request 1: 20 tokens, boundary at 16 -> creates TurnClosure (slot 0) & SessionEndpoint (slot 1)
+    std::vector<ninfer::TokenId> t1(20);
+    for (std::size_t i = 0; i < 20; ++i) t1[i] = static_cast<ninfer::TokenId>(100 + i);
+    auto [h1, reused1] = run_request(t1, 16);
+    failures += check(reused1 == 0, "R1 must be root (reused=0)");
+    failures += check(h1.has_value(), "R1 finish must catalogue continuation");
+
+    // Request 2: 20 tokens, boundary at 16 -> creates TurnClosure (slot 2) & SessionEndpoint (slot 3)
+    std::vector<ninfer::TokenId> t2(20);
+    for (std::size_t i = 0; i < 20; ++i) t2[i] = static_cast<ninfer::TokenId>(200 + i);
+    auto [h2, reused2] = run_request(t2, 16);
+    failures += check(reused2 == 0, "R2 must be root (reused=0)");
+    failures += check(h2.has_value(), "R2 finish must catalogue continuation");
+
+    // All 4 slots are now Catalogued!
+    // Request 3: 20 tokens, boundary at 16 (new tokens: 300..320)
+    std::vector<ninfer::TokenId> t3(20);
+    for (std::size_t i = 0; i < 20; ++i) t3[i] = static_cast<ninfer::TokenId>(300 + i);
+    auto [h3, reused3] = run_request(t3, 16);
+    failures += check(h3.has_value(), "R3 finish must catalogue continuation via LRU eviction of old slots");
+
+    // Request 4: identical prompt to Request 3 (tokens 300..320)
+    // Must match R3's TurnClosure checkpoint (16 tokens) or SessionEndpoint (20 tokens)!
+    auto [h4, reused4] = run_request(t3, 16, h3 ? &*h3 : nullptr);
+    failures += check(reused4 > 0, "R4 must reuse R3 prefix (reused > 0) after capacity saturation");
+    std::printf("  [Saturation LRU Result] R3 reused=%u, R4 reused=%u\n", reused3, reused4);
+
+    std::printf("[DONE] test_continuation_capacity_saturation_and_lru_reuse, failures: %d\n", failures);
+    return failures;
+}
+
+int test_24k_prompt_ttft_and_prefix_hit(ninfer::DeviceContext& device) {
+    std::printf("[RUN] test_24k_prompt_ttft_and_prefix_hit (Synthetic 24k token prompt before/after)\n");
+    std::fflush(stdout);
+    _putenv("NINFER_FLASH_NEXT_TRACE_ADMISSION=1");
+    int failures = 0;
+    auto model    = make_synthetic_model(device);
+    auto ple_meta = make_synthetic_ple_meta();
+
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency       = 4,
+        .max_context           = 32768,
+        .state_slot_capacity   = 0,
+        .continuation_capacity = 4,
+        .prefill_chunk         = 4096,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+
+    auto program_impl = std::make_unique<ProgramImpl>(nullptr, plan, device, model.view, std::nullopt, ple_meta);
+    Program program(std::move(program_impl));
+
+    ninfer::runtime::ResolvedExecutionOptions exec_options{};
+    exec_options.requested_output_tokens = 8;
+    exec_options.allow_prefix_reuse      = true;
+    std::atomic<bool> flag{false};
+    ninfer::runtime::CancellationFlagView cancellation{&flag};
+
+    constexpr std::size_t kPromptLen = 24'000;
+    constexpr std::size_t kSharedPreamble = 20'000;
+    std::vector<ninfer::TokenId> tokens1(kPromptLen);
+    for (std::size_t i = 0; i < kPromptLen; ++i) {
+        tokens1[i] = static_cast<ninfer::TokenId>(1000 + (i % 5000));
+    }
+
+    auto run_timing = [&](const std::vector<ninfer::TokenId>& prompt_toks,
+                          std::optional<uint32_t> boundary,
+                          const ContinuationHandle* source) -> std::tuple<std::optional<ContinuationHandle>, uint32_t, double> {
+        const auto prompt = make_prompt(prompt_toks, true, boundary);
+        const auto t_start = std::chrono::steady_clock::now();
+        auto base = program.plan_request(prompt, exec_options);
+        auto cand = program.inspect_admission(prompt, base, ninfer::runtime::LaneId(0), source, nullptr, std::nullopt, false);
+        if (!cand.has_value()) {
+            return {std::nullopt, 0, 0.0};
+        }
+        uint32_t reused = cand->summary().reusable_prompt_tokens;
+        auto res = program.seal_identity(*cand, prompt);
+        if (!res.has_value()) return {std::nullopt, 0, 0.0};
+        (void)program.start_resource_transaction(std::move(*res), make_prompt(prompt_toks, true, boundary), cancellation);
+        auto prog = program.progress_context_transaction(cancellation);
+        auto* mat = std::get_if<MaterializationResult>(&prog);
+        if (!mat || !mat->published) return {std::nullopt, 0, 0.0};
+        SequenceHandle seq = mat->published->sequence;
+        program.finalize_context_transaction();
+
+        auto p = program.advance_prefill(seq);
+        while (!p.complete) {
+            if (p.capture.has_value()) {
+                auto assess = program.inspect_capture(*p.capture, nullptr, nullptr, std::nullopt);
+                if (assess.physically_feasible) {
+                    auto stat = program.reserve_active_capture(std::move(*p.capture), nullptr, nullptr, std::nullopt, cancellation);
+                    if (stat == ninfer::runtime::ContextTransactionReserveStatus::Reserved) {
+                        (void)program.progress_context_transaction(cancellation);
+                        program.finalize_context_transaction();
+                    }
+                } else {
+                    program.skip_capture(std::move(*p.capture));
+                }
+            }
+            p = program.advance_prefill(seq);
+        }
+        std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = true}}};
+        if (p.pending.has_value()) {
+            (void)program.commit(std::move(*p.pending), commit_dec);
+        }
+        const auto t_end = std::chrono::steady_clock::now();
+        const double ttft_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+        FinishResult fin = program.finish(seq);
+        return {std::move(fin.continuation), reused, ttft_ms};
+    };
+
+    // Run 1 (scratch 24k tokens, preamble checkpoint at 20k):
+    auto [h1, reused1, ttft1_ms] = run_timing(tokens1, static_cast<uint32_t>(kSharedPreamble), nullptr);
+    failures += check(reused1 == 0, "Run 1 must have reused=0");
+    failures += check(h1.has_value(), "Run 1 must catalogue continuation");
+    std::printf("  [24k Scratch] prefix_cache_hit_tokens=%u, TTFT=%.2f ms\n", reused1, ttft1_ms);
+
+    // Run 2 (repeated turn with shared 20k preamble and new 4k query):
+    std::vector<ninfer::TokenId> tokens2(tokens1.begin(), tokens1.begin() + kSharedPreamble);
+    for (std::size_t i = 0; i < 4000; ++i) {
+        tokens2.push_back(static_cast<ninfer::TokenId>(8000 + i));
+    }
+    auto [h2, reused2, ttft2_ms] = run_timing(tokens2, std::nullopt, h1 ? &*h1 : nullptr);
+    failures += check(reused2 == kSharedPreamble, "Run 2 must reuse 20000 preamble tokens");
+    std::printf("  [24k Reused ] prefix_cache_hit_tokens=%u, TTFT=%.2f ms (prefill speedup: %.1fx)\n",
+                reused2, ttft2_ms, ttft1_ms / std::max(ttft2_ms, 0.001));
+
+    std::printf("[DONE] test_24k_prompt_ttft_and_prefix_hit, failures: %d\n", failures);
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -2550,6 +2749,8 @@ int main() {
         failures += test_resumed_checkpoint_not_evicted_while_lane_runs(device);
         failures += test_materialization_planner_call_sequence(device);
         failures += test_resume_from_endpoint_consumes_pair(device);
+        failures += test_continuation_capacity_saturation_and_lru_reuse(device);
+        failures += test_24k_prompt_ttft_and_prefix_hit(device);
 
         if (failures == 0) {
             std::printf("ALL FLASH-NEXT CONTINUATION LIFECYCLE TESTS PASSED\n");
