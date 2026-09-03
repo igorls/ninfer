@@ -2620,10 +2620,16 @@ int test_continuation_capacity_saturation_and_lru_reuse(ninfer::DeviceContext& d
     return failures;
 }
 
-int test_24k_prompt_ttft_and_prefix_hit(ninfer::DeviceContext& device) {
-    std::printf("[RUN] test_24k_prompt_ttft_and_prefix_hit (Synthetic 24k token prompt before/after)\n");
+// Shows that a large shared preamble is reused at scale once a checkpoint exists. It does NOT
+// demonstrate the LRU eviction fix: it issues only two requests, so it never saturates the four
+// continuation slots and it passes on the unfixed tree too. Measured both ways, 20,000 tokens
+// reused either side of the fix. The test that actually pins the fix is
+// test_continuation_capacity_saturation_and_lru_reuse, which fails without it.
+// The elapsed figure below is the synthetic-fixture prefill loop, not a server
+// time-to-first-token, so it must not be quoted as TTFT.
+int test_24k_prompt_reuse_scale(ninfer::DeviceContext& device) {
+    std::printf("[RUN] test_24k_prompt_reuse_scale (synthetic 24k prompt, 20k shared preamble)\n");
     std::fflush(stdout);
-    _putenv("NINFER_FLASH_NEXT_TRACE_ADMISSION=1");
     int failures = 0;
     auto model    = make_synthetic_model(device);
     auto ple_meta = make_synthetic_ple_meta();
@@ -2704,7 +2710,7 @@ int test_24k_prompt_ttft_and_prefix_hit(ninfer::DeviceContext& device) {
     auto [h1, reused1, ttft1_ms] = run_timing(tokens1, static_cast<uint32_t>(kSharedPreamble), nullptr);
     failures += check(reused1 == 0, "Run 1 must have reused=0");
     failures += check(h1.has_value(), "Run 1 must catalogue continuation");
-    std::printf("  [24k Scratch] prefix_cache_hit_tokens=%u, TTFT=%.2f ms\n", reused1, ttft1_ms);
+    std::printf("  [24k scratch] prefix_cache_hit_tokens=%u, prefill_loop=%.2f ms\n", reused1, ttft1_ms);
 
     // Run 2 (repeated turn with shared 20k preamble and new 4k query):
     std::vector<ninfer::TokenId> tokens2(tokens1.begin(), tokens1.begin() + kSharedPreamble);
@@ -2713,10 +2719,10 @@ int test_24k_prompt_ttft_and_prefix_hit(ninfer::DeviceContext& device) {
     }
     auto [h2, reused2, ttft2_ms] = run_timing(tokens2, std::nullopt, h1 ? &*h1 : nullptr);
     failures += check(reused2 == kSharedPreamble, "Run 2 must reuse 20000 preamble tokens");
-    std::printf("  [24k Reused ] prefix_cache_hit_tokens=%u, TTFT=%.2f ms (prefill speedup: %.1fx)\n",
+    std::printf("  [24k reused ] prefix_cache_hit_tokens=%u, prefill_loop=%.2f ms (%.1fx, fixture only)\n",
                 reused2, ttft2_ms, ttft1_ms / std::max(ttft2_ms, 0.001));
 
-    std::printf("[DONE] test_24k_prompt_ttft_and_prefix_hit, failures: %d\n", failures);
+    std::printf("[DONE] test_24k_prompt_reuse_scale, failures: %d\n", failures);
     return failures;
 }
 
@@ -2750,7 +2756,7 @@ int main() {
         failures += test_materialization_planner_call_sequence(device);
         failures += test_resume_from_endpoint_consumes_pair(device);
         failures += test_continuation_capacity_saturation_and_lru_reuse(device);
-        failures += test_24k_prompt_ttft_and_prefix_hit(device);
+        failures += test_24k_prompt_reuse_scale(device);
 
         if (failures == 0) {
             std::printf("ALL FLASH-NEXT CONTINUATION LIFECYCLE TESTS PASSED\n");
