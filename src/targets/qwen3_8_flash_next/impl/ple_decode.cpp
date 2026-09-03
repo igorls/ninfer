@@ -47,7 +47,8 @@ std::size_t flash_next_ple_workspace_capacity_bytes(std::int32_t tokens) {
 void flash_next_ple_decode(const Tensor& hidden, const Tensor& gathered_embedding,
                            const PleWeights& weights, const Tensor& source_slots,
                            const Tensor& destination_slots, Tensor& convolution_states,
-                           WorkspaceArena& workspace, Tensor& output, cudaStream_t stream) {
+                           WorkspaceArena& workspace, Tensor& output, cudaStream_t stream,
+                           bool aliased_recurrent_scan) {
     const std::int32_t batch       = hidden.ne[1];
     const std::int32_t state_slots = convolution_states.ne[2];
     if (!exact_tensor(hidden, DType::BF16, 10'240, batch) || batch < 1 || batch > 8 ||
@@ -78,7 +79,7 @@ void flash_next_ple_decode(const Tensor& hidden, const Tensor& gathered_embeddin
                           weights.query_norm, weights.key_norm, weights.conv_norm,
                           weights.convolution, source_slots, destination_slots, convolution_states,
                           scratch.gated, scratch.normalized_gated, output, state_slots, batch,
-                          stream);
+                          stream, aliased_recurrent_scan);
 }
 
 void flash_next_ple_prefill_chunk(const Tensor& hidden, const Tensor& gathered_embedding,

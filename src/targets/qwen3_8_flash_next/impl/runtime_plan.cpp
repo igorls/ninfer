@@ -121,8 +121,11 @@ compute_fixed_base_bytes(const FlashNextRuntimeConfig& config, std::uint32_t res
                                              sizeof(std::uint16_t)))))));
 
     // 4. Text decode and prefill workspace peak
+    const std::uint32_t decode_batch_capacity = std::max(
+        config.max_concurrency,
+        config.speculative_draft_tokens > 0 ? (config.speculative_draft_tokens + 1U) : 1U);
     const std::size_t decode_workspace =
-        flash_next_text_decode_workspace_capacity_bytes(maximum_blocks, config.max_concurrency);
+        flash_next_text_decode_workspace_capacity_bytes(maximum_blocks, decode_batch_capacity);
     const std::size_t prefill_workspace =
         flash_next_text_prefill_workspace_capacity_bytes(maximum_blocks, config.prefill_chunk);
     const std::size_t general_workspace = std::max(decode_workspace, prefill_workspace);

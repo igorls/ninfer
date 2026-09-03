@@ -13,6 +13,7 @@
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
 #include "targets/qwen3_8_flash_next/impl/text_executor.h"
 
+#include <ninfer/ops/embedding.h>
 #include <ninfer/targets/qwen3_8_flash_next/package.h>
 #include <ninfer/targets/qwen3_8_flash_next/runtime.h>
 #include <ninfer/targets/qwen3_6/frontend.h>
@@ -87,6 +88,15 @@ SyntheticModel make_synthetic_model(ninfer::DeviceContext& device) {
     constexpr std::uint64_t kOutputHeadBytes = 248'320ULL * 2'560 * 2;
     model.big_bf16_buf = ninfer::DeviceBuffer(kOutputHeadBytes);
     model.big_bf16_buf.fill(0x38);
+    {
+        std::vector<std::uint16_t> h_varying(1000 * 2'560);
+        for (size_t r = 0; r < 1000; ++r) {
+            for (size_t c = 0; c < 2'560; ++c) {
+                h_varying[r * 2'560 + c] = float_to_bf16(0.0005f * static_cast<float>((r * 7 + c * 13) % 31 + 1));
+            }
+        }
+        model.big_bf16_buf.copy_from_host(h_varying.data(), h_varying.size() * sizeof(std::uint16_t), 0);
+    }
 
     // 2. RMSNorm weights (~1.0)
     std::vector<std::uint16_t> h_norm(10'240);
@@ -315,19 +325,93 @@ SyntheticModel make_synthetic_model(ninfer::DeviceContext& device) {
     // Allocate MTP weights
     constexpr std::uint64_t kMtpWeightBytes = 64ULL * 1024 * 1024;
     model.mtp_weights_buf = ninfer::DeviceBuffer(kMtpWeightBytes);
-    model.mtp_weights_buf.fill(0x38);
+
+    auto make_bf16_weight_at = [](ninfer::DeviceBuffer& buf, std::size_t offset, std::int32_t rows, std::int32_t cols) {
+        ninfer::Weight w{};
+        w.payload         = static_cast<std::byte*>(buf.p) + offset;
+        w.payload_bytes   = static_cast<std::uint64_t>(rows) * cols * 2;
+        w.qdata           = static_cast<std::byte*>(buf.p) + offset;
+        w.qtype           = ninfer::QType::BF16_CTRL;
+        w.layout          = ninfer::QuantLayout::Contiguous;
+        w.n               = rows;
+        w.k               = cols;
+        w.ndim            = 2;
+        w.shape[0]        = rows;
+        w.shape[1]        = cols;
+        w.padded_shape[0] = rows;
+        w.padded_shape[1] = cols;
+        return w;
+    };
+
+    // 1. hidden_projection: 2560 x 2560 BF16
+    const std::size_t hid_proj_bytes = 2'560 * 2'560 * sizeof(std::uint16_t);
+    std::vector<std::uint16_t> h_mtp_hid_proj(2'560 * 2'560);
+    for (size_t r = 0; r < 2'560; ++r) {
+        for (size_t c = 0; c < 2'560; ++c) {
+            h_mtp_hid_proj[r * 2'560 + c] = float_to_bf16(0.0005f * static_cast<float>((r * 7 + c * 13) % 23) +
+                                                          0.0001f * static_cast<float>((r % 37) * (c % 17)));
+        }
+    }
+    model.mtp_weights_buf.copy_from_host(h_mtp_hid_proj.data(), hid_proj_bytes, 0);
+
+    // 2. mixer.input_mix_down: 320 x 10240 BF16
+    const std::size_t mix_down_offset = hid_proj_bytes;
+    const std::size_t mix_down_bytes = 320 * 10'240 * sizeof(std::uint16_t);
+    std::vector<std::uint16_t> h_mix_down(320 * 10'240);
+    for (size_t r = 0; r < 320; ++r) {
+        for (size_t c = 0; c < 10'240; ++c) {
+            h_mix_down[r * 10'240 + c] = float_to_bf16(0.001f * static_cast<float>((r * 5 + c * 11) % 19));
+        }
+    }
+    model.mtp_weights_buf.copy_from_host(h_mix_down.data(), mix_down_bytes, mix_down_offset);
+
+    // 3. mixer.input_mix_up: 10240 x 320 BF16
+    const std::size_t mix_up_offset = mix_down_offset + mix_down_bytes;
+    const std::size_t mix_up_bytes = 10'240 * 320 * sizeof(std::uint16_t);
+    std::vector<std::uint16_t> h_mix_up(10'240 * 320);
+    for (size_t r = 0; r < 10'240; ++r) {
+        for (size_t c = 0; c < 320; ++c) {
+            h_mix_up[r * 320 + c] = float_to_bf16(0.001f * static_cast<float>((r * 3 + c * 17) % 29));
+        }
+    }
+    model.mtp_weights_buf.copy_from_host(h_mix_up.data(), mix_up_bytes, mix_up_offset);
+
+    // 4. mixer.norm: 10240 BF16
+    const std::size_t mix_norm_offset = mix_up_offset + mix_up_bytes;
+    const std::size_t mix_norm_bytes = 10'240 * sizeof(std::uint16_t);
+    std::vector<std::uint16_t> h_mix_norm(10'240);
+    for (size_t i = 0; i < 10'240; ++i) {
+        h_mix_norm[i] = float_to_bf16(0.01f * static_cast<float>((i % 31) + 1));
+    }
+    model.mtp_weights_buf.copy_from_host(h_mix_norm.data(), mix_norm_bytes, mix_norm_offset);
+
+    // 5. MTP block_inject: 4 x 10240 BF16 (set negative to keep injection gentle)
+    const std::size_t inject_offset = mix_norm_offset + mix_norm_bytes;
+    const std::size_t inject_bytes = 4 * 10'240 * sizeof(std::uint16_t);
+    std::vector<std::uint16_t> h_mtp_inject(4 * 10'240);
+    for (size_t i = 0; i < h_mtp_inject.size(); ++i) {
+        h_mtp_inject[i] = float_to_bf16(-0.05f);
+    }
+    model.mtp_weights_buf.copy_from_host(h_mtp_inject.data(), inject_bytes, inject_offset);
+
+    // 6. MTP MoE divisors: 512 floats of 1.0e9f to scale down synthetic MoE explosion
+    const std::size_t div_offset = inject_offset + inject_bytes;
+    const std::size_t div_bytes = 512 * sizeof(float);
+    std::vector<float> h_mtp_divisors(512, 1.0e9f);
+    model.mtp_weights_buf.copy_from_host(h_mtp_divisors.data(), div_bytes, div_offset);
 
     MtpModelView mtp_view{};
     mtp_view.embedding_projection = make_bf16_weight(2'560, 2'560);
-    mtp_view.hidden_projection    = make_bf16_weight(2'560, 2'560);
+    mtp_view.hidden_projection    = make_bf16_weight_at(model.mtp_weights_buf, 0, 2'560, 2'560);
     mtp_view.embedding_norm       = ninfer::Tensor(model.norm_bf16_buf.p, ninfer::DType::BF16, {2'560});
     mtp_view.hidden_norm          = ninfer::Tensor(model.norm_bf16_buf.p, ninfer::DType::BF16, {10'240});
 
-    mtp_view.mixer.norm           = ninfer::Tensor(model.norm_bf16_buf.p, ninfer::DType::BF16, {10'240});
-    mtp_view.mixer.input_mix_down = make_bf16_weight(320, 10'240);
-    mtp_view.mixer.input_mix_up   = make_bf16_weight(10'240, 320);
+    mtp_view.mixer.norm           = ninfer::Tensor(static_cast<std::byte*>(model.mtp_weights_buf.p) + mix_norm_offset,
+                                                   ninfer::DType::BF16, {10'240});
+    mtp_view.mixer.input_mix_down = make_bf16_weight_at(model.mtp_weights_buf, mix_down_offset, 320, 10'240);
+    mtp_view.mixer.input_mix_up   = make_bf16_weight_at(model.mtp_weights_buf, mix_up_offset, 10'240, 320);
 
-    mtp_view.attention_hyper.block_inject   = make_bf16_weight_from(model.inject_buf, 4, 10'240);
+    mtp_view.attention_hyper.block_inject   = make_bf16_weight_at(model.mtp_weights_buf, inject_offset, 4, 10'240);
     mtp_view.attention_hyper.norm           = ninfer::Tensor(model.norm_bf16_buf.p, ninfer::DType::BF16, {10'240});
     mtp_view.attention_hyper.input_mix_down = make_bf16_weight(320, 10'240);
     mtp_view.attention_hyper.input_mix_up   = make_bf16_weight(10'240, 320);
@@ -340,7 +424,7 @@ SyntheticModel make_synthetic_model(ninfer::DeviceContext& device) {
     mtp_view.attention.query_gate_key_value = make_bf16_weight(13'312, 2'560);
     mtp_view.attention.output               = make_bf16_weight(2'560, 6'144);
 
-    mtp_view.mlp_hyper.block_inject   = make_bf16_weight_from(model.inject_buf, 4, 10'240);
+    mtp_view.mlp_hyper.block_inject   = make_bf16_weight_at(model.mtp_weights_buf, inject_offset, 4, 10'240);
     mtp_view.mlp_hyper.norm           = ninfer::Tensor(model.norm_bf16_buf.p, ninfer::DType::BF16, {10'240});
     mtp_view.mlp_hyper.input_mix_down = make_bf16_weight(320, 10'240);
     mtp_view.mlp_hyper.input_mix_up   = make_bf16_weight(10'240, 320);
@@ -355,7 +439,7 @@ SyntheticModel make_synthetic_model(ninfer::DeviceContext& device) {
     mtp_view.moe.expert_gate_up     = Nvfp4ExpertBankView{
         .codes                  = static_cast<const std::byte*>(model.big_nvfp4_gate_codes_buf.p),
         .scales                 = static_cast<const std::byte*>(model.big_nvfp4_gate_scales_buf.p),
-        .weight_scale_divisors  = static_cast<const float*>(model.big_divisors_buf.p),
+        .weight_scale_divisors  = reinterpret_cast<const float*>(static_cast<const std::byte*>(model.mtp_weights_buf.p) + div_offset),
         .experts                = 512,
         .rows                   = 1'280,
         .columns                = 2'560,
@@ -365,7 +449,7 @@ SyntheticModel make_synthetic_model(ninfer::DeviceContext& device) {
     mtp_view.moe.expert_down        = Nvfp4ExpertBankView{
         .codes                  = static_cast<const std::byte*>(model.big_nvfp4_down_codes_buf.p),
         .scales                 = static_cast<const std::byte*>(model.big_nvfp4_down_scales_buf.p),
-        .weight_scale_divisors  = static_cast<const float*>(model.big_divisors_buf.p),
+        .weight_scale_divisors  = reinterpret_cast<const float*>(static_cast<const std::byte*>(model.mtp_weights_buf.p) + div_offset),
         .experts                = 512,
         .rows                   = 2'560,
         .columns                = 640,
@@ -878,6 +962,346 @@ int test_speculative_turn_closure_interaction(ninfer::DeviceContext& device,
     }
 }
 
+int test_h1_verifier_row_ordering(ninfer::DeviceContext& device, const SyntheticModel& model) {
+    std::cout << "[AUDIT H1] test_h1_verifier_row_ordering ...\n" << std::flush;
+    using namespace ninfer::targets::qwen3_8_flash_next;
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+
+        for (uint32_t K : {1U, 2U, 3U, 4U}) {
+            FlashNextRuntimeConfig cfg{
+                .max_concurrency          = 1,
+                .max_context              = 512,
+                .prefill_chunk            = 512,
+                .speculative_draft_tokens = K,
+                .use_cuda_graph           = false,
+            };
+            const auto curve = flash_next_capacity_curve(cfg);
+            auto plan = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+
+            const std::vector<int32_t> prompt = {101, 102, 103, 104};
+            std::vector<std::array<int32_t, 3>> mrope_positions(prompt.size());
+            for (size_t i = 0; i < prompt.size(); ++i) {
+                mrope_positions[i] = {static_cast<int32_t>(i), static_cast<int32_t>(i), static_cast<int32_t>(i)};
+            }
+
+            // Reference sequential oracle: execute each row sequentially on a fresh lane
+            std::vector<int32_t> oracle_tokens;
+            std::vector<int32_t> drafts(K);
+            for (uint32_t i = 0; i < K; ++i) { drafts[i] = static_cast<int32_t>(200 + i); }
+
+            {
+                FlashNextRuntimeAllocation alloc_seq(plan);
+                alloc_seq.initialize(device.stream);
+                FlashNextTextExecutor exec_seq(model.view, ple_meta, device, alloc_seq);
+                auto lane_seq = exec_seq.allocate_lane();
+
+                auto prefill = exec_seq.execute_prefill_chunk(lane_seq, prompt, mrope_positions, 0);
+                std::array<LaneCommitDecision, 1> decision = {{{.accept = true}}};
+                prefill.commit(decision);
+
+                // Row 0: decode prompt.back() (no drafts)
+                auto r0 = exec_seq.execute_speculative_verify_round(
+                    lane_seq, prompt.back(), {}, static_cast<int32_t>(prompt.size()),
+                    {static_cast<int32_t>(prompt.size()), static_cast<int32_t>(prompt.size()),
+                     static_cast<int32_t>(prompt.size())}, {});
+                oracle_tokens.push_back(r0.sampled_tokens()[0]);
+                std::array<int32_t, 1> acc0 = {r0.sampled_tokens()[0]};
+                r0.commit_speculative(lane_seq.lane_index(), acc0);
+
+                for (uint32_t i = 0; i < K; ++i) {
+                    const int32_t cur_pos = static_cast<int32_t>(prompt.size() + 1 + i);
+                    auto ri = exec_seq.execute_speculative_verify_round(
+                        lane_seq, drafts[i], {}, cur_pos, {cur_pos, cur_pos, cur_pos}, {});
+                    oracle_tokens.push_back(ri.sampled_tokens()[0]);
+                    std::array<int32_t, 1> acc_i = {ri.sampled_tokens()[0]};
+                    ri.commit_speculative(lane_seq.lane_index(), acc_i);
+                }
+                exec_seq.release_lane(lane_seq);
+            }
+
+            // Speculative verify round: execute all K+1 rows batched in one verify round
+            std::vector<int32_t> verify_tokens;
+            {
+                FlashNextRuntimeAllocation alloc_verify(plan);
+                alloc_verify.initialize(device.stream);
+                FlashNextTextExecutor exec_verify(model.view, ple_meta, device, alloc_verify);
+                auto lane_ver = exec_verify.allocate_lane();
+
+                auto prefill = exec_verify.execute_prefill_chunk(lane_ver, prompt, mrope_positions, 0);
+                std::array<LaneCommitDecision, 1> decision = {{{.accept = true}}};
+                prefill.commit(decision);
+
+                auto r_all = exec_verify.execute_speculative_verify_round(
+                    lane_ver, prompt.back(), drafts, static_cast<int32_t>(prompt.size()),
+                    {static_cast<int32_t>(prompt.size()), static_cast<int32_t>(prompt.size()),
+                     static_cast<int32_t>(prompt.size())}, {});
+                for (size_t i = 0; i <= K; ++i) {
+                    verify_tokens.push_back(r_all.sampled_tokens()[i]);
+                }
+                exec_verify.release_lane(lane_ver);
+            }
+
+            // Assert bit-exact match across all K+1 rows
+            for (size_t i = 0; i <= K; ++i) {
+                if (verify_tokens[i] != oracle_tokens[i]) {
+                    std::cerr << "FAIL: H1 row ordering mismatch at row " << i << " for K=" << K
+                              << " (verify=" << verify_tokens[i] << " != oracle=" << oracle_tokens[i] << ")\n";
+                    return 1;
+                }
+            }
+            std::cout << "  PASS: K=" << K << " verifier matches sequential oracle across all " << (K + 1) << " rows\n";
+        }
+        std::cout << "PASS: test_h1_verifier_row_ordering\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_h1_verifier_row_ordering exception: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+int test_h2_mtp_allocation_zeroing(ninfer::DeviceContext& device, const SyntheticModel& model) {
+    std::cout << "[AUDIT H2] test_h2_mtp_allocation_zeroing ...\n" << std::flush;
+    using namespace ninfer::targets::qwen3_8_flash_next;
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+
+        // 1. Dirty GPU memory pool with poison bytes 0x7B
+        constexpr std::size_t kPoisonBytes = 64ULL * 1024ULL * 1024ULL;
+        void* poison_ptr = nullptr;
+        CUDA_CHECK(cudaMalloc(&poison_ptr, kPoisonBytes));
+        CUDA_CHECK(cudaMemset(poison_ptr, 0x7B, kPoisonBytes));
+        CUDA_CHECK(cudaFree(poison_ptr));
+
+        // 2. Allocate FlashNextTextExecutor with speculative draft tokens
+        FlashNextRuntimeConfig cfg{
+            .max_concurrency          = 1,
+            .max_context              = 512,
+            .prefill_chunk            = 512,
+            .speculative_draft_tokens = 1,
+            .use_cuda_graph           = false,
+        };
+        const auto curve = flash_next_capacity_curve(cfg);
+        auto plan = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+        FlashNextRuntimeAllocation alloc(plan);
+        alloc.initialize(device.stream);
+        FlashNextTextExecutor exec(model.view, ple_meta, device, alloc);
+
+        // 3. Inspect MTP buffers and assert they are zeroed
+        auto check_zero = [&](const ninfer::DeviceBuffer* buf, std::string_view name) -> bool {
+            if (buf == nullptr || buf->p == nullptr) {
+                std::cerr << "FAIL: H2 buffer " << name << " is null\n";
+                return false;
+            }
+            const std::size_t bytes_to_check = std::min<std::size_t>(buf->bytes, 65536);
+            std::vector<std::uint8_t> host_buf(bytes_to_check);
+            CUDA_CHECK(cudaMemcpy(host_buf.data(), buf->p, bytes_to_check, cudaMemcpyDeviceToHost));
+            for (std::size_t i = 0; i < bytes_to_check; ++i) {
+                if (host_buf[i] != 0) {
+                    std::cerr << "FAIL: H2 buffer " << name << " nonzero byte at offset " << i
+                              << " (0x" << std::hex << static_cast<int>(host_buf[i]) << std::dec << ")\n";
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        if (!check_zero(exec.mtp_key_pages(), "mtp_key_pages")) return 1;
+        if (!check_zero(exec.mtp_value_pages(), "mtp_value_pages")) return 1;
+        if (!check_zero(exec.mtp_selected_blocks(), "mtp_selected_blocks")) return 1;
+        if (!check_zero(exec.mtp_selected_counts(), "mtp_selected_counts")) return 1;
+        if (!check_zero(exec.mtp_carried_hidden(), "mtp_carried_hidden")) return 1;
+
+        std::cout << "  PASS: all MTP buffers explicitly zeroed at allocation\n";
+        std::cout << "PASS: test_h2_mtp_allocation_zeroing\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_h2_mtp_allocation_zeroing exception: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+int test_h3_multi_step_hidden_carry(ninfer::DeviceContext& device, const SyntheticModel& model) {
+    std::cout << "[AUDIT H3] test_h3_multi_step_hidden_carry ...\n" << std::flush;
+    using namespace ninfer;
+    using namespace ninfer::targets::qwen3_8_flash_next;
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+
+    try {
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+
+        FlashNextRuntimeConfig cfg{
+            .max_concurrency          = 1,
+            .max_context              = 512,
+            .prefill_chunk            = 512,
+            .speculative_draft_tokens = 2,
+            .use_cuda_graph           = false,
+        };
+        const auto curve = flash_next_capacity_curve(cfg);
+        auto plan = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+        FlashNextRuntimeAllocation alloc(plan);
+        alloc.initialize(device.stream);
+        FlashNextTextExecutor exec(model.view, ple_meta, device, alloc);
+        auto lane = exec.allocate_lane();
+
+        const std::vector<int32_t> prompt = {100, 200, 300, 400};
+        std::vector<std::array<int32_t, 3>> mrope_positions(prompt.size());
+        for (size_t i = 0; i < prompt.size(); ++i) {
+            mrope_positions[i] = {static_cast<int32_t>(i), static_cast<int32_t>(i), static_cast<int32_t>(i)};
+        }
+        auto prefill = exec.execute_prefill_chunk(lane, prompt, mrope_positions, 0);
+        std::array<LaneCommitDecision, 1> decision = {{{.accept = true}}};
+        prefill.commit(decision);
+
+        // Get initial backbone hidden state by running a decode token
+        auto r0 = exec.execute_speculative_verify_round(
+            lane, prompt.back(), {}, static_cast<int32_t>(prompt.size()),
+            {static_cast<int32_t>(prompt.size()), static_cast<int32_t>(prompt.size()),
+             static_cast<int32_t>(prompt.size())}, {});
+        Tensor backbone_hidden = r0.hyper_hidden();
+
+        // Populate backbone_hidden with non-uniform channel values to avoid RMSNorm constant collapse
+        std::vector<uint16_t> h_init_bb(10240);
+        for (size_t i = 0; i < 10240; ++i) {
+            h_init_bb[i] = float_to_bf16(1.0f + 0.1f * static_cast<float>(i % 31));
+        }
+        CUDA_CHECK(cudaMemcpy(backbone_hidden.data, h_init_bb.data(),
+                              10240 * sizeof(uint16_t), cudaMemcpyHostToDevice));
+
+        // 1. Run draft_mtp_tokens with K=2
+        std::vector<int32_t> drafts(2);
+        exec.draft_mtp_tokens(lane, prompt.back(), static_cast<int32_t>(prompt.size()),
+                              {static_cast<int32_t>(prompt.size()), static_cast<int32_t>(prompt.size()),
+                               static_cast<int32_t>(prompt.size())},
+                              backbone_hidden, 2, drafts);
+
+        // 2. Check that carried hidden buffer is populated (non-zero)
+        const DeviceBuffer* carried_buf = exec.mtp_carried_hidden();
+        if (carried_buf == nullptr || carried_buf->p == nullptr) {
+            std::cerr << "FAIL: H3 mtp_carried_hidden buffer is null\n";
+            return 1;
+        }
+        std::vector<uint16_t> carried_h(10240);
+        CUDA_CHECK(cudaMemcpy(carried_h.data(), carried_buf->p, 10240 * sizeof(uint16_t), cudaMemcpyDeviceToHost));
+        bool has_nonzero = false;
+        for (auto v : carried_h) {
+            if (v != 0) { has_nonzero = true; break; }
+        }
+        if (!has_nonzero) {
+            std::cerr << "FAIL: H3 carried hidden buffer is completely zero after draft step 1\n";
+            return 1;
+        }
+
+        // 3. Directly evaluate MTP step 2 with static backbone hidden vs carried hidden
+        WorkspaceArena ws(flash_next_mtp_workspace_capacity_bytes(1));
+        DeviceBuffer d_in_emb(2560 * sizeof(uint16_t));
+        Tensor in_emb(d_in_emb.p, DType::BF16, {2560, 1});
+        DeviceBuffer d_tok_ids(sizeof(int32_t));
+        Tensor tok_ids(d_tok_ids.p, DType::I32, {1});
+        int32_t d1 = (drafts[0] >= 0 && drafts[0] < 248320) ? drafts[0] : 0;
+        CUDA_CHECK(cudaMemcpy(tok_ids.data, &d1, sizeof(int32_t), cudaMemcpyHostToDevice));
+        ops::embedding(tok_ids, model.view.token_embedding, in_emb, device.stream);
+
+        DeviceBuffer d_tok_idx(sizeof(int32_t));
+        Tensor tok_idx(d_tok_idx.p, DType::I32, {1});
+        int32_t idx1 = static_cast<int32_t>(prompt.size() + 1);
+        CUDA_CHECK(cudaMemcpy(tok_idx.data, &idx1, sizeof(int32_t), cudaMemcpyHostToDevice));
+
+        DeviceBuffer d_mrope(3 * sizeof(int32_t));
+        Tensor mrope(d_mrope.p, DType::I32, {1, 3});
+        int32_t pos1[3] = {idx1, idx1, idx1};
+        CUDA_CHECK(cudaMemcpy(mrope.data, pos1, sizeof(pos1), cudaMemcpyHostToDevice));
+
+        DeviceBuffer d_tbl(sizeof(int32_t));
+        Tensor tbl(d_tbl.p, DType::I32, {1});
+        int32_t tbl0 = 0;
+        CUDA_CHECK(cudaMemcpy(tbl.data, &tbl0, sizeof(int32_t), cudaMemcpyHostToDevice));
+
+        Tensor sel_blk(const_cast<void*>(exec.mtp_selected_blocks()->p), DType::I32, {512, 1});
+        Tensor sel_cnt(const_cast<void*>(exec.mtp_selected_counts()->p), DType::I32, {1});
+
+        QsaAttentionCacheView mtp_cache{};
+        mtp_cache.key_pages = Tensor(const_cast<void*>(exec.mtp_key_pages()->p), DType::BF16,
+                                     {256, 64, 2, static_cast<int32_t>(plan.attention_physical_pages)});
+        mtp_cache.value_pages = Tensor(const_cast<void*>(exec.mtp_value_pages()->p), DType::BF16,
+                                       {256, 64, 2, static_cast<int32_t>(plan.attention_physical_pages)});
+        mtp_cache.block_tables = alloc.state_view().qsa_attention_caches[0].block_tables;
+
+        // Step 2 with static backbone hidden
+        DeviceBuffer d_logits_static(248320 * sizeof(uint16_t));
+        Tensor logits_static(d_logits_static.p, DType::BF16, {248320, 1});
+        DeviceBuffer d_tok_static(sizeof(int32_t));
+        Tensor tok_static(d_tok_static.p, DType::I32, {1});
+        DeviceBuffer d_out_hidden_static(10240 * sizeof(uint16_t));
+        Tensor out_hidden_static(d_out_hidden_static.p, DType::BF16, {10240, 1});
+
+        ws.reset();
+        flash_next_mtp_step(model.view, in_emb, backbone_hidden, tok_idx, mrope, tbl,
+                            sel_blk, sel_cnt, mtp_cache, ws, logits_static, tok_static,
+                            device.stream, nullptr, &out_hidden_static);
+
+        // Step 2 with carried hidden
+        DeviceBuffer d_logits_carried(248320 * sizeof(uint16_t));
+        Tensor logits_carried(d_logits_carried.p, DType::BF16, {248320, 1});
+        DeviceBuffer d_tok_carried(sizeof(int32_t));
+        Tensor tok_carried(d_tok_carried.p, DType::I32, {1});
+        Tensor carried_hidden_tensor(const_cast<void*>(carried_buf->p), DType::BF16, {10240, 1});
+        DeviceBuffer d_out_hidden_carried(10240 * sizeof(uint16_t));
+        Tensor out_hidden_carried(d_out_hidden_carried.p, DType::BF16, {10240, 1});
+        ws.reset();
+        flash_next_mtp_step(model.view, in_emb, carried_hidden_tensor, tok_idx, mrope, tbl,
+                            sel_blk, sel_cnt, mtp_cache, ws, logits_carried, tok_carried,
+                            device.stream, nullptr, &out_hidden_carried);
+        device.synchronize();
+
+        std::vector<uint16_t> h_out_static(10240);
+        std::vector<uint16_t> h_out_carried(10240);
+        CUDA_CHECK(cudaMemcpy(h_out_static.data(), d_out_hidden_static.p, 10240 * sizeof(uint16_t), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_out_carried.data(), d_out_hidden_carried.p, 10240 * sizeof(uint16_t), cudaMemcpyDeviceToHost));
+        std::vector<uint16_t> h_static(248320);
+        std::vector<uint16_t> h_carried(248320);
+        CUDA_CHECK(cudaMemcpy(h_static.data(), d_logits_static.p, 248320 * sizeof(uint16_t), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_carried.data(), d_logits_carried.p, 248320 * sizeof(uint16_t), cudaMemcpyDeviceToHost));
+
+        float max_diff = 0.0f;
+        for (size_t i = 0; i < 248320; ++i) {
+            float diff = std::abs(bf16_to_float(h_carried[i]) - bf16_to_float(h_static[i]));
+            if (diff > max_diff) { max_diff = diff; }
+        }
+
+        std::cout << "  H3 check: draft step 1 produced non-zero carried hidden (first elements: "
+                  << bf16_to_float(carried_h[0]) << ", " << bf16_to_float(carried_h[1]) << ")\n";
+        std::cout << "  H3 check: draft step 2 with carried hidden produced distinct output hidden from static backbone ("
+                  << bf16_to_float(h_out_carried[0]) << " vs " << bf16_to_float(h_out_static[0]) << ")\n";
+        std::cout << "  H3 check: draft step 2 output logits differ from static backbone evaluation (max_diff = "
+                  << max_diff << ")\n";
+        if (max_diff < 1e-3f) {
+            std::cerr << "FAIL: H3 draft step 2 produced identical logits to static backbone (no carry effect)\n";
+            return 1;
+        }
+
+        exec.release_lane(lane);
+        std::cout << "PASS: test_h3_multi_step_hidden_carry\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_h3_multi_step_hidden_carry exception: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -900,6 +1324,9 @@ int main(int argc, char** argv) {
     if (test_speculative_greedy_exact_match(device, model) != 0) return 1;
     if (test_speculative_rollback_on_mismatch(device, model) != 0) return 1;
     if (test_speculative_turn_closure_interaction(device, model) != 0) return 1;
+    if (test_h1_verifier_row_ordering(device, model) != 0) return 1;
+    if (test_h2_mtp_allocation_zeroing(device, model) != 0) return 1;
+    if (test_h3_multi_step_hidden_carry(device, model) != 0) return 1;
 
     std::cout << "ALL MTP SPECULATIVE DECODING TESTS PASSED\n";
     return 0;

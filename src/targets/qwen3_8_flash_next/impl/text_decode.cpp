@@ -196,7 +196,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                                  std::int32_t active_blocks, FlashNextDecodeStateView state,
                                  WorkspaceArena& workspace, Tensor& final_hidden, Tensor& logits,
                                  cudaStream_t stream, const FlashNextDecodeStateSink* sink,
-                                 Tensor* out_hyper_hidden) {
+                                 Tensor* out_hyper_hidden, bool aliased_recurrent_scan) {
     const std::int32_t batch       = embedding.ne[1];
     const std::int32_t state_slots = state.ple_convolution_states.ne[2];
     if (batch <= 0 || batch > 8 || maximum_blocks <= 0 || maximum_blocks > 65'536 ||
@@ -244,7 +244,8 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
             emit_state("ple_gathered", gathered_ple_embedding);
             flash_next_ple_decode(round_ws.hyper_hidden, gathered_ple_embedding, model.ple,
                                   source_slots, destination_slots, state.ple_convolution_states,
-                                  workspace, round_ws.ple_injection, stream);
+                                  workspace, round_ws.ple_injection, stream,
+                                  aliased_recurrent_scan);
             emit_state("ple_injection", round_ws.ple_injection);
             ops::residual_add(round_ws.ple_injection, round_ws.hyper_hidden, stream);
             emit_state("hyper_after_ple", round_ws.hyper_hidden);
@@ -262,7 +263,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                 round_ws.block_input, model.full_attention[qsa_idx], token_indices, mrope_positions,
                 table_rows, source_slots, destination_slots, state.qsa_indexer_caches[qsa_idx],
                 maximum_blocks, active_blocks, workspace, round_ws.selected_blocks,
-                round_ws.selected_counts, stream);
+                round_ws.selected_counts, stream, aliased_recurrent_scan);
             emit_state(prefix + "selected_counts", round_ws.selected_counts);
             flash_next_qsa_attention_decode(
                 round_ws.block_input, model.full_attention[qsa_idx], token_indices, mrope_positions,
@@ -273,7 +274,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
             flash_next_gdn_decode(round_ws.block_input, model.gdn[gdn_idx], source_slots,
                                   destination_slots, state.gdn_convolution_states[gdn_idx],
                                   state.gdn_ssm_states[gdn_idx], workspace, round_ws.block_output,
-                                  stream);
+                                  stream, aliased_recurrent_scan);
         }
         emit_state(prefix + "attn_block_output", round_ws.block_output);
 

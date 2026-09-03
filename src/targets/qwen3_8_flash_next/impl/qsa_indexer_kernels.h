@@ -18,7 +18,8 @@ void flash_next_qsa_indexer_launch(const Tensor& token_indices, const Tensor& mr
                                    const Tensor& key_norm, QsaIndexerCacheView cache,
                                    FlashNextQsaIndexerWorkspace& scratch,
                                    std::int32_t active_blocks, Tensor& selected_blocks,
-                                   Tensor& selected_counts, cudaStream_t stream);
+                                   Tensor& selected_counts, cudaStream_t stream,
+                                   bool aliased_recurrent_scan = false);
 
 void flash_next_qsa_indexer_prefill_launch(
     const Tensor& token_indices, const Tensor& mrope_positions, std::int32_t table_row,

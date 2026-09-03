@@ -108,6 +108,12 @@ public:
     [[nodiscard]] const PleTokenHistory& lane_history(LaneHandle handle) const {
         return ledger_.lane_history(handle);
     }
+
+    [[nodiscard]] const DeviceBuffer* mtp_key_pages() const noexcept { return mtp_key_pages_.get(); }
+    [[nodiscard]] const DeviceBuffer* mtp_value_pages() const noexcept { return mtp_value_pages_.get(); }
+    [[nodiscard]] const DeviceBuffer* mtp_selected_blocks() const noexcept { return mtp_selected_blocks_.get(); }
+    [[nodiscard]] const DeviceBuffer* mtp_selected_counts() const noexcept { return mtp_selected_counts_.get(); }
+    [[nodiscard]] const DeviceBuffer* mtp_carried_hidden() const noexcept { return mtp_carried_hidden_.get(); }
     [[nodiscard]] std::size_t active_lanes_count() const noexcept;
 
     [[nodiscard]] std::size_t available_physical_groups() const noexcept {
@@ -240,6 +246,7 @@ private:
     std::unique_ptr<DeviceBuffer> mtp_draft_logits_;
     std::unique_ptr<DeviceBuffer> mtp_draft_tokens_;
     std::unique_ptr<DeviceBuffer> mtp_input_embedding_;
+    std::unique_ptr<DeviceBuffer> mtp_carried_hidden_;
 
     enum class LazyCaptureOutcome { Installed, NeedEager };
 

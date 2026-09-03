@@ -152,6 +152,8 @@ ReferenceToolOptions parse_reference_tool_options(std::span<const std::string_vi
             opts.mode = "materialize-mtp";
         } else if (arg == "--mtp-step") {
             opts.mode = "mtp-step";
+        } else if (arg == "--mtp-acceptance-trace") {
+            opts.mode = "mtp-acceptance-trace";
         } else if (arg == "--chat-diagnostic") {
             opts.mode = "chat-diagnostic";
         } else if (arg == "--prompt") {

@@ -18,7 +18,8 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
                            const Tensor& source_slots, const Tensor& destination_slots,
                            Tensor& convolution_states, Tensor& ssm_states,
-                           WorkspaceArena& workspace, Tensor& output, cudaStream_t stream);
+                           WorkspaceArena& workspace, Tensor& output, cudaStream_t stream,
+                           bool aliased_recurrent_scan = false);
 
 // T-wide prefill chunk execution for one lane.
 void flash_next_gdn_prefill_chunk(const Tensor& input, const GdnWeights& weights,

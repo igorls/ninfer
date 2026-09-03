@@ -20,6 +20,7 @@ void flash_next_mtp_step(const TextModelView& model, const Tensor& input_embeddi
                          const Tensor& selected_blocks, const Tensor& selected_counts,
                          QsaAttentionCacheView mtp_cache, WorkspaceArena& workspace,
                          Tensor& draft_logits, Tensor& draft_tokens, cudaStream_t stream,
-                         const FlashNextDecodeStateSink* sink = nullptr);
+                         const FlashNextDecodeStateSink* sink = nullptr,
+                         Tensor* out_hyper_hidden             = nullptr);
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

@@ -22,10 +22,11 @@ __global__ void conv_split_kernel(
     const std::int32_t* __restrict__ source_slots,
     const std::int32_t* __restrict__ destination_slots, __nv_bfloat16* __restrict__ states,
     __nv_bfloat16* __restrict__ query, __nv_bfloat16* __restrict__ key,
-    __nv_bfloat16* __restrict__ value, __nv_bfloat16* __restrict__ z) {
+    __nv_bfloat16* __restrict__ value, __nv_bfloat16* __restrict__ z,
+    int batch_offset = 0) {
     const int channel =
         static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
-    const int batch = static_cast<int>(blockIdx.y);
+    const int batch = static_cast<int>(blockIdx.y) + batch_offset;
     if (channel >= kConvChannels) { return; }
     const int source               = source_slots[batch];
     const int destination          = destination_slots[batch];
@@ -114,10 +115,12 @@ __global__ void output_gate_kernel(const __nv_bfloat16* __restrict__ recurrent,
 
 void flash_next_gdn_conv_launch(const FlashNextGdnWorkspace& scratch, const Tensor& convolution,
                                 const Tensor& source_slots, const Tensor& destination_slots,
-                                Tensor& convolution_states, cudaStream_t stream) {
+                                Tensor& convolution_states, cudaStream_t stream,
+                                int batch_count, int batch_offset) {
     constexpr int threads = 256;
-    conv_split_kernel<<<dim3((kConvChannels + threads - 1) / threads,
-                             static_cast<unsigned>(scratch.projected.ne[1])),
+    const unsigned b_count = (batch_count > 0) ? static_cast<unsigned>(batch_count)
+                                               : static_cast<unsigned>(scratch.projected.ne[1]);
+    conv_split_kernel<<<dim3((kConvChannels + threads - 1) / threads, b_count),
                         threads, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(scratch.projected.data),
         static_cast<const __nv_bfloat16*>(convolution.data),
@@ -127,7 +130,8 @@ void flash_next_gdn_conv_launch(const FlashNextGdnWorkspace& scratch, const Tens
         static_cast<__nv_bfloat16*>(scratch.query.data),
         static_cast<__nv_bfloat16*>(scratch.key.data),
         static_cast<__nv_bfloat16*>(scratch.value.data),
-        static_cast<__nv_bfloat16*>(scratch.z.data));
+        static_cast<__nv_bfloat16*>(scratch.z.data),
+        batch_offset);
     CUDA_CHECK(cudaGetLastError());
 }
 

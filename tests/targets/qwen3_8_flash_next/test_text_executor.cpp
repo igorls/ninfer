@@ -2960,11 +2960,11 @@ int test_g8_graph_node_diff(ninfer::DeviceContext& device) {
         ple_meta.head_vocab_sizes.fill(1);
         auto synthetic_model = make_synthetic_model(device);
 
-        auto make_exec = [&](std::int32_t max_context) {
+        auto make_exec = [&](std::int32_t max_context, std::uint32_t concurrency) {
             FlashNextRuntimeConfig cfg{
-                .max_concurrency     = 1,
+                .max_concurrency     = concurrency,
                 .max_context         = static_cast<std::uint32_t>(max_context),
-                .state_slot_capacity = 2,
+                .state_slot_capacity = 2 * concurrency,
                 .prefill_chunk       = 2048,
                 .use_cuda_graph      = true,
             };
@@ -2977,22 +2977,46 @@ int test_g8_graph_node_diff(ninfer::DeviceContext& device) {
             return std::make_pair(std::move(alloc), std::move(exec));
         };
 
-        auto [alloc_8k, exec_8k]   = make_exec(8192);
+        // 1. Verify B=1 graph node signature diffs between 8192 and 65536
+        auto [alloc_8k, exec_8k]   = make_exec(8192, 1);
         std::vector<KernelSig> k8k;
-        dump_cuda_graph("max_context=8192 bucket0", bucket0_native(exec_8k->decode_graphs()), k8k);
+        dump_cuda_graph("max_context=8192 bucket0 (B=1)", bucket0_native(exec_8k->decode_graphs()), k8k);
         exec_8k.reset();
         alloc_8k.reset();
 
-        auto [alloc_64k, exec_64k] = make_exec(65536);
+        auto [alloc_64k, exec_64k] = make_exec(65536, 1);
         std::vector<KernelSig> k64k;
-        dump_cuda_graph("max_context=65536 bucket0", bucket0_native(exec_64k->decode_graphs()), k64k);
-        const int diffs = diff_kernel_sigs("8192", k8k, "65536", k64k);
-        std::cout << "G8 note: captured kernelParams include cache.block_tables.ne[0] "
-                     "(indexer_logical_pages = ceil(max_context/256): 32 vs 256) and "
-                     "workspace tensors sized to maximum_blocks (2048 vs 16384) even on the "
-                     "identity path. Those integer/pointer args are not in KernelSig.\n";
-        std::cout << (diffs == 0 ? "PASS" : "ANOMALY")
-                  << ": test_g8_graph_node_diff signature_diffs=" << diffs << "\n";
+        dump_cuda_graph("max_context=65536 bucket0 (B=1)", bucket0_native(exec_64k->decode_graphs()), k64k);
+        exec_64k.reset();
+        alloc_64k.reset();
+
+        const int diffs_b1 = diff_kernel_sigs("8192_B1", k8k, "65536_B1", k64k);
+        std::cout << (diffs_b1 == 0 ? "PASS" : "FAIL")
+                  << ": test_g8_graph_node_diff B=1 signature_diffs=" << diffs_b1 << "\n";
+        if (diffs_b1 != 0) {
+            return 1;
+        }
+
+        // 2. Verify B=8 graph node signature diffs between 8192 and 65536
+        auto [alloc_8k_b8, exec_8k_b8] = make_exec(8192, 8);
+        std::vector<KernelSig> k8k_b8;
+        dump_cuda_graph("max_context=8192 bucket0 (B=8)", bucket0_native(exec_8k_b8->decode_graphs()), k8k_b8);
+        exec_8k_b8.reset();
+        alloc_8k_b8.reset();
+
+        auto [alloc_64k_b8, exec_64k_b8] = make_exec(65536, 8);
+        std::vector<KernelSig> k64k_b8;
+        dump_cuda_graph("max_context=65536 bucket0 (B=8)", bucket0_native(exec_64k_b8->decode_graphs()), k64k_b8);
+        exec_64k_b8.reset();
+        alloc_64k_b8.reset();
+
+        const int diffs_b8 = diff_kernel_sigs("8192_B8", k8k_b8, "65536_B8", k64k_b8);
+        std::cout << (diffs_b8 == 0 ? "PASS" : "FAIL")
+                  << ": test_g8_graph_node_diff B=8 signature_diffs=" << diffs_b8 << "\n";
+        if (diffs_b8 != 0) {
+            return 1;
+        }
+
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "test_g8_graph_node_diff exception: " << e.what() << "\n";

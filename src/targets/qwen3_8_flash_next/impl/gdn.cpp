@@ -83,7 +83,8 @@ std::size_t flash_next_gdn_workspace_capacity_bytes(std::int32_t min_batch,
 void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
                            const Tensor& source_slots, const Tensor& destination_slots,
                            Tensor& convolution_states, Tensor& ssm_states,
-                           WorkspaceArena& workspace, Tensor& output, cudaStream_t stream) {
+                           WorkspaceArena& workspace, Tensor& output, cudaStream_t stream,
+                           bool aliased_recurrent_scan) {
     const std::int32_t batch = input.ne[1];
     if (!exact_tensor(input, DType::BF16, 2'560, batch) || batch < 1 || batch > 8 ||
         !exact_tensor(output, DType::BF16, 2'560, batch) ||
@@ -109,19 +110,37 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
     FlashNextGdnWorkspace scratch = allocate_flash_next_gdn_workspace(workspace, batch);
     ops::linear(input, weights.query_key_value_z, scratch.projected, ops::LinearPolicy::A16Only,
                 workspace, stream);
-    flash_next_gdn_conv_launch(scratch, weights.convolution, source_slots, destination_slots,
-                               convolution_states, stream);
     flash_next_gdn_controls_launch(input, weights, scratch, stream);
 
-    Tensor query            = scratch.query.view({128, 16, 1, batch});
-    Tensor key              = scratch.key.view({128, 16, 1, batch});
-    Tensor value            = scratch.value.view({128, 48, 1, batch});
-    Tensor recurrent_output = scratch.recurrent_output.view({128, 48, 1, batch});
-    Tensor g                = scratch.g.view({48, 1, batch});
-    Tensor beta             = scratch.beta.view({48, 1, batch});
-    ops::gated_delta_net_batch_update(query, key, value, g, beta, 1.0F / std::sqrt(128.0F), true,
-                                      ssm_states, source_slots, destination_slots, recurrent_output,
-                                      stream);
+    if (aliased_recurrent_scan && batch > 1) {
+        for (std::int32_t r = 0; r < batch; ++r) {
+            flash_next_gdn_conv_launch(scratch, weights.convolution, source_slots, destination_slots,
+                                       convolution_states, stream, 1, r);
+            Tensor query_r            = scratch.query.view({128, 16, 1, batch}).slice(3, r, 1);
+            Tensor key_r              = scratch.key.view({128, 16, 1, batch}).slice(3, r, 1);
+            Tensor value_r            = scratch.value.view({128, 48, 1, batch}).slice(3, r, 1);
+            Tensor recurrent_output_r = scratch.recurrent_output.view({128, 48, 1, batch}).slice(3, r, 1);
+            Tensor g_r                = scratch.g.view({48, 1, batch}).slice(2, r, 1);
+            Tensor beta_r             = scratch.beta.view({48, 1, batch}).slice(2, r, 1);
+            Tensor src_r              = source_slots.slice(0, r, 1);
+            Tensor dst_r              = destination_slots.slice(0, r, 1);
+            ops::gated_delta_net_batch_update(query_r, key_r, value_r, g_r, beta_r,
+                                              1.0F / std::sqrt(128.0F), true, ssm_states,
+                                              src_r, dst_r, recurrent_output_r, stream);
+        }
+    } else {
+        flash_next_gdn_conv_launch(scratch, weights.convolution, source_slots, destination_slots,
+                                   convolution_states, stream);
+        Tensor query            = scratch.query.view({128, 16, 1, batch});
+        Tensor key              = scratch.key.view({128, 16, 1, batch});
+        Tensor value            = scratch.value.view({128, 48, 1, batch});
+        Tensor recurrent_output = scratch.recurrent_output.view({128, 48, 1, batch});
+        Tensor g                = scratch.g.view({48, 1, batch});
+        Tensor beta             = scratch.beta.view({48, 1, batch});
+        ops::gated_delta_net_batch_update(query, key, value, g, beta, 1.0F / std::sqrt(128.0F), true,
+                                          ssm_states, source_slots, destination_slots, recurrent_output,
+                                          stream);
+    }
 
     flash_next_gdn_output_gate_launch(scratch, weights.norm, stream);
     ops::linear(scratch.gated_output, weights.output, output, ops::LinearPolicy::A16Only, workspace,

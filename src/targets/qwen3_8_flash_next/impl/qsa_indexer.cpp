@@ -51,8 +51,9 @@ void flash_next_qsa_indexer_decode(const Tensor& input, const AttentionWeights& 
                                    const Tensor& table_rows, const Tensor& source_state_slots,
                                    const Tensor& destination_state_slots, QsaIndexerCacheView cache,
                                    std::int32_t maximum_blocks, std::int32_t active_blocks,
-                                   WorkspaceArena& workspace, Tensor& selected_blocks,
-                                   Tensor& selected_counts, cudaStream_t stream) {
+                                    WorkspaceArena& workspace, Tensor& selected_blocks,
+                                    Tensor& selected_counts, cudaStream_t stream,
+                                    bool aliased_recurrent_scan) {
     const std::int32_t batch         = input.ne[1];
     const std::int32_t logical_pages = cache.block_tables.ne[0];
     if (maximum_blocks <= 0 || maximum_blocks > 65'536 || active_blocks < 0 ||
@@ -92,7 +93,7 @@ void flash_next_qsa_indexer_decode(const Tensor& input, const AttentionWeights& 
     flash_next_qsa_indexer_launch(token_indices, mrope_positions, table_rows, source_state_slots,
                                   destination_state_slots, weights.indexer_query_norm,
                                   weights.indexer_key_norm, cache, scratch, active_blocks,
-                                  selected_blocks, selected_counts, stream);
+                                  selected_blocks, selected_counts, stream, aliased_recurrent_scan);
 }
 
 void flash_next_qsa_indexer_prefill_chunk(
