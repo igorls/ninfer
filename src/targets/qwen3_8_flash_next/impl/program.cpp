@@ -57,7 +57,8 @@ ProgramImpl::ProgramImpl(const LoadedModelData* model_data, FlashNextRuntimePlan
       device_sampled_tokens_(plan_.config.max_concurrency * sizeof(std::int32_t)),
       host_sampled_tokens_(plan_.config.max_concurrency, 0),
       host_sampling_configs_(plan_.config.max_concurrency),
-      host_sampling_positions_(plan_.config.max_concurrency, 0) {
+      host_sampling_positions_(plan_.config.max_concurrency, 0),
+      trace_spec_(std::getenv("NINFER_TRACE_SPEC") != nullptr) {
     allocation_.initialize(device_.stream);
     const std::uint32_t cont_cap = plan_.config.continuation_capacity;
     continuation_slots_.resize(cont_cap);
@@ -1648,9 +1649,24 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
     st.last_token_pos          = 0;
     st.last_token_index        = 0;
     st.total_generated_tokens  = 0;
+    st.pending_accepted_tokens.clear();
+    st.draft_tokens.clear();
     st.requested_output_tokens = summary.requested_output_tokens;
     st.effective_output_tokens = summary.effective_output_tokens;
     st.publish_continuation    = summary.publish_continuation;
+    st.speculative_stats       = ninfer::SpeculativeStats{
+        .backend               = impl_->plan_.config.speculative_draft_tokens > 0
+                                     ? ninfer::SpeculativeBackend::Mtp
+                                     : ninfer::SpeculativeBackend::None,
+        .enabled               = impl_->plan_.config.speculative_draft_tokens > 0,
+        .draft_window          = impl_->plan_.config.speculative_draft_tokens,
+        .rounds                = 0,
+        .drafted_tokens        = 0,
+        .accepted_tokens       = 0,
+        .fallback_steps        = 0,
+        .accepted_per_position = std::vector<std::uint64_t>(
+            impl_->plan_.config.speculative_draft_tokens + 1, 0),
+    };
 
     if (adm.impl_ != nullptr && adm.impl_->base_plan != nullptr) {
         st.sampling_config = adm.impl_->base_plan->sampling_config;
@@ -2235,7 +2251,7 @@ runtime::ContextTransactionReserveStatus Program::reserve_active_capture_with_pr
 }
 
 PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
-                             std::span<const runtime::RoundBudget> /*budgets*/,
+                             std::span<const runtime::RoundBudget> budgets,
                              runtime::ExecutionTiming* failed_timing) {
     if (impl_ == nullptr) { throw std::logic_error("Program: instance is empty"); }
 
@@ -2264,17 +2280,25 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
             throw std::logic_error("sequence lane is not active or epoch mismatch");
         }
 
-        const std::uint32_t K =
-            std::min<std::uint32_t>(4U, impl_->plan_.config.speculative_draft_tokens);
+        const std::uint32_t remaining =
+            budgets.empty() ? 4U : budgets[0].generated_tokens_remaining;
+        const std::uint32_t max_draft_by_budget = remaining > 1U ? remaining - 1U : 0U;
+        const std::uint32_t K = std::min<std::uint32_t>(
+            max_draft_by_budget,
+            std::min<std::uint32_t>(4U, impl_->plan_.config.speculative_draft_tokens));
 
         // If draft tokens are not already prepared, draft them from current state
-        if (st.draft_tokens.empty()) {
+        if (K == 0) {
+            st.draft_tokens.clear();
+        } else if (st.draft_tokens.empty()) {
             st.draft_tokens.resize(K);
             Tensor last_hidden = impl_->allocation_.round_tensors().hyper_hidden.slice(1, 0, 1);
             std::array<std::int32_t, 3> mrope_pos = {st.last_token_pos, st.last_token_pos,
                                                      st.last_token_pos};
             impl_->executor_.draft_mtp_tokens(st.lane_handle, st.last_token_id, st.last_token_index,
                                               mrope_pos, last_hidden, K, st.draft_tokens);
+        } else if (st.draft_tokens.size() != K) {
+            st.draft_tokens.resize(K);
         }
 
         const std::int32_t last_token_index =
@@ -2481,6 +2505,9 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
         auto& st                     = impl_->lane_states_[lane_idx];
 
         if (dec.accepted_tokens > 0) {
+            if (st.pending_accepted_tokens.size() > dec.accepted_tokens) {
+                st.pending_accepted_tokens.resize(dec.accepted_tokens);
+            }
             // Commit accepted tokens via speculative commit
             if (impl_->pending_round_.valid()) {
                 impl_->pending_round_.commit_speculative(lane_idx, st.pending_accepted_tokens);
@@ -2497,10 +2524,32 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
                 st.total_generated_tokens += 1;
             }
 
+            // Record speculative stats before clearing draft_tokens
+            const std::uint32_t drafted = static_cast<std::uint32_t>(st.draft_tokens.size());
+            const std::uint32_t accepted = dec.accepted_tokens;
+            st.speculative_stats.rounds += 1;
+            st.speculative_stats.drafted_tokens += drafted;
+            st.speculative_stats.accepted_tokens += accepted;
+            if (accepted < st.speculative_stats.accepted_per_position.size()) {
+                st.speculative_stats.accepted_per_position[accepted] += 1;
+            }
+            result.rows[0].speculative = st.speculative_stats;
+            if (impl_->trace_spec_) {
+                std::fprintf(stderr, "[spec] round=%llu drafted=%u accepted=%u cum_drafted=%llu cum_accepted=%llu acc_rate=%.3f\n",
+                             static_cast<unsigned long long>(st.speculative_stats.rounds),
+                             drafted, accepted,
+                             static_cast<unsigned long long>(st.speculative_stats.drafted_tokens),
+                             static_cast<unsigned long long>(st.speculative_stats.accepted_tokens),
+                             st.speculative_stats.drafted_tokens > 0
+                                 ? static_cast<double>(st.speculative_stats.accepted_tokens - st.speculative_stats.rounds) /
+                                       static_cast<double>(st.speculative_stats.drafted_tokens)
+                                 : 0.0);
+            }
+
             // Draft new MTP tokens for the next round if not terminal
             st.draft_tokens.clear();
             if (!dec.terminal && impl_->plan_.config.speculative_draft_tokens > 0 &&
-                impl_->has_mtp()) {
+                impl_->has_mtp() && !st.pending_accepted_tokens.empty()) {
                 const std::uint32_t K =
                     std::min<std::uint32_t>(4U, impl_->plan_.config.speculative_draft_tokens);
                 st.draft_tokens.resize(K);
@@ -2520,6 +2569,8 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
                 result.rows[0].disposition = runtime::CommitDisposition::Active;
             }
         } else {
+            st.speculative_stats.fallback_steps += 1;
+            result.rows[0].speculative = st.speculative_stats;
             st.draft_tokens.clear();
             st.pending_accepted_tokens.clear();
             if (impl_->pending_round_.valid()) {
@@ -2537,7 +2588,7 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
             result.rows[0].disposition = runtime::CommitDisposition::CancelledReleased;
         }
     } else {
-        // Standard non-speculative path (or prefill commit, or B > 1)
+        // Standard non-speculative decode or prefill commit
         std::vector<detail::LaneCommitDecision> lane_decisions(B);
         for (std::size_t b = 0; b < B; ++b) {
             lane_decisions[b].accept = (decisions[b].accepted_tokens > 0);
@@ -2607,17 +2658,32 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
 }
 
 DiscardResult Program::abort_pending(PendingBatch&& pending) noexcept {
-    if (impl_ != nullptr && impl_->pending_round_.valid()) {
-        impl_->pending_round_.abort();
+    const auto rows = ContractAccess::rows(pending);
+    if (impl_ != nullptr) {
+        if (impl_->pending_round_.valid()) {
+            impl_->pending_round_.abort();
+        }
+        for (const auto& row : rows) {
+            const std::uint32_t lane_idx = row.lane().value;
+            if (lane_idx < impl_->plan_.config.max_concurrency) {
+                auto& st = impl_->lane_states_[lane_idx];
+                st.pending_accepted_tokens.clear();
+                st.draft_tokens.clear();
+            }
+        }
     }
     ContractAccess::consume(pending);
     return DiscardResult{
         .status    = runtime::ConsumeStatus::Consumed,
-        .row_count = 0,
+        .row_count = rows.size(),
     };
 }
 
 FinishResult Program::finish(SequenceHandle sequence) noexcept {
+    FinishResult out{
+        .status      = runtime::ConsumeStatus::Consumed,
+        .disposition = runtime::FinishDisposition::Released,
+    };
     if (impl_ != nullptr) {
         try {
             if (impl_->pending_round_.valid()) {
@@ -2626,6 +2692,8 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
             const std::uint32_t lane_idx = sequence.lane().value;
             if (lane_idx < impl_->plan_.config.max_concurrency) {
                 auto& st = impl_->lane_states_[lane_idx];
+                st.pending_accepted_tokens.clear();
+                st.draft_tokens.clear();
                 if (st.active && st.epoch == sequence.epoch()) {
                     const bool should_catalogue =
                         st.publish_continuation && (impl_->plan_.config.continuation_capacity > 0) &&
@@ -2734,6 +2802,7 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
                             out.disposition          = runtime::FinishDisposition::Catalogued;
                             out.continuation         = ContinuationHandle(
                                 this, static_cast<std::uint32_t>(target_c_idx), c_slot.generation);
+                            out.speculative          = std::move(st.speculative_stats);
                             ++impl_->resource_revision_;
                             return out;
                         }
@@ -2747,6 +2816,7 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
                     st.reused_from_continuation_generation.reset();
                     st.turn_closure_continuation_index.reset();
                     st.pending_capture_offer = 0;
+                    out.speculative          = std::move(st.speculative_stats);
                     ++impl_->resource_revision_;
                 }
             }
@@ -2758,10 +2828,7 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
                          sequence.lane().value);
         }
     }
-    return FinishResult{
-        .status      = runtime::ConsumeStatus::Consumed,
-        .disposition = runtime::FinishDisposition::Released,
-    };
+    return out;
 }
 
 AbortResult Program::abort(SequenceHandle sequence) noexcept {

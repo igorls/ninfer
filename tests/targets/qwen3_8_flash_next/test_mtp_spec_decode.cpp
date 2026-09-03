@@ -2,6 +2,7 @@
 #include "core/device.h"
 #include "runtime/contract/types.h"
 #include "runtime/engine/context_cost.h"
+#include "runtime/engine/resource_manager.h"
 #include "targets/qwen3_8_flash_next/impl/lane_ledger.h"
 #include "targets/qwen3_8_flash_next/impl/model_view.h"
 #include "targets/qwen3_8_flash_next/impl/mtp_forward.h"
@@ -1302,6 +1303,142 @@ int test_h3_multi_step_hidden_carry(ninfer::DeviceContext& device, const Synthet
     }
 }
 
+int test_g26_speculative_discard_with_rejected_draft(ninfer::DeviceContext& device,
+                                                     const SyntheticModel& model) {
+    std::cout << "[TEST G26] test_g26_speculative_discard_with_rejected_draft ...\n" << std::flush;
+    using namespace ninfer;
+    using namespace ninfer::targets::qwen3_8_flash_next;
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    using FlashNextResourceManager = runtime::ResourceManager<Package>;
+
+    try {
+        auto make_prompt = [](std::span<const TokenId> tokens) {
+            targets::qwen3_6::PreparedPromptData data;
+            const std::size_t num_tokens = tokens.size();
+            data.token_ids.assign(tokens.begin(), tokens.end());
+            data.token_types.resize(num_tokens, 0);
+            data.positions.resize(num_tokens * 3);
+            for (std::size_t i = 0; i < num_tokens; ++i) {
+                data.positions[i]                  = static_cast<std::int32_t>(i);
+                data.positions[num_tokens + i]     = static_cast<std::int32_t>(i);
+                data.positions[2 * num_tokens + i] = static_cast<std::int32_t>(i);
+            }
+            data.identity.reusable = true;
+            return targets::qwen3_6::PreparedPromptAccess::construct(std::move(data));
+        };
+
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers.fill(0);
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+
+        runtime::ResolvedExecutionOptions exec_options{};
+        exec_options.requested_output_tokens = 32;
+        exec_options.allow_prefix_reuse      = true;
+        std::atomic<bool> flag{false};
+        runtime::CancellationFlagView cancellation{&flag};
+
+        FlashNextRuntimeConfig cfg{
+            .max_concurrency          = 1,
+            .max_context              = 512,
+            .continuation_capacity    = 4,
+            .prefill_chunk            = 512,
+            .speculative_draft_tokens = 3,
+            .use_cuda_graph           = false,
+        };
+        const auto curve = flash_next_capacity_curve(cfg);
+        auto plan = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+
+        auto pimpl = std::make_unique<ProgramImpl>(nullptr, plan, device, model.view, std::nullopt, ple_meta);
+        Program program(std::move(pimpl));
+
+        auto admit = [&](Program& prog, std::span<const TokenId> tokens) {
+            auto p = make_prompt(tokens);
+            auto base_plan = prog.plan_request(p, exec_options);
+            auto cand = prog.inspect_admission(
+                p, base_plan, runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
+            if (!cand.has_value()) {
+                throw std::runtime_error("inspect_admission failed");
+            }
+            auto res = prog.seal_identity(*cand, p);
+            (void)prog.start_resource_transaction(std::move(*res), make_prompt(tokens), cancellation);
+            auto prog_res = prog.progress_context_transaction(cancellation);
+            auto* mat = std::get_if<MaterializationResult>(&prog_res);
+            SequenceHandle sequence = mat->published->sequence;
+            prog.finalize_context_transaction();
+            return sequence;
+        };
+
+        std::vector<TokenId> prompt_tokens(8);
+        for (std::size_t i = 0; i < 8; ++i) { prompt_tokens[i] = static_cast<TokenId>(100 + i); }
+
+        SequenceHandle seq = admit(program, prompt_tokens);
+
+        std::cout << "  step 1: prefill seq1 ...\n" << std::flush;
+        auto prefill = program.advance_prefill(seq);
+        if (!prefill.complete || !prefill.pending.has_value()) {
+            std::cerr << "FAIL: Prefill step failed\n" << std::flush;
+            return 1;
+        }
+        std::array<runtime::CommitDecision, 1> prefill_commit = {{{.accepted_tokens = 1, .terminal = false}}};
+        (void)program.commit(std::move(*prefill.pending), prefill_commit);
+
+        std::cout << "  step 2: speculative decode round seq1 ...\n" << std::flush;
+        std::array<runtime::RoundBudget, 1> budgets = {{{.generated_tokens_remaining = 16}}};
+        auto pending = program.decode(std::span(&seq, 1), budgets);
+
+        std::cout << "  step 3: abort_pending seq1 ...\n" << std::flush;
+        auto discarded = program.abort_pending(std::move(pending));
+        if (discarded.status != runtime::ConsumeStatus::Consumed) {
+            std::cerr << "FAIL: abort_pending did not return Consumed\n" << std::flush;
+            return 1;
+        }
+        if (discarded.row_count != 1) {
+            std::cerr << "FAIL: abort_pending returned row_count=" << discarded.row_count
+                      << ", expected 1. On base commit 6991b0db, row_count was 0.\n" << std::flush;
+            return 1;
+        }
+
+        std::array<runtime::LaneId, 1> lanes = {runtime::LaneId(0)};
+        if (lanes.size() != discarded.row_count || discarded.status != runtime::ConsumeStatus::Consumed) {
+            throw std::logic_error("pending discard did not consume its membership");
+        }
+
+        std::cout << "  step 4: finish seq1 and admit seq2 ...\n" << std::flush;
+        program.finish(seq);
+
+        std::vector<TokenId> prompt2_tokens(8);
+        for (std::size_t i = 0; i < 8; ++i) { prompt2_tokens[i] = static_cast<TokenId>(200 + i); }
+
+        SequenceHandle seq2 = admit(program, prompt2_tokens);
+
+        std::cout << "  step 5: prefill seq2 ...\n" << std::flush;
+        auto prefill2 = program.advance_prefill(seq2);
+        std::array<runtime::CommitDecision, 1> dec2 = {{{.accepted_tokens = 1, .terminal = false}}};
+        (void)program.commit(std::move(*prefill2.pending), dec2);
+
+        std::cout << "  step 6: decode seq2 (budget=1) ...\n" << std::flush;
+        std::array<runtime::RoundBudget, 1> budget_one = {{{.generated_tokens_remaining = 1}}};
+        auto pending_one = program.decode(std::span(&seq2, 1), budget_one);
+        if (pending_one.row_stride() != 1) {
+            std::cerr << "FAIL: draft tokens not clamped when remaining budget is 1 (row_stride="
+                      << pending_one.row_stride() << ")\n" << std::flush;
+            return 1;
+        }
+        auto discarded_one = program.abort_pending(std::move(pending_one));
+        if (lanes.size() != discarded_one.row_count || discarded_one.status != runtime::ConsumeStatus::Consumed) {
+            throw std::logic_error("pending discard did not consume its membership");
+        }
+        program.finish(seq2);
+
+        std::cout << "PASS: test_g26_speculative_discard_with_rejected_draft\n" << std::flush;
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_g26_speculative_discard_with_rejected_draft exception: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1327,6 +1464,7 @@ int main(int argc, char** argv) {
     if (test_h1_verifier_row_ordering(device, model) != 0) return 1;
     if (test_h2_mtp_allocation_zeroing(device, model) != 0) return 1;
     if (test_h3_multi_step_hidden_carry(device, model) != 0) return 1;
+    if (test_g26_speculative_discard_with_rejected_draft(device, model) != 0) return 1;
 
     std::cout << "ALL MTP SPECULATIVE DECODING TESTS PASSED\n";
     return 0;
