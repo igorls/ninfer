@@ -42,6 +42,7 @@ std::size_t flash_next_mtp_workspace_capacity_bytes(std::int32_t batch) {
     // Primary MTP activation tensors
     (void)layout.alloc(DType::BF16, {2'560, batch}, 256);  // emb_norm
     (void)layout.alloc(DType::BF16, {2'560, batch}, 256);  // emb_proj
+    (void)layout.alloc(DType::BF16, {10'240, batch}, 256); // hid_norm
     (void)layout.alloc(DType::BF16, {2'560, batch}, 256);  // hid_mix
     (void)layout.alloc(DType::BF16, {2'560, batch}, 256);  // hid_proj
     (void)layout.alloc(DType::BF16, {2'560, batch}, 256);  // trunk_sum
@@ -119,6 +120,7 @@ void flash_next_mtp_step(const TextModelView& model, const Tensor& input_embeddi
     // Allocate stage tensors
     Tensor emb_norm         = workspace.alloc(DType::BF16, {2'560, batch}, 256);
     Tensor emb_proj         = workspace.alloc(DType::BF16, {2'560, batch}, 256);
+    Tensor hid_norm         = workspace.alloc(DType::BF16, {10'240, batch}, 256);
     Tensor hid_mix          = workspace.alloc(DType::BF16, {2'560, batch}, 256);
     Tensor hid_proj         = workspace.alloc(DType::BF16, {2'560, batch}, 256);
     Tensor trunk_sum        = workspace.alloc(DType::BF16, {2'560, batch}, 256);
@@ -139,7 +141,9 @@ void flash_next_mtp_step(const TextModelView& model, const Tensor& input_embeddi
     emit_state("mtp_embedding_proj", emb_proj);
 
     // 2. Stem: Backbone hidden mixing & projection
-    flash_next_hyper_mix(backbone_hyper_hidden, mtp.mixer, hyper_scratch, hid_mix, stream);
+    ops::rmsnorm(backbone_hyper_hidden, mtp.hidden_norm, 1e-6F, true, hid_norm, stream);
+    emit_state("mtp_hidden_norm", hid_norm);
+    flash_next_hyper_mix(hid_norm, mtp.mixer, hyper_scratch, hid_mix, stream);
     emit_state("mtp_hidden_mix", hid_mix);
     ops::linear(hid_mix, mtp.hidden_projection, hid_proj, ops::LinearPolicy::A16Only, workspace,
                 stream);

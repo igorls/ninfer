@@ -22,6 +22,7 @@ class Qwen4ExpMTP(nn.Module):
         self.config = config
         self.pre_fc_norm_embedding = Qwen4ExpTextRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.fc_embedding = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+        self.pre_fc_norm_hidden = Qwen4ExpTextRMSNorm(config.hidden_size * 4, eps=config.rms_norm_eps)
         self.hyper_connection_mixer = Qwen4ExpTextGatedResidual(config, use_combine=False)
         self.fc_hidden = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
         self.rotary = Qwen4ExpTextRotaryEmbedding(config=config)
@@ -36,7 +37,9 @@ class Qwen4ExpMTP(nn.Module):
         emb_proj = self.fc_embedding(emb_norm)
         stages['mtp_embedding_proj'] = emb_proj
 
-        hid_mix = self.hyper_connection_mixer(backbone_hyper_hidden)
+        hid_norm = self.pre_fc_norm_hidden(backbone_hyper_hidden)
+        stages['mtp_hidden_norm'] = hid_norm
+        hid_mix = self.hyper_connection_mixer(hid_norm)
         stages['mtp_hidden_mix'] = hid_mix
         hid_proj = self.fc_hidden(hid_mix)
         stages['mtp_hidden_proj'] = hid_proj

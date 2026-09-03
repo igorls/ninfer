@@ -1444,28 +1444,39 @@ int test_g26_speculative_discard_with_rejected_draft(ninfer::DeviceContext& devi
 int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
-    int device_count = 0;
-    const auto err   = cudaGetDeviceCount(&device_count);
-    if (cuda_unavailable(err) || device_count == 0) {
-        std::cerr << "skip: CUDA device unavailable\n";
-        return 77;
-    }
-    if (err != cudaSuccess) {
-        std::cerr << "CUDA initialization error: " << cudaGetErrorString(err) << "\n";
+    try {
+        int device_count = 0;
+        const auto err   = cudaGetDeviceCount(&device_count);
+        if (cuda_unavailable(err) || device_count == 0) {
+            std::cerr << "skip: CUDA device unavailable\n";
+            return 77;
+        }
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA initialization error: " << cudaGetErrorString(err) << "\n";
+            return 1;
+        }
+
+        std::cout << "Creating device context ...\n" << std::flush;
+        ninfer::DeviceContext device(0);
+        std::cout << "Making synthetic model ...\n" << std::flush;
+        auto model = make_synthetic_model(device);
+        std::cout << "Synthetic model ready.\n" << std::flush;
+
+        if (test_speculative_greedy_exact_match(device, model) != 0) return 1;
+        if (test_speculative_rollback_on_mismatch(device, model) != 0) return 1;
+        if (test_speculative_turn_closure_interaction(device, model) != 0) return 1;
+        if (test_h1_verifier_row_ordering(device, model) != 0) return 1;
+        if (test_h2_mtp_allocation_zeroing(device, model) != 0) return 1;
+        if (test_h3_multi_step_hidden_carry(device, model) != 0) return 1;
+        if (test_g26_speculative_discard_with_rejected_draft(device, model) != 0) return 1;
+
+        std::cout << "ALL MTP SPECULATIVE DECODING TESTS PASSED\n" << std::flush;
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "FATAL EXCEPTION in main: " << e.what() << "\n" << std::flush;
+        return 1;
+    } catch (...) {
+        std::cerr << "FATAL UNKNOWN EXCEPTION in main\n" << std::flush;
         return 1;
     }
-
-    ninfer::DeviceContext device(0);
-    auto model = make_synthetic_model(device);
-
-    if (test_speculative_greedy_exact_match(device, model) != 0) return 1;
-    if (test_speculative_rollback_on_mismatch(device, model) != 0) return 1;
-    if (test_speculative_turn_closure_interaction(device, model) != 0) return 1;
-    if (test_h1_verifier_row_ordering(device, model) != 0) return 1;
-    if (test_h2_mtp_allocation_zeroing(device, model) != 0) return 1;
-    if (test_h3_multi_step_hidden_carry(device, model) != 0) return 1;
-    if (test_g26_speculative_discard_with_rejected_draft(device, model) != 0) return 1;
-
-    std::cout << "ALL MTP SPECULATIVE DECODING TESTS PASSED\n";
-    return 0;
 }

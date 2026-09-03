@@ -53,6 +53,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                                    WorkspaceArena& workspace, Tensor& final_hidden, Tensor& logits,
                                    cudaStream_t stream,
                                    const FlashNextDecodeStateSink* sink = nullptr,
-                                   bool use_qsa_prefill_mma            = false);
+                                   bool use_qsa_prefill_mma            = false,
+                                   Tensor* out_hyper_hidden            = nullptr);
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail
