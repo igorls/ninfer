@@ -113,6 +113,15 @@ void set_qsa_prefill_mma_env(bool enable) {
 #endif
 }
 
+void set_moe_staging_env(bool enable_new) {
+    const char* value = enable_new ? "new" : "old";
+#ifdef _WIN32
+    (void)_putenv_s("NINFER_FLASH_NEXT_MOE_STAGING", value);
+#else
+    (void)setenv("NINFER_FLASH_NEXT_MOE_STAGING", value, 1);
+#endif
+}
+
 struct PrefillBenchStats {
     float min_ms    = 0.0F;
     float median_ms = 0.0F;
@@ -1955,7 +1964,8 @@ int test_cuda_graph_timing_benchmark(ninfer::DeviceContext& device) {
 
 int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device, bool mode_ab,
                                         bool host_sync_ab = false, bool moe_shared_ab = false,
-                                        bool qsa_sched_ab = false) {
+                                        bool qsa_sched_ab = false,
+                                        bool moe_staging_ab = false) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
     try {
         PleIndexMetadata ple_meta{};
@@ -1966,13 +1976,15 @@ int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device, bool mode
         auto synthetic_model = make_synthetic_model(device);
 
         const bool interleaved_ab =
-            prefill_bench_ab_requested(mode_ab) || host_sync_ab || moe_shared_ab || qsa_sched_ab;
+            prefill_bench_ab_requested(mode_ab) || host_sync_ab || moe_shared_ab || qsa_sched_ab ||
+            moe_staging_ab;
         const int bench_iters     = prefill_bench_iters();
         const int warmup_s        = prefill_bench_warmup_s(interleaved_ab);
-        const char* kind          = qsa_sched_ab   ? "qsa-mma-sched"
+        const char* kind          = moe_staging_ab ? "moe-staging"
+                                    : qsa_sched_ab  ? "qsa-mma-sched"
                                     : moe_shared_ab ? "moe-shared-mma"
-                                    : host_sync_ab ? "host-sync"
-                                                   : "residual-splitk";
+                                    : host_sync_ab  ? "host-sync"
+                                                    : "residual-splitk";
         std::cout << "--- Prefill Chunk Performance & Host CPU Benchmark (Synthetic Model) ---\n";
         std::cout << "NINFER_PREFILL_BENCH_ITERS=" << bench_iters
                   << " WARMUP_S=" << warmup_s
@@ -1981,7 +1993,7 @@ int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device, bool mode
                   << " (one plan/executor; env reread at each launch)\n";
 
         const std::vector<std::int32_t> chunk_sizes =
-            (moe_shared_ab || qsa_sched_ab) ? std::vector<std::int32_t>{2048, 512}
+            (moe_shared_ab || qsa_sched_ab || moe_staging_ab) ? std::vector<std::int32_t>{2048, 512}
             : interleaved_ab ? std::vector<std::int32_t>{2048, 128}
                              : std::vector<std::int32_t>{128, 2048};
         if (qsa_sched_ab) { set_qsa_prefill_mma_env(true); }
@@ -2035,7 +2047,9 @@ int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device, bool mode
 
             const int run_warmup = (!warmed && warmup_s > 0) ? warmup_s : 0;
             if (run_warmup > 0) {
-                if (qsa_sched_ab) {
+                if (moe_staging_ab) {
+                    set_moe_staging_env(true);
+                } else if (qsa_sched_ab) {
                     set_qsa_mma_sched_env(false);
                 } else if (moe_shared_ab) {
                     set_moe_shared_mma_env(true);
@@ -2054,14 +2068,43 @@ int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device, bool mode
                 warmed = true;
                 std::cout << "  T=" << T << " warmup " << run_warmup << " s (" << warm_chunks
                           << " chunks, "
-                          << (qsa_sched_ab    ? "qsa_sched=old"
-                              : moe_shared_ab ? "shared_mma=1"
-                              : host_sync_ab  ? "host_sync=0"
-                                              : "splitk=4")
+                          << (moe_staging_ab ? "staging=new"
+                              : qsa_sched_ab   ? "qsa_sched=old"
+                              : moe_shared_ab  ? "shared_mma=1"
+                              : host_sync_ab   ? "host_sync=0"
+                                               : "splitk=4")
                           << ")\n";
             }
 
-            if (interleaved_ab && qsa_sched_ab) {
+            if (interleaved_ab && moe_staging_ab) {
+                set_moe_staging_env(false);
+                (void)time_one_chunk_ms();
+                set_moe_staging_env(true);
+                (void)time_one_chunk_ms();
+                std::vector<float> samples_old(static_cast<std::size_t>(bench_iters));
+                std::vector<float> samples_new(static_cast<std::size_t>(bench_iters));
+                for (int i = 0; i < bench_iters; ++i) {
+                    set_moe_staging_env(false);
+                    samples_old[static_cast<std::size_t>(i)] = time_one_chunk_ms();
+                    set_moe_staging_env(true);
+                    samples_new[static_cast<std::size_t>(i)] = time_one_chunk_ms();
+                }
+                const PrefillBenchStats s_old = prefill_bench_stats(samples_old);
+                const PrefillBenchStats s_new = prefill_bench_stats(samples_new);
+                const float paired            = s_old.median_ms - s_new.median_ms;
+                std::cout << std::fixed << std::setprecision(3);
+                std::cout << "  Prefill T=" << T << " AB n=" << bench_iters
+                          << " paired_median_delta=" << paired
+                          << " ms (staging=old minus staging=new; + = new staging faster)\n";
+                std::cout << "    arm staging=old min=" << s_old.min_ms
+                          << " median=" << s_old.median_ms << " max=" << s_old.max_ms
+                          << " mean=" << s_old.mean_ms
+                          << " span=" << (s_old.max_ms - s_old.min_ms) << " ms\n";
+                std::cout << "    arm staging=new min=" << s_new.min_ms
+                          << " median=" << s_new.median_ms << " max=" << s_new.max_ms
+                          << " mean=" << s_new.mean_ms
+                          << " span=" << (s_new.max_ms - s_new.min_ms) << " ms\n";
+            } else if (interleaved_ab && qsa_sched_ab) {
                 set_qsa_mma_sched_env(false);
                 (void)time_one_chunk_ms();
                 set_qsa_mma_sched_env(true);
@@ -4009,6 +4052,9 @@ int main(int argc, char** argv) {
     }
     if (mode == "prefill-timing-moe-shared-ab") {
         return test_prefill_chunk_timing_benchmark(device, true, false, true);
+    }
+    if (mode == "prefill-timing-moe-staging-ab") {
+        return test_prefill_chunk_timing_benchmark(device, true, false, false, false, true);
     }
     if (mode == "prefill-timing-qsa-sched-ab") {
         return test_prefill_chunk_timing_benchmark(device, true, false, false, true);
