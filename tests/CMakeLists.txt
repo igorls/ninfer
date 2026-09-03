@@ -281,8 +281,28 @@ set_tests_properties(ninfer_qwen3_8_flash_next_engine_serving_real_test PROPERTI
 ninfer_add_test(ninfer_qwen3_8_flash_next_text_executor_test
   SOURCES targets/qwen3_8_flash_next/test_text_executor.cpp
   LIBRARIES ninfer_qwen3_8_flash_next)
+target_include_directories(ninfer_qwen3_8_flash_next_text_executor_test PRIVATE
+  ${PROJECT_SOURCE_DIR})
 set_tests_properties(ninfer_qwen3_8_flash_next_text_executor_test
   PROPERTIES SKIP_RETURN_CODE 77)
+# Two processes on purpose. NINFER_FLASH_NEXT_TRACE_STAGES is latched into a
+# function-local static at the first prefill, so the stage trace that proves the
+# dump reaches execute_prefill_chunk cannot be switched off again within one
+# process; the -trace test therefore dumps a single position, and the comparison
+# test runs all 23 with tracing off.
+add_test(NAME ninfer_qwen3_8_flash_next_oracle_chat23_logits_test
+  COMMAND ninfer_qwen3_8_flash_next_text_executor_test oracle-chat23)
+add_test(NAME ninfer_qwen3_8_flash_next_oracle_chat23_trace_test
+  COMMAND ninfer_qwen3_8_flash_next_text_executor_test oracle-chat23-trace)
+foreach(_oracle_test
+    ninfer_qwen3_8_flash_next_oracle_chat23_logits_test
+    ninfer_qwen3_8_flash_next_oracle_chat23_trace_test)
+  set_tests_properties(${_oracle_test} PROPERTIES SKIP_RETURN_CODE 77)
+  if(WIN32)
+    set_property(TEST ${_oracle_test} PROPERTY
+      ENVIRONMENT "PATH=P:/third_party/ffmpeg/ffmpeg-master-latest-win64-gpl-shared/bin\\;P:/third_party/curl-inst/bin\\;C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.3/bin\\;$ENV{PATH}")
+  endif()
+endforeach()
 
 ninfer_add_test(ninfer_qwen3_8_flash_next_mtp_test
   SOURCES targets/qwen3_8_flash_next/test_mtp.cpp

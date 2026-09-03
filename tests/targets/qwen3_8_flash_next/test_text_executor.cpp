@@ -11,6 +11,7 @@
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode_workspace.h"
 #include "targets/qwen3_8_flash_next/impl/text_executor.h"
+#include "tools/reference/qwen3_8_flash_next/oracle_chat23.h"
 
 #include <cuda_runtime.h>
 
@@ -22,11 +23,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -3662,6 +3666,158 @@ int test_stage_ledger_smoke(ninfer::DeviceContext& device) {
     }
 }
 
+int count_named_bins(const std::filesystem::path& dir, std::string_view prefix) {
+    int n = 0;
+    if (!std::filesystem::exists(dir)) { return 0; }
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        const auto name = entry.path().filename().string();
+        if (name.rfind(prefix, 0) == 0 && name.size() >= 4 &&
+            name.compare(name.size() - 4, 4, ".bin") == 0) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+bool logit_files_equal(const std::filesystem::path& a, const std::filesystem::path& b) {
+    const auto sa = std::filesystem::file_size(a);
+    const auto sb = std::filesystem::file_size(b);
+    if (sa != sb) { return false; }
+    std::ifstream fa(a, std::ios::binary);
+    std::ifstream fb(b, std::ios::binary);
+    std::vector<char> ba(static_cast<std::size_t>(sa));
+    std::vector<char> bb(static_cast<std::size_t>(sb));
+    fa.read(ba.data(), static_cast<std::streamsize>(sa));
+    fb.read(bb.data(), static_cast<std::streamsize>(sb));
+    return fa && fb && ba == bb;
+}
+
+int test_oracle_chat23_logits_prefill(ninfer::DeviceContext& device, bool trace_mode) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        // Reviewer amendment: the delivered patch hardcoded one lane's worktree
+        // (E:/NInfer.grok/out), which does not exist in any other checkout.
+        // NINFER_TEST_SCRATCH_DIR overrides; otherwise the system temp directory.
+        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        std::filesystem::path scratch_base;
+        if (const char* env = std::getenv("NINFER_TEST_SCRATCH_DIR");
+            env != nullptr && env[0] != '\0') {
+            scratch_base = std::filesystem::path(env);
+        } else {
+            std::error_code base_ec;
+            scratch_base = std::filesystem::temp_directory_path(base_ec);
+            if (base_ec) { scratch_base = std::filesystem::path("."); }
+        }
+        const std::filesystem::path root = scratch_base / ("g23c-oracle-" + std::to_string(stamp));
+        const auto trace   = root / "trace";
+        const auto off_dir = root / "logits-off";
+        const auto on_dir  = root / "logits-on";
+        std::filesystem::create_directories(trace);
+        std::filesystem::create_directories(off_dir);
+        std::filesystem::create_directories(on_dir);
+
+        // Reviewer amendment. As delivered this traced every stage of all 46
+        // prefills: 18,538 files, each preceded by a synchronous device-to-host
+        // copy, adding 260 s to the suite. It also could not have worked as
+        // written, because text_executor.cpp latches NINFER_FLASH_NEXT_TRACE_STAGES
+        // into a function-local static on the first prefill of the process, so
+        // tracing can afterwards be neither redirected nor switched off. The proof
+        // is therefore split into its own process: trace_mode dumps one position
+        // with tracing on and asserts stage files appeared, which a decode round
+        // would never write; the comparison run traces nothing.
+        if (trace_mode) {
+            const std::string trace_env = trace.generic_string();
+#ifdef _WIN32
+            (void)_putenv_s("NINFER_FLASH_NEXT_TRACE_STAGES", trace_env.c_str());
+#else
+            (void)setenv("NINFER_FLASH_NEXT_TRACE_STAGES", trace_env.c_str(), 1);
+#endif
+        }
+
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+        auto synthetic_model = make_synthetic_model(device);
+
+        auto run_arm = [&](bool mma, const std::filesystem::path& out_dir,
+                           std::int32_t positions_wanted) -> int {
+#ifdef _WIN32
+            (void)_putenv_s("NINFER_FLASH_NEXT_QSA_PREFILL_MMA", mma ? "1" : "0");
+#else
+            (void)setenv("NINFER_FLASH_NEXT_QSA_PREFILL_MMA", mma ? "1" : "0", 1);
+#endif
+            FlashNextRuntimeConfig cfg{
+                .max_concurrency     = 1,
+                .max_context         = 512,
+                .state_slot_capacity = 2,
+                .prefill_chunk       = 128,
+                .use_cuda_graph      = false,
+                .use_qsa_prefill_mma = mma,
+            };
+            const auto curve = flash_next_capacity_curve(cfg);
+            auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+            if (plan.config.use_qsa_prefill_mma != mma) {
+                std::cerr << "plan.config.use_qsa_prefill_mma mismatch for mma=" << mma << "\n";
+                return 1;
+            }
+            FlashNextRuntimeAllocation alloc(plan);
+            alloc.initialize(device.stream);
+            FlashNextTextExecutor exec(synthetic_model.view, ple_meta, device, alloc);
+            dump_oracle_chat23_logits(exec, device, plan, out_dir, positions_wanted);
+            for (int p = 0; p < positions_wanted; ++p) {
+                char name[32];
+                std::snprintf(name, sizeof(name), "pos%04d_logits.bin", p);
+                if (!std::filesystem::exists(out_dir / name)) {
+                    std::cerr << "missing " << (out_dir / name).string() << "\n";
+                    return 1;
+                }
+            }
+            return 0;
+        };
+
+        if (trace_mode) {
+            if (run_arm(false, off_dir, 1) != 0) { return 1; }
+            const int chunks = count_named_bins(trace, "chunk");
+            if (chunks == 0) {
+                std::cerr << "TRACE_STAGES wrote no chunk*.bin: the dump did not reach "
+                             "execute_prefill_chunk (a decode round writes nothing)\n";
+                return 1;
+            }
+            std::cout << "oracle-chat23 prefill path proven: " << chunks
+                      << " stage files from one dumped position\n";
+            std::cout << "PASS: test_oracle_chat23_logits_trace\n" << std::flush;
+            std::error_code trace_ec;
+            std::filesystem::remove_all(root, trace_ec);
+            return 0;
+        }
+
+        if (run_arm(false, off_dir, 23) != 0) { return 1; }
+        if (run_arm(true, on_dir, 23) != 0) { return 1; }
+
+        int identical = 0;
+        int differ    = 0;
+        for (int p = 0; p < 23; ++p) {
+            char name[32];
+            std::snprintf(name, sizeof(name), "pos%04d_logits.bin", p);
+            if (logit_files_equal(off_dir / name, on_dir / name)) {
+                ++identical;
+            } else {
+                ++differ;
+            }
+        }
+        std::cout << "oracle-chat23 synthetic bitwise: identical=" << identical << " differ=" << differ
+                  << " of 23\n";
+        std::cout << "PASS: test_oracle_chat23_logits_prefill\n" << std::flush;
+        std::error_code ec;
+        std::filesystem::remove_all(root, ec);
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_oracle_chat23_logits_prefill exception: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -3691,6 +3847,8 @@ int main(int argc, char** argv) {
     if (mode == "g8-graph-nodes") { return test_g8_graph_node_diff(device); }
     if (mode == "g8-stage-checksum") { return test_g8_stage_checksum(device); }
     if (mode == "g9-gate") { return test_g9_prefill_determinism(device); }
+    if (mode == "oracle-chat23") { return test_oracle_chat23_logits_prefill(device, false); }
+    if (mode == "oracle-chat23-trace") { return test_oracle_chat23_logits_prefill(device, true); }
     if (mode == "stage-ledger-smoke") { return test_stage_ledger_smoke(device); }
     if (mode == "prefill-timing") { return test_prefill_chunk_timing_benchmark(device, false); }
     if (mode == "prefill-timing-ab") { return test_prefill_chunk_timing_benchmark(device, true); }

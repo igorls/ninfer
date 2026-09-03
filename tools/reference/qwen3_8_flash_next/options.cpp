@@ -96,6 +96,10 @@ void print_reference_tool_usage(std::string_view prog) {
         << "  --system <string>          Optional system prompt for chat-diagnostic\n"
         << "  --dump-states <dir>        Directory to dump raw state tensors for oracle comparison\n"
         << "  --dump-gen-logits <dir>    Write the logits of every generation round (gen_NNN.bin)\n"
+        << "  --oracle-chat23-logits <dir> Prefill tokens[0..p] on a fresh lane for p=0..22 and dump\n"
+        << "                             posNNNN_logits.bin (BF16 vocab). Pair with --qsa-prefill-mma\n"
+        << "                             on vs off in one production window.\n"
+        << "  --qsa-prefill-mma          Set NINFER_FLASH_NEXT_QSA_PREFILL_MMA=1 before plan build\n"
         << "  --no-cuda-graph            Run decode rounds eagerly instead of replaying CUDA graphs\n"
         << "  --repeat-prefill <n>       Run the prompt prefill n times on fresh lanes and compare logits\n"
         << "  --temperature <float>      Sampling temperature (default: 1.0, 0 = greedy)\n"
@@ -230,6 +234,13 @@ ReferenceToolOptions parse_reference_tool_options(std::span<const std::string_vi
             opts.do_commit = true;
         } else if (arg == "--abort") {
             opts.do_commit = false;
+        } else if (arg == "--oracle-chat23-logits") {
+            if (++i >= args.size())
+                throw std::invalid_argument("Missing argument for --oracle-chat23-logits");
+            opts.oracle_chat23_logits = std::string(args[i]);
+            opts.mode                 = "oracle-chat23-logits";
+        } else if (arg == "--qsa-prefill-mma") {
+            opts.qsa_prefill_mma = true;
         } else if (arg == "--json") {
             opts.json_output = true;
         } else {
@@ -241,10 +252,11 @@ ReferenceToolOptions parse_reference_tool_options(std::span<const std::string_vi
     if (opts.mode != "preflight" && opts.mode != "execute-token" &&
         opts.mode != "materialize-full" && opts.mode != "materialize-vision" &&
         opts.mode != "chat-diagnostic" && opts.mode != "execute-vision" &&
-        opts.mode != "continuation-check") {
+        opts.mode != "continuation-check" && opts.mode != "oracle-chat23-logits") {
         throw std::invalid_argument(
             "Invalid --mode: must be 'preflight', 'execute-token', 'materialize-full', "
-            "'materialize-vision', 'chat-diagnostic', 'execute-vision', or 'continuation-check'");
+            "'materialize-vision', 'chat-diagnostic', 'execute-vision', 'continuation-check', "
+            "or 'oracle-chat23-logits'");
     }
     if (opts.thinking_budget > 0) {
         throw std::invalid_argument(

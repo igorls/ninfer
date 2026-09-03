@@ -103,6 +103,52 @@ int test_chat_diagnostic_options_parsing() {
     return 0;
 }
 
+int test_oracle_chat23_logits_options() {
+    const std::vector<std::string_view> args = {
+        "--model", "model.ninfer", "--oracle-chat23-logits", "E:/tmp/oracle-mma-on",
+        "--qsa-prefill-mma",
+    };
+    try {
+        const auto opts = parse_reference_tool_options(args);
+        if (opts.mode != "oracle-chat23-logits" ||
+            opts.oracle_chat23_logits != "E:/tmp/oracle-mma-on" || !opts.qsa_prefill_mma ||
+            opts.model_path != "model.ninfer") {
+            std::cerr << "Parsed options mismatch for oracle-chat23-logits + qsa-prefill-mma\n";
+            return 1;
+        }
+    } catch (const std::exception& ex) {
+        std::cerr << "Unexpected failure parsing oracle-chat23-logits args: " << ex.what() << "\n";
+        return 1;
+    }
+
+    const std::vector<std::string_view> off_args = {
+        "--model", "model.ninfer", "--oracle-chat23-logits", "E:/tmp/oracle-mma-off",
+    };
+    try {
+        const auto opts = parse_reference_tool_options(off_args);
+        if (opts.mode != "oracle-chat23-logits" || opts.qsa_prefill_mma ||
+            opts.oracle_chat23_logits != "E:/tmp/oracle-mma-off") {
+            std::cerr << "oracle-chat23-logits without --qsa-prefill-mma should leave MMA off\n";
+            return 1;
+        }
+    } catch (const std::exception& ex) {
+        std::cerr << "Unexpected failure parsing oracle-chat23-logits off args: " << ex.what()
+                  << "\n";
+        return 1;
+    }
+
+    try {
+        const std::vector<std::string_view> missing = {"--model", "m.ninfer",
+                                                      "--oracle-chat23-logits"};
+        (void)parse_reference_tool_options(missing);
+        std::cerr << "Failed to reject missing --oracle-chat23-logits directory\n";
+        return 1;
+    } catch (const std::invalid_argument&) {}
+
+    std::cout << "PASS: test_oracle_chat23_logits_options\n";
+    return 0;
+}
+
 int test_sampler_token_domain() {
     ninfer::DeviceContext device(0);
 
@@ -448,16 +494,19 @@ int test_real_artifact_chat_diagnostic_smoke_if_available() {
 int main() {
     std::cout << "Starting Flash-Next Chat Diagnostic Tests...\n" << std::flush;
     try {
-        std::cout << "[1/4] Running test_chat_diagnostic_options_parsing...\n" << std::flush;
+        std::cout << "[1/5] Running test_chat_diagnostic_options_parsing...\n" << std::flush;
         if (test_chat_diagnostic_options_parsing() != 0) return 1;
 
-        std::cout << "[2/4] Running test_sampler_token_domain...\n" << std::flush;
+        std::cout << "[2/5] Running test_oracle_chat23_logits_options...\n" << std::flush;
+        if (test_oracle_chat23_logits_options() != 0) return 1;
+
+        std::cout << "[3/5] Running test_sampler_token_domain...\n" << std::flush;
         if (test_sampler_token_domain() != 0) return 1;
 
-        std::cout << "[3/4] Running test_frontend_parity_with_embedded_resources_if_available...\n" << std::flush;
+        std::cout << "[4/5] Running test_frontend_parity_with_embedded_resources_if_available...\n" << std::flush;
         if (test_frontend_parity_with_embedded_resources_if_available() != 0) return 1;
 
-        std::cout << "[4/4] Running test_real_artifact_chat_diagnostic_smoke_if_available...\n" << std::flush;
+        std::cout << "[5/5] Running test_real_artifact_chat_diagnostic_smoke_if_available...\n" << std::flush;
         if (test_real_artifact_chat_diagnostic_smoke_if_available() != 0) return 1;
     } catch (const std::exception& ex) {
         std::cerr << "Fatal exception in test_chat_diagnostic: " << ex.what() << "\n" << std::flush;

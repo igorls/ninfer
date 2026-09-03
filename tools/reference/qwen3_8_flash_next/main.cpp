@@ -24,6 +24,7 @@
 #include <ninfer/targets/qwen3_8_flash_next/runtime.h>
 #include "runtime/engine/context_cost.h"
 #include "options.h"
+#include "oracle_chat23.h"
 #include "targets/qwen3_8_flash_next/impl/state_dumper.h"
 
 #include <cuda_runtime.h>
@@ -41,6 +42,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <bit>
@@ -1785,11 +1787,48 @@ int run_mtp_step(const ReferenceToolOptions& opts) {
     return 0;
 }
 
+int run_oracle_chat23_logits(const ReferenceToolOptions& opts) {
+    int device_count = 0;
+    const auto err   = cudaGetDeviceCount(&device_count);
+    if (err != cudaSuccess || device_count == 0) {
+        throw std::runtime_error("No CUDA device available for execution");
+    }
+    DeviceContext device(0);
+#ifdef _WIN32
+    (void)_putenv_s("NINFER_FLASH_NEXT_QSA_PREFILL_MMA", opts.qsa_prefill_mma ? "1" : "0");
+#else
+    (void)setenv("NINFER_FLASH_NEXT_QSA_PREFILL_MMA", opts.qsa_prefill_mma ? "1" : "0", 1);
+#endif
+    FlashNextRuntimeConfig config{
+        .max_concurrency     = opts.max_concurrency,
+        .max_context         = opts.max_context,
+        .state_slot_capacity = opts.state_slots,
+        .use_qsa_prefill_mma = opts.qsa_prefill_mma,
+    };
+    const auto curve = flash_next_capacity_curve(config);
+    const std::uint32_t resolved_groups =
+        opts.page_groups == 0 ? curve.maximum_main_page_groups : opts.page_groups;
+    auto runtime_plan = finalize_flash_next_runtime_plan(config, resolved_groups);
+    auto model        = LoadedModel::load_from_file(opts.model_path, device);
+    FlashNextRuntimeAllocation alloc(runtime_plan);
+    alloc.initialize(device.stream);
+    FlashNextTextExecutor executor(model.text_view(), model.ple_metadata(), device, alloc);
+    dump_oracle_chat23_logits(executor, device, runtime_plan, opts.oracle_chat23_logits);
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     try {
         const auto opts = parse_reference_tool_options(argc, argv);
+        if (opts.qsa_prefill_mma) {
+#ifdef _WIN32
+            (void)_putenv_s("NINFER_FLASH_NEXT_QSA_PREFILL_MMA", "1");
+#else
+            (void)setenv("NINFER_FLASH_NEXT_QSA_PREFILL_MMA", "1", 1);
+#endif
+        }
         if (opts.mode == "preflight") {
             return run_preflight(opts);
         } else if (opts.mode == "execute-token") {
@@ -1808,6 +1847,8 @@ int main(int argc, char** argv) {
             return run_execute_vision(opts);
         } else if (opts.mode == "continuation-check") {
             return run_continuation_check(opts);
+        } else if (opts.mode == "oracle-chat23-logits") {
+            return run_oracle_chat23_logits(opts);
         }
     } catch (const std::exception& ex) {
         std::cerr << "Error: " << ex.what() << "\n";
