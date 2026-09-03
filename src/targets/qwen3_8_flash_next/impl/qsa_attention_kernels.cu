@@ -224,8 +224,9 @@ __global__ void sparse_attention_kernel(
         running_max = next_max;
         __syncthreads();
     }
+    const float attended_val = running_sum > 0.0F ? (accumulator / running_sum) : 0.0F;
     output[static_cast<std::int64_t>(batch) * kQueryHeads * kHeadDim + head * kHeadDim + dim] =
-        __float2bfloat16_rn(accumulator / running_sum);
+        __float2bfloat16_rn(attended_val);
 }
 
 __global__ void gate_output_kernel(const __nv_bfloat16* __restrict__ attended,
