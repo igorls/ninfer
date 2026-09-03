@@ -337,6 +337,7 @@ void FlashNextRuntimeAllocation::zero_lane_slots(std::uint32_t lane_index, cudaS
     host_ring_offsets_[lane_index]  = 0U;
     host_active_slots_[lane_index]  = static_cast<std::int32_t>(base_slot);
     host_standby_slots_[lane_index] = static_cast<std::int32_t>(base_slot + (1U % slots_per_lane_));
+    sync_slots_to_device(stream);
 }
 
 void FlashNextRuntimeAllocation::copy_state_slot(std::uint32_t src_slot, std::uint32_t dst_slot,
