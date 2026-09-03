@@ -15,7 +15,8 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 void flash_next_ple_decode(const Tensor& hidden, const Tensor& gathered_embedding,
                            const PleWeights& weights, const Tensor& source_slots,
                            const Tensor& destination_slots, Tensor& convolution_states,
-                           WorkspaceArena& workspace, Tensor& output, cudaStream_t stream);
+                           WorkspaceArena& workspace, Tensor& output, cudaStream_t stream,
+                           bool aliased_recurrent_scan = false);
 
 void flash_next_ple_prefill_chunk(const Tensor& hidden, const Tensor& gathered_embedding,
                                   const PleWeights& weights, std::int32_t source_slot,

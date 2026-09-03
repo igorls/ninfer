@@ -14,7 +14,7 @@ void flash_next_ple_launch(const Tensor& hidden, const Tensor& projected_key,
                            const Tensor& convolution, const Tensor& source_slots,
                            const Tensor& destination_slots, Tensor& convolution_states,
                            Tensor& gated, Tensor& normalized_gated, Tensor& output, int state_slots,
-                           int batch, cudaStream_t stream);
+                           int batch, cudaStream_t stream, bool aliased_recurrent_scan = false);
 
 void flash_next_ple_chunk_launch(const Tensor& hidden, const Tensor& projected_key,
                                  const Tensor& projected_value, const Tensor& query_norm,

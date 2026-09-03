@@ -170,6 +170,14 @@ FlashNextTextExecutor::FlashNextTextExecutor(const TextModelView& model,
         mtp_draft_logits_    = std::make_unique<DeviceBuffer>(248'320 * sizeof(std::uint16_t));
         mtp_draft_tokens_    = std::make_unique<DeviceBuffer>(1 * sizeof(std::int32_t));
         mtp_input_embedding_ = std::make_unique<DeviceBuffer>(2'560 * sizeof(std::uint16_t));
+        mtp_carried_hidden_  = std::make_unique<DeviceBuffer>(10'240 * sizeof(std::uint16_t));
+
+        CUDA_CHECK(cudaMemsetAsync(mtp_key_pages_->p, 0, key_bytes, device_.stream));
+        CUDA_CHECK(cudaMemsetAsync(mtp_value_pages_->p, 0, val_bytes, device_.stream));
+        CUDA_CHECK(cudaMemsetAsync(mtp_selected_blocks_->p, 0, 512 * sizeof(std::int32_t), device_.stream));
+        CUDA_CHECK(cudaMemsetAsync(mtp_selected_counts_->p, 0, 1 * sizeof(std::int32_t), device_.stream));
+        CUDA_CHECK(cudaMemsetAsync(mtp_carried_hidden_->p, 0, 10'240 * sizeof(std::uint16_t), device_.stream));
+        CUDA_CHECK(cudaStreamSynchronize(device_.stream));
     }
     instantiate_graphs();
 }
@@ -838,7 +846,8 @@ PendingRound FlashNextTextExecutor::execute_speculative_verify_round(
         flash_next_text_decode_core(model_, embedding, token_indices, mrope_positions, table_rows,
                                     source_slots, destination_slots, gathered_ple, max_blocks,
                                     bucket_blocks, alloc_.state_view(), alloc_.workspace(),
-                                    final_hidden, logits, device_.stream, nullptr, &hyper_hidden);
+                                    final_hidden, logits, device_.stream, nullptr, &hyper_hidden,
+                                    /*aliased_recurrent_scan=*/true);
 
         Tensor sampled_tokens =
             alloc_.round_tensors().sampled_tokens.slice(0, 0, static_cast<std::int32_t>(num_tokens));
@@ -892,6 +901,7 @@ void FlashNextTextExecutor::draft_mtp_tokens(LaneHandle handle, std::int32_t tok
     Tensor selected_counts(mtp_selected_counts_->p, DType::I32, {1});
     Tensor draft_logits(mtp_draft_logits_->p, DType::BF16, {248'320, 1});
     Tensor draft_tokens_tensor(mtp_draft_tokens_->p, DType::I32, {1});
+    Tensor carried_hidden(mtp_carried_hidden_->p, DType::BF16, {10'240, 1});
 
     for (std::uint32_t k = 0; k < draft_count; ++k) {
         mtp_workspace_->reset();
@@ -924,10 +934,12 @@ void FlashNextTextExecutor::draft_mtp_tokens(LaneHandle handle, std::int32_t tok
         Tensor cur_embedding(mtp_input_embedding_->p, DType::BF16, {2'560, 1});
         ops::embedding(cur_token_id_tensor, model_.token_embedding, cur_embedding, device_.stream);
 
+        const Tensor& step_backbone = (k == 0) ? backbone_hidden : carried_hidden;
         flash_next_mtp_step(
-            model_, cur_embedding, backbone_hidden, dev_token_indices, dev_mrope_positions,
+            model_, cur_embedding, step_backbone, dev_token_indices, dev_mrope_positions,
             dev_table_rows, selected_blocks, selected_counts, *mtp_cache_,
-            *mtp_workspace_, draft_logits, draft_tokens_tensor, device_.stream);
+            *mtp_workspace_, draft_logits, draft_tokens_tensor, device_.stream, nullptr,
+            &carried_hidden);
 
         std::int32_t sampled_tok = 0;
         CUDA_CHECK(cudaMemcpyAsync(&sampled_tok, draft_tokens_tensor.data, sizeof(std::int32_t),

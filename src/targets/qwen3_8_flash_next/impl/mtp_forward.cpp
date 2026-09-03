@@ -1,5 +1,6 @@
 #include "targets/qwen3_8_flash_next/impl/mtp_forward.h"
 
+#include "core/device.h"
 #include "ninfer/ops/argmax.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/rmsnorm.h"
@@ -88,7 +89,7 @@ void flash_next_mtp_step(const TextModelView& model, const Tensor& input_embeddi
                          const Tensor& selected_blocks, const Tensor& selected_counts,
                          QsaAttentionCacheView mtp_cache, WorkspaceArena& workspace,
                          Tensor& draft_logits, Tensor& draft_tokens, cudaStream_t stream,
-                         const FlashNextDecodeStateSink* sink) {
+                         const FlashNextDecodeStateSink* sink, Tensor* out_hyper_hidden) {
     if (!model.mtp.has_value()) {
         throw std::invalid_argument("Flash-Next MTP step called but MTP weights are not materialized");
     }
@@ -175,6 +176,12 @@ void flash_next_mtp_step(const TextModelView& model, const Tensor& input_embeddi
     // 9. MLP hyper inject
     flash_next_hyper_inject(mlp_out, hyper_scratch.injection, mtp_hyper_hidden, stream);
     emit_state("mtp_hyper_after_mlp", mtp_hyper_hidden);
+
+    if (out_hyper_hidden != nullptr && out_hyper_hidden->data != nullptr) {
+        CUDA_CHECK(cudaMemcpyAsync(out_hyper_hidden->data, mtp_hyper_hidden.data,
+                                   10'240ULL * batch * sizeof(std::uint16_t),
+                                   cudaMemcpyDeviceToDevice, stream));
+    }
 
     // 10. Final Hyper Mixer -> mtp_final_hidden
     flash_next_hyper_mix(mtp_hyper_hidden, mtp.mixer, hyper_scratch, mtp_final_hidden, stream);

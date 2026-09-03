@@ -88,12 +88,12 @@ __global__ void update_key_kernel(
     const std::int32_t* __restrict__ destination_slots, __nv_bfloat16* __restrict__ block_keys,
     const std::int32_t* __restrict__ block_tables, int logical_pages,
     __nv_bfloat16* __restrict__ raw_keys, std::int32_t* __restrict__ raw_positions,
-    int batch_size) {
+    int batch_size, int batch_offset = 0) {
     __shared__ float warp_squares[4];
     __shared__ __nv_bfloat16 pooled[kHeadDim];
     __shared__ __nv_bfloat16 normalized[kHeadDim];
     const int dim                       = static_cast<int>(threadIdx.x);
-    const int batch                     = static_cast<int>(blockIdx.x);
+    const int batch                     = static_cast<int>(blockIdx.x) + batch_offset;
     const int warp                      = dim >> 5;
     const int lane                      = dim & 31;
     const int source                    = source_slots[batch];
@@ -363,20 +363,37 @@ void flash_next_qsa_indexer_launch(const Tensor& token_indices, const Tensor& mr
                                    const Tensor& key_norm, QsaIndexerCacheView cache,
                                    FlashNextQsaIndexerWorkspace& scratch, int active_blocks,
                                    Tensor& selected_blocks, Tensor& selected_counts,
-                                   cudaStream_t stream) {
+                                   cudaStream_t stream, bool aliased_recurrent_scan) {
     const int batch = token_indices.ne[0];
-    update_key_kernel<<<batch, kHeadDim, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(scratch.projected.data),
-        static_cast<const __nv_bfloat16*>(key_norm.data),
-        static_cast<const std::int32_t*>(token_indices.data),
-        static_cast<const std::int32_t*>(mrope_positions.data),
-        static_cast<const std::int32_t*>(table_rows.data),
-        static_cast<const std::int32_t*>(source_state_slots.data),
-        static_cast<const std::int32_t*>(destination_state_slots.data),
-        static_cast<__nv_bfloat16*>(cache.block_keys.data),
-        static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
-        static_cast<__nv_bfloat16*>(cache.raw_keys.data),
-        static_cast<std::int32_t*>(cache.raw_positions.data), batch);
+    if (aliased_recurrent_scan && batch > 1) {
+        for (int r = 0; r < batch; ++r) {
+            update_key_kernel<<<1, kHeadDim, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(scratch.projected.data),
+                static_cast<const __nv_bfloat16*>(key_norm.data),
+                static_cast<const std::int32_t*>(token_indices.data),
+                static_cast<const std::int32_t*>(mrope_positions.data),
+                static_cast<const std::int32_t*>(table_rows.data),
+                static_cast<const std::int32_t*>(source_state_slots.data),
+                static_cast<const std::int32_t*>(destination_state_slots.data),
+                static_cast<__nv_bfloat16*>(cache.block_keys.data),
+                static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
+                static_cast<__nv_bfloat16*>(cache.raw_keys.data),
+                static_cast<std::int32_t*>(cache.raw_positions.data), batch, r);
+        }
+    } else {
+        update_key_kernel<<<batch, kHeadDim, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.projected.data),
+            static_cast<const __nv_bfloat16*>(key_norm.data),
+            static_cast<const std::int32_t*>(token_indices.data),
+            static_cast<const std::int32_t*>(mrope_positions.data),
+            static_cast<const std::int32_t*>(table_rows.data),
+            static_cast<const std::int32_t*>(source_state_slots.data),
+            static_cast<const std::int32_t*>(destination_state_slots.data),
+            static_cast<__nv_bfloat16*>(cache.block_keys.data),
+            static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
+            static_cast<__nv_bfloat16*>(cache.raw_keys.data),
+            static_cast<std::int32_t*>(cache.raw_positions.data), batch, 0);
+    }
     CUDA_CHECK(cudaGetLastError());
 
     if (active_blocks == 0) {

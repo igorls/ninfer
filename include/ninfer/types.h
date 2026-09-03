@@ -166,7 +166,7 @@ struct EngineOptions {
     // Flash-Next only. Default off keeps the BF16 output head and byte-identical serving.
     bool quantize_output_head_fp8 = false;
     // Flash-Next only. Default off uses the scalar reduction QSA prefill path.
-    bool use_qsa_prefill_mma      = false;
+    bool use_qsa_prefill_mma      = true;
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
     StartupObserver startup_observer;

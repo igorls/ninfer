@@ -122,9 +122,9 @@ __global__ void ple_conv_inject_kernel(
     const __nv_bfloat16* __restrict__ gated, const __nv_bfloat16* __restrict__ normalized_gated,
     const __nv_bfloat16* __restrict__ convolution, const int32_t* __restrict__ source_slots,
     const int32_t* __restrict__ destination_slots, __nv_bfloat16* __restrict__ convolution_states,
-    __nv_bfloat16* __restrict__ output, int state_slots, int batch) {
+    __nv_bfloat16* __restrict__ output, int state_slots, int batch, int batch_offset = 0) {
     const int channel   = blockIdx.x * blockDim.x + threadIdx.x;
-    const int batch_idx = blockIdx.y;
+    const int batch_idx = blockIdx.y + batch_offset;
 
     if (channel >= kTotalDims || batch_idx >= batch) { return; }
 
@@ -241,7 +241,7 @@ void flash_next_ple_launch(const Tensor& hidden, const Tensor& projected_key,
                            const Tensor& convolution, const Tensor& source_slots,
                            const Tensor& destination_slots, Tensor& convolution_states,
                            Tensor& gated, Tensor& normalized_gated, Tensor& output, int state_slots,
-                           int batch, cudaStream_t stream) {
+                           int batch, cudaStream_t stream, bool aliased_recurrent_scan) {
     dim3 grid_gate(kStreams, batch);
     ple_gate_norm_kernel<<<grid_gate, 256, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(hidden.data),
@@ -253,15 +253,29 @@ void flash_next_ple_launch(const Tensor& hidden, const Tensor& projected_key,
         static_cast<__nv_bfloat16*>(normalized_gated.data), batch);
     CUDA_CHECK(cudaGetLastError());
 
-    dim3 grid_conv((kTotalDims + 255) / 256, batch);
-    ple_conv_inject_kernel<<<grid_conv, 256, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(gated.data),
-        static_cast<const __nv_bfloat16*>(normalized_gated.data),
-        static_cast<const __nv_bfloat16*>(convolution.data),
-        static_cast<const int32_t*>(source_slots.data),
-        static_cast<const int32_t*>(destination_slots.data),
-        static_cast<__nv_bfloat16*>(convolution_states.data),
-        static_cast<__nv_bfloat16*>(output.data), state_slots, batch);
+    if (aliased_recurrent_scan && batch > 1) {
+        dim3 grid_conv_single((kTotalDims + 255) / 256, 1);
+        for (int r = 0; r < batch; ++r) {
+            ple_conv_inject_kernel<<<grid_conv_single, 256, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(gated.data),
+                static_cast<const __nv_bfloat16*>(normalized_gated.data),
+                static_cast<const __nv_bfloat16*>(convolution.data),
+                static_cast<const int32_t*>(source_slots.data),
+                static_cast<const int32_t*>(destination_slots.data),
+                static_cast<__nv_bfloat16*>(convolution_states.data),
+                static_cast<__nv_bfloat16*>(output.data), state_slots, batch, r);
+        }
+    } else {
+        dim3 grid_conv((kTotalDims + 255) / 256, batch);
+        ple_conv_inject_kernel<<<grid_conv, 256, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(gated.data),
+            static_cast<const __nv_bfloat16*>(normalized_gated.data),
+            static_cast<const __nv_bfloat16*>(convolution.data),
+            static_cast<const int32_t*>(source_slots.data),
+            static_cast<const int32_t*>(destination_slots.data),
+            static_cast<__nv_bfloat16*>(convolution_states.data),
+            static_cast<__nv_bfloat16*>(output.data), state_slots, batch, 0);
+    }
     CUDA_CHECK(cudaGetLastError());
 }
 

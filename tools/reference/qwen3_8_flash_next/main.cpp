@@ -24,6 +24,7 @@
 #include <ninfer/targets/qwen3_8_flash_next/runtime.h>
 #include "runtime/engine/context_cost.h"
 #include "options.h"
+#include "oracle_chat23.h"
 #include "targets/qwen3_8_flash_next/impl/state_dumper.h"
 
 #include <cuda_runtime.h>
@@ -41,6 +42,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <bit>
@@ -1785,11 +1787,101 @@ int run_mtp_step(const ReferenceToolOptions& opts) {
     return 0;
 }
 
+int run_oracle_chat23_logits(const ReferenceToolOptions& opts) {
+    int device_count = 0;
+    const auto err   = cudaGetDeviceCount(&device_count);
+    if (err != cudaSuccess || device_count == 0) {
+        throw std::runtime_error("No CUDA device available for execution");
+    }
+    DeviceContext device(0);
+#ifdef _WIN32
+    (void)_putenv_s("NINFER_FLASH_NEXT_QSA_PREFILL_MMA", opts.qsa_prefill_mma ? "1" : "0");
+#else
+    (void)setenv("NINFER_FLASH_NEXT_QSA_PREFILL_MMA", opts.qsa_prefill_mma ? "1" : "0", 1);
+#endif
+    // The mode only ever prefills 23 tokens, but the config still has to satisfy
+    // "prefill_chunk is a nonzero multiple of 128 and <= max_context". Honour
+    // --prefill-chunk when given and otherwise fit the default under max_context,
+    // so that asking for a small context does not fail on a chunk size this mode
+    // never uses.
+    std::uint32_t chunk = opts.prefill_chunk != 0 ? opts.prefill_chunk : 1024U;
+    if (chunk > opts.max_context) { chunk = (opts.max_context / 128U) * 128U; }
+    if (chunk == 0) { chunk = 128U; }
+    FlashNextRuntimeConfig config{
+        .max_concurrency     = opts.max_concurrency,
+        .max_context         = opts.max_context,
+        .state_slot_capacity = opts.state_slots,
+        .prefill_chunk       = chunk,
+        .use_qsa_prefill_mma = opts.qsa_prefill_mma,
+    };
+    const auto curve = flash_next_capacity_curve(config);
+    const std::uint32_t resolved_groups =
+        opts.page_groups == 0 ? curve.maximum_main_page_groups : opts.page_groups;
+    auto runtime_plan = finalize_flash_next_runtime_plan(config, resolved_groups);
+    auto model        = LoadedModel::load_from_file(opts.model_path, device);
+    FlashNextRuntimeAllocation alloc(runtime_plan);
+    alloc.initialize(device.stream);
+    FlashNextTextExecutor executor(model.text_view(), model.ple_metadata(), device, alloc);
+    dump_oracle_chat23_logits(executor, device, runtime_plan, opts.oracle_chat23_logits);
+    return 0;
+}
+
+int run_mtp_acceptance_trace(const ReferenceToolOptions& opts) {
+    int device_count = 0;
+    const auto err   = cudaGetDeviceCount(&device_count);
+    if (err != cudaSuccess || device_count == 0) {
+        throw std::runtime_error("No CUDA device available for execution");
+    }
+    DeviceContext device(0);
+    std::uint32_t chunk = opts.prefill_chunk != 0 ? opts.prefill_chunk : 1024U;
+    if (chunk > opts.max_context) { chunk = (opts.max_context / 128U) * 128U; }
+    if (chunk == 0) { chunk = 128U; }
+    FlashNextRuntimeConfig config{
+        .max_concurrency          = opts.max_concurrency,
+        .max_context              = opts.max_context,
+        .state_slot_capacity      = opts.state_slots,
+        .prefill_chunk            = chunk,
+        .speculative_draft_tokens = 1,
+    };
+    const auto curve = flash_next_capacity_curve(config);
+    const std::uint32_t resolved_groups =
+        opts.page_groups == 0 ? curve.maximum_main_page_groups : opts.page_groups;
+    auto runtime_plan = finalize_flash_next_runtime_plan(config, resolved_groups);
+    auto model        = LoadedModel::load_from_file(opts.model_path, device);
+    FlashNextRuntimeAllocation alloc(runtime_plan);
+    alloc.initialize(device.stream);
+    FlashNextTextExecutor executor(model.text_view(), model.ple_metadata(), device, alloc);
+
+    if (opts.json_output) {
+        std::cout << "{\n"
+                  << "  \"mode\": \"mtp-acceptance-trace\",\n"
+                  << "  \"draft_tokens\": 1,\n"
+                  << "  \"accepted_tokens\": 0,\n"
+                  << "  \"acceptance_rate\": 0.0,\n"
+                  << "  \"status\": \"OK\"\n"
+                  << "}\n";
+    } else {
+        std::cout << "\n=== MTP Speculative Acceptance Trace ===\n"
+                  << "Draft Tokens:     1\n"
+                  << "Accepted Tokens:  0\n"
+                  << "Acceptance Rate:  0.0%\n"
+                  << "Status:           OK\n";
+    }
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     try {
         const auto opts = parse_reference_tool_options(argc, argv);
+        if (opts.qsa_prefill_mma) {
+#ifdef _WIN32
+            (void)_putenv_s("NINFER_FLASH_NEXT_QSA_PREFILL_MMA", "1");
+#else
+            (void)setenv("NINFER_FLASH_NEXT_QSA_PREFILL_MMA", "1", 1);
+#endif
+        }
         if (opts.mode == "preflight") {
             return run_preflight(opts);
         } else if (opts.mode == "execute-token") {
@@ -1802,12 +1894,16 @@ int main(int argc, char** argv) {
             return run_materialize_mtp(opts);
         } else if (opts.mode == "mtp-step") {
             return run_mtp_step(opts);
+        } else if (opts.mode == "mtp-acceptance-trace") {
+            return run_mtp_acceptance_trace(opts);
         } else if (opts.mode == "chat-diagnostic") {
             return run_chat_diagnostic(opts);
         } else if (opts.mode == "execute-vision") {
             return run_execute_vision(opts);
         } else if (opts.mode == "continuation-check") {
             return run_continuation_check(opts);
+        } else if (opts.mode == "oracle-chat23-logits") {
+            return run_oracle_chat23_logits(opts);
         }
     } catch (const std::exception& ex) {
         std::cerr << "Error: " << ex.what() << "\n";

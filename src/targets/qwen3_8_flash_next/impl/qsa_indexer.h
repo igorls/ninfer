@@ -37,7 +37,8 @@ void flash_next_qsa_indexer_decode(const Tensor& input, const AttentionWeights& 
                                    const Tensor& destination_state_slots, QsaIndexerCacheView cache,
                                    std::int32_t maximum_blocks, std::int32_t active_blocks,
                                    WorkspaceArena& workspace, Tensor& selected_blocks,
-                                   Tensor& selected_counts, cudaStream_t stream);
+                                   Tensor& selected_counts, cudaStream_t stream,
+                                   bool aliased_recurrent_scan = false);
 
 void flash_next_qsa_indexer_prefill_chunk(
     const Tensor& input, const AttentionWeights& weights, const Tensor& token_indices,

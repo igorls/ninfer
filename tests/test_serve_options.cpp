@@ -33,8 +33,8 @@ int main() {
     failures +=
         check(!defaults.preserve_thinking, "thinking history is unexpectedly preserved by default");
     failures += check(!defaults.enable_vision, "Vision is not disabled by default");
-    failures += check(!defaults.use_qsa_prefill_mma,
-                      "QSA prefill MMA is not disabled by default");
+    failures += check(defaults.use_qsa_prefill_mma,
+                      "QSA prefill MMA is not enabled by default");
     failures += check(defaults.request_log_jsonl.empty(),
                       "request JSONL logging is not disabled by default");
     failures += check(defaults.context_cost_presets.empty(),

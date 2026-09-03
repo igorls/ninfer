@@ -121,8 +121,11 @@ compute_fixed_base_bytes(const FlashNextRuntimeConfig& config, std::uint32_t res
                                              sizeof(std::uint16_t)))))));
 
     // 4. Text decode and prefill workspace peak
+    const std::uint32_t decode_batch_capacity = std::max(
+        config.max_concurrency,
+        config.speculative_draft_tokens > 0 ? (config.speculative_draft_tokens + 1U) : 1U);
     const std::size_t decode_workspace =
-        flash_next_text_decode_workspace_capacity_bytes(maximum_blocks, config.max_concurrency);
+        flash_next_text_decode_workspace_capacity_bytes(maximum_blocks, decode_batch_capacity);
     const std::size_t prefill_workspace =
         flash_next_text_prefill_workspace_capacity_bytes(maximum_blocks, config.prefill_chunk);
     const std::size_t general_workspace = std::max(decode_workspace, prefill_workspace);
@@ -199,8 +202,16 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
     const auto curve = flash_next_capacity_curve(config);
     if (selected_main_page_groups < curve.minimum_main_page_groups ||
         selected_main_page_groups > curve.maximum_main_page_groups) {
+        // The bounds are worth printing: for max_context 32768 with one lane the curve
+        // collapses to a single legal value (128 groups), and the message without numbers
+        // sends the reader guessing.
         throw std::invalid_argument(
-            "Flash-Next selected_main_page_groups outside capacity curve [min_groups, max_groups]");
+            "Flash-Next selected_main_page_groups " + std::to_string(selected_main_page_groups) +
+            " outside capacity curve [" + std::to_string(curve.minimum_main_page_groups) + ", " +
+            std::to_string(curve.maximum_main_page_groups) + "] for max_context " +
+            std::to_string(config.max_context) + " and max_concurrency " +
+            std::to_string(config.max_concurrency) + " (" +
+            std::to_string(curve.main_page_tokens) + " tokens per group)");
     }
 
     FlashNextRuntimePlan plan{};

@@ -11,6 +11,7 @@
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode_workspace.h"
 #include "targets/qwen3_8_flash_next/impl/text_executor.h"
+#include "tools/reference/qwen3_8_flash_next/oracle_chat23.h"
 
 #include <cuda_runtime.h>
 
@@ -22,11 +23,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -88,6 +92,33 @@ void set_moe_shared_mma_env(bool enable_mma) {
     (void)_putenv_s("NINFER_FLASH_NEXT_MOE_SHARED_MMA", value);
 #else
     (void)setenv("NINFER_FLASH_NEXT_MOE_SHARED_MMA", value, 1);
+#endif
+}
+
+void set_qsa_mma_sched_env(bool use_new) {
+    const char* value = use_new ? "new" : "old";
+#ifdef _WIN32
+    (void)_putenv_s("NINFER_FLASH_NEXT_QSA_MMA_SCHED", value);
+#else
+    (void)setenv("NINFER_FLASH_NEXT_QSA_MMA_SCHED", value, 1);
+#endif
+}
+
+void set_qsa_prefill_mma_env(bool enable) {
+    const char* value = enable ? "1" : "0";
+#ifdef _WIN32
+    (void)_putenv_s("NINFER_FLASH_NEXT_QSA_PREFILL_MMA", value);
+#else
+    (void)setenv("NINFER_FLASH_NEXT_QSA_PREFILL_MMA", value, 1);
+#endif
+}
+
+void set_moe_staging_env(bool enable_new) {
+    const char* value = enable_new ? "new" : "old";
+#ifdef _WIN32
+    (void)_putenv_s("NINFER_FLASH_NEXT_MOE_STAGING", value);
+#else
+    (void)setenv("NINFER_FLASH_NEXT_MOE_STAGING", value, 1);
 #endif
 }
 
@@ -1932,7 +1963,9 @@ int test_cuda_graph_timing_benchmark(ninfer::DeviceContext& device) {
 }
 
 int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device, bool mode_ab,
-                                        bool host_sync_ab = false, bool moe_shared_ab = false) {
+                                        bool host_sync_ab = false, bool moe_shared_ab = false,
+                                        bool qsa_sched_ab = false,
+                                        bool moe_staging_ab = false) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
     try {
         PleIndexMetadata ple_meta{};
@@ -1943,12 +1976,15 @@ int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device, bool mode
         auto synthetic_model = make_synthetic_model(device);
 
         const bool interleaved_ab =
-            prefill_bench_ab_requested(mode_ab) || host_sync_ab || moe_shared_ab;
+            prefill_bench_ab_requested(mode_ab) || host_sync_ab || moe_shared_ab || qsa_sched_ab ||
+            moe_staging_ab;
         const int bench_iters     = prefill_bench_iters();
         const int warmup_s        = prefill_bench_warmup_s(interleaved_ab);
-        const char* kind          = moe_shared_ab ? "moe-shared-mma"
-                                    : host_sync_ab ? "host-sync"
-                                                   : "residual-splitk";
+        const char* kind          = moe_staging_ab ? "moe-staging"
+                                    : qsa_sched_ab  ? "qsa-mma-sched"
+                                    : moe_shared_ab ? "moe-shared-mma"
+                                    : host_sync_ab  ? "host-sync"
+                                                    : "residual-splitk";
         std::cout << "--- Prefill Chunk Performance & Host CPU Benchmark (Synthetic Model) ---\n";
         std::cout << "NINFER_PREFILL_BENCH_ITERS=" << bench_iters
                   << " WARMUP_S=" << warmup_s
@@ -1957,9 +1993,10 @@ int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device, bool mode
                   << " (one plan/executor; env reread at each launch)\n";
 
         const std::vector<std::int32_t> chunk_sizes =
-            moe_shared_ab ? std::vector<std::int32_t>{2048, 512}
+            (moe_shared_ab || qsa_sched_ab || moe_staging_ab) ? std::vector<std::int32_t>{2048, 512}
             : interleaved_ab ? std::vector<std::int32_t>{2048, 128}
                              : std::vector<std::int32_t>{128, 2048};
+        if (qsa_sched_ab) { set_qsa_prefill_mma_env(true); }
         bool warmed = false;
         for (std::int32_t T : chunk_sizes) {
             FlashNextRuntimeConfig cfg{
@@ -1967,6 +2004,7 @@ int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device, bool mode
                 .max_context         = 16384,
                 .state_slot_capacity = 2,
                 .prefill_chunk       = static_cast<std::uint32_t>(T),
+                .use_qsa_prefill_mma = qsa_sched_ab,
             };
             const auto curve = flash_next_capacity_curve(cfg);
             auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
@@ -2009,7 +2047,11 @@ int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device, bool mode
 
             const int run_warmup = (!warmed && warmup_s > 0) ? warmup_s : 0;
             if (run_warmup > 0) {
-                if (moe_shared_ab) {
+                if (moe_staging_ab) {
+                    set_moe_staging_env(true);
+                } else if (qsa_sched_ab) {
+                    set_qsa_mma_sched_env(false);
+                } else if (moe_shared_ab) {
                     set_moe_shared_mma_env(true);
                 } else if (host_sync_ab) {
                     set_prefill_host_sync_env(false);
@@ -2026,13 +2068,71 @@ int test_prefill_chunk_timing_benchmark(ninfer::DeviceContext& device, bool mode
                 warmed = true;
                 std::cout << "  T=" << T << " warmup " << run_warmup << " s (" << warm_chunks
                           << " chunks, "
-                          << (moe_shared_ab ? "shared_mma=1"
-                              : host_sync_ab ? "host_sync=0"
-                                             : "splitk=4")
+                          << (moe_staging_ab ? "staging=new"
+                              : qsa_sched_ab   ? "qsa_sched=old"
+                              : moe_shared_ab  ? "shared_mma=1"
+                              : host_sync_ab   ? "host_sync=0"
+                                               : "splitk=4")
                           << ")\n";
             }
 
-            if (interleaved_ab && moe_shared_ab) {
+            if (interleaved_ab && moe_staging_ab) {
+                set_moe_staging_env(false);
+                (void)time_one_chunk_ms();
+                set_moe_staging_env(true);
+                (void)time_one_chunk_ms();
+                std::vector<float> samples_old(static_cast<std::size_t>(bench_iters));
+                std::vector<float> samples_new(static_cast<std::size_t>(bench_iters));
+                for (int i = 0; i < bench_iters; ++i) {
+                    set_moe_staging_env(false);
+                    samples_old[static_cast<std::size_t>(i)] = time_one_chunk_ms();
+                    set_moe_staging_env(true);
+                    samples_new[static_cast<std::size_t>(i)] = time_one_chunk_ms();
+                }
+                const PrefillBenchStats s_old = prefill_bench_stats(samples_old);
+                const PrefillBenchStats s_new = prefill_bench_stats(samples_new);
+                const float paired            = s_old.median_ms - s_new.median_ms;
+                std::cout << std::fixed << std::setprecision(3);
+                std::cout << "  Prefill T=" << T << " AB n=" << bench_iters
+                          << " paired_median_delta=" << paired
+                          << " ms (staging=old minus staging=new; + = new staging faster)\n";
+                std::cout << "    arm staging=old min=" << s_old.min_ms
+                          << " median=" << s_old.median_ms << " max=" << s_old.max_ms
+                          << " mean=" << s_old.mean_ms
+                          << " span=" << (s_old.max_ms - s_old.min_ms) << " ms\n";
+                std::cout << "    arm staging=new min=" << s_new.min_ms
+                          << " median=" << s_new.median_ms << " max=" << s_new.max_ms
+                          << " mean=" << s_new.mean_ms
+                          << " span=" << (s_new.max_ms - s_new.min_ms) << " ms\n";
+            } else if (interleaved_ab && qsa_sched_ab) {
+                set_qsa_mma_sched_env(false);
+                (void)time_one_chunk_ms();
+                set_qsa_mma_sched_env(true);
+                (void)time_one_chunk_ms();
+                std::vector<float> samples_old(static_cast<std::size_t>(bench_iters));
+                std::vector<float> samples_new(static_cast<std::size_t>(bench_iters));
+                for (int i = 0; i < bench_iters; ++i) {
+                    set_qsa_mma_sched_env(false);
+                    samples_old[static_cast<std::size_t>(i)] = time_one_chunk_ms();
+                    set_qsa_mma_sched_env(true);
+                    samples_new[static_cast<std::size_t>(i)] = time_one_chunk_ms();
+                }
+                const PrefillBenchStats s_old = prefill_bench_stats(samples_old);
+                const PrefillBenchStats s_new = prefill_bench_stats(samples_new);
+                const float paired            = s_old.median_ms - s_new.median_ms;
+                std::cout << std::fixed << std::setprecision(3);
+                std::cout << "  Prefill T=" << T << " AB n=" << bench_iters
+                          << " paired_median_delta=" << paired
+                          << " ms (qsa_sched=old minus new; + = new faster)\n";
+                std::cout << "    arm qsa_sched=old min=" << s_old.min_ms
+                          << " median=" << s_old.median_ms << " max=" << s_old.max_ms
+                          << " mean=" << s_old.mean_ms
+                          << " span=" << (s_old.max_ms - s_old.min_ms) << " ms\n";
+                std::cout << "    arm qsa_sched=new min=" << s_new.min_ms
+                          << " median=" << s_new.median_ms << " max=" << s_new.max_ms
+                          << " mean=" << s_new.mean_ms
+                          << " span=" << (s_new.max_ms - s_new.min_ms) << " ms\n";
+            } else if (interleaved_ab && moe_shared_ab) {
                 set_moe_shared_mma_env(false);
                 (void)time_one_chunk_ms();
                 set_moe_shared_mma_env(true);
@@ -2903,11 +3003,11 @@ int test_g8_graph_node_diff(ninfer::DeviceContext& device) {
         ple_meta.head_vocab_sizes.fill(1);
         auto synthetic_model = make_synthetic_model(device);
 
-        auto make_exec = [&](std::int32_t max_context) {
+        auto make_exec = [&](std::int32_t max_context, std::uint32_t concurrency) {
             FlashNextRuntimeConfig cfg{
-                .max_concurrency     = 1,
+                .max_concurrency     = concurrency,
                 .max_context         = static_cast<std::uint32_t>(max_context),
-                .state_slot_capacity = 2,
+                .state_slot_capacity = 2 * concurrency,
                 .prefill_chunk       = 2048,
                 .use_cuda_graph      = true,
             };
@@ -2920,22 +3020,46 @@ int test_g8_graph_node_diff(ninfer::DeviceContext& device) {
             return std::make_pair(std::move(alloc), std::move(exec));
         };
 
-        auto [alloc_8k, exec_8k]   = make_exec(8192);
+        // 1. Verify B=1 graph node signature diffs between 8192 and 65536
+        auto [alloc_8k, exec_8k]   = make_exec(8192, 1);
         std::vector<KernelSig> k8k;
-        dump_cuda_graph("max_context=8192 bucket0", bucket0_native(exec_8k->decode_graphs()), k8k);
+        dump_cuda_graph("max_context=8192 bucket0 (B=1)", bucket0_native(exec_8k->decode_graphs()), k8k);
         exec_8k.reset();
         alloc_8k.reset();
 
-        auto [alloc_64k, exec_64k] = make_exec(65536);
+        auto [alloc_64k, exec_64k] = make_exec(65536, 1);
         std::vector<KernelSig> k64k;
-        dump_cuda_graph("max_context=65536 bucket0", bucket0_native(exec_64k->decode_graphs()), k64k);
-        const int diffs = diff_kernel_sigs("8192", k8k, "65536", k64k);
-        std::cout << "G8 note: captured kernelParams include cache.block_tables.ne[0] "
-                     "(indexer_logical_pages = ceil(max_context/256): 32 vs 256) and "
-                     "workspace tensors sized to maximum_blocks (2048 vs 16384) even on the "
-                     "identity path. Those integer/pointer args are not in KernelSig.\n";
-        std::cout << (diffs == 0 ? "PASS" : "ANOMALY")
-                  << ": test_g8_graph_node_diff signature_diffs=" << diffs << "\n";
+        dump_cuda_graph("max_context=65536 bucket0 (B=1)", bucket0_native(exec_64k->decode_graphs()), k64k);
+        exec_64k.reset();
+        alloc_64k.reset();
+
+        const int diffs_b1 = diff_kernel_sigs("8192_B1", k8k, "65536_B1", k64k);
+        std::cout << (diffs_b1 == 0 ? "PASS" : "FAIL")
+                  << ": test_g8_graph_node_diff B=1 signature_diffs=" << diffs_b1 << "\n";
+        if (diffs_b1 != 0) {
+            return 1;
+        }
+
+        // 2. Verify B=8 graph node signature diffs between 8192 and 65536
+        auto [alloc_8k_b8, exec_8k_b8] = make_exec(8192, 8);
+        std::vector<KernelSig> k8k_b8;
+        dump_cuda_graph("max_context=8192 bucket0 (B=8)", bucket0_native(exec_8k_b8->decode_graphs()), k8k_b8);
+        exec_8k_b8.reset();
+        alloc_8k_b8.reset();
+
+        auto [alloc_64k_b8, exec_64k_b8] = make_exec(65536, 8);
+        std::vector<KernelSig> k64k_b8;
+        dump_cuda_graph("max_context=65536 bucket0 (B=8)", bucket0_native(exec_64k_b8->decode_graphs()), k64k_b8);
+        exec_64k_b8.reset();
+        alloc_64k_b8.reset();
+
+        const int diffs_b8 = diff_kernel_sigs("8192_B8", k8k_b8, "65536_B8", k64k_b8);
+        std::cout << (diffs_b8 == 0 ? "PASS" : "FAIL")
+                  << ": test_g8_graph_node_diff B=8 signature_diffs=" << diffs_b8 << "\n";
+        if (diffs_b8 != 0) {
+            return 1;
+        }
+
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "test_g8_graph_node_diff exception: " << e.what() << "\n";
@@ -3662,6 +3786,232 @@ int test_stage_ledger_smoke(ninfer::DeviceContext& device) {
     }
 }
 
+int count_named_bins(const std::filesystem::path& dir, std::string_view prefix) {
+    int n = 0;
+    if (!std::filesystem::exists(dir)) { return 0; }
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        const auto name = entry.path().filename().string();
+        if (name.rfind(prefix, 0) == 0 && name.size() >= 4 &&
+            name.compare(name.size() - 4, 4, ".bin") == 0) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+bool logit_files_equal(const std::filesystem::path& a, const std::filesystem::path& b) {
+    const auto sa = std::filesystem::file_size(a);
+    const auto sb = std::filesystem::file_size(b);
+    if (sa != sb) { return false; }
+    std::ifstream fa(a, std::ios::binary);
+    std::ifstream fb(b, std::ios::binary);
+    std::vector<char> ba(static_cast<std::size_t>(sa));
+    std::vector<char> bb(static_cast<std::size_t>(sb));
+    fa.read(ba.data(), static_cast<std::streamsize>(sa));
+    fb.read(bb.data(), static_cast<std::streamsize>(sb));
+    return fa && fb && ba == bb;
+}
+
+int test_oracle_chat23_logits_prefill(ninfer::DeviceContext& device, bool trace_mode) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        // Reviewer amendment: the delivered patch hardcoded one lane's worktree
+        // (E:/NInfer.grok/out), which does not exist in any other checkout.
+        // NINFER_TEST_SCRATCH_DIR overrides; otherwise the system temp directory.
+        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        std::filesystem::path scratch_base;
+        if (const char* env = std::getenv("NINFER_TEST_SCRATCH_DIR");
+            env != nullptr && env[0] != '\0') {
+            scratch_base = std::filesystem::path(env);
+        } else {
+            std::error_code base_ec;
+            scratch_base = std::filesystem::temp_directory_path(base_ec);
+            if (base_ec) { scratch_base = std::filesystem::path("."); }
+        }
+        const std::filesystem::path root = scratch_base / ("g23c-oracle-" + std::to_string(stamp));
+        const auto trace   = root / "trace";
+        const auto off_dir = root / "logits-off";
+        const auto on_dir  = root / "logits-on";
+        std::filesystem::create_directories(trace);
+        std::filesystem::create_directories(off_dir);
+        std::filesystem::create_directories(on_dir);
+
+        // Reviewer amendment. As delivered this traced every stage of all 46
+        // prefills: 18,538 files, each preceded by a synchronous device-to-host
+        // copy, adding 260 s to the suite. It also could not have worked as
+        // written, because text_executor.cpp latches NINFER_FLASH_NEXT_TRACE_STAGES
+        // into a function-local static on the first prefill of the process, so
+        // tracing can afterwards be neither redirected nor switched off. The proof
+        // is therefore split into its own process: trace_mode dumps one position
+        // with tracing on and asserts stage files appeared, which a decode round
+        // would never write; the comparison run traces nothing.
+        if (trace_mode) {
+            const std::string trace_env = trace.generic_string();
+#ifdef _WIN32
+            (void)_putenv_s("NINFER_FLASH_NEXT_TRACE_STAGES", trace_env.c_str());
+#else
+            (void)setenv("NINFER_FLASH_NEXT_TRACE_STAGES", trace_env.c_str(), 1);
+#endif
+        }
+
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+        auto synthetic_model = make_synthetic_model(device);
+
+        auto run_arm = [&](bool mma, const std::filesystem::path& out_dir,
+                           std::int32_t positions_wanted) -> int {
+#ifdef _WIN32
+            (void)_putenv_s("NINFER_FLASH_NEXT_QSA_PREFILL_MMA", mma ? "1" : "0");
+#else
+            (void)setenv("NINFER_FLASH_NEXT_QSA_PREFILL_MMA", mma ? "1" : "0", 1);
+#endif
+            FlashNextRuntimeConfig cfg{
+                .max_concurrency     = 1,
+                .max_context         = 512,
+                .state_slot_capacity = 2,
+                .prefill_chunk       = 128,
+                .use_cuda_graph      = false,
+                .use_qsa_prefill_mma = mma,
+            };
+            const auto curve = flash_next_capacity_curve(cfg);
+            auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+            if (plan.config.use_qsa_prefill_mma != mma) {
+                std::cerr << "plan.config.use_qsa_prefill_mma mismatch for mma=" << mma << "\n";
+                return 1;
+            }
+            FlashNextRuntimeAllocation alloc(plan);
+            alloc.initialize(device.stream);
+            FlashNextTextExecutor exec(synthetic_model.view, ple_meta, device, alloc);
+            dump_oracle_chat23_logits(exec, device, plan, out_dir, positions_wanted);
+            for (int p = 0; p < positions_wanted; ++p) {
+                char name[32];
+                std::snprintf(name, sizeof(name), "pos%04d_logits.bin", p);
+                if (!std::filesystem::exists(out_dir / name)) {
+                    std::cerr << "missing " << (out_dir / name).string() << "\n";
+                    return 1;
+                }
+            }
+            return 0;
+        };
+
+        if (trace_mode) {
+            if (run_arm(false, off_dir, 1) != 0) { return 1; }
+            const int chunks = count_named_bins(trace, "chunk");
+            if (chunks == 0) {
+                std::cerr << "TRACE_STAGES wrote no chunk*.bin: the dump did not reach "
+                             "execute_prefill_chunk (a decode round writes nothing)\n";
+                return 1;
+            }
+            std::cout << "oracle-chat23 prefill path proven: " << chunks
+                      << " stage files from one dumped position\n";
+            std::cout << "PASS: test_oracle_chat23_logits_trace\n" << std::flush;
+            std::error_code trace_ec;
+            std::filesystem::remove_all(root, trace_ec);
+            return 0;
+        }
+
+        if (run_arm(false, off_dir, 23) != 0) { return 1; }
+        if (run_arm(true, on_dir, 23) != 0) { return 1; }
+
+        int identical = 0;
+        int differ    = 0;
+        for (int p = 0; p < 23; ++p) {
+            char name[32];
+            std::snprintf(name, sizeof(name), "pos%04d_logits.bin", p);
+            if (logit_files_equal(off_dir / name, on_dir / name)) {
+                ++identical;
+            } else {
+                ++differ;
+            }
+        }
+        std::cout << "oracle-chat23 synthetic bitwise: identical=" << identical << " differ=" << differ
+                  << " of 23\n";
+        std::cout << "PASS: test_oracle_chat23_logits_prefill\n" << std::flush;
+        std::error_code ec;
+        std::filesystem::remove_all(root, ec);
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_oracle_chat23_logits_prefill exception: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+int test_oracle_chat23_sched(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    try {
+        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        std::filesystem::path scratch_base;
+        if (const char* env = std::getenv("NINFER_TEST_SCRATCH_DIR");
+            env != nullptr && env[0] != '\0') {
+            scratch_base = std::filesystem::path(env);
+        } else {
+            std::error_code base_ec;
+            scratch_base = std::filesystem::temp_directory_path(base_ec);
+            if (base_ec) { scratch_base = std::filesystem::path("."); }
+        }
+        const std::filesystem::path root = scratch_base / ("g24-oracle-sched-" + std::to_string(stamp));
+        const auto old_dir = root / "logits-old";
+        const auto new_dir = root / "logits-new";
+        std::filesystem::create_directories(old_dir);
+        std::filesystem::create_directories(new_dir);
+
+        PleIndexMetadata ple_meta{};
+        ple_meta.multipliers = {1, 2, 3};
+        ple_meta.head_offsets.fill(0);
+        ple_meta.head_vocab_sizes.fill(1);
+        auto synthetic_model = make_synthetic_model(device);
+        set_qsa_prefill_mma_env(true);
+
+        auto run_arm = [&](bool use_new, const std::filesystem::path& out_dir) -> int {
+            set_qsa_mma_sched_env(use_new);
+            FlashNextRuntimeConfig cfg{
+                .max_concurrency     = 1,
+                .max_context         = 512,
+                .state_slot_capacity = 2,
+                .prefill_chunk       = 128,
+                .use_cuda_graph      = false,
+                .use_qsa_prefill_mma = true,
+            };
+            const auto curve = flash_next_capacity_curve(cfg);
+            auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+            FlashNextRuntimeAllocation alloc(plan);
+            alloc.initialize(device.stream);
+            FlashNextTextExecutor exec(synthetic_model.view, ple_meta, device, alloc);
+            dump_oracle_chat23_logits(exec, device, plan, out_dir, 23);
+            return 0;
+        };
+
+        if (run_arm(false, old_dir) != 0) { return 1; }
+        if (run_arm(true, new_dir) != 0) { return 1; }
+        int identical = 0;
+        int differ    = 0;
+        for (int p = 0; p < 23; ++p) {
+            char name[32];
+            std::snprintf(name, sizeof(name), "pos%04d_logits.bin", p);
+            if (logit_files_equal(old_dir / name, new_dir / name)) {
+                ++identical;
+            } else {
+                ++differ;
+            }
+        }
+        std::cout << "oracle-chat23 sched synthetic bitwise: identical=" << identical
+                  << " differ=" << differ << " of 23\n";
+        if (differ != 0) {
+            std::cout << "DECLARE: G24 P->BF16 PV rounding (or MMA fragment layout) differs from "
+                         "the G17 serial-PV MMA kernel on the synthetic fixture.\n";
+        }
+        std::cout << "PASS: test_oracle_chat23_sched\n" << std::flush;
+        std::error_code ec;
+        std::filesystem::remove_all(root, ec);
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "test_oracle_chat23_sched exception: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -3691,6 +4041,9 @@ int main(int argc, char** argv) {
     if (mode == "g8-graph-nodes") { return test_g8_graph_node_diff(device); }
     if (mode == "g8-stage-checksum") { return test_g8_stage_checksum(device); }
     if (mode == "g9-gate") { return test_g9_prefill_determinism(device); }
+    if (mode == "oracle-chat23") { return test_oracle_chat23_logits_prefill(device, false); }
+    if (mode == "oracle-chat23-trace") { return test_oracle_chat23_logits_prefill(device, true); }
+    if (mode == "oracle-chat23-sched") { return test_oracle_chat23_sched(device); }
     if (mode == "stage-ledger-smoke") { return test_stage_ledger_smoke(device); }
     if (mode == "prefill-timing") { return test_prefill_chunk_timing_benchmark(device, false); }
     if (mode == "prefill-timing-ab") { return test_prefill_chunk_timing_benchmark(device, true); }
@@ -3699,6 +4052,12 @@ int main(int argc, char** argv) {
     }
     if (mode == "prefill-timing-moe-shared-ab") {
         return test_prefill_chunk_timing_benchmark(device, true, false, true);
+    }
+    if (mode == "prefill-timing-moe-staging-ab") {
+        return test_prefill_chunk_timing_benchmark(device, true, false, false, false, true);
+    }
+    if (mode == "prefill-timing-qsa-sched-ab") {
+        return test_prefill_chunk_timing_benchmark(device, true, false, false, true);
     }
     if (mode == "g14-prefill") { return test_g14_prefill_and_decode(device, 128); }
     if (mode == "g14-prefill-32") { return test_g14_prefill_and_decode(device, 32); }
