@@ -122,67 +122,60 @@ __global__ void flash_next_moe_down_kernel(
     const int lane  = tid & 31;
     const int row   = static_cast<int>(blockIdx.x) * kDownWarps + warp;
 
-    // 1. Stage all 11 activation vectors (10 routed + 1 shared, 13.75 KB total)
-    __shared__ alignas(16) uint4 s_act[kPaths][80];
+    if (row >= kHidden) { return; }
+
+    const int m_tile       = row / 128;
+    const int row_inner    = row % 128;
+    const int row_mod32    = row_inner & 31;
+    const int row_quartile = row_inner >> 5;
+    const std::int64_t scale_row_base = static_cast<std::int64_t>(m_tile * 10) * 512 +
+                                        row_mod32 * 16 + row_quartile * 4;
+
     const auto* token_activations =
         activations + static_cast<std::int64_t>(token) * kPaths * kIntermediate;
-#pragma unroll
-    for (int i = tid; i < kPaths * 80; i += kDownWarps * 32) {
-        const int path = i / 80;
-        const int u4   = i % 80;
-        s_act[path][u4] = reinterpret_cast<const uint4*>(
-            token_activations + static_cast<std::int64_t>(path) * kIntermediate)[u4];
-    }
-
-    // 2. Stage ALL 10 EXPERTS' scales up-front (3.125 KB, 800 uint32_t words)
-    __shared__ alignas(16) std::uint8_t s_all_scales[kTopK][kDownWarps][40];
-#pragma unroll
-    for (int i = tid; i < kTopK * kDownWarps * 10; i += kDownWarps * 32) {
-        const int path   = i / (kDownWarps * 10);
-        const int rem    = i % (kDownWarps * 10);
-        const int r      = rem % kDownWarps;
-        const int tile   = rem / kDownWarps;
-        const int r_row  = static_cast<int>(blockIdx.x) * kDownWarps + r;
-        const int expert = ids[token * kTopK + path];
-        if (r_row < kHidden) {
-            const int m_tile       = r_row / 128;
-            const int row_inner    = r_row % 128;
-            const int row_mod32    = row_inner & 31;
-            const int row_quartile = row_inner >> 5;
-            const std::int64_t off = static_cast<std::int64_t>(m_tile * 10 + tile) * 512 +
-                                     row_mod32 * 16 + row_quartile * 4;
-            const auto* exp_scales =
-                expert_scales + static_cast<std::uint64_t>(expert) * scale_stride;
-            const std::uint32_t word = *reinterpret_cast<const std::uint32_t*>(exp_scales + off);
-            *reinterpret_cast<std::uint32_t*>(&s_all_scales[path][r][tile * 4]) = word;
-        }
-    }
-
-    // Single synchronization for the entire kernel
-    __syncthreads();
-
-    if (row >= kHidden) { return; }
 
     float routed = 0.0F;
 
-    // Asynchronous expert loop: ZERO memory barriers or syncthreads
 #pragma unroll
     for (int path = 0; path < kTopK; ++path) {
         const int expert = ids[token * kTopK + path];
         const auto* exp_codes =
             expert_codes + static_cast<std::uint64_t>(expert) * code_stride;
+        const auto* exp_scales =
+            expert_scales + static_cast<std::uint64_t>(expert) * scale_stride;
         const float inverse = 1.0F / expert_divisors[expert];
+        const auto* act_path = token_activations + static_cast<std::int64_t>(path) * kIntermediate;
+
+        // Lanes 0..9 load the 10 scale words (tiles 0..9) for this row
+        std::uint32_t my_tile = 0;
+        if (lane < 10) {
+            const std::int64_t off = scale_row_base + static_cast<std::int64_t>(lane) * 512;
+            my_tile = *reinterpret_cast<const std::uint32_t*>(exp_scales + off);
+        }
+
+        // Broadcast tile words across the warp with all 32 threads active (zero divergence)
+        const std::uint32_t tile_g0 = __shfl_sync(0xFFFFFFFFU, my_tile, lane >> 2);
+        const std::uint32_t tile_g1 = __shfl_sync(0xFFFFFFFFU, my_tile, 8 + (lane >> 2));
+
+        const std::uint8_t scale_g0 = static_cast<std::uint8_t>(tile_g0 >> ((lane & 3) * 8));
+        const float coef_g0 = ops::detail::decode_nvfp4_e4m3(scale_g0) * inverse;
+
+        const std::uint8_t scale_g1 = static_cast<std::uint8_t>(tile_g1 >> ((lane & 3) * 8));
+        const float coef_g1 = ops::detail::decode_nvfp4_e4m3(scale_g1) * inverse;
 
         float sum0 = 0.0F;
         float sum1 = 0.0F;
 
-        for (int group = lane; group < 40; group += 32) {
+        // Group 0..31: all 32 lanes active
+        {
+            const int group = lane;
             const auto* packed =
                 exp_codes + static_cast<std::int64_t>(row) * (kIntermediate / 2) + group * 8;
             const uint2 code_words = *reinterpret_cast<const uint2*>(packed);
 
-            const uint4 act_v0 = s_act[path][group * 2];
-            const uint4 act_v1 = s_act[path][group * 2 + 1];
+            const auto* act_ptr = reinterpret_cast<const uint4*>(act_path + group * 16);
+            const uint4 act_v0 = act_ptr[0];
+            const uint4 act_v1 = act_ptr[1];
 
             const float2 dw[8] = {
                 ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.x)),
@@ -206,13 +199,50 @@ __global__ void flash_next_moe_down_kernel(
                 ops::bf16x2_bits_to_float2(act_v1.w)
             };
 
-            const float coefficient =
-                ops::detail::decode_nvfp4_e4m3(s_all_scales[path][warp][group]) * inverse;
+#pragma unroll
+            for (int pair = 0; pair < 8; ++pair) {
+                sum0 = fmaf(dw[pair].x * coef_g0, hv[pair].x, sum0);
+                sum1 = fmaf(dw[pair].y * coef_g0, hv[pair].y, sum1);
+            }
+        }
+
+        // Group 32..39: lanes 0..7 active
+        if (lane < 8) {
+            const int group = lane + 32;
+            const auto* packed =
+                exp_codes + static_cast<std::int64_t>(row) * (kIntermediate / 2) + group * 8;
+            const uint2 code_words = *reinterpret_cast<const uint2*>(packed);
+
+            const auto* act_ptr = reinterpret_cast<const uint4*>(act_path + group * 16);
+            const uint4 act_v0 = act_ptr[0];
+            const uint4 act_v1 = act_ptr[1];
+
+            const float2 dw[8] = {
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.x)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.x >> 8)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.x >> 16)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.x >> 24)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.y)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.y >> 8)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.y >> 16)),
+                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.y >> 24))
+            };
+
+            const float2 hv[8] = {
+                ops::bf16x2_bits_to_float2(act_v0.x),
+                ops::bf16x2_bits_to_float2(act_v0.y),
+                ops::bf16x2_bits_to_float2(act_v0.z),
+                ops::bf16x2_bits_to_float2(act_v0.w),
+                ops::bf16x2_bits_to_float2(act_v1.x),
+                ops::bf16x2_bits_to_float2(act_v1.y),
+                ops::bf16x2_bits_to_float2(act_v1.z),
+                ops::bf16x2_bits_to_float2(act_v1.w)
+            };
 
 #pragma unroll
             for (int pair = 0; pair < 8; ++pair) {
-                sum0 = fmaf(dw[pair].x * coefficient, hv[pair].x, sum0);
-                sum1 = fmaf(dw[pair].y * coefficient, hv[pair].y, sum1);
+                sum0 = fmaf(dw[pair].x * coef_g1, hv[pair].x, sum0);
+                sum1 = fmaf(dw[pair].y * coef_g1, hv[pair].y, sum1);
             }
         }
 
@@ -220,15 +250,17 @@ __global__ void flash_next_moe_down_kernel(
         if (lane == 0) { routed = fmaf(alpha[token * kTopK + path], value, routed); }
     }
 
-    // 3. Vectorized 128-bit loads for shared expert dot product
+    // 3. Vectorized 128-bit loads for shared expert dot product directly from L1/L2
     float shared_sum = 0.0F;
     const auto* shared_row = reinterpret_cast<const uint4*>(
         shared_down + static_cast<std::int64_t>(row) * kIntermediate);
+    const auto* shared_act = reinterpret_cast<const uint4*>(
+        token_activations + static_cast<std::int64_t>(kTopK) * kIntermediate);
 
 #pragma unroll
     for (int phase = 0; phase < 2; ++phase) {
         const uint4 w = shared_row[phase * 32 + lane];
-        const uint4 a = s_act[kTopK][phase * 32 + lane];
+        const uint4 a = shared_act[phase * 32 + lane];
         const float2 wv0 = ops::bf16x2_bits_to_float2(w.x);
         const float2 av0 = ops::bf16x2_bits_to_float2(a.x);
         const float2 wv1 = ops::bf16x2_bits_to_float2(w.y);
@@ -248,7 +280,7 @@ __global__ void flash_next_moe_down_kernel(
     }
     if (lane < 16) {
         const uint4 w = shared_row[64 + lane];
-        const uint4 a = s_act[kTopK][64 + lane];
+        const uint4 a = shared_act[64 + lane];
         const float2 wv0 = ops::bf16x2_bits_to_float2(w.x);
         const float2 av0 = ops::bf16x2_bits_to_float2(a.x);
         const float2 wv1 = ops::bf16x2_bits_to_float2(w.y);
