@@ -180,6 +180,11 @@ std::size_t flash_next_text_prefill_workspace_capacity_bytes(std::int32_t maximu
     {
         auto scope = layout.scope();
         (void)allocate_flash_next_qsa_attention_workspace(layout, tokens);
+        const std::size_t qgkv_ws = ops::linear_workspace_capacity_bytes(
+            QType::FP8_E4M3FN_ROW_F32S, 13'312, 2'560, ops::LinearPolicy::AllowA8, 1, tokens);
+        const std::size_t out_ws = ops::linear_workspace_capacity_bytes(
+            QType::FP8_E4M3FN_ROW_F32S, 2'560, 6'144, ops::LinearPolicy::AllowA8, 1, tokens);
+        (void)layout.alloc_bytes(std::max(qgkv_ws, out_ws), 256);
     }
     {
         auto scope = layout.scope();

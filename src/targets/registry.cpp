@@ -119,6 +119,54 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
     device.synchronize();
     runtime::KvCapacityResolution capacity_resolution =
         runtime::resolve_kv_capacity(options.kv_capacity, curve, current_free_device_bytes());
+
+    const std::uint32_t groups_per_seq =
+        (options.max_context + curve.main_page_tokens - 1U) / curve.main_page_tokens;
+    const std::uint32_t full_demand_groups = options.max_concurrency * groups_per_seq;
+    const double backing_ratio = static_cast<double>(capacity_resolution.main_page_groups) /
+                                 static_cast<double>(std::max(1U, groups_per_seq));
+    const double coverage_pct =
+        (static_cast<double>(capacity_resolution.main_page_groups) /
+         static_cast<double>(std::max(1U, full_demand_groups))) * 100.0;
+
+    std::uint32_t effective_concurrency = options.max_concurrency;
+    if (options.clamp_concurrency_to_pool &&
+        capacity_resolution.main_page_groups < full_demand_groups) {
+        effective_concurrency =
+            std::max(1U, capacity_resolution.main_page_groups / std::max(1U, groups_per_seq));
+    }
+    capacity_resolution.requested_concurrency    = options.max_concurrency;
+    capacity_resolution.effective_concurrency    = effective_concurrency;
+    capacity_resolution.unbacked_concurrency_ratio =
+        (coverage_pct < 100.0) ? (static_cast<double>(full_demand_groups) /
+                                  static_cast<double>(std::max(1U, capacity_resolution.main_page_groups)))
+                               : 1.0;
+
+    std::fprintf(stderr,
+                 "[kv-sizer] KV pool: %u page groups (%u tokens, %zu MiB). Demand: %u groups (%u tokens) per full-context sequence.\n"
+                 "[kv-sizer] Pool backing: %.1fx full-context sequences (%.1f%% coverage) against requested max_concurrency %u [effective_concurrency=%u].\n",
+                 capacity_resolution.main_page_groups, capacity_resolution.resolved_tokens,
+                 capacity_resolution.runtime_reservation_bytes / (1024ULL * 1024ULL),
+                 groups_per_seq, options.max_context,
+                 backing_ratio, coverage_pct, options.max_concurrency, effective_concurrency);
+
+    if (effective_concurrency < options.max_concurrency) {
+        std::fprintf(stderr,
+                     "[kv-sizer] CONCURRENCY CLAMPED: effective_concurrency reduced from %u to %u lanes to guarantee 100%% full-context backing (--clamp-concurrency-to-pool enabled).\n",
+                     options.max_concurrency, effective_concurrency);
+    } else if (coverage_pct < 100.0) {
+        std::fprintf(stderr,
+                     "[kv-sizer] WARNING: KV pool is oversubscribed (%.1f%% full-context backing). Concurrent long requests exceeding pool budget will experience admission queueing.\n",
+                     coverage_pct);
+    }
+
+    EngineOptions effective_options = options;
+    effective_options.max_concurrency = effective_concurrency;
+
+    if (effective_concurrency != options.max_concurrency) {
+        sequence_planner = Target::make_sequence_planner(device, effective_options, weights_profile);
+    }
+
     auto sequence_plan = std::move(sequence_planner).finalize(capacity_resolution.main_page_groups);
     if (sequence_plan.device_reservation_bytes() != capacity_resolution.runtime_reservation_bytes ||
         sequence_plan.kv_capacity() != capacity_resolution.resolved_tokens) {
@@ -126,17 +174,28 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
     }
     target_finalize_phase.complete();
 
-    StartupPhaseScope frontend_phase(options.startup_observer, StartupPhase::FrontendInitialize);
-    auto loaded = std::make_unique<Loaded>(std::move(model), options);
+    StartupPhaseScope frontend_phase(effective_options.startup_observer, StartupPhase::FrontendInitialize);
+    auto loaded = std::make_unique<Loaded>(std::move(model), effective_options);
     frontend_phase.complete();
 
-    StartupPhaseScope program_phase(options.startup_observer, StartupPhase::ProgramInitialize);
+    StartupPhaseScope program_phase(effective_options.startup_observer, StartupPhase::ProgramInitialize);
     auto instance =
         std::make_unique<Instance>(std::move(loaded), capacity_resolution, std::move(sequence_plan),
-                                   device, options.startup_observer);
+                                   device, effective_options.startup_observer);
     device.synchronize();
     program_phase.complete();
     instance->kv_capacity_resolution.available_after_startup_bytes = current_free_device_bytes();
+    const std::size_t post_startup_free =
+        instance->kv_capacity_resolution.available_after_startup_bytes;
+    std::fprintf(stderr,
+                 "[kv-sizer] Device slack after startup: %zu bytes (%zu MiB). Minimum safe slack floor: %zu MiB.\n",
+                 post_startup_free, post_startup_free / (1024ULL * 1024ULL),
+                 options.min_slack_floor_bytes / (1024ULL * 1024ULL));
+    if (post_startup_free < options.min_slack_floor_bytes) {
+        std::fprintf(stderr,
+                     "[kv-sizer] CRITICAL WARNING: Device memory slack after startup (%zu bytes) is below the minimum safe floor (%zu bytes)! CUDA runtime prefill stalls may occur.\n",
+                     post_startup_free, options.min_slack_floor_bytes);
+    }
 
     LoadSummary summary;
     summary.target               = std::string(target_key);

@@ -29,6 +29,8 @@ struct ServeOptions {
     std::uint32_t max_context          = 8192;
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(8192);
     std::uint32_t max_concurrency      = 1;
+    bool clamp_concurrency_to_pool     = false;
+    std::size_t min_slack_floor_bytes  = kDefaultKvCapacitySlackFloorBytes;
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;
     std::uint32_t prefill_chunk        = 1024;

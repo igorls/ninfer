@@ -1,5 +1,6 @@
 #include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
 
+#include "ninfer/ops/sampling.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
 
 #include <algorithm>
@@ -139,9 +140,20 @@ compute_fixed_base_bytes(const FlashNextRuntimeConfig& config, std::uint32_t res
         workspace_bytes = std::max(general_workspace, vision_plan.capacity_bytes);
     }
 
+    const std::size_t sampling_workspace_bytes = std::max<std::size_t>(
+        16ULL * 1024ULL * 1024ULL,
+        ops::sampling_workspace_capacity_bytes(
+            248'320, 1, static_cast<std::int32_t>(config.max_concurrency)));
+    const std::size_t sampling_arrays_bytes = checked_align_up_256(
+        config.max_concurrency * (sizeof(ops::SamplingConfig) + 2 * sizeof(std::int32_t)));
+
     return checked_add(
         block_tables_bytes,
-        checked_add(recurrent_state_bytes, checked_add(round_tensors_bytes, workspace_bytes)));
+        checked_add(
+            recurrent_state_bytes,
+            checked_add(round_tensors_bytes,
+                        checked_add(workspace_bytes,
+                                    checked_add(sampling_workspace_bytes, sampling_arrays_bytes)))));
 }
 
 } // namespace

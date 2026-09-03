@@ -499,7 +499,7 @@ bool test_selection_equivalence(ninfer::DeviceContext& device) {
                 }
             }
             std::sort(seq_ids.begin(), seq_ids.end());
-            if (std::unique(seq_ids.begin(), seq_ids.end()) != seq_ids.end()) {
+            if (std::adjacent_find(seq_ids.begin(), seq_ids.end()) != seq_ids.end()) {
                 std::cerr << "FAIL: duplicate selected ids at T=" << T << " t=" << t << "\n";
                 return false;
             }
@@ -534,7 +534,7 @@ bool selection_sets_equal(const std::int32_t* a, const std::int32_t* b, std::int
     std::sort(sa.begin(), sa.end());
     std::sort(sb.begin(), sb.end());
     if (sa != sb) { return false; }
-    if (std::unique(sa.begin(), sa.end()) != sa.end()) { return false; }
+    if (std::adjacent_find(sa.begin(), sa.end()) != sa.end()) { return false; }
     for (std::int32_t id : sa) {
         if (id < 0 || id >= complete_blocks) { return false; }
     }
@@ -806,7 +806,7 @@ bool test_fully_selected_identity_bypass(ninfer::DeviceContext& device, float& u
     }
     std::vector<std::int32_t> kept(ids_513.begin(), ids_513.begin() + 512);
     std::sort(kept.begin(), kept.end());
-    if (std::unique(kept.begin(), kept.end()) != kept.end()) {
+    if (std::adjacent_find(kept.begin(), kept.end()) != kept.end()) {
         std::cerr << "FAIL: 513-block top-k contained duplicates\n";
         return false;
     }

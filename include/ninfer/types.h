@@ -44,21 +44,25 @@ enum class KvCapacityMode : std::uint8_t {
     Automatic,
 };
 
-inline constexpr std::size_t kDefaultKvCapacityHeadroomBytes = 1024ULL * 1024ULL * 1024ULL;
+inline constexpr std::size_t kDefaultKvCapacityHeadroomBytes   = 1024ULL * 1024ULL * 1024ULL;
+inline constexpr std::size_t kDefaultKvCapacitySlackFloorBytes = 1024ULL * 1024ULL * 1024ULL;
 
 struct KvCapacityPolicy {
     KvCapacityMode mode                  = KvCapacityMode::Explicit;
     std::uint32_t explicit_tokens        = 2048;
     std::size_t automatic_headroom_bytes = 0;
+    std::size_t slack_floor_bytes        = 0;
 
     [[nodiscard]] static constexpr KvCapacityPolicy
-    explicit_capacity(std::uint32_t tokens) noexcept {
-        return KvCapacityPolicy{KvCapacityMode::Explicit, tokens, 0};
+    explicit_capacity(std::uint32_t tokens, std::size_t slack_floor_bytes = 0) noexcept {
+        return KvCapacityPolicy{KvCapacityMode::Explicit, tokens, 0, slack_floor_bytes};
     }
 
     [[nodiscard]] static constexpr KvCapacityPolicy
-    automatic(std::size_t headroom_bytes = kDefaultKvCapacityHeadroomBytes) noexcept {
-        return KvCapacityPolicy{KvCapacityMode::Automatic, 0, headroom_bytes};
+    automatic(std::size_t headroom_bytes    = kDefaultKvCapacityHeadroomBytes,
+              std::size_t slack_floor_bytes = 0) noexcept {
+        return KvCapacityPolicy{KvCapacityMode::Automatic, 0, headroom_bytes,
+                                (slack_floor_bytes == 0 ? headroom_bytes : slack_floor_bytes)};
     }
 };
 
@@ -152,6 +156,8 @@ struct EngineOptions {
     std::uint32_t max_context          = 2048; // Logical ceiling of one request or score window.
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(2048);
     std::uint32_t max_concurrency      = 1;
+    bool clamp_concurrency_to_pool     = false;
+    std::size_t min_slack_floor_bytes  = kDefaultKvCapacitySlackFloorBytes;
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;
     std::uint32_t prefill_chunk        = 1024;

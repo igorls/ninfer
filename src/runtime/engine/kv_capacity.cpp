@@ -97,27 +97,40 @@ KvCapacityResolution resolve_kv_capacity(const KvCapacityPolicy& policy,
 
     std::uint32_t pages         = curve.minimum_main_page_groups;
     std::size_t capacity_budget = available_runtime_bytes;
+    const std::size_t required_slack =
+        std::max(policy.automatic_headroom_bytes, policy.slack_floor_bytes);
+
     switch (policy.mode) {
     case KvCapacityMode::Explicit:
         if (policy.automatic_headroom_bytes != 0) {
             throw std::invalid_argument("explicit KV capacity must not carry automatic headroom");
         }
         pages = explicit_page_groups(policy, curve);
+        if (policy.slack_floor_bytes > 0) {
+            if (available_runtime_bytes < policy.slack_floor_bytes) {
+                throw std::invalid_argument(
+                    "explicit KV capacity requires at least " +
+                    std::to_string(policy.slack_floor_bytes) +
+                    " bytes of slack floor, but only " +
+                    std::to_string(available_runtime_bytes) + " bytes are available after weights");
+            }
+            capacity_budget -= policy.slack_floor_bytes;
+        }
         break;
     case KvCapacityMode::Automatic:
-        if (available_runtime_bytes < policy.automatic_headroom_bytes) {
+        if (available_runtime_bytes < required_slack) {
             throw std::invalid_argument(
-                "automatic KV headroom requires " +
-                std::to_string(policy.automatic_headroom_bytes) + " bytes, but only " +
+                "automatic KV capacity requires at least " +
+                std::to_string(required_slack) + " bytes of headroom/slack floor, but only " +
                 std::to_string(available_runtime_bytes) + " bytes are available after weights");
         }
-        capacity_budget -= policy.automatic_headroom_bytes;
+        capacity_budget -= required_slack;
         if (capacity_budget < curve.minimum_device_reservation_bytes) {
             throw std::invalid_argument(
                 "minimum Engine runtime reservation requires " +
                 std::to_string(curve.minimum_device_reservation_bytes) + " bytes in addition to " +
-                std::to_string(policy.automatic_headroom_bytes) +
-                " bytes of automatic headroom, but only " +
+                std::to_string(required_slack) +
+                " bytes of automatic headroom/slack floor, but only " +
                 std::to_string(available_runtime_bytes) + " bytes are available after weights");
         }
         if (curve.minimum_main_page_groups < curve.maximum_main_page_groups) {
@@ -136,6 +149,14 @@ KvCapacityResolution resolve_kv_capacity(const KvCapacityPolicy& policy,
 
     const std::size_t reservation = curve.reservation_bytes(pages);
     if (reservation > capacity_budget) {
+        if (policy.mode == KvCapacityMode::Explicit && policy.slack_floor_bytes > 0) {
+            throw std::invalid_argument(
+                "requested Engine runtime reservation requires " + std::to_string(reservation) +
+                " bytes, which violates the required slack floor of " +
+                std::to_string(policy.slack_floor_bytes) +
+                " bytes (available after weights: " + std::to_string(available_runtime_bytes) +
+                " bytes)");
+        }
         throw std::invalid_argument("requested Engine runtime reservation requires " +
                                     std::to_string(reservation) + " bytes, but only " +
                                     std::to_string(capacity_budget) +
@@ -147,11 +168,16 @@ KvCapacityResolution resolve_kv_capacity(const KvCapacityPolicy& policy,
         .main_page_groups                     = pages,
         .maximum_main_page_groups             = curve.maximum_main_page_groups,
         .resolved_tokens                      = curve.resolved_tokens(pages),
+        .requested_concurrency                = 0,
+        .effective_concurrency                = 0,
+        .unbacked_concurrency_ratio           = 1.0,
         .minimum_runtime_reservation_bytes    = curve.minimum_device_reservation_bytes,
         .bytes_per_additional_main_page_group = curve.bytes_per_additional_main_page_group,
         .runtime_reservation_bytes            = reservation,
         .available_after_weights_bytes        = available_runtime_bytes,
+        .available_after_startup_bytes        = 0,
         .automatic_headroom_bytes             = policy.automatic_headroom_bytes,
+        .slack_floor_bytes                    = policy.slack_floor_bytes,
         .planned_slack_bytes                  = available_runtime_bytes - reservation,
     };
 }

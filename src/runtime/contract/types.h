@@ -645,12 +645,16 @@ struct KvCapacityResolution {
     std::uint32_t main_page_groups                   = 0;
     std::uint32_t maximum_main_page_groups           = 0;
     std::uint32_t resolved_tokens                    = 0;
+    std::uint32_t requested_concurrency              = 0;
+    std::uint32_t effective_concurrency              = 0;
+    double unbacked_concurrency_ratio                = 1.0;
     std::size_t minimum_runtime_reservation_bytes    = 0;
     std::size_t bytes_per_additional_main_page_group = 0;
     std::size_t runtime_reservation_bytes            = 0;
     std::size_t available_after_weights_bytes        = 0;
     std::size_t available_after_startup_bytes        = 0;
     std::size_t automatic_headroom_bytes             = 0;
+    std::size_t slack_floor_bytes                    = 0;
     std::size_t planned_slack_bytes                  = 0;
 };
 

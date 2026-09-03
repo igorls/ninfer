@@ -230,6 +230,8 @@ GenerationService::GenerationService(ServeOptions options, StartupObserver start
     engine_options.max_context              = options_.max_context;
     engine_options.kv_capacity              = options_.kv_capacity;
     engine_options.max_concurrency          = options_.max_concurrency;
+    engine_options.clamp_concurrency_to_pool = options_.clamp_concurrency_to_pool;
+    engine_options.min_slack_floor_bytes     = options_.min_slack_floor_bytes;
     engine_options.max_pending_requests     = options_.max_pending_requests;
     engine_options.pending_timeout_ms       = options_.pending_timeout_ms;
     engine_options.prefill_chunk            = options_.prefill_chunk;

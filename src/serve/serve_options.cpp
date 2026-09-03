@@ -55,11 +55,14 @@ KvCacheStorage parse_kv_dtype(const char* text) {
     throw std::invalid_argument("invalid kv-dtype: " + value);
 }
 
-KvCapacityPolicy parse_kv_capacity(const char* text) {
-    if (std::string_view(text) == "auto") { return KvCapacityPolicy::automatic(); }
+KvCapacityPolicy parse_kv_capacity(const char* text,
+                                   std::size_t slack_floor_bytes = kDefaultKvCapacitySlackFloorBytes) {
+    if (std::string_view(text) == "auto") {
+        return KvCapacityPolicy::automatic(kDefaultKvCapacityHeadroomBytes, slack_floor_bytes);
+    }
     const int value = parse_nonnegative_int(text, "kv-capacity");
     if (value == 0) { throw std::invalid_argument("--kv-capacity must be positive"); }
-    return KvCapacityPolicy::explicit_capacity(static_cast<std::uint32_t>(value));
+    return KvCapacityPolicy::explicit_capacity(static_cast<std::uint32_t>(value), 0);
 }
 
 } // namespace
@@ -68,6 +71,7 @@ std::string serve_usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
            " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
            "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
+           "[--clamp-concurrency-to-pool] [--kv-slack-floor-mib N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
            "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
            "[--context-cost-presets FILE] "
@@ -83,7 +87,16 @@ std::string serve_usage_text(const char* argv0) {
            "[--vision] [--no-qsa-prefill-mma] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
-           "[--frequency-penalty F] [--seed N] [--greedy]\n"
+           "[--frequency-penalty F] [--seed N] [--greedy]\n\n"
+           "       --vision enables media and loads the fixed Vision GPU allocations\n"
+           "       --no-qsa-prefill-mma selects the scalar QSA prefill attention kernel. The\n"
+           "                         tiled-MMA kernel is the default: equal accuracy against the\n"
+           "                         reference at all 23 oracle positions, 16-22 percent faster prefill\n"
+           "       --kv-capacity auto leaves " +
+           std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
+           " MiB of sizing headroom\n"
+           "       --clamp-concurrency-to-pool clamps effective concurrency to what the KV pool can fully back\n"
+           "       --kv-slack-floor-mib sets the minimum post-startup device memory slack floor (default 1024 MiB)\n"
            "       serves OpenAI Responses/Chat Completions and Anthropic Messages endpoints\n"
            "       --default-max-tokens defaults to " +
            std::to_string(kDefaultMaxTokens) +
@@ -165,6 +178,14 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--max-concurrency") {
             options.max_concurrency = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--max-concurrency"), "max-concurrency"));
+        } else if (arg == "--clamp-concurrency-to-pool") {
+            options.clamp_concurrency_to_pool = true;
+        } else if (arg == "--kv-slack-floor-mib") {
+            const int mib = parse_nonnegative_int(require_value("--kv-slack-floor-mib"), "kv-slack-floor-mib");
+            options.min_slack_floor_bytes = static_cast<std::size_t>(mib) << 20;
+            if (options.kv_capacity.mode == KvCapacityMode::Automatic) {
+                options.kv_capacity.slack_floor_bytes = options.min_slack_floor_bytes;
+            }
         } else if (arg == "--max-pending-requests") {
             options.max_pending_requests = static_cast<std::uint32_t>(parse_nonnegative_int(
                 require_value("--max-pending-requests"), "max-pending-requests"));
@@ -329,6 +350,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     }
     if (!kv_capacity_explicit) {
         options.kv_capacity = KvCapacityPolicy::explicit_capacity(options.max_context);
+    } else if (options.kv_capacity.mode == KvCapacityMode::Automatic) {
+        options.kv_capacity.slack_floor_bytes = options.min_slack_floor_bytes;
     }
     if (!options.allow_prefix_reuse) {
         if (context_capacity_explicit) {
