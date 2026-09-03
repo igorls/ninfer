@@ -198,6 +198,7 @@ struct LaneState {
     std::uint32_t planned_groups = 0;
     std::optional<std::uint32_t> reused_from_continuation_index;
     std::optional<std::uint64_t> reused_from_continuation_generation;
+    ninfer::SpeculativeStats speculative_stats;
 };
 
 class ProgramImpl {
@@ -272,6 +273,7 @@ public:
     std::vector<std::int32_t> host_sampled_tokens_;
     std::vector<ops::SamplingConfig> host_sampling_configs_;
     std::vector<std::int32_t> host_sampling_positions_;
+    bool trace_spec_ = false;
 };
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail
