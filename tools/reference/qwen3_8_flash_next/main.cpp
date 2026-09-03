@@ -1799,10 +1799,19 @@ int run_oracle_chat23_logits(const ReferenceToolOptions& opts) {
 #else
     (void)setenv("NINFER_FLASH_NEXT_QSA_PREFILL_MMA", opts.qsa_prefill_mma ? "1" : "0", 1);
 #endif
+    // The mode only ever prefills 23 tokens, but the config still has to satisfy
+    // "prefill_chunk is a nonzero multiple of 128 and <= max_context". Honour
+    // --prefill-chunk when given and otherwise fit the default under max_context,
+    // so that asking for a small context does not fail on a chunk size this mode
+    // never uses.
+    std::uint32_t chunk = opts.prefill_chunk != 0 ? opts.prefill_chunk : 1024U;
+    if (chunk > opts.max_context) { chunk = (opts.max_context / 128U) * 128U; }
+    if (chunk == 0) { chunk = 128U; }
     FlashNextRuntimeConfig config{
         .max_concurrency     = opts.max_concurrency,
         .max_context         = opts.max_context,
         .state_slot_capacity = opts.state_slots,
+        .prefill_chunk       = chunk,
         .use_qsa_prefill_mma = opts.qsa_prefill_mma,
     };
     const auto curve = flash_next_capacity_curve(config);

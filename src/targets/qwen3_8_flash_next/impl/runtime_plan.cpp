@@ -199,8 +199,16 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
     const auto curve = flash_next_capacity_curve(config);
     if (selected_main_page_groups < curve.minimum_main_page_groups ||
         selected_main_page_groups > curve.maximum_main_page_groups) {
+        // The bounds are worth printing: for max_context 32768 with one lane the curve
+        // collapses to a single legal value (128 groups), and the message without numbers
+        // sends the reader guessing.
         throw std::invalid_argument(
-            "Flash-Next selected_main_page_groups outside capacity curve [min_groups, max_groups]");
+            "Flash-Next selected_main_page_groups " + std::to_string(selected_main_page_groups) +
+            " outside capacity curve [" + std::to_string(curve.minimum_main_page_groups) + ", " +
+            std::to_string(curve.maximum_main_page_groups) + "] for max_context " +
+            std::to_string(config.max_context) + " and max_concurrency " +
+            std::to_string(config.max_concurrency) + " (" +
+            std::to_string(curve.main_page_tokens) + " tokens per group)");
     }
 
     FlashNextRuntimePlan plan{};
