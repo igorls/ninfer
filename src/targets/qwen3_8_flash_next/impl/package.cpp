@@ -96,8 +96,14 @@ Package::WeightsProfile Package::resolve_weights(const artifact::ArtifactIdentit
 Package::LoadPlan Package::plan_load(artifact::Binder& binder, const EngineOptions& options,
                                      WeightsProfile weights_profile) {
     (void)weights_profile;
-    auto target_plan = detail::bind_artifact(
-        binder, detail::LoadFeatures{.vision = options.enable_vision, .mtp = false});
+    // The MTP draft head is bound only when speculative decoding asks for it, because binding it
+    // costs device memory for the draft head's expert banks that a non-speculative server would
+    // never touch. This was hardcoded false, which is the second half of why --spec mtp did
+    // nothing: even with the draft window wired into the plan, Program's speculative gate also
+    // requires has_mtp(), and that reads the bound model rather than the options.
+    const bool bind_mtp = options.speculative.backend == SpeculativeBackend::Mtp;
+    auto target_plan    = detail::bind_artifact(
+        binder, detail::LoadFeatures{.vision = options.enable_vision, .mtp = bind_mtp});
     return LoadPlan(std::make_unique<LoadPlan::Impl>(
         weights_profile, std::move(target_plan), options.quantize_output_head_fp8));
 }
@@ -132,24 +138,50 @@ Package::SequencePlanner Package::make_sequence_planner(DeviceContext& device,
     (void)device;
     (void)weights_profile;
     const std::uint32_t max_concurrency = std::clamp(options.max_concurrency, 1u, 8u);
+
+    // Speculative decoding. The serve layer validates --spec mtp --draft-tokens in [1,5], but
+    // Flash-Next's own bound is [0,4] and it implements the MTP backend only. Leaving this
+    // unmapped is what made --spec silently inert: the decode gates in program.cpp all require
+    // speculative_draft_tokens > 0, so the whole speculative path was unreachable from the
+    // server while the flag still parsed and reported success. Reject what we cannot honour
+    // here rather than degrading to non-speculative decoding without telling anyone.
+    std::uint32_t speculative_draft_tokens = 0;
+    switch (options.speculative.backend) {
+    case SpeculativeBackend::None:
+        break;
+    case SpeculativeBackend::Mtp:
+        speculative_draft_tokens = options.speculative.draft_tokens;
+        break;
+    case SpeculativeBackend::DFlash:
+        throw std::invalid_argument(
+            "Flash-Next supports --spec mtp only; --spec dflash has no draft head in this target");
+    }
+
     // Every active lane needs a source and a destination recurrent-state slot, so the plan's
-    // floor is 2 * max_concurrency. Context-cache continuation capacity adds slots on top of that floor.
-    const std::uint32_t floor_slots = 2u * max_concurrency;
+    // floor is 2 * max_concurrency without speculation. Speculative decoding widens it:
+    // runtime_plan.cpp sizes a lane at draft_tokens + 1 slots and rejects a state_slot_capacity
+    // below that floor, so computing the floor with the 2-slot assumption while asking for a
+    // draft window of 2 or more makes the plan throw at startup. Context-cache continuation
+    // capacity adds slots on top of the floor.
+    const std::uint32_t slots_per_lane =
+        speculative_draft_tokens > 0 ? speculative_draft_tokens + 1u : 2u;
+    const std::uint32_t floor_slots = slots_per_lane * max_concurrency;
     const std::uint32_t cont_cap =
         options.context_cache.enabled && options.context_cache.max_private_continuations
             ? *options.context_cache.max_private_continuations
             : 0u;
     const std::uint32_t total_state_slots = floor_slots + cont_cap;
     detail::FlashNextRuntimeConfig config{
-        .max_concurrency       = max_concurrency,
-        .max_context           = options.max_context,
-        .state_slot_capacity   = std::min(64u, total_state_slots),
-        .continuation_capacity = cont_cap,
-        .prefill_chunk         = options.prefill_chunk,
-        .use_cuda_graph        = options.use_cuda_graph,
-        .vision_enabled        = options.enable_vision,
-        .max_vision_tokens     = 4096,
-        .use_qsa_prefill_mma   = options.use_qsa_prefill_mma, // G18 serve flag; dropped by the upstream merge e650ee62, restored after window 6
+        .max_concurrency          = max_concurrency,
+        .max_context              = options.max_context,
+        .state_slot_capacity      = std::min(64u, total_state_slots),
+        .continuation_capacity    = cont_cap,
+        .prefill_chunk            = options.prefill_chunk,
+        .speculative_draft_tokens = speculative_draft_tokens,
+        .use_cuda_graph           = options.use_cuda_graph,
+        .vision_enabled           = options.enable_vision,
+        .max_vision_tokens        = 4096,
+        .use_qsa_prefill_mma      = options.use_qsa_prefill_mma, // G18 serve flag; dropped by the upstream merge e650ee62, restored after window 6
     };
     return SequencePlanner(std::make_unique<detail::SequencePlannerImpl>(config));
 }
