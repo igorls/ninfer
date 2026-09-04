@@ -23,6 +23,16 @@ ServeOptions parse(std::vector<std::string> arguments) {
     return parse_serve_options(static_cast<int>(argv.size()), argv.data());
 }
 
+template <typename Function>
+ApiError api_error(Function&& function) {
+    try {
+        function();
+    } catch (const ApiException& exception) {
+        return exception.error();
+    }
+    return ApiError{.status = 0, .message = "no exception"};
+}
+
 } // namespace
 
 int main() {
@@ -233,6 +243,7 @@ int main() {
     ninfer::PromptCapabilities prompt_capabilities;
     prompt_capabilities.enable_thinking                 = true;
     prompt_capabilities.reasoning_effort.low            = true;
+    prompt_capabilities.reasoning_effort.medium         = true;
     prompt_capabilities.reasoning_effort.xhigh          = true;
     prompt_capabilities.reasoning_effort.default_effort = ninfer::ReasoningEffort::XHigh;
     const auto semantics = resolve_prompt_semantics(request, defaults, prompt_capabilities);
@@ -275,6 +286,103 @@ int main() {
         check(explicit_effort.reasoning_effort == ninfer::ReasoningEffort::Low &&
                   explicit_effort.effective_reasoning_effort == ninfer::ReasoningEffort::Low,
               "explicit reasoning effort did not remain the effective effort");
+    request.reasoning_effort.reset();
+
+    // Medium effort
+    request.reasoning_effort = RequestedReasoningEffort::Medium;
+    const auto medium_effort = resolve_prompt_semantics(request, defaults, prompt_capabilities);
+    failures += check(medium_effort.reasoning_effort == ninfer::ReasoningEffort::Medium &&
+                          medium_effort.effective_reasoning_effort == ninfer::ReasoningEffort::Medium &&
+                          medium_effort.enable_thinking,
+                      "explicit medium reasoning effort did not resolve correctly");
+
+    // XHigh effort
+    request.reasoning_effort = RequestedReasoningEffort::XHigh;
+    const auto xhigh_effort = resolve_prompt_semantics(request, defaults, prompt_capabilities);
+    failures += check(xhigh_effort.reasoning_effort == ninfer::ReasoningEffort::XHigh &&
+                          xhigh_effort.effective_reasoning_effort == ninfer::ReasoningEffort::XHigh &&
+                          xhigh_effort.enable_thinking,
+                      "explicit xhigh reasoning effort did not resolve correctly");
+
+    // None effort (disables thinking)
+    request.reasoning_effort = RequestedReasoningEffort::None;
+    const auto none_effort = resolve_prompt_semantics(request, defaults, prompt_capabilities);
+    failures += check(!none_effort.reasoning_effort && !none_effort.effective_reasoning_effort &&
+                          !none_effort.enable_thinking,
+                      "reasoning_effort:none did not disable thinking");
+
+    // Rejection of high, minimal, and max with dynamic error message matching loaded template capabilities
+    request.reasoning_effort = RequestedReasoningEffort::High;
+    ApiError err = api_error([&] { (void)resolve_prompt_semantics(request, defaults, prompt_capabilities); });
+    failures += check(err.status == 400 && err.code == "reasoning_effort_not_supported" &&
+                          err.param == "reasoning_effort" &&
+                          err.message == "Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low.",
+                      "rejection of reasoning_effort:high did not return expected dynamic message and code");
+
+    request.reasoning_effort = RequestedReasoningEffort::Minimal;
+    err = api_error([&] { (void)resolve_prompt_semantics(request, defaults, prompt_capabilities); });
+    failures += check(err.status == 400 && err.code == "reasoning_effort_not_supported" &&
+                          err.param == "reasoning_effort" &&
+                          err.message == "Unexpected reasoning effort minimal. Supported types are xhigh (default), medium, and low.",
+                      "rejection of reasoning_effort:minimal did not return expected dynamic message and code");
+
+    request.reasoning_effort = RequestedReasoningEffort::Max;
+    err = api_error([&] { (void)resolve_prompt_semantics(request, defaults, prompt_capabilities); });
+    failures += check(err.status == 400 && err.code == "reasoning_effort_not_supported" &&
+                          err.param == "reasoning_effort" &&
+                          err.message == "Unexpected reasoning effort max. Supported types are xhigh (default), medium, and low.",
+                      "rejection of reasoning_effort:max did not return expected dynamic message and code");
+
+    // Conflicting template options: enable_thinking=false combined with active reasoning effort
+    request.enable_thinking  = false;
+    request.reasoning_effort = RequestedReasoningEffort::Low;
+    err = api_error([&] { (void)resolve_prompt_semantics(request, defaults, prompt_capabilities); });
+    failures += check(err.status == 400 && err.code == "conflicting_template_option" &&
+                          err.param == "reasoning_effort" &&
+                          err.message == "reasoning effort conflicts with enable_thinking",
+                      "enable_thinking=false with reasoning_effort=low did not report conflict");
+
+    // Conflicting template options: enable_thinking=true combined with reasoning_effort=none
+    request.enable_thinking  = true;
+    request.reasoning_effort = RequestedReasoningEffort::None;
+    err = api_error([&] { (void)resolve_prompt_semantics(request, defaults, prompt_capabilities); });
+    failures += check(err.status == 400 && err.code == "conflicting_template_option" &&
+                          err.param == "reasoning_effort" &&
+                          err.message == "reasoning effort conflicts with enable_thinking",
+                      "enable_thinking=true with reasoning_effort=none did not report conflict");
+    request.enable_thinking.reset();
+
+    // Template without reasoning effort support
+    ninfer::PromptCapabilities toggle_only;
+    toggle_only.enable_thinking = true;
+    request.reasoning_effort    = RequestedReasoningEffort::Low;
+    err = api_error([&] { (void)resolve_prompt_semantics(request, defaults, toggle_only); });
+    failures += check(err.status == 400 && err.code == "reasoning_effort_not_supported" &&
+                          err.param == "reasoning_effort" &&
+                          err.message == "the loaded chat template does not support reasoning effort",
+                      "unsupported template effort did not report generic unsupported error");
+
+    // Dynamic formatting helper tests
+    failures += check(format_supported_reasoning_efforts({}) == "",
+                      "empty capabilities formatted non-empty");
+    ninfer::ReasoningEffortCapabilities custom_caps;
+    custom_caps.xhigh          = true;
+    custom_caps.default_effort = ninfer::ReasoningEffort::XHigh;
+    failures += check(format_supported_reasoning_efforts(custom_caps) == "xhigh (default)",
+                      "single effort format failed");
+    custom_caps.medium = true;
+    failures += check(format_supported_reasoning_efforts(custom_caps) == "xhigh (default) and medium",
+                      "two efforts format failed");
+    custom_caps.low = true;
+    failures += check(format_supported_reasoning_efforts(custom_caps) == "xhigh (default), medium, and low",
+                      "three efforts format failed");
+    custom_caps.default_effort = ninfer::ReasoningEffort::Medium;
+    failures += check(format_supported_reasoning_efforts(custom_caps) == "medium (default), xhigh, and low",
+                      "medium default format failed");
+    custom_caps.default_effort.reset();
+    failures += check(format_supported_reasoning_efforts(custom_caps) == "xhigh, medium, and low",
+                      "no-default format failed");
+
     request.reasoning_effort.reset();
     failures +=
         check(resolve_prompt_semantics(request, configured, prompt_capabilities).preserve_thinking,
@@ -350,3 +458,4 @@ int main() {
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }
+

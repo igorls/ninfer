@@ -7,8 +7,14 @@
 #include "serve/serve_options.h"
 
 #include <functional>
+#include <string>
 
 namespace ninfer::serve {
+
+// Formats a human-readable list of supported reasoning efforts from template capabilities.
+// If a default is declared and supported, it is listed first with " (default)".
+// E.g.: "xhigh (default), medium, and low"
+std::string format_supported_reasoning_efforts(const ninfer::ReasoningEffortCapabilities& capabilities);
 
 // Media acquisition is a product-layer concern. Translation preserves part order
 // and asks the caller to turn each wire source into owning bytes before the
