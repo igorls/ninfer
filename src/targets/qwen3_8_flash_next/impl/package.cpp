@@ -97,12 +97,16 @@ Package::LoadPlan Package::plan_load(artifact::Binder& binder, const EngineOptio
                                      WeightsProfile weights_profile) {
     (void)weights_profile;
     const bool enable_mtp = options.speculative.backend == SpeculativeBackend::Mtp;
+    std::uint32_t draft_rows = 32'768;
+    if (const char* env = std::getenv("NINFER_FLASH_NEXT_DRAFT_HEAD_ROWS"); env && env[0] != '\0') {
+        draft_rows = static_cast<std::uint32_t>(std::strtoul(env, nullptr, 10));
+    }
     auto target_plan = detail::bind_artifact(
         binder, detail::LoadFeatures{
                     .vision           = options.enable_vision,
                     .mtp              = enable_mtp,
                     .proposal_head    = options.speculative.proposal_head,
-                    .draft_head_rows  = 32'768,
+                    .draft_head_rows  = draft_rows,
                 });
     return LoadPlan(std::make_unique<LoadPlan::Impl>(
         weights_profile, std::move(target_plan), options.quantize_output_head_fp8));
@@ -147,6 +151,10 @@ Package::SequencePlanner Package::make_sequence_planner(DeviceContext& device,
             : 0u;
     const std::uint32_t total_state_slots = floor_slots + cont_cap;
     const bool is_mtp = options.speculative.backend == SpeculativeBackend::Mtp;
+    std::uint32_t draft_rows = 32'768;
+    if (const char* env = std::getenv("NINFER_FLASH_NEXT_DRAFT_HEAD_ROWS"); env && env[0] != '\0') {
+        draft_rows = static_cast<std::uint32_t>(std::strtoul(env, nullptr, 10));
+    }
     detail::FlashNextRuntimeConfig config{
         .max_concurrency          = max_concurrency,
         .max_context              = options.max_context,
@@ -155,7 +163,7 @@ Package::SequencePlanner Package::make_sequence_planner(DeviceContext& device,
         .prefill_chunk            = options.prefill_chunk,
         .speculative_draft_tokens = is_mtp ? options.speculative.draft_tokens : 0u,
         .proposal_head            = options.speculative.proposal_head,
-        .draft_head_rows          = 32'768,
+        .draft_head_rows          = draft_rows,
         .use_cuda_graph           = options.use_cuda_graph,
         .vision_enabled           = options.enable_vision,
         .max_vision_tokens        = 4096,
