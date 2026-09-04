@@ -1664,6 +1664,17 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
     st.requested_output_tokens = summary.requested_output_tokens;
     st.effective_output_tokens = summary.effective_output_tokens;
     st.publish_continuation    = summary.publish_continuation;
+    const bool is_mtp = impl_->has_mtp() && impl_->plan_.config.speculative_draft_tokens > 0;
+    st.speculative_stats = SpeculativeStats{
+        .backend               = is_mtp ? SpeculativeBackend::Mtp : SpeculativeBackend::None,
+        .enabled               = is_mtp,
+        .draft_window          = is_mtp ? impl_->plan_.config.speculative_draft_tokens : 0U,
+        .rounds                = 0,
+        .drafted_tokens        = 0,
+        .accepted_tokens       = 0,
+        .fallback_steps        = 0,
+        .accepted_per_position = std::vector<std::uint64_t>(is_mtp ? impl_->plan_.config.speculative_draft_tokens : 0U, 0),
+    };
 
     if (adm.impl_ != nullptr && adm.impl_->base_plan != nullptr) {
         st.sampling_config = adm.impl_->base_plan->sampling_config;
@@ -2341,6 +2352,15 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
         }
 
         st.pending_accepted_tokens = accepted;
+        if (st.speculative_stats.enabled) {
+            st.speculative_stats.rounds += 1;
+            st.speculative_stats.drafted_tokens += st.draft_tokens.size();
+            const std::size_t num_accepted_draft = accepted.size() > 1 ? (accepted.size() - 1) : 0;
+            st.speculative_stats.accepted_tokens += num_accepted_draft;
+            for (std::size_t p = 0; p < num_accepted_draft && p < st.speculative_stats.accepted_per_position.size(); ++p) {
+                st.speculative_stats.accepted_per_position[p] += 1;
+            }
+        }
 
         impl_->pending_batch_tokens_.resize(accepted.size());
         for (std::size_t i = 0; i < accepted.size(); ++i) {
@@ -2378,6 +2398,10 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
             throw std::logic_error("sequence lane is not active or epoch mismatch");
         }
         lane_indices[b] = lane_idx;
+        if (st.speculative_stats.enabled) {
+            st.speculative_stats.fallback_steps += 1;
+            st.speculative_stats.rounds += 1;
+        }
 
         requests[b] = detail::LaneStepRequest{
             .handle          = st.lane_handle,
@@ -2666,6 +2690,7 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
             if (lane_idx < impl_->plan_.config.max_concurrency) {
                 auto& st = impl_->lane_states_[lane_idx];
                 if (st.active && st.epoch == sequence.epoch()) {
+                    SpeculativeStats lane_spec = std::move(st.speculative_stats);
                     const bool should_catalogue =
                         st.publish_continuation && (impl_->plan_.config.continuation_capacity > 0) &&
                         (st.committed_frontier > 0);
@@ -2771,6 +2796,7 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
                             st.pending_capture_offer = 0;
                             out.status               = runtime::ConsumeStatus::Consumed;
                             out.disposition          = runtime::FinishDisposition::Catalogued;
+                            out.speculative          = std::move(lane_spec);
                             out.continuation         = ContinuationHandle(
                                 this, static_cast<std::uint32_t>(target_c_idx), c_slot.generation);
                             ++impl_->resource_revision_;
@@ -2787,6 +2813,11 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
                     st.turn_closure_continuation_index.reset();
                     st.pending_capture_offer = 0;
                     ++impl_->resource_revision_;
+                    return FinishResult{
+                        .status      = runtime::ConsumeStatus::Consumed,
+                        .disposition = runtime::FinishDisposition::Released,
+                        .speculative = std::move(lane_spec),
+                    };
                 }
             }
         } catch (const std::exception& e) {
@@ -2809,6 +2840,7 @@ AbortResult Program::abort(SequenceHandle sequence) noexcept {
         if (lane_idx < impl_->plan_.config.max_concurrency) {
             auto& st = impl_->lane_states_[lane_idx];
             if (st.active && st.epoch == sequence.epoch()) {
+                SpeculativeStats lane_spec = std::move(st.speculative_stats);
                 if (impl_->pending_round_.valid()) {
                     impl_->pending_round_.abort();
                 }
@@ -2821,6 +2853,10 @@ AbortResult Program::abort(SequenceHandle sequence) noexcept {
                 st.turn_closure_continuation_index.reset();
                 st.pending_capture_offer = 0;
                 ++impl_->resource_revision_;
+                return AbortResult{
+                    .status      = runtime::ConsumeStatus::Consumed,
+                    .speculative = std::move(lane_spec),
+                };
             }
         }
     }

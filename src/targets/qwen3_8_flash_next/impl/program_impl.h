@@ -187,6 +187,7 @@ struct LaneState {
     bool finished          = false;
     std::vector<std::int32_t> draft_tokens;
     std::vector<std::int32_t> pending_accepted_tokens;
+    SpeculativeStats speculative_stats{};
     qwen3_6::detail::PrefixShortlistDigests prefix_digests;
     std::optional<std::uint32_t> turn_closure_continuation_index;
     std::uint64_t pending_capture_offer = 0;

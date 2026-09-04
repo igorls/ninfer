@@ -858,6 +858,11 @@ int test_speculative_turn_closure_interaction(ninfer::DeviceContext& device,
             std::cerr << "FAIL: Session 1 finish failed to catalogue continuation\n";
             return 1;
         }
+        if (!fin1.speculative.enabled || fin1.speculative.rounds != 3) {
+            std::cerr << "FAIL: Session 1 finish reported invalid speculative telemetry (enabled="
+                      << fin1.speculative.enabled << ", rounds=" << fin1.speculative.rounds << ")\n";
+            return 1;
+        }
 
         // 2. Multi-turn Session 2 (resuming from TurnClosure at F=16)
         // We will run Session 2 under speculative mode (K=3) and record generated tokens.
