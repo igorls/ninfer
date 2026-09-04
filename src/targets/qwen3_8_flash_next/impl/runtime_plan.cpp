@@ -56,6 +56,11 @@ void validate_config_invariants(const FlashNextRuntimeConfig& config,
     if (config.speculative_draft_tokens > 4) {
         throw std::invalid_argument("Flash-Next speculative_draft_tokens must be in [0, 4]");
     }
+    if (config.kv_cache != KvCacheStorage::BFloat16 &&
+        config.kv_cache != KvCacheStorage::Fp8E4M3Row256) {
+        throw std::invalid_argument(
+            "Flash-Next supports only --kv-dtype bf16 and fp8 (requested unsupported kv-dtype)");
+    }
 
     const std::uint32_t slots_per_lane =
         flash_next_slots_per_lane(config.speculative_draft_tokens);
@@ -210,13 +215,14 @@ flash_next_capacity_curve(const FlashNextRuntimeConfig& config) {
                                            flash_next_decode_graph_buckets(maximum_blocks).count))
             : 0ULL;
 
+    const std::size_t stride_bytes = flash_next_physical_stride_bytes_per_group(config.kv_cache);
     ninfer::runtime::SequenceCapacityCurve curve{};
     curve.main_page_tokens                     = kMainPageGroupTokens;
     curve.minimum_main_page_groups             = min_groups;
     curve.maximum_main_page_groups             = max_groups;
-    curve.bytes_per_additional_main_page_group = kPhysicalStrideBytesPerGroup;
+    curve.bytes_per_additional_main_page_group = stride_bytes;
     curve.minimum_device_reservation_bytes     = checked_add(
-        checked_add(fixed_base_bytes, checked_mul<std::size_t>(min_groups, kPhysicalStrideBytesPerGroup)),
+        checked_add(fixed_base_bytes, checked_mul<std::size_t>(min_groups, stride_bytes)),
         graph_allowance);
 
     return curve;
@@ -266,8 +272,10 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
     plan.maximum_blocks =
         std::min<std::uint32_t>(65'536U, (config.max_context + kBlockTokens - 1U) / kBlockTokens);
 
+    const std::size_t kv_element_bytes =
+        (config.kv_cache == KvCacheStorage::Fp8E4M3Row256) ? 1ULL : sizeof(std::uint16_t);
     const std::size_t single_att_kv_plane = checked_align_up_256(checked_mul<std::size_t>(
-        256ULL * 64ULL * 2ULL * sizeof(std::uint16_t), plan.attention_physical_pages));
+        256ULL * 64ULL * 2ULL * kv_element_bytes, plan.attention_physical_pages));
     plan.attention_kv_bytes               = checked_mul<std::size_t>(24ULL, single_att_kv_plane);
 
     const std::size_t single_indexer_keys_plane = checked_align_up_256(checked_mul<std::size_t>(

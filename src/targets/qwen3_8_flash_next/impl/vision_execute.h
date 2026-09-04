@@ -47,6 +47,7 @@ public:
     [[nodiscard]] const qwen3_vision::WorkspacePlan& workspace_plan() const noexcept { return workspace_plan_; }
     [[nodiscard]] std::size_t workspace_capacity_bytes() const noexcept { return workspace_plan_.capacity_bytes; }
     [[nodiscard]] const Tensor& output_tensor() const noexcept { return output_handoff_; }
+    [[nodiscard]] const DeviceSpan& workspace() const noexcept { return workspace_; }
 
 private:
     DeviceContext& device_;

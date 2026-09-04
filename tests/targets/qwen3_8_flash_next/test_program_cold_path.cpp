@@ -376,6 +376,53 @@ int test_plan_request_validations(ninfer::DeviceContext& device) {
     return failures;
 }
 
+int test_program_memory_summary_kv_cache(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next;
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+
+    int failures = 0;
+
+    // 1. FP8 KV Cache
+    {
+        FlashNextRuntimeConfig cfg{
+            .max_concurrency = 2,
+            .max_context     = 128,
+            .prefill_chunk   = 128,
+            .kv_cache        = ninfer::KvCacheStorage::Fp8E4M3Row256,
+        };
+        const auto curve = flash_next_capacity_curve(cfg);
+        auto plan        = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
+
+        auto program_impl = std::make_unique<ProgramImpl>(nullptr, plan, device);
+        Program program(std::move(program_impl));
+
+        const auto summary = program.memory_summary();
+        failures += check(summary.kv_cache == ninfer::KvCacheStorage::Fp8E4M3Row256,
+                          "program.memory_summary().kv_cache must be Fp8E4M3Row256");
+    }
+
+    // 2. BF16 KV Cache
+    {
+        FlashNextRuntimeConfig cfg{
+            .max_concurrency = 2,
+            .max_context     = 128,
+            .prefill_chunk   = 128,
+            .kv_cache        = ninfer::KvCacheStorage::BFloat16,
+        };
+        const auto curve = flash_next_capacity_curve(cfg);
+        auto plan        = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
+
+        auto program_impl = std::make_unique<ProgramImpl>(nullptr, plan, device);
+        Program program(std::move(program_impl));
+
+        const auto summary = program.memory_summary();
+        failures += check(summary.kv_cache == ninfer::KvCacheStorage::BFloat16,
+                          "program.memory_summary().kv_cache must be BFloat16");
+    }
+
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -390,6 +437,7 @@ int main() {
     ninfer::DeviceContext device(0);
     failures += test_plan_request_validations(device);
     failures += test_program_lifecycle(device);
+    failures += test_program_memory_summary_kv_cache(device);
 
     if (failures == 0) {
         std::cout << "All Program cold path contract tests passed cleanly.\n";

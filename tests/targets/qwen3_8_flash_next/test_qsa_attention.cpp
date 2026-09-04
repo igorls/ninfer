@@ -791,6 +791,147 @@ int main() {
     }
     std::cout << "PASS: Decode B=1..8 bit-exact verification passed\n";
 
+    // FP8 KV Cache Verification
+    {
+        ninfer::DeviceBuffer fp8_key_pages(256ULL * 64 * 2 * physical_pages);
+        ninfer::DeviceBuffer fp8_value_pages(256ULL * 64 * 2 * physical_pages);
+        fp8_key_pages.fill(0);
+        fp8_value_pages.fill(0);
+
+        QsaAttentionCacheView fp8_cache{
+            .key_pages = ninfer::Tensor(fp8_key_pages.p, ninfer::DType::FP8_E4M3FN,
+                                        {256, 64, 2, physical_pages}),
+            .value_pages = ninfer::Tensor(fp8_value_pages.p, ninfer::DType::FP8_E4M3FN,
+                                          {256, 64, 2, physical_pages}),
+            .block_tables = ninfer::Tensor(block_tables.p, ninfer::DType::I32, {logical_pages, 1}),
+        };
+
+        // Decode B=1..8 with FP8 cache
+        for (std::int32_t b = 1; b <= 8; ++b) {
+            ninfer::DeviceBuffer in_b(input_dim * b * sizeof(std::uint16_t));
+            ninfer::DeviceBuffer out_b(input_dim * b * sizeof(std::uint16_t));
+            ninfer::DeviceBuffer tok_b(b * sizeof(std::int32_t));
+            ninfer::DeviceBuffer pos_b(b * 3 * sizeof(std::int32_t));
+            ninfer::DeviceBuffer row_b(b * sizeof(std::int32_t));
+            ninfer::DeviceBuffer sel_b(512 * b * sizeof(std::int32_t));
+            ninfer::DeviceBuffer cnt_b(b * sizeof(std::int32_t));
+
+            std::vector<std::uint16_t> h_in(input_dim * b, 0);
+            for (int i = 0; i < b; ++i) { h_in[i * input_dim] = 0x3F80U; }
+            in_b.copy_from_host(h_in.data(), h_in.size() * sizeof(std::uint16_t));
+            out_b.fill(0);
+            tok_b.fill(0);
+            pos_b.fill(0);
+            row_b.fill(0);
+            sel_b.fill(0);
+            cnt_b.fill(0);
+
+            ninfer::Tensor in_t(in_b.p, ninfer::DType::BF16, {input_dim, b});
+            ninfer::Tensor out_t(out_b.p, ninfer::DType::BF16, {input_dim, b});
+            ninfer::Tensor tok_t(tok_b.p, ninfer::DType::I32, {b});
+            ninfer::Tensor pos_t(pos_b.p, ninfer::DType::I32, {b, 3});
+            ninfer::Tensor row_t(row_b.p, ninfer::DType::I32, {b});
+            ninfer::Tensor sel_t(sel_b.p, ninfer::DType::I32, {512, b});
+            ninfer::Tensor cnt_t(cnt_b.p, ninfer::DType::I32, {b});
+
+            ninfer::WorkspaceArena ws(flash_next_qsa_attention_workspace_capacity_bytes(b));
+            flash_next_qsa_attention_decode(in_t, weights, tok_t, pos_t, row_t, sel_t, cnt_t,
+                                            fp8_cache, ws, out_t, device.stream);
+            device.synchronize();
+
+            std::vector<std::uint16_t> h_out(input_dim * b);
+            out_b.copy_to_host(h_out.data(), h_out.size() * sizeof(std::uint16_t));
+            for (std::size_t i = 0; i < h_out.size(); ++i) {
+                if (h_out[i] != 0x3F00U) {
+                    std::cerr << "Mismatch at FP8 decode B=" << b << ", idx=" << i << ": 0x"
+                              << std::hex << h_out[i] << std::dec << "\n";
+                    return 1;
+                }
+            }
+        }
+
+        // Verify appended FP8 key and value: 0x38 is 1.0 in FP8 E4M3
+        std::vector<std::uint8_t> h_fp8_keys(256ULL * 64 * 2 * physical_pages);
+        std::vector<std::uint8_t> h_fp8_vals(256ULL * 64 * 2 * physical_pages);
+        fp8_key_pages.copy_to_host(h_fp8_keys.data(), h_fp8_keys.size());
+        fp8_value_pages.copy_to_host(h_fp8_vals.data(), h_fp8_vals.size());
+        for (int kv_head = 0; kv_head < 2; ++kv_head) {
+            for (int dim = 0; dim < 256; ++dim) {
+                const std::size_t idx = ((0 * 2 + kv_head) * 64 + 0) * 256 + dim;
+                if (h_fp8_keys[idx] != 0x38U) {
+                    std::cerr << "FP8 Key cache mismatch at head " << kv_head << ", dim " << dim
+                              << ": expected 0x38 (1.0), got 0x" << std::hex
+                              << static_cast<int>(h_fp8_keys[idx]) << std::dec << "\n";
+                    return 1;
+                }
+                if (h_fp8_vals[idx] != 0x38U) {
+                    std::cerr << "FP8 Value cache mismatch at head " << kv_head << ", dim " << dim
+                              << ": expected 0x38 (1.0), got 0x" << std::hex
+                              << static_cast<int>(h_fp8_vals[idx]) << std::dec << "\n";
+                    return 1;
+                }
+            }
+        }
+        std::cout << "PASS: FP8 Decode B=1..8 and cache append verification passed\n";
+
+        // FP8 Prefill Chunk test: MMA vs non-MMA
+        for (std::int32_t T : {16, 64, 128}) {
+            ninfer::DeviceBuffer in_t(input_dim * T * sizeof(std::uint16_t));
+            ninfer::DeviceBuffer out_mma(input_dim * T * sizeof(std::uint16_t));
+            ninfer::DeviceBuffer out_non_mma(input_dim * T * sizeof(std::uint16_t));
+            ninfer::DeviceBuffer tok_t(T * sizeof(std::int32_t));
+            ninfer::DeviceBuffer pos_t(T * 3 * sizeof(std::int32_t));
+            ninfer::DeviceBuffer sel_t(512 * T * sizeof(std::int32_t));
+            ninfer::DeviceBuffer cnt_t(T * sizeof(std::int32_t));
+            in_t.fill(0);
+            out_mma.fill(0);
+            out_non_mma.fill(0);
+            tok_t.fill(0);
+            pos_t.fill(0);
+            sel_t.fill(0);
+            cnt_t.fill(0);
+
+            std::vector<std::uint16_t> h_in(input_dim * T, 0);
+            for (int i = 0; i < T; ++i) { h_in[i * input_dim] = 0x3F80U; }
+            in_t.copy_from_host(h_in.data(), h_in.size() * sizeof(std::uint16_t));
+
+            ninfer::Tensor tin(in_t.p, ninfer::DType::BF16, {input_dim, T});
+            ninfer::Tensor tout_mma(out_mma.p, ninfer::DType::BF16, {input_dim, T});
+            ninfer::Tensor tout_non(out_non_mma.p, ninfer::DType::BF16, {input_dim, T});
+            ninfer::Tensor ttok(tok_t.p, ninfer::DType::I32, {T});
+            ninfer::Tensor tpos(pos_t.p, ninfer::DType::I32, {T, 3});
+            ninfer::Tensor tsel(sel_t.p, ninfer::DType::I32, {512, T});
+            ninfer::Tensor tcnt(cnt_t.p, ninfer::DType::I32, {T});
+
+            ninfer::WorkspaceArena ws_mma(flash_next_qsa_attention_workspace_capacity_bytes(T));
+            ninfer::WorkspaceArena ws_non(flash_next_qsa_attention_workspace_capacity_bytes(T));
+
+            flash_next_qsa_attention_prefill_chunk(tin, weights, ttok, tpos, 0, tsel, tcnt,
+                                                   fp8_cache, ws_mma, tout_mma, device.stream,
+                                                   nullptr, true);
+            flash_next_qsa_attention_prefill_chunk(tin, weights, ttok, tpos, 0, tsel, tcnt,
+                                                   fp8_cache, ws_non, tout_non, device.stream,
+                                                   nullptr, false);
+            device.synchronize();
+
+            std::vector<std::uint16_t> h_mma(input_dim * T);
+            std::vector<std::uint16_t> h_non(input_dim * T);
+            out_mma.copy_to_host(h_mma.data(), h_mma.size() * sizeof(std::uint16_t));
+            out_non_mma.copy_to_host(h_non.data(), h_non.size() * sizeof(std::uint16_t));
+
+            for (std::size_t i = 0; i < h_mma.size(); ++i) {
+                float diff = std::abs(bf16_to_float(h_mma[i]) - bf16_to_float(h_non[i]));
+                if (diff > 0.05f) {
+                    std::cerr << "FP8 Prefill mismatch T=" << T << " idx=" << i
+                              << " mma=" << bf16_to_float(h_mma[i])
+                              << " non=" << bf16_to_float(h_non[i]) << "\n";
+                    return 1;
+                }
+            }
+        }
+        std::cout << "PASS: FP8 Prefill Chunk MMA vs Non-MMA verification passed\n";
+    }
+
     // Timing measurements
     cudaEvent_t start, stop;
     CUDA_CHECK(cudaEventCreate(&start));

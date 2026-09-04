@@ -2920,7 +2920,7 @@ MemorySummary Program::memory_summary() const noexcept {
     out.device                            = impl_->device_.device;
     out.max_context                       = impl_->plan_.config.max_context;
     out.kv_capacity                       = impl_->plan_.resolved_tokens;
-    out.kv_cache                          = KvCacheStorage::BFloat16;
+    out.kv_cache                          = impl_->plan_.config.kv_cache;
     out.runtime_reservation_bytes         = impl_->plan_.total_device_bytes;
     out.minimum_runtime_reservation_bytes =
         impl_->plan_.capacity_curve.minimum_device_reservation_bytes;
