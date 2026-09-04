@@ -26,7 +26,8 @@ namespace ninfer::product {
     return "unknown";
 }
 
-inline void validate_speculative_cli_options(const SpeculativeOptions& options) {
+inline void validate_speculative_cli_options(const SpeculativeOptions& options,
+                                             std::uint32_t max_concurrency = 1) {
     switch (options.backend) {
     case SpeculativeBackend::None:
         if (options.draft_tokens != 0 || options.proposal_head != ProposalHead::Full) {
@@ -34,11 +35,17 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
                 "--draft-tokens and --lm-head-draft require --spec mtp|dflash");
         }
         return;
-    case SpeculativeBackend::Mtp:
-        if (options.draft_tokens == 0 || options.draft_tokens > 5) {
-            throw std::invalid_argument("--spec mtp requires --draft-tokens in [1,5]");
+    case SpeculativeBackend::Mtp: {
+        const std::uint32_t conc = std::max(1u, max_concurrency);
+        const std::uint32_t ceiling = (conc <= 64u) ? (64u / conc) - 1u : 0u;
+        const std::uint32_t max_mtp = std::min(4u, ceiling);
+        if (options.draft_tokens == 0 || options.draft_tokens > max_mtp) {
+            throw std::invalid_argument(
+                "--spec mtp requires --draft-tokens in [1, " + std::to_string(max_mtp) +
+                "] at max-concurrency " + std::to_string(max_concurrency));
         }
         return;
+    }
     case SpeculativeBackend::DFlash:
         if (options.draft_tokens == 0 || options.draft_tokens > 15) {
             throw std::invalid_argument("--spec dflash requires --draft-tokens in [1,15]");

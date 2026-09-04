@@ -98,12 +98,16 @@ Package::LoadPlan Package::plan_load(artifact::Binder& binder, const EngineOptio
                                      WeightsProfile weights_profile) {
     (void)weights_profile;
     const bool enable_mtp = options.speculative.backend == SpeculativeBackend::Mtp;
+    std::uint32_t draft_rows = 32'768;
+    if (const char* env = std::getenv("NINFER_FLASH_NEXT_DRAFT_HEAD_ROWS"); env && env[0] != '\0') {
+        draft_rows = static_cast<std::uint32_t>(std::strtoul(env, nullptr, 10));
+    }
     auto target_plan = detail::bind_artifact(
         binder, detail::LoadFeatures{
                     .vision           = options.enable_vision,
                     .mtp              = enable_mtp,
                     .proposal_head    = options.speculative.proposal_head,
-                    .draft_head_rows  = 32'768,
+                    .draft_head_rows  = draft_rows,
                 });
     return LoadPlan(std::make_unique<LoadPlan::Impl>(
         weights_profile, std::move(target_plan), options.quantize_output_head_fp8));
@@ -139,9 +143,10 @@ Package::SequencePlanner Package::make_sequence_planner(DeviceContext& device,
     (void)device;
     (void)weights_profile;
     const std::uint32_t max_concurrency = std::clamp(options.max_concurrency, 1u, 8u);
-    // Every active lane needs a source and a destination recurrent-state slot, so the plan's
-    // floor is 2 * max_concurrency. Context-cache continuation capacity adds slots on top of that floor.
-    const std::uint32_t floor_slots = 2u * max_concurrency;
+    const bool is_mtp = options.speculative.backend == SpeculativeBackend::Mtp;
+    const std::uint32_t draft_tokens = is_mtp ? options.speculative.draft_tokens : 0u;
+    const std::uint32_t floor_slots =
+        detail::flash_next_floor_slots(max_concurrency, draft_tokens);
     const std::uint32_t cont_cap_limit =
         detail::kMaxStateSlots > floor_slots ? (detail::kMaxStateSlots - floor_slots) : 0u;
     const std::uint32_t requested_cont =
@@ -155,16 +160,19 @@ Package::SequencePlanner Package::make_sequence_planner(DeviceContext& device,
                      requested_cont, cont_cap, detail::kMaxStateSlots, floor_slots, max_concurrency);
     }
     const std::uint32_t total_state_slots = floor_slots + cont_cap;
-    const bool is_mtp = options.speculative.backend == SpeculativeBackend::Mtp;
+    std::uint32_t draft_rows = 32'768;
+    if (const char* env = std::getenv("NINFER_FLASH_NEXT_DRAFT_HEAD_ROWS"); env && env[0] != '\0') {
+        draft_rows = static_cast<std::uint32_t>(std::strtoul(env, nullptr, 10));
+    }
     detail::FlashNextRuntimeConfig config{
         .max_concurrency          = max_concurrency,
         .max_context              = options.max_context,
         .state_slot_capacity      = total_state_slots,
         .continuation_capacity    = cont_cap,
         .prefill_chunk            = options.prefill_chunk,
-        .speculative_draft_tokens = is_mtp ? options.speculative.draft_tokens : 0u,
+        .speculative_draft_tokens = draft_tokens,
         .proposal_head            = options.speculative.proposal_head,
-        .draft_head_rows          = 32'768,
+        .draft_head_rows          = draft_rows,
         .use_cuda_graph           = options.use_cuda_graph,
         .vision_enabled           = options.enable_vision,
         .max_vision_tokens        = 4096,
