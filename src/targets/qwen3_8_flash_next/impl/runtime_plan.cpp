@@ -64,10 +64,22 @@ void validate_config_invariants(const FlashNextRuntimeConfig& config,
     resolved_state_slots = config.state_slot_capacity;
     if (resolved_state_slots == 0) {
         resolved_state_slots = min_state_slots;
-    } else if (resolved_state_slots < min_state_slots || resolved_state_slots > 64) {
+    } else if (resolved_state_slots < min_state_slots || resolved_state_slots > kMaxStateSlots) {
+        // This is the path an operator hits by passing --max-private-continuations larger than the
+        // state-slot budget allows, so say what they can actually ask for at this concurrency
+        // rather than only what was rejected. Clamping instead of throwing would be friendlier but
+        // is NOT safe here: the Engine sizes its private catalog from the same option
+        // (engine_core.h:70) and would then hold more catalog entries than the target has
+        // continuation slots, which is the Engine/target slot disagreement that produced the
+        // concurrency-4 crash. A clear failure at startup beats an inconsistency under load.
+        const std::uint32_t cont_cap_limit = kMaxStateSlots > slots_per_lane * config.max_concurrency
+                                                 ? kMaxStateSlots - slots_per_lane * config.max_concurrency
+                                                 : 0U;
         throw std::invalid_argument(
             "Flash-Next state_slot_capacity must be in [slots_per_lane * max_concurrency + continuation_capacity (" +
-            std::to_string(min_state_slots) + "), 64]");
+            std::to_string(min_state_slots) + "), " + std::to_string(kMaxStateSlots) +
+            "]; at max_concurrency " + std::to_string(config.max_concurrency) +
+            " the continuation capacity may be at most " + std::to_string(cont_cap_limit));
     }
 }
 

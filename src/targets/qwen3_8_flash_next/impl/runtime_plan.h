@@ -22,6 +22,12 @@ inline constexpr std::uint32_t kIndexerPageBlocks = 64; // Blocks per indexer pa
 inline constexpr std::uint32_t kIndexerPageTokens = kBlockTokens * kIndexerPageBlocks; // 256 tokens
 inline constexpr std::uint32_t kMainPageGroupTokens = 256; // 256-token affine group
 
+// Ceiling on recurrent-state slots. Each slot carries the GDN state for all 36 GDN layers, and
+// the SSM part alone is 128 * 128 * 48 floats per layer, so a slot costs roughly 110 MiB and the
+// full 64 reserve about 6.9 GiB. Both the planner and the package sizer must agree on this bound:
+// when only one of them clamped, the package built a plan the planner then rejected.
+inline constexpr std::uint32_t kMaxStateSlots = 64;
+
 // Per 256-token group strides across all 12 QSA layers
 // Attention K + V: 12 layers * 4 pages/group * (256 * 64 * 2 heads * 2 bytes * 2 K/V) = 6,291,456
 // bytes
