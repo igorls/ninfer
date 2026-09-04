@@ -20,6 +20,8 @@
 #include <iomanip>
 #include <iostream>
 #include <random>
+#include <set>
+#include <string>
 #include <vector>
 
 namespace {
@@ -172,59 +174,58 @@ int test_decode_cobatching_equivalence(ninfer::DeviceContext& device) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
 
     constexpr int kHidden = 2'560;
+    constexpr int kExperts = 512;
     constexpr std::uint64_t gate_code_bytes_per_expert  = 1'280ULL * 2'560 / 2;
     constexpr std::uint64_t gate_scale_bytes_per_expert = 1'280ULL * 2'560 / 16;
     constexpr std::uint64_t down_code_bytes_per_expert  = 2'560ULL * 640 / 2;
     constexpr std::uint64_t down_scale_bytes_per_expert = 2'560ULL * 640 / 16;
 
-    // Allocate device buffers for weights (covering 32 experts)
-    constexpr int kTestExperts = 32;
+    std::mt19937 rng(42);
+    std::uniform_real_distribution<float> dist_router(-0.1F, 0.1F);
+    std::uniform_real_distribution<float> dist_act(-0.05F, 0.05F);
+
+    // Allocate full 512 physical experts for realistic decode routing across the full catalog
     ninfer::DeviceBuffer router(512ULL * kHidden * 2);
     ninfer::DeviceBuffer shared_down(kHidden * 640ULL * 2);
     ninfer::DeviceBuffer shared_gate(640ULL * kHidden * 2);
     ninfer::DeviceBuffer shared_up(640ULL * kHidden * 2);
     ninfer::DeviceBuffer shared_gate_weight(kHidden * 2);
-    ninfer::DeviceBuffer gate_codes(kTestExperts * gate_code_bytes_per_expert);
-    ninfer::DeviceBuffer gate_scales(kTestExperts * gate_scale_bytes_per_expert);
-    ninfer::DeviceBuffer down_codes(kTestExperts * down_code_bytes_per_expert);
-    ninfer::DeviceBuffer down_scales(kTestExperts * down_scale_bytes_per_expert);
-    ninfer::DeviceBuffer gate_divisors(512 * sizeof(float));
-    ninfer::DeviceBuffer down_divisors(512 * sizeof(float));
+    ninfer::DeviceBuffer gate_codes(kExperts * gate_code_bytes_per_expert);
+    ninfer::DeviceBuffer gate_scales(kExperts * gate_scale_bytes_per_expert);
+    ninfer::DeviceBuffer down_codes(kExperts * down_code_bytes_per_expert);
+    ninfer::DeviceBuffer down_scales(kExperts * down_scale_bytes_per_expert);
+    ninfer::DeviceBuffer gate_divisors(kExperts * sizeof(float));
+    ninfer::DeviceBuffer down_divisors(kExperts * sizeof(float));
 
-    router.fill(0);
-    shared_down.fill(0);
-    shared_gate.fill(0);
-    shared_up.fill(0);
-    shared_gate_weight.fill(0);
+    std::vector<std::uint8_t> h_gate_codes(kExperts * gate_code_bytes_per_expert, 0x22U);
+    std::vector<std::uint8_t> h_gate_scales(kExperts * gate_scale_bytes_per_expert, 0x38U);
+    std::vector<std::uint8_t> h_down_codes(kExperts * down_code_bytes_per_expert, 0x22U);
+    std::vector<std::uint8_t> h_down_scales(kExperts * down_scale_bytes_per_expert, 0x38U);
+    std::vector<float> h_divisors(kExperts, 1.0F);
 
-    std::vector<std::uint8_t> gate_code_values(kTestExperts * gate_code_bytes_per_expert, 0);
-    std::vector<std::uint8_t> gate_scale_values(kTestExperts * gate_scale_bytes_per_expert, 0x38U);
-    std::vector<std::uint8_t> down_code_values(kTestExperts * down_code_bytes_per_expert, 0);
-    std::vector<std::uint8_t> down_scale_values(kTestExperts * down_scale_bytes_per_expert, 0x38U);
+    gate_codes.copy_from_host(h_gate_codes.data(), h_gate_codes.size());
+    gate_scales.copy_from_host(h_gate_scales.data(), h_gate_scales.size());
+    down_codes.copy_from_host(h_down_codes.data(), h_down_codes.size());
+    down_scales.copy_from_host(h_down_scales.data(), h_down_scales.size());
+    gate_divisors.copy_from_host(h_divisors.data(), sizeof(float) * kExperts);
+    down_divisors.copy_from_host(h_divisors.data(), sizeof(float) * kExperts);
 
-    for (std::uint64_t expert = 0; expert < kTestExperts; ++expert) {
-        for (std::uint64_t row = 0; row < 1'280; ++row) {
-            std::fill_n(gate_code_values.begin() +
-                            static_cast<std::ptrdiff_t>(expert * gate_code_bytes_per_expert +
-                                                        row * (kHidden / 2)),
-                        8, static_cast<std::uint8_t>(0x22U + (expert & 3)));
-        }
-        for (std::uint64_t row = 0; row < 2'560; ++row) {
-            std::fill_n(down_code_values.begin() +
-                            static_cast<std::ptrdiff_t>(expert * down_code_bytes_per_expert +
-                                                        row * (640 / 2)),
-                        8, static_cast<std::uint8_t>(0x22U + ((expert >> 1) & 3)));
-        }
-    }
-    gate_codes.copy_from_host(gate_code_values.data(), gate_code_values.size());
-    gate_scales.copy_from_host(gate_scale_values.data(), gate_scale_values.size());
-    down_codes.copy_from_host(down_code_values.data(), down_code_values.size());
-    down_scales.copy_from_host(down_scale_values.data(), down_scale_values.size());
+    std::vector<std::uint16_t> h_router(512ULL * kHidden);
+    for (auto& v : h_router) { v = float_to_bf16(dist_router(rng)); }
+    router.copy_from_host(h_router.data(), h_router.size() * 2);
 
-    std::array<float, 512> divisors{};
-    divisors.fill(1.0F);
-    gate_divisors.copy_from_host(divisors.data(), sizeof(divisors));
-    down_divisors.copy_from_host(divisors.data(), sizeof(divisors));
+    std::vector<std::uint16_t> h_shared_down(kHidden * 640ULL);
+    std::vector<std::uint16_t> h_shared_gate(640ULL * kHidden);
+    std::vector<std::uint16_t> h_shared_up(640ULL * kHidden);
+    std::vector<std::uint16_t> h_shared_gate_weight(kHidden);
+    for (auto& v : h_shared_down) { v = float_to_bf16(dist_router(rng)); }
+    for (auto& v : h_shared_gate) { v = float_to_bf16(dist_router(rng)); }
+    for (auto& v : h_shared_up) { v = float_to_bf16(dist_router(rng)); }
+    for (auto& v : h_shared_gate_weight) { v = float_to_bf16(dist_router(rng)); }
+    shared_down.copy_from_host(h_shared_down.data(), h_shared_down.size() * 2);
+    shared_gate.copy_from_host(h_shared_gate.data(), h_shared_gate.size() * 2);
+    shared_up.copy_from_host(h_shared_up.data(), h_shared_up.size() * 2);
+    shared_gate_weight.copy_from_host(h_shared_gate_weight.data(), h_shared_gate_weight.size() * 2);
 
     MoeWeights weights{
         .router             = bf16_weight(router.p, 512, kHidden),
@@ -250,76 +251,81 @@ int test_decode_cobatching_equivalence(ninfer::DeviceContext& device) {
                                .scale_bytes_per_expert = down_scale_bytes_per_expert},
     };
 
-    const std::array<int, 4> test_batch_sizes = {1, 2, 4, 8};
+    const std::vector<int> test_batch_sizes = {1, 2, 3, 4, 6, 8};
+
+    std::cout << "\n========================================================================================================\n";
+    std::cout << "--- HEAD-TO-HEAD BENCHMARK: REALISTIC ROUTING (Diverse Independent Tokens) ---\n";
+    std::cout << "========================================================================================================\n";
+    std::cout << std::left
+              << std::setw(4)  << "B"
+              << std::setw(16) << "Unique Exps"
+              << std::setw(18) << "Baseline Tot(us)"
+              << std::setw(18) << "Baseline us/tok"
+              << std::setw(18) << "Cobatch Tot(us)"
+              << std::setw(18) << "Cobatch us/tok"
+              << std::setw(12) << "Speedup"
+              << "Winner\n";
+    std::cout << "--------------------------------------------------------------------------------------------------------\n";
 
     for (int B : test_batch_sizes) {
         std::vector<std::uint16_t> host_input(B * kHidden);
-        for (int b = 0; b < B; ++b) {
-            const float scale = 0.5F + 0.25F * b;
-            const std::uint16_t bf16_val = float_to_bf16(scale);
-            std::fill_n(host_input.begin() + b * kHidden, kHidden, bf16_val);
-        }
+        for (auto& v : host_input) { v = float_to_bf16(dist_act(rng)); }
 
         ninfer::DeviceBuffer dev_input(B * kHidden * 2);
         dev_input.copy_from_host(host_input.data(), host_input.size() * 2);
 
-        // 1. Run batched execution (co-batched when B > 1, bypass when B == 1)
-        ninfer::DeviceBuffer dev_output_batched(B * kHidden * 2);
-        dev_output_batched.fill(0);
-        ninfer::Tensor input_view(dev_input.p, ninfer::DType::BF16, {kHidden, B});
-        ninfer::Tensor output_batched_view(dev_output_batched.p, ninfer::DType::BF16, {kHidden, B});
-        ninfer::WorkspaceArena ws_batched(flash_next_moe_workspace_capacity_bytes(1, 8));
+        ninfer::DeviceBuffer dev_out_baseline(B * kHidden * 2);
+        ninfer::DeviceBuffer dev_out_cobatched(B * kHidden * 2);
+        dev_out_baseline.fill(0);
+        dev_out_cobatched.fill(0);
 
-        flash_next_moe(input_view, weights, output_batched_view, ws_batched, device.stream);
+        ninfer::Tensor input_view(dev_input.p, ninfer::DType::BF16, {kHidden, B});
+        ninfer::Tensor out_base_view(dev_out_baseline.p, ninfer::DType::BF16, {kHidden, B});
+        ninfer::Tensor out_cobatch_view(dev_out_cobatched.p, ninfer::DType::BF16, {kHidden, B});
+
+        ninfer::WorkspaceArena ws(flash_next_moe_workspace_capacity_bytes(1, 8));
+        auto scratch = allocate_flash_next_moe_workspace(ws, B);
+
+        flash_next_route(input_view, weights.router, weights.shared_gate_weight,
+                         scratch.scores, scratch.ids, scratch.alpha, scratch.shared_scale, device.stream);
         device.synchronize();
 
-        std::vector<std::uint16_t> host_output_batched(B * kHidden);
-        dev_output_batched.copy_to_host(host_output_batched.data(), host_output_batched.size() * 2);
+        // Count unique active experts
+        std::vector<std::int32_t> h_ids(B * 10);
+        cudaMemcpy(h_ids.data(), scratch.ids.data, B * 10 * sizeof(std::int32_t), cudaMemcpyDeviceToHost);
+        std::set<std::int32_t> unique_set(h_ids.begin(), h_ids.end());
+        const int num_unique = static_cast<int>(unique_set.size());
 
-        // 2. Run B individual single-token executions (each uses the exact baseline bypass)
-        std::vector<std::uint16_t> host_output_sequential(B * kHidden);
-        ninfer::WorkspaceArena ws_single(flash_next_moe_workspace_capacity_bytes(1, 1));
+        // 1. Equivalence check
+        flash_next_moe_launch_baseline_decode(input_view, weights, scratch, out_base_view, device.stream);
+        flash_next_moe_launch_cobatched_decode(input_view, weights, scratch, out_cobatch_view, device.stream);
+        device.synchronize();
 
-        for (int b = 0; b < B; ++b) {
-            ninfer::DeviceBuffer dev_single_in(kHidden * 2);
-            ninfer::DeviceBuffer dev_single_out(kHidden * 2);
-            dev_single_in.copy_from_host(host_input.data() + b * kHidden, kHidden * 2);
-            dev_single_out.fill(0);
+        std::vector<std::uint16_t> h_out_base(B * kHidden);
+        std::vector<std::uint16_t> h_out_cobatch(B * kHidden);
+        dev_out_baseline.copy_to_host(h_out_base.data(), h_out_base.size() * 2);
+        dev_out_cobatched.copy_to_host(h_out_cobatch.data(), h_out_cobatch.size() * 2);
 
-            ninfer::Tensor single_in_view(dev_single_in.p, ninfer::DType::BF16, {kHidden, 1});
-            ninfer::Tensor single_out_view(dev_single_out.p, ninfer::DType::BF16, {kHidden, 1});
-
-            flash_next_moe(single_in_view, weights, single_out_view, ws_single, device.stream);
-            device.synchronize();
-
-            dev_single_out.copy_to_host(host_output_sequential.data() + b * kHidden, kHidden * 2);
-        }
-
-        // 3. Bitwise exact comparison: 0 mismatch across all tokens and hidden dimensions
         int bitwise_mismatches = 0;
         for (int i = 0; i < B * kHidden; ++i) {
-            if (host_output_batched[i] != host_output_sequential[i]) {
+            if (h_out_base[i] != h_out_cobatch[i]) {
                 if (bitwise_mismatches < 5) {
                     std::cerr << "Mismatch at B=" << B << " index " << i
-                              << ": batched=0x" << std::hex << host_output_batched[i]
-                              << " vs single=0x" << host_output_sequential[i] << std::dec << '\n';
+                              << ": base=0x" << std::hex << h_out_base[i]
+                              << " vs cobatch=0x" << h_out_cobatch[i] << std::dec << '\n';
                 }
                 bitwise_mismatches++;
             }
         }
-
         if (bitwise_mismatches > 0) {
-            std::cerr << "FAILED: Co-batching B=" << B << " had " << bitwise_mismatches
-                      << " bitwise mismatches vs single-token baseline!\n";
+            std::cerr << "FAILED: B=" << B << " had " << bitwise_mismatches << " bitwise mismatches!\n";
             return 1;
         }
-        std::cout << "  Co-batching B=" << B << " bitwise identical vs single-token baseline ("
-                  << B * kHidden << " values verified)\n";
 
-        // 4. Timing benchmark (warmup + 200 iterations)
+        // 2. Timing benchmark (warmup 20 + 200 iters)
         constexpr int kIters = 200;
         for (int i = 0; i < 20; ++i) {
-            flash_next_moe(input_view, weights, output_batched_view, ws_batched, device.stream);
+            flash_next_moe_launch_baseline_decode(input_view, weights, scratch, out_base_view, device.stream);
         }
         device.synchronize();
 
@@ -329,20 +335,143 @@ int test_decode_cobatching_equivalence(ninfer::DeviceContext& device) {
 
         CUDA_CHECK(cudaEventRecord(ev_start, device.stream));
         for (int i = 0; i < kIters; ++i) {
-            flash_next_moe(input_view, weights, output_batched_view, ws_batched, device.stream);
+            flash_next_moe_launch_baseline_decode(input_view, weights, scratch, out_base_view, device.stream);
         }
         CUDA_CHECK(cudaEventRecord(ev_end, device.stream));
         CUDA_CHECK(cudaEventSynchronize(ev_end));
+        float ms_base = 0.0F;
+        CUDA_CHECK(cudaEventElapsedTime(&ms_base, ev_start, ev_end));
+        const float us_base = (ms_base / kIters) * 1000.0F;
 
-        float ms = 0.0f;
-        CUDA_CHECK(cudaEventElapsedTime(&ms, ev_start, ev_end));
+        for (int i = 0; i < 20; ++i) {
+            flash_next_moe_launch_cobatched_decode(input_view, weights, scratch, out_cobatch_view, device.stream);
+        }
+        device.synchronize();
+
+        CUDA_CHECK(cudaEventRecord(ev_start, device.stream));
+        for (int i = 0; i < kIters; ++i) {
+            flash_next_moe_launch_cobatched_decode(input_view, weights, scratch, out_cobatch_view, device.stream);
+        }
+        CUDA_CHECK(cudaEventRecord(ev_end, device.stream));
+        CUDA_CHECK(cudaEventSynchronize(ev_end));
+        float ms_cobatch = 0.0F;
+        CUDA_CHECK(cudaEventElapsedTime(&ms_cobatch, ev_start, ev_end));
+        const float us_cobatch = (ms_cobatch / kIters) * 1000.0F;
+
         CUDA_CHECK(cudaEventDestroy(ev_start));
         CUDA_CHECK(cudaEventDestroy(ev_end));
 
-        float avg_us = (ms / kIters) * 1000.0f;
-        std::cout << "  Decode B=" << B << " Layer Latency: " << avg_us << " us ("
-                  << (avg_us / B) << " us/token)\n";
+        const float speedup = us_base / us_cobatch;
+        const std::string winner = (speedup >= 1.0F) ? "Co-batched" : "Baseline";
+        std::string unq_str = std::to_string(num_unique) + " / " + std::to_string(B * 10);
+
+        std::cout << std::left
+                  << std::setw(4)  << B
+                  << std::setw(16) << unq_str
+                  << std::setw(18) << std::fixed << std::setprecision(2) << us_base
+                  << std::setw(18) << std::fixed << std::setprecision(2) << (us_base / B)
+                  << std::setw(18) << std::fixed << std::setprecision(2) << us_cobatch
+                  << std::setw(18) << std::fixed << std::setprecision(2) << (us_cobatch / B)
+                  << std::setw(12) << std::fixed << std::setprecision(3) << speedup
+                  << winner << "\n";
     }
+
+    std::cout << "\n========================================================================================================\n";
+    std::cout << "--- HEAD-TO-HEAD BENCHMARK: MAXIMUM OVERLAP (Identical Tokens -> Exact 10 Unique Experts) ---\n";
+    std::cout << "========================================================================================================\n";
+    std::cout << std::left
+              << std::setw(4)  << "B"
+              << std::setw(16) << "Unique Exps"
+              << std::setw(18) << "Baseline Tot(us)"
+              << std::setw(18) << "Baseline us/tok"
+              << std::setw(18) << "Cobatch Tot(us)"
+              << std::setw(18) << "Cobatch us/tok"
+              << std::setw(12) << "Speedup"
+              << "Winner\n";
+    std::cout << "--------------------------------------------------------------------------------------------------------\n";
+
+    for (int B : test_batch_sizes) {
+        // Replicate a single token across all B positions
+        std::vector<std::uint16_t> single_token(kHidden);
+        for (auto& v : single_token) { v = float_to_bf16(dist_act(rng)); }
+        std::vector<std::uint16_t> host_input(B * kHidden);
+        for (int b = 0; b < B; ++b) {
+            std::copy(single_token.begin(), single_token.end(), host_input.begin() + b * kHidden);
+        }
+
+        ninfer::DeviceBuffer dev_input(B * kHidden * 2);
+        dev_input.copy_from_host(host_input.data(), host_input.size() * 2);
+
+        ninfer::DeviceBuffer dev_out_baseline(B * kHidden * 2);
+        ninfer::DeviceBuffer dev_out_cobatched(B * kHidden * 2);
+        dev_out_baseline.fill(0);
+        dev_out_cobatched.fill(0);
+
+        ninfer::Tensor input_view(dev_input.p, ninfer::DType::BF16, {kHidden, B});
+        ninfer::Tensor out_base_view(dev_out_baseline.p, ninfer::DType::BF16, {kHidden, B});
+        ninfer::Tensor out_cobatch_view(dev_out_cobatched.p, ninfer::DType::BF16, {kHidden, B});
+
+        ninfer::WorkspaceArena ws(flash_next_moe_workspace_capacity_bytes(1, 8));
+        auto scratch = allocate_flash_next_moe_workspace(ws, B);
+
+        flash_next_route(input_view, weights.router, weights.shared_gate_weight,
+                         scratch.scores, scratch.ids, scratch.alpha, scratch.shared_scale, device.stream);
+        device.synchronize();
+
+        // 1. Timing benchmark (warmup 20 + 200 iters)
+        constexpr int kIters = 200;
+        for (int i = 0; i < 20; ++i) {
+            flash_next_moe_launch_baseline_decode(input_view, weights, scratch, out_base_view, device.stream);
+        }
+        device.synchronize();
+
+        cudaEvent_t ev_start, ev_end;
+        CUDA_CHECK(cudaEventCreate(&ev_start));
+        CUDA_CHECK(cudaEventCreate(&ev_end));
+
+        CUDA_CHECK(cudaEventRecord(ev_start, device.stream));
+        for (int i = 0; i < kIters; ++i) {
+            flash_next_moe_launch_baseline_decode(input_view, weights, scratch, out_base_view, device.stream);
+        }
+        CUDA_CHECK(cudaEventRecord(ev_end, device.stream));
+        CUDA_CHECK(cudaEventSynchronize(ev_end));
+        float ms_base = 0.0F;
+        CUDA_CHECK(cudaEventElapsedTime(&ms_base, ev_start, ev_end));
+        const float us_base = (ms_base / kIters) * 1000.0F;
+
+        for (int i = 0; i < 20; ++i) {
+            flash_next_moe_launch_cobatched_decode(input_view, weights, scratch, out_cobatch_view, device.stream);
+        }
+        device.synchronize();
+
+        CUDA_CHECK(cudaEventRecord(ev_start, device.stream));
+        for (int i = 0; i < kIters; ++i) {
+            flash_next_moe_launch_cobatched_decode(input_view, weights, scratch, out_cobatch_view, device.stream);
+        }
+        CUDA_CHECK(cudaEventRecord(ev_end, device.stream));
+        CUDA_CHECK(cudaEventSynchronize(ev_end));
+        float ms_cobatch = 0.0F;
+        CUDA_CHECK(cudaEventElapsedTime(&ms_cobatch, ev_start, ev_end));
+        const float us_cobatch = (ms_cobatch / kIters) * 1000.0F;
+
+        CUDA_CHECK(cudaEventDestroy(ev_start));
+        CUDA_CHECK(cudaEventDestroy(ev_end));
+
+        const float speedup = us_base / us_cobatch;
+        const std::string winner = (speedup >= 1.0F) ? "Co-batched" : "Baseline";
+        std::string unq_str = "10 / " + std::to_string(B * 10);
+
+        std::cout << std::left
+                  << std::setw(4)  << B
+                  << std::setw(16) << unq_str
+                  << std::setw(18) << std::fixed << std::setprecision(2) << us_base
+                  << std::setw(18) << std::fixed << std::setprecision(2) << (us_base / B)
+                  << std::setw(18) << std::fixed << std::setprecision(2) << us_cobatch
+                  << std::setw(18) << std::fixed << std::setprecision(2) << (us_cobatch / B)
+                  << std::setw(12) << std::fixed << std::setprecision(3) << speedup
+                  << winner << "\n";
+    }
+    std::cout << "========================================================================================================\n\n";
 
     std::cout << "PASS: test_decode_cobatching_equivalence\n";
     return 0;

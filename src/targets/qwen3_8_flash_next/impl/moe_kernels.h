@@ -11,6 +11,14 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
                                    const FlashNextMoeWorkspace& workspace, Tensor& output,
                                    cudaStream_t stream);
 
+void flash_next_moe_launch_baseline_decode(const Tensor& input, const MoeWeights& weights,
+                                           const FlashNextMoeWorkspace& workspace, Tensor& output,
+                                           cudaStream_t stream);
+
+void flash_next_moe_launch_cobatched_decode(const Tensor& input, const MoeWeights& weights,
+                                            const FlashNextMoeWorkspace& workspace, Tensor& output,
+                                            cudaStream_t stream);
+
 void flash_next_moe_bf16_kernels_launch(const Tensor& input, const MoeBf16Weights& weights,
                                         const FlashNextMoeWorkspace& workspace, Tensor& output,
                                         cudaStream_t stream);

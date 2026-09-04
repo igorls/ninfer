@@ -79,7 +79,7 @@ FlashNextMoeWorkspace allocate_flash_next_moe_workspace(Arena& arena, std::int32
         out.down_act_codes    = arena.alloc(DType::U8, {320, 11 * tokens}, 256);
         out.down_act_scales   = arena.alloc(DType::U8, {40, 11 * tokens}, 256);
         out.shared_gemm       = arena.alloc(DType::BF16, {640, 2 * tokens}, 256);
-    } else if (tokens > 1) {
+    } else if (tokens >= 1) {
         out.dedup_unique_count    = arena.alloc(DType::I32, {1}, 16);
         out.dedup_unique_experts  = arena.alloc(DType::I32, {80}, 16);
         out.dedup_assigned_count  = arena.alloc(DType::I32, {80}, 16);
