@@ -88,6 +88,7 @@ std::string usage_text(const char* argv0) {
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
            "       [--device N] [--desktop-reserve-gib N] [--desktop-reserve-mib N]\n"
            "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--gdn-state-dtype fp32|bf16]\n"
+           "       [--output-head-fp8] [--output-head-dtype bf16|fp8]\n"
            "       [--spec mtp|dflash --draft-tokens N] [--lm-head-draft]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
            "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"
@@ -151,6 +152,19 @@ Options parse_options(int argc, char** argv) {
             options.kv_cache = parse_kv_cache(value(arg));
         } else if (arg == "--gdn-state-dtype") {
             options.gdn_state_storage = parse_gdn_state_storage(value(arg));
+        } else if (arg == "--output-head-fp8") {
+            options.quantize_output_head_fp8 = true;
+        } else if (arg == "--no-output-head-fp8") {
+            options.quantize_output_head_fp8 = false;
+        } else if (arg == "--output-head-dtype") {
+            const std::string_view dt = value(arg);
+            if (dt == "fp8") {
+                options.quantize_output_head_fp8 = true;
+            } else if (dt == "bf16") {
+                options.quantize_output_head_fp8 = false;
+            } else {
+                throw std::invalid_argument("invalid --output-head-dtype: expected 'bf16' or 'fp8'");
+            }
         } else if (arg == "--spec") {
             options.speculative.backend = product::parse_speculative_backend(value(arg));
         } else if (arg == "--draft-tokens") {

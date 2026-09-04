@@ -66,6 +66,42 @@ int main() {
     failures +=
         check(help.find("nvfp4") != std::string::npos && help.find("k8v4") != std::string::npos,
               "CLI help omits a production KV storage mode");
+    failures += check(help.find("--output-head-fp8") != std::string::npos,
+                      "CLI help omits --output-head-fp8");
+    failures += check(help.find("--output-head-dtype") != std::string::npos,
+                      "CLI help omits --output-head-dtype");
+
+    const ninfer::cli::Options default_cli =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello"});
+    failures += check(!default_cli.quantize_output_head_fp8,
+                      "CLI output head FP8 quantization is unexpectedly enabled by default");
+
+    const ninfer::cli::Options cli_head_fp8 =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--output-head-fp8"});
+    failures += check(cli_head_fp8.quantize_output_head_fp8,
+                      "--output-head-fp8 did not enable output head FP8 quantization");
+
+    const ninfer::cli::Options cli_no_head_fp8 =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--output-head-fp8", "--no-output-head-fp8"});
+    failures += check(!cli_no_head_fp8.quantize_output_head_fp8,
+                      "--no-output-head-fp8 did not disable output head FP8 quantization");
+
+    const ninfer::cli::Options cli_head_dtype_fp8 =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--output-head-dtype", "fp8"});
+    failures += check(cli_head_dtype_fp8.quantize_output_head_fp8,
+                      "--output-head-dtype fp8 did not enable output head FP8 quantization");
+
+    const ninfer::cli::Options cli_head_dtype_bf16 =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--output-head-fp8", "--output-head-dtype", "bf16"});
+    failures += check(!cli_head_dtype_bf16.quantize_output_head_fp8,
+                      "--output-head-dtype bf16 did not disable output head FP8 quantization");
+
+    failures += check(rejects([] {
+                          (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                       "--output-head-dtype", "invalid"});
+                      }),
+                      "--output-head-dtype invalid did not reject");
+
     failures +=
         check(rejects([] {
                   (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--top-k", "21"});

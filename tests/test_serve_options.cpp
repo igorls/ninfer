@@ -78,6 +78,39 @@ int main() {
         "server defaults unexpectedly override registered model sampling");
     failures += check(resolve_public_model_id(defaults, "artifact-model") == "artifact-model",
                       "artifact model id was not selected by default");
+    failures += check(!defaults.quantize_output_head_fp8,
+                      "output head FP8 quantization is unexpectedly enabled by default");
+
+    const ServeOptions head_fp8 = parse({"ninfer-serve", "model.ninfer", "--output-head-fp8"});
+    failures += check(head_fp8.quantize_output_head_fp8,
+                      "--output-head-fp8 did not enable output head FP8 quantization");
+
+    const ServeOptions no_head_fp8 =
+        parse({"ninfer-serve", "model.ninfer", "--output-head-fp8", "--no-output-head-fp8"});
+    failures += check(!no_head_fp8.quantize_output_head_fp8,
+                      "--no-output-head-fp8 did not disable output head FP8 quantization");
+
+    const ServeOptions head_dtype_fp8 =
+        parse({"ninfer-serve", "model.ninfer", "--output-head-dtype", "fp8"});
+    failures += check(head_dtype_fp8.quantize_output_head_fp8,
+                      "--output-head-dtype fp8 did not enable output head FP8 quantization");
+
+    const ServeOptions head_dtype_bf16 = parse(
+        {"ninfer-serve", "model.ninfer", "--output-head-fp8", "--output-head-dtype", "bf16"});
+    failures += check(!head_dtype_bf16.quantize_output_head_fp8,
+                      "--output-head-dtype bf16 did not disable output head FP8 quantization");
+
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--output-head-dtype", "invalid"});
+        failures += check(false, "--output-head-dtype invalid did not throw");
+    } catch (const std::invalid_argument&) {
+        // expected
+    }
+
+    failures += check(serve_usage_text("ninfer-serve").find("--output-head-fp8") != std::string::npos,
+                      "serve help omits --output-head-fp8");
+    failures += check(serve_usage_text("ninfer-serve").find("--output-head-dtype") != std::string::npos,
+                      "serve help omits --output-head-dtype");
 
     const ServeOptions fp8 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "fp8"});
     failures += check(fp8.kv_cache == ninfer::KvCacheStorage::Fp8E4M3Row256,

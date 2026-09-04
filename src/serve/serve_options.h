@@ -46,6 +46,7 @@ struct ServeOptions {
     int device                             = 0;
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     GdnStateStorage gdn_state_storage      = GdnStateStorage::FP32;
+    bool quantize_output_head_fp8          = false;
     SpeculativeOptions speculative;
     ContextCacheOptions context_cache;
     bool enable_vision      = false;
