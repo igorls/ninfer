@@ -61,6 +61,12 @@ void launch_fp8_decode(const Tensor& x, const Weight& weight, Tensor& out, cudaS
     case Fp8Problem::FlashNextVocabulary:
         launch_exact<Fp8FlashNextVocabularyGeometry, float>(x, weight, out, stream);
         return;
+    case Fp8Problem::FlashNextDraft32k:
+        launch_exact<Fp8FlashNextDraft32kGeometry, float>(x, weight, out, stream);
+        return;
+    case Fp8Problem::FlashNextDraft65k:
+        launch_exact<Fp8FlashNextDraft65kGeometry, float>(x, weight, out, stream);
+        return;
     }
     throw std::logic_error("FP8 vocabulary decode uses its A16 MMA route");
 }

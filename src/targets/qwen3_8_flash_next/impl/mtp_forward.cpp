@@ -4,6 +4,7 @@
 #include "ninfer/ops/argmax.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/rmsnorm.h"
+#include "ninfer/ops/speculative_round.h"
 
 #include "core/layout.h"
 #include "targets/qwen3_8_flash_next/impl/hyper_connection.h"
@@ -103,7 +104,8 @@ void flash_next_mtp_step(const TextModelView& model, const Tensor& input_embeddi
         !exact_tensor(table_rows, DType::I32, batch) ||
         !exact_tensor(selected_blocks, DType::I32, 512, batch) ||
         !exact_tensor(selected_counts, DType::I32, batch) ||
-        !exact_tensor(draft_logits, DType::BF16, 248'320, batch) ||
+        !exact_tensor(draft_logits, DType::BF16,
+                      model.proposal.has_value() ? model.proposal->head.n : 248'320, batch) ||
         !exact_tensor(draft_tokens, DType::I32, batch) || stream == nullptr) {
         throw std::invalid_argument("Flash-Next MTP step received invalid tensor views");
     }
@@ -188,13 +190,29 @@ void flash_next_mtp_step(const TextModelView& model, const Tensor& input_embeddi
     emit_state("mtp_final_hidden", mtp_final_hidden);
 
     // 11. Draft Head Linear Projection -> draft_logits
-    ops::linear(mtp_final_hidden, model.output_head, draft_logits, ops::LinearPolicy::A16Only,
-                workspace, stream);
-    emit_state("mtp_draft_logits", draft_logits);
+    if (model.proposal.has_value()) {
+        const auto& proposal = *model.proposal;
+        ops::linear(mtp_final_hidden, proposal.head, draft_logits, ops::LinearPolicy::A16Only,
+                    workspace, stream);
+        emit_state("mtp_draft_logits", draft_logits);
 
-    // 12. Greedy Argmax -> draft_tokens
-    ops::argmax(draft_logits, draft_tokens, draft_logits.ne[0], stream);
-    emit_state("mtp_draft_tokens", draft_tokens);
+        // 12. Greedy Argmax -> draft_tokens (within subset)
+        ops::argmax(draft_logits, draft_tokens, draft_logits.ne[0], stream);
+
+        // 13. Remap from subset index to true vocabulary ID
+        ops::proposal_remap_token_ids(
+            draft_tokens, static_cast<const std::int32_t*>(proposal.token_ids.data),
+            draft_logits.ne[0], stream);
+        emit_state("mtp_draft_tokens", draft_tokens);
+    } else {
+        ops::linear(mtp_final_hidden, model.output_head, draft_logits, ops::LinearPolicy::A16Only,
+                    workspace, stream);
+        emit_state("mtp_draft_logits", draft_logits);
+
+        // 12. Greedy Argmax -> draft_tokens
+        ops::argmax(draft_logits, draft_tokens, draft_logits.ne[0], stream);
+        emit_state("mtp_draft_tokens", draft_tokens);
+    }
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

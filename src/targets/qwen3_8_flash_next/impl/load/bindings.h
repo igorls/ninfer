@@ -1,6 +1,7 @@
 #pragma once
 
 #include "artifact/binder.h"
+#include "ninfer/types.h"
 #include <ninfer/targets/qwen3_6/frontend_resources.h>
 
 #include <array>
@@ -13,8 +14,10 @@ inline constexpr std::size_t kPleShards    = 128;
 inline constexpr std::size_t kVisionLayers = 27;
 
 struct LoadFeatures {
-    bool vision = false;
-    bool mtp    = false;
+    bool vision                            = false;
+    bool mtp                               = false;
+    ProposalHead proposal_head             = ProposalHead::Full;
+    std::uint32_t draft_head_rows          = 32'768;
 };
 
 struct HyperConnectionPlan {

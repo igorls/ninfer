@@ -96,8 +96,14 @@ Package::WeightsProfile Package::resolve_weights(const artifact::ArtifactIdentit
 Package::LoadPlan Package::plan_load(artifact::Binder& binder, const EngineOptions& options,
                                      WeightsProfile weights_profile) {
     (void)weights_profile;
+    const bool enable_mtp = options.speculative.backend == SpeculativeBackend::Mtp;
     auto target_plan = detail::bind_artifact(
-        binder, detail::LoadFeatures{.vision = options.enable_vision, .mtp = false});
+        binder, detail::LoadFeatures{
+                    .vision           = options.enable_vision,
+                    .mtp              = enable_mtp,
+                    .proposal_head    = options.speculative.proposal_head,
+                    .draft_head_rows  = 32'768,
+                });
     return LoadPlan(std::make_unique<LoadPlan::Impl>(
         weights_profile, std::move(target_plan), options.quantize_output_head_fp8));
 }
@@ -140,16 +146,20 @@ Package::SequencePlanner Package::make_sequence_planner(DeviceContext& device,
             ? *options.context_cache.max_private_continuations
             : 0u;
     const std::uint32_t total_state_slots = floor_slots + cont_cap;
+    const bool is_mtp = options.speculative.backend == SpeculativeBackend::Mtp;
     detail::FlashNextRuntimeConfig config{
-        .max_concurrency       = max_concurrency,
-        .max_context           = options.max_context,
-        .state_slot_capacity   = std::min(64u, total_state_slots),
-        .continuation_capacity = cont_cap,
-        .prefill_chunk         = options.prefill_chunk,
-        .use_cuda_graph        = options.use_cuda_graph,
-        .vision_enabled        = options.enable_vision,
-        .max_vision_tokens     = 4096,
-        .use_qsa_prefill_mma   = options.use_qsa_prefill_mma, // G18 serve flag; dropped by the upstream merge e650ee62, restored after window 6
+        .max_concurrency          = max_concurrency,
+        .max_context              = options.max_context,
+        .state_slot_capacity      = std::min(64u, total_state_slots),
+        .continuation_capacity    = cont_cap,
+        .prefill_chunk            = options.prefill_chunk,
+        .speculative_draft_tokens = is_mtp ? options.speculative.draft_tokens : 0u,
+        .proposal_head            = options.speculative.proposal_head,
+        .draft_head_rows          = 32'768,
+        .use_cuda_graph           = options.use_cuda_graph,
+        .vision_enabled           = options.enable_vision,
+        .max_vision_tokens        = 4096,
+        .use_qsa_prefill_mma      = options.use_qsa_prefill_mma, // G18 serve flag; dropped by the upstream merge e650ee62, restored after window 6
     };
     return SequencePlanner(std::make_unique<detail::SequencePlannerImpl>(config));
 }

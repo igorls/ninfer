@@ -13,7 +13,8 @@ Bf16Launch select_bf16_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t
     const bool ple_key           = n == 10240 && k == 2560;
     const bool ple_value         = n == 2560 && k == 2560;
     const bool shared_down       = n == 2560 && k == 640;
-    const bool output_head       = n == 248320 && k == 2560;
+    const bool output_head       = (n == 248320 && k == 2560) || (n == 32768 && k == 2560) ||
+                                   (n == 65536 && k == 2560);
     const bool mtp_qgkv          = n == 13312 && k == 2560;
     const bool mtp_out           = n == 2560 && k == 6144;
     const bool flash_next_text   = qsa_indexer || ple_key || ple_value || shared_down || output_head || mtp_qgkv || mtp_out;
