@@ -453,13 +453,99 @@ void decode_and_finish(FlashNextResourceManager& manager, Program& prog, Admitte
     (void)manager.finish(prog, req.lane, req.sequence);
 }
 
+void run_concurrency_4_test(ninfer::DeviceContext& device, SyntheticFlashNextModel& model, PleIndexMetadata& ple_meta) {
+    FlashNextRuntimeConfig config{};
+    config.max_context = 2048;
+    config.max_concurrency = 4;
+    config.continuation_capacity = 4;
+    config.speculative_draft_tokens = 0;
+
+    FlashNextRuntimePlan plan = finalize_flash_next_runtime_plan(config, 32);
+    auto prog_impl = std::make_unique<ProgramImpl>(nullptr, plan, device, model.view, std::nullopt, ple_meta);
+    Program prog(std::move(prog_impl));
+
+    FlashNextResourceManager manager(
+        /*lane_count=*/4,
+        /*private_catalog_capacity=*/4,
+        /*shared_catalog_capacity=*/4,
+        /*cache_enabled=*/true,
+        /*max_long_anchors=*/2,
+        ninfer::runtime::ContextMachineCostModel{});
+
+    std::printf("\n=== Running Concurrency 4 Stale Owner Reproduction Test ===\n");
+    std::fflush(stdout);
+
+    std::uint64_t pub_order = 1;
+
+    try {
+        // Step 1: Run 4 requests to completion at concurrency 4.
+        // Each request has 512 tokens (>= 256 for main page group allocation) with TurnClosure at 256.
+        // Each request finishes and catalogues its endpoint into continuation slots 0..3.
+        for (std::size_t i = 0; i < 4; ++i) {
+            std::vector<TokenId> toks(512);
+            for (std::size_t t = 0; t < 512; ++t) {
+                toks[t] = static_cast<TokenId>(2000 + i * 1000 + (t % 500));
+            }
+            auto prompt = make_prompt(toks, 256);
+            AdmittedRequest req = admit_request(manager, prog, std::move(prompt), pub_order++);
+            execute_prefill_and_capture(manager, prog, req);
+            decode_and_finish(manager, prog, req, 2);
+        }
+
+        std::printf("Catalog populated with 4 retained requests at concurrency 4.\n");
+        std::fflush(stdout);
+
+        // Step 2: Workload 5 arrives (5 concurrent workloads, concurrency 4).
+        // continuation_slots_ is full (all 4 slots occupied). inspect_capture() correctly detects
+        // no vacant slot is available (physically_feasible = false) and skips capture.
+        // It does NOT uncooperatively evict any slot behind ResourceManager's back.
+        std::vector<TokenId> w5_toks(512);
+        for (std::size_t t = 0; t < 512; ++t) {
+            w5_toks[t] = static_cast<TokenId>(6000 + (t % 500));
+        }
+        auto prompt5 = make_prompt(w5_toks, 256);
+        AdmittedRequest req5 = admit_request(manager, prog, std::move(prompt5), pub_order++);
+        execute_prefill_and_capture(manager, prog, req5);
+
+        std::printf("Workload 5 prefilled without unilateral slot eviction.\n");
+        std::fflush(stdout);
+
+        // Step 3: Workload 6 arrives while private catalog is full.
+        // ResourceManager needs to admit Workload 6, which requires coordinated pressure eviction.
+        // It asks about private owners (slots 0..3 with generation 1).
+        // Since no out-of-band eviction occurred, all owners are valid and match catalog generations.
+        // Pressure planning plans eviction cooperatively, avoiding stale owner warnings and crashes.
+        std::vector<TokenId> w6_toks(512);
+        for (std::size_t t = 0; t < 512; ++t) {
+            w6_toks[t] = static_cast<TokenId>(7000 + (t % 500));
+        }
+        auto prompt6 = make_prompt(w6_toks, 256);
+        AdmittedRequest req6 = admit_request(manager, prog, std::move(prompt6), pub_order++);
+        execute_prefill_and_capture(manager, prog, req6);
+        decode_and_finish(manager, prog, req6, 2);
+        decode_and_finish(manager, prog, req5, 2);
+
+        std::printf("SUCCESS: Concurrency 4 test completed successfully!\n");
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "\n[CRASH REPRODUCED IN C4 TEST] Caught exception: %s\n", e.what());
+        std::fflush(stderr);
+        std::fflush(stdout);
+        throw;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
     bool expect_fatal = false;
+    bool run_c4 = false;
     for (int i = 1; i < argc; ++i) {
         if (std::string_view(argv[i]) == "--expect-fatal") {
             expect_fatal = true;
+        } else if (std::string_view(argv[i]) == "--concurrency-4") {
+            run_c4 = true;
         }
     }
 
@@ -472,6 +558,13 @@ int main(int argc, char** argv) {
     ninfer::DeviceContext device(0);
     SyntheticFlashNextModel model = make_synthetic_model(device);
     auto ple_meta = make_synthetic_ple_meta();
+
+    try {
+        run_concurrency_4_test(device, model, ple_meta);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "\n[FATAL ERROR IN C4 TEST]: %s\n", e.what());
+        return 1;
+    }
 
     // Pool geometry matching Serve A from A.err:
     // kv_page_groups = 154, max_context = 32768, max_concurrency = 8, continuation_capacity = 16

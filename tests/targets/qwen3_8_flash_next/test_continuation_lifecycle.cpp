@@ -2548,6 +2548,8 @@ int test_continuation_capacity_saturation_and_lru_reuse(ninfer::DeviceContext& d
     std::atomic<bool> flag{false};
     ninfer::runtime::CancellationFlagView cancellation{&flag};
 
+    std::vector<const ContinuationHandle*> active_owners;
+
     auto run_request = [&](const std::vector<ninfer::TokenId>& tokens, std::optional<uint32_t> boundary,
                            const ContinuationHandle* source = nullptr) -> std::pair<std::optional<ContinuationHandle>, uint32_t> {
         const auto prompt = make_prompt(tokens, true, boundary);
@@ -2555,13 +2557,38 @@ int test_continuation_capacity_saturation_and_lru_reuse(ninfer::DeviceContext& d
         auto cand = program.inspect_admission(prompt, base, ninfer::runtime::LaneId(0), source, nullptr, std::nullopt, false);
         if (!cand.has_value()) return {std::nullopt, 0};
         uint32_t reused = cand->summary().reusable_prompt_tokens;
-        auto res = program.seal_identity(*cand, prompt);
+
+        std::optional<ResourcePlan> res;
+        if (!active_owners.empty() && program.physical_usage().device_state_slots >= 4) {
+            std::vector<ninfer::runtime::PlanningOwnerId> owner_ids;
+            owner_ids.reserve(active_owners.size());
+            for (std::size_t i = 0; i < active_owners.size(); ++i) {
+                owner_ids.push_back(ninfer::runtime::PlanningOwnerId{static_cast<std::uint32_t>(i)});
+            }
+            const AdmissionCandidate* cand_ptr = &*cand;
+            std::array cand_ids{ninfer::runtime::PlanningCandidateId{0}};
+            auto session = program.begin_pressure_planning(std::span(&cand_ptr, 1), cand_ids, active_owners, owner_ids, {}, {});
+            auto prep = session.prepare_expansion(session.identity_target(cand_ids[0]));
+            auto view = session.commit_expansion(std::move(prep));
+            if (!view.children.empty()) {
+                auto assessed = session.assess(view.children[0]);
+                res = session.seal(std::move(assessed), prompt);
+            }
+        }
+        if (!res.has_value()) {
+            res = program.seal_identity(*cand, prompt);
+        }
         if (!res.has_value()) return {std::nullopt, 0};
         (void)program.start_resource_transaction(std::move(*res), make_prompt(tokens, true, boundary), cancellation);
         auto prog = program.progress_context_transaction(cancellation);
         auto* mat = std::get_if<MaterializationResult>(&prog);
         if (!mat || !mat->published) return {std::nullopt, 0};
         SequenceHandle seq = mat->published->sequence;
+        for (const auto& v : mat->victims) {
+            if (v.owner.value < active_owners.size()) {
+                active_owners.erase(active_owners.begin() + v.owner.value);
+            }
+        }
         program.finalize_context_transaction();
 
         // Advance prefill
@@ -2595,6 +2622,7 @@ int test_continuation_capacity_saturation_and_lru_reuse(ninfer::DeviceContext& d
     auto [h1, reused1] = run_request(t1, 16);
     failures += check(reused1 == 0, "R1 must be root (reused=0)");
     failures += check(h1.has_value(), "R1 finish must catalogue continuation");
+    if (h1.has_value()) active_owners.push_back(&*h1);
 
     // Request 2: 20 tokens, boundary at 16 -> creates TurnClosure (slot 2) & SessionEndpoint (slot 3)
     std::vector<ninfer::TokenId> t2(20);
@@ -2602,6 +2630,7 @@ int test_continuation_capacity_saturation_and_lru_reuse(ninfer::DeviceContext& d
     auto [h2, reused2] = run_request(t2, 16);
     failures += check(reused2 == 0, "R2 must be root (reused=0)");
     failures += check(h2.has_value(), "R2 finish must catalogue continuation");
+    if (h2.has_value()) active_owners.push_back(&*h2);
 
     // All 4 slots are now Catalogued!
     // Request 3: 20 tokens, boundary at 16 (new tokens: 300..320)
@@ -2609,6 +2638,7 @@ int test_continuation_capacity_saturation_and_lru_reuse(ninfer::DeviceContext& d
     for (std::size_t i = 0; i < 20; ++i) t3[i] = static_cast<ninfer::TokenId>(300 + i);
     auto [h3, reused3] = run_request(t3, 16);
     failures += check(h3.has_value(), "R3 finish must catalogue continuation via LRU eviction of old slots");
+    if (h3.has_value()) active_owners.push_back(&*h3);
 
     // Request 4: identical prompt to Request 3 (tokens 300..320)
     // Must match R3's TurnClosure checkpoint (16 tokens) or SessionEndpoint (20 tokens)!
