@@ -165,6 +165,11 @@ Package::SequencePlanner Package::make_sequence_planner(DeviceContext& device,
                      "for active decode lanes and rollback). Prefix reuse and context cache are disabled.\n",
                      detail::kMaxStateSlots);
     }
+    if (options.kv_cache != KvCacheStorage::BFloat16 &&
+        options.kv_cache != KvCacheStorage::Fp8E4M3Row256) {
+        throw std::invalid_argument(
+            "Flash-Next supports only --kv-dtype bf16 and fp8 (requested unsupported kv-dtype)");
+    }
     const std::uint32_t total_state_slots = floor_slots + cont_cap;
     std::uint32_t draft_rows = 32'768;
     if (const char* env = std::getenv("NINFER_FLASH_NEXT_DRAFT_HEAD_ROWS"); env && env[0] != '\0') {
@@ -183,6 +188,7 @@ Package::SequencePlanner Package::make_sequence_planner(DeviceContext& device,
         .vision_enabled           = options.enable_vision,
         .max_vision_tokens        = 4096,
         .use_qsa_prefill_mma      = options.use_qsa_prefill_mma, // G18 serve flag; dropped by the upstream merge e650ee62, restored after window 6
+        .kv_cache                 = options.kv_cache,
     };
     return SequencePlanner(std::make_unique<detail::SequencePlannerImpl>(config));
 }

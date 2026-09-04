@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ninfer/types.h"
+
 #include <cstdint>
 #include <span>
 #include <string>
@@ -24,6 +26,7 @@ struct ReferenceToolOptions {
     std::uint32_t repeat_prefill  = 1;    // --repeat-prefill N: prefill N times, compare logits
     bool do_commit                = true;
     bool json_output              = false;
+    ninfer::KvCacheStorage kv_cache = ninfer::KvCacheStorage::BFloat16;
 
     // Chat diagnostic options
     std::string prompt;

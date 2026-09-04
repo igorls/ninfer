@@ -60,6 +60,92 @@ int test_sequence_plan_curve_consistency() {
     return failures;
 }
 
+int test_sequence_plan_fp8_curve_consistency() {
+    using Package = ninfer::targets::qwen3_8_flash_next::Package;
+
+    int failures = 0;
+
+    ninfer::EngineOptions options{};
+    options.max_concurrency = 4;
+    options.max_context     = 8192;
+    options.kv_cache        = ninfer::KvCacheStorage::Fp8E4M3Row256;
+
+    ninfer::DeviceContext dummy_device{};
+    auto planner = Package::make_sequence_planner(
+        dummy_device, options, Package::WeightsProfile::MixedNvfp4Fp8PleInt4);
+
+    const auto curve = planner.capacity_curve();
+    failures += check(curve.main_page_tokens == 256, "FP8 main_page_tokens must be 256");
+    failures += check(curve.minimum_main_page_groups == (8192 + 255) / 256,
+                      "FP8 minimum_main_page_groups mismatch");
+    failures += check(curve.bytes_per_additional_main_page_group == 3342336,
+                      "FP8 bytes_per_additional_main_page_group mismatch (expected 3,342,336)");
+
+    // Test multiple main_page_groups values
+    for (std::uint32_t groups : {curve.minimum_main_page_groups,
+                                 curve.minimum_main_page_groups + 1,
+                                 curve.minimum_main_page_groups + 10,
+                                 curve.minimum_main_page_groups + 50}) {
+        auto p = Package::make_sequence_planner(
+            dummy_device, options, Package::WeightsProfile::MixedNvfp4Fp8PleInt4);
+        auto plan = std::move(p).finalize(groups);
+
+        const std::size_t expected_reservation =
+            curve.minimum_device_reservation_bytes +
+            static_cast<std::size_t>(groups - curve.minimum_main_page_groups) *
+                curve.bytes_per_additional_main_page_group;
+        const std::uint32_t expected_tokens = groups * 256;
+
+        failures += check(plan.device_reservation_bytes() == expected_reservation,
+                          "FP8 plan.device_reservation_bytes() does not match expected curve reservation");
+        failures += check(plan.kv_capacity() == expected_tokens,
+                          "FP8 plan.kv_capacity() does not match expected resolved tokens");
+        failures += check(plan.capacity() == expected_tokens,
+                          "FP8 plan.capacity() does not match expected resolved tokens");
+        failures += check(plan.max_concurrency() == 4,
+                          "FP8 plan.max_concurrency() mismatch");
+    }
+
+    // Claude acceptance scenario test:
+    // Concurrency 8, max-context 262144 (1024 min groups), continuation 48.
+    // Capacity 524288 (2048 groups).
+    {
+        ninfer::EngineOptions accept_opts{};
+        accept_opts.max_concurrency = 8;
+        accept_opts.max_context     = 262144;
+        accept_opts.context_cache.enabled = true;
+        accept_opts.context_cache.max_private_continuations = 48;
+        accept_opts.kv_cache        = ninfer::KvCacheStorage::Fp8E4M3Row256;
+
+        auto accept_planner = Package::make_sequence_planner(
+            dummy_device, accept_opts, Package::WeightsProfile::MixedNvfp4Fp8PleInt4);
+        const auto accept_curve = accept_planner.capacity_curve();
+        failures += check(accept_curve.minimum_main_page_groups == 1024,
+                          "262k context requires 1024 min page groups");
+        auto accept_plan = std::move(accept_planner).finalize(2048);
+        failures += check(accept_plan.kv_capacity() == 524288,
+                          "2048 groups must resolve to 524288 tokens");
+        failures += check(accept_plan.continuation_capacity() == 48,
+                          "continuation capacity must be 48");
+    }
+
+    // Unsupported dtype validation test
+    {
+        ninfer::EngineOptions bad_opts{};
+        bad_opts.kv_cache = ninfer::KvCacheStorage::Nvfp4Group16;
+        bool threw = false;
+        try {
+            (void)Package::make_sequence_planner(
+                dummy_device, bad_opts, Package::WeightsProfile::MixedNvfp4Fp8PleInt4);
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        failures += check(threw, "Package::make_sequence_planner must reject Nvfp4Group16 KV cache");
+    }
+
+    return failures;
+}
+
 int test_continuation_capacity_clamping() {
     using Package = ninfer::targets::qwen3_8_flash_next::Package;
 
@@ -228,15 +314,21 @@ int test_make_sequence_planner_draft_tokens() {
 } // namespace
 
 int main() {
-    int failures = 0;
-    failures += test_sequence_plan_curve_consistency();
-    failures += test_continuation_capacity_clamping();
-    failures += test_make_sequence_planner_draft_tokens();
+    try {
+        int failures = 0;
+        failures += test_sequence_plan_curve_consistency();
+        failures += test_sequence_plan_fp8_curve_consistency();
+        failures += test_continuation_capacity_clamping();
+        failures += test_make_sequence_planner_draft_tokens();
 
-    if (failures == 0) {
-        std::cout << "All SequencePlan tests passed cleanly.\n";
-        return 0;
+        if (failures == 0) {
+            std::cout << "All SequencePlan tests passed cleanly.\n";
+            return 0;
+        }
+        std::cerr << failures << " SequencePlan test(s) failed.\n";
+        return 1;
+    } catch (const std::exception& e) {
+        std::cerr << "EXCEPTION: " << e.what() << "\n";
+        return 1;
     }
-    std::cerr << failures << " SequencePlan test(s) failed.\n";
-    return 1;
 }

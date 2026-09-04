@@ -88,6 +88,7 @@ void flash_next_qsa_attention_decode(const Tensor& input, const AttentionWeights
                                      WorkspaceArena& workspace, Tensor& output,
                                      cudaStream_t stream) {
     const std::int32_t batch = input.ne[1];
+    const auto key_dt = cache.key_pages.dtype;
     if (!exact_tensor(input, DType::BF16, 2'560, batch) || batch < 1 || batch > 8 ||
         !exact_tensor(output, DType::BF16, 2'560, batch) ||
         !exact_tensor(weights.query_norm, DType::BF16, 256) ||
@@ -98,10 +99,11 @@ void flash_next_qsa_attention_decode(const Tensor& input, const AttentionWeights
         !exact_tensor(mrope_positions, DType::I32, batch, 3) ||
         !exact_tensor(table_rows, DType::I32, batch) ||
         !exact_tensor(selected_blocks, DType::I32, 512, batch) ||
-        !exact_tensor(selected_counts, DType::I32, batch) || cache.key_pages.dtype != DType::BF16 ||
+        !exact_tensor(selected_counts, DType::I32, batch) ||
+        (key_dt != DType::BF16 && key_dt != DType::FP8_E4M3FN) ||
         cache.key_pages.ne[0] != 256 || cache.key_pages.ne[1] != 64 || cache.key_pages.ne[2] != 2 ||
         cache.key_pages.ne[3] <= 0 || !cache.key_pages.is_contiguous() ||
-        !aligned_to(cache.key_pages.data, 16) || cache.value_pages.dtype != DType::BF16 ||
+        !aligned_to(cache.key_pages.data, 16) || cache.value_pages.dtype != key_dt ||
         cache.value_pages.ne[0] != 256 || cache.value_pages.ne[1] != 64 ||
         cache.value_pages.ne[2] != 2 || cache.value_pages.ne[3] != cache.key_pages.ne[3] ||
         !cache.value_pages.is_contiguous() || !aligned_to(cache.value_pages.data, 16) ||
@@ -131,6 +133,7 @@ void flash_next_qsa_attention_prefill_chunk(
     const Tensor& selected_counts, QsaAttentionCacheView cache, WorkspaceArena& workspace,
     Tensor& output, cudaStream_t stream, const QsaStageEmitter& emit, bool use_mma) {
     const std::int32_t tokens = input.ne[1];
+    const auto key_dt = cache.key_pages.dtype;
     if (tokens <= 0 || !exact_tensor(input, DType::BF16, 2'560, tokens) ||
         !exact_tensor(output, DType::BF16, 2'560, tokens) ||
         !exact_tensor(weights.query_norm, DType::BF16, 256) ||
@@ -140,10 +143,11 @@ void flash_next_qsa_attention_prefill_chunk(
         !exact_tensor(token_indices, DType::I32, tokens) ||
         table_row < 0 || table_row >= cache.block_tables.ne[1] ||
         !exact_tensor(selected_blocks, DType::I32, 512, tokens) ||
-        !exact_tensor(selected_counts, DType::I32, tokens) || cache.key_pages.dtype != DType::BF16 ||
+        !exact_tensor(selected_counts, DType::I32, tokens) ||
+        (key_dt != DType::BF16 && key_dt != DType::FP8_E4M3FN) ||
         cache.key_pages.ne[0] != 256 || cache.key_pages.ne[1] != 64 || cache.key_pages.ne[2] != 2 ||
         cache.key_pages.ne[3] <= 0 || !cache.key_pages.is_contiguous() ||
-        !aligned_to(cache.key_pages.data, 16) || cache.value_pages.dtype != DType::BF16 ||
+        !aligned_to(cache.key_pages.data, 16) || cache.value_pages.dtype != key_dt ||
         cache.value_pages.ne[0] != 256 || cache.value_pages.ne[1] != 64 ||
         cache.value_pages.ne[2] != 2 || cache.value_pages.ne[3] != cache.key_pages.ne[3] ||
         !cache.value_pages.is_contiguous() || !aligned_to(cache.value_pages.data, 16) ||

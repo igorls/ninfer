@@ -77,17 +77,21 @@ void FlashNextRuntimeAllocation::materialize_views() {
     const std::uint32_t concurrency = plan_.config.max_concurrency;
 
     // 1. Attention KV pages (12 layers, Key & Value)
-    // Key: [256, 64, 2, attention_physical_pages] BF16
-    // Value: [256, 64, 2, attention_physical_pages] BF16
+    // Key: [256, 64, 2, attention_physical_pages] BF16 or FP8
+    // Value: [256, 64, 2, attention_physical_pages] BF16 or FP8
+    const std::size_t kv_element_bytes =
+        (plan_.config.kv_cache == KvCacheStorage::Fp8E4M3Row256) ? 1ULL : sizeof(std::uint16_t);
+    const DType kv_dtype =
+        (plan_.config.kv_cache == KvCacheStorage::Fp8E4M3Row256) ? DType::FP8_E4M3FN : DType::BF16;
     const std::size_t att_kv_bytes = align_up_256(
-        256ULL * 64ULL * 2ULL * plan_.attention_physical_pages * sizeof(std::uint16_t));
+        256ULL * 64ULL * 2ULL * plan_.attention_physical_pages * kv_element_bytes);
     for (std::size_t i = 0; i < kFullAttentionLayers; ++i) {
         state_view_.qsa_attention_caches[i].key_pages =
-            Tensor(cur, DType::BF16,
+            Tensor(cur, kv_dtype,
                    {256, 64, 2, static_cast<std::int32_t>(plan_.attention_physical_pages)});
         cur += att_kv_bytes;
         state_view_.qsa_attention_caches[i].value_pages =
-            Tensor(cur, DType::BF16,
+            Tensor(cur, kv_dtype,
                    {256, 64, 2, static_cast<std::int32_t>(plan_.attention_physical_pages)});
         cur += att_kv_bytes;
     }

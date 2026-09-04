@@ -127,6 +127,7 @@ int run_preflight(const ReferenceToolOptions& opts) {
         .max_concurrency     = opts.max_concurrency,
         .max_context         = opts.max_context,
         .state_slot_capacity = opts.state_slots,
+        .kv_cache            = opts.kv_cache,
     };
 
     const auto report = preflight_text_file(opts.model_path, config, opts.page_groups);
@@ -204,6 +205,7 @@ int run_execute_token(const ReferenceToolOptions& opts) {
         .max_concurrency     = opts.max_concurrency,
         .max_context         = opts.max_context,
         .state_slot_capacity = opts.state_slots,
+        .kv_cache            = opts.kv_cache,
     };
 
     const auto curve = flash_next_capacity_curve(config);
@@ -640,6 +642,7 @@ int run_chat_diagnostic(const ReferenceToolOptions& opts) {
         .state_slot_capacity = opts.state_slots,
         .prefill_chunk       = opts.prefill_chunk > 0 ? opts.prefill_chunk : 1024,
         .use_cuda_graph      = opts.use_cuda_graph,
+        .kv_cache            = opts.kv_cache,
     };
     const auto curve = flash_next_capacity_curve(config);
     const std::uint32_t resolved_groups =
@@ -1081,6 +1084,7 @@ int run_execute_vision(const ReferenceToolOptions& opts) {
             .max_context         = ((static_cast<std::uint32_t>(res.prompt_tokens + 64) + 127U) / 128U) * 128U,
             .state_slot_capacity = 2,
             .prefill_chunk       = 128, // must be a multiple of 128 and <= max_context (5c-1)
+            .kv_cache            = opts.kv_cache,
         };
         const auto curve = flash_next_capacity_curve(config);
         const std::uint32_t resolved_groups =
@@ -1248,6 +1252,7 @@ int run_continuation_check(const ReferenceToolOptions& opts) {
         .continuation_capacity = 16,
         .prefill_chunk         = opts.prefill_chunk > 0 ? opts.prefill_chunk : 1024,
         .use_cuda_graph        = opts.use_cuda_graph,
+        .kv_cache              = opts.kv_cache,
     };
     const auto curve = flash_next_capacity_curve(config);
     const std::uint32_t resolved_groups =
@@ -1813,6 +1818,7 @@ int run_oracle_chat23_logits(const ReferenceToolOptions& opts) {
         .state_slot_capacity = opts.state_slots,
         .prefill_chunk       = chunk,
         .use_qsa_prefill_mma = opts.qsa_prefill_mma,
+        .kv_cache            = opts.kv_cache,
     };
     const auto curve = flash_next_capacity_curve(config);
     const std::uint32_t resolved_groups =
@@ -1842,6 +1848,7 @@ int run_mtp_acceptance_trace(const ReferenceToolOptions& opts) {
         .state_slot_capacity      = opts.state_slots,
         .prefill_chunk            = chunk,
         .speculative_draft_tokens = 1,
+        .kv_cache                 = opts.kv_cache,
     };
     const auto curve = flash_next_capacity_curve(config);
     const std::uint32_t resolved_groups =

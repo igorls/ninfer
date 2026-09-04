@@ -100,6 +100,7 @@ void print_reference_tool_usage(std::string_view prog) {
         << "                             posNNNN_logits.bin (BF16 vocab). Pair with --qsa-prefill-mma\n"
         << "                             on vs off in one production window.\n"
         << "  --qsa-prefill-mma          Set NINFER_FLASH_NEXT_QSA_PREFILL_MMA=1 before plan build\n"
+        << "  --kv-dtype <dtype>         KV cache storage dtype: 'bf16' (default) or 'fp8'\n"
         << "  --no-cuda-graph            Run decode rounds eagerly instead of replaying CUDA graphs\n"
         << "  --repeat-prefill <n>       Run the prompt prefill n times on fresh lanes and compare logits\n"
         << "  --temperature <float>      Sampling temperature (default: 1.0, 0 = greedy)\n"
@@ -243,6 +244,17 @@ ReferenceToolOptions parse_reference_tool_options(std::span<const std::string_vi
             opts.mode                 = "oracle-chat23-logits";
         } else if (arg == "--qsa-prefill-mma") {
             opts.qsa_prefill_mma = true;
+        } else if (arg == "--kv-dtype") {
+            if (++i >= args.size())
+                throw std::invalid_argument("Missing argument for --kv-dtype");
+            if (args[i] == "bf16") {
+                opts.kv_cache = ninfer::KvCacheStorage::BFloat16;
+            } else if (args[i] == "fp8") {
+                opts.kv_cache = ninfer::KvCacheStorage::Fp8E4M3Row256;
+            } else {
+                throw std::invalid_argument("Invalid --kv-dtype: " + std::string(args[i]) +
+                                            " (Flash-Next supports bf16 and fp8)");
+            }
         } else if (arg == "--json") {
             opts.json_output = true;
         } else {

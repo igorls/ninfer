@@ -145,18 +145,22 @@ FlashNextTextExecutor::FlashNextTextExecutor(const TextModelView& model,
                       : 1U))))),
       round_completion_(device) {
     if (model_.mtp.has_value()) {
+        const std::uint64_t kv_element_bytes =
+            allocation.plan().config.kv_cache == KvCacheStorage::Fp8E4M3Row256 ? 1ULL : sizeof(std::uint16_t);
+        const auto kv_dt =
+            allocation.plan().config.kv_cache == KvCacheStorage::Fp8E4M3Row256 ? DType::FP8_E4M3FN : DType::BF16;
         const std::uint64_t key_bytes =
-            256ULL * 64ULL * 2ULL * allocation.plan().attention_physical_pages * sizeof(std::uint16_t);
+            256ULL * 64ULL * 2ULL * allocation.plan().attention_physical_pages * kv_element_bytes;
         const std::uint64_t val_bytes = key_bytes;
         mtp_key_pages_   = std::make_unique<DeviceBuffer>(key_bytes);
         mtp_value_pages_ = std::make_unique<DeviceBuffer>(val_bytes);
 
         QsaAttentionCacheView mtp_cache{};
         mtp_cache.key_pages =
-            Tensor(mtp_key_pages_->p, DType::BF16,
+            Tensor(mtp_key_pages_->p, kv_dt,
                    {256, 64, 2, static_cast<std::int32_t>(allocation.plan().attention_physical_pages)});
         mtp_cache.value_pages =
-            Tensor(mtp_value_pages_->p, DType::BF16,
+            Tensor(mtp_value_pages_->p, kv_dt,
                    {256, 64, 2, static_cast<std::int32_t>(allocation.plan().attention_physical_pages)});
         mtp_cache.block_tables =
             allocation.state_view().qsa_attention_caches[0].block_tables;

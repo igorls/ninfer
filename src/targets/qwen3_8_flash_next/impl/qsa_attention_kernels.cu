@@ -7,14 +7,81 @@
 #include "ops/common/warp.cuh"
 
 #include <cuda_bf16.h>
+#include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <type_traits>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 namespace {
+
+template <typename StorageT>
+__device__ __forceinline__ StorageT to_storage(__nv_bfloat16 x);
+
+template <>
+__device__ __forceinline__ __nv_bfloat16 to_storage<__nv_bfloat16>(__nv_bfloat16 x) {
+    return x;
+}
+
+template <>
+__device__ __forceinline__ __nv_fp8_e4m3 to_storage<__nv_fp8_e4m3>(__nv_bfloat16 x) {
+    return __nv_fp8_e4m3(__bfloat162float(x));
+}
+
+__device__ __forceinline__ float to_float(__nv_bfloat16 x) { return __bfloat162float(x); }
+__device__ __forceinline__ float to_float(__nv_fp8_e4m3 x) { return static_cast<float>(x); }
+
+template <typename StorageT>
+struct VectorKV;
+
+template <>
+struct VectorKV<__nv_bfloat16> {
+    __device__ __forceinline__ static void load_8(const __nv_bfloat16* ptr, int lane_id, float out[8]) {
+        const float4 vec = *reinterpret_cast<const float4*>(reinterpret_cast<const char*>(ptr) + lane_id * 16);
+        const auto* bf16 = reinterpret_cast<const __nv_bfloat16*>(&vec);
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            out[i] = __bfloat162float(bf16[i]);
+        }
+    }
+};
+
+template <>
+struct VectorKV<__nv_fp8_e4m3> {
+    __device__ __forceinline__ static void load_8(const __nv_fp8_e4m3* ptr, int lane_id, float out[8]) {
+        const uint2 vec = *reinterpret_cast<const uint2*>(reinterpret_cast<const char*>(ptr) + lane_id * 8);
+        const auto* fp8 = reinterpret_cast<const __nv_fp8_e4m3*>(&vec);
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            out[i] = static_cast<float>(fp8[i]);
+        }
+    }
+};
+
+template <typename StorageT>
+__device__ __forceinline__ void stage_kv_vector(
+    __nv_bfloat16* dst, const StorageT* src, bool valid) {
+    if constexpr (std::is_same_v<StorageT, __nv_bfloat16>) {
+        ops::cp_async_zfill<16, ops::Cache::cg>(dst, src, valid ? 16 : 0);
+    } else {
+        if (valid) {
+            const unsigned long long raw = *reinterpret_cast<const unsigned long long*>(src);
+            const auto* fp8 = reinterpret_cast<const __nv_fp8_e4m3*>(&raw);
+            __nv_bfloat16 bf16_vals[8];
+            #pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                bf16_vals[i] = __float2bfloat16_rn(static_cast<float>(fp8[i]));
+            }
+            *reinterpret_cast<float4*>(dst) = *reinterpret_cast<float4*>(bf16_vals);
+        } else {
+            float4 zero = {0.0f, 0.0f, 0.0f, 0.0f};
+            *reinterpret_cast<float4*>(dst) = zero;
+        }
+    }
+}
 
 constexpr int kHeadDim         = 256;
 constexpr int kQueryHeads      = 24;
@@ -79,12 +146,13 @@ __global__ void prepare_query_kernel(const __nv_bfloat16* __restrict__ projected
     store_mrope(normalized, local_positions, destination, dim);
 }
 
+template <typename StorageT>
 __global__ void prepare_append_kv_kernel(
     const __nv_bfloat16* __restrict__ projected, const __nv_bfloat16* __restrict__ norm,
     const std::int32_t* __restrict__ token_indices, const std::int32_t* __restrict__ positions,
     const std::int32_t* __restrict__ table_rows, const std::int32_t* __restrict__ block_tables,
-    int logical_pages, __nv_bfloat16* __restrict__ key_pages,
-    __nv_bfloat16* __restrict__ value_pages, __nv_bfloat16* __restrict__ key,
+    int logical_pages, StorageT* __restrict__ key_pages,
+    StorageT* __restrict__ value_pages, __nv_bfloat16* __restrict__ key,
     __nv_bfloat16* __restrict__ value, int batch_size) {
     __shared__ float warp_squares[8];
     __shared__ __nv_bfloat16 normalized[kHeadDim];
@@ -122,8 +190,8 @@ __global__ void prepare_append_kv_kernel(
         ((static_cast<std::int64_t>(physical_page) * kKvHeads + head) * kPageTokens + page_offset) *
             kHeadDim +
         dim;
-    key_pages[page_index]   = key_destination[dim];
-    value_pages[page_index] = value_word;
+    key_pages[page_index]   = to_storage<StorageT>(key_destination[dim]);
+    value_pages[page_index] = to_storage<StorageT>(value_word);
 }
 
 __device__ int selected_token(int ordinal, int selected_count, int complete_blocks,
@@ -133,12 +201,13 @@ __device__ int selected_token(int ordinal, int selected_count, int complete_bloc
     return complete_blocks * 4 + ordinal - selected_tokens;
 }
 
+template <typename StorageT>
 __global__ void sparse_attention_kernel(
     const __nv_bfloat16* __restrict__ query, const std::int32_t* __restrict__ token_indices,
     const std::int32_t* __restrict__ table_rows, const std::int32_t* __restrict__ selected_blocks,
     const std::int32_t* __restrict__ selected_counts, const std::int32_t* __restrict__ block_tables,
-    int logical_pages, const __nv_bfloat16* __restrict__ key_pages,
-    const __nv_bfloat16* __restrict__ value_pages, __nv_bfloat16* __restrict__ output) {
+    int logical_pages, const StorageT* __restrict__ key_pages,
+    const StorageT* __restrict__ value_pages, __nv_bfloat16* __restrict__ output) {
     __shared__ float scores[256];
     __shared__ float reduction[256];
     const int dim             = static_cast<int>(threadIdx.x);
@@ -175,7 +244,7 @@ __global__ void sparse_attention_kernel(
             score = 0.0F;
             for (int feature = 0; feature < kHeadDim; ++feature) {
                 score =
-                    fmaf(__bfloat162float(q[feature]), __bfloat162float(cache_key[feature]), score);
+                    fmaf(__bfloat162float(q[feature]), to_float(cache_key[feature]), score);
             }
             score *= kScale;
         }
@@ -217,7 +286,7 @@ __global__ void sparse_attention_kernel(
                     kHeadDim +
                 dim;
             chunk_value =
-                fmaf(scores[local], __bfloat162float(value_pages[cache_index]), chunk_value);
+                fmaf(scores[local], to_float(value_pages[cache_index]), chunk_value);
         }
         accumulator = accumulator * prior_scale + chunk_value * chunk_scale;
         running_sum = running_sum * prior_scale + chunk_sum * chunk_scale;
@@ -254,29 +323,55 @@ void flash_next_qsa_attention_launch(const Tensor& token_indices, const Tensor& 
         static_cast<__nv_bfloat16*>(scratch.query.data),
         static_cast<__nv_bfloat16*>(scratch.gate.data), batch);
     CUDA_CHECK(cudaGetLastError());
-    prepare_append_kv_kernel<<<dim3(kKvHeads, batch), kHeadDim, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(scratch.projected.data),
-        static_cast<const __nv_bfloat16*>(key_norm.data),
-        static_cast<const std::int32_t*>(token_indices.data),
-        static_cast<const std::int32_t*>(mrope_positions.data),
-        static_cast<const std::int32_t*>(table_rows.data),
-        static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
-        static_cast<__nv_bfloat16*>(cache.key_pages.data),
-        static_cast<__nv_bfloat16*>(cache.value_pages.data),
-        static_cast<__nv_bfloat16*>(scratch.key.data),
-        static_cast<__nv_bfloat16*>(scratch.value.data), batch);
-    CUDA_CHECK(cudaGetLastError());
-    sparse_attention_kernel<<<dim3(kQueryHeads, batch), kHeadDim, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(scratch.query.data),
-        static_cast<const std::int32_t*>(token_indices.data),
-        static_cast<const std::int32_t*>(table_rows.data),
-        static_cast<const std::int32_t*>(selected_blocks.data),
-        static_cast<const std::int32_t*>(selected_counts.data),
-        static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
-        static_cast<const __nv_bfloat16*>(cache.key_pages.data),
-        static_cast<const __nv_bfloat16*>(cache.value_pages.data),
-        static_cast<__nv_bfloat16*>(scratch.attended.data));
-    CUDA_CHECK(cudaGetLastError());
+    if (cache.key_pages.dtype == DType::FP8_E4M3FN) {
+        prepare_append_kv_kernel<__nv_fp8_e4m3><<<dim3(kKvHeads, batch), kHeadDim, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.projected.data),
+            static_cast<const __nv_bfloat16*>(key_norm.data),
+            static_cast<const std::int32_t*>(token_indices.data),
+            static_cast<const std::int32_t*>(mrope_positions.data),
+            static_cast<const std::int32_t*>(table_rows.data),
+            static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
+            static_cast<__nv_fp8_e4m3*>(cache.key_pages.data),
+            static_cast<__nv_fp8_e4m3*>(cache.value_pages.data),
+            static_cast<__nv_bfloat16*>(scratch.key.data),
+            static_cast<__nv_bfloat16*>(scratch.value.data), batch);
+        CUDA_CHECK(cudaGetLastError());
+        sparse_attention_kernel<__nv_fp8_e4m3><<<dim3(kQueryHeads, batch), kHeadDim, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.query.data),
+            static_cast<const std::int32_t*>(token_indices.data),
+            static_cast<const std::int32_t*>(table_rows.data),
+            static_cast<const std::int32_t*>(selected_blocks.data),
+            static_cast<const std::int32_t*>(selected_counts.data),
+            static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
+            static_cast<const __nv_fp8_e4m3*>(cache.key_pages.data),
+            static_cast<const __nv_fp8_e4m3*>(cache.value_pages.data),
+            static_cast<__nv_bfloat16*>(scratch.attended.data));
+        CUDA_CHECK(cudaGetLastError());
+    } else {
+        prepare_append_kv_kernel<__nv_bfloat16><<<dim3(kKvHeads, batch), kHeadDim, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.projected.data),
+            static_cast<const __nv_bfloat16*>(key_norm.data),
+            static_cast<const std::int32_t*>(token_indices.data),
+            static_cast<const std::int32_t*>(mrope_positions.data),
+            static_cast<const std::int32_t*>(table_rows.data),
+            static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
+            static_cast<__nv_bfloat16*>(cache.key_pages.data),
+            static_cast<__nv_bfloat16*>(cache.value_pages.data),
+            static_cast<__nv_bfloat16*>(scratch.key.data),
+            static_cast<__nv_bfloat16*>(scratch.value.data), batch);
+        CUDA_CHECK(cudaGetLastError());
+        sparse_attention_kernel<__nv_bfloat16><<<dim3(kQueryHeads, batch), kHeadDim, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.query.data),
+            static_cast<const std::int32_t*>(token_indices.data),
+            static_cast<const std::int32_t*>(table_rows.data),
+            static_cast<const std::int32_t*>(selected_blocks.data),
+            static_cast<const std::int32_t*>(selected_counts.data),
+            static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
+            static_cast<const __nv_bfloat16*>(cache.key_pages.data),
+            static_cast<const __nv_bfloat16*>(cache.value_pages.data),
+            static_cast<__nv_bfloat16*>(scratch.attended.data));
+        CUDA_CHECK(cudaGetLastError());
+    }
     const int elements    = kQueryHeads * kHeadDim * batch;
     constexpr int threads = 256;
     gate_output_kernel<<<(elements + threads - 1) / threads, threads, 0, stream>>>(
@@ -318,11 +413,12 @@ __global__ void qsa_prefill_prepare_query_kernel(const __nv_bfloat16* __restrict
     store_mrope(normalized, local_positions, destination, dim);
 }
 
+template <typename StorageT>
 __global__ void qsa_prefill_prepare_append_kv_kernel(
     const __nv_bfloat16* __restrict__ projected, const __nv_bfloat16* __restrict__ norm,
     const std::int32_t* __restrict__ token_indices, const std::int32_t* __restrict__ positions,
     int table_row, const std::int32_t* __restrict__ block_tables, int logical_pages,
-    __nv_bfloat16* __restrict__ key_pages, __nv_bfloat16* __restrict__ value_pages,
+    StorageT* __restrict__ key_pages, StorageT* __restrict__ value_pages,
     __nv_bfloat16* __restrict__ key, __nv_bfloat16* __restrict__ value, int tokens) {
     __shared__ float warp_squares[8];
     __shared__ __nv_bfloat16 normalized[kHeadDim];
@@ -360,17 +456,17 @@ __global__ void qsa_prefill_prepare_append_kv_kernel(
         ((static_cast<std::int64_t>(physical_page) * kKvHeads + head) * kPageTokens + page_offset) *
             kHeadDim +
         dim;
-    key_pages[page_index]   = key_destination[dim];
-    value_pages[page_index] = value_word;
+    key_pages[page_index]   = to_storage<StorageT>(key_destination[dim]);
+    value_pages[page_index] = to_storage<StorageT>(value_word);
 }
 
-template <int NUM_WARPS>
+template <int NUM_WARPS, typename StorageT>
 __global__ void qsa_prefill_sparse_attention_kernel(
     const __nv_bfloat16* __restrict__ query, const std::int32_t* __restrict__ token_indices,
     int table_row, const std::int32_t* __restrict__ selected_blocks,
     const std::int32_t* __restrict__ selected_counts, const std::int32_t* __restrict__ block_tables,
-    int logical_pages, const __nv_bfloat16* __restrict__ key_pages,
-    const __nv_bfloat16* __restrict__ value_pages, __nv_bfloat16* __restrict__ output) {
+    int logical_pages, const StorageT* __restrict__ key_pages,
+    const StorageT* __restrict__ value_pages, __nv_bfloat16* __restrict__ output) {
     
     constexpr int CHUNK_SIZE = 256;
     __shared__ float s_q[kHeadDim];
@@ -446,16 +542,15 @@ __global__ void qsa_prefill_sparse_attention_kernel(
             const auto* k_ptr1 = key_pages +
                 ((static_cast<std::int64_t>(phys1) * kKvHeads + kv_head) * kPageTokens + (cand1 % kPageTokens)) * kHeadDim;
             
-            const float4 k_vec0 = *reinterpret_cast<const float4*>(reinterpret_cast<const char*>(k_ptr0) + lane_id * 16);
-            const float4 k_vec1 = *reinterpret_cast<const float4*>(reinterpret_cast<const char*>(k_ptr1) + lane_id * 16);
-            const auto* bf16_k0 = reinterpret_cast<const __nv_bfloat16*>(&k_vec0);
-            const auto* bf16_k1 = reinterpret_cast<const __nv_bfloat16*>(&k_vec1);
+            float k_val0[8], k_val1[8];
+            VectorKV<StorageT>::load_8(k_ptr0, lane_id, k_val0);
+            VectorKV<StorageT>::load_8(k_ptr1, lane_id, k_val1);
 
             float dot0 = 0.0F, dot1 = 0.0F;
             #pragma unroll
             for (int i = 0; i < 8; ++i) {
-                dot0 = fmaf(reg_q[i], __bfloat162float(bf16_k0[i]), dot0);
-                dot1 = fmaf(reg_q[i], __bfloat162float(bf16_k1[i]), dot1);
+                dot0 = fmaf(reg_q[i], k_val0[i], dot0);
+                dot1 = fmaf(reg_q[i], k_val1[i], dot1);
             }
 
             #pragma unroll
@@ -474,13 +569,13 @@ __global__ void qsa_prefill_sparse_attention_kernel(
             const int phys0 = block_table_row[cand0 / kPageTokens];
             const auto* k_ptr0 = key_pages +
                 ((static_cast<std::int64_t>(phys0) * kKvHeads + kv_head) * kPageTokens + (cand0 % kPageTokens)) * kHeadDim;
-            const float4 k_vec0 = *reinterpret_cast<const float4*>(reinterpret_cast<const char*>(k_ptr0) + lane_id * 16);
-            const auto* bf16_k0 = reinterpret_cast<const __nv_bfloat16*>(&k_vec0);
+            float k_val0[8];
+            VectorKV<StorageT>::load_8(k_ptr0, lane_id, k_val0);
 
             float dot0 = 0.0F;
             #pragma unroll
             for (int i = 0; i < 8; ++i) {
-                dot0 = fmaf(reg_q[i], __bfloat162float(bf16_k0[i]), dot0);
+                dot0 = fmaf(reg_q[i], k_val0[i], dot0);
             }
             #pragma unroll
             for (int offset = 16; offset > 0; offset >>= 1) {
@@ -561,15 +656,14 @@ __global__ void qsa_prefill_sparse_attention_kernel(
             const auto* v_ptr1 = value_pages +
                 ((static_cast<std::int64_t>(phys1) * kKvHeads + kv_head) * kPageTokens + (cand1 % kPageTokens)) * kHeadDim;
             
-            const float4 v_vec0 = *reinterpret_cast<const float4*>(reinterpret_cast<const char*>(v_ptr0) + lane_id * 16);
-            const float4 v_vec1 = *reinterpret_cast<const float4*>(reinterpret_cast<const char*>(v_ptr1) + lane_id * 16);
-            const auto* bf16_v0 = reinterpret_cast<const __nv_bfloat16*>(&v_vec0);
-            const auto* bf16_v1 = reinterpret_cast<const __nv_bfloat16*>(&v_vec1);
+            float v_val0[8], v_val1[8];
+            VectorKV<StorageT>::load_8(v_ptr0, lane_id, v_val0);
+            VectorKV<StorageT>::load_8(v_ptr1, lane_id, v_val1);
 
             #pragma unroll
             for (int i = 0; i < 8; ++i) {
-                warp_acc[i] = fmaf(p0, __bfloat162float(bf16_v0[i]), warp_acc[i]);
-                warp_acc[i] = fmaf(p1, __bfloat162float(bf16_v1[i]), warp_acc[i]);
+                warp_acc[i] = fmaf(p0, v_val0[i], warp_acc[i]);
+                warp_acc[i] = fmaf(p1, v_val1[i], warp_acc[i]);
             }
         }
         if (v_base < count) {
@@ -579,11 +673,11 @@ __global__ void qsa_prefill_sparse_attention_kernel(
                 const int phys0 = block_table_row[cand0 / kPageTokens];
                 const auto* v_ptr0 = value_pages +
                     ((static_cast<std::int64_t>(phys0) * kKvHeads + kv_head) * kPageTokens + (cand0 % kPageTokens)) * kHeadDim;
-                const float4 v_vec0 = *reinterpret_cast<const float4*>(reinterpret_cast<const char*>(v_ptr0) + lane_id * 16);
-                const auto* bf16_v0 = reinterpret_cast<const __nv_bfloat16*>(&v_vec0);
+                float v_val0[8];
+                VectorKV<StorageT>::load_8(v_ptr0, lane_id, v_val0);
                 #pragma unroll
                 for (int i = 0; i < 8; ++i) {
-                    warp_acc[i] = fmaf(p0, __bfloat162float(bf16_v0[i]), warp_acc[i]);
+                    warp_acc[i] = fmaf(p0, v_val0[i], warp_acc[i]);
                 }
             }
         }
@@ -630,13 +724,14 @@ constexpr int kMmaThreads   = 32 * kMmaWarps;
 constexpr int kMmaNTiles    = kMmaBN / 8;
 constexpr int kHeadsPerKv   = 12;
 
+template <typename StorageT>
 __global__ __launch_bounds__(kMmaThreads)
 void qsa_prefill_sparse_attention_mma_kernel(
     const __nv_bfloat16* __restrict__ query, const std::int32_t* __restrict__ token_indices,
     int table_row, const std::int32_t* __restrict__ selected_blocks,
     const std::int32_t* __restrict__ selected_counts, const std::int32_t* __restrict__ block_tables,
-    int logical_pages, const __nv_bfloat16* __restrict__ key_pages,
-    const __nv_bfloat16* __restrict__ value_pages, __nv_bfloat16* __restrict__ output) {
+    int logical_pages, const StorageT* __restrict__ key_pages,
+    const StorageT* __restrict__ value_pages, __nv_bfloat16* __restrict__ output) {
     using ops::cp_async_zfill;
     using ops::cp_commit;
     using ops::cp_wait;
@@ -715,11 +810,13 @@ void qsa_prefill_sparse_attention_mma_kernel(
                  (valid ? (cand % kPageTokens) : 0)) *
                     kHeadDim +
                 k8 * 8;
-            cp_async_zfill<16, Cache::cg>(kdst, key_pages + kv_off, valid ? 16 : 0);
-            cp_async_zfill<16, Cache::cg>(vdst, value_pages + kv_off, valid ? 16 : 0);
+            stage_kv_vector(kdst, key_pages + kv_off, valid);
+            stage_kv_vector(vdst, value_pages + kv_off, valid);
         }
-        cp_commit();
-        cp_wait<0>();
+        if constexpr (std::is_same_v<StorageT, __nv_bfloat16>) {
+            cp_commit();
+            cp_wait<0>();
+        }
         __syncthreads();
 
         float tile_score[kMmaNTiles][4] = {};
@@ -819,13 +916,14 @@ void qsa_prefill_sparse_attention_mma_kernel(
 // G24: QK on all 4 warps (split 64-key N-tiles), PV as m16n8k16 over staged V.
 // BN stays 64 so the online-softmax tile and FP32 order match the G17 kernel.
 // P is rounded to BF16 after the FP32 rescale; that rounding is declared.
+template <typename StorageT>
 __global__ __launch_bounds__(kMmaThreads)
 void qsa_prefill_sparse_attention_mma_sched_kernel(
     const __nv_bfloat16* __restrict__ query, const std::int32_t* __restrict__ token_indices,
     int table_row, const std::int32_t* __restrict__ selected_blocks,
     const std::int32_t* __restrict__ selected_counts, const std::int32_t* __restrict__ block_tables,
-    int logical_pages, const __nv_bfloat16* __restrict__ key_pages,
-    const __nv_bfloat16* __restrict__ value_pages, __nv_bfloat16* __restrict__ output) {
+    int logical_pages, const StorageT* __restrict__ key_pages,
+    const StorageT* __restrict__ value_pages, __nv_bfloat16* __restrict__ output) {
     using ops::cp_async_zfill;
     using ops::cp_commit;
     using ops::cp_wait;
@@ -919,11 +1017,13 @@ void qsa_prefill_sparse_attention_mma_sched_kernel(
                  (valid ? (cand % kPageTokens) : 0)) *
                     kHeadDim +
                 k8 * 8;
-            cp_async_zfill<16, Cache::cg>(kdst, key_pages + kv_off, valid ? 16 : 0);
-            cp_async_zfill<16, Cache::cg>(vdst, value_pages + kv_off, valid ? 16 : 0);
+            stage_kv_vector(kdst, key_pages + kv_off, valid);
+            stage_kv_vector(vdst, value_pages + kv_off, valid);
         }
-        cp_commit();
-        cp_wait<0>();
+        if constexpr (std::is_same_v<StorageT, __nv_bfloat16>) {
+            cp_commit();
+            cp_wait<0>();
+        }
         __syncthreads();
 
         float tile_score[2][4] = {};
@@ -1068,53 +1168,104 @@ void flash_next_qsa_attention_prefill_launch(
         static_cast<__nv_bfloat16*>(scratch.query.data),
         static_cast<__nv_bfloat16*>(scratch.gate.data), tokens);
     CUDA_CHECK(cudaGetLastError());
-    qsa_prefill_prepare_append_kv_kernel<<<dim3(kKvHeads, tokens), kHeadDim, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(scratch.projected.data),
-        static_cast<const __nv_bfloat16*>(key_norm.data),
-        static_cast<const std::int32_t*>(token_indices.data),
-        static_cast<const std::int32_t*>(mrope_positions.data),
-        table_row,
-        static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
-        static_cast<__nv_bfloat16*>(cache.key_pages.data),
-        static_cast<__nv_bfloat16*>(cache.value_pages.data),
-        static_cast<__nv_bfloat16*>(scratch.key.data),
-        static_cast<__nv_bfloat16*>(scratch.value.data), tokens);
-    CUDA_CHECK(cudaGetLastError());
-    if (use_mma) {
-        const auto* q_ptr  = static_cast<const __nv_bfloat16*>(scratch.query.data);
-        const auto* ti_ptr = static_cast<const std::int32_t*>(token_indices.data);
-        const auto* sb_ptr = static_cast<const std::int32_t*>(selected_blocks.data);
-        const auto* sc_ptr = static_cast<const std::int32_t*>(selected_counts.data);
-        const auto* bt_ptr = static_cast<const std::int32_t*>(cache.block_tables.data);
-        const auto* k_ptr  = static_cast<const __nv_bfloat16*>(cache.key_pages.data);
-        const auto* v_ptr  = static_cast<const __nv_bfloat16*>(cache.value_pages.data);
-        auto* att_ptr      = static_cast<__nv_bfloat16*>(scratch.attended.data);
-        if (flash_next_qsa_mma_sched_new()) {
-            qsa_prefill_sparse_attention_mma_sched_kernel<<<dim3(kKvHeads, tokens), kMmaThreads, 0,
-                                                            stream>>>(
-                q_ptr, ti_ptr, table_row, sb_ptr, sc_ptr, bt_ptr, cache.block_tables.ne[0], k_ptr,
-                v_ptr, att_ptr);
+    const bool is_fp8 = (cache.key_pages.dtype == DType::FP8_E4M3FN);
+    if (is_fp8) {
+        qsa_prefill_prepare_append_kv_kernel<__nv_fp8_e4m3><<<dim3(kKvHeads, tokens), kHeadDim, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.projected.data),
+            static_cast<const __nv_bfloat16*>(key_norm.data),
+            static_cast<const std::int32_t*>(token_indices.data),
+            static_cast<const std::int32_t*>(mrope_positions.data),
+            table_row,
+            static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
+            static_cast<__nv_fp8_e4m3*>(cache.key_pages.data),
+            static_cast<__nv_fp8_e4m3*>(cache.value_pages.data),
+            static_cast<__nv_bfloat16*>(scratch.key.data),
+            static_cast<__nv_bfloat16*>(scratch.value.data), tokens);
+        CUDA_CHECK(cudaGetLastError());
+        if (use_mma) {
+            const auto* q_ptr  = static_cast<const __nv_bfloat16*>(scratch.query.data);
+            const auto* ti_ptr = static_cast<const std::int32_t*>(token_indices.data);
+            const auto* sb_ptr = static_cast<const std::int32_t*>(selected_blocks.data);
+            const auto* sc_ptr = static_cast<const std::int32_t*>(selected_counts.data);
+            const auto* bt_ptr = static_cast<const std::int32_t*>(cache.block_tables.data);
+            const auto* k_ptr  = static_cast<const __nv_fp8_e4m3*>(cache.key_pages.data);
+            const auto* v_ptr  = static_cast<const __nv_fp8_e4m3*>(cache.value_pages.data);
+            auto* att_ptr      = static_cast<__nv_bfloat16*>(scratch.attended.data);
+            if (flash_next_qsa_mma_sched_new()) {
+                qsa_prefill_sparse_attention_mma_sched_kernel<__nv_fp8_e4m3><<<dim3(kKvHeads, tokens), kMmaThreads, 0,
+                                                                stream>>>(
+                    q_ptr, ti_ptr, table_row, sb_ptr, sc_ptr, bt_ptr, cache.block_tables.ne[0], k_ptr,
+                    v_ptr, att_ptr);
+            } else {
+                qsa_prefill_sparse_attention_mma_kernel<__nv_fp8_e4m3><<<dim3(kKvHeads, tokens), kMmaThreads, 0,
+                                                          stream>>>(
+                    q_ptr, ti_ptr, table_row, sb_ptr, sc_ptr, bt_ptr, cache.block_tables.ne[0], k_ptr,
+                    v_ptr, att_ptr);
+            }
         } else {
-            qsa_prefill_sparse_attention_mma_kernel<<<dim3(kKvHeads, tokens), kMmaThreads, 0,
-                                                      stream>>>(
-                q_ptr, ti_ptr, table_row, sb_ptr, sc_ptr, bt_ptr, cache.block_tables.ne[0], k_ptr,
-                v_ptr, att_ptr);
+            constexpr int kPrefillWarps   = 4;
+            constexpr int kPrefillThreads = kPrefillWarps * 32;
+            qsa_prefill_sparse_attention_kernel<kPrefillWarps, __nv_fp8_e4m3>
+                <<<dim3(kQueryHeads, tokens), kPrefillThreads, 0, stream>>>(
+                    static_cast<const __nv_bfloat16*>(scratch.query.data),
+                    static_cast<const std::int32_t*>(token_indices.data), table_row,
+                    static_cast<const std::int32_t*>(selected_blocks.data),
+                    static_cast<const std::int32_t*>(selected_counts.data),
+                    static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
+                    static_cast<const __nv_fp8_e4m3*>(cache.key_pages.data),
+                    static_cast<const __nv_fp8_e4m3*>(cache.value_pages.data),
+                    static_cast<__nv_bfloat16*>(scratch.attended.data));
         }
+        CUDA_CHECK(cudaGetLastError());
     } else {
-        constexpr int kPrefillWarps   = 4;
-        constexpr int kPrefillThreads = kPrefillWarps * 32;
-        qsa_prefill_sparse_attention_kernel<kPrefillWarps>
-            <<<dim3(kQueryHeads, tokens), kPrefillThreads, 0, stream>>>(
-                static_cast<const __nv_bfloat16*>(scratch.query.data),
-                static_cast<const std::int32_t*>(token_indices.data), table_row,
-                static_cast<const std::int32_t*>(selected_blocks.data),
-                static_cast<const std::int32_t*>(selected_counts.data),
-                static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
-                static_cast<const __nv_bfloat16*>(cache.key_pages.data),
-                static_cast<const __nv_bfloat16*>(cache.value_pages.data),
-                static_cast<__nv_bfloat16*>(scratch.attended.data));
+        qsa_prefill_prepare_append_kv_kernel<__nv_bfloat16><<<dim3(kKvHeads, tokens), kHeadDim, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.projected.data),
+            static_cast<const __nv_bfloat16*>(key_norm.data),
+            static_cast<const std::int32_t*>(token_indices.data),
+            static_cast<const std::int32_t*>(mrope_positions.data),
+            table_row,
+            static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
+            static_cast<__nv_bfloat16*>(cache.key_pages.data),
+            static_cast<__nv_bfloat16*>(cache.value_pages.data),
+            static_cast<__nv_bfloat16*>(scratch.key.data),
+            static_cast<__nv_bfloat16*>(scratch.value.data), tokens);
+        CUDA_CHECK(cudaGetLastError());
+        if (use_mma) {
+            const auto* q_ptr  = static_cast<const __nv_bfloat16*>(scratch.query.data);
+            const auto* ti_ptr = static_cast<const std::int32_t*>(token_indices.data);
+            const auto* sb_ptr = static_cast<const std::int32_t*>(selected_blocks.data);
+            const auto* sc_ptr = static_cast<const std::int32_t*>(selected_counts.data);
+            const auto* bt_ptr = static_cast<const std::int32_t*>(cache.block_tables.data);
+            const auto* k_ptr  = static_cast<const __nv_bfloat16*>(cache.key_pages.data);
+            const auto* v_ptr  = static_cast<const __nv_bfloat16*>(cache.value_pages.data);
+            auto* att_ptr      = static_cast<__nv_bfloat16*>(scratch.attended.data);
+            if (flash_next_qsa_mma_sched_new()) {
+                qsa_prefill_sparse_attention_mma_sched_kernel<__nv_bfloat16><<<dim3(kKvHeads, tokens), kMmaThreads, 0,
+                                                                stream>>>(
+                    q_ptr, ti_ptr, table_row, sb_ptr, sc_ptr, bt_ptr, cache.block_tables.ne[0], k_ptr,
+                    v_ptr, att_ptr);
+            } else {
+                qsa_prefill_sparse_attention_mma_kernel<__nv_bfloat16><<<dim3(kKvHeads, tokens), kMmaThreads, 0,
+                                                          stream>>>(
+                    q_ptr, ti_ptr, table_row, sb_ptr, sc_ptr, bt_ptr, cache.block_tables.ne[0], k_ptr,
+                    v_ptr, att_ptr);
+            }
+        } else {
+            constexpr int kPrefillWarps   = 4;
+            constexpr int kPrefillThreads = kPrefillWarps * 32;
+            qsa_prefill_sparse_attention_kernel<kPrefillWarps, __nv_bfloat16>
+                <<<dim3(kQueryHeads, tokens), kPrefillThreads, 0, stream>>>(
+                    static_cast<const __nv_bfloat16*>(scratch.query.data),
+                    static_cast<const std::int32_t*>(token_indices.data), table_row,
+                    static_cast<const std::int32_t*>(selected_blocks.data),
+                    static_cast<const std::int32_t*>(selected_counts.data),
+                    static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
+                    static_cast<const __nv_bfloat16*>(cache.key_pages.data),
+                    static_cast<const __nv_bfloat16*>(cache.value_pages.data),
+                    static_cast<__nv_bfloat16*>(scratch.attended.data));
+        }
+        CUDA_CHECK(cudaGetLastError());
     }
-    CUDA_CHECK(cudaGetLastError());
     const int elements    = kQueryHeads * kHeadDim * tokens;
     constexpr int threads = 256;
     gate_output_kernel<<<(elements + threads - 1) / threads, threads, 0, stream>>>(

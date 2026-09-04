@@ -41,15 +41,40 @@ flash_next_floor_slots(std::uint32_t max_concurrency,
 }
 
 // Per 256-token group strides across all 12 QSA layers
-// Attention K + V: 12 layers * 4 pages/group * (256 * 64 * 2 heads * 2 bytes * 2 K/V) = 6,291,456
-// bytes
-inline constexpr std::size_t kAttentionKvBytesPerGroup =
+// Attention K + V (BF16): 12 layers * 4 pages/group * (256 * 64 * 2 heads * 2 bytes * 2 K/V) = 6,291,456 bytes
+inline constexpr std::size_t kAttentionKvBytesPerGroupBf16 =
     12ULL * 4ULL * (256ULL * 64ULL * 2ULL * 2ULL * 2ULL);
+// Attention K + V (FP8): 12 layers * 4 pages/group * (256 * 64 * 2 heads * 1 byte * 2 K/V) = 3,145,728 bytes
+inline constexpr std::size_t kAttentionKvBytesPerGroupFp8 =
+    12ULL * 4ULL * (256ULL * 64ULL * 2ULL * 1ULL * 2ULL);
+inline constexpr std::size_t kAttentionKvBytesPerGroup = kAttentionKvBytesPerGroupBf16;
+
 // Indexer block keys: 12 layers * 1 page/group * (128 * 64 * 2 bytes) = 196,608 bytes
 inline constexpr std::size_t kIndexerBlockKeysBytesPerGroup = 12ULL * (128ULL * 64ULL * 2ULL);
-// Total physical stride per 256-token group = 6,488,064 bytes
-inline constexpr std::size_t kPhysicalStrideBytesPerGroup =
-    kAttentionKvBytesPerGroup + kIndexerBlockKeysBytesPerGroup;
+
+// Total physical stride per 256-token group: BF16 = 6,488,064 bytes; FP8 = 3,342,336 bytes
+inline constexpr std::size_t kPhysicalStrideBytesPerGroupBf16 =
+    kAttentionKvBytesPerGroupBf16 + kIndexerBlockKeysBytesPerGroup;
+inline constexpr std::size_t kPhysicalStrideBytesPerGroupFp8 =
+    kAttentionKvBytesPerGroupFp8 + kIndexerBlockKeysBytesPerGroup;
+inline constexpr std::size_t kPhysicalStrideBytesPerGroup = kPhysicalStrideBytesPerGroupBf16;
+
+[[nodiscard]] inline constexpr std::size_t
+flash_next_attention_kv_bytes_per_group(KvCacheStorage storage) {
+    switch (storage) {
+    case KvCacheStorage::BFloat16:
+        return kAttentionKvBytesPerGroupBf16;
+    case KvCacheStorage::Fp8E4M3Row256:
+        return kAttentionKvBytesPerGroupFp8;
+    default:
+        throw std::invalid_argument("Flash-Next supports only --kv-dtype bf16 and fp8");
+    }
+}
+
+[[nodiscard]] inline constexpr std::size_t
+flash_next_physical_stride_bytes_per_group(KvCacheStorage storage) {
+    return flash_next_attention_kv_bytes_per_group(storage) + kIndexerBlockKeysBytesPerGroup;
+}
 
 // Recurrent state bytes per state slot across all recurrent modules
 // GDN conv (36 layers): 36 * (10240 * 3 * 2) = 2,211,840 bytes
@@ -148,6 +173,7 @@ struct FlashNextRuntimeConfig {
     std::uint32_t max_vision_tokens        = 4096;
     // Prefill QSA attention: GQA tiled MMA (12 query heads share each KV tile). Default off.
     bool use_qsa_prefill_mma               = true;
+    KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
 };
 
 struct FlashNextRuntimePlan {

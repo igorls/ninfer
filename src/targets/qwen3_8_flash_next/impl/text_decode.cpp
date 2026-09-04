@@ -103,10 +103,11 @@ void validate_flash_next_decode_state(const FlashNextDecodeStateView& state,
             throw std::invalid_argument("Flash-Next QSA indexer cache view is invalid");
         }
         const auto& att = state.qsa_attention_caches[i];
-        if (att.key_pages.dtype != DType::BF16 || att.key_pages.ne[0] != 256 ||
+        const auto att_kv_dt = att.key_pages.dtype;
+        if ((att_kv_dt != DType::BF16 && att_kv_dt != DType::FP8_E4M3FN) || att.key_pages.ne[0] != 256 ||
             att.key_pages.ne[1] != 64 || att.key_pages.ne[2] != 2 || att.key_pages.ne[3] <= 0 ||
             !att.key_pages.is_contiguous() || !aligned_to(att.key_pages.data, 16) ||
-            att.value_pages.dtype != DType::BF16 || att.value_pages.ne[0] != 256 ||
+            att.value_pages.dtype != att_kv_dt || att.value_pages.ne[0] != 256 ||
             att.value_pages.ne[1] != 64 || att.value_pages.ne[2] != 2 ||
             att.value_pages.ne[3] <= 0 || !att.value_pages.is_contiguous() ||
             !aligned_to(att.value_pages.data, 16) || att.block_tables.dtype != DType::I32 ||

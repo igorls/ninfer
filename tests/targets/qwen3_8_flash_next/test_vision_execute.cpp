@@ -1041,34 +1041,53 @@ int test_vision_no_double_allocation(DeviceContext& device) {
     ple_meta.head_offsets.fill(0);
     ple_meta.head_vocab_sizes.fill(1);
 
-    std::size_t free_before = 0, total_mem = 0;
-    CUDA_CHECK(cudaMemGetInfo(&free_before, &total_mem));
-
     auto program_impl = std::make_unique<ProgramImpl>(
         nullptr, plan, device, synth_text.view, synth_vision.view, ple_meta);
-    Program program(std::move(program_impl));
-    device.synchronize();
 
-    std::size_t free_after = 0;
-    CUDA_CHECK(cudaMemGetInfo(&free_after, &total_mem));
+    // Verify FlashNextVisionSession borrows its workspace directly from FlashNextRuntimeAllocation's
+    // workspace arena, rather than allocating a private DeviceBuffer (which previously caused double-allocation).
+    if (!program_impl->vision_session_.has_value()) {
+        std::cerr << "FAIL: test_vision_no_double_allocation: vision_session_ is not initialized\n";
+        return 1;
+    }
+    const auto& vs = *program_impl->vision_session_;
+    void* expected_ws_base = program_impl->allocation_.workspace().base();
+    std::size_t expected_ws_cap = program_impl->allocation_.workspace().capacity();
 
-    const std::size_t allocated_bytes = (free_before > free_after) ? (free_before - free_after) : 0;
-    const std::size_t planned_reservation = plan.total_device_bytes - plan.cuda_graph_allowance_bytes;
-
-    // Prior to D14 fix, vision allocated an extra unmeasured ~206.6 MiB buffer (DeviceBuffer in FlashNextVisionSession).
-    // With borrowed workspace from allocation_.workspace(), allocated_bytes matches planned_reservation
-    // (allowing 20 MiB for any device runtime internal tables/contexts, which is far below 206.6 MiB).
-    const std::size_t double_alloc_threshold = 50ULL * 1024ULL * 1024ULL;
-    if (allocated_bytes > planned_reservation + double_alloc_threshold) {
-        std::cerr << "FAIL: test_vision_no_double_allocation: allocated " << allocated_bytes
-                  << " bytes but planned reservation was " << planned_reservation
-                  << " bytes (extra unmeasured: " << (allocated_bytes - planned_reservation)
-                  << " bytes, double-allocation detected!)\n";
+    if (vs.workspace().data == nullptr || vs.workspace().data != expected_ws_base) {
+        std::cerr << "FAIL: test_vision_no_double_allocation: vision workspace base ("
+                  << vs.workspace().data << ") does not match program allocation workspace ("
+                  << expected_ws_base << ")\n";
+        return 1;
+    }
+    if (vs.workspace().bytes != expected_ws_cap) {
+        std::cerr << "FAIL: test_vision_no_double_allocation: vision workspace bytes ("
+                  << vs.workspace().bytes << ") does not match program allocation workspace capacity ("
+                  << expected_ws_cap << ")\n";
+        return 1;
+    }
+    if (vs.workspace_capacity_bytes() != plan.vision_workspace->capacity_bytes) {
+        std::cerr << "FAIL: test_vision_no_double_allocation: workspace capacity mismatch\n";
         return 1;
     }
 
-    std::cout << "PASS: test_vision_no_double_allocation (allocated=" << allocated_bytes
-              << " B, planned=" << planned_reservation << " B)\n";
+    Program program(std::move(program_impl));
+    const auto mem = program.memory_summary();
+    if (!mem.vision_workspace.has_value()) {
+        std::cerr << "FAIL: test_vision_no_double_allocation: memory summary has no vision workspace\n";
+        return 1;
+    }
+    if (mem.vision_workspace->general_capacity_bytes != plan.vision_workspace->general_capacity_bytes) {
+        std::cerr << "FAIL: test_vision_no_double_allocation: general capacity mismatch\n";
+        return 1;
+    }
+    if (mem.workspace.capacity_bytes != plan.workspace_bytes) {
+        std::cerr << "FAIL: test_vision_no_double_allocation: workspace capacity_bytes mismatch\n";
+        return 1;
+    }
+
+    std::cout << "PASS: test_vision_no_double_allocation (borrowed workspace verified at "
+              << expected_ws_base << ", capacity=" << expected_ws_cap << " B)\n";
     return 0;
 }
 
