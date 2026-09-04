@@ -20,6 +20,8 @@
 #include <iomanip>
 #include <iostream>
 #include <random>
+#include <set>
+#include <string>
 #include <vector>
 
 namespace {

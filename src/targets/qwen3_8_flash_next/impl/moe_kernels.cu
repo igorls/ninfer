@@ -937,6 +937,232 @@ __global__ __launch_bounds__(128, 4) void flash_next_moe_prefill_gate_up_mma_ker
     }
 }
 
+// Step 2c: Grouped Expert Gate & Up Projection (Optimized N=32 tokens, M=16 pairs, 256 threads / 8 warps)
+// Tile: 32 rows (16 Gate + 16 Up intermediate pairs) x 32 tokens per CTA (4 warps along N x 2 warps along M)
+// Warps 0..1: pairs 0..7, tokens 0..15; Warps 2..3: pairs 8..15, tokens 0..15
+// Warps 4..5: pairs 0..7, tokens 16..31; Warps 6..7: pairs 8..15, tokens 16..31
+// Threads: 256 threads (8 warps) per block -> doubles warp occupancy per SM!
+// Loop step: 32 tokens per iteration -> halves token loop iterations!
+// Shared memory: 40960 + 5248 (weights) + 40960 + 5248 (activations) = 92416 bytes (fits hardware limit 101,376).
+__global__ __launch_bounds__(256, 1) void flash_next_moe_prefill_gate_up_mma_v2_kernel(
+    const std::uint8_t* __restrict__ act_codes,     // [1280, tokens]
+    const std::uint8_t* __restrict__ act_scales,    // [160, tokens]
+    const std::int32_t* __restrict__ expert_offsets,
+    const std::int32_t* __restrict__ expert_counts,
+    const std::int32_t* __restrict__ active_experts,
+    const std::int32_t* __restrict__ active_count_ptr,
+    const std::int32_t* __restrict__ grouped_tokens,
+    const std::int32_t* __restrict__ grouped_paths,
+    const std::uint8_t* __restrict__ expert_codes,
+    const std::uint8_t* __restrict__ expert_scales,
+    const float* __restrict__ expert_divisors,
+    std::uint64_t code_stride,
+    std::uint64_t scale_stride,
+    __nv_bfloat16* __restrict__ activations) {
+
+    const int total_active = active_count_ptr[0];
+    const int active_idx   = static_cast<int>(blockIdx.y);
+    if (active_idx >= total_active) { return; }
+
+    const int expert = active_experts[active_idx];
+    const int count  = expert_counts[expert];
+    if (count <= 0) { return; }
+
+    const int pair_base = static_cast<int>(blockIdx.x) * 16;
+    if (pair_base >= kIntermediate) { return; }
+
+    const int tid        = static_cast<int>(threadIdx.x);
+    const int warp       = tid >> 5;
+    const int warp_n_grp = warp >> 2;                     // 0 for warps 0..3 (tok 0..15); 1 for warps 4..7 (tok 16..31)
+    const int warp_sub   = warp & 3;
+    const int warp_m     = warp_sub >> 1;                 // 0 for pairs 0..7; 1 for pairs 8..15
+    const int warp_n_sub = warp_sub & 1;                  // 0 for tok 0..7 / 16..23; 1 for tok 8..15 / 24..31
+    const int warp_n     = (warp_n_grp << 1) | warp_n_sub; // 0, 1, 2, 3 (tok 0..7, 8..15, 16..23, 24..31)
+    const int lane       = tid & 31;
+
+    extern __shared__ alignas(16) std::uint8_t s_dyn_mem[];
+    auto* s_w_codes  = s_dyn_mem;                                           // 32 * 1280 = 40960 bytes
+    auto* s_w_scales = s_dyn_mem + 40960;                                   // 32 * 164  =  5248 bytes
+    auto* s_a_codes  = s_dyn_mem + 40960 + 5248;                           // 32 * 1280 = 40960 bytes
+    auto* s_a_scales = s_dyn_mem + 40960 + 5248 + 40960;                   // 32 * 164  =  5248 bytes
+
+    const auto* exp_codes  = expert_codes + static_cast<std::uint64_t>(expert) * code_stride;
+    const auto* exp_scales = expert_scales + static_cast<std::uint64_t>(expert) * scale_stride;
+    const int offset       = expert_offsets[expert];
+    const float alpha      = 1.0F / expert_divisors[expert];
+
+    const int a_matrix      = lane >> 3;
+    const int a_row_offset  = (lane & 7) + ((a_matrix & 1) << 3);
+    const int a_column_byte = (a_matrix >> 1) * 16;
+    const int b_row_offset  = lane & 7;
+    const int b_column_byte = ((lane >> 3) & 1) * 16;
+    const int sfa_row       = ((lane & 1) << 3) | (lane >> 2);
+    const int sfb_row       = lane >> 2;
+
+    // 1. Cooperative load 32 rows of weights (40,960 bytes) across 256 threads (10 steps)
+    #pragma unroll
+    for (int i = tid * 16; i < 32 * 1280; i += 256 * 16) {
+        const int row = i / 1280;
+        const int col = i - row * 1280;
+        const int m_grp = row >> 4;   // 0 or 1
+        const int r_in  = row & 15;   // 0..15
+        const int p_off = m_grp * 8 + (r_in & 7);
+        const int global_row = (r_in < 8) ? (pair_base + p_off) : (pair_base + p_off + kIntermediate);
+        ops::cp_async<16, ops::Cache::cg>(s_w_codes + i,
+                                          exp_codes + static_cast<std::int64_t>(global_row) * 1280 + col);
+    }
+
+    // 2. Cooperative load 32 rows of weight scales (1,280 words) across 256 threads (5 steps)
+    #pragma unroll
+    for (int i = tid; i < 32 * 40; i += 256) {
+        const int row  = i / 40;
+        const int tile = i - row * 40;
+        const int m_grp = row >> 4;
+        const int r_in  = row & 15;
+        const int p_off = m_grp * 8 + (r_in & 7);
+        const int global_row = (r_in < 8) ? (pair_base + p_off) : (pair_base + p_off + kIntermediate);
+        const int m_tile     = global_row >> 7;   // global_row / 128
+        const int row_inner  = global_row & 127;  // global_row % 128
+        const int row_mod32  = row_inner & 31;
+        const int row_quart  = row_inner >> 5;
+        const std::int64_t off = (static_cast<std::int64_t>(m_tile * 40 + tile) << 9) |
+                                 (row_mod32 << 4) | (row_quart << 2);
+        ops::cp_async<4, ops::Cache::ca>(s_w_scales + row * 164 + tile * 4,
+                                         exp_scales + off);
+    }
+
+    // 3. Co-issue chunk-0 activations (32 tokens) concurrently with weights
+    #pragma unroll
+    for (int i = tid * 16; i < 32 * 1280; i += 256 * 16) {
+        const int tok_idx = i / 1280;
+        const int col     = i - tok_idx * 1280;
+        if (tok_idx < count) {
+            const int pos = offset + tok_idx;
+            const int tok = grouped_tokens[pos];
+            ops::cp_async<16, ops::Cache::ca>(s_a_codes + i,
+                                              act_codes + static_cast<std::int64_t>(tok) * 1280 + col);
+        } else {
+            *reinterpret_cast<uint4*>(s_a_codes + i) = make_uint4(0, 0, 0, 0);
+        }
+    }
+
+    #pragma unroll
+    for (int i = tid; i < 32 * 40; i += 256) {
+        const int tok_idx = i / 40;
+        const int tile    = i - tok_idx * 40;
+        if (tok_idx < count) {
+            const int pos = offset + tok_idx;
+            const int tok = grouped_tokens[pos];
+            ops::cp_async<4, ops::Cache::ca>(s_a_scales + tok_idx * 164 + tile * 4,
+                                             act_scales + static_cast<std::int64_t>(tok) * 160 + tile * 4);
+        } else {
+            *reinterpret_cast<std::uint32_t*>(s_a_scales + tok_idx * 164 + tile * 4) = 0;
+        }
+    }
+
+    ops::cp_commit();
+    ops::cp_wait<0>();
+    __syncthreads();
+
+    // 4. Token chunk loop (32 tokens per iteration)
+    for (int t_chunk = 0; t_chunk < count; t_chunk += 32) {
+        if (t_chunk > 0) {
+            #pragma unroll
+            for (int i = tid * 16; i < 32 * 1280; i += 256 * 16) {
+                const int tok_idx = i / 1280;
+                const int col     = i - tok_idx * 1280;
+                if (t_chunk + tok_idx < count) {
+                    const int pos = offset + t_chunk + tok_idx;
+                    const int tok = grouped_tokens[pos];
+                    ops::cp_async<16, ops::Cache::ca>(s_a_codes + i,
+                                                      act_codes + static_cast<std::int64_t>(tok) * 1280 + col);
+                } else {
+                    *reinterpret_cast<uint4*>(s_a_codes + i) = make_uint4(0, 0, 0, 0);
+                }
+            }
+
+            #pragma unroll
+            for (int i = tid; i < 32 * 40; i += 256) {
+                const int tok_idx = i / 40;
+                const int tile    = i - tok_idx * 40;
+                if (t_chunk + tok_idx < count) {
+                    const int pos = offset + t_chunk + tok_idx;
+                    const int tok = grouped_tokens[pos];
+                    ops::cp_async<4, ops::Cache::ca>(s_a_scales + tok_idx * 164 + tile * 4,
+                                                     act_scales + static_cast<std::int64_t>(tok) * 160 + tile * 4);
+                } else {
+                    *reinterpret_cast<std::uint32_t*>(s_a_scales + tok_idx * 164 + tile * 4) = 0;
+                }
+            }
+
+            ops::cp_commit();
+            ops::cp_wait<0>();
+            __syncthreads();
+        }
+
+        const int t_base    = t_chunk + warp_n * 8;
+        const int cur_batch = max(0, min(8, count - t_base));
+
+        if (cur_batch > 0) {
+            float accumulators[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            const auto* warp_w_codes  = s_w_codes + warp_m * (16 * 1280);
+            const auto* warp_w_scales = s_w_scales + warp_m * (16 * 164);
+            const auto* warp_a_codes  = s_a_codes + warp_n * (8 * 1280);
+            const auto* warp_a_scales = s_a_scales + warp_n * (8 * 164);
+
+            #pragma unroll 4
+            for (int k64 = 0; k64 < 40; ++k64) {
+                unsigned a[4];
+                unsigned b[2];
+
+                const int a_row = a_row_offset;
+                const auto* a_addr = warp_w_codes + a_row * 1280 + k64 * 32 + a_column_byte;
+                ops::ldmatrix_x4(a[0], a[1], a[2], a[3], ops::smem_addr(a_addr));
+
+                const int b_row = b_row_offset;
+                const auto* b_addr = warp_a_codes + b_row * 1280 + k64 * 32 + b_column_byte;
+                ops::ldmatrix_x2(b[0], b[1], ops::smem_addr(b_addr));
+
+                const uint32_t sfa = *reinterpret_cast<const uint32_t*>(warp_w_scales + sfa_row * 164 + k64 * 4);
+                const uint32_t sfb = *reinterpret_cast<const uint32_t*>(warp_a_scales + sfb_row * 164 + k64 * 4);
+
+                ops::mma_nvfp4_e4m3(accumulators[0], accumulators[1], accumulators[2], accumulators[3],
+                                   a[0], a[1], a[2], a[3], b[0], b[1], sfa, sfb);
+            }
+
+            const int tok0 = 2 * (lane & 3);
+            const int tok1 = tok0 + 1;
+            const int local_pair = lane >> 2;
+            const int pair = pair_base + warp_m * 8 + local_pair;
+
+            const float gate0 = accumulators[0] * alpha;
+            const float gate1 = accumulators[1] * alpha;
+            const float up0   = accumulators[2] * alpha;
+            const float up1   = accumulators[3] * alpha;
+
+            if (tok0 < cur_batch) {
+                const int pos = offset + t_base + tok0;
+                const int tok = grouped_tokens[pos];
+                const int path = grouped_paths[pos];
+                activations[(static_cast<std::int64_t>(tok) * kPaths + path) * kIntermediate + pair] =
+                    __float2bfloat16_rn(ops::silu(gate0) * up0);
+            }
+            if (tok1 < cur_batch) {
+                const int pos = offset + t_base + tok1;
+                const int tok = grouped_tokens[pos];
+                const int path = grouped_paths[pos];
+                activations[(static_cast<std::int64_t>(tok) * kPaths + path) * kIntermediate + pair] =
+                    __float2bfloat16_rn(ops::silu(gate1) * up1);
+            }
+        }
+
+        if (t_chunk + 32 < count) {
+            __syncthreads();
+        }
+    }
+}
+
+
 // Step 3: Shared Expert Gate & Up Projection (Vectorized 128-bit loads)
 // CTA: 256 threads (8 warps). Each warp processes 1 pair -> 8 pairs per CTA.
 // Grid.x = 640 / 8 = 80, Grid.y = (tokens + 7) / 8.
@@ -1621,6 +1847,7 @@ __global__ void flash_next_moe_bf16_down_kernel(
 // achieves 1.26x+ higher throughput.
 constexpr int kMmaPrefillThreshold = 512;
 
+
 void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weights,
                                    const FlashNextMoeWorkspace& workspace, Tensor& output,
                                    cudaStream_t stream) {
@@ -1716,20 +1943,42 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
 
             // 4. Grouped Expert Gate & Up (Native NVFP4 Tensor Core MMA)
             static const bool s_mma_smem_init = []() {
-                cudaFuncSetAttribute(flash_next_moe_prefill_gate_up_mma_kernel<false>,
-                                     cudaFuncAttributeMaxDynamicSharedMemorySize, 69312);
-                cudaFuncSetAttribute(flash_next_moe_prefill_gate_up_mma_kernel<true>,
-                                     cudaFuncAttributeMaxDynamicSharedMemorySize, 92416);
+                CUDA_CHECK(cudaFuncSetAttribute(flash_next_moe_prefill_gate_up_mma_kernel<false>,
+                                                cudaFuncAttributeMaxDynamicSharedMemorySize, 69312));
+                CUDA_CHECK(cudaFuncSetAttribute(flash_next_moe_prefill_gate_up_mma_kernel<true>,
+                                                cudaFuncAttributeMaxDynamicSharedMemorySize, 92416));
+                CUDA_CHECK(cudaFuncSetAttribute(flash_next_moe_prefill_gate_up_mma_v2_kernel,
+                                                cudaFuncAttributeMaxDynamicSharedMemorySize, 92416));
                 return true;
             }();
             (void)s_mma_smem_init;
 
             const char* staging_env = std::getenv("NINFER_FLASH_NEXT_MOE_STAGING");
-            const bool staging_new = staging_env && (std::strcmp(staging_env, "new") == 0 ||
-                                                     std::strcmp(staging_env, "1") == 0);
+            const bool staging_legacy = staging_env && (std::strcmp(staging_env, "0") == 0 ||
+                                                         std::strcmp(staging_env, "legacy") == 0 ||
+                                                         std::strcmp(staging_env, "old") == 0);
+            const bool staging_v1 = staging_env && (std::strcmp(staging_env, "1") == 0 ||
+                                                     std::strcmp(staging_env, "v1") == 0);
 
-            const dim3 gate_grid(kIntermediate / 16, 512);
-            if (staging_new) {
+            if (staging_legacy) {
+                const dim3 gate_grid(kIntermediate / 16, 512);
+                flash_next_moe_prefill_gate_up_mma_kernel<false><<<gate_grid, 128, 69312, stream>>>(
+                    static_cast<const std::uint8_t*>(workspace.act_codes.data),
+                    static_cast<const std::uint8_t*>(workspace.act_scales.data),
+                    static_cast<const std::int32_t*>(workspace.expert_offsets.data),
+                    static_cast<const std::int32_t*>(workspace.expert_counts.data),
+                    static_cast<const std::int32_t*>(workspace.active_expert_ids.data),
+                    static_cast<const std::int32_t*>(workspace.active_count.data),
+                    static_cast<const std::int32_t*>(workspace.grouped_tokens.data),
+                    static_cast<const std::int32_t*>(workspace.grouped_paths.data),
+                    reinterpret_cast<const std::uint8_t*>(weights.expert_gate_up.codes),
+                    reinterpret_cast<const std::uint8_t*>(weights.expert_gate_up.scales),
+                    weights.expert_gate_up.weight_scale_divisors,
+                    weights.expert_gate_up.code_bytes_per_expert,
+                    weights.expert_gate_up.scale_bytes_per_expert,
+                    static_cast<__nv_bfloat16*>(workspace.activations.data));
+            } else if (staging_v1) {
+                const dim3 gate_grid(kIntermediate / 16, 512);
                 flash_next_moe_prefill_gate_up_mma_kernel<true><<<gate_grid, 128, 92416, stream>>>(
                     static_cast<const std::uint8_t*>(workspace.act_codes.data),
                     static_cast<const std::uint8_t*>(workspace.act_scales.data),
@@ -1746,7 +1995,9 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
                     weights.expert_gate_up.scale_bytes_per_expert,
                     static_cast<__nv_bfloat16*>(workspace.activations.data));
             } else {
-                flash_next_moe_prefill_gate_up_mma_kernel<false><<<gate_grid, 128, 69312, stream>>>(
+                // Default: High-throughput V2 MMA kernel (M=16 pairs, N=32 tokens, 256 threads / 8 warps)
+                const dim3 gate_grid(kIntermediate / 16, 512);
+                flash_next_moe_prefill_gate_up_mma_v2_kernel<<<gate_grid, 256, 92416, stream>>>(
                     static_cast<const std::uint8_t*>(workspace.act_codes.data),
                     static_cast<const std::uint8_t*>(workspace.act_scales.data),
                     static_cast<const std::int32_t*>(workspace.expert_offsets.data),
