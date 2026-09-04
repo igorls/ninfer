@@ -50,6 +50,14 @@ int test_constants_and_math() {
         std::cerr << "kGdnSsmBytesPerSlot mismatch: " << kGdnSsmBytesPerSlot << "\n";
         return 1;
     }
+    if (flash_next_gdn_ssm_bytes_per_slot(ninfer::GdnStateStorage::FP32) != 113'246'208ULL) {
+        std::cerr << "flash_next_gdn_ssm_bytes_per_slot(FP32) mismatch\n";
+        return 1;
+    }
+    if (flash_next_gdn_ssm_bytes_per_slot(ninfer::GdnStateStorage::BF16) != 56'623'104ULL) {
+        std::cerr << "flash_next_gdn_ssm_bytes_per_slot(BF16) mismatch\n";
+        return 1;
+    }
     if (kPleConvBytesPerSlot != 184'320ULL) {
         std::cerr << "kPleConvBytesPerSlot mismatch: " << kPleConvBytesPerSlot << "\n";
         return 1;
@@ -66,6 +74,14 @@ int test_constants_and_math() {
     if (kRecurrentStateBytesPerSlot != 115'655'232ULL) {
         std::cerr << "kRecurrentStateBytesPerSlot mismatch: " << kRecurrentStateBytesPerSlot
                   << "\n";
+        return 1;
+    }
+    if (flash_next_recurrent_state_bytes_per_slot(ninfer::GdnStateStorage::FP32) != 115'655'232ULL) {
+        std::cerr << "flash_next_recurrent_state_bytes_per_slot(FP32) mismatch\n";
+        return 1;
+    }
+    if (flash_next_recurrent_state_bytes_per_slot(ninfer::GdnStateStorage::BF16) != 59'032'128ULL) {
+        std::cerr << "flash_next_recurrent_state_bytes_per_slot(BF16) mismatch\n";
         return 1;
     }
 
@@ -395,6 +411,30 @@ int test_capacity_curve_and_finalize() {
         return 1;
     } catch (const std::invalid_argument&) {}
 
+    // 4. Verify 64-slot (C=8 floor 16 + 48 continuations) exact recurrent state savings
+    FlashNextRuntimeConfig cfg64_fp32{
+        .max_concurrency       = 8,
+        .max_context           = 2048,
+        .state_slot_capacity   = 64,
+        .continuation_capacity = 48,
+        .prefill_chunk         = 1024,
+        .gdn_state_storage     = ninfer::GdnStateStorage::FP32,
+    };
+    FlashNextRuntimeConfig cfg64_bf16 = cfg64_fp32;
+    cfg64_bf16.gdn_state_storage      = ninfer::GdnStateStorage::BF16;
+
+    const auto plan64_fp32 = finalize_flash_next_runtime_plan(cfg64_fp32, 64);
+    const auto plan64_bf16 = finalize_flash_next_runtime_plan(cfg64_bf16, 64);
+    if (plan64_fp32.state_slots != 64 || plan64_bf16.state_slots != 64) {
+        std::cerr << "Expected 64 state slots\n";
+        return 1;
+    }
+    const std::size_t rec_diff = plan64_fp32.recurrent_state_bytes - plan64_bf16.recurrent_state_bytes;
+    if (rec_diff != 3'623'878'656ULL) {
+        std::cerr << "Recurrent state savings mismatch: expected 3623878656, got " << rec_diff << "\n";
+        return 1;
+    }
+
     std::cout << "PASS: test_capacity_curve_and_finalize\n";
     return 0;
 }
@@ -402,111 +442,123 @@ int test_capacity_curve_and_finalize() {
 int test_runtime_allocation_and_slots(ninfer::DeviceContext& device) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
 
-    FlashNextRuntimeConfig cfg{
-        .max_concurrency     = 2,
-        .max_context         = 256,
-        .state_slot_capacity = 4,
-        .prefill_chunk       = 128,
-    };
-    const auto curve = flash_next_capacity_curve(cfg);
-    auto plan        = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
+    for (const auto storage : {ninfer::GdnStateStorage::FP32, ninfer::GdnStateStorage::BF16}) {
+        FlashNextRuntimeConfig cfg{
+            .max_concurrency     = 2,
+            .max_context         = 256,
+            .state_slot_capacity = 4,
+            .prefill_chunk       = 128,
+            .gdn_state_storage   = storage,
+        };
+        const auto curve = flash_next_capacity_curve(cfg);
+        auto plan        = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
 
-    // 1. Test plan tamper rejection (byte mismatch and curve mismatch)
-    auto forged_plan_bytes = plan;
-    forged_plan_bytes.total_device_bytes -= 1024;
-    try {
-        FlashNextRuntimeAllocation bad_alloc(forged_plan_bytes);
-        std::cerr << "Failed to reject tampered bytes in plan\n";
-        return 1;
-    } catch (const std::invalid_argument&) {}
+        // 1. Test plan tamper rejection (byte mismatch and curve mismatch)
+        auto forged_plan_bytes = plan;
+        forged_plan_bytes.total_device_bytes -= 1024;
+        try {
+            FlashNextRuntimeAllocation bad_alloc(forged_plan_bytes);
+            std::cerr << "Failed to reject tampered bytes in plan\n";
+            return 1;
+        } catch (const std::invalid_argument&) {}
 
-    auto forged_plan_curve = plan;
-    forged_plan_curve.capacity_curve.minimum_main_page_groups += 1;
-    try {
-        FlashNextRuntimeAllocation bad_alloc(forged_plan_curve);
-        std::cerr << "Failed to reject tampered curve in plan\n";
-        return 1;
-    } catch (const std::invalid_argument&) {}
+        auto forged_plan_curve = plan;
+        forged_plan_curve.capacity_curve.minimum_main_page_groups += 1;
+        try {
+            FlashNextRuntimeAllocation bad_alloc(forged_plan_curve);
+            std::cerr << "Failed to reject tampered curve in plan\n";
+            return 1;
+        } catch (const std::invalid_argument&) {}
 
-    FlashNextRuntimeAllocation alloc(plan);
+        FlashNextRuntimeAllocation alloc(plan);
 
-    // 2. Initialize device slots and zero persistent recurrent state
-    alloc.initialize(device.stream);
-    device.synchronize();
+        // 2. Initialize device slots and zero persistent recurrent state
+        alloc.initialize(device.stream);
+        device.synchronize();
 
-    // Verify representative state values on device are zeroed
-    std::vector<std::uint16_t> ple_host(10'240 * 9 * 4, 0x1234);
-    CUDA_CHECK(cudaMemcpy(ple_host.data(), alloc.state_view().ple_convolution_states.data,
-                          ple_host.size() * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
-    for (std::size_t i = 0; i < ple_host.size(); ++i) {
-        if (ple_host[i] != 0) {
-            std::cerr << "PLE state not zeroed on initialization at index " << i << ": "
-                      << ple_host[i] << "\n";
+        // Verify representative state values on device are zeroed
+        std::vector<std::uint16_t> ple_host(10'240 * 9 * 4, 0x1234);
+        CUDA_CHECK(cudaMemcpy(ple_host.data(), alloc.state_view().ple_convolution_states.data,
+                              ple_host.size() * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+        for (std::size_t i = 0; i < ple_host.size(); ++i) {
+            if (ple_host[i] != 0) {
+                std::cerr << "PLE state not zeroed on initialization at index " << i << ": "
+                          << ple_host[i] << "\n";
+                return 1;
+            }
+        }
+
+        // Verify SSM states have the expected DType
+        const ninfer::DType expected_dtype = (storage == ninfer::GdnStateStorage::BF16)
+                                                 ? ninfer::DType::BF16
+                                                 : ninfer::DType::FP32;
+        if (alloc.state_view().gdn_ssm_states[0].dtype != expected_dtype) {
+            std::cerr << "SSM state tensor dtype mismatch\n";
             return 1;
         }
-    }
 
-    // 3. Verify state view passes validation
-    try {
-        validate_flash_next_decode_state(alloc.state_view(), plan.state_slots);
-    } catch (const std::exception& e) {
-        std::cerr << "State view failed validation: " << e.what() << "\n";
-        return 1;
-    }
-
-    // 4. Verify shared block tables across all 12 layers
-    for (std::size_t i = 1; i < kFullAttentionLayers; ++i) {
-        if (alloc.state_view().qsa_attention_caches[i].block_tables.data !=
-            alloc.state_view().qsa_attention_caches[0].block_tables.data) {
-            std::cerr << "Attention block tables not shared across layers\n";
+        // 3. Verify state view passes validation
+        try {
+            validate_flash_next_decode_state(alloc.state_view(), plan.state_slots);
+        } catch (const std::exception& e) {
+            std::cerr << "State view failed validation: " << e.what() << "\n";
             return 1;
         }
-        if (alloc.state_view().qsa_indexer_caches[i].block_tables.data !=
-            alloc.state_view().qsa_indexer_caches[0].block_tables.data) {
-            std::cerr << "Indexer block tables not shared across layers\n";
+
+        // 4. Verify shared block tables across all 12 layers
+        for (std::size_t i = 1; i < kFullAttentionLayers; ++i) {
+            if (alloc.state_view().qsa_attention_caches[i].block_tables.data !=
+                alloc.state_view().qsa_attention_caches[0].block_tables.data) {
+                std::cerr << "Attention block tables not shared across layers\n";
+                return 1;
+            }
+            if (alloc.state_view().qsa_indexer_caches[i].block_tables.data !=
+                alloc.state_view().qsa_indexer_caches[0].block_tables.data) {
+                std::cerr << "Indexer block tables not shared across layers\n";
+                return 1;
+            }
+        }
+
+        // 5. Verify initial device slots match host (source=0, destination=1 for row 0)
+        std::vector<std::int32_t> dev_src(2), dev_dst(2);
+        CUDA_CHECK(cudaMemcpy(dev_src.data(), alloc.round_tensors().source_slots.data,
+                              2 * sizeof(std::int32_t), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(dev_dst.data(), alloc.round_tensors().destination_slots.data,
+                              2 * sizeof(std::int32_t), cudaMemcpyDeviceToHost));
+        if (dev_src[0] != 0 || dev_dst[0] != 1 || dev_src[1] != 2 || dev_dst[1] != 3) {
+            std::cerr << "Initial device slot tensors mismatch\n";
             return 1;
         }
-    }
 
-    // 5. Verify initial device slots match host (source=0, destination=1 for row 0)
-    std::vector<std::int32_t> dev_src(2), dev_dst(2);
-    CUDA_CHECK(cudaMemcpy(dev_src.data(), alloc.round_tensors().source_slots.data,
-                          2 * sizeof(std::int32_t), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(dev_dst.data(), alloc.round_tensors().destination_slots.data,
-                          2 * sizeof(std::int32_t), cudaMemcpyDeviceToHost));
-    if (dev_src[0] != 0 || dev_dst[0] != 1 || dev_src[1] != 2 || dev_dst[1] != 3) {
-        std::cerr << "Initial device slot tensors mismatch\n";
-        return 1;
-    }
+        // 6. Test slot transactional commit and address stability
+        const void* initial_ple_data    = alloc.state_view().ple_convolution_states.data;
+        const void* initial_logits_data = alloc.round_tensors().logits.data;
 
-    // 6. Test slot transactional commit and address stability
-    const void* initial_ple_data    = alloc.state_view().ple_convolution_states.data;
-    const void* initial_logits_data = alloc.round_tensors().logits.data;
+        alloc.commit_row_slot(0, device.stream);
+        device.synchronize();
 
-    alloc.commit_row_slot(0, device.stream);
-    device.synchronize();
+        const auto new_src = alloc.current_source_slot(0);
+        const auto new_dst = alloc.current_destination_slot(0);
+        if (new_src != 1 || new_dst != 0) {
+            std::cerr << "Commit row slot failed host swap: expected src=1 dst=0, got src=" << new_src
+                      << " dst=" << new_dst << "\n";
+            return 1;
+        }
 
-    const auto new_src = alloc.current_source_slot(0);
-    const auto new_dst = alloc.current_destination_slot(0);
-    if (new_src != 1 || new_dst != 0) {
-        std::cerr << "Commit row slot failed host swap: expected src=1 dst=0, got src=" << new_src
-                  << " dst=" << new_dst << "\n";
-        return 1;
-    }
+        CUDA_CHECK(cudaMemcpy(dev_src.data(), alloc.round_tensors().source_slots.data,
+                              2 * sizeof(std::int32_t), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(dev_dst.data(), alloc.round_tensors().destination_slots.data,
+                              2 * sizeof(std::int32_t), cudaMemcpyDeviceToHost));
+        if (dev_src[0] != 1 || dev_dst[0] != 0) {
+            std::cerr << "Device slot tensors not updated after commit\n";
+            return 1;
+        }
 
-    CUDA_CHECK(cudaMemcpy(dev_src.data(), alloc.round_tensors().source_slots.data,
-                          2 * sizeof(std::int32_t), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(dev_dst.data(), alloc.round_tensors().destination_slots.data,
-                          2 * sizeof(std::int32_t), cudaMemcpyDeviceToHost));
-    if (dev_src[0] != 1 || dev_dst[0] != 0) {
-        std::cerr << "Device slot tensors not updated after commit\n";
-        return 1;
-    }
-
-    if (alloc.state_view().ple_convolution_states.data != initial_ple_data ||
-        alloc.round_tensors().logits.data != initial_logits_data) {
-        std::cerr << "Device tensor pointers changed after slot commit\n";
-        return 1;
+        if (alloc.state_view().ple_convolution_states.data != initial_ple_data ||
+            alloc.round_tensors().logits.data != initial_logits_data) {
+            std::cerr << "Device tensor pointers changed after slot commit\n";
+            return 1;
+        }
     }
 
     std::cout << "PASS: test_runtime_allocation_and_slots\n";

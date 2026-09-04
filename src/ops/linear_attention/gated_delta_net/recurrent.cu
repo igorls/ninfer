@@ -18,7 +18,7 @@ static_assert(sizeof(GdnReplayFoldKernelRows) == 128);
 static_assert(alignof(GdnReplayFoldKernelRows) == 16);
 static_assert(std::is_trivially_copyable_v<GdnReplayFoldKernelRows>);
 
-template <bool NormalizeQK>
+template <bool NormalizeQK, typename StateReadT = float, typename StateWriteT = StateReadT>
 void launch_recurrent_direct_fixed(const Tensor& q, const Tensor& k, const Tensor& v,
                                    const Tensor& g, const Tensor& beta, float scale,
                                    const Tensor& state_read, Tensor& state_write, Tensor& out,
@@ -26,16 +26,16 @@ void launch_recurrent_direct_fixed(const Tensor& q, const Tensor& k, const Tenso
     const auto heads = head_map::of(q.ne[1], v.ne[1]);
     const dim3 grid(static_cast<unsigned>(v.ne[1]), 1, static_cast<unsigned>(kStateDim / kBlockDv));
     const dim3 block(kWarpSize, kNumWarps, 1);
-    recurrent_bf16_direct_kernel<NormalizeQK><<<grid, block, 0, stream>>>(
+    recurrent_bf16_direct_kernel<NormalizeQK, StateReadT, StateWriteT><<<grid, block, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(q.data), static_cast<const __nv_bfloat16*>(k.data),
         static_cast<const __nv_bfloat16*>(v.data), static_cast<const float*>(g.data),
-        static_cast<const float*>(beta.data), static_cast<const float*>(state_read.data),
-        static_cast<float*>(state_write.data), static_cast<__nv_bfloat16*>(out.data), q.ne[2],
+        static_cast<const float*>(beta.data), static_cast<const StateReadT*>(state_read.data),
+        static_cast<StateWriteT*>(state_write.data), static_cast<__nv_bfloat16*>(out.data), q.ne[2],
         heads, scale);
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <bool NormalizeInputs>
+template <bool NormalizeInputs, typename StateT = float>
 void launch_recurrent_batch_update_fixed(const Tensor& q, const Tensor& k, const Tensor& v,
                                          const Tensor& g, const Tensor& beta, float scale,
                                          Tensor& ssm_states, const Tensor& source_state_slots,
@@ -47,14 +47,14 @@ void launch_recurrent_batch_update_fixed(const Tensor& q, const Tensor& k, const
     const dim3 block(kWarpSize, kNumWarps, 1);
     const std::int64_t state_slot_stride =
         static_cast<std::int64_t>(kStateDim) * kStateDim * ssm_states.ne[2];
-    const BatchUpdateAccess access{
+    const BatchUpdateAccess<StateT> access{
         static_cast<const __nv_bfloat16*>(q.data),
         static_cast<const __nv_bfloat16*>(k.data),
         static_cast<const __nv_bfloat16*>(v.data),
         static_cast<const float*>(g.data),
         static_cast<const float*>(beta.data),
-        static_cast<const float*>(ssm_states.data),
-        static_cast<float*>(ssm_states.data),
+        static_cast<const StateT*>(ssm_states.data),
+        static_cast<StateT*>(ssm_states.data),
         static_cast<const std::int32_t*>(source_state_slots.data),
         static_cast<const std::int32_t*>(destination_state_slots.data),
         static_cast<__nv_bfloat16*>(out.data),
@@ -62,7 +62,7 @@ void launch_recurrent_batch_update_fixed(const Tensor& q, const Tensor& k, const
         state_slot_stride,
         scale,
     };
-    recurrent_batch_update_kernel<NormalizeInputs><<<grid, block, 0, stream>>>(access);
+    recurrent_batch_update_kernel<NormalizeInputs, StateT><<<grid, block, 0, stream>>>(access);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -132,12 +132,24 @@ void launch_replay_fold_fixed(const GdnReplayRecords& records,
 void launch_recurrent(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                       const Tensor& beta, float scale, bool normalize_qk, Tensor& ssm_state,
                       Tensor& out, cudaStream_t stream) {
-    if (normalize_qk) {
-        launch_recurrent_direct_fixed<true>(q, k, v, g, beta, scale, ssm_state, ssm_state, out,
-                                            stream);
+    if (ssm_state.dtype == DType::BF16) {
+        if (normalize_qk) {
+            launch_recurrent_direct_fixed<true, __nv_bfloat16, __nv_bfloat16>(
+                q, k, v, g, beta, scale, ssm_state, ssm_state, out, stream);
+        } else {
+            launch_recurrent_direct_fixed<false, __nv_bfloat16, __nv_bfloat16>(
+                q, k, v, g, beta, scale, ssm_state, ssm_state, out, stream);
+        }
+    } else if (ssm_state.dtype == DType::FP32) {
+        if (normalize_qk) {
+            launch_recurrent_direct_fixed<true, float, float>(q, k, v, g, beta, scale, ssm_state,
+                                                              ssm_state, out, stream);
+        } else {
+            launch_recurrent_direct_fixed<false, float, float>(q, k, v, g, beta, scale, ssm_state,
+                                                               ssm_state, out, stream);
+        }
     } else {
-        launch_recurrent_direct_fixed<false>(q, k, v, g, beta, scale, ssm_state, ssm_state, out,
-                                             stream);
+        throw std::invalid_argument("GDN recurrent launcher unsupported state dtype");
     }
 }
 
@@ -145,12 +157,40 @@ void launch_recurrent_inout(const Tensor& q, const Tensor& k, const Tensor& v, c
                             const Tensor& beta, float scale, bool normalize_qk,
                             const Tensor& ssm_state_in, Tensor& ssm_state_out, Tensor& out,
                             cudaStream_t stream) {
-    if (normalize_qk) {
-        launch_recurrent_direct_fixed<true>(q, k, v, g, beta, scale, ssm_state_in, ssm_state_out,
-                                            out, stream);
+    if (ssm_state_in.dtype == DType::BF16 && ssm_state_out.dtype == DType::BF16) {
+        if (normalize_qk) {
+            launch_recurrent_direct_fixed<true, __nv_bfloat16, __nv_bfloat16>(
+                q, k, v, g, beta, scale, ssm_state_in, ssm_state_out, out, stream);
+        } else {
+            launch_recurrent_direct_fixed<false, __nv_bfloat16, __nv_bfloat16>(
+                q, k, v, g, beta, scale, ssm_state_in, ssm_state_out, out, stream);
+        }
+    } else if (ssm_state_in.dtype == DType::FP32 && ssm_state_out.dtype == DType::FP32) {
+        if (normalize_qk) {
+            launch_recurrent_direct_fixed<true, float, float>(q, k, v, g, beta, scale, ssm_state_in,
+                                                              ssm_state_out, out, stream);
+        } else {
+            launch_recurrent_direct_fixed<false, float, float>(q, k, v, g, beta, scale, ssm_state_in,
+                                                               ssm_state_out, out, stream);
+        }
+    } else if (ssm_state_in.dtype == DType::FP32 && ssm_state_out.dtype == DType::BF16) {
+        if (normalize_qk) {
+            launch_recurrent_direct_fixed<true, float, __nv_bfloat16>(
+                q, k, v, g, beta, scale, ssm_state_in, ssm_state_out, out, stream);
+        } else {
+            launch_recurrent_direct_fixed<false, float, __nv_bfloat16>(
+                q, k, v, g, beta, scale, ssm_state_in, ssm_state_out, out, stream);
+        }
+    } else if (ssm_state_in.dtype == DType::BF16 && ssm_state_out.dtype == DType::FP32) {
+        if (normalize_qk) {
+            launch_recurrent_direct_fixed<true, __nv_bfloat16, float>(
+                q, k, v, g, beta, scale, ssm_state_in, ssm_state_out, out, stream);
+        } else {
+            launch_recurrent_direct_fixed<false, __nv_bfloat16, float>(
+                q, k, v, g, beta, scale, ssm_state_in, ssm_state_out, out, stream);
+        }
     } else {
-        launch_recurrent_direct_fixed<false>(q, k, v, g, beta, scale, ssm_state_in, ssm_state_out,
-                                             out, stream);
+        throw std::invalid_argument("GDN recurrent launcher unsupported state dtypes");
     }
 }
 
@@ -160,14 +200,28 @@ void launch_recurrent_batch_update(const Tensor& q, const Tensor& k, const Tenso
                                    const Tensor& source_state_slots,
                                    const Tensor& destination_state_slots, Tensor& out,
                                    cudaStream_t stream) {
-    if (normalize_qk) {
-        launch_recurrent_batch_update_fixed<true>(q, k, v, g, beta, scale, ssm_states,
-                                                  source_state_slots, destination_state_slots, out,
-                                                  stream);
+    if (ssm_states.dtype == DType::BF16) {
+        if (normalize_qk) {
+            launch_recurrent_batch_update_fixed<true, __nv_bfloat16>(
+                q, k, v, g, beta, scale, ssm_states, source_state_slots,
+                destination_state_slots, out, stream);
+        } else {
+            launch_recurrent_batch_update_fixed<false, __nv_bfloat16>(
+                q, k, v, g, beta, scale, ssm_states, source_state_slots,
+                destination_state_slots, out, stream);
+        }
+    } else if (ssm_states.dtype == DType::FP32) {
+        if (normalize_qk) {
+            launch_recurrent_batch_update_fixed<true, float>(
+                q, k, v, g, beta, scale, ssm_states, source_state_slots,
+                destination_state_slots, out, stream);
+        } else {
+            launch_recurrent_batch_update_fixed<false, float>(
+                q, k, v, g, beta, scale, ssm_states, source_state_slots,
+                destination_state_slots, out, stream);
+        }
     } else {
-        launch_recurrent_batch_update_fixed<false>(q, k, v, g, beta, scale, ssm_states,
-                                                   source_state_slots, destination_state_slots, out,
-                                                   stream);
+        throw std::invalid_argument("GDN recurrent batch update unsupported state dtype");
     }
 }
 

@@ -93,7 +93,8 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
         convolution_states.dtype != DType::BF16 || convolution_states.ne[0] != 10'240 ||
         convolution_states.ne[1] != 3 || convolution_states.ne[2] <= 0 ||
         convolution_states.ne[3] != 1 || !convolution_states.is_contiguous() ||
-        !aligned_to(convolution_states.data, 16) || ssm_states.dtype != DType::FP32 ||
+        !aligned_to(convolution_states.data, 16) ||
+        (ssm_states.dtype != DType::FP32 && ssm_states.dtype != DType::BF16) ||
         ssm_states.ne[0] != 128 || ssm_states.ne[1] != 128 || ssm_states.ne[2] != 48 ||
         ssm_states.ne[3] != convolution_states.ne[2] || !ssm_states.is_contiguous() ||
         !aligned_to(ssm_states.data, 16) || !exact_tensor(weights.a_log, DType::BF16, 48) ||
@@ -158,7 +159,8 @@ void flash_next_gdn_prefill_chunk(const Tensor& input, const GdnWeights& weights
         convolution_states.dtype != DType::BF16 || convolution_states.ne[0] != 10'240 ||
         convolution_states.ne[1] != 3 || convolution_states.ne[2] <= 0 ||
         convolution_states.ne[3] != 1 || !convolution_states.is_contiguous() ||
-        !aligned_to(convolution_states.data, 16) || ssm_states.dtype != DType::FP32 ||
+        !aligned_to(convolution_states.data, 16) ||
+        (ssm_states.dtype != DType::FP32 && ssm_states.dtype != DType::BF16) ||
         ssm_states.ne[0] != 128 || ssm_states.ne[1] != 128 || ssm_states.ne[2] != 48 ||
         ssm_states.ne[3] != convolution_states.ne[2] || !ssm_states.is_contiguous() ||
         !aligned_to(ssm_states.data, 16) || !exact_tensor(weights.a_log, DType::BF16, 48) ||

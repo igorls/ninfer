@@ -47,18 +47,20 @@ void launch_chunked(const Tensor& q, const Tensor& k, const Tensor& v, const Ten
     }
 
     chunked::state_passing_config state{};
-    state.H_qk      = q.ne[1];
-    state.H_v       = v.ne[1];
-    state.L         = q.ne[2];
-    state.W         = static_cast<const __nv_bfloat16*>(W.data);
-    state.U         = static_cast<const __nv_bfloat16*>(U.data);
-    state.k         = static_cast<const __nv_bfloat16*>(k.data);
-    state.g_cumsum  = static_cast<const float*>(g_cumsum.data);
-    state.state_in  = static_cast<const float*>(ssm_state_in.data);
-    state.v_new     = static_cast<__nv_bfloat16*>(v_new.data);
-    state.h_chunk   = static_cast<__nv_bfloat16*>(h_chunk.data);
-    state.state_out = static_cast<float*>(ssm_state_out.data);
-    state.stream    = stream;
+    state.H_qk            = q.ne[1];
+    state.H_v             = v.ne[1];
+    state.L               = q.ne[2];
+    state.W               = static_cast<const __nv_bfloat16*>(W.data);
+    state.U               = static_cast<const __nv_bfloat16*>(U.data);
+    state.k               = static_cast<const __nv_bfloat16*>(k.data);
+    state.g_cumsum        = static_cast<const float*>(g_cumsum.data);
+    state.state_in        = ssm_state_in.data;
+    state.state_in_dtype  = ssm_state_in.dtype;
+    state.v_new           = static_cast<__nv_bfloat16*>(v_new.data);
+    state.h_chunk         = static_cast<__nv_bfloat16*>(h_chunk.data);
+    state.state_out       = ssm_state_out.data;
+    state.state_out_dtype = ssm_state_out.dtype;
+    state.stream          = stream;
     CUDA_CHECK(chunked::launch_state_passing(state));
     if (hook != nullptr && hook->record_stage != nullptr) {
         hook->record_stage(hook->user_data, 1, stream);

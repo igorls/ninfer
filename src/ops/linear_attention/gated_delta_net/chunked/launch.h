@@ -80,11 +80,13 @@ struct state_passing_config {
     const __nv_bfloat16* U = nullptr;
     const __nv_bfloat16* k = nullptr;
     const float* g_cumsum  = nullptr;
-    const float* state_in  = nullptr;
+    const void* state_in   = nullptr;
+    DType state_in_dtype   = DType::FP32;
 
     __nv_bfloat16* v_new   = nullptr;
     __nv_bfloat16* h_chunk = nullptr;
-    float* state_out       = nullptr;
+    void* state_out        = nullptr;
+    DType state_out_dtype  = DType::FP32;
 
     cudaStream_t stream = nullptr;
 };

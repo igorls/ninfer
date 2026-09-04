@@ -137,12 +137,16 @@ void FlashNextRuntimeAllocation::materialize_views() {
         cur += gdn_conv_bytes;
     }
 
-    // 36 GDN SSM: [128, 128, 48, state_slots] FP32
+    // 36 GDN SSM: [128, 128, 48, state_slots] FP32 or BF16
+    const DType ssm_dtype = (plan_.config.gdn_state_storage == GdnStateStorage::BF16)
+                                ? DType::BF16
+                                : DType::FP32;
+    const std::size_t ssm_elem_size = dtype_size(ssm_dtype);
     const std::size_t gdn_ssm_bytes =
-        align_up_256(128ULL * 128ULL * 48ULL * plan_.state_slots * sizeof(float));
+        align_up_256(128ULL * 128ULL * 48ULL * plan_.state_slots * ssm_elem_size);
     for (std::size_t i = 0; i < kGdnLayers; ++i) {
         state_view_.gdn_ssm_states[i] =
-            Tensor(cur, DType::FP32, {128, 128, 48, static_cast<std::int32_t>(plan_.state_slots)});
+            Tensor(cur, ssm_dtype, {128, 128, 48, static_cast<std::int32_t>(plan_.state_slots)});
         cur += gdn_ssm_bytes;
     }
 
@@ -309,9 +313,11 @@ void FlashNextRuntimeAllocation::zero_slot(std::uint32_t slot_index, cudaStream_
                        slot_index * 10'240ULL * 3ULL * sizeof(std::uint16_t);
         CUDA_CHECK(cudaMemsetAsync(conv_p, 0, 10'240ULL * 3ULL * sizeof(std::uint16_t), stream));
 
+        const std::size_t ssm_elem_size = dtype_size(state_view_.gdn_ssm_states[i].dtype);
+        const std::size_t ssm_slot_bytes = 128ULL * 128ULL * 48ULL * ssm_elem_size;
         auto* ssm_p = static_cast<std::byte*>(state_view_.gdn_ssm_states[i].data) +
-                      slot_index * 128ULL * 128ULL * 48ULL * sizeof(float);
-        CUDA_CHECK(cudaMemsetAsync(ssm_p, 0, 128ULL * 128ULL * 48ULL * sizeof(float), stream));
+                      slot_index * ssm_slot_bytes;
+        CUDA_CHECK(cudaMemsetAsync(ssm_p, 0, ssm_slot_bytes, stream));
     }
 
     auto* ple_p = static_cast<std::byte*>(state_view_.ple_convolution_states.data) +
@@ -359,11 +365,13 @@ void FlashNextRuntimeAllocation::copy_state_slot(std::uint32_t src_slot, std::ui
         CUDA_CHECK(cudaMemcpyAsync(dst_conv_p, src_conv_p, 10'240ULL * 3ULL * sizeof(std::uint16_t),
                                    cudaMemcpyDeviceToDevice, stream));
 
+        const std::size_t ssm_elem_size = dtype_size(state_view_.gdn_ssm_states[i].dtype);
+        const std::size_t ssm_slot_bytes = 128ULL * 128ULL * 48ULL * ssm_elem_size;
         const auto* src_ssm_p = static_cast<const std::byte*>(state_view_.gdn_ssm_states[i].data) +
-                                src_slot * 128ULL * 128ULL * 48ULL * sizeof(float);
+                                src_slot * ssm_slot_bytes;
         auto* dst_ssm_p = static_cast<std::byte*>(state_view_.gdn_ssm_states[i].data) +
-                          dst_slot * 128ULL * 128ULL * 48ULL * sizeof(float);
-        CUDA_CHECK(cudaMemcpyAsync(dst_ssm_p, src_ssm_p, 128ULL * 128ULL * 48ULL * sizeof(float),
+                          dst_slot * ssm_slot_bytes;
+        CUDA_CHECK(cudaMemcpyAsync(dst_ssm_p, src_ssm_p, ssm_slot_bytes,
                                    cudaMemcpyDeviceToDevice, stream));
     }
 
