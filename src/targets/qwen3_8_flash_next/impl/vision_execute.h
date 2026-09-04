@@ -20,6 +20,8 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 class FlashNextVisionSession {
 public:
     FlashNextVisionSession(const VisionModelView& vision_view, DeviceContext& device,
+                           DeviceSpan workspace,
+                           const qwen3_vision::WorkspacePlan& workspace_plan,
                            std::uint32_t max_merged_tokens = 4096);
 
     ~FlashNextVisionSession() = default;
@@ -52,7 +54,7 @@ private:
     qwen3_vision::Encoder encoder_;
     std::uint32_t max_merged_tokens_ = 4096;
     qwen3_vision::WorkspacePlan workspace_plan_;
-    DeviceBuffer workspace_buf_;
+    DeviceSpan workspace_{};
     Tensor output_handoff_;
 
     double elapsed_seconds_           = 0.0;

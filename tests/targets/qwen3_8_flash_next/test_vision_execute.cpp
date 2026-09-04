@@ -508,7 +508,10 @@ int test_vision_adapter() {
 
 int test_vision_session_lifecycle(DeviceContext& device) {
     SyntheticVisionModel synth_vision(device);
-    FlashNextVisionSession session(synth_vision.view, device, 512);
+    const auto ws_plan = Encoder::plan_workspace(512, 64ULL * 1024ULL * 1024ULL, 2560);
+    DeviceBuffer test_ws(ws_plan.capacity_bytes);
+    DeviceSpan ws{test_ws.p, test_ws.bytes};
+    FlashNextVisionSession session(synth_vision.view, device, ws, ws_plan, 512);
 
     if (session.workspace_capacity_bytes() == 0) {
         std::cerr << "workspace_capacity_bytes is 0" << std::endl;
@@ -1016,6 +1019,59 @@ int test_g16_stale_vision_embeddings(DeviceContext& device) {
     return 0;
 }
 
+int test_vision_no_double_allocation(DeviceContext& device) {
+    auto synth_text = make_synthetic_model(device);
+    SyntheticVisionModel synth_vision(device);
+    device.synchronize();
+
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency     = 1,
+        .max_context         = 512,
+        .state_slot_capacity = 2,
+        .prefill_chunk       = 128,
+        .use_cuda_graph      = false,
+        .vision_enabled      = true,
+        .max_vision_tokens   = 512,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+
+    PleIndexMetadata ple_meta{};
+    ple_meta.multipliers.fill(0);
+    ple_meta.head_offsets.fill(0);
+    ple_meta.head_vocab_sizes.fill(1);
+
+    std::size_t free_before = 0, total_mem = 0;
+    CUDA_CHECK(cudaMemGetInfo(&free_before, &total_mem));
+
+    auto program_impl = std::make_unique<ProgramImpl>(
+        nullptr, plan, device, synth_text.view, synth_vision.view, ple_meta);
+    Program program(std::move(program_impl));
+    device.synchronize();
+
+    std::size_t free_after = 0;
+    CUDA_CHECK(cudaMemGetInfo(&free_after, &total_mem));
+
+    const std::size_t allocated_bytes = (free_before > free_after) ? (free_before - free_after) : 0;
+    const std::size_t planned_reservation = plan.total_device_bytes - plan.cuda_graph_allowance_bytes;
+
+    // Prior to D14 fix, vision allocated an extra unmeasured ~206.6 MiB buffer (DeviceBuffer in FlashNextVisionSession).
+    // With borrowed workspace from allocation_.workspace(), allocated_bytes matches planned_reservation
+    // (allowing 20 MiB for any device runtime internal tables/contexts, which is far below 206.6 MiB).
+    const std::size_t double_alloc_threshold = 50ULL * 1024ULL * 1024ULL;
+    if (allocated_bytes > planned_reservation + double_alloc_threshold) {
+        std::cerr << "FAIL: test_vision_no_double_allocation: allocated " << allocated_bytes
+                  << " bytes but planned reservation was " << planned_reservation
+                  << " bytes (extra unmeasured: " << (allocated_bytes - planned_reservation)
+                  << " bytes, double-allocation detected!)\n";
+        return 1;
+    }
+
+    std::cout << "PASS: test_vision_no_double_allocation (allocated=" << allocated_bytes
+              << " B, planned=" << planned_reservation << " B)\n";
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -1035,6 +1091,7 @@ int main() {
         if (test_vision_session_lifecycle(device) != 0) return 1;
         if (test_program_vision_request_and_chunk_clipping(device) != 0) return 1;
         if (test_g16_stale_vision_embeddings(device) != 0) return 1;
+        if (test_vision_no_double_allocation(device) != 0) return 1;
     } catch (const std::exception& ex) {
         std::cerr << "Fatal exception: " << ex.what() << std::endl;
         return 1;
