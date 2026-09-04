@@ -65,13 +65,17 @@ void validate_config_invariants(const FlashNextRuntimeConfig& config,
     if (resolved_state_slots == 0) {
         resolved_state_slots = min_state_slots;
     } else if (resolved_state_slots < min_state_slots || resolved_state_slots > kMaxStateSlots) {
-        // This is the path an operator hits by passing --max-private-continuations larger than the
-        // state-slot budget allows, so say what they can actually ask for at this concurrency
-        // rather than only what was rejected. Clamping instead of throwing would be friendlier but
-        // is NOT safe here: the Engine sizes its private catalog from the same option
-        // (engine_core.h:70) and would then hold more catalog entries than the target has
-        // continuation slots, which is the Engine/target slot disagreement that produced the
-        // concurrency-4 crash. A clear failure at startup beats an inconsistency under load.
+        // Defensive invariant for configs built directly -- tests, and any future caller that
+        // does not come through Package::make_sequence_planner, which now clamps
+        // --max-private-continuations to the state-slot budget before we ever get here. Say what
+        // can actually be asked for at this concurrency rather than only what was rejected.
+        //
+        // This comment previously argued that clamping was unsafe because the Engine sized its
+        // private catalog from the un-clamped option and would hold more entries than the target
+        // had continuation slots -- the disagreement behind the concurrency-4 crash. That is no
+        // longer true: construct_registered writes the clamped value back into the effective
+        // options (registry.cpp) and the Engine constructs its core from those, so the two sides
+        // now read the same number by construction.
         const std::uint32_t cont_cap_limit = kMaxStateSlots > slots_per_lane * config.max_concurrency
                                                  ? kMaxStateSlots - slots_per_lane * config.max_concurrency
                                                  : 0U;

@@ -231,6 +231,7 @@ public:
         active            = std::move(constructed.active);
         load              = std::move(constructed.load);
         sampling_defaults = constructed.sampling_defaults;
+        options           = std::move(constructed.effective_options);
         StartupPhaseScope finalize_phase(options.startup_observer, StartupPhase::EngineFinalize);
         core = std::visit(
             [&](auto& target_ptr) -> Core {

@@ -11,6 +11,7 @@
 #include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <stdexcept>
 #include <utility>
 
@@ -141,16 +142,24 @@ Package::SequencePlanner Package::make_sequence_planner(DeviceContext& device,
     // Every active lane needs a source and a destination recurrent-state slot, so the plan's
     // floor is 2 * max_concurrency. Context-cache continuation capacity adds slots on top of that floor.
     const std::uint32_t floor_slots = 2u * max_concurrency;
-    const std::uint32_t cont_cap =
+    const std::uint32_t cont_cap_limit =
+        detail::kMaxStateSlots > floor_slots ? (detail::kMaxStateSlots - floor_slots) : 0u;
+    const std::uint32_t requested_cont =
         options.context_cache.enabled && options.context_cache.max_private_continuations
             ? *options.context_cache.max_private_continuations
             : 0u;
+    const std::uint32_t cont_cap = std::min(requested_cont, cont_cap_limit);
+    if (requested_cont > cont_cap_limit) {
+        std::fprintf(stderr,
+                     "[state-sizer] Continuation capacity clamped from %u to %u (state slot ceiling %u, floor slots %u at concurrency %u).\n",
+                     requested_cont, cont_cap, detail::kMaxStateSlots, floor_slots, max_concurrency);
+    }
     const std::uint32_t total_state_slots = floor_slots + cont_cap;
     const bool is_mtp = options.speculative.backend == SpeculativeBackend::Mtp;
     detail::FlashNextRuntimeConfig config{
         .max_concurrency          = max_concurrency,
         .max_context              = options.max_context,
-        .state_slot_capacity      = std::min(64u, total_state_slots),
+        .state_slot_capacity      = total_state_slots,
         .continuation_capacity    = cont_cap,
         .prefill_chunk            = options.prefill_chunk,
         .speculative_draft_tokens = is_mtp ? options.speculative.draft_tokens : 0u,

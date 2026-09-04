@@ -44,6 +44,13 @@ std::uint32_t SequencePlan<Variant>::max_concurrency() const noexcept {
 }
 
 template <>
+std::uint32_t SequencePlan<Variant>::continuation_capacity() const noexcept {
+    return (impl_ != nullptr && impl_->context_cache.max_private_continuations.has_value())
+        ? *impl_->context_cache.max_private_continuations
+        : 0;
+}
+
+template <>
 std::size_t SequencePlan<Variant>::device_reservation_bytes() const noexcept {
     return impl_ != nullptr ? impl_->device_reservation_bytes : 0;
 }
