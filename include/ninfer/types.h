@@ -34,6 +34,11 @@ enum class KvCacheStorage : std::uint8_t {
     Fp8KeyNvfp4Value,
 };
 
+enum class GdnStateStorage : std::uint8_t {
+    FP32,
+    BF16,
+};
+
 enum class EnginePurpose : std::uint8_t {
     Generation,
     CausalScoring,
@@ -173,6 +178,8 @@ struct EngineOptions {
     bool quantize_output_head_fp8 = false;
     // Flash-Next only. Default off uses the scalar reduction QSA prefill path.
     bool use_qsa_prefill_mma      = true;
+    // Flash-Next only. GDN recurrent SSM state storage precision (FP32 default, BF16 for reduced memory).
+    GdnStateStorage gdn_state_storage = GdnStateStorage::FP32;
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
     StartupObserver startup_observer;

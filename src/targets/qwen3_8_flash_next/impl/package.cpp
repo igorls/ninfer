@@ -183,6 +183,7 @@ Package::SequencePlanner Package::make_sequence_planner(DeviceContext& device,
         .vision_enabled           = options.enable_vision,
         .max_vision_tokens        = 4096,
         .use_qsa_prefill_mma      = options.use_qsa_prefill_mma, // G18 serve flag; dropped by the upstream merge e650ee62, restored after window 6
+        .gdn_state_storage        = options.gdn_state_storage,
     };
     return SequencePlanner(std::make_unique<detail::SequencePlannerImpl>(config));
 }

@@ -55,6 +55,14 @@ KvCacheStorage parse_kv_dtype(const char* text) {
     throw std::invalid_argument("invalid kv-dtype: " + value);
 }
 
+GdnStateStorage parse_gdn_state_storage(const char* text) {
+    const std::string_view value(text);
+    if (value == "fp32") { return GdnStateStorage::FP32; }
+    if (value == "bf16") { return GdnStateStorage::BF16; }
+    throw std::invalid_argument("invalid --gdn-state-dtype: " + std::string(value) +
+                                " (expected fp32 or bf16)");
+}
+
 KvCapacityPolicy parse_kv_capacity(const char* text,
                                    std::size_t slack_floor_bytes = kDefaultKvCapacitySlackFloorBytes) {
     if (std::string_view(text) == "auto") {
@@ -82,7 +90,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--max-long-anchors-per-continuation N] "
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
-           "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash --draft-tokens N] "
+           "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--gdn-state-dtype fp32|bf16] "
+           "[--spec mtp|dflash --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--no-qsa-prefill-mma] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "
@@ -284,6 +293,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.device = parse_nonnegative_int(require_value("--device"), "device");
         } else if (arg == "--kv-dtype") {
             options.kv_cache = parse_kv_dtype(require_value("--kv-dtype"));
+        } else if (arg == "--gdn-state-dtype") {
+            options.gdn_state_storage = parse_gdn_state_storage(require_value("--gdn-state-dtype"));
         } else if (arg == "--spec") {
             options.speculative.backend =
                 product::parse_speculative_backend(require_value("--spec"));

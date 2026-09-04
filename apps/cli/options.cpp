@@ -61,6 +61,13 @@ KvCacheStorage parse_kv_cache(std::string_view text) {
     throw std::invalid_argument("invalid kv-dtype: " + std::string(text));
 }
 
+GdnStateStorage parse_gdn_state_storage(std::string_view text) {
+    if (text == "fp32") { return GdnStateStorage::FP32; }
+    if (text == "bf16") { return GdnStateStorage::BF16; }
+    throw std::invalid_argument("invalid --gdn-state-dtype: " + std::string(text) +
+                                " (expected fp32 or bf16)");
+}
+
 KvCapacityPolicy parse_kv_capacity(const char* text) {
     if (std::string_view(text) == "auto") { return KvCapacityPolicy::automatic(); }
     return KvCapacityPolicy::explicit_capacity(parse_u32(text, "kv-capacity"));
@@ -80,8 +87,8 @@ std::string usage_text(const char* argv0) {
            " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
            "       [--device N]\n"
-           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash --draft-tokens N]\n"
-           "       [--lm-head-draft]\n"
+           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--gdn-state-dtype fp32|bf16]\n"
+           "       [--spec mtp|dflash --draft-tokens N] [--lm-head-draft]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
            "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"
            "       [--stop-token-id N]... [--stop <text>]... [--reasoning-stop <text>]...\n"
@@ -136,6 +143,8 @@ Options parse_options(int argc, char** argv) {
             options.device = parse_device(value(arg));
         } else if (arg == "--kv-dtype") {
             options.kv_cache = parse_kv_cache(value(arg));
+        } else if (arg == "--gdn-state-dtype") {
+            options.gdn_state_storage = parse_gdn_state_storage(value(arg));
         } else if (arg == "--spec") {
             options.speculative.backend = product::parse_speculative_backend(value(arg));
         } else if (arg == "--draft-tokens") {

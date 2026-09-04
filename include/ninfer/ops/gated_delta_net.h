@@ -33,11 +33,11 @@ namespace ninfer::ops {
  *   ideal[:,h,t] = scale * S_h * q[:,qh,t].
  *
  * Shapes/dtypes are contiguous q/k BF16 [128,Hqk,T], v/out BF16 [128,Hv,T], g/beta FP32 [Hv,T],
- * and state FP32 [128,128,Hv], where Hqk>=1, Hv>=Hqk, and Hv%Hqk==0. `scale` is 1/sqrt(128). When
+ * and state FP32 or BF16 [128,128,Hv], where Hqk>=1, Hv>=Hqk, and Hv%Hqk==0. `scale` is 1/sqrt(128). When
  * `normalize_qk` is true, the recurrent implementation consumes raw q/k and applies
  * x / sqrt(sum(x^2) + 1e-6) independently to every 128-element row before using it. When false,
  * q/k are consumed as supplied. The oracle evaluates the complete recurrence and `ideal` naively
- * in FP64 from the represented inputs and FP32 initial state. The BF16 out is promoted and
+ * in FP64 from the represented inputs and initial state. The BF16 out is promoted and
  * compared directly with that result; output storage rounding belongs to the Op's numerical
  * criterion, not the oracle. Recurrent implementations may apply the normalization directly;
  * chunked implementations may use private normalized staging. The corresponding private storage
@@ -62,7 +62,7 @@ struct GdnChunkedStageHook {
 /**
  * Distinct-state form of the same recurrence. `ssm_state_out` receives the final state;
  * `ssm_state_in` and `ssm_state_out` may be disjoint or exactly the same storage. No other
- * arguments may overlap either state.
+ * arguments may overlap either state. State dtypes may be FP32 or BF16 and must match.
  */
 void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                      const Tensor& beta, float scale, bool normalize_qk, WorkspaceArena& ws,
@@ -72,7 +72,7 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
 
 /**
  * One-token update for B independent state-pool slots. q/k are contiguous BF16 [128,Hqk,1,B],
- * v/out are BF16 [128,Hv,1,B], g/beta are FP32 [Hv,1,B], `ssm_states` is contiguous FP32
+ * v/out are BF16 [128,Hv,1,B], g/beta are FP32 [Hv,1,B], `ssm_states` is contiguous FP32 or BF16
  * [128,128,Hv,Slots], and both selector tensors are contiguous device I32 [B]. B is in [1,8].
  * Row b reads source_state_slots[b] and publishes the transition to
  * destination_state_slots[b]; selectors may be equal for an in-place row. Destination slots are

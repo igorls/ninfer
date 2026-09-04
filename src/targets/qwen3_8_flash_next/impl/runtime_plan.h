@@ -62,10 +62,23 @@ inline constexpr std::size_t kPleConvBytesPerSlot = 10'240ULL * 9ULL * 2ULL;
 inline constexpr std::size_t kQsaRawKeysBytesPerSlot = 12ULL * (128ULL * 4ULL * 2ULL);
 // QSA raw positions (12 layers): 12 * (3 * 4 * 4) = 576 bytes
 inline constexpr std::size_t kQsaRawPositionsBytesPerSlot = 12ULL * (3ULL * 4ULL * 4ULL);
-// Total recurrent state per slot = 115,655,232 bytes
+// Total recurrent state per slot = 115,655,232 bytes (at default FP32 GDN state)
 inline constexpr std::size_t kRecurrentStateBytesPerSlot =
     kGdnConvBytesPerSlot + kGdnSsmBytesPerSlot + kPleConvBytesPerSlot + kQsaRawKeysBytesPerSlot +
     kQsaRawPositionsBytesPerSlot;
+
+[[nodiscard]] inline constexpr std::size_t
+flash_next_gdn_ssm_bytes_per_slot(GdnStateStorage storage) noexcept {
+    const std::size_t elem_size =
+        (storage == GdnStateStorage::BF16) ? sizeof(std::uint16_t) : sizeof(float);
+    return 36ULL * (128ULL * 128ULL * 48ULL * elem_size);
+}
+
+[[nodiscard]] inline constexpr std::size_t
+flash_next_recurrent_state_bytes_per_slot(GdnStateStorage storage) noexcept {
+    return kGdnConvBytesPerSlot + flash_next_gdn_ssm_bytes_per_slot(storage) +
+           kPleConvBytesPerSlot + kQsaRawKeysBytesPerSlot + kQsaRawPositionsBytesPerSlot;
+}
 
 inline constexpr std::uint32_t kPrefillChunkAlignment = 128;
 
@@ -148,6 +161,7 @@ struct FlashNextRuntimeConfig {
     std::uint32_t max_vision_tokens        = 4096;
     // Prefill QSA attention: GQA tiled MMA (12 query heads share each KV tile). Default off.
     bool use_qsa_prefill_mma               = true;
+    GdnStateStorage gdn_state_storage      = GdnStateStorage::FP32;
 };
 
 struct FlashNextRuntimePlan {

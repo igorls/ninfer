@@ -84,8 +84,10 @@ void validate_flash_next_decode_state(const FlashNextDecodeStateView& state,
         throw std::invalid_argument("Flash-Next PLE convolution state view is invalid");
     }
     for (std::size_t i = 0; i < kGdnLayers; ++i) {
+        const DType ssm_dtype = state.gdn_ssm_states[i].dtype;
         if (!exact_tensor(state.gdn_convolution_states[i], DType::BF16, 10'240, 3, state_slots) ||
-            !exact_tensor(state.gdn_ssm_states[i], DType::FP32, 128, 128, 48, state_slots)) {
+            (ssm_dtype != DType::FP32 && ssm_dtype != DType::BF16) ||
+            !exact_tensor(state.gdn_ssm_states[i], ssm_dtype, 128, 128, 48, state_slots)) {
             throw std::invalid_argument("Flash-Next GDN state view is invalid");
         }
     }

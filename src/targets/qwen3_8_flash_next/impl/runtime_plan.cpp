@@ -105,8 +105,11 @@ compute_fixed_base_bytes(const FlashNextRuntimeConfig& config, std::uint32_t res
     // 2. Recurrent states
     const std::size_t single_gdn_conv = checked_align_up_256(
         checked_mul<std::size_t>(10'240ULL * 3ULL * sizeof(std::uint16_t), resolved_state_slots));
+    const std::size_t gdn_ssm_elem_size = (config.gdn_state_storage == GdnStateStorage::BF16)
+                                              ? sizeof(std::uint16_t)
+                                              : sizeof(float);
     const std::size_t single_gdn_ssm = checked_align_up_256(
-        checked_mul<std::size_t>(128ULL * 128ULL * 48ULL * sizeof(float), resolved_state_slots));
+        checked_mul<std::size_t>(128ULL * 128ULL * 48ULL * gdn_ssm_elem_size, resolved_state_slots));
     const std::size_t ple_conv = checked_align_up_256(
         checked_mul<std::size_t>(10'240ULL * 9ULL * sizeof(std::uint16_t), resolved_state_slots));
     const std::size_t single_raw_keys = checked_align_up_256(

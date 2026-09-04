@@ -3,6 +3,8 @@
 #include "ops/common/mma.cuh"
 #include "ops/linear_attention/gated_delta_net/chunked/common.cuh"
 
+#include <type_traits>
+
 // Stage 3: chunk-sequential state passing.
 //
 // Math + I/O layouts: see the Gated DeltaNet chunked state_passing_config.
@@ -167,14 +169,14 @@ __device__ __forceinline__ void unpack_bf16x2_to_fp32_bits(unsigned packed, unsi
 
 // The narrow geometry targets two 128-register CTAs per SM. The wide geometry
 // uses one 512-thread CTA; both expose 16 resident warps without local spills.
-template <int NStrip>
+template <int NStrip, typename StateInT = float, typename StateOutT = StateInT>
 __launch_bounds__(kernel_dims<NStrip>::THREADS, kernel_dims<NStrip>::MIN_BLOCKS) __global__
     void state_passing_kernel(const __nv_bfloat16* __restrict__ W_in,
                               const __nv_bfloat16* __restrict__ U_in,
                               const __nv_bfloat16* __restrict__ k_in,
-                              const float* __restrict__ g_cumsum, const float* state_in,
+                              const float* __restrict__ g_cumsum, const StateInT* state_in,
                               __nv_bfloat16* __restrict__ v_new,
-                              __nv_bfloat16* __restrict__ h_chunk, float* state_out,
+                              __nv_bfloat16* __restrict__ h_chunk, StateOutT* state_out,
                               head_map qk_map, int chunks) {
     using D                         = kernel_dims<NStrip>;
     using L                         = smem_layout<NStrip>;
@@ -262,14 +264,25 @@ __launch_bounds__(kernel_dims<NStrip>::THREADS, kernel_dims<NStrip>::MIN_BLOCKS)
             const int row_g1 = row_g0 + 8;
             const int col_d0 = warp_d_global + 2 * lane_t;
             const int col_d1 = col_d0 + 1;
-            h_frag[m][0] =
-                load_ldg<float>(state_in + st_base + (int64_t)col_d0 * kStateDim + row_g0);
-            h_frag[m][1] =
-                load_ldg<float>(state_in + st_base + (int64_t)col_d1 * kStateDim + row_g0);
-            h_frag[m][2] =
-                load_ldg<float>(state_in + st_base + (int64_t)col_d0 * kStateDim + row_g1);
-            h_frag[m][3] =
-                load_ldg<float>(state_in + st_base + (int64_t)col_d1 * kStateDim + row_g1);
+            if constexpr (std::is_same_v<StateInT, __nv_bfloat16>) {
+                h_frag[m][0] = __bfloat162float(
+                    load_ldg<__nv_bfloat16>(state_in + st_base + (int64_t)col_d0 * kStateDim + row_g0));
+                h_frag[m][1] = __bfloat162float(
+                    load_ldg<__nv_bfloat16>(state_in + st_base + (int64_t)col_d1 * kStateDim + row_g0));
+                h_frag[m][2] = __bfloat162float(
+                    load_ldg<__nv_bfloat16>(state_in + st_base + (int64_t)col_d0 * kStateDim + row_g1));
+                h_frag[m][3] = __bfloat162float(
+                    load_ldg<__nv_bfloat16>(state_in + st_base + (int64_t)col_d1 * kStateDim + row_g1));
+            } else {
+                h_frag[m][0] =
+                    load_ldg<float>(state_in + st_base + (int64_t)col_d0 * kStateDim + row_g0);
+                h_frag[m][1] =
+                    load_ldg<float>(state_in + st_base + (int64_t)col_d1 * kStateDim + row_g0);
+                h_frag[m][2] =
+                    load_ldg<float>(state_in + st_base + (int64_t)col_d0 * kStateDim + row_g1);
+                h_frag[m][3] =
+                    load_ldg<float>(state_in + st_base + (int64_t)col_d1 * kStateDim + row_g1);
+            }
         }
     }
 
@@ -528,10 +541,17 @@ __launch_bounds__(kernel_dims<NStrip>::THREADS, kernel_dims<NStrip>::MIN_BLOCKS)
         const int k_g1 = k_g0 + 8;
         const int d0   = warp_d_global + 2 * lane_t;
         const int d1   = d0 + 1;
-        state_out[st_base + (int64_t)d0 * kStateDim + k_g0] = h_frag[m][0];
-        state_out[st_base + (int64_t)d1 * kStateDim + k_g0] = h_frag[m][1];
-        state_out[st_base + (int64_t)d0 * kStateDim + k_g1] = h_frag[m][2];
-        state_out[st_base + (int64_t)d1 * kStateDim + k_g1] = h_frag[m][3];
+        if constexpr (std::is_same_v<StateOutT, __nv_bfloat16>) {
+            state_out[st_base + (int64_t)d0 * kStateDim + k_g0] = __float2bfloat16(h_frag[m][0]);
+            state_out[st_base + (int64_t)d1 * kStateDim + k_g0] = __float2bfloat16(h_frag[m][1]);
+            state_out[st_base + (int64_t)d0 * kStateDim + k_g1] = __float2bfloat16(h_frag[m][2]);
+            state_out[st_base + (int64_t)d1 * kStateDim + k_g1] = __float2bfloat16(h_frag[m][3]);
+        } else {
+            state_out[st_base + (int64_t)d0 * kStateDim + k_g0] = h_frag[m][0];
+            state_out[st_base + (int64_t)d1 * kStateDim + k_g0] = h_frag[m][1];
+            state_out[st_base + (int64_t)d0 * kStateDim + k_g1] = h_frag[m][2];
+            state_out[st_base + (int64_t)d1 * kStateDim + k_g1] = h_frag[m][3];
+        }
     }
 }
 

@@ -13,7 +13,7 @@ struct FlashNextDecodeStateView {
     std::array<QsaIndexerCacheView, kFullAttentionLayers> qsa_indexer_caches;
     std::array<QsaAttentionCacheView, kFullAttentionLayers> qsa_attention_caches;
     std::array<Tensor, kGdnLayers> gdn_convolution_states; // BF16 [10240, 3, state_slots]
-    std::array<Tensor, kGdnLayers> gdn_ssm_states;         // FP32 [128, 128, 48, state_slots]
+    std::array<Tensor, kGdnLayers> gdn_ssm_states;         // FP32 or BF16 [128, 128, 48, state_slots]
     Tensor ple_convolution_states;                         // BF16 [10240, 9, state_slots]
 };
 
