@@ -15,3 +15,16 @@ target_link_libraries(ninfer_qwen3_8_flash_next_reference PRIVATE
   ninfer_core
   ninfer_ops
   CUDA::cudart)
+
+add_executable(ninfer_quantize_mtp
+  quantize_mtp.cpp)
+ninfer_internal_includes(ninfer_quantize_mtp)
+target_include_directories(ninfer_quantize_mtp PRIVATE
+  ${PROJECT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_8_flash_next)
+target_link_libraries(ninfer_quantize_mtp PRIVATE
+  ninfer_qwen3_8_flash_next
+  ninfer_artifact
+  ninfer_core
+  CUDA::cudart)
+

@@ -33,9 +33,9 @@ int test_synthetic_fixture_load_plans() {
             const auto plan = bind_artifact(binder, {.vision = true, .mtp = true});
             const auto& m   = plan.materialization;
 
-            if (m.object_count != 1'566 || m.device_objects.size() != 1'427 ||
-                m.mapped_tensor_objects.size() != 133 || m.host_objects.size() != 6 ||
-                m.device_capacity_bytes != 76'251'952'640ULL) {
+            if (m.object_count != 1'566 || m.device_objects.size() != 1'429 ||
+                m.mapped_tensor_objects.size() != 131 || m.host_objects.size() != 6 ||
+                m.device_capacity_bytes != 77'667'534'336ULL) {
                 std::cerr << "Synthetic full binding mismatch: objects=" << m.object_count
                           << " device=" << m.device_objects.size()
                           << " mapped=" << m.mapped_tensor_objects.size()
@@ -97,8 +97,8 @@ int test_synthetic_fixture_load_plans() {
             const auto plan = bind_artifact(binder, {.vision = false, .mtp = true});
             const auto& m   = plan.materialization;
 
-            if (m.object_count != 1'566 || m.device_objects.size() != 1'094 ||
-                m.mapped_tensor_objects.size() != 133 || m.host_objects.size() != 6) {
+            if (m.object_count != 1'566 || m.device_objects.size() != 1'096 ||
+                m.mapped_tensor_objects.size() != 131 || m.host_objects.size() != 6) {
                 std::cerr << "Synthetic text+mtp binding mismatch: objects=" << m.object_count
                           << " device=" << m.device_objects.size()
                           << " mapped=" << m.mapped_tensor_objects.size()
@@ -107,6 +107,33 @@ int test_synthetic_fixture_load_plans() {
             }
             if (plan.bindings.features.vision || !plan.bindings.features.mtp) {
                 std::cerr << "Synthetic text+mtp features mismatch\n";
+                return 1;
+            }
+        }
+
+        // Case 5: Legacy BF16 MTP fixture with full features
+        {
+            const auto legacy_fixture =
+                ninfer::test::flash_next_fixture::create_flash_next_synthetic_artifact(
+                    "load_plan_legacy_bf16", false);
+            const ninfer::artifact::Reader legacy_reader(legacy_fixture.path);
+            ninfer::artifact::Binder binder(legacy_reader);
+            const auto plan = bind_artifact(binder, {.vision = true, .mtp = true});
+            const auto& m   = plan.materialization;
+
+            if (m.object_count != 1'566 || m.device_objects.size() != 1'427 ||
+                m.mapped_tensor_objects.size() != 133 || m.host_objects.size() != 6 ||
+                m.device_capacity_bytes != 76'251'952'640ULL) {
+                std::cerr << "Synthetic legacy BF16 binding mismatch: objects=" << m.object_count
+                          << " device=" << m.device_objects.size()
+                          << " mapped=" << m.mapped_tensor_objects.size()
+                          << " host=" << m.host_objects.size()
+                          << " device_bytes=" << m.device_capacity_bytes << "\n";
+                return 1;
+            }
+            if (!plan.bindings.features.vision || !plan.bindings.features.mtp ||
+                plan.bindings.mtp.moe.experts_nvfp4) {
+                std::cerr << "Synthetic legacy features mismatch\n";
                 return 1;
             }
         }
@@ -134,9 +161,13 @@ int test_real_artifact_if_available() {
         const auto plan = bind_artifact(binder, {.vision = true, .mtp = true});
 
         const auto& m = plan.materialization;
-        if (m.object_count != 1'566 || m.device_objects.size() != 1'427 ||
-            m.mapped_tensor_objects.size() != 133 || m.host_objects.size() != 6 ||
-            m.device_capacity_bytes != 76'251'952'640ULL) {
+        const bool is_nvfp4 = plan.bindings.mtp.moe.experts_nvfp4;
+        const std::size_t expected_dev_objs = is_nvfp4 ? 1'429 : 1'427;
+        const std::size_t expected_mapped   = is_nvfp4 ? 131 : 133;
+        const std::uint64_t expected_bytes  = is_nvfp4 ? 77'667'534'336ULL : 76'251'952'640ULL;
+        if (m.object_count != 1'566 || m.device_objects.size() != expected_dev_objs ||
+            m.mapped_tensor_objects.size() != expected_mapped || m.host_objects.size() != 6 ||
+            m.device_capacity_bytes != expected_bytes) {
             std::cerr << "unexpected Flash-Next load plan: objects=" << m.object_count
                       << " device=" << m.device_objects.size()
                       << " mapped=" << m.mapped_tensor_objects.size()
