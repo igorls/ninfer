@@ -20,13 +20,15 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 class LoadPlan::Impl {
 public:
     Impl(WeightsProfile weights_profile_in, ArtifactLoadPlan target_plan,
-         bool quantize_output_head_fp8_in)
+         bool quantize_output_head_fp8_in, bool quantize_token_embedding_fp8_in)
         : weights_profile(weights_profile_in), plan(std::move(target_plan)),
-          quantize_output_head_fp8(quantize_output_head_fp8_in) {}
+          quantize_output_head_fp8(quantize_output_head_fp8_in),
+          quantize_token_embedding_fp8(quantize_token_embedding_fp8_in) {}
 
     WeightsProfile weights_profile;
     ArtifactLoadPlan plan;
     bool quantize_output_head_fp8 = false;
+    bool quantize_token_embedding_fp8 = false;
 };
 
 LoadPlan::LoadPlan(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
@@ -42,8 +44,9 @@ const artifact::MaterializationPlan& LoadPlan::materialization() const {
 class LoadedModel::Impl {
 public:
     Impl(BindingPlan plan, artifact::MaterializedArtifact materialized,
-         bool quantize_output_head_fp8)
-        : data(std::move(plan), std::move(materialized), quantize_output_head_fp8) {}
+         bool quantize_output_head_fp8, bool quantize_token_embedding_fp8)
+        : data(std::move(plan), std::move(materialized), quantize_output_head_fp8,
+               quantize_token_embedding_fp8) {}
 
     LoadedModelData data;
 };
@@ -110,7 +113,8 @@ Package::LoadPlan Package::plan_load(artifact::Binder& binder, const EngineOptio
                     .draft_head_rows  = draft_rows,
                 });
     return LoadPlan(std::make_unique<LoadPlan::Impl>(
-        weights_profile, std::move(target_plan), options.quantize_output_head_fp8));
+        weights_profile, std::move(target_plan), options.quantize_output_head_fp8,
+        options.quantize_token_embedding_fp8));
 }
 
 std::unique_ptr<Package::LoadedModel>
@@ -119,7 +123,7 @@ Package::construct_loaded_model(LoadPlan&& plan, artifact::MaterializedArtifact&
 
     auto impl = std::make_unique<detail::LoadedModel::Impl>(
         std::move(plan.impl_->plan.bindings), std::move(materialized),
-        plan.impl_->quantize_output_head_fp8);
+        plan.impl_->quantize_output_head_fp8, plan.impl_->quantize_token_embedding_fp8);
     plan.impl_.reset();
     return std::unique_ptr<LoadedModel>(new LoadedModel(std::move(impl)));
 }

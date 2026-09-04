@@ -178,6 +178,8 @@ struct EngineOptions {
     bool use_cuda_graph                    = true;
     // Flash-Next only. Default off keeps the BF16 output head and byte-identical serving.
     bool quantize_output_head_fp8 = false;
+    // Flash-Next only. Default off keeps the BF16 token embedding and byte-identical serving.
+    bool quantize_token_embedding_fp8 = false;
     // Flash-Next only. Default off uses the scalar reduction QSA prefill path.
     bool use_qsa_prefill_mma      = true;
     // Flash-Next only. GDN recurrent SSM state storage precision (FP32 default, BF16 for reduced memory).

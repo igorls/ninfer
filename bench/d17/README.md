@@ -1,16 +1,22 @@
-# Sequence D17 Item 2: Output-Head FP8 Quantizer & Greedy Divergence Benchmark
+# Sequence D17: Output-Head & Token-Embedding FP8 Quantizers & Greedy Divergence Benchmark
 
 ## 1. Overview & Rationale
 
-During the Flash-Next architecture audit, a dormant quantizer was identified at `src/targets/qwen3_8_flash_next/impl/load/materialized.cpp:271`:
-```cpp
-quantize_bf16_output_head_to_fp8_e4m3_row_f32s(text.output_head, output_head_fp8, fp8_head, ...)
-```
-While the kernel implementation and unit verification (`tests/targets/qwen3_8_flash_next/test_output_head_fp8.cpp`) were already complete, the quantization pass was hardcoded to `false` and not exposed to user-facing CLI or server flags.
+During the Flash-Next architecture audit, two high-footprint BF16 projection tensors were identified:
+1. **Output Head** (`src/targets/qwen3_8_flash_next/impl/load/materialized.cpp:271`):
+   - Projects final hidden state to vocabulary logits ($248,320 \times 2,560$).
+   - In BF16, occupies **1,271,398,400 bytes (~1.18 GiB)**.
+   - In FP8 E4M3 with row-wise float32 scaling, occupies **636,692,480 bytes (~607 MiB)**, saving **~605 MiB** device VRAM.
+2. **Token Embedding** (`text.token_embedding`, shape $248,320 \times 2,560$):
+   - Maps input token IDs to hidden states across the trunk and MTP stem.
+   - Shares the exact same dimension ($248,320 \times 2,560$, **~1.18 GiB** in BF16).
+   - In FP8 E4M3 with row-wise float32 scaling, occupies **636,692,480 bytes (~607 MiB)**, saving an additional **~605 MiB** device VRAM.
+   - **Combined Net Savings**: **~1,273 MiB (~1.21 GiB)** GPU VRAM reduction when both output head and token embedding are quantized.
 
-- **Storage Impact**: The Qwen3.8-Flash-Next output head is a $248,320 \times 2,560$ projection matrix. In BF16, this single unquantized tensor occupies **1,271,398,400 bytes (~1.18 GiB)** of device VRAM. In FP8 E4M3 with row-wise float32 scaling, it occupies **636,692,480 bytes (~607 MiB)**, yielding **~605 MiB** of net GPU memory reduction.
-- **Critical Quality Seam**: Unlike speculative draft heads (where prediction errors are discarded during verification against the target model), the primary output head directly projects final hidden states to vocabulary logits. Quantization errors directly alter the emitted token distribution.
-- **Acceptance Contract**: Rather than a crude binary pass/fail or perplexity proxy, acceptance is evaluated through **greedy divergence position ($P_{\text{div}}$)** against unquantized BF16 across identical prompts and seeds under temperature 0.0.
+### Critical Quality Seams:
+- **Output Head**: Projects final hidden states to vocabulary logits. A defect or loss of precision here directly alters emitted token probabilities.
+- **Token Embedding**: Feeds the input representations into every single layer and recurrent block. While output head errors affect the final decision boundary, embedding errors propagate through the entire forward pass.
+- **Acceptance Contract**: Rather than crude perplexity proxies or uncalibrated loss metrics, acceptance is evaluated through **greedy divergence position ($P_{\text{div}}$)** against the unquantized BF16 baseline across identical prompts and seeds under temperature 0.0.
 
 ---
 
@@ -22,7 +28,10 @@ The following options have been wired into `ninfer` (CLI) and `ninfer-serve` (RE
 |---|---|---|---|
 | `--output-head-fp8` | boolean flag | `false` | Enable FP8 E4M3 row-scaled output head |
 | `--no-output-head-fp8` | boolean flag | `false` | Explicitly disable FP8 output head |
-| `--output-head-dtype` | `bf16` \| `fp8` | `bf16` | Explicit output head datatype selector |
+| `--output-head-dtype` | `bf16` \| `fp8` | `bf16` | Output head datatype selector |
+| `--token-embedding-fp8` | boolean flag | `false` | Enable FP8 E4M3 row-scaled token embedding |
+| `--no-token-embedding-fp8` | boolean flag | `false` | Explicitly disable FP8 token embedding |
+| `--token-embedding-dtype` | `bf16` \| `fp8` | `bf16` | Token embedding datatype selector |
 
 ---
 
@@ -48,32 +57,52 @@ The benchmark harness executes paired A/B evaluation across a diverse, curated 1
 
 Under the active GPU stand-down protocol, only the coordinator (`windows:claude:ninfer`) runs GPU processes.
 
-### A. Fully Automated Sequential Run
-Starts BF16 server, evaluates all prompts, drains VRAM, starts FP8 server, evaluates all prompts, and outputs summary JSON and terminal table:
+### A. Fully Automated Sequential Runs by Target
+
+The harness supports evaluating any of the three quantization configurations via `--quant-target`:
+
+1. **Evaluate Output Head FP8** (expected ~605 MiB savings):
 ```powershell
-python P:\NInfer\bench\d17\bench_output_head_divergence.py --port 8160 --max-tokens 256
+python P:\NInfer\bench\d17\bench_output_head_divergence.py --quant-target output-head --port 8160 --max-tokens 256
+```
+
+2. **Evaluate Token Embedding FP8** (expected ~605 MiB savings):
+```powershell
+python P:\NInfer\bench\d17\bench_output_head_divergence.py --quant-target token-embedding --port 8160 --max-tokens 256
+```
+
+3. **Evaluate Both Combined (Output Head + Token Embedding)** (expected ~1.21 GiB savings):
+```powershell
+python P:\NInfer\bench\d17\bench_output_head_divergence.py --quant-target both --port 8160 --max-tokens 256
 ```
 
 ### B. Evaluating Against Pre-Existing Servers
-If coordinator manages server lifecycles manually:
+
+If the coordinator manages server lifecycles manually:
 ```powershell
-# Server 1 (BF16):
-.\build-win\apps\Release\ninfer-serve.exe E:\models\Qwen3.8-Flash-Next\qwen3_8_flash_next_nvfp4_mtp.ninfer --port 8160 --output-head-dtype bf16 --max-context 32768 --kv-capacity 32768 --max-concurrency 1 --max-private-continuations 16 --greedy --no-thinking
+# Server 1 (Baseline BF16):
+.\build-win\apps\Release\ninfer-serve.exe E:\models\Qwen3.8-Flash-Next\qwen3_8_flash_next_nvfp4_mtp.ninfer --port 8160 --output-head-dtype bf16 --token-embedding-dtype bf16 --max-context 32768 --kv-capacity 32768 --max-concurrency 1 --max-private-continuations 16 --greedy --no-thinking
 
-# Server 2 (FP8):
-.\build-win\apps\Release\ninfer-serve.exe E:\models\Qwen3.8-Flash-Next\qwen3_8_flash_next_nvfp4_mtp.ninfer --port 8161 --output-head-dtype fp8 --max-context 32768 --kv-capacity 32768 --max-concurrency 1 --max-private-continuations 16 --greedy --no-thinking
+# Server 2 (Combined FP8 Head + FP8 Embedding):
+.\build-win\apps\Release\ninfer-serve.exe E:\models\Qwen3.8-Flash-Next\qwen3_8_flash_next_nvfp4_mtp.ninfer --port 8161 --output-head-dtype fp8 --token-embedding-dtype fp8 --max-context 32768 --kv-capacity 32768 --max-concurrency 1 --max-private-continuations 16 --greedy --no-thinking
 
-# Run divergence harness:
-python P:\NInfer\bench\d17\bench_output_head_divergence.py --bf16-url http://127.0.0.1:8160 --fp8-url http://127.0.0.1:8161 --max-tokens 256
+# Run divergence harness pointing to both ports:
+python P:\NInfer\bench\d17\bench_output_head_divergence.py --quant-target both --bf16-url http://127.0.0.1:8160 --fp8-url http://127.0.0.1:8161 --max-tokens 256
 ```
 
 ---
 
 ## 5. Artifact Output
 
-The benchmark automatically generates `bench/d17/d17_output_head_divergence_summary.json` containing:
-- Complete execution configuration, model path, and timestamp
+The benchmark automatically generates:
+- `bench/d17/d17_divergence_output_head_summary.json`
+- `bench/d17/d17_divergence_token_embedding_summary.json`
+- `bench/d17/d17_divergence_both_summary.json`
+
+Each summary contains:
+- Complete execution configuration, model path, quant target, and timestamp
 - VRAM usage and savings measurements
 - Overall statistics ($P_{\text{div}}$ distribution, zero-divergence rate, mean prefix match)
 - Category breakdown
 - Full per-prompt token streams, timing, and divergence analysis
+

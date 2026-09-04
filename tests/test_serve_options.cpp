@@ -112,6 +112,40 @@ int main() {
     failures += check(serve_usage_text("ninfer-serve").find("--output-head-dtype") != std::string::npos,
                       "serve help omits --output-head-dtype");
 
+    failures += check(!defaults.quantize_token_embedding_fp8,
+                      "token embedding FP8 quantization is unexpectedly enabled by default");
+
+    const ServeOptions emb_fp8 = parse({"ninfer-serve", "model.ninfer", "--token-embedding-fp8"});
+    failures += check(emb_fp8.quantize_token_embedding_fp8,
+                      "--token-embedding-fp8 did not enable token embedding FP8 quantization");
+
+    const ServeOptions no_emb_fp8 =
+        parse({"ninfer-serve", "model.ninfer", "--token-embedding-fp8", "--no-token-embedding-fp8"});
+    failures += check(!no_emb_fp8.quantize_token_embedding_fp8,
+                      "--no-token-embedding-fp8 did not disable token embedding FP8 quantization");
+
+    const ServeOptions emb_dtype_fp8 =
+        parse({"ninfer-serve", "model.ninfer", "--token-embedding-dtype", "fp8"});
+    failures += check(emb_dtype_fp8.quantize_token_embedding_fp8,
+                      "--token-embedding-dtype fp8 did not enable token embedding FP8 quantization");
+
+    const ServeOptions emb_dtype_bf16 = parse(
+        {"ninfer-serve", "model.ninfer", "--token-embedding-fp8", "--token-embedding-dtype", "bf16"});
+    failures += check(!emb_dtype_bf16.quantize_token_embedding_fp8,
+                      "--token-embedding-dtype bf16 did not disable token embedding FP8 quantization");
+
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--token-embedding-dtype", "invalid"});
+        failures += check(false, "--token-embedding-dtype invalid did not throw");
+    } catch (const std::invalid_argument&) {
+        // expected
+    }
+
+    failures += check(serve_usage_text("ninfer-serve").find("--token-embedding-fp8") != std::string::npos,
+                      "serve help omits --token-embedding-fp8");
+    failures += check(serve_usage_text("ninfer-serve").find("--token-embedding-dtype") != std::string::npos,
+                      "serve help omits --token-embedding-dtype");
+
     const ServeOptions fp8 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "fp8"});
     failures += check(fp8.kv_cache == ninfer::KvCacheStorage::Fp8E4M3Row256,
                       "--kv-dtype fp8 did not select row-scaled E4M3 KV");

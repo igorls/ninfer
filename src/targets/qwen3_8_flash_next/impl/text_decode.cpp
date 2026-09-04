@@ -73,6 +73,11 @@ bool exact_output_head(const Weight& weight) {
            exact_fp8_f32_weight(weight, 248'320, 2'560);
 }
 
+bool exact_token_embedding(const Weight& weight) {
+    return exact_bf16_weight(weight, 248'320, 2'560) ||
+           exact_fp8_f32_weight(weight, 248'320, 2'560);
+}
+
 } // namespace
 
 void validate_flash_next_decode_state(const FlashNextDecodeStateView& state,
@@ -334,7 +339,7 @@ void flash_next_text_decode(const TextModelView& model, const Tensor& token_ids,
                             const FlashNextDecodeStateSink* sink) {
     const std::int32_t batch = token_ids.ne[0];
     if (batch <= 0 || batch > 8 || !exact_tensor(token_ids, DType::I32, batch) ||
-        !exact_bf16_weight(model.token_embedding, 248'320, 2'560)) {
+        !exact_token_embedding(model.token_embedding)) {
         throw std::invalid_argument("Flash-Next text decode token embedding input is invalid");
     }
     const auto round_scope = workspace.scope();

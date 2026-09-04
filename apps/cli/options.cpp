@@ -89,6 +89,7 @@ std::string usage_text(const char* argv0) {
            "       [--device N] [--desktop-reserve-gib N] [--desktop-reserve-mib N]\n"
            "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--gdn-state-dtype fp32|bf16]\n"
            "       [--output-head-fp8] [--output-head-dtype bf16|fp8]\n"
+           "       [--token-embedding-fp8] [--token-embedding-dtype bf16|fp8]\n"
            "       [--spec mtp|dflash --draft-tokens N] [--lm-head-draft]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
            "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"
@@ -164,6 +165,19 @@ Options parse_options(int argc, char** argv) {
                 options.quantize_output_head_fp8 = false;
             } else {
                 throw std::invalid_argument("invalid --output-head-dtype: expected 'bf16' or 'fp8'");
+            }
+        } else if (arg == "--token-embedding-fp8") {
+            options.quantize_token_embedding_fp8 = true;
+        } else if (arg == "--no-token-embedding-fp8") {
+            options.quantize_token_embedding_fp8 = false;
+        } else if (arg == "--token-embedding-dtype") {
+            const std::string_view dt = value(arg);
+            if (dt == "fp8") {
+                options.quantize_token_embedding_fp8 = true;
+            } else if (dt == "bf16") {
+                options.quantize_token_embedding_fp8 = false;
+            } else {
+                throw std::invalid_argument("invalid --token-embedding-dtype: expected 'bf16' or 'fp8'");
             }
         } else if (arg == "--spec") {
             options.speculative.backend = product::parse_speculative_backend(value(arg));

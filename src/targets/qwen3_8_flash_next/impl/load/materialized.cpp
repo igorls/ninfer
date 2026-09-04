@@ -245,12 +245,21 @@ MtpModelView load_mtp(const MtpPlan& plan, const artifact::MaterializedArtifact&
 } // namespace
 
 LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifact materialized,
-                                 bool quantize_output_head_fp8)
+                                 bool quantize_output_head_fp8,
+                                 bool quantize_token_embedding_fp8)
     : backing(std::move(materialized)) {
     frontend = qwen3_6::take_frontend_resources(backing, plan.frontend);
 
     text.weights_arena     = &backing.device_arena();
     text.token_embedding   = bf16_weight(backing, plan.token_embedding, 248'320, 2'560);
+    if (quantize_token_embedding_fp8) {
+        token_embedding_fp8 = DeviceBuffer(flash_next_fp8_head_payload_bytes(248'320, 2'560));
+        Weight fp8_embedding{};
+        quantize_bf16_head_to_fp8_e4m3_row_f32s(text.token_embedding, token_embedding_fp8,
+                                                fp8_embedding, 248'320, 2'560, cudaStream_t{});
+        CUDA_CHECK(cudaDeviceSynchronize());
+        text.token_embedding = fp8_embedding;
+    }
     std::size_t full_index = 0;
     std::size_t gdn_index  = 0;
     for (std::size_t layer = 0; layer < plan.text_layers.size(); ++layer) {

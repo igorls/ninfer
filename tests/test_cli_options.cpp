@@ -102,6 +102,40 @@ int main() {
                       }),
                       "--output-head-dtype invalid did not reject");
 
+    failures += check(help.find("--token-embedding-fp8") != std::string::npos,
+                      "CLI help omits --token-embedding-fp8");
+    failures += check(help.find("--token-embedding-dtype") != std::string::npos,
+                      "CLI help omits --token-embedding-dtype");
+
+    failures += check(!default_cli.quantize_token_embedding_fp8,
+                      "CLI token embedding FP8 quantization is unexpectedly enabled by default");
+
+    const ninfer::cli::Options cli_emb_fp8 =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--token-embedding-fp8"});
+    failures += check(cli_emb_fp8.quantize_token_embedding_fp8,
+                      "--token-embedding-fp8 did not enable token embedding FP8 quantization");
+
+    const ninfer::cli::Options cli_no_emb_fp8 =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--token-embedding-fp8", "--no-token-embedding-fp8"});
+    failures += check(!cli_no_emb_fp8.quantize_token_embedding_fp8,
+                      "--no-token-embedding-fp8 did not disable token embedding FP8 quantization");
+
+    const ninfer::cli::Options cli_emb_dtype_fp8 =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--token-embedding-dtype", "fp8"});
+    failures += check(cli_emb_dtype_fp8.quantize_token_embedding_fp8,
+                      "--token-embedding-dtype fp8 did not enable token embedding FP8 quantization");
+
+    const ninfer::cli::Options cli_emb_dtype_bf16 =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--token-embedding-fp8", "--token-embedding-dtype", "bf16"});
+    failures += check(!cli_emb_dtype_bf16.quantize_token_embedding_fp8,
+                      "--token-embedding-dtype bf16 did not disable token embedding FP8 quantization");
+
+    failures += check(rejects([] {
+                          (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                       "--token-embedding-dtype", "invalid"});
+                      }),
+                      "--token-embedding-dtype invalid did not reject");
+
     failures +=
         check(rejects([] {
                   (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--top-k", "21"});

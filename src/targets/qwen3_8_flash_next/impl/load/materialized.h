@@ -16,7 +16,8 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 class LoadedModelData {
 public:
     LoadedModelData(BindingPlan plan, artifact::MaterializedArtifact materialized,
-                    bool quantize_output_head_fp8 = false);
+                    bool quantize_output_head_fp8 = false,
+                    bool quantize_token_embedding_fp8 = false);
 
     LoadedModelData(const LoadedModelData&)            = delete;
     LoadedModelData& operator=(const LoadedModelData&) = delete;
@@ -25,6 +26,7 @@ public:
 
     artifact::MaterializedArtifact backing;
     DeviceBuffer output_head_fp8;
+    DeviceBuffer token_embedding_fp8;
     DeviceBuffer mtp_expert_gate_up_nvfp4;
     DeviceBuffer mtp_expert_down_nvfp4;
     DeviceBuffer proposal_head_payload;

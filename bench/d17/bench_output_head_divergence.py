@@ -95,17 +95,34 @@ def load_fixtures(fixtures_path, filter_category=None):
     return all_prompts
 
 
-def start_server(exe_path, model_path, port, output_head_dtype, spec_backend="off", stdout_log=None, stderr_log=None):
+def start_server(exe_path, model_path, port, is_quantized=False, quant_target="output-head", spec_backend="off", stdout_log=None, stderr_log=None):
     kill_any_ninfer_serve()
     wait_vram_drained()
 
     env = os.environ.copy()
     env["PATH"] = f"{FFMPEG_BIN};{CURL_BIN};" + env.get("PATH", "")
 
+    if not is_quantized:
+        head_dtype = "bf16"
+        emb_dtype = "bf16"
+    else:
+        if quant_target == "output-head":
+            head_dtype = "fp8"
+            emb_dtype = "bf16"
+        elif quant_target == "token-embedding":
+            head_dtype = "bf16"
+            emb_dtype = "fp8"
+        elif quant_target == "both":
+            head_dtype = "fp8"
+            emb_dtype = "fp8"
+        else:
+            raise ValueError(f"Unknown quant_target: {quant_target}")
+
     args = [
         model_path,
         "--port", str(port),
-        "--output-head-dtype", output_head_dtype,
+        "--output-head-dtype", head_dtype,
+        "--token-embedding-dtype", emb_dtype,
         "--max-context", "32768",
         "--kv-capacity", "32768",
         "--max-concurrency", "1",
@@ -121,7 +138,7 @@ def start_server(exe_path, model_path, port, output_head_dtype, spec_backend="of
         pass  # speculation disabled by default when --spec is omitted
 
     cmd = [exe_path] + args
-    print(f"  [Server] Launching head-dtype={output_head_dtype} (port {port}): {' '.join(cmd)}", flush=True)
+    print(f"  [Server] Launching (head={head_dtype}, embed={emb_dtype}, port {port}): {' '.join(cmd)}", flush=True)
 
     out_f = open(stdout_log, "w", encoding="utf-8") if stdout_log else subprocess.DEVNULL
     err_f = open(stderr_log, "w", encoding="utf-8") if stderr_log else subprocess.DEVNULL
@@ -294,7 +311,7 @@ def compute_quantiles(values):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Sequence D17 Output-Head FP8 vs BF16 Greedy Divergence Benchmark")
+    parser = argparse.ArgumentParser(description="Sequence D17 FP8 Quantization Greedy Divergence Benchmark")
     parser.add_argument("--exe", default=DEFAULT_EXE, help="Path to ninfer-serve.exe")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Path to .ninfer model artifact")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port for server instance(s)")
@@ -302,15 +319,20 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=256, help="Max completion tokens per prompt")
     parser.add_argument("--spec-backend", choices=["off", "mtp"], default="off", help="Speculative decoding mode (default: off to isolate output head)")
     parser.add_argument("--category", default=None, help="Filter fixtures by category")
-    parser.add_argument("--output-json", default=DEFAULT_OUT_JSON, help="Path to output summary JSON")
+    parser.add_argument("--quant-target", choices=["output-head", "token-embedding", "both"], default="output-head",
+                        help="Target tensor to quantize to FP8 (output-head, token-embedding, or both)")
+    parser.add_argument("--output-json", default=None, help="Path to output summary JSON")
     parser.add_argument("--bf16-url", default=None, help="URL for existing BF16 server instance (e.g. http://127.0.0.1:8160)")
     parser.add_argument("--fp8-url", default=None, help="URL for existing FP8 server instance (e.g. http://127.0.0.1:8161)")
     args = parser.parse_args()
 
+    output_json_path = args.output_json if args.output_json else rf"P:\NInfer\bench\d17\d17_divergence_{args.quant_target.replace('-', '_')}_summary.json"
+
     print("================================================================================")
-    print("Sequence D17: Output-Head FP8 vs BF16 Greedy Divergence Benchmark")
+    print(f"Sequence D17: FP8 ({args.quant_target}) vs BF16 Greedy Divergence Benchmark")
     print("================================================================================")
     print(f"Model:        {args.model}")
+    print(f"Quant Target: {args.quant_target}")
     print(f"Fixtures:     {args.fixtures}")
     print(f"Max Tokens:   {args.max_tokens}")
     print(f"Spec Mode:    {args.spec_backend}")
@@ -331,10 +353,12 @@ def main():
         print(f"[ARM 1: BF16] Connecting to pre-existing server at {bf16_url}...")
     else:
         bf16_url = f"http://127.0.0.1:{args.port}"
-        print(f"[ARM 1: BF16] Launching server with --output-head-dtype bf16 on port {args.port}...")
-        log_out = r"P:\NInfer\bench\d17\server_bf16.log"
-        log_err = r"P:\NInfer\bench\d17\server_bf16_err.log"
-        proc, out_f, err_f = start_server(args.exe, args.model, args.port, "bf16", args.spec_backend, log_out, log_err)
+        print(f"[ARM 1: BF16 Baseline] Launching unquantized server on port {args.port}...")
+        log_out = r"P:\NInfer\bench\d17\server_baseline_bf16.log"
+        log_err = r"P:\NInfer\bench\d17\server_baseline_bf16_err.log"
+        proc, out_f, err_f = start_server(args.exe, args.model, args.port, is_quantized=False,
+                                          quant_target=args.quant_target, spec_backend=args.spec_backend,
+                                          stdout_log=log_out, stderr_log=log_err)
         if proc is None:
             print("ERROR: Failed to launch BF16 server.")
             sys.exit(1)
@@ -356,25 +380,33 @@ def main():
         stop_server(proc, out_f, err_f)
 
     # -------------------------------------------------------------------------
-    # ARM 2: FP8 Quantized Output Head
+    # ARM 2: FP8 Quantized (output-head / token-embedding / both)
     # -------------------------------------------------------------------------
     if args.fp8_url:
         fp8_url = args.fp8_url
-        print(f"\n[ARM 2: FP8] Connecting to pre-existing server at {fp8_url}...")
+        print(f"\n[ARM 2: FP8 ({args.quant_target})] Connecting to pre-existing server at {fp8_url}...")
     else:
         fp8_url = f"http://127.0.0.1:{args.port}"
-        print(f"\n[ARM 2: FP8] Launching server with --output-head-dtype fp8 on port {args.port}...")
-        log_out = r"P:\NInfer\bench\d17\server_fp8.log"
-        log_err = r"P:\NInfer\bench\d17\server_fp8_err.log"
-        proc, out_f, err_f = start_server(args.exe, args.model, args.port, "fp8", args.spec_backend, log_out, log_err)
+        target_name = args.quant_target.replace('-', '_')
+        print(f"\n[ARM 2: FP8 ({args.quant_target})] Launching quantized server on port {args.port}...")
+        log_out = rf"P:\NInfer\bench\d17\server_quant_{target_name}.log"
+        log_err = rf"P:\NInfer\bench\d17\server_quant_{target_name}_err.log"
+        proc, out_f, err_f = start_server(args.exe, args.model, args.port, is_quantized=True,
+                                          quant_target=args.quant_target, spec_backend=args.spec_backend,
+                                          stdout_log=log_out, stderr_log=log_err)
         if proc is None:
             print("ERROR: Failed to launch FP8 server.")
             sys.exit(1)
         vram_stats["fp8"] = get_vram_info()
         print(f"  [ARM 2: FP8] Resident VRAM: {vram_stats['fp8']['used_mib']} MiB used ({vram_stats['fp8']['free_mib']} MiB free)")
+        expected_savings = {
+            "output-head": "~605 MiB",
+            "token-embedding": "~605 MiB",
+            "both": "~1,210 MiB (~1.21 GiB)",
+        }.get(args.quant_target, "~605 MiB")
         if "bf16" in vram_stats:
             vram_saved = vram_stats["bf16"]["used_mib"] - vram_stats["fp8"]["used_mib"]
-            print(f"  [ARM 2: FP8] Measured VRAM Savings: {vram_saved} MiB (expected ~605 MiB)")
+            print(f"  [ARM 2: FP8] Measured VRAM Savings: {vram_saved} MiB (expected {expected_savings})")
 
     print(f"  [ARM 2: FP8] Running {len(prompts)} prompts...")
     for idx, p in enumerate(prompts, 1):
@@ -435,7 +467,7 @@ def main():
             p_div_by_category[cat]["identical_count"] += 1
 
     # Print Table
-    header = f"{'Category':<22} | {'Prompt ID':<24} | {'Tokens':<9} | {'P_div':<10} | {'Match%':<8} | {'First Divergent Token (BF16 vs FP8)'}"
+    header = f"{'Category':<22} | {'Prompt ID':<24} | {'Tokens':<9} | {'P_div':<10} | {'Match%':<8} | {f'First Divergent Token (BF16 vs FP8[{args.quant_target}])'}"
     print(header)
     print("-" * len(header))
     for c in detailed_comparisons:
@@ -459,6 +491,7 @@ def main():
     print("\n--------------------------------------------------------------------------------")
     print("STATISTICAL SUMMARY ACROSS WORKLOAD CORPUS")
     print("--------------------------------------------------------------------------------")
+    print(f"Quantization Target:        {args.quant_target}")
     print(f"Total Evaluated Prompts:    {total_prompts}")
     print(f"Zero-Divergence Prompts:    {identical_prompts} ({identical_pct:.1f}%)")
     print(f"Divergent Prompts:          {divergent_prompts} ({100.0 - identical_pct:.1f}%)")
@@ -487,6 +520,7 @@ def main():
     summary_data = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "model": args.model,
+        "quant_target": args.quant_target,
         "max_tokens": args.max_tokens,
         "spec_backend": args.spec_backend,
         "vram_stats": vram_stats,
@@ -502,10 +536,10 @@ def main():
         "comparisons": detailed_comparisons,
     }
 
-    Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)
-    with open(args.output_json, "w", encoding="utf-8") as f:
+    Path(output_json_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(output_json_path, "w", encoding="utf-8") as f:
         json.dump(summary_data, f, indent=2)
-    print(f"\nSummary JSON saved to: {args.output_json}")
+    print(f"\nSummary JSON saved to: {output_json_path}")
     print("================================================================================\n")
 
 

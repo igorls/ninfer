@@ -170,8 +170,7 @@ void require_w8_metadata(const Weight& table, const Tensor& out) {
 
 void require_fp8_metadata(const Weight& table, const Tensor& out) {
     constexpr std::int32_t kVocabulary = 248320;
-    constexpr std::int32_t kHidden     = 5120;
-    if (table.n != kVocabulary || table.k != kHidden || out.ne[0] != kHidden) {
+    if (table.n != kVocabulary || (table.k != 5120 && table.k != 2560) || out.ne[0] != table.k) {
         throw std::invalid_argument("embedding: unsupported FP8 table shape");
     }
     if ((reinterpret_cast<std::uintptr_t>(out.data) &
@@ -227,6 +226,7 @@ void embedding(const Tensor& ids, const Weight& table, Tensor& out, cudaStream_t
         detail::embed_gather_w8_launch(ids, table, out, stream);
         break;
     case QType::FP8_E4M3FN_ROW_BF16S:
+    case QType::FP8_E4M3FN_ROW_F32S:
         require_fp8_metadata(table, out);
         if (is_empty_T(ids, out)) { return; }
         require_non_empty_tensors(ids, out);

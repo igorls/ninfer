@@ -10,6 +10,7 @@
 #include <cuda_fp8.h>
 
 #include <cstdint>
+#include <type_traits>
 
 namespace ninfer::ops {
 
@@ -22,12 +23,12 @@ inline constexpr std::int32_t kEmbedGatherW8D              = 2048;
 inline constexpr std::int32_t kEmbedGatherW8Groups         = kEmbedGatherW8D / kEmbedGatherW8Group;
 inline constexpr std::int32_t kEmbedGatherFp8D             = 5120;
 
-template <int BlocksPerToken, int Threads>
+template <int Hidden, int BlocksPerToken, int Threads, typename ScaleType>
 __launch_bounds__(Threads) __global__
     void embed_gather_fp8_kernel(const std::int32_t* ids, const std::uint8_t* codes,
-                                 const __nv_bfloat16* scales, __nv_bfloat16* out) {
-    static_assert(kEmbedGatherFp8D % BlocksPerToken == 0);
-    constexpr int kValuesPerBlock = kEmbedGatherFp8D / BlocksPerToken;
+                                 const ScaleType* scales, __nv_bfloat16* out) {
+    static_assert(Hidden % BlocksPerToken == 0);
+    constexpr int kValuesPerBlock = Hidden / BlocksPerToken;
     static_assert(kValuesPerBlock % 4 == 0);
     constexpr int kWordsPerBlock = kValuesPerBlock / 4;
 
@@ -37,13 +38,17 @@ __launch_bounds__(Threads) __global__
     __shared__ float scale;
     if (threadIdx.x == 0) {
         row   = ids[token];
-        scale = __bfloat162float(scales[row]);
+        if constexpr (std::is_same_v<ScaleType, float>) {
+            scale = scales[row];
+        } else {
+            scale = __bfloat162float(scales[row]);
+        }
     }
     __syncthreads();
 
     const int split_offset = split * kValuesPerBlock;
-    const auto* code_row   = codes + static_cast<std::int64_t>(row) * kEmbedGatherFp8D;
-    auto* output_column    = out + static_cast<std::int64_t>(token) * kEmbedGatherFp8D;
+    const auto* code_row   = codes + static_cast<std::int64_t>(row) * Hidden;
+    auto* output_column    = out + static_cast<std::int64_t>(token) * Hidden;
     for (int word_index = static_cast<int>(threadIdx.x); word_index < kWordsPerBlock;
          word_index += Threads) {
         const int offset    = split_offset + word_index * 4;
