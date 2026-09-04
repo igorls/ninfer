@@ -96,6 +96,9 @@ target_include_directories(ninfer_cli_options_test PRIVATE ${PROJECT_SOURCE_DIR}
 ninfer_add_test(ninfer_kv_cache_test
   SOURCES test_kv_cache.cpp
   LIBRARIES ninfer_core)
+ninfer_add_test(ninfer_logical_kv_store_test
+  SOURCES test_logical_kv_store.cpp
+  LIBRARIES ninfer_core)
 ninfer_add_test(ninfer_state_store_test
   SOURCES test_state_store.cpp
   LIBRARIES ninfer_core)
@@ -108,6 +111,7 @@ set_tests_properties(
   ninfer_decode_graph_test
   ninfer_arena_test
   ninfer_kv_cache_test
+  ninfer_logical_kv_store_test
   ninfer_state_store_test
   PROPERTIES SKIP_RETURN_CODE 77)
 
