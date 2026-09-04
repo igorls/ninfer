@@ -302,25 +302,6 @@ std::int32_t ProgramImpl::allocate_vacant_continuation_slot() {
             return static_cast<std::int32_t>(c);
         }
     }
-
-    // No vacant slot: perform LRU eviction of the oldest catalogued slot that is not protected.
-    std::int32_t best_c = -1;
-    std::uint64_t oldest_epoch = std::numeric_limits<std::uint64_t>::max();
-    for (std::size_t c = 0; c < cap; ++c) {
-        const auto& slot = continuation_slots_[c];
-        if (slot.role != ContinuationSlotRole::Catalogued) { continue; }
-        if (is_slot_protected(c)) { continue; }
-        if (slot.last_used_epoch < oldest_epoch) {
-            oldest_epoch = slot.last_used_epoch;
-            best_c       = static_cast<std::int32_t>(c);
-        }
-    }
-
-    if (best_c >= 0) {
-        evict_continuation_slot(static_cast<std::size_t>(best_c));
-        return best_c;
-    }
-
     return -1;
 }
 
@@ -460,10 +441,7 @@ PressurePlanningSessionImpl::PressurePlanningSessionImpl(
         if (slot_idx >= program.continuation_slots_.size() ||
             program.continuation_slots_[slot_idx].role != ContinuationSlotRole::Catalogued ||
             program.continuation_slots_[slot_idx].generation != gen) {
-            std::fprintf(stderr,
-                         "[warn] flash_next: pressure planning private owner %u (generation %llu) is stale; ignoring it\n",
-                         slot_idx, static_cast<unsigned long long>(gen));
-            continue;
+            throw std::logic_error("pressure planning private owner is stale");
         }
         owners_.push_back(PressurePlanningOwner{
             .handle = handle,
@@ -2123,13 +2101,13 @@ Program::inspect_capture(const CaptureOffer& offer,
     };
     // The merged Engine reserves a private capture only when the assessment is physically
     // feasible (resource_manager.h gates on publishes_private && physically_feasible). For
-    // Flash-Next feasibility means a vacant continuation slot or an unprotected catalogued slot
-    // that can be LRU-evicted: the reserve copies the recurrent state into that slot's cache slot
-    // and refcounts the lane's existing page groups, so nothing else is consumed.
+    // Flash-Next feasibility means a vacant continuation slot: the reserve copies the recurrent
+    // state into that slot's cache slot and refcounts the lane's existing page groups.
+    // Unilateral eviction of catalogued slots is prohibited; catalog evictions are coordinated
+    // exclusively by the Engine via pressure planning.
     for (std::size_t c = 0; c < impl_->continuation_slots_.size(); ++c) {
         const auto& slot = impl_->continuation_slots_[c];
-        if (slot.role == detail::ContinuationSlotRole::Vacant ||
-            (slot.role == detail::ContinuationSlotRole::Catalogued && !impl_->is_slot_protected(c))) {
+        if (slot.role == detail::ContinuationSlotRole::Vacant) {
             assessment.physically_feasible = true;
             break;
         }
