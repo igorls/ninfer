@@ -167,7 +167,10 @@ FlashNextTextExecutor::FlashNextTextExecutor(const TextModelView& model,
         mtp_workspace_       = std::make_unique<WorkspaceArena>(mtp_ws_bytes);
         mtp_selected_blocks_ = std::make_unique<DeviceBuffer>(512 * sizeof(std::int32_t));
         mtp_selected_counts_ = std::make_unique<DeviceBuffer>(1 * sizeof(std::int32_t));
-        mtp_draft_logits_    = std::make_unique<DeviceBuffer>(248'320 * sizeof(std::uint16_t));
+        const std::size_t draft_logits_rows =
+            model_.proposal.has_value() ? static_cast<std::size_t>(model_.proposal->head.n)
+                                        : 248'320ULL;
+        mtp_draft_logits_    = std::make_unique<DeviceBuffer>(draft_logits_rows * sizeof(std::uint16_t));
         mtp_draft_tokens_    = std::make_unique<DeviceBuffer>(1 * sizeof(std::int32_t));
         mtp_input_embedding_ = std::make_unique<DeviceBuffer>(2'560 * sizeof(std::uint16_t));
         mtp_carried_hidden_  = std::make_unique<DeviceBuffer>(10'240 * sizeof(std::uint16_t));
@@ -913,7 +916,9 @@ void FlashNextTextExecutor::draft_mtp_tokens(LaneHandle handle, std::int32_t tok
 
     Tensor selected_blocks(mtp_selected_blocks_->p, DType::I32, {512, 1});
     Tensor selected_counts(mtp_selected_counts_->p, DType::I32, {1});
-    Tensor draft_logits(mtp_draft_logits_->p, DType::BF16, {248'320, 1});
+    const std::int32_t draft_logits_rows =
+        model_.proposal.has_value() ? model_.proposal->head.n : 248'320;
+    Tensor draft_logits(mtp_draft_logits_->p, DType::BF16, {draft_logits_rows, 1});
     Tensor draft_tokens_tensor(mtp_draft_tokens_->p, DType::I32, {1});
     Tensor carried_hidden(mtp_carried_hidden_->p, DType::BF16, {10'240, 1});
 

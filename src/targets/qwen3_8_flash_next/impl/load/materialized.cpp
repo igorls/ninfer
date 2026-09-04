@@ -5,11 +5,69 @@
 #include "targets/qwen3_8_flash_next/impl/load/quantize_nvfp4_expert_bank.h"
 #include "targets/qwen3_8_flash_next/impl/load/quantize_output_head.h"
 
+#include <algorithm>
+#include <cstdlib>
+#include <fstream>
+#include <numeric>
 #include <stdexcept>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 namespace {
+
+std::vector<std::int32_t> load_flash_next_draft_shortlist(std::uint32_t K) {
+    std::vector<std::int32_t> shortlist(K);
+    const std::string i32_name = (K == 32'768) ? "shortlist_32k.i32" : ((K == 65'536) ? "shortlist_65k.i32" : "");
+    std::vector<std::string> candidate_paths;
+    if (const char* env_path = std::getenv("NINFER_RANKING_PATH"); env_path != nullptr && *env_path != '\0') {
+        candidate_paths.emplace_back(env_path);
+    }
+    if (!i32_name.empty()) {
+        candidate_paths.push_back("tools/freq_corpus/fixtures/ranking/" + i32_name);
+        candidate_paths.push_back("../tools/freq_corpus/fixtures/ranking/" + i32_name);
+        candidate_paths.push_back("E:/NInfer.gemini2/tools/freq_corpus/fixtures/ranking/" + i32_name);
+    }
+    candidate_paths.push_back("tools/freq_corpus/fixtures/ranking/ranking.train.counts.i64");
+    candidate_paths.push_back("../tools/freq_corpus/fixtures/ranking/ranking.train.counts.i64");
+    candidate_paths.push_back("E:/NInfer.gemini2/tools/freq_corpus/fixtures/ranking/ranking.train.counts.i64");
+
+    for (const auto& path_str : candidate_paths) {
+        std::ifstream file(path_str, std::ios::binary);
+        if (!file.is_open()) { continue; }
+
+        file.seekg(0, std::ios::end);
+        const auto file_size = file.tellg();
+        file.seekg(0, std::ios::beg);
+
+        if (file_size >= static_cast<std::streamoff>(K * sizeof(std::int32_t)) &&
+            path_str.ends_with(".i32")) {
+            file.read(reinterpret_cast<char*>(shortlist.data()), K * sizeof(std::int32_t));
+            if (file.gcount() == static_cast<std::streamsize>(K * sizeof(std::int32_t))) {
+                return shortlist;
+            }
+        }
+
+        constexpr std::size_t kVocab = 248'320;
+        if (file_size >= static_cast<std::streamoff>(kVocab * sizeof(std::int64_t))) {
+            std::vector<std::int64_t> counts(kVocab);
+            file.read(reinterpret_cast<char*>(counts.data()), kVocab * sizeof(std::int64_t));
+            if (file.gcount() == static_cast<std::streamsize>(kVocab * sizeof(std::int64_t))) {
+                std::vector<std::int32_t> indices(kVocab);
+                std::iota(indices.begin(), indices.end(), 0);
+                std::stable_sort(indices.begin(), indices.end(), [&](std::int32_t a, std::int32_t b) {
+                    return counts[a] > counts[b];
+                });
+                std::copy_n(indices.begin(), K, shortlist.begin());
+                return shortlist;
+            }
+        }
+    }
+
+    std::iota(shortlist.begin(), shortlist.end(), 0);
+    return shortlist;
+}
 
 using artifact::NumericFormat;
 
@@ -207,8 +265,9 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
     if (full_index != text.full_attention.size() || gdn_index != text.gdn.size()) {
         throw std::logic_error("Flash-Next Text topology materialization is incomplete");
     }
-    text.ple         = load_ple(plan.ple, backing);
-    text.output_head = bf16_weight(backing, plan.output_head, 248'320, 2'560);
+    text.ple                   = load_ple(plan.ple, backing);
+    const Weight raw_bf16_head = bf16_weight(backing, plan.output_head, 248'320, 2'560);
+    text.output_head           = raw_bf16_head;
     if (quantize_output_head_fp8) {
         output_head_fp8 = DeviceBuffer(flash_next_fp8_output_head_payload_bytes());
         Weight fp8_head{};
@@ -217,6 +276,40 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
         CUDA_CHECK(cudaDeviceSynchronize());
         text.output_head = fp8_head;
     }
+
+    if (plan.features.proposal_head == ProposalHead::Optimized) {
+        const std::uint32_t K =
+            plan.features.draft_head_rows > 0 ? plan.features.draft_head_rows : 32'768;
+        const auto shortlist_ids = load_flash_next_draft_shortlist(K);
+
+        proposal_token_ids = DeviceBuffer(K * sizeof(std::int32_t));
+        proposal_token_ids.copy_from_host(shortlist_ids.data(), K * sizeof(std::int32_t));
+
+        proposal_head_payload =
+            DeviceBuffer(static_cast<std::size_t>(K) * 2'560 * sizeof(std::uint16_t));
+        Weight bf16_proposal_head{};
+        gather_head_rows_bf16(raw_bf16_head,
+                              static_cast<const std::int32_t*>(proposal_token_ids.p),
+                              static_cast<std::int32_t>(K), 2'560, proposal_head_payload,
+                              bf16_proposal_head, cudaStream_t{});
+
+        Weight final_proposal_head = bf16_proposal_head;
+        if (quantize_output_head_fp8) {
+            proposal_head_fp8 = DeviceBuffer(flash_next_fp8_head_payload_bytes(static_cast<std::int32_t>(K), 2'560));
+            Weight fp8_proposal_head{};
+            quantize_bf16_head_to_fp8_e4m3_row_f32s(bf16_proposal_head, proposal_head_fp8,
+                                                    fp8_proposal_head, static_cast<std::int32_t>(K),
+                                                    2'560, cudaStream_t{});
+            final_proposal_head = fp8_proposal_head;
+        }
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        OptimizedProposalWeights prop{};
+        prop.head      = final_proposal_head;
+        prop.token_ids = Tensor(proposal_token_ids.p, DType::I32, {static_cast<std::int32_t>(K)});
+        text.proposal  = prop;
+    }
+
     text.final_mixer = load_mixer(plan.final_mixer, backing);
 
     if (plan.features.mtp) {

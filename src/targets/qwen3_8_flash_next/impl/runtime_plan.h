@@ -2,6 +2,7 @@
 
 #include "core/tensor.h"
 #include "ninfer/ops/sampling.h"
+#include "ninfer/types.h"
 #include "runtime/contract/types.h"
 #include "targets/qwen3_8_flash_next/impl/model_view.h"
 
@@ -129,6 +130,8 @@ struct FlashNextRuntimeConfig {
     std::uint32_t continuation_capacity    = 0;  // Checkpoint cache slot capacity
     std::uint32_t prefill_chunk            = 1024; // nonzero multiple of 128, <= max_context
     std::uint32_t speculative_draft_tokens = 0;    // 0 -> speculative decoding off; K in [1, 4]
+    ProposalHead proposal_head             = ProposalHead::Full;
+    std::uint32_t draft_head_rows          = 32'768; // Used when proposal_head == ProposalHead::Optimized
     bool use_cuda_graph                    = true;
     bool vision_enabled                    = false;
     std::uint32_t max_vision_tokens        = 4096;

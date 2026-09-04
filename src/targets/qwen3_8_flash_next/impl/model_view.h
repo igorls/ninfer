@@ -98,6 +98,11 @@ struct MtpModelView {
     Tensor hidden_norm;
 };
 
+struct OptimizedProposalWeights {
+    Weight head;
+    Tensor token_ids;
+};
+
 struct TextModelView {
     DeviceArena* weights_arena = nullptr;
     Weight token_embedding;
@@ -108,6 +113,7 @@ struct TextModelView {
     Weight output_head;
     HyperMixerWeights final_mixer;
     std::optional<MtpModelView> mtp;
+    std::optional<OptimizedProposalWeights> proposal;
 };
 
 struct VisionLayerWeights {
