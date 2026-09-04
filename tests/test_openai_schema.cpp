@@ -537,6 +537,58 @@ int test_reasoning_and_extensions() {
     failures +=
         check(api_error([&] { (void)parse(body); }).code == "mm_processor_kwargs_not_supported",
               "non-empty media processor kwargs rejected");
+
+    // reasoning_effort parsing and semantics
+    ninfer::PromptCapabilities caps;
+    caps.enable_thinking                 = true;
+    caps.reasoning_effort.low            = true;
+    caps.reasoning_effort.medium         = true;
+    caps.reasoning_effort.xhigh          = true;
+    caps.reasoning_effort.default_effort = ninfer::ReasoningEffort::XHigh;
+    ServeOptions server_opts;
+
+    body                     = base_request();
+    body["reasoning_effort"] = "high";
+    const auto high_req      = parse(body);
+    failures += check(high_req.generation.reasoning_effort == RequestedReasoningEffort::High,
+                      "reasoning_effort:high parsed into GenerationRequest");
+    ApiError effort_err = api_error([&] {
+        (void)resolve_prompt_semantics(high_req.generation, server_opts, caps);
+    });
+    failures += check(effort_err.status == 400 &&
+                          effort_err.code == "reasoning_effort_not_supported" &&
+                          effort_err.param == "reasoning_effort" &&
+                          effort_err.message == "Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low.",
+                      "OpenAI reasoning_effort:high did not produce expected dynamic error message");
+
+    body["reasoning_effort"] = "minimal";
+    effort_err = api_error([&] {
+        (void)resolve_prompt_semantics(parse(body).generation, server_opts, caps);
+    });
+    failures += check(effort_err.status == 400 &&
+                          effort_err.message == "Unexpected reasoning effort minimal. Supported types are xhigh (default), medium, and low.",
+                      "OpenAI reasoning_effort:minimal did not produce expected dynamic error message");
+
+    body["reasoning_effort"] = "low";
+    const auto low_sem       = resolve_prompt_semantics(parse(body).generation, server_opts, caps);
+    failures += check(low_sem.reasoning_effort == ninfer::ReasoningEffort::Low &&
+                          low_sem.effective_reasoning_effort == ninfer::ReasoningEffort::Low &&
+                          low_sem.enable_thinking,
+                      "OpenAI reasoning_effort:low did not resolve to Low");
+
+    body["reasoning_effort"] = "none";
+    const auto none_sem      = resolve_prompt_semantics(parse(body).generation, server_opts, caps);
+    failures += check(!none_sem.reasoning_effort && !none_sem.effective_reasoning_effort &&
+                          !none_sem.enable_thinking,
+                      "OpenAI reasoning_effort:none did not disable thinking");
+
+    body["reasoning_effort"] = "invalid_value";
+    effort_err               = api_error([&] { (void)parse(body); });
+    failures += check(effort_err.status == 400 &&
+                          effort_err.param == "reasoning_effort" &&
+                          effort_err.message.find("reasoning_effort must be one of") != std::string::npos,
+                      "unrecognized reasoning_effort value was not rejected at parse time");
+
     return failures;
 }
 
