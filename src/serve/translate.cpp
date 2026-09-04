@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -12,6 +13,63 @@
 #include <vector>
 
 namespace ninfer::serve {
+
+std::string format_supported_reasoning_efforts(const ninfer::ReasoningEffortCapabilities& capabilities) {
+    std::vector<std::string> items;
+    const auto format_effort = [](ninfer::ReasoningEffort effort, bool is_default) -> std::string {
+        std::string name;
+        switch (effort) {
+        case ninfer::ReasoningEffort::XHigh:  name = "xhigh"; break;
+        case ninfer::ReasoningEffort::Medium: name = "medium"; break;
+        case ninfer::ReasoningEffort::Low:    name = "low"; break;
+        }
+        if (is_default) {
+            name += " (default)";
+        }
+        return name;
+    };
+
+    if (capabilities.default_effort && capabilities.supports(*capabilities.default_effort)) {
+        items.push_back(format_effort(*capabilities.default_effort, true));
+    }
+
+    const std::array<ninfer::ReasoningEffort, 3> ordered_efforts = {
+        ninfer::ReasoningEffort::XHigh,
+        ninfer::ReasoningEffort::Medium,
+        ninfer::ReasoningEffort::Low,
+    };
+
+    for (const auto effort : ordered_efforts) {
+        if (capabilities.default_effort && *capabilities.default_effort == effort) {
+            continue;
+        }
+        if (capabilities.supports(effort)) {
+            items.push_back(format_effort(effort, false));
+        }
+    }
+
+    if (items.empty()) {
+        return "";
+    }
+    if (items.size() == 1) {
+        return items[0];
+    }
+    if (items.size() == 2) {
+        return items[0] + " and " + items[1];
+    }
+    std::string result;
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        if (i > 0) {
+            result += ", ";
+        }
+        if (i + 1 == items.size()) {
+            result += "and ";
+        }
+        result += items[i];
+    }
+    return result;
+}
+
 namespace {
 
 std::uint64_t random_seed() {
@@ -147,33 +205,37 @@ ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& reques
         return complete();
     }
 
+    std::optional<ninfer::ReasoningEffort> mapped_effort;
     switch (requested) {
     case RequestedReasoningEffort::Low:
-        result.reasoning_effort = ninfer::ReasoningEffort::Low;
+        mapped_effort = ninfer::ReasoningEffort::Low;
         break;
     case RequestedReasoningEffort::Medium:
-        result.reasoning_effort = ninfer::ReasoningEffort::Medium;
+        mapped_effort = ninfer::ReasoningEffort::Medium;
         break;
     case RequestedReasoningEffort::XHigh:
-        result.reasoning_effort = ninfer::ReasoningEffort::XHigh;
+        mapped_effort = ninfer::ReasoningEffort::XHigh;
         break;
     case RequestedReasoningEffort::Minimal:
     case RequestedReasoningEffort::High:
     case RequestedReasoningEffort::Max:
-        invalid_prompt_option("reasoning effort '" +
-                                  std::string(requested_reasoning_effort_name(requested)) +
-                                  "' is not supported by the loaded chat template",
-                              "reasoning_effort", "reasoning_effort_not_supported");
     case RequestedReasoningEffort::None:
         break;
     }
 
-    if (!capabilities.reasoning_effort.supports(*result.reasoning_effort)) {
-        invalid_prompt_option("reasoning effort '" +
+    if (!mapped_effort || !capabilities.reasoning_effort.supports(*mapped_effort)) {
+        const std::string supported =
+            format_supported_reasoning_efforts(capabilities.reasoning_effort);
+        if (supported.empty()) {
+            invalid_prompt_option("the loaded chat template does not support reasoning effort",
+                                  "reasoning_effort", "reasoning_effort_not_supported");
+        }
+        invalid_prompt_option("Unexpected reasoning effort " +
                                   std::string(requested_reasoning_effort_name(requested)) +
-                                  "' is not supported by the loaded chat template",
+                                  ". Supported types are " + supported + ".",
                               "reasoning_effort", "reasoning_effort_not_supported");
     }
+    result.reasoning_effort = *mapped_effort;
     return complete();
 }
 
