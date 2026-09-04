@@ -8,14 +8,25 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 
 FlashNextVisionSession::FlashNextVisionSession(const VisionModelView& vision_view,
                                                DeviceContext& device,
+                                               DeviceSpan workspace,
+                                               const qwen3_vision::WorkspacePlan& workspace_plan,
                                                std::uint32_t max_merged_tokens)
     : device_(device),
       weights_(adapt_vision_weights(vision_view)),
       encoder_(device, weights_),
       max_merged_tokens_(max_merged_tokens),
-      workspace_plan_(qwen3_vision::Encoder::plan_workspace(
-          max_merged_tokens_, 64ULL * 1024ULL * 1024ULL, weights_.output_hidden)),
-      workspace_buf_(workspace_plan_.capacity_bytes) {}
+      workspace_plan_(workspace_plan),
+      workspace_(workspace) {
+    if (workspace_.data == nullptr) {
+        throw std::invalid_argument("FlashNextVisionSession: workspace data is null");
+    }
+    if (workspace_.bytes < workspace_plan_.capacity_bytes) {
+        throw std::invalid_argument("FlashNextVisionSession: workspace bytes (" +
+                                    std::to_string(workspace_.bytes) +
+                                    ") is smaller than plan capacity (" +
+                                    std::to_string(workspace_plan_.capacity_bytes) + ")");
+    }
+}
 
 Tensor FlashNextVisionSession::encode(const qwen3_6::VisionItemControl& control,
                                       std::span<const std::uint16_t> patches,
@@ -24,9 +35,8 @@ Tensor FlashNextVisionSession::encode(const qwen3_6::VisionItemControl& control,
         throw std::invalid_argument("FlashNextVisionSession: merged_count is 0 or exceeds max_merged_tokens");
     }
 
-    DeviceSpan backing{workspace_buf_.p, workspace_buf_.bytes};
     Tensor output = qwen3_vision::Encoder::bind_output(
-        backing, workspace_plan_, control.merged_count, weights_.output_hidden);
+        workspace_, workspace_plan_, control.merged_count, weights_.output_hidden);
 
     qwen3_vision::EncodeItemView item_view{
         .patches                = patches,
@@ -40,7 +50,7 @@ Tensor FlashNextVisionSession::encode(const qwen3_6::VisionItemControl& control,
 
     CudaEventTimer timer(device_, stream);
     timer.start();
-    encoder_.encode(item_view, output, backing, workspace_plan_);
+    encoder_.encode(item_view, output, workspace_, workspace_plan_);
     timer.record_stop();
     CUDA_CHECK(cudaStreamSynchronize(stream));
     elapsed_seconds_ += timer.elapsed_ms() / 1000.0;

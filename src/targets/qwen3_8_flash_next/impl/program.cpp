@@ -65,9 +65,19 @@ ProgramImpl::ProgramImpl(const LoadedModelData* model_data, FlashNextRuntimePlan
         continuation_slots_[c].cache_slot = 2U * plan_.config.max_concurrency + c;
     }
     if (model_data_ != nullptr && model_data_->vision.has_value() && plan_.config.vision_enabled) {
-        vision_session_.emplace(*model_data_->vision, device_, plan_.config.max_vision_tokens);
+        if (!plan_.vision_workspace.has_value()) {
+            throw std::logic_error("Vision enabled but plan has no vision workspace");
+        }
+        DeviceSpan ws{allocation_.workspace().base(), allocation_.workspace().capacity()};
+        vision_session_.emplace(*model_data_->vision, device_, ws, *plan_.vision_workspace,
+                                plan_.config.max_vision_tokens);
     } else if (vision_override_.has_value() && plan_.config.vision_enabled) {
-        vision_session_.emplace(*vision_override_, device_, plan_.config.max_vision_tokens);
+        if (!plan_.vision_workspace.has_value()) {
+            throw std::logic_error("Vision enabled but plan has no vision workspace");
+        }
+        DeviceSpan ws{allocation_.workspace().base(), allocation_.workspace().capacity()};
+        vision_session_.emplace(*vision_override_, device_, ws, *plan_.vision_workspace,
+                                plan_.config.max_vision_tokens);
     }
 }
 
