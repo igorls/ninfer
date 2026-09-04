@@ -58,9 +58,10 @@ void validate_config_invariants(const FlashNextRuntimeConfig& config,
     }
 
     const std::uint32_t slots_per_lane =
-        config.speculative_draft_tokens > 0 ? (config.speculative_draft_tokens + 1U) : 2U;
-    const std::uint32_t min_state_slots =
-        slots_per_lane * config.max_concurrency + config.continuation_capacity;
+        flash_next_slots_per_lane(config.speculative_draft_tokens);
+    const std::uint32_t floor_slots =
+        flash_next_floor_slots(config.max_concurrency, config.speculative_draft_tokens);
+    const std::uint32_t min_state_slots = floor_slots + config.continuation_capacity;
     resolved_state_slots = config.state_slot_capacity;
     if (resolved_state_slots == 0) {
         resolved_state_slots = min_state_slots;
@@ -76,9 +77,8 @@ void validate_config_invariants(const FlashNextRuntimeConfig& config,
         // longer true: construct_registered writes the clamped value back into the effective
         // options (registry.cpp) and the Engine constructs its core from those, so the two sides
         // now read the same number by construction.
-        const std::uint32_t cont_cap_limit = kMaxStateSlots > slots_per_lane * config.max_concurrency
-                                                 ? kMaxStateSlots - slots_per_lane * config.max_concurrency
-                                                 : 0U;
+        const std::uint32_t cont_cap_limit =
+            kMaxStateSlots > floor_slots ? kMaxStateSlots - floor_slots : 0U;
         throw std::invalid_argument(
             "Flash-Next state_slot_capacity must be in [slots_per_lane * max_concurrency + continuation_capacity (" +
             std::to_string(min_state_slots) + "), " + std::to_string(kMaxStateSlots) +

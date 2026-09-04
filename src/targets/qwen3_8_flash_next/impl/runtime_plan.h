@@ -29,6 +29,17 @@ inline constexpr std::uint32_t kMainPageGroupTokens = 256; // 256-token affine g
 // when only one of them clamped, the package built a plan the planner then rejected.
 inline constexpr std::uint32_t kMaxStateSlots = 64;
 
+[[nodiscard]] inline constexpr std::uint32_t
+flash_next_slots_per_lane(std::uint32_t speculative_draft_tokens) noexcept {
+    return speculative_draft_tokens > 0 ? (speculative_draft_tokens + 1U) : 2U;
+}
+
+[[nodiscard]] inline constexpr std::uint32_t
+flash_next_floor_slots(std::uint32_t max_concurrency,
+                       std::uint32_t speculative_draft_tokens) noexcept {
+    return flash_next_slots_per_lane(speculative_draft_tokens) * max_concurrency;
+}
+
 // Per 256-token group strides across all 12 QSA layers
 // Attention K + V: 12 layers * 4 pages/group * (256 * 64 * 2 heads * 2 bytes * 2 K/V) = 6,291,456
 // bytes

@@ -156,12 +156,82 @@ int test_continuation_capacity_clamping() {
     return failures;
 }
 
+int test_make_sequence_planner_draft_tokens() {
+    using Package = ninfer::targets::qwen3_8_flash_next::Package;
+
+    int failures = 0;
+    ninfer::DeviceContext dummy_device{};
+
+    // 1. draft_tokens 1 at c=8: floor is (1+1)*8 = 16. Limit 64 - 16 = 48.
+    // Requested 48 remains 48 without clamping.
+    {
+        ninfer::EngineOptions options{};
+        options.max_concurrency = 8;
+        options.max_context     = 4096;
+        options.speculative.backend = ninfer::SpeculativeBackend::Mtp;
+        options.speculative.draft_tokens = 1;
+        options.context_cache.enabled = true;
+        options.context_cache.max_private_continuations = 48;
+
+        auto planner = Package::make_sequence_planner(
+            dummy_device, options, Package::WeightsProfile::MixedNvfp4Fp8PleInt4);
+        const auto curve = planner.capacity_curve();
+        auto plan = std::move(planner).finalize(curve.minimum_main_page_groups);
+
+        failures += check(plan.continuation_capacity() == 48,
+                          "draft_tokens 1 at c=8: continuation capacity must be 48");
+    }
+
+    // 2. draft_tokens 2 at c=8: floor is (2+1)*8 = 24. Limit 64 - 24 = 40.
+    // Requested 48 must clamp cleanly to 40.
+    {
+        ninfer::EngineOptions options{};
+        options.max_concurrency = 8;
+        options.max_context     = 4096;
+        options.speculative.backend = ninfer::SpeculativeBackend::Mtp;
+        options.speculative.draft_tokens = 2;
+        options.context_cache.enabled = true;
+        options.context_cache.max_private_continuations = 48;
+
+        auto planner = Package::make_sequence_planner(
+            dummy_device, options, Package::WeightsProfile::MixedNvfp4Fp8PleInt4);
+        const auto curve = planner.capacity_curve();
+        auto plan = std::move(planner).finalize(curve.minimum_main_page_groups);
+
+        failures += check(plan.continuation_capacity() == 40,
+                          "draft_tokens 2 at c=8: continuation capacity must clamp from 48 to 40");
+    }
+
+    // 3. draft_tokens 4 at c=8: floor is (4+1)*8 = 40. Limit 64 - 40 = 24.
+    // Requested 48 must clamp cleanly to 24.
+    {
+        ninfer::EngineOptions options{};
+        options.max_concurrency = 8;
+        options.max_context     = 4096;
+        options.speculative.backend = ninfer::SpeculativeBackend::Mtp;
+        options.speculative.draft_tokens = 4;
+        options.context_cache.enabled = true;
+        options.context_cache.max_private_continuations = 48;
+
+        auto planner = Package::make_sequence_planner(
+            dummy_device, options, Package::WeightsProfile::MixedNvfp4Fp8PleInt4);
+        const auto curve = planner.capacity_curve();
+        auto plan = std::move(planner).finalize(curve.minimum_main_page_groups);
+
+        failures += check(plan.continuation_capacity() == 24,
+                          "draft_tokens 4 at c=8: continuation capacity must clamp from 48 to 24");
+    }
+
+    return failures;
+}
+
 } // namespace
 
 int main() {
     int failures = 0;
     failures += test_sequence_plan_curve_consistency();
     failures += test_continuation_capacity_clamping();
+    failures += test_make_sequence_planner_draft_tokens();
 
     if (failures == 0) {
         std::cout << "All SequencePlan tests passed cleanly.\n";
