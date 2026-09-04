@@ -60,11 +60,108 @@ int test_sequence_plan_curve_consistency() {
     return failures;
 }
 
+int test_continuation_capacity_clamping() {
+    using Package = ninfer::targets::qwen3_8_flash_next::Package;
+
+    int failures = 0;
+    ninfer::DeviceContext dummy_device{};
+
+    // 1. Concurrency 8: floor is 16 slots. kMaxStateSlots is 64, so ceiling for continuations is 48.
+    // Requesting 128 must clamp to 48 without throwing.
+    {
+        ninfer::EngineOptions options{};
+        options.max_concurrency = 8;
+        options.max_context     = 4096;
+        options.context_cache.enabled = true;
+        options.context_cache.max_private_continuations = 128;
+
+        auto planner = Package::make_sequence_planner(
+            dummy_device, options, Package::WeightsProfile::MixedNvfp4Fp8PleInt4);
+        const auto curve = planner.capacity_curve();
+        auto plan = std::move(planner).finalize(curve.minimum_main_page_groups);
+
+        failures += check(plan.continuation_capacity() == 48,
+                          "concurrency 8: continuation capacity must clamp from 128 to 48");
+    }
+
+    // 2. Concurrency 4: floor is 8 slots. Ceiling for continuations is 64 - 8 = 56.
+    // Requesting 128 must clamp to 56 without throwing.
+    {
+        ninfer::EngineOptions options{};
+        options.max_concurrency = 4;
+        options.max_context     = 4096;
+        options.context_cache.enabled = true;
+        options.context_cache.max_private_continuations = 128;
+
+        auto planner = Package::make_sequence_planner(
+            dummy_device, options, Package::WeightsProfile::MixedNvfp4Fp8PleInt4);
+        const auto curve = planner.capacity_curve();
+        auto plan = std::move(planner).finalize(curve.minimum_main_page_groups);
+
+        failures += check(plan.continuation_capacity() == 56,
+                          "concurrency 4: continuation capacity must clamp from 128 to 56");
+    }
+
+    // 3. Concurrency 4: requesting 20 (<= 56) must remain 20 without clamping.
+    {
+        ninfer::EngineOptions options{};
+        options.max_concurrency = 4;
+        options.max_context     = 4096;
+        options.context_cache.enabled = true;
+        options.context_cache.max_private_continuations = 20;
+
+        auto planner = Package::make_sequence_planner(
+            dummy_device, options, Package::WeightsProfile::MixedNvfp4Fp8PleInt4);
+        const auto curve = planner.capacity_curve();
+        auto plan = std::move(planner).finalize(curve.minimum_main_page_groups);
+
+        failures += check(plan.continuation_capacity() == 20,
+                          "concurrency 4: continuation capacity 20 must remain 20");
+    }
+
+    // 4. Context cache disabled: continuation capacity must be 0.
+    {
+        ninfer::EngineOptions options{};
+        options.max_concurrency = 4;
+        options.max_context     = 4096;
+        options.context_cache.enabled = false;
+
+        auto planner = Package::make_sequence_planner(
+            dummy_device, options, Package::WeightsProfile::MixedNvfp4Fp8PleInt4);
+        const auto curve = planner.capacity_curve();
+        auto plan = std::move(planner).finalize(curve.minimum_main_page_groups);
+
+        failures += check(plan.continuation_capacity() == 0,
+                          "disabled cache: continuation capacity must be 0");
+    }
+
+    // 5. Concurrency 1: floor is 2 slots. Ceiling for continuations is 64 - 2 = 62.
+    // Requesting 100 must clamp to 62.
+    {
+        ninfer::EngineOptions options{};
+        options.max_concurrency = 1;
+        options.max_context     = 4096;
+        options.context_cache.enabled = true;
+        options.context_cache.max_private_continuations = 100;
+
+        auto planner = Package::make_sequence_planner(
+            dummy_device, options, Package::WeightsProfile::MixedNvfp4Fp8PleInt4);
+        const auto curve = planner.capacity_curve();
+        auto plan = std::move(planner).finalize(curve.minimum_main_page_groups);
+
+        failures += check(plan.continuation_capacity() == 62,
+                          "concurrency 1: continuation capacity must clamp from 100 to 62");
+    }
+
+    return failures;
+}
+
 } // namespace
 
 int main() {
     int failures = 0;
     failures += test_sequence_plan_curve_consistency();
+    failures += test_continuation_capacity_clamping();
 
     if (failures == 0) {
         std::cout << "All SequencePlan tests passed cleanly.\n";

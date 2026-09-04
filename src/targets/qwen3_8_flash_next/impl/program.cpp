@@ -1219,6 +1219,10 @@ std::uint32_t SequencePlan::max_concurrency() const noexcept {
     return impl_ != nullptr ? impl_->plan.config.max_concurrency : 0;
 }
 
+std::uint32_t SequencePlan::continuation_capacity() const noexcept {
+    return impl_ != nullptr ? impl_->plan.continuation_slots : 0;
+}
+
 std::size_t SequencePlan::device_reservation_bytes() const noexcept {
     return impl_ != nullptr ? impl_->plan.total_device_bytes : 0;
 }

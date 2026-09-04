@@ -174,6 +174,11 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
     }
     target_finalize_phase.complete();
 
+    if (effective_options.context_cache.enabled) {
+        effective_options.context_cache.max_private_continuations =
+            sequence_plan.continuation_capacity();
+    }
+
     StartupPhaseScope frontend_phase(effective_options.startup_observer, StartupPhase::FrontendInitialize);
     auto loaded = std::make_unique<Loaded>(std::move(model), effective_options);
     frontend_phase.complete();
@@ -212,7 +217,8 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
     return ConstructedTarget{.active            = ActiveTarget(std::move(instance)),
                              .load              = std::move(summary),
                              .sampling_defaults = sampling_defaults,
-                             .context_cost      = std::move(context_cost.model)};
+                             .context_cost      = std::move(context_cost.model),
+                             .effective_options = std::move(effective_options)};
 }
 
 } // namespace
