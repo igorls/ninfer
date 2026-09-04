@@ -33,6 +33,13 @@ struct FlashNextMoeWorkspace {
     Tensor down_act_scales;
     // Packed BF16 [1280, T] = gate[640,T] | shared-act[640,T] for the MMA shared path.
     Tensor shared_gemm;
+    // Multi-sequence decode expert co-batching (tokens in [2, 8])
+    Tensor dedup_unique_count;
+    Tensor dedup_unique_experts;
+    Tensor dedup_assigned_count;
+    Tensor dedup_assigned_tokens;
+    Tensor dedup_assigned_paths;
+    Tensor down_scratchpad;
 };
 
 template <class Arena>
@@ -72,6 +79,13 @@ FlashNextMoeWorkspace allocate_flash_next_moe_workspace(Arena& arena, std::int32
         out.down_act_codes    = arena.alloc(DType::U8, {320, 11 * tokens}, 256);
         out.down_act_scales   = arena.alloc(DType::U8, {40, 11 * tokens}, 256);
         out.shared_gemm       = arena.alloc(DType::BF16, {640, 2 * tokens}, 256);
+    } else if (tokens > 1) {
+        out.dedup_unique_count    = arena.alloc(DType::I32, {1}, 16);
+        out.dedup_unique_experts  = arena.alloc(DType::I32, {80}, 16);
+        out.dedup_assigned_count  = arena.alloc(DType::I32, {80}, 16);
+        out.dedup_assigned_tokens = arena.alloc(DType::I32, {80 * 8}, 16);
+        out.dedup_assigned_paths  = arena.alloc(DType::I32, {80 * 8}, 16);
+        out.down_scratchpad       = arena.alloc(DType::FP32, {2'560, 10, tokens}, 256);
     }
     return out;
 }

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
 #include <stdexcept>
 #include <vector>
 
@@ -79,6 +80,45 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
                      scratch.alpha, scratch.shared_scale, stream);
     stage_ledger_record(stream, FlashNextStageId::MoE_Router);
     flash_next_moe_kernels_launch(input, weights, scratch, output, stream);
+
+    // Diagnostic NINFER_FLASH_NEXT_TRACE_DECODE_ROUTING: log router choices during decode (tokens <= 8).
+    static const char* trace_decode_env = std::getenv("NINFER_FLASH_NEXT_TRACE_DECODE_ROUTING");
+    if (trace_decode_env != nullptr && trace_decode_env[0] != '\0' && tokens <= 8) {
+        cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
+        cudaStreamIsCapturing(stream, &capture_status);
+        if (capture_status == cudaStreamCaptureStatusNone) {
+            static std::FILE* s_trace_fp = nullptr;
+            static std::mutex s_trace_mtx;
+            static int s_trace_call = 0;
+
+            std::vector<int> h_ids(tokens * 10);
+            cudaMemcpyAsync(h_ids.data(), scratch.ids.data, tokens * 10 * sizeof(int), cudaMemcpyDeviceToHost, stream);
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+
+            std::lock_guard<std::mutex> lock(s_trace_mtx);
+            if (s_trace_fp == nullptr) {
+                s_trace_fp = std::fopen(trace_decode_env, "w");
+                if (s_trace_fp != nullptr) {
+                    std::fprintf(s_trace_fp, "round,layer,tokens");
+                    for (int i = 0; i < 80; ++i) {
+                        std::fprintf(s_trace_fp, ",id_%d", i);
+                    }
+                    std::fprintf(s_trace_fp, "\n");
+                }
+            }
+            if (s_trace_fp != nullptr) {
+                const int layer = s_trace_call % 48;
+                const int round = s_trace_call / 48;
+                std::fprintf(s_trace_fp, "%d,%d,%d", round, layer, tokens);
+                for (int i = 0; i < tokens * 10; ++i) {
+                    std::fprintf(s_trace_fp, ",%d", h_ids[i]);
+                }
+                std::fprintf(s_trace_fp, "\n");
+                std::fflush(s_trace_fp);
+                s_trace_call++;
+            }
+        }
+    }
 
     // Diagnostic NINFER_FLASH_NEXT_TRACE_ROUTING only; not on the default prefill chunk path.
     static const char* trace_routing_env = std::getenv("NINFER_FLASH_NEXT_TRACE_ROUTING");

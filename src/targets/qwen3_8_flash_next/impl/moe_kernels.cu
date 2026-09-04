@@ -308,6 +308,397 @@ __global__ void flash_next_moe_down_kernel(
 }
 
 // =========================================================================
+// MULTI-SEQUENCE DECODE CO-BATCHED KERNELS (tokens in [2, 8])
+// =========================================================================
+
+// Fast warp deduplication (<0.1 us): reduces tokens * 10 expert selections into U unique active experts
+// and builds the inverted index tables (assigned tokens and paths per unique expert).
+__global__ void flash_next_moe_dedup_kernel(
+    const std::int32_t* __restrict__ ids,
+    std::int32_t* __restrict__ unique_count,
+    std::int32_t* __restrict__ unique_experts,
+    std::int32_t* __restrict__ assigned_count,
+    std::int32_t* __restrict__ assigned_tokens,
+    std::int32_t* __restrict__ assigned_paths,
+    int tokens) {
+    __shared__ int s_expert_to_unique[512];
+    __shared__ int s_unique_count;
+    __shared__ int s_unique_experts[80];
+    __shared__ int s_assigned_count[80];
+    __shared__ int s_assigned_tokens[80 * 8];
+    __shared__ int s_assigned_paths[80 * 8];
+
+    const int tid = static_cast<int>(threadIdx.x);
+    if (tid < 512) {
+        s_expert_to_unique[tid] = -1;
+    }
+    if (tid == 0) {
+        s_unique_count = 0;
+    }
+    __syncthreads();
+
+    if (tid == 0) {
+        int u_cnt = 0;
+        const int total_items = tokens * kTopK;
+        for (int i = 0; i < total_items; ++i) {
+            const int token = i / kTopK;
+            const int path  = i % kTopK;
+            const int exp   = ids[i];
+            int u_idx = s_expert_to_unique[exp];
+            if (u_idx < 0) {
+                u_idx = u_cnt++;
+                s_expert_to_unique[exp] = u_idx;
+                s_unique_experts[u_idx] = exp;
+                s_assigned_count[u_idx] = 0;
+            }
+            const int c = s_assigned_count[u_idx];
+            s_assigned_tokens[u_idx * 8 + c] = token;
+            s_assigned_paths[u_idx * 8 + c]  = path;
+            s_assigned_count[u_idx] = c + 1;
+        }
+        s_unique_count = u_cnt;
+    }
+    __syncthreads();
+
+    if (tid == 0) {
+        *unique_count = s_unique_count;
+    }
+    const int u_cnt = s_unique_count;
+    for (int i = tid; i < u_cnt; i += blockDim.x) {
+        unique_experts[i] = s_unique_experts[i];
+        assigned_count[i] = s_assigned_count[i];
+    }
+    const int total_assigned = u_cnt * 8;
+    for (int i = tid; i < total_assigned; i += blockDim.x) {
+        assigned_tokens[i] = s_assigned_tokens[i];
+        assigned_paths[i]  = s_assigned_paths[i];
+    }
+}
+
+// Co-batched Gate/Up kernel: gridded on (kIntermediate / GateSchedule::kWarpsPerCta, tokens * kTopK).
+// Block exits immediately if blockIdx.y >= *unique_count.
+// For active unique expert, loads weights once into registers/SMEM and evaluates GEMV against
+// all assigned tokens, writing to per-(token, path, row) activations.
+__global__ void flash_next_moe_gate_up_cobatched_kernel(
+    const __nv_bfloat16* __restrict__ input,
+    const std::int32_t* __restrict__ unique_count,
+    const std::int32_t* __restrict__ unique_experts,
+    const std::int32_t* __restrict__ assigned_count,
+    const std::int32_t* __restrict__ assigned_tokens,
+    const std::int32_t* __restrict__ assigned_paths,
+    const std::uint8_t* __restrict__ expert_codes,
+    const std::uint8_t* __restrict__ expert_scales,
+    const float* __restrict__ expert_divisors,
+    std::uint64_t code_stride,
+    std::uint64_t scale_stride,
+    __nv_bfloat16* __restrict__ activations) {
+    const int u = static_cast<int>(blockIdx.y);
+    if (u >= *unique_count) { return; }
+
+    const int expert = unique_experts[u];
+    const int num_assigned = assigned_count[u];
+    const int warp = static_cast<int>(threadIdx.x) >> 5;
+    const int lane = static_cast<int>(threadIdx.x) & 31;
+    const int row  = static_cast<int>(blockIdx.x) * GateSchedule::kWarpsPerCta + warp;
+    if (row >= kIntermediate) { return; }
+
+    __shared__ ops::detail::Nvfp4GemvSharedStorage<GateGeometry, GateSchedule> shared;
+
+    const auto* codes   = expert_codes + static_cast<std::uint64_t>(expert) * code_stride;
+    const auto* scales  = expert_scales + static_cast<std::uint64_t>(expert) * scale_stride;
+    const float inverse = 1.0F / expert_divisors[expert];
+    const int parent_rows[GateSchedule::kRowsPerWarp] = {row, row + kIntermediate};
+
+    for (int t = 0; t < num_assigned; ++t) {
+        const int token = assigned_tokens[u * 8 + t];
+        const int path  = assigned_paths[u * 8 + t];
+        const auto* x   = input + static_cast<std::int64_t>(token) * kHidden;
+
+        float accumulators[GateSchedule::kRowsPerWarp][GateSchedule::kAccumulatorChains] = {};
+        ops::detail::compute_nvfp4_rows<GateGeometry, GateSchedule>(
+            x, codes, scales, shared, inverse, parent_rows, warp * GateSchedule::kRowsPerWarp, lane,
+            accumulators);
+
+        float gate = 0.0F;
+        float up   = 0.0F;
+#pragma unroll
+        for (int chain = 0; chain < GateSchedule::kAccumulatorChains; ++chain) {
+            gate += accumulators[0][chain];
+            up   += accumulators[1][chain];
+        }
+        gate = ops::warp_reduce_sum(gate);
+        up   = ops::warp_reduce_sum(up);
+
+        if (lane == 0) {
+            activations[(static_cast<std::int64_t>(token) * kPaths + path) * kIntermediate + row] =
+                __float2bfloat16_rn(ops::silu(gate) * up);
+        }
+    }
+}
+
+// Dedicated Gate/Up kernel for path 10 shared expert: gridded on (kIntermediate / GateSchedule::kWarpsPerCta, tokens).
+__global__ void flash_next_moe_gate_up_shared_kernel(
+    const __nv_bfloat16* __restrict__ input,
+    const __nv_bfloat16* __restrict__ shared_gate,
+    const __nv_bfloat16* __restrict__ shared_up,
+    __nv_bfloat16* __restrict__ activations) {
+    const int token = static_cast<int>(blockIdx.y);
+    const int warp  = static_cast<int>(threadIdx.x) >> 5;
+    const int lane  = static_cast<int>(threadIdx.x) & 31;
+    const int row   = static_cast<int>(blockIdx.x) * GateSchedule::kWarpsPerCta + warp;
+    if (row >= kIntermediate) { return; }
+
+    const auto* x = input + static_cast<std::int64_t>(token) * kHidden;
+    float gate    = 0.0F;
+    float up      = 0.0F;
+    dot_bf16_pair<kHidden>(x, shared_gate + static_cast<std::int64_t>(row) * kHidden,
+                           shared_up + static_cast<std::int64_t>(row) * kHidden, gate, up);
+    if (lane == 0) {
+        activations[(static_cast<std::int64_t>(token) * kPaths + kTopK) * kIntermediate + row] =
+            __float2bfloat16_rn(ops::silu(gate) * up);
+    }
+}
+
+// Co-batched Down kernel: gridded on (kHidden / kDownWarps, tokens * kTopK).
+// Block exits immediately if blockIdx.y >= *unique_count.
+// For active unique expert, loads expert down weights ONCE into registers/SMEM and evaluates
+// dot products against all assigned (token, path) pairs, writing partial projections to down_scratchpad.
+__global__ void flash_next_moe_down_cobatched_kernel(
+    const std::int32_t* __restrict__ unique_count,
+    const std::int32_t* __restrict__ unique_experts,
+    const std::int32_t* __restrict__ assigned_count,
+    const std::int32_t* __restrict__ assigned_tokens,
+    const std::int32_t* __restrict__ assigned_paths,
+    const __nv_bfloat16* __restrict__ activations,
+    const std::uint8_t* __restrict__ expert_codes,
+    const std::uint8_t* __restrict__ expert_scales,
+    const float* __restrict__ expert_divisors,
+    std::uint64_t code_stride,
+    std::uint64_t scale_stride,
+    float* __restrict__ down_scratchpad) {
+    const int u = static_cast<int>(blockIdx.y);
+    if (u >= *unique_count) { return; }
+
+    const int tid  = static_cast<int>(threadIdx.x);
+    const int warp = tid >> 5;
+    const int lane = tid & 31;
+    const int row  = static_cast<int>(blockIdx.x) * kDownWarps + warp;
+
+    if (row >= kHidden) { return; }
+
+    const int expert       = unique_experts[u];
+    const int num_assigned = assigned_count[u];
+
+    const int m_tile       = row / 128;
+    const int row_inner    = row % 128;
+    const int row_mod32    = row_inner & 31;
+    const int row_quartile = row_inner >> 5;
+    const std::int64_t scale_row_base = static_cast<std::int64_t>(m_tile * 10) * 512 +
+                                        row_mod32 * 16 + row_quartile * 4;
+
+    const auto* exp_codes =
+        expert_codes + static_cast<std::uint64_t>(expert) * code_stride;
+    const auto* exp_scales =
+        expert_scales + static_cast<std::uint64_t>(expert) * scale_stride;
+    const float inverse = 1.0F / expert_divisors[expert];
+
+    // Lanes 0..9 load the 10 scale words (tiles 0..9) for this row
+    std::uint32_t my_tile = 0;
+    if (lane < 10) {
+        const std::int64_t off = scale_row_base + static_cast<std::int64_t>(lane) * 512;
+        my_tile = *reinterpret_cast<const std::uint32_t*>(exp_scales + off);
+    }
+
+    // Broadcast tile words across the warp with all 32 threads active (zero divergence)
+    const std::uint32_t tile_g0 = __shfl_sync(0xFFFFFFFFU, my_tile, lane >> 2);
+    const std::uint32_t tile_g1 = __shfl_sync(0xFFFFFFFFU, my_tile, 8 + (lane >> 2));
+
+    const std::uint8_t scale_g0 = static_cast<std::uint8_t>(tile_g0 >> ((lane & 3) * 8));
+    const float coef_g0 = ops::detail::decode_nvfp4_e4m3(scale_g0) * inverse;
+
+    const std::uint8_t scale_g1 = static_cast<std::uint8_t>(tile_g1 >> ((lane & 3) * 8));
+    const float coef_g1 = ops::detail::decode_nvfp4_e4m3(scale_g1) * inverse;
+
+    // Load and decode codes for group 0..31 once into registers
+    const auto* packed0 =
+        exp_codes + static_cast<std::int64_t>(row) * (kIntermediate / 2) + lane * 8;
+    const uint2 code_words0 = *reinterpret_cast<const uint2*>(packed0);
+    const float2 dw0[8] = {
+        ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words0.x)),
+        ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words0.x >> 8)),
+        ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words0.x >> 16)),
+        ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words0.x >> 24)),
+        ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words0.y)),
+        ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words0.y >> 8)),
+        ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words0.y >> 16)),
+        ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words0.y >> 24))
+    };
+
+    // Load and decode codes for group 32..39 once into registers (lanes 0..7)
+    float2 dw1[8] = {};
+    if (lane < 8) {
+        const auto* packed1 =
+            exp_codes + static_cast<std::int64_t>(row) * (kIntermediate / 2) + (lane + 32) * 8;
+        const uint2 code_words1 = *reinterpret_cast<const uint2*>(packed1);
+        dw1[0] = ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words1.x));
+        dw1[1] = ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words1.x >> 8));
+        dw1[2] = ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words1.x >> 16));
+        dw1[3] = ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words1.x >> 24));
+        dw1[4] = ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words1.y));
+        dw1[5] = ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words1.y >> 8));
+        dw1[6] = ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words1.y >> 16));
+        dw1[7] = ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words1.y >> 24));
+    }
+
+    // Evaluate dot product against every assigned (token, path) reusing register-cached weights
+    for (int t = 0; t < num_assigned; ++t) {
+        const int token = assigned_tokens[u * 8 + t];
+        const int path  = assigned_paths[u * 8 + t];
+        const auto* act_path =
+            activations + (static_cast<std::int64_t>(token) * kPaths + path) * kIntermediate;
+
+        float sum0 = 0.0F;
+        float sum1 = 0.0F;
+
+        // Group 0..31: all 32 lanes active
+        {
+            const auto* act_ptr = reinterpret_cast<const uint4*>(act_path + lane * 16);
+            const uint4 act_v0 = act_ptr[0];
+            const uint4 act_v1 = act_ptr[1];
+
+            const float2 hv[8] = {
+                ops::bf16x2_bits_to_float2(act_v0.x),
+                ops::bf16x2_bits_to_float2(act_v0.y),
+                ops::bf16x2_bits_to_float2(act_v0.z),
+                ops::bf16x2_bits_to_float2(act_v0.w),
+                ops::bf16x2_bits_to_float2(act_v1.x),
+                ops::bf16x2_bits_to_float2(act_v1.y),
+                ops::bf16x2_bits_to_float2(act_v1.z),
+                ops::bf16x2_bits_to_float2(act_v1.w)
+            };
+
+#pragma unroll
+            for (int pair = 0; pair < 8; ++pair) {
+                sum0 = fmaf(dw0[pair].x * coef_g0, hv[pair].x, sum0);
+                sum1 = fmaf(dw0[pair].y * coef_g0, hv[pair].y, sum1);
+            }
+        }
+
+        // Group 32..39: lanes 0..7 active
+        if (lane < 8) {
+            const auto* act_ptr = reinterpret_cast<const uint4*>(act_path + (lane + 32) * 16);
+            const uint4 act_v0 = act_ptr[0];
+            const uint4 act_v1 = act_ptr[1];
+
+            const float2 hv[8] = {
+                ops::bf16x2_bits_to_float2(act_v0.x),
+                ops::bf16x2_bits_to_float2(act_v0.y),
+                ops::bf16x2_bits_to_float2(act_v0.z),
+                ops::bf16x2_bits_to_float2(act_v0.w),
+                ops::bf16x2_bits_to_float2(act_v1.x),
+                ops::bf16x2_bits_to_float2(act_v1.y),
+                ops::bf16x2_bits_to_float2(act_v1.z),
+                ops::bf16x2_bits_to_float2(act_v1.w)
+            };
+
+#pragma unroll
+            for (int pair = 0; pair < 8; ++pair) {
+                sum0 = fmaf(dw1[pair].x * coef_g1, hv[pair].x, sum0);
+                sum1 = fmaf(dw1[pair].y * coef_g1, hv[pair].y, sum1);
+            }
+        }
+
+        const float value = ops::warp_reduce_sum(sum0 + sum1);
+        if (lane == 0) {
+            down_scratchpad[(static_cast<std::int64_t>(token) * kTopK + path) * kHidden + row] = value;
+        }
+    }
+}
+
+// Fused canonical sequential reduction summing p = 0..9 (100% bitwise identical, 0 atomicAdd)
+// plus shared expert dot product. Gridded on (kHidden / kDownWarps, tokens).
+__global__ void flash_next_moe_down_reduce_kernel(
+    const float* __restrict__ down_scratchpad,
+    const float* __restrict__ alpha,
+    const float* __restrict__ shared_scale,
+    const __nv_bfloat16* __restrict__ activations,
+    const __nv_bfloat16* __restrict__ shared_down,
+    __nv_bfloat16* __restrict__ output) {
+    const int token = static_cast<int>(blockIdx.y);
+    const int tid   = static_cast<int>(threadIdx.x);
+    const int warp  = tid >> 5;
+    const int lane  = tid & 31;
+    const int row   = static_cast<int>(blockIdx.x) * kDownWarps + warp;
+
+    if (row >= kHidden) { return; }
+
+    float routed = 0.0F;
+    if (lane == 0) {
+#pragma unroll
+        for (int path = 0; path < kTopK; ++path) {
+            const float val = down_scratchpad[(static_cast<std::int64_t>(token) * kTopK + path) * kHidden + row];
+            routed = fmaf(alpha[token * kTopK + path], val, routed);
+        }
+    }
+
+    // Vectorized 128-bit loads for shared expert dot product directly from L1/L2
+    float shared_sum = 0.0F;
+    const auto* shared_row = reinterpret_cast<const uint4*>(
+        shared_down + static_cast<std::int64_t>(row) * kIntermediate);
+    const auto* shared_act = reinterpret_cast<const uint4*>(
+        activations + (static_cast<std::int64_t>(token) * kPaths + kTopK) * kIntermediate);
+
+#pragma unroll
+    for (int phase = 0; phase < 2; ++phase) {
+        const uint4 w = shared_row[phase * 32 + lane];
+        const uint4 a = shared_act[phase * 32 + lane];
+        const float2 wv0 = ops::bf16x2_bits_to_float2(w.x);
+        const float2 av0 = ops::bf16x2_bits_to_float2(a.x);
+        const float2 wv1 = ops::bf16x2_bits_to_float2(w.y);
+        const float2 av1 = ops::bf16x2_bits_to_float2(a.y);
+        const float2 wv2 = ops::bf16x2_bits_to_float2(w.z);
+        const float2 av2 = ops::bf16x2_bits_to_float2(a.z);
+        const float2 wv3 = ops::bf16x2_bits_to_float2(w.w);
+        const float2 av3 = ops::bf16x2_bits_to_float2(a.w);
+        shared_sum = fmaf(wv0.x, av0.x, shared_sum);
+        shared_sum = fmaf(wv0.y, av0.y, shared_sum);
+        shared_sum = fmaf(wv1.x, av1.x, shared_sum);
+        shared_sum = fmaf(wv1.y, av1.y, shared_sum);
+        shared_sum = fmaf(wv2.x, av2.x, shared_sum);
+        shared_sum = fmaf(wv2.y, av2.y, shared_sum);
+        shared_sum = fmaf(wv3.x, av3.x, shared_sum);
+        shared_sum = fmaf(wv3.y, av3.y, shared_sum);
+    }
+    if (lane < 16) {
+        const uint4 w = shared_row[64 + lane];
+        const uint4 a = shared_act[64 + lane];
+        const float2 wv0 = ops::bf16x2_bits_to_float2(w.x);
+        const float2 av0 = ops::bf16x2_bits_to_float2(a.x);
+        const float2 wv1 = ops::bf16x2_bits_to_float2(w.y);
+        const float2 av1 = ops::bf16x2_bits_to_float2(a.y);
+        const float2 wv2 = ops::bf16x2_bits_to_float2(w.z);
+        const float2 av2 = ops::bf16x2_bits_to_float2(a.z);
+        const float2 wv3 = ops::bf16x2_bits_to_float2(w.w);
+        const float2 av3 = ops::bf16x2_bits_to_float2(a.w);
+        shared_sum = fmaf(wv0.x, av0.x, shared_sum);
+        shared_sum = fmaf(wv0.y, av0.y, shared_sum);
+        shared_sum = fmaf(wv1.x, av1.x, shared_sum);
+        shared_sum = fmaf(wv1.y, av1.y, shared_sum);
+        shared_sum = fmaf(wv2.x, av2.x, shared_sum);
+        shared_sum = fmaf(wv2.y, av2.y, shared_sum);
+        shared_sum = fmaf(wv3.x, av3.x, shared_sum);
+        shared_sum = fmaf(wv3.y, av3.y, shared_sum);
+    }
+
+    const float shared_value = ops::warp_reduce_sum(shared_sum);
+
+    if (lane == 0) {
+        output[static_cast<std::int64_t>(token) * kHidden + row] =
+            __float2bfloat16_rn(fmaf(shared_scale[token], shared_value, routed));
+    }
+}
+
+// =========================================================================
 // PREFILL KERNELS (T >= 128, Amortized Weight Loading & Grouped GEMMs)
 // =========================================================================
 
@@ -1626,10 +2017,9 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
                                    cudaStream_t stream) {
     const int tokens = static_cast<int>(input.ne[1]);
 
-    if (tokens <= 8) {
-        // Decode path (tokens <= 8): UNTOUCHED fused kernels
-        const dim3 gate_grid(kIntermediate / GateSchedule::kWarpsPerCta,
-                             static_cast<unsigned>(tokens), kPaths);
+    if (tokens == 1) {
+        // Single-token decode fastpath: UNTOUCHED original baseline kernels with zero dedup or scratchpad overhead
+        const dim3 gate_grid(kIntermediate / GateSchedule::kWarpsPerCta, 1, kPaths);
         flash_next_moe_gate_up_kernel<<<gate_grid, GateSchedule::kThreads, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(input.data),
             static_cast<const std::int32_t*>(workspace.ids.data),
@@ -1643,7 +2033,7 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
             static_cast<__nv_bfloat16*>(workspace.activations.data));
         CUDA_CHECK(cudaGetLastError());
 
-        const dim3 down_grid(kHidden / kDownWarps, static_cast<unsigned>(tokens));
+        const dim3 down_grid(kHidden / kDownWarps, 1);
         flash_next_moe_down_kernel<<<down_grid, kDownWarps * 32, 0, stream>>>(
             static_cast<const std::int32_t*>(workspace.ids.data),
             static_cast<const float*>(workspace.alpha.data),
@@ -1654,6 +2044,73 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
             weights.expert_down.weight_scale_divisors,
             weights.expert_down.code_bytes_per_expert,
             weights.expert_down.scale_bytes_per_expert,
+            static_cast<const __nv_bfloat16*>(weights.shared_down.qdata),
+            static_cast<__nv_bfloat16*>(output.data));
+        CUDA_CHECK(cudaGetLastError());
+    } else if (tokens <= 8) {
+        // Multi-sequence decode path (tokens in [2, 8]): Co-batched expert kernels across concurrent sequences
+        // Step 1: Warp deduplication into unique active experts and inverted index tables (<0.1 us)
+        flash_next_moe_dedup_kernel<<<1, 512, 0, stream>>>(
+            static_cast<const std::int32_t*>(workspace.ids.data),
+            static_cast<std::int32_t*>(workspace.dedup_unique_count.data),
+            static_cast<std::int32_t*>(workspace.dedup_unique_experts.data),
+            static_cast<std::int32_t*>(workspace.dedup_assigned_count.data),
+            static_cast<std::int32_t*>(workspace.dedup_assigned_tokens.data),
+            static_cast<std::int32_t*>(workspace.dedup_assigned_paths.data),
+            tokens);
+        CUDA_CHECK(cudaGetLastError());
+
+        // Step 2a: Co-batched Gate/Up projections for routed unique experts
+        const dim3 gate_cobatched_grid(kIntermediate / GateSchedule::kWarpsPerCta,
+                                       static_cast<unsigned>(tokens * kTopK));
+        flash_next_moe_gate_up_cobatched_kernel<<<gate_cobatched_grid, GateSchedule::kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(input.data),
+            static_cast<const std::int32_t*>(workspace.dedup_unique_count.data),
+            static_cast<const std::int32_t*>(workspace.dedup_unique_experts.data),
+            static_cast<const std::int32_t*>(workspace.dedup_assigned_count.data),
+            static_cast<const std::int32_t*>(workspace.dedup_assigned_tokens.data),
+            static_cast<const std::int32_t*>(workspace.dedup_assigned_paths.data),
+            reinterpret_cast<const std::uint8_t*>(weights.expert_gate_up.codes),
+            reinterpret_cast<const std::uint8_t*>(weights.expert_gate_up.scales),
+            weights.expert_gate_up.weight_scale_divisors,
+            weights.expert_gate_up.code_bytes_per_expert,
+            weights.expert_gate_up.scale_bytes_per_expert,
+            static_cast<__nv_bfloat16*>(workspace.activations.data));
+        CUDA_CHECK(cudaGetLastError());
+
+        // Step 2b: Dedicated Gate/Up projection for path 10 shared expert
+        const dim3 gate_shared_grid(kIntermediate / GateSchedule::kWarpsPerCta, static_cast<unsigned>(tokens));
+        flash_next_moe_gate_up_shared_kernel<<<gate_shared_grid, GateSchedule::kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(input.data),
+            static_cast<const __nv_bfloat16*>(weights.shared_gate.qdata),
+            static_cast<const __nv_bfloat16*>(weights.shared_up.qdata),
+            static_cast<__nv_bfloat16*>(workspace.activations.data));
+        CUDA_CHECK(cudaGetLastError());
+
+        // Step 3a: Co-batched Down projections writing partials into L2-resident down_scratchpad
+        const dim3 down_cobatched_grid(kHidden / kDownWarps, static_cast<unsigned>(tokens * kTopK));
+        flash_next_moe_down_cobatched_kernel<<<down_cobatched_grid, kDownWarps * 32, 0, stream>>>(
+            static_cast<const std::int32_t*>(workspace.dedup_unique_count.data),
+            static_cast<const std::int32_t*>(workspace.dedup_unique_experts.data),
+            static_cast<const std::int32_t*>(workspace.dedup_assigned_count.data),
+            static_cast<const std::int32_t*>(workspace.dedup_assigned_tokens.data),
+            static_cast<const std::int32_t*>(workspace.dedup_assigned_paths.data),
+            static_cast<const __nv_bfloat16*>(workspace.activations.data),
+            reinterpret_cast<const std::uint8_t*>(weights.expert_down.codes),
+            reinterpret_cast<const std::uint8_t*>(weights.expert_down.scales),
+            weights.expert_down.weight_scale_divisors,
+            weights.expert_down.code_bytes_per_expert,
+            weights.expert_down.scale_bytes_per_expert,
+            static_cast<float*>(workspace.down_scratchpad.data));
+        CUDA_CHECK(cudaGetLastError());
+
+        // Step 3b: Down reduction (canonical sequential sum over p=0..9) + shared expert dot product
+        const dim3 down_reduce_grid(kHidden / kDownWarps, static_cast<unsigned>(tokens));
+        flash_next_moe_down_reduce_kernel<<<down_reduce_grid, kDownWarps * 32, 0, stream>>>(
+            static_cast<const float*>(workspace.down_scratchpad.data),
+            static_cast<const float*>(workspace.alpha.data),
+            static_cast<const float*>(workspace.shared_scale.data),
+            static_cast<const __nv_bfloat16*>(workspace.activations.data),
             static_cast<const __nv_bfloat16*>(weights.shared_down.qdata),
             static_cast<__nv_bfloat16*>(output.data));
         CUDA_CHECK(cudaGetLastError());

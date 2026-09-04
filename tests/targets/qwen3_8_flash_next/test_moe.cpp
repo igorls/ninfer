@@ -168,6 +168,186 @@ double relative_l2_error(const std::vector<float>& act, const std::vector<float>
     return std::sqrt(diff_sq) / (std::sqrt(exp_sq) + 1.0e-12);
 }
 
+int test_decode_cobatching_equivalence(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+
+    constexpr int kHidden = 2'560;
+    constexpr std::uint64_t gate_code_bytes_per_expert  = 1'280ULL * 2'560 / 2;
+    constexpr std::uint64_t gate_scale_bytes_per_expert = 1'280ULL * 2'560 / 16;
+    constexpr std::uint64_t down_code_bytes_per_expert  = 2'560ULL * 640 / 2;
+    constexpr std::uint64_t down_scale_bytes_per_expert = 2'560ULL * 640 / 16;
+
+    // Allocate device buffers for weights (covering 32 experts)
+    constexpr int kTestExperts = 32;
+    ninfer::DeviceBuffer router(512ULL * kHidden * 2);
+    ninfer::DeviceBuffer shared_down(kHidden * 640ULL * 2);
+    ninfer::DeviceBuffer shared_gate(640ULL * kHidden * 2);
+    ninfer::DeviceBuffer shared_up(640ULL * kHidden * 2);
+    ninfer::DeviceBuffer shared_gate_weight(kHidden * 2);
+    ninfer::DeviceBuffer gate_codes(kTestExperts * gate_code_bytes_per_expert);
+    ninfer::DeviceBuffer gate_scales(kTestExperts * gate_scale_bytes_per_expert);
+    ninfer::DeviceBuffer down_codes(kTestExperts * down_code_bytes_per_expert);
+    ninfer::DeviceBuffer down_scales(kTestExperts * down_scale_bytes_per_expert);
+    ninfer::DeviceBuffer gate_divisors(512 * sizeof(float));
+    ninfer::DeviceBuffer down_divisors(512 * sizeof(float));
+
+    router.fill(0);
+    shared_down.fill(0);
+    shared_gate.fill(0);
+    shared_up.fill(0);
+    shared_gate_weight.fill(0);
+
+    std::vector<std::uint8_t> gate_code_values(kTestExperts * gate_code_bytes_per_expert, 0);
+    std::vector<std::uint8_t> gate_scale_values(kTestExperts * gate_scale_bytes_per_expert, 0x38U);
+    std::vector<std::uint8_t> down_code_values(kTestExperts * down_code_bytes_per_expert, 0);
+    std::vector<std::uint8_t> down_scale_values(kTestExperts * down_scale_bytes_per_expert, 0x38U);
+
+    for (std::uint64_t expert = 0; expert < kTestExperts; ++expert) {
+        for (std::uint64_t row = 0; row < 1'280; ++row) {
+            std::fill_n(gate_code_values.begin() +
+                            static_cast<std::ptrdiff_t>(expert * gate_code_bytes_per_expert +
+                                                        row * (kHidden / 2)),
+                        8, static_cast<std::uint8_t>(0x22U + (expert & 3)));
+        }
+        for (std::uint64_t row = 0; row < 2'560; ++row) {
+            std::fill_n(down_code_values.begin() +
+                            static_cast<std::ptrdiff_t>(expert * down_code_bytes_per_expert +
+                                                        row * (640 / 2)),
+                        8, static_cast<std::uint8_t>(0x22U + ((expert >> 1) & 3)));
+        }
+    }
+    gate_codes.copy_from_host(gate_code_values.data(), gate_code_values.size());
+    gate_scales.copy_from_host(gate_scale_values.data(), gate_scale_values.size());
+    down_codes.copy_from_host(down_code_values.data(), down_code_values.size());
+    down_scales.copy_from_host(down_scale_values.data(), down_scale_values.size());
+
+    std::array<float, 512> divisors{};
+    divisors.fill(1.0F);
+    gate_divisors.copy_from_host(divisors.data(), sizeof(divisors));
+    down_divisors.copy_from_host(divisors.data(), sizeof(divisors));
+
+    MoeWeights weights{
+        .router             = bf16_weight(router.p, 512, kHidden),
+        .shared_down        = bf16_weight(shared_down.p, kHidden, 640),
+        .shared_gate        = bf16_weight(shared_gate.p, 640, kHidden),
+        .shared_up          = bf16_weight(shared_up.p, 640, kHidden),
+        .shared_gate_weight = bf16_weight(shared_gate_weight.p, 1, kHidden),
+        .expert_gate_up     = {.codes                  = static_cast<const std::byte*>(gate_codes.p),
+                               .scales                 = static_cast<const std::byte*>(gate_scales.p),
+                               .weight_scale_divisors  = static_cast<const float*>(gate_divisors.p),
+                               .experts                = 512,
+                               .rows                   = 1'280,
+                               .columns                = kHidden,
+                               .code_bytes_per_expert  = gate_code_bytes_per_expert,
+                               .scale_bytes_per_expert = gate_scale_bytes_per_expert},
+        .expert_down        = {.codes                  = static_cast<const std::byte*>(down_codes.p),
+                               .scales                 = static_cast<const std::byte*>(down_scales.p),
+                               .weight_scale_divisors  = static_cast<const float*>(down_divisors.p),
+                               .experts                = 512,
+                               .rows                   = kHidden,
+                               .columns                = 640,
+                               .code_bytes_per_expert  = down_code_bytes_per_expert,
+                               .scale_bytes_per_expert = down_scale_bytes_per_expert},
+    };
+
+    const std::array<int, 4> test_batch_sizes = {1, 2, 4, 8};
+
+    for (int B : test_batch_sizes) {
+        std::vector<std::uint16_t> host_input(B * kHidden);
+        for (int b = 0; b < B; ++b) {
+            const float scale = 0.5F + 0.25F * b;
+            const std::uint16_t bf16_val = float_to_bf16(scale);
+            std::fill_n(host_input.begin() + b * kHidden, kHidden, bf16_val);
+        }
+
+        ninfer::DeviceBuffer dev_input(B * kHidden * 2);
+        dev_input.copy_from_host(host_input.data(), host_input.size() * 2);
+
+        // 1. Run batched execution (co-batched when B > 1, bypass when B == 1)
+        ninfer::DeviceBuffer dev_output_batched(B * kHidden * 2);
+        dev_output_batched.fill(0);
+        ninfer::Tensor input_view(dev_input.p, ninfer::DType::BF16, {kHidden, B});
+        ninfer::Tensor output_batched_view(dev_output_batched.p, ninfer::DType::BF16, {kHidden, B});
+        ninfer::WorkspaceArena ws_batched(flash_next_moe_workspace_capacity_bytes(1, 8));
+
+        flash_next_moe(input_view, weights, output_batched_view, ws_batched, device.stream);
+        device.synchronize();
+
+        std::vector<std::uint16_t> host_output_batched(B * kHidden);
+        dev_output_batched.copy_to_host(host_output_batched.data(), host_output_batched.size() * 2);
+
+        // 2. Run B individual single-token executions (each uses the exact baseline bypass)
+        std::vector<std::uint16_t> host_output_sequential(B * kHidden);
+        ninfer::WorkspaceArena ws_single(flash_next_moe_workspace_capacity_bytes(1, 1));
+
+        for (int b = 0; b < B; ++b) {
+            ninfer::DeviceBuffer dev_single_in(kHidden * 2);
+            ninfer::DeviceBuffer dev_single_out(kHidden * 2);
+            dev_single_in.copy_from_host(host_input.data() + b * kHidden, kHidden * 2);
+            dev_single_out.fill(0);
+
+            ninfer::Tensor single_in_view(dev_single_in.p, ninfer::DType::BF16, {kHidden, 1});
+            ninfer::Tensor single_out_view(dev_single_out.p, ninfer::DType::BF16, {kHidden, 1});
+
+            flash_next_moe(single_in_view, weights, single_out_view, ws_single, device.stream);
+            device.synchronize();
+
+            dev_single_out.copy_to_host(host_output_sequential.data() + b * kHidden, kHidden * 2);
+        }
+
+        // 3. Bitwise exact comparison: 0 mismatch across all tokens and hidden dimensions
+        int bitwise_mismatches = 0;
+        for (int i = 0; i < B * kHidden; ++i) {
+            if (host_output_batched[i] != host_output_sequential[i]) {
+                if (bitwise_mismatches < 5) {
+                    std::cerr << "Mismatch at B=" << B << " index " << i
+                              << ": batched=0x" << std::hex << host_output_batched[i]
+                              << " vs single=0x" << host_output_sequential[i] << std::dec << '\n';
+                }
+                bitwise_mismatches++;
+            }
+        }
+
+        if (bitwise_mismatches > 0) {
+            std::cerr << "FAILED: Co-batching B=" << B << " had " << bitwise_mismatches
+                      << " bitwise mismatches vs single-token baseline!\n";
+            return 1;
+        }
+        std::cout << "  Co-batching B=" << B << " bitwise identical vs single-token baseline ("
+                  << B * kHidden << " values verified)\n";
+
+        // 4. Timing benchmark (warmup + 200 iterations)
+        constexpr int kIters = 200;
+        for (int i = 0; i < 20; ++i) {
+            flash_next_moe(input_view, weights, output_batched_view, ws_batched, device.stream);
+        }
+        device.synchronize();
+
+        cudaEvent_t ev_start, ev_end;
+        CUDA_CHECK(cudaEventCreate(&ev_start));
+        CUDA_CHECK(cudaEventCreate(&ev_end));
+
+        CUDA_CHECK(cudaEventRecord(ev_start, device.stream));
+        for (int i = 0; i < kIters; ++i) {
+            flash_next_moe(input_view, weights, output_batched_view, ws_batched, device.stream);
+        }
+        CUDA_CHECK(cudaEventRecord(ev_end, device.stream));
+        CUDA_CHECK(cudaEventSynchronize(ev_end));
+
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, ev_start, ev_end));
+        CUDA_CHECK(cudaEventDestroy(ev_start));
+        CUDA_CHECK(cudaEventDestroy(ev_end));
+
+        float avg_us = (ms / kIters) * 1000.0f;
+        std::cout << "  Decode B=" << B << " Layer Latency: " << avg_us << " us ("
+                  << (avg_us / B) << " us/token)\n";
+    }
+
+    std::cout << "PASS: test_decode_cobatching_equivalence\n";
+    return 0;
+}
+
 int test_prefill_equivalence_and_benchmark(ninfer::DeviceContext& device) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
     std::mt19937 rng(1337);
@@ -500,6 +680,11 @@ int main() {
         return 1;
     }
     std::cout << "PASS: test_decode_basic_unit\n";
+
+    if (test_decode_cobatching_equivalence(device) != 0) {
+        std::cerr << "FAILED: test_decode_cobatching_equivalence\n";
+        return 1;
+    }
 
     if (test_prefill_workspace_envelope_covers_simt_tail() != 0) {
         std::cerr << "FAILED: test_prefill_workspace_envelope_covers_simt_tail\n";
