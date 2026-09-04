@@ -207,8 +207,8 @@ AttentionWeights load_mtp_attention(const AttentionPlan& plan,
     };
 }
 
-MoeWeights load_mtp_moe(const MoePlan& plan, const artifact::MaterializedArtifact& backing,
-                        void* expert_gate_up_nvfp4, void* expert_down_nvfp4) {
+MoeWeights load_mtp_moe_legacy(const MoePlan& plan, const artifact::MaterializedArtifact& backing,
+                               void* expert_gate_up_nvfp4, void* expert_down_nvfp4) {
     const std::size_t gate_bytes = flash_next_nvfp4_expert_bank_payload_bytes(512, 1'280, 2'560);
     const std::size_t down_bytes = flash_next_nvfp4_expert_bank_payload_bytes(512, 2'560, 640);
     return {
@@ -225,7 +225,7 @@ MoeWeights load_mtp_moe(const MoePlan& plan, const artifact::MaterializedArtifac
 }
 
 MtpModelView load_mtp(const MtpPlan& plan, const artifact::MaterializedArtifact& backing,
-                      void* expert_gate_up_nvfp4, void* expert_down_nvfp4) {
+                      void* expert_gate_up_nvfp4 = nullptr, void* expert_down_nvfp4 = nullptr) {
     return {
         .embedding_projection = bf16_weight(backing, plan.embedding_projection, 2'560, 2'560),
         .hidden_projection    = bf16_weight(backing, plan.hidden_projection, 2'560, 2'560),
@@ -233,7 +233,10 @@ MtpModelView load_mtp(const MtpPlan& plan, const artifact::MaterializedArtifact&
         .attention_hyper      = load_hyper(plan.attention_hyper, backing),
         .attention            = load_mtp_attention(plan.attention, backing),
         .mlp_hyper            = load_hyper(plan.mlp_hyper, backing),
-        .moe                  = load_mtp_moe(plan.moe, backing, expert_gate_up_nvfp4, expert_down_nvfp4),
+        .moe                  = plan.moe.experts_nvfp4
+                                    ? load_moe(plan.moe, backing)
+                                    : load_mtp_moe_legacy(plan.moe, backing, expert_gate_up_nvfp4,
+                                                          expert_down_nvfp4),
         .embedding_norm       = bf16_tensor(backing, plan.embedding_norm, {2'560}),
         .hidden_norm          = bf16_tensor(backing, plan.hidden_norm, {10'240}),
     };
@@ -313,21 +316,26 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
     text.final_mixer = load_mixer(plan.final_mixer, backing);
 
     if (plan.features.mtp) {
-        mtp_expert_gate_up_nvfp4 =
-            DeviceBuffer(flash_next_nvfp4_expert_bank_payload_bytes(512, 1'280, 2'560));
-        mtp_expert_down_nvfp4 =
-            DeviceBuffer(flash_next_nvfp4_expert_bank_payload_bytes(512, 2'560, 640));
+        if (plan.mtp.moe.experts_nvfp4) {
+            text.mtp = load_mtp(plan.mtp, backing);
+        } else {
+            mtp_expert_gate_up_nvfp4 =
+                DeviceBuffer(flash_next_nvfp4_expert_bank_payload_bytes(512, 1'280, 2'560));
+            mtp_expert_down_nvfp4 =
+                DeviceBuffer(flash_next_nvfp4_expert_bank_payload_bytes(512, 2'560, 640));
 
-        const auto gate_up_bytes = backing.mapped_tensor_bytes(plan.mtp.moe.expert_gate_up);
-        const auto down_bytes    = backing.mapped_tensor_bytes(plan.mtp.moe.expert_down);
+            const auto gate_up_bytes = backing.mapped_tensor_bytes(plan.mtp.moe.expert_gate_up);
+            const auto down_bytes    = backing.mapped_tensor_bytes(plan.mtp.moe.expert_down);
 
-        quantize_bf16_expert_bank_to_nvfp4(gate_up_bytes.data(), mtp_expert_gate_up_nvfp4.p, 512,
-                                           1'280, 2'560, cudaStream_t{});
-        quantize_bf16_expert_bank_to_nvfp4(down_bytes.data(), mtp_expert_down_nvfp4.p, 512, 2'560,
-                                           640, cudaStream_t{});
-        CUDA_CHECK(cudaDeviceSynchronize());
+            quantize_bf16_expert_bank_to_nvfp4(gate_up_bytes.data(), mtp_expert_gate_up_nvfp4.p, 512,
+                                               1'280, 2'560, cudaStream_t{});
+            quantize_bf16_expert_bank_to_nvfp4(down_bytes.data(), mtp_expert_down_nvfp4.p, 512, 2'560,
+                                               640, cudaStream_t{});
+            CUDA_CHECK(cudaDeviceSynchronize());
 
-        text.mtp = load_mtp(plan.mtp, backing, mtp_expert_gate_up_nvfp4.p, mtp_expert_down_nvfp4.p);
+            text.mtp = load_mtp(plan.mtp, backing, mtp_expert_gate_up_nvfp4.p,
+                                mtp_expert_down_nvfp4.p);
+        }
     }
     if (plan.features.vision) { vision = load_vision(plan.vision, backing); }
 }

@@ -26,7 +26,8 @@
 namespace ninfer::test::flash_next_fixture {
 
 inline artifact_fixture::TemporaryArtifact
-create_flash_next_synthetic_artifact(std::string_view suffix = "synthetic_flash_next") {
+create_flash_next_synthetic_artifact(std::string_view suffix = "synthetic_flash_next",
+                                     bool mtp_nvfp4 = true) {
     using Json = artifact_fixture::Json;
     using artifact::NumericFormat;
     using artifact::ResourceEncoding;
@@ -227,10 +228,17 @@ create_flash_next_synthetic_artifact(std::string_view suffix = "synthetic_flash_
     add_tensor("mtp/layer/mlp/shared_expert/gate", NumericFormat::BF16, kBf16Layout, {640, 2'560});
     add_tensor("mtp/layer/mlp/shared_expert/up", NumericFormat::BF16, kBf16Layout, {640, 2'560});
     add_tensor("mtp/layer/mlp/shared_expert_gate", NumericFormat::BF16, kBf16Layout, {1, 2'560});
-    add_tensor("mtp/layer/mlp/experts/gate_up", NumericFormat::BF16, kBf16Layout,
-               {512, 1280, 2560});
-    add_tensor("mtp/layer/mlp/experts/down", NumericFormat::BF16, kBf16Layout,
-               {512, 2560, 640});
+    if (mtp_nvfp4) {
+        add_tensor("mtp/layer/mlp/experts/gate_up", NumericFormat::NVFP4, kExpertLayout,
+                   {512, 1280, 2560});
+        add_tensor("mtp/layer/mlp/experts/down", NumericFormat::NVFP4, kExpertLayout,
+                   {512, 2560, 640});
+    } else {
+        add_tensor("mtp/layer/mlp/experts/gate_up", NumericFormat::BF16, kBf16Layout,
+                   {512, 1280, 2560});
+        add_tensor("mtp/layer/mlp/experts/down", NumericFormat::BF16, kBf16Layout,
+                   {512, 2560, 640});
+    }
     add_tensor("mtp/layer/attention/indexer/query_key", NumericFormat::BF16, kBf16Layout,
                {640, 2'560});
     add_tensor("mtp/layer/attention/indexer/key_norm", NumericFormat::BF16, kBf16Layout, {128});

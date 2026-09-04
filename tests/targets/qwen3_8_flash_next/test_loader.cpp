@@ -390,11 +390,16 @@ int test_real_artifact_full_binding_if_available() {
             tensor_bytes += object.bytes;
         }
 
-        if (tensor_bytes != 76'251'938'528ULL ||
-            full_plan.materialization.device_capacity_bytes != 76'251'952'640ULL ||
-            full_plan.materialization.device_objects.size() != 1'427 ||
-            full_plan.materialization.host_objects.size() != 6 || // the MTP banks are mapped tensors, not host resources
-            full_plan.materialization.mapped_tensor_objects.size() != 133) { // 131 PLE + 2 MTP expert banks
+        const bool is_nvfp4 = full_plan.bindings.mtp.moe.experts_nvfp4;
+        const std::uint64_t expected_tensor_bytes = is_nvfp4 ? 77'667'520'224ULL : 76'251'938'528ULL;
+        const std::uint64_t expected_dev_cap      = is_nvfp4 ? 77'667'534'336ULL : 76'251'952'640ULL;
+        const std::size_t expected_dev_objs       = is_nvfp4 ? 1'429 : 1'427;
+        const std::size_t expected_mapped         = is_nvfp4 ? 131 : 133;
+        if (tensor_bytes != expected_tensor_bytes ||
+            full_plan.materialization.device_capacity_bytes != expected_dev_cap ||
+            full_plan.materialization.device_objects.size() != expected_dev_objs ||
+            full_plan.materialization.host_objects.size() != 6 ||
+            full_plan.materialization.mapped_tensor_objects.size() != expected_mapped) {
             std::cerr << "Full artifact binding inventory mismatch: tensor_bytes=" << tensor_bytes
                       << " dev_cap=" << full_plan.materialization.device_capacity_bytes
                       << " dev_objs=" << full_plan.materialization.device_objects.size()
@@ -504,9 +509,9 @@ int test_synthetic_artifact_plan_mtp_features() {
             const auto plan = bind_artifact(binder, LoadFeatures{.vision = true, .mtp = true});
             const auto& m   = plan.materialization;
 
-            if (m.object_count != 1'566 || m.device_objects.size() != 1'427 ||
-                m.mapped_tensor_objects.size() != 133 || m.host_objects.size() != 6 ||
-                m.device_capacity_bytes != 76'251'952'640ULL) {
+            if (m.object_count != 1'566 || m.device_objects.size() != 1'429 ||
+                m.mapped_tensor_objects.size() != 131 || m.host_objects.size() != 6 ||
+                m.device_capacity_bytes != 77'667'534'336ULL) {
                 std::cerr << "Synthetic full (mtp on) inventory mismatch: dev_objs="
                           << m.device_objects.size() << " host_objs=" << m.host_objects.size()
                           << " mapped=" << m.mapped_tensor_objects.size()
@@ -515,6 +520,32 @@ int test_synthetic_artifact_plan_mtp_features() {
             }
             if (!plan.bindings.features.vision || !plan.bindings.features.mtp) {
                 std::cerr << "Synthetic features mismatch on mtp=true\n";
+                return 1;
+            }
+        }
+
+        // 3. Legacy BF16 MTP enabled
+        {
+            const auto legacy_fixture =
+                ninfer::test::flash_next_fixture::create_flash_next_synthetic_artifact(
+                    "synthetic_mtp_legacy_bf16", false);
+            const ninfer::artifact::Reader legacy_reader(legacy_fixture.path);
+            ninfer::artifact::Binder binder(legacy_reader);
+            const auto plan = bind_artifact(binder, LoadFeatures{.vision = true, .mtp = true});
+            const auto& m   = plan.materialization;
+
+            if (m.object_count != 1'566 || m.device_objects.size() != 1'427 ||
+                m.mapped_tensor_objects.size() != 133 || m.host_objects.size() != 6 ||
+                m.device_capacity_bytes != 76'251'952'640ULL) {
+                std::cerr << "Synthetic legacy full (mtp on) inventory mismatch: dev_objs="
+                          << m.device_objects.size() << " host_objs=" << m.host_objects.size()
+                          << " mapped=" << m.mapped_tensor_objects.size()
+                          << " dev_cap=" << m.device_capacity_bytes << "\n";
+                return 1;
+            }
+            if (!plan.bindings.features.vision || !plan.bindings.features.mtp ||
+                plan.bindings.mtp.moe.experts_nvfp4) {
+                std::cerr << "Synthetic legacy features mismatch on mtp=true\n";
                 return 1;
             }
         }

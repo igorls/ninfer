@@ -41,6 +41,7 @@ struct MoePlan {
     artifact::ObjectHandle shared_gate_weight;
     artifact::ObjectHandle expert_gate_up;
     artifact::ObjectHandle expert_down;
+    bool experts_nvfp4 = true;
 };
 
 struct GdnPlan {

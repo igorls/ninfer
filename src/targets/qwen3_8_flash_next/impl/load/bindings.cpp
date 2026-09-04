@@ -135,6 +135,7 @@ MoePlan bind_moe(artifact::Binder& binder, const std::string& prefix, NumericFor
         .shared_gate_weight = bf16("shared_expert_gate", {1, 2'560}),
         .expert_gate_up     = bind_expert("experts/gate_up", {512, 1'280, 2'560}),
         .expert_down        = bind_expert("experts/down", {512, 2'560, 640}),
+        .experts_nvfp4      = (expert_format == NumericFormat::NVFP4),
     };
 }
 
@@ -220,8 +221,22 @@ MtpPlan bind_mtp(artifact::Binder& binder, bool enabled) {
         binder, "mtp/hidden_projection", NumericFormat::BF16, kBf16Layout, {2'560, 2'560}, enabled);
     out.mixer           = bind_mixer(binder, "mtp/hyper_connection/", enabled);
     out.attention_hyper = bind_hyper(binder, "mtp/layer/attention/hyper_connection/", enabled);
-    out.moe             = bind_moe(binder, "mtp/layer/mlp/", NumericFormat::BF16, enabled,
-                                   /*retain_experts_on_host=*/true);
+
+    // Format-tolerant MTP MoE expert binding:
+    // Support both new NVFP4 spliced artifacts and legacy BF16 artifacts seamlessly.
+    NumericFormat mtp_expert_format = NumericFormat::NVFP4;
+    bool retain_on_host             = false;
+    const auto* gate_up_desc        = binder.reader().find("mtp/layer/mlp/experts/gate_up");
+    if (gate_up_desc != nullptr) {
+        if (const auto* tensor = std::get_if<artifact::TensorDescriptor>(gate_up_desc)) {
+            if (tensor->format == artifact::NumericFormat::BF16) {
+                mtp_expert_format = artifact::NumericFormat::BF16;
+                retain_on_host    = true;
+            }
+        }
+    }
+    out.moe = bind_moe(binder, "mtp/layer/mlp/", mtp_expert_format, enabled, retain_on_host);
+
     out.mlp_hyper       = bind_hyper(binder, "mtp/layer/mlp/hyper_connection/", enabled);
     out.attention = bind_attention(binder, "mtp/layer/attention/", NumericFormat::BF16, enabled);
     out.embedding_norm = bind_optional_device(binder, "mtp/embedding_norm", NumericFormat::BF16,
