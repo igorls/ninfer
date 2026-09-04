@@ -1464,8 +1464,10 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestB
                      impl_->has_context_transaction_ ? 1 : 0);
     }
 
+    const std::uint32_t remaining_tokens =
+        prompt_tokens > reusable_tokens ? prompt_tokens - reusable_tokens : 0U;
     const runtime::PrefillWork prefill_work =
-        runtime::make_prefill_work(reusable_tokens, prompt_tokens, 0, 0, impl_->plan_.config.prefill_chunk);
+        runtime::make_prefill_work(reusable_tokens, remaining_tokens, 0, 0, impl_->plan_.config.prefill_chunk);
 
     auto cand_impl                            = std::make_unique<detail::AdmissionCandidateImpl>();
     cand_impl->summary                        = base.summary();
