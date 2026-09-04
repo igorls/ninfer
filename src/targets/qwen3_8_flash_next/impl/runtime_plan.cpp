@@ -65,13 +65,10 @@ void validate_config_invariants(const FlashNextRuntimeConfig& config,
     if (resolved_state_slots == 0) {
         resolved_state_slots = min_state_slots;
     } else if (resolved_state_slots < min_state_slots || resolved_state_slots > kMaxStateSlots) {
-        // This is the path an operator hits by passing --max-private-continuations larger than the
-        // state-slot budget allows, so say what they can actually ask for at this concurrency
-        // rather than only what was rejected. Clamping instead of throwing would be friendlier but
-        // is NOT safe here: the Engine sizes its private catalog from the same option
-        // (engine_core.h:70) and would then hold more catalog entries than the target has
-        // continuation slots, which is the Engine/target slot disagreement that produced the
-        // concurrency-4 crash. A clear failure at startup beats an inconsistency under load.
+        // Defensive invariant validation for configs built directly (tests, custom callers)
+        // rather than through Package::make_sequence_planner, which clamps continuation_capacity
+        // to kMaxStateSlots - floor_slots and propagates the effective options to the Engine
+        // to prevent catalog/slot disagreements.
         const std::uint32_t cont_cap_limit = kMaxStateSlots > slots_per_lane * config.max_concurrency
                                                  ? kMaxStateSlots - slots_per_lane * config.max_concurrency
                                                  : 0U;
