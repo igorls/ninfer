@@ -37,7 +37,10 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options,
         return;
     case SpeculativeBackend::Mtp: {
         const std::uint32_t conc = std::max(1u, max_concurrency);
+        // State-slot budget ceiling: (draft_tokens + 1) * conc <= 64 slots.
         const std::uint32_t ceiling = (conc <= 64u) ? (64u / conc) - 1u : 0u;
+        // Engine target limit: Flash-Next bounds speculative_draft_tokens to [0, 4]
+        // (see runtime_plan.cpp:56).
         const std::uint32_t max_mtp = std::min(4u, ceiling);
         if (options.draft_tokens == 0 || options.draft_tokens > max_mtp) {
             throw std::invalid_argument(

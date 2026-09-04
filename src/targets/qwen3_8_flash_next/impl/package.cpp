@@ -159,6 +159,12 @@ Package::SequencePlanner Package::make_sequence_planner(DeviceContext& device,
                      "[state-sizer] Continuation capacity clamped from %u to %u (state slot ceiling %u, floor slots %u at concurrency %u).\n",
                      requested_cont, cont_cap, detail::kMaxStateSlots, floor_slots, max_concurrency);
     }
+    if (options.context_cache.enabled && cont_cap == 0) {
+        std::fprintf(stderr,
+                     "[state-sizer] WARNING: continuation capacity is 0 (all %u state slots reserved "
+                     "for active decode lanes and rollback). Prefix reuse and context cache are disabled.\n",
+                     detail::kMaxStateSlots);
+    }
     const std::uint32_t total_state_slots = floor_slots + cont_cap;
     std::uint32_t draft_rows = 32'768;
     if (const char* env = std::getenv("NINFER_FLASH_NEXT_DRAFT_HEAD_ROWS"); env && env[0] != '\0') {
