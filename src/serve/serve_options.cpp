@@ -80,6 +80,7 @@ std::string serve_usage_text(const char* argv0) {
            " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
            "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
            "[--clamp-concurrency-to-pool] [--kv-slack-floor-mib N] "
+           "[--desktop-reserve-gib N] [--desktop-reserve-mib N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
            "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
            "[--context-cost-presets FILE] "
@@ -106,6 +107,8 @@ std::string serve_usage_text(const char* argv0) {
            " MiB of sizing headroom\n"
            "       --clamp-concurrency-to-pool clamps effective concurrency to what the KV pool can fully back\n"
            "       --kv-slack-floor-mib sets the minimum post-startup device memory slack floor (default 1024 MiB)\n"
+           "       --desktop-reserve-gib sets the device memory floor reserved for desktop/compositor (default 8 GiB)\n"
+           "       --desktop-reserve-mib sets the desktop memory reserve floor in MiB\n"
            "       serves OpenAI Responses/Chat Completions and Anthropic Messages endpoints\n"
            "       --default-max-tokens defaults to " +
            std::to_string(kDefaultMaxTokens) +
@@ -195,6 +198,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             if (options.kv_capacity.mode == KvCapacityMode::Automatic) {
                 options.kv_capacity.slack_floor_bytes = options.min_slack_floor_bytes;
             }
+        } else if (arg == "--desktop-reserve-gib") {
+            const int gib = parse_nonnegative_int(require_value("--desktop-reserve-gib"), "desktop-reserve-gib");
+            options.desktop_reserve_bytes = static_cast<std::size_t>(gib) * 1024ULL * 1024ULL * 1024ULL;
+        } else if (arg == "--desktop-reserve-mib") {
+            const int mib = parse_nonnegative_int(require_value("--desktop-reserve-mib"), "desktop-reserve-mib");
+            options.desktop_reserve_bytes = static_cast<std::size_t>(mib) << 20;
         } else if (arg == "--max-pending-requests") {
             options.max_pending_requests = static_cast<std::uint32_t>(parse_nonnegative_int(
                 require_value("--max-pending-requests"), "max-pending-requests"));

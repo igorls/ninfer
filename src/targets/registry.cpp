@@ -4,6 +4,7 @@
 #include "artifact/materializer.h"
 #include "artifact/reader.h"
 #include "core/device.h"
+#include "core/device_memory.h"
 #include "core/startup.h"
 #include "runtime/engine/kv_capacity.h"
 #include "runtime/engine/context_cost.h"
@@ -64,24 +65,38 @@ void validate_options(const EngineOptions& options) {
     }
 }
 
-std::size_t runtime_bytes_after_planned_weights(std::uint64_t weight_bytes) {
-    std::size_t free_bytes  = 0;
-    std::size_t total_bytes = 0;
-    CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
-    if (weight_bytes > free_bytes) {
-        throw std::invalid_argument("model weights require " + std::to_string(weight_bytes) +
-                                    " bytes of device memory, but only " +
-                                    std::to_string(free_bytes) +
-                                    " bytes are free before loading weights");
+std::size_t runtime_bytes_after_planned_weights(int device_index,
+                                                std::uint64_t weight_bytes,
+                                                std::size_t desktop_reserve_bytes) {
+    const DeviceMemorySnapshot mem = query_device_memory(device_index);
+    const std::size_t initial_required =
+        static_cast<std::size_t>(weight_bytes) + desktop_reserve_bytes;
+    if (mem.free_bytes < initial_required) {
+        throw std::invalid_argument(format_insufficient_memory_error(
+            mem, device_index, static_cast<std::size_t>(weight_bytes), desktop_reserve_bytes));
     }
-    return free_bytes - static_cast<std::size_t>(weight_bytes);
+    return mem.free_bytes - initial_required;
 }
 
-std::size_t current_free_device_bytes() {
-    std::size_t free_bytes  = 0;
-    std::size_t total_bytes = 0;
-    CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
-    return free_bytes;
+std::size_t runtime_bytes_after_materialization(int device_index,
+                                                std::size_t desktop_reserve_bytes) {
+    const DeviceMemorySnapshot mem = query_device_memory(device_index);
+    if (mem.free_bytes < desktop_reserve_bytes) {
+        throw std::invalid_argument(
+            "Insufficient device memory after loading weights: free memory is " +
+            format_device_memory_bytes(mem.free_bytes) +
+            ", which is less than the required desktop reserve floor of " +
+            format_device_memory_bytes(desktop_reserve_bytes) + ".\n" +
+            "Another process or OS component holds " + format_device_memory_bytes(mem.used_bytes) +
+            " on device " + std::to_string(device_index) +
+            (mem.device_name.empty() ? "" : " (" + mem.device_name + ")") + ".\n" +
+            "Telemetry source: " + (mem.is_nvml ? "NVML device-wide query" : "cudaMemGetInfo fallback") + ".");
+    }
+    return mem.free_bytes - desktop_reserve_bytes;
+}
+
+std::size_t current_free_device_bytes(int device_index) {
+    return query_device_memory(device_index).free_bytes;
 }
 
 template <class Target, class Loaded, class Instance>
@@ -106,8 +121,21 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
     auto sequence_planner = Target::make_sequence_planner(device, options, weights_profile);
     const runtime::SequenceCapacityCurve curve = sequence_planner.capacity_curve();
     const std::size_t preflight_runtime_bytes =
-        runtime_bytes_after_planned_weights(load_plan.materialization().device_capacity_bytes);
-    (void)runtime::resolve_kv_capacity(options.kv_capacity, curve, preflight_runtime_bytes);
+        runtime_bytes_after_planned_weights(device.device,
+                                            load_plan.materialization().device_capacity_bytes,
+                                            options.desktop_reserve_bytes);
+    try {
+        (void)runtime::resolve_kv_capacity(options.kv_capacity, curve, preflight_runtime_bytes);
+    } catch (const std::invalid_argument& e) {
+        const DeviceMemorySnapshot mem = query_device_memory(device.device);
+        throw std::invalid_argument(
+            std::string(e.what()) + "\n" +
+            format_insufficient_memory_error(
+                mem, device.device,
+                load_plan.materialization().device_capacity_bytes,
+                options.desktop_reserve_bytes,
+                curve.minimum_device_reservation_bytes));
+    }
     target_plan_phase.complete();
 
     auto materialized = artifact::materialize(reader, load_plan.materialization(), device,
@@ -117,8 +145,11 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
     StartupPhaseScope target_finalize_phase(options.startup_observer, StartupPhase::TargetFinalize);
     auto model = Target::construct_loaded_model(std::move(load_plan), std::move(materialized));
     device.synchronize();
+    const std::size_t post_weights_runtime_bytes =
+        runtime_bytes_after_materialization(device.device, options.desktop_reserve_bytes);
     runtime::KvCapacityResolution capacity_resolution =
-        runtime::resolve_kv_capacity(options.kv_capacity, curve, current_free_device_bytes());
+        runtime::resolve_kv_capacity(options.kv_capacity, curve, post_weights_runtime_bytes);
+    capacity_resolution.desktop_reserve_bytes = options.desktop_reserve_bytes;
 
     const std::uint32_t groups_per_seq =
         (options.max_context + curve.main_page_tokens - 1U) / curve.main_page_tokens;
@@ -189,17 +220,20 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
                                    device, effective_options.startup_observer);
     device.synchronize();
     program_phase.complete();
-    instance->kv_capacity_resolution.available_after_startup_bytes = current_free_device_bytes();
+    instance->kv_capacity_resolution.available_after_startup_bytes =
+        current_free_device_bytes(device.device);
+    instance->kv_capacity_resolution.desktop_reserve_bytes = options.desktop_reserve_bytes;
     const std::size_t post_startup_free =
         instance->kv_capacity_resolution.available_after_startup_bytes;
     std::fprintf(stderr,
-                 "[kv-sizer] Device slack after startup: %zu bytes (%zu MiB). Minimum safe slack floor: %zu MiB.\n",
+                 "[kv-sizer] Device free after startup: %zu bytes (%zu MiB). Desktop reserve floor: %zu MiB (Slack floor: %zu MiB).\n",
                  post_startup_free, post_startup_free / (1024ULL * 1024ULL),
+                 options.desktop_reserve_bytes / (1024ULL * 1024ULL),
                  options.min_slack_floor_bytes / (1024ULL * 1024ULL));
-    if (post_startup_free < options.min_slack_floor_bytes) {
+    if (post_startup_free < options.desktop_reserve_bytes) {
         std::fprintf(stderr,
-                     "[kv-sizer] CRITICAL WARNING: Device memory slack after startup (%zu bytes) is below the minimum safe floor (%zu bytes)! CUDA runtime prefill stalls may occur.\n",
-                     post_startup_free, options.min_slack_floor_bytes);
+                     "[kv-sizer] CRITICAL WARNING: Device memory free after startup (%zu bytes) is below the desktop reserve floor (%zu bytes)! Desktop compositor stalls may occur.\n",
+                     post_startup_free, options.desktop_reserve_bytes);
     }
 
     LoadSummary summary;

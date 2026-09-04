@@ -51,6 +51,7 @@ enum class KvCapacityMode : std::uint8_t {
 
 inline constexpr std::size_t kDefaultKvCapacityHeadroomBytes   = 1024ULL * 1024ULL * 1024ULL;
 inline constexpr std::size_t kDefaultKvCapacitySlackFloorBytes = 1024ULL * 1024ULL * 1024ULL;
+inline constexpr std::size_t kDefaultDesktopReserveBytes       = 8ULL * 1024ULL * 1024ULL * 1024ULL;
 
 struct KvCapacityPolicy {
     KvCapacityMode mode                  = KvCapacityMode::Explicit;
@@ -163,6 +164,7 @@ struct EngineOptions {
     std::uint32_t max_concurrency      = 1;
     bool clamp_concurrency_to_pool     = false;
     std::size_t min_slack_floor_bytes  = kDefaultKvCapacitySlackFloorBytes;
+    std::size_t desktop_reserve_bytes  = kDefaultDesktopReserveBytes;
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;
     std::uint32_t prefill_chunk        = 1024;

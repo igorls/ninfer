@@ -677,6 +677,7 @@ struct KvCapacityResolution {
     std::size_t available_after_startup_bytes        = 0;
     std::size_t automatic_headroom_bytes             = 0;
     std::size_t slack_floor_bytes                    = 0;
+    std::size_t desktop_reserve_bytes                = 0;
     std::size_t planned_slack_bytes                  = 0;
 };
 
