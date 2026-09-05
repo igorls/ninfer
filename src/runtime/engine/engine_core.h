@@ -240,8 +240,30 @@ public:
         return Submission(*this, std::move(request));
     }
 
+    // Non-blocking variant for telemetry. Returns nothing when the worker is
+    // mid-execution rather than queueing behind it.
+    //
+    // memory_summary() takes execution_mutex_, which the worker holds for a whole
+    // execution unit. A once-per-second poller calling the blocking form is a
+    // slow-motion denial of service on the server's own thread pool: each poll
+    // takes a worker and blocks, the client times out and gives up but the worker
+    // stays stuck, and under sustained load every worker is consumed within
+    // seconds. The process then accepts connections and immediately closes them,
+    // alive and holding the port while serving nothing. That is exactly how the
+    // 27B went unreachable in production while its process stayed up.
+    [[nodiscard]] std::optional<MemorySummary> try_memory_summary() const {
+        std::unique_lock lock(execution_mutex_, std::try_to_lock);
+        if (!lock.owns_lock()) { return std::nullopt; }
+        return memory_summary_locked();
+    }
+
     [[nodiscard]] MemorySummary memory_summary() const {
         std::scoped_lock lock(execution_mutex_);
+        return memory_summary_locked();
+    }
+
+private:
+    [[nodiscard]] MemorySummary memory_summary_locked() const {
         MemorySummary out                      = instance_.program->memory_summary();
         const KvCapacityResolution& resolution = instance_.kv_capacity_resolution;
         out.kv_capacity_mode                   = resolution.mode;
@@ -257,6 +279,7 @@ public:
         return out;
     }
 
+public:
     [[nodiscard]] RuntimeStats runtime_stats() const {
         std::lock_guard lock(stats_mutex_);
         return published_stats_;

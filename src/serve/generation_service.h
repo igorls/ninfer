@@ -101,6 +101,11 @@ public:
 
     [[nodiscard]] ninfer::MemorySummary memory_summary() const { return engine_->memory_summary(); }
 
+    // Telemetry callers must use this. See Engine::try_memory_summary.
+    [[nodiscard]] std::optional<ninfer::MemorySummary> try_memory_summary() const {
+        return engine_->try_memory_summary();
+    }
+
     [[nodiscard]] ninfer::RuntimeStats runtime_stats() const { return engine_->runtime_stats(); }
 
     [[nodiscard]] ninfer::MediaCacheSummary media_cache_summary() const {

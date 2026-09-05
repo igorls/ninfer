@@ -599,7 +599,41 @@ void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& r
         return;
     }
 
-    const MemorySummary memory   = service_->memory_summary();
+    // Never the blocking memory_summary() here. It takes the engine's execution
+    // mutex, which the worker holds for a whole execution unit, so a once-a-second
+    // poller would take one HTTP worker per poll and block it; under sustained
+    // load every worker is consumed and the server accepts connections only to
+    // close them. Serve the last good reading with its age instead -- a couple of
+    // seconds of staleness in a diagnostics payload costs nothing, and taking the
+    // engine offline to avoid it costs everything.
+    static std::mutex memory_cache_mu;
+    static MemorySummary memory_cached;
+    static std::chrono::steady_clock::time_point memory_taken{};
+    static bool memory_primed = false;
+
+    MemorySummary memory;
+    std::int64_t memory_age_ms = 0;
+    if (std::optional<MemorySummary> fresh = service_->try_memory_summary()) {
+        std::lock_guard lock(memory_cache_mu);
+        memory_cached = *fresh;
+        memory_taken  = std::chrono::steady_clock::now();
+        memory_primed = true;
+        memory        = *fresh;
+    } else {
+        std::lock_guard lock(memory_cache_mu);
+        if (!memory_primed) {
+            ApiError error;
+            error.status  = 503;
+            error.type    = "service_unavailable";
+            error.message = "engine memory summary is not available yet";
+            write_openai_error(res, error);
+            return;
+        }
+        memory        = memory_cached;
+        memory_age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - memory_taken)
+                            .count();
+    }
     const EngineOptions& engine  = service_->engine_options();
     std::int64_t device_age_ms   = 0;
     const DeviceMemorySnapshot device = device_snapshot(engine.device, device_age_ms);
@@ -660,6 +694,9 @@ void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& r
     nlohmann::json body = {
         {"schema_version", 1},
         {"model_id", public_model_id_},
+        // Non-zero when the engine was busy and this payload reports the previous
+        // reading rather than blocking behind execution to take a fresh one.
+        {"memory_age_ms", memory_age_ms},
         {"device",
          {{"index", engine.device},
           {"name", device.device_name},

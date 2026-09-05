@@ -72,6 +72,33 @@ EngineOptions normalize_engine_options(EngineOptions options) {
         throw std::invalid_argument(
             "context cache max_private_continuations must cover every active request");
     }
+    // A continuation is only real if a StateImage can hold it. Total StateImage
+    // capacity is (concurrency + device_state_slots) on the device plus
+    // host_state_slots spilled to pinned host memory; the active lanes consume
+    // `concurrency` of those, leaving device_state_slots + host_state_slots to
+    // back checkpoints.
+    //
+    // A catalog larger than that can never fill, so the capacity-driven eviction
+    // that frees StateImages never runs. The physical pool exhausts first and
+    // simply stops accepting captures -- and because nothing evicts, it never
+    // recovers. Prefix reuse then dies permanently a few conversations in and
+    // every turn re-prefills, with no error anywhere to say why.
+    //
+    // Measured on the 27B before this clamp: 64 declared continuations against 32
+    // backable states, reuse working for 10 conversations and then zero for
+    // every request after, host_state_occupied_slots pinned at 24/24 through 60 s
+    // of idle. Flash-Next got the equivalent clamp in D8 (1fcd72b4); this is the
+    // same defect on the shared Engine path, so it is fixed for every target.
+    //
+    // Clamped rather than rejected: an operator asking for a bigger catalog than
+    // the state budget backs should get the biggest honest one, not a refusal to
+    // start. Engine::options() then reports the effective value.
+    const std::uint64_t backable_continuations =
+        static_cast<std::uint64_t>(*cache.device_state_slots) + cache.host_state_slots;
+    if (backable_continuations >= concurrency &&
+        *cache.max_private_continuations > backable_continuations) {
+        cache.max_private_continuations = static_cast<std::uint32_t>(backable_continuations);
+    }
     const std::uint64_t total_device_state_slots =
         static_cast<std::uint64_t>(concurrency) + *cache.device_state_slots;
     if (total_device_state_slots > std::numeric_limits<std::uint32_t>::max()) {
@@ -488,6 +515,22 @@ MemorySummary Engine::memory_summary() const {
             using CoreState = std::remove_cvref_t<decltype(core)>;
             if constexpr (std::is_same_v<CoreState, std::monostate>) {
                 throw std::logic_error("Engine core is unavailable");
+            } else {
+                return core->memory_summary();
+            }
+        },
+        impl_->core);
+}
+
+std::optional<MemorySummary> Engine::try_memory_summary() const {
+    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+    return std::visit(
+        [](const auto& core) -> std::optional<MemorySummary> {
+            using CoreState = std::remove_cvref_t<decltype(core)>;
+            if constexpr (std::is_same_v<CoreState, std::monostate>) {
+                throw std::logic_error("Engine core is unavailable");
+            } else if constexpr (requires { core->try_memory_summary(); }) {
+                return core->try_memory_summary();
             } else {
                 return core->memory_summary();
             }

@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <functional>
+#include <optional>
 #include <memory>
 #include <string_view>
 #include <vector>
@@ -104,6 +105,11 @@ public:
     [[nodiscard]] const EngineOptions& options() const;
     [[nodiscard]] LoadSummary load_summary() const;
     [[nodiscard]] MemorySummary memory_summary() const;
+    // Non-blocking variant for telemetry: returns nothing while the engine is
+    // mid-execution instead of waiting for it. Anything polled on a timer must
+    // use this -- the blocking form queues behind execution and will exhaust a
+    // server's thread pool under load.
+    [[nodiscard]] std::optional<MemorySummary> try_memory_summary() const;
     [[nodiscard]] RuntimeStats runtime_stats() const;
     [[nodiscard]] MediaCacheSummary media_cache_summary() const;
     void reset_memory_peaks() noexcept;
