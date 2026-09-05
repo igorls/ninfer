@@ -264,15 +264,31 @@ void FlashNextRuntimeAllocation::commit_slots(std::span<const std::uint32_t> acc
         }
         seen_mask |= (1U << lane);
     }
-    // All validated — advance each lane
+    // All validated — advance each lane.
+    //
+    // This is the decode-round commit (FlashNextLaneLedger::commit_round). The device copies of
+    // the slot selectors are deliberately NOT refreshed here: the only readers of
+    // round_tensors().source_slots/destination_slots are the two decode bodies in
+    // text_executor.cpp (execute_round_body and execute_speculative_verify_round), and each is
+    // preceded on the same stream by the full pinned-ingress H2D memcpy that re-derives both
+    // arrays from current_source_slot()/current_destination_slot(). The two cudaMemcpyAsync this
+    // used to issue per accepted lane were therefore dead — and, sourced from pageable
+    // std::vector storage, host-synchronous — landing in the middle of the inter-round idle
+    // window. That window measures 0.99 ms/token of GPU idle at ~1.2 gaps >100 us per token
+    // where the round structure only accounts for 1.0; these copies are the extra 0.2.
+    //
+    // Prefill (commit_row_slot) and MTP (commit_speculative_round) keep the upload so their
+    // observable behaviour is unchanged, including test_runtime_foundation, which reads the
+    // device tensors back after commit_row_slot.
     for (const auto lane : accepted_lanes) {
-        advance_lane_slot(lane, 1U, stream);
+        advance_lane_slot(lane, 1U, stream, /*upload_slots=*/false);
     }
 }
 
 void FlashNextRuntimeAllocation::advance_lane_slot(std::uint32_t lane_index,
                                                   std::uint32_t step_count,
-                                                  cudaStream_t stream) {
+                                                  cudaStream_t stream,
+                                                  bool upload_slots) {
     if (lane_index >= plan_.config.max_concurrency) {
         throw std::out_of_range("advance_lane_slot: lane_index exceeds max_concurrency");
     }
@@ -283,7 +299,7 @@ void FlashNextRuntimeAllocation::advance_lane_slot(std::uint32_t lane_index,
         static_cast<std::int32_t>(base_slot + host_ring_offsets_[lane_index]);
     host_standby_slots_[lane_index] =
         static_cast<std::int32_t>(base_slot + ((host_ring_offsets_[lane_index] + 1U) % slots_per_lane_));
-    sync_slots_to_device(stream);
+    if (upload_slots) { sync_slots_to_device(stream); }
 }
 
 void FlashNextRuntimeAllocation::restore_lane_slots(std::uint32_t lane_index,
@@ -404,6 +420,12 @@ void FlashNextRuntimeAllocation::copy_state_slot(std::uint32_t src_slot, std::ui
 }
 
 void FlashNextRuntimeAllocation::sync_slots_to_device(cudaStream_t stream) {
+    // Seeding/repair path only (initialize, restore_lane_slots, prefill and MTP commits). It is
+    // not the authoritative writer of the device slot selectors: host_active_slots_ is indexed by
+    // lane while round_tensors().source_slots is indexed by round row, and every decode body is
+    // preceded by the pinned-ingress H2D that fills the row-indexed arrays from
+    // current_source_slot()/current_destination_slot(). Both copies are pageable, hence
+    // host-synchronous — keep them off the per-token path (see commit_slots).
     const std::size_t bytes = plan_.config.max_concurrency * sizeof(std::int32_t);
     CUDA_CHECK(cudaMemcpyAsync(round_tensors_.source_slots.data, host_active_slots_.data(), bytes,
                                cudaMemcpyHostToDevice, stream));

@@ -61,9 +61,12 @@ int main() {
     PleTableView table;
     for (PleShardView& shard : table.shards) { shard = make_ple_shard_view(encoded, rows, width); }
 
-    // 1. Decode pinned gather test (CPU gather_pinned for decode graph support)
-    {
-        constexpr std::size_t B = 8;
+    // 1. Decode pinned gather test (CPU gather_pinned for decode graph support).
+    // B is swept across the inline/pool threshold in gather_pinned: B<=2 gathers on the calling
+    // thread (served decode is B=1 and cannot afford the two condvar hops in the ~1 ms/token
+    // inter-round window), B>2 goes through the HostWorkerPool. Both must produce identical
+    // pinned bytes.
+    for (const std::size_t B : {std::size_t{1}, std::size_t{2}, std::size_t{3}, std::size_t{8}}) {
         PleGatherPipeline decode_pipeline(table, device, B);
         std::vector<std::array<std::int64_t, 16>> decode_indices(B);
         for (std::size_t b = 0; b < B; ++b) {

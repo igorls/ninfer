@@ -161,6 +161,25 @@ void PleGatherPipeline::gather_pinned(
         throw std::invalid_argument("PLE gather batch is outside the startup-fixed capacity");
     }
     auto* output = static_cast<std::uint16_t*>(fixed_host_buffer_.data());
+
+    // Served decode runs at B=1, and this gather sits in the inter-round window that nsys
+    // measured at 0.99 ms/token of GPU idle (~1.2 host gaps >100 us per token). At that batch the
+    // HostWorkerPool round-trip is two Windows condvar wake-ups (submit notify, then the future
+    // wait) to buy ~2560 scalar dequants of parallelism that has nowhere to go. Below the
+    // threshold the calling thread does the work itself.
+    // Bitwise identity: same gather_ple_rows_bf16 over the same rows into the same
+    // token * kPleOutputWidth offsets, so the pinned bytes are unchanged either way. Only the
+    // thread that produces them differs.
+    constexpr std::size_t kInlineGatherTokens = 2;
+    if (global_rows.size() <= kInlineGatherTokens) {
+        for (std::size_t token = 0; token < global_rows.size(); ++token) {
+            gather_ple_rows_bf16(
+                table_, global_rows[token],
+                std::span<std::uint16_t>(output + token * kPleOutputWidth, kPleOutputWidth));
+        }
+        return;
+    }
+
     std::vector<std::future<void>> work;
     work.reserve(global_rows.size());
     for (std::size_t token = 0; token < global_rows.size(); ++token) {
