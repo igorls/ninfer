@@ -9,6 +9,7 @@
 #include "runtime/engine/engine_core.h"
 #include "targets/registry.h"
 
+#include <algorithm>
 #include <functional>
 #include <future>
 #include <limits>
@@ -72,32 +73,28 @@ EngineOptions normalize_engine_options(EngineOptions options) {
         throw std::invalid_argument(
             "context cache max_private_continuations must cover every active request");
     }
-    // A continuation is only real if a StateImage can hold it. Total StateImage
-    // capacity is (concurrency + device_state_slots) on the device plus
-    // host_state_slots spilled to pinned host memory; the active lanes consume
-    // `concurrency` of those, leaving device_state_slots + host_state_slots to
-    // back checkpoints.
+    // A catalog entry is only real if a StateImage can hold it: device_state_slots
+    // plus host_state_slots are what can back checkpoints, since the active lanes
+    // consume the rest. Advertising more than that reports capacity that cannot
+    // exist -- the 27B claimed 64 against 32 backable.
     //
-    // A catalog larger than that can never fill, so the capacity-driven eviction
-    // that frees StateImages never runs. The physical pool exhausts first and
-    // simply stops accepting captures -- and because nothing evicts, it never
-    // recovers. Prefix reuse then dies permanently a few conversations in and
-    // every turn re-prefills, with no error anywhere to say why.
+    // This corrects the claim. It does NOT stop the pool from being exhausted, and
+    // must not be mistaken for that fix: a conversation consumes roughly 2.4 state
+    // images but about one catalog entry, so the pool still runs out well before
+    // the catalog fills, and the catalog-driven eviction that would release images
+    // never runs. Measured on the 27B: reuse works for ten conversations, then
+    // stops permanently with host_state_occupied_slots pinned at capacity through
+    // 60 s of idle. Clamping the catalog to the backing, and separately to the
+    // backing minus a concurrency of headroom, both left that unchanged.
     //
-    // Measured on the 27B before this clamp: 64 declared continuations against 32
-    // backable states, reuse working for 10 conversations and then zero for
-    // every request after, host_state_occupied_slots pinned at 24/24 through 60 s
-    // of idle. Flash-Next got the equivalent clamp in D8 (1fcd72b4); this is the
-    // same defect on the shared Engine path, so it is fixed for every target.
-    //
-    // Clamped rather than rejected: an operator asking for a bigger catalog than
-    // the state budget backs should get the biggest honest one, not a refusal to
-    // start. Engine::options() then reports the effective value.
-    const std::uint64_t backable_continuations =
+    // The real fix is to make state-pool exhaustion trigger the eviction that
+    // already exists for catalog pressure -- pressure_planner.h already scores
+    // residual.host.state_slots and program_impl.h:5750 already knows how to drop
+    // a host replica; nothing connects exhaustion to them.
+    const std::uint64_t backing =
         static_cast<std::uint64_t>(*cache.device_state_slots) + cache.host_state_slots;
-    if (backable_continuations >= concurrency &&
-        *cache.max_private_continuations > backable_continuations) {
-        cache.max_private_continuations = static_cast<std::uint32_t>(backable_continuations);
+    if (backing >= concurrency && *cache.max_private_continuations > backing) {
+        cache.max_private_continuations = static_cast<std::uint32_t>(backing);
     }
     const std::uint64_t total_device_state_slots =
         static_cast<std::uint64_t>(concurrency) + *cache.device_state_slots;
