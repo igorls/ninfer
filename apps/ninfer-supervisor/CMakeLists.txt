@@ -2,7 +2,11 @@ if(NOT WIN32)
   return()
 endif()
 
-add_executable(ninfer-supervisor
+# WIN32 links this for the Windows subsystem so no console window appears when
+# the supervisor autostarts at login. It still has a main() rather than a
+# WinMain(), so the entry point is set back explicitly; main() adopts the
+# parent terminal when the binary is run by hand (see attach_parent_console_if_any).
+add_executable(ninfer-supervisor WIN32
   main.cpp
   engine_child.cpp
   collector.cpp
@@ -14,6 +18,7 @@ target_include_directories(ninfer-supervisor PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib)
 target_link_libraries(ninfer-supervisor PRIVATE CUDA::cudart)
 target_link_options(ninfer-supervisor PRIVATE
+  "LINKER:/ENTRY:mainCRTStartup"
   "LINKER:/DEFAULTLIB:dxgi"
   "LINKER:/DEFAULTLIB:ole32"
   "LINKER:/DEFAULTLIB:shell32"

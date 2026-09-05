@@ -4,6 +4,7 @@
 #include "logic.hpp"
 #include "server.hpp"
 #include "tray.hpp"
+#include "tray_prefs.hpp"
 
 #include <windows.h>
 
@@ -52,7 +53,30 @@ void usage() {
 
 } // namespace
 
+// A tray application has no business conjuring a console window. The target is
+// linked for the Windows subsystem so nothing appears when the supervisor starts
+// at login, which is how it usually starts. But this is also a small CLI --
+// --install-login, --uninstall-login and usage all print -- so when it IS run
+// from a terminal, adopt that terminal and send stdout/stderr back to it.
+// Without this the Windows-subsystem build would silently swallow those.
+void attach_parent_console_if_any() {
+    // Leave an already-connected stdout alone. A Windows-subsystem process gets
+    // null standard handles when launched from Explorer or the Run key, but real
+    // ones when the caller redirected to a file or a pipe -- and reopening
+    // CONOUT$ in that case would write past the redirection to the console,
+    // quietly breaking `ninfer-supervisor --help > file`.
+    const HANDLE existing = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (existing != nullptr && existing != INVALID_HANDLE_VALUE) { return; }
+    if (AttachConsole(ATTACH_PARENT_PROCESS) == 0) { return; }
+    FILE* out = nullptr;
+    (void)freopen_s(&out, "CONOUT$", "w", stdout);
+    FILE* err = nullptr;
+    (void)freopen_s(&err, "CONOUT$", "w", stderr);
+    std::ios::sync_with_stdio(true);
+}
+
 int main(int argc, char** argv) {
+    attach_parent_console_if_any();
     try {
         std::string config_path;
         std::string host_override;
@@ -127,7 +151,9 @@ int main(int argc, char** argv) {
             "http://" + (cfg.bind_any ? std::string("127.0.0.1") : cfg.host) + ":" +
             std::to_string(cfg.port) + "/";
         std::cout << "ninfer-supervisor dashboard " << url << "\n";
-        ninfer::supervisor::TrayIcon tray(child, url, ninfer::supervisor::manages_engine_process(cfg));
+        ninfer::supervisor::TrayIcon tray(child, cfg.engine, url,
+                                          ninfer::supervisor::manages_engine_process(cfg),
+                                          ninfer::supervisor::tray_prefs_path(config_path));
         tray.run();
         server.stop();
         collector.stop_series();
