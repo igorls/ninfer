@@ -1397,9 +1397,11 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestB
         const std::size_t K = static_cast<std::size_t>(c.committed_frontier);
         if (K > 0 && K <= prompt_data.token_ids.size() && K <= c.committed_tokens.size()) {
             bool match = true;
+            std::size_t diverged_at = K;
             for (std::size_t i = 0; i < K; ++i) {
                 if (prompt_data.token_ids[i] != c.committed_tokens[i]) {
-                    match = false;
+                    match       = false;
+                    diverged_at = i;
                     break;
                 }
             }
@@ -1407,10 +1409,34 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestB
                 reusable_tokens    = static_cast<std::uint32_t>(K);
                 cont_slot          = &c;
                 matched_slot_index = c_idx;
+            } else if (std::getenv("NINFER_FLASH_NEXT_TRACE_KEYS") != nullptr) {
+                // Where a reuse candidate stops matching is the whole diagnosis: a
+                // divergence in the last few tokens costs the entire prefix, because
+                // this match is all-or-nothing at K.
+                std::fprintf(stderr,
+                             "[fnkey] endpoint MISMATCH at %zu of K=%zu (prompt=%zu): "
+                             "prompt_tok=%d cached_tok=%d\n",
+                             diverged_at, K, prompt_data.token_ids.size(),
+                             static_cast<int>(prompt_data.token_ids[diverged_at]),
+                             static_cast<int>(c.committed_tokens[diverged_at]));
             }
+        } else if (std::getenv("NINFER_FLASH_NEXT_TRACE_KEYS") != nullptr) {
+            std::fprintf(stderr,
+                         "[fnkey] endpoint UNUSABLE K=%zu prompt=%zu cached=%zu\n", K,
+                         prompt_data.token_ids.size(), c.committed_tokens.size());
         }
 
         // If endpoint didn't match (e.g. omitted reasoning / divergence in multi-turn), check TurnClosure checkpoints
+        if (cont_slot == nullptr && std::getenv("NINFER_FLASH_NEXT_TRACE_KEYS") != nullptr) {
+            std::size_t catalogued = 0, turn_closures = 0;
+            for (const auto& slot : impl_->continuation_slots_) {
+                if (slot.role != detail::ContinuationSlotRole::Catalogued) { continue; }
+                ++catalogued;
+                if (slot.kind == runtime::CheckpointKind::TurnClosure) { ++turn_closures; }
+            }
+            std::fprintf(stderr, "[fnkey] fallback inventory: slots=%zu catalogued=%zu turn_closures=%zu\n",
+                         impl_->continuation_slots_.size(), catalogued, turn_closures);
+        }
         if (cont_slot == nullptr) {
             for (std::size_t tc_idx = 0; tc_idx < impl_->continuation_slots_.size(); ++tc_idx) {
                 const auto& tc = impl_->continuation_slots_[tc_idx];
@@ -1418,10 +1444,12 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestB
                     tc.kind == runtime::CheckpointKind::TurnClosure) {
                     const std::size_t tc_K = static_cast<std::size_t>(tc.committed_frontier);
                     if (tc_K > 0 && tc_K <= prompt_data.token_ids.size() && tc_K <= tc.committed_tokens.size()) {
-                        bool match = true;
+                        bool match              = true;
+                        std::size_t diverged_at = tc_K;
                         for (std::size_t i = 0; i < tc_K; ++i) {
                             if (prompt_data.token_ids[i] != tc.committed_tokens[i]) {
-                                match = false;
+                                match       = false;
+                                diverged_at = i;
                                 break;
                             }
                         }
@@ -1429,7 +1457,19 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestB
                             reusable_tokens    = static_cast<std::uint32_t>(tc_K);
                             cont_slot          = &tc;
                             matched_slot_index = static_cast<std::uint32_t>(tc_idx);
+                        } else if (!match && std::getenv("NINFER_FLASH_NEXT_TRACE_KEYS") != nullptr) {
+                            std::fprintf(stderr,
+                                         "[fnkey] turnclosure[%zu] MISMATCH at %zu of K=%zu: "
+                                         "prompt_tok=%d cached_tok=%d\n",
+                                         tc_idx, diverged_at, tc_K,
+                                         static_cast<int>(prompt_data.token_ids[diverged_at]),
+                                         static_cast<int>(tc.committed_tokens[diverged_at]));
                         }
+                    } else if (std::getenv("NINFER_FLASH_NEXT_TRACE_KEYS") != nullptr) {
+                        std::fprintf(stderr,
+                                     "[fnkey] turnclosure[%zu] UNUSABLE K=%zu prompt=%zu cached=%zu\n",
+                                     tc_idx, tc_K, prompt_data.token_ids.size(),
+                                     tc.committed_tokens.size());
                     }
                 }
             }
