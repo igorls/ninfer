@@ -98,6 +98,9 @@ private:
     void spawn();
     void capture_wait();
     void append_log(const char* data, std::size_t n);
+    // Records a restart's cause where it outlives st_.last_event, which is
+    // overwritten within seconds of the restart it describes. Caller holds mu_.
+    void note_restart_reason(const std::string& reason);
     void rotate_logs_if_needed();
     void note_engine_output(const char* data, std::size_t n);
 

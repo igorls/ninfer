@@ -293,8 +293,27 @@ void EngineChild::observe_health(int http_status) {
     if (restart_now) { restart(); }
 }
 
+// Writes why the engine is being restarted into the engine log, where it
+// survives.
+//
+// st_.last_event is the only record of a restart's cause, and it is overwritten
+// within seconds -- "health restart threshold" becomes "restart requested"
+// becomes "engine started" -- so by the time anyone looks at the dashboard the
+// reason is gone. An unexplained restart then cannot be told apart from a crash:
+// the engine exits with code 1 either way, because that is what TerminateProcess
+// is given here. Diagnosing one after the fact meant ruling out possibilities
+// rather than reading the answer.
+void EngineChild::note_restart_reason(const std::string& reason) {
+    const std::string line = "[supervisor] restarting engine: " + reason + "\n";
+    append_log(line.data(), line.size());
+}
+
 void EngineChild::restart() {
     if (!manages_engine_process(cfg_)) { return; }
+    {
+        std::lock_guard lock(mu_);
+        note_restart_reason(st_.last_event.empty() ? "no reason recorded" : st_.last_event);
+    }
     auto_restart_ = true;
     stop_child_   = true;
     HANDLE proc   = nullptr;
