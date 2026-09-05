@@ -26,6 +26,14 @@ struct EngineSpec {
     bool unmanaged  = false; // observe an engine this process did not spawn
 };
 
+// A wildcard is a listening address, not a destination for the supervisor's
+// health and memory requests. Keep the configured engine binding unchanged.
+inline std::string engine_connect_host(const EngineSpec& spec) {
+    if (spec.engine_host == "0.0.0.0") { return "127.0.0.1"; }
+    if (spec.engine_host == "::") { return "::1"; }
+    return spec.engine_host;
+}
+
 struct SupervisorConfig {
     EngineSpec engine;
     // Where this config was loaded from. The dashboard writes edits back here, so

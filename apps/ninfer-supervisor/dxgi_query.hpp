@@ -22,6 +22,7 @@ struct DxgiSnapshot {
     std::uint64_t available_for_reservation_bytes = 0;
     std::uint64_t current_reservation_bytes       = 0;
     std::string adapter_name;
+    LUID adapter_luid{};
     bool ok = false;
     std::string error;
 };
@@ -116,6 +117,7 @@ private:
                                 static_cast<int>(sizeof(name)), nullptr, nullptr);
             chosen      = a3;
             chosen_name = name;
+            adapter_luid_ = desc.AdapterLuid;
             break;
         }
         if (chosen == nullptr) {
@@ -146,6 +148,7 @@ private:
         out.available_for_reservation_bytes = info.AvailableForReservation;
         out.current_reservation_bytes       = info.CurrentReservation;
         out.adapter_name                    = adapter_name_;
+        out.adapter_luid                    = adapter_luid_;
         out.ok                              = true;
         out.error.clear();
         return true;
@@ -156,6 +159,7 @@ private:
     IDXGIAdapter3* adapter3_ = nullptr;
     int bound_device_        = -1;
     std::string adapter_name_;
+    LUID adapter_luid_{};
 };
 
 inline DxgiSnapshot query_dxgi_local(int cuda_device) {

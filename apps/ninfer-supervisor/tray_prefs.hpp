@@ -18,6 +18,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <mutex>
 
 namespace ninfer::supervisor {
 
@@ -59,8 +60,7 @@ inline std::string tray_prefs_path(const std::string& config_path) {
 inline TrayPrefs normalize_tray_prefs(TrayPrefs p) {
     const bool reserve_ok =
         p.desktop_reserve_gib == kReserveUnset ||
-        std::find(kReserveChoicesGib.begin(), kReserveChoicesGib.end(), p.desktop_reserve_gib) !=
-            kReserveChoicesGib.end();
+        (p.desktop_reserve_gib >= 0 && p.desktop_reserve_gib <= 64);
     if (!reserve_ok) { p.desktop_reserve_gib = kReserveUnset; }
     const bool idle_ok = std::find(kIdleChoicesMinutes.begin(), kIdleChoicesMinutes.end(),
                                    p.idle_unload_minutes) != kIdleChoicesMinutes.end();
@@ -107,6 +107,19 @@ inline void save_tray_prefs(const std::string& path, const TrayPrefs& p) {
     } catch (...) {
         // Best effort. Failing to persist a preference is not worth an error path.
     }
+}
+
+// Both UI surfaces update only their field, preserving the other preference.
+inline bool update_tray_preference(const std::string& path, bool reserve, int value) {
+    static std::mutex mutex;
+    std::lock_guard lock(mutex);
+    auto prefs = load_tray_prefs(path);
+    if (reserve) prefs.desktop_reserve_gib = value;
+    else prefs.idle_unload_minutes = value;
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << tray_prefs_to_json(prefs) << '\n';
+    out.flush();
+    return out.good();
 }
 
 } // namespace ninfer::supervisor

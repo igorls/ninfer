@@ -20,6 +20,7 @@ target_link_libraries(ninfer-supervisor PRIVATE CUDA::cudart)
 target_link_options(ninfer-supervisor PRIVATE
   "LINKER:/ENTRY:mainCRTStartup"
   "LINKER:/DEFAULTLIB:dxgi"
+  "LINKER:/DEFAULTLIB:pdh"
   "LINKER:/DEFAULTLIB:ole32"
   "LINKER:/DEFAULTLIB:shell32"
   "LINKER:/DEFAULTLIB:user32"

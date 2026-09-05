@@ -238,10 +238,10 @@ HICON make_tray_icon(TrayStatus status, int size) {
 std::wstring reserve_label(int gib) {
     wchar_t label[64];
     if (gib <= 0) {
-        _snwprintf_s(label, _TRUNCATE, L"Engine default (8 GB)");
+        _snwprintf_s(label, _TRUNCATE, L"Engine default (8 GiB)");
     } else {
-        const wchar_t* note = gib == 2 ? L"   measured floor" : (gib == 4 ? L"   recommended" : L"");
-        _snwprintf_s(label, _TRUNCATE, L"%d GB%s", gib, note);
+        const wchar_t* note = L"";
+        _snwprintf_s(label, _TRUNCATE, L"%d GiB%s", gib, note);
     }
     return label;
 }
@@ -292,9 +292,15 @@ void show_menu(HWND hwnd, TrayIcon* self) {
         append_disabled(menu, 0, L"Reserve for the desktop", L"pinned by --desktop-reserve-mib");
     } else {
         HMENU reserve = CreatePopupMenu();
+        const int selected = self->reserve_gib();
+        const auto budget = self->child().reserve_budget();
+        if (std::find(kReserveChoicesGib.begin(), kReserveChoicesGib.end(), selected) == kReserveChoicesGib.end()) {
+            append_caption(reserve, (std::to_wstring(selected) + L" GiB custom (dashboard)").c_str());
+        }
         for (std::size_t i = 0; i < kReserveChoicesGib.size(); ++i) {
             const int gib = kReserveChoicesGib[i];
-            AppendMenuW(reserve, MF_STRING | (gib == self->reserve_gib() ? MF_CHECKED : 0),
+            const bool fits = budget.value("ok", false) && (gib == 0 ? 8 : gib) <= budget.value("max_gib", 0);
+            AppendMenuW(reserve, MF_STRING | (fits ? 0 : MF_GRAYED) | (gib == self->reserve_gib() ? MF_CHECKED : 0),
                         tray_cmd_reserve(i), reserve_label(gib).c_str());
         }
         if (alive) {
@@ -425,7 +431,8 @@ TrayIcon::~TrayIcon() {
 EngineChild& TrayIcon::child() { return child_; }
 
 int TrayIcon::reserve_gib() const {
-    if (prefs_.desktop_reserve_gib >= 0) { return prefs_.desktop_reserve_gib; }
+    const int saved = child_.status().desktop_reserve_gib;
+    if (saved >= 0) { return saved; }
     // No stored choice: the checkmark belongs on whatever the config file asks
     // for, so the menu never claims a number the engine is not running with.
     return desktop_reserve_from_args(child_.config().engine.args);
@@ -477,9 +484,10 @@ void TrayIcon::on_reserve_chosen(int gib) {
     // Nothing the menu can say survives a pinned --desktop-reserve-mib; the item
     // is greyed, and this is the guard for the path that greying does not cover.
     if (reserve_pinned_by_config()) { return; }
-    prefs_.desktop_reserve_gib = gib;
-    save_tray_prefs(prefs_path_, prefs_);
-    child_.set_desktop_reserve_gib(gib);
+    if (!child_.save_desktop_reserve_gib(gib)) {
+        MessageBoxW(nullptr, L"Could not save the reserve. It must fit the ready model's current memory budget. Check the dashboard for the available limit and retry.", L"NInfer", MB_OK | MB_ICONERROR);
+        return;
+    }
 
     // Ask before restarting, and only when there is something to interrupt.
     // Reserving memory is cheap to choose and expensive to apply -- a restart
@@ -502,7 +510,7 @@ void TrayIcon::on_idle_chosen(int minutes) { set_idle_minutes(minutes); }
 
 void TrayIcon::set_idle_minutes(int minutes) {
     prefs_.idle_unload_minutes = minutes;
-    save_tray_prefs(prefs_path_, prefs_);
+    update_tray_preference(prefs_path_, false, prefs_.idle_unload_minutes);
 }
 
 void TrayIcon::on_start_at_login_toggled() {

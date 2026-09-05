@@ -346,6 +346,10 @@ nlohmann::json DashboardServer::state_json() {
             {"engine", std::move(engine)},
             {"dxgi", std::move(dxgi)},
             {"nvidia_smi", std::move(nvidia)},
+            {"gpu_processes", snap.gpu_processes},
+            {"reserve_budget", child_.reserve_budget()},
+            {"desktop_reserve", {{"next_gib", desktop_reserve_launch_mib(child_.config().engine.args, st.desktop_reserve_gib) / 1024.0},
+                                  {"pinned", desktop_reserve_pinned(child_.config().engine.args)}}},
             {"engine_capacity_line", cap},
             {"admin_vram", snap.admin_vram},
             {"admin_vram_note", snap.admin_vram_note},
@@ -431,6 +435,28 @@ void DashboardServer::run() {
     });
     svr.Post("/api/restart", [this, control](const httplib::Request& req, httplib::Response& res) {
         control(req, res, [this] { child_.restart(); });
+    });
+
+    svr.Post("/api/desktop-reserve", [this](const httplib::Request& req, httplib::Response& res) {
+        auto error = [&res](int status, const char* message) {
+            res.status = status;
+            res.set_content(nlohmann::json{{"error", message}}.dump(), "application/json");
+        };
+        if (!control_allowed(req.remote_addr) || !supervisor_control_header_ok(req.get_header_value(std::string(kSupervisorControlHeader)))) {
+            error(403, "Reserve changes require a local supervisor request."); return;
+        }
+        if (!manages_engine_process(cfg_)) { error(409, "This supervisor does not manage the engine."); return; }
+        const auto body = nlohmann::json::parse(req.body, nullptr, false);
+        if (!body.is_object() || !body.contains("gib") || !body["gib"].is_number_integer() || body["gib"] < 0 || body["gib"] > 64) {
+            error(400, "Choose engine default (0), or a whole number from 1 to 64 GiB."); return;
+        }
+        if (desktop_reserve_pinned(child_.config().engine.args)) { error(409, "Reserve is pinned by --desktop-reserve-mib in the launch configuration."); return; }
+        const auto budget = child_.reserve_budget();
+        if (!budget.value("ok", false)) { error(409, "Wait for a ready engine with the saved model settings before changing the reserve."); return; }
+        const int gib = body["gib"].get<int>();
+        if ((gib == 0 ? 8 : gib) > budget.value("max_gib", 0)) { error(409, "That reserve would leave too little memory for this model and its configured capacity. Choose a value within the current slider limit."); return; }
+        if (!child_.save_desktop_reserve_gib(gib)) { error(409, "Could not save: the available model budget changed or the preferences folder is not writable. Refresh and try again."); return; }
+        res.set_content(state_json().dump(), "application/json");
     });
 
     // Reading the configuration is gated exactly like changing it. The payload

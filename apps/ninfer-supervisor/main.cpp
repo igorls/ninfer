@@ -6,6 +6,7 @@
 #include "server.hpp"
 #include "tray.hpp"
 #include "tray_prefs.hpp"
+#include "reserve_budget.hpp"
 
 #include <windows.h>
 #include <shellapi.h>
@@ -194,6 +195,15 @@ int main(int argc, char** argv) {
         child.set_desktop_reserve_gib(
             ninfer::supervisor::load_tray_prefs(prefs_path).desktop_reserve_gib);
         ninfer::supervisor::Collector collector(cfg.engine, cfg.logs_dir);
+        child.set_reserve_budget_provider([&collector, &child, probe = cfg.engine] {
+            const auto snapshot = collector.snapshot();
+            const auto current = child.config().engine;
+            if (!child.reserve_plan_matches_config() || snapshot.health_status != 200 ||
+                probe.device != current.device || probe.engine_host != current.engine_host || probe.engine_port != current.engine_port) {
+                return nlohmann::json{{"ok", false}, {"reason", "A ready engine with the saved model settings is needed to calculate the reserve limit."}};
+            }
+            return ninfer::supervisor::model_reserve_budget(snapshot.admin_vram, current.args);
+        });
         // Wired BEFORE start_series: the 1 Hz observe thread reads them, and
         // this is what makes health and engine-state observation independent of
         // whether anybody has the dashboard open.

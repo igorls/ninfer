@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <set>
 #include <string>
@@ -66,6 +67,10 @@ public:
     // what the first version did, could never reach the command line.
     // kReserveUnset leaves the config's own arguments untouched.
     void set_desktop_reserve_gib(int gib);
+    bool save_desktop_reserve_gib(int gib);
+    void set_reserve_budget_provider(std::function<nlohmann::json()> provider) { reserve_budget_provider_ = std::move(provider); }
+    nlohmann::json reserve_budget() const { return reserve_budget_provider_ ? reserve_budget_provider_() : nlohmann::json{{"ok", false}}; }
+    bool reserve_plan_matches_config() const;
 
     // Replaces the configuration the NEXT spawn will use. The dashboard's config
     // editor writes the file and calls this; without it the file would change and
@@ -111,6 +116,8 @@ private:
     std::atomic<bool> auto_restart_{true};
     std::atomic<std::int64_t> last_activity_ms_{0};
     int desktop_reserve_gib_ = kReserveUnset; // under mu_
+    EngineSpec launched_spec_;
+    std::function<nlohmann::json()> reserve_budget_provider_;
     std::string line_buf_;                    // under mu_; partial stderr line
     std::set<std::uint64_t> inflight_;        // under mu_; open request ids
     void* process_handle_ = nullptr;          // HANDLE

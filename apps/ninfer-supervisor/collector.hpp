@@ -41,6 +41,7 @@ struct RequestMix {
 struct Collected {
     DxgiSnapshot dxgi;
     NvidiaSmiMemory nvidia;
+    nlohmann::json gpu_processes = {{"ok", false}, {"apps", nlohmann::json::array()}};
     nlohmann::json admin_vram = nullptr;
     std::string admin_vram_note;
     RequestMix requests;
@@ -119,6 +120,7 @@ private:
     std::string last_admin_note_;
     DxgiSnapshot last_dxgi_;
     NvidiaSmiMemory last_nvidia_;
+    nlohmann::json last_gpu_processes_ = {{"ok", false}, {"apps", nlohmann::json::array()}};
     HealthObserver health_observer_;
     EngineStateProvider engine_state_provider_;
     std::int64_t request_log_mtime_ms_ = 0;

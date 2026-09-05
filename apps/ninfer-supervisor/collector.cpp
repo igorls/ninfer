@@ -1,4 +1,5 @@
 #include "collector.hpp"
+#include "gpu_processes.hpp"
 #include "insights.hpp"
 
 #ifdef _WIN32
@@ -78,7 +79,7 @@ std::string load_key(const std::string& path) {
 }
 
 httplib::Client engine_client(const EngineSpec& spec) {
-    httplib::Client cli(spec.engine_host, spec.engine_port);
+    httplib::Client cli(engine_connect_host(spec), spec.engine_port);
     cli.set_connection_timeout(1, 0);
     cli.set_read_timeout(2, 0);
     const std::string key = load_key(spec.api_key_file);
@@ -369,6 +370,8 @@ void Collector::series_loop() {
     constexpr int kNvidiaEvery = 10;
     int nvidia_tick            = 0;
     NvidiaSmiMemory nvidia_last;
+    GpuProcessSource process_source;
+    nlohmann::json process_last;
     while (series_run_.load()) {
         const auto t0 = std::chrono::steady_clock::now();
         try {
@@ -379,6 +382,7 @@ void Collector::series_loop() {
                 Collected nv;
                 poll_nvidia_smi(nv);
                 nvidia_last = nv.nvidia;
+                process_last = process_source.sample(dxgi);
             }
             nvidia_tick = (nvidia_tick + 1) % kNvidiaEvery;
             sample.budget_bytes      = dxgi.budget_bytes;
@@ -387,6 +391,7 @@ void Collector::series_loop() {
                 std::lock_guard lock(mu_);
                 last_dxgi_   = dxgi;
                 last_nvidia_ = nvidia_last;
+                last_gpu_processes_ = dxgi.ok ? process_last : nlohmann::json{{"ok", false}, {"error", "Graphics card unavailable."}};
                 series_.push(sample);
                 persist_sample(sample);
             }
@@ -553,6 +558,7 @@ Collected Collector::snapshot() {
         out.admin_vram_note  = last_admin_note_;
         out.dxgi             = last_dxgi_;
         out.nvidia           = last_nvidia_;
+        out.gpu_processes    = last_gpu_processes_;
         return out;
     }
     poll_health(out);
