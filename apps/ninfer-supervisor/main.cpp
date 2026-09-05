@@ -123,6 +123,13 @@ int main(int argc, char** argv) {
             path_ec ? config_path : canonical.generic_string();
         auto cfg = ninfer::supervisor::load_config_json(
             ninfer::supervisor::read_file_text(config_path), monitor_only);
+        // Resolved, because the dashboard writes edits back to this path and the
+        // supervisor's working directory is not the one the CLI was invoked from.
+        {
+            std::error_code ec;
+            const auto resolved = std::filesystem::weakly_canonical(config_path, ec);
+            cfg.source_path     = ec ? config_path : resolved.string();
+        }
         if (!host_override.empty()) { cfg.host = host_override; }
         if (port_override > 0) { cfg.port = port_override; }
         if (bind_any) { cfg.bind_any = true; }

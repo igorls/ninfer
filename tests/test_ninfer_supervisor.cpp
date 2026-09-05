@@ -3,6 +3,7 @@
 #include "insights.hpp"
 #include "tray_prefs.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <string>
 
@@ -810,6 +811,90 @@ int test_tray_prefs() {
 
 } // namespace
 
+
+int test_engine_param_round_trip() {
+    using namespace ninfer::supervisor;
+    int f = 0;
+    const std::vector<std::string> args{
+        "model.ninfer", "--host", "127.0.0.1", "--port", "8190", "--max-context", "262144",
+        "--kv-dtype", "fp8", "--vision", "--some-future-flag", "7"};
+    const ParsedEngineArgs parsed = parse_engine_args(args);
+    f += check(parsed.artifact == "model.ninfer", "first positional is the artifact");
+    const std::string* ctx = find_param_value(parsed.params, "max_context");
+    f += check(ctx != nullptr && *ctx == "262144", "int parameter parses");
+    const std::string* vis = find_param_value(parsed.params, "vision");
+    f += check(vis != nullptr && *vis == "true", "presence flag parses");
+    // An unknown flag and its value must survive together, or rendering would turn
+    // the value into a positional argument.
+    f += check(parsed.passthrough.size() == 6 && parsed.passthrough[4] == "--some-future-flag" &&
+                   parsed.passthrough[5] == "7",
+               "unknown flags keep their values");
+
+    const auto rendered = render_engine_args(parsed);
+    std::vector<std::string> a = args;
+    std::vector<std::string> b = rendered;
+    std::sort(a.begin(), a.end());
+    std::sort(b.begin(), b.end());
+    f += check(a == b, "round trip loses nothing");
+    return f;
+}
+
+int test_engine_param_validation() {
+    using namespace ninfer::supervisor;
+    int f = 0;
+    f += check(validate_engine_params({{"max_concurrency", "8"}}).empty(), "in-range value passes");
+    f += check(!validate_engine_params({{"max_concurrency", "16"}}).empty(),
+               "the engine's own concurrency limit is enforced");
+    f += check(!validate_engine_params({{"max_context", "not-a-number"}}).empty(),
+               "non-numeric int is rejected");
+    f += check(validate_engine_params({{"kv_capacity", "auto"}}).empty(), "auto is accepted");
+    f += check(!validate_engine_params({{"kv_dtype", "fp4"}}).empty(),
+               "unsupported enum value is rejected");
+    f += check(!validate_engine_params({{"rm_rf", "1"}}).empty(),
+               "an unknown key is not silently written through");
+    f += check(!validate_engine_params({{"model_id", std::string(1, '\n')}}).empty(),
+               "a newline cannot be smuggled into the config file");
+    f += check(!validate_engine_param_combination({{"kv_capacity", "4096"},
+                                                   {"max_context", "262144"}})
+                    .empty(),
+               "a KV pool smaller than one full context is refused");
+    return f;
+}
+
+int test_redact_engine_args() {
+    using namespace ninfer::supervisor;
+    int f = 0;
+    const auto out = redact_engine_args({"model.ninfer", "--api-key", "sk-live-secret", "--port",
+                                         "8190"});
+    f += check(out[2] == "(redacted)", "an inline api key never leaves the process");
+    f += check(out[4] == "8190", "ordinary values are untouched");
+    return f;
+}
+
+int test_engine_endpoint_sync() {
+    using namespace ninfer::supervisor;
+    int f = 0;
+    const auto rewritten =
+        with_engine_endpoint({"model.ninfer", "--host", "127.0.0.1", "--port", "8190"},
+                             "127.0.0.1", 8191);
+    f += check(rewritten[4] == "8191", "listen port follows the polled port");
+    const auto appended = with_engine_endpoint({"model.ninfer"}, "127.0.0.1", 8191);
+    f += check(appended.size() == 5, "endpoint flags are added when absent");
+    return f;
+}
+
+int test_with_request_log() {
+    using namespace ninfer::supervisor;
+    int f = 0;
+    const auto added = with_request_log({"model.ninfer"}, "C:/logs/r.jsonl");
+    f += check(added.size() == 3 && added[1] == "--request-log-jsonl", "config path is passed on");
+    const auto kept =
+        with_request_log({"model.ninfer", "--request-log-jsonl", "explicit.jsonl"}, "other.jsonl");
+    f += check(kept[2] == "explicit.jsonl", "an explicit flag wins over the config field");
+    f += check(with_request_log({"model.ninfer"}, "").size() == 1, "empty path adds nothing");
+    return f;
+}
+
 int main() {
     int failures = 0;
     failures += test_loopback();
@@ -830,6 +915,11 @@ int main() {
     failures += test_series_ring();
     failures += test_health_threshold();
     failures += test_with_desktop_reserve();
+    failures += test_engine_param_round_trip();
+    failures += test_engine_param_validation();
+    failures += test_redact_engine_args();
+    failures += test_engine_endpoint_sync();
+    failures += test_with_request_log();
     failures += test_tray_command_ids();
     failures += test_classify_engine_line();
     failures += test_process_scoped_error();

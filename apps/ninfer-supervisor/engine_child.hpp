@@ -67,10 +67,19 @@ public:
     // kReserveUnset leaves the config's own arguments untouched.
     void set_desktop_reserve_gib(int gib);
 
+    // Replaces the configuration the NEXT spawn will use. The dashboard's config
+    // editor writes the file and calls this; without it the file would change and
+    // a restart would still launch the previous parameters, because this object
+    // owns a copy. Takes effect on the next start, never on the running process.
+    void update_config(SupervisorConfig cfg);
+
     [[nodiscard]] EngineStatus status() const;
     [[nodiscard]] std::string log_tail(std::size_t max_bytes) const;
-    [[nodiscard]] const SupervisorConfig& config() const noexcept { return cfg_; }
-    [[nodiscard]] std::string logs_dir() const { return cfg_.logs_dir; }
+    // By value and under the lock: update_config can swap this out while the tray
+    // is drawing a menu from it, and a reference into a member that another thread
+    // is assigning is a race whatever the members happen to be.
+    [[nodiscard]] SupervisorConfig config() const;
+    [[nodiscard]] std::string logs_dir() const;
 
     // Last moment the engine proved it was doing something, from its own stderr.
     // Atomic because the reader thread writes it and the UI timer reads it.

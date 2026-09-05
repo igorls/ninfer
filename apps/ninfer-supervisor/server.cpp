@@ -45,6 +45,250 @@ bool DashboardServer::control_allowed(const std::string& remote) const {
     return is_loopback_peer(remote);
 }
 
+namespace {
+
+const char* param_kind_name(ParamKind kind) noexcept {
+    switch (kind) {
+    case ParamKind::Int: return "int";
+    case ParamKind::Text: return "text";
+    case ParamKind::Enum: return "enum";
+    case ParamKind::Flag: return "flag";
+    case ParamKind::IntOrAuto: return "int_or_auto";
+    }
+    return "text";
+}
+
+} // namespace
+
+nlohmann::json DashboardServer::config_json() const {
+    const ParsedEngineArgs parsed = parse_engine_args(cfg_.engine.args);
+
+    // The form's field list comes from the engine parameter table, so a knob added
+    // in C++ appears in the page with its own label, help text and bounds, and no
+    // second description can go stale.
+    nlohmann::json schema = nlohmann::json::array();
+    for (const auto& spec : engine_param_specs()) {
+        nlohmann::json choices = nlohmann::json::array();
+        for (const auto& choice : spec.choices) {
+            if (!choice.empty()) { choices.push_back(std::string(choice)); }
+        }
+        schema.push_back({{"key", std::string(spec.key)},
+                          {"flag", std::string(spec.flag)},
+                          {"kind", param_kind_name(spec.kind)},
+                          {"group", std::string(spec.group)},
+                          {"label", std::string(spec.label)},
+                          {"help", std::string(spec.help)},
+                          {"min", spec.min_value},
+                          {"max", spec.max_value},
+                          {"choices", choices}});
+    }
+
+    nlohmann::json values = nlohmann::json::object();
+    for (const auto& param : parsed.params) { values[param.key] = param.value; }
+
+    return {
+        {"config_path", cfg_.source_path},
+        {"writable", !cfg_.source_path.empty()},
+        {"manages_engine", manages_engine_process(cfg_)},
+        {"engine",
+         {// Shown, never editable here: changing which binary runs is a file-only
+          // decision. See the note on the parameter table.
+          {"executable", cfg_.engine.executable},
+          {"workdir", cfg_.engine.workdir},
+          {"artifact", parsed.artifact},
+          {"engine_host", cfg_.engine.engine_host},
+          {"engine_port", cfg_.engine.engine_port},
+          {"device", cfg_.engine.device},
+          {"request_log", cfg_.engine.request_log},
+          {"unmanaged", cfg_.engine.unmanaged},
+          // The path, and whether it resolves to something. Never the key itself.
+          {"api_key_file", cfg_.engine.api_key_file},
+          {"api_key_present", !read_api_key_quiet(cfg_.engine.api_key_file).empty()},
+          {"args", redact_engine_args(cfg_.engine.args)},
+          {"passthrough", parsed.passthrough}}},
+        {"supervisor",
+         {{"host", cfg_.host},
+          {"port", cfg_.port},
+          {"bind_any", cfg_.bind_any},
+          {"monitor_only", cfg_.monitor_only},
+          {"logs_dir", cfg_.logs_dir},
+          {"restart",
+           {{"max_backoff_s", cfg_.restart.max_backoff_s},
+            {"crash_loop_window_s", cfg_.restart.crash_loop_window_s},
+            {"crash_loop_max", cfg_.restart.crash_loop_max},
+            {"health_fail_threshold", cfg_.restart.health_fail_threshold}}}}},
+        {"params", values},
+        {"schema", schema}};
+}
+
+DashboardServer::ConfigResult DashboardServer::apply_config(const std::string& request_body) {
+    if (cfg_.source_path.empty()) {
+        return {409, {{"error", "this supervisor has no config file to write to"}}};
+    }
+    nlohmann::json body;
+    try {
+        body = nlohmann::json::parse(request_body);
+    } catch (const std::exception& ex) {
+        return {400, {{"error", std::string("request is not valid JSON: ") + ex.what()}}};
+    }
+
+    SupervisorConfig next = cfg_;
+    std::vector<std::string> errors;
+    bool engine_restart_required     = false;
+    bool supervisor_restart_required = false;
+
+    if (body.contains("params") && body.at("params").is_object()) {
+        ParsedEngineArgs parsed = parse_engine_args(cfg_.engine.args);
+        std::vector<EngineParam> edited;
+        for (const auto& [key, value] : body.at("params").items()) {
+            const EngineParamSpec* spec = find_engine_param(key);
+            if (spec == nullptr) {
+                errors.push_back(key + " is not an editable parameter");
+                continue;
+            }
+            // Everything is compared and stored as text: it is what the argument
+            // vector holds, and it keeps "8192" from a number field and "8192"
+            // from a text field indistinguishable, as they should be.
+            std::string text;
+            if (value.is_string()) {
+                text = value.get<std::string>();
+            } else if (value.is_boolean()) {
+                text = value.get<bool>() ? "true" : "false";
+            } else if (value.is_number_integer()) {
+                text = std::to_string(value.get<long long>());
+            } else if (value.is_null()) {
+                text = ""; // explicit removal
+            } else {
+                errors.push_back(std::string(spec->label) + " has an unsupported value type");
+                continue;
+            }
+            edited.push_back({key, text});
+        }
+        // An empty value means "unset this parameter", which is not the same as a
+        // bad value: validating "" as an integer would reject every removal.
+        std::vector<EngineParam> to_check;
+        for (const auto& param : edited) {
+            if (!param.value.empty()) { to_check.push_back(param); }
+        }
+        for (const auto& message : validate_engine_params(to_check)) { errors.push_back(message); }
+
+        // Apply onto a copy so a later cross-field failure leaves nothing behind.
+        std::vector<EngineParam> merged = parsed.params;
+        for (const auto& param : edited) {
+            const bool remove = param.value.empty() ||
+                                (find_engine_param(param.key)->kind == ParamKind::Flag &&
+                                 param.value == "false");
+            std::erase_if(merged, [&](const EngineParam& p) { return p.key == param.key; });
+            if (!remove) { merged.push_back(param); }
+        }
+        for (const auto& message : validate_engine_param_combination(merged)) {
+            errors.push_back(message);
+        }
+        parsed.params            = std::move(merged);
+        next.engine.args         = render_engine_args(parsed);
+        engine_restart_required  = next.engine.args != cfg_.engine.args;
+    }
+
+    if (body.contains("engine") && body.at("engine").is_object()) {
+        const auto& e = body.at("engine");
+        if (e.contains("engine_host")) {
+            next.engine.engine_host = e.value("engine_host", cfg_.engine.engine_host);
+        }
+        if (e.contains("engine_port")) {
+            const int port = e.value("engine_port", cfg_.engine.engine_port);
+            if (port < 1 || port > 65535) {
+                errors.emplace_back("Engine port must be between 1 and 65535");
+            } else {
+                next.engine.engine_port = port;
+            }
+        }
+        if (e.contains("device")) {
+            const int device = e.value("device", cfg_.engine.device);
+            if (device < 0 || device > 15) {
+                errors.emplace_back("Device index must be between 0 and 15");
+            } else {
+                next.engine.device = device;
+            }
+        }
+        if (e.contains("request_log")) {
+            next.engine.request_log = e.value("request_log", cfg_.engine.request_log);
+        }
+        if (e.contains("api_key_file")) {
+            next.engine.api_key_file = e.value("api_key_file", cfg_.engine.api_key_file);
+        }
+        // Where the engine listens and where the supervisor polls have to be the same
+        // place. Rewriting --host/--port here is what keeps a port edit from producing
+        // an engine that starts and is then permanently unreachable.
+        if (next.engine.engine_host != cfg_.engine.engine_host ||
+            next.engine.engine_port != cfg_.engine.engine_port) {
+            next.engine.args = with_engine_endpoint(std::move(next.engine.args),
+                                                    next.engine.engine_host,
+                                                    next.engine.engine_port);
+        }
+        // The engine's own listen address and its launch-time flags both only take
+        // effect when the process is started again.
+        engine_restart_required =
+            engine_restart_required || next.engine.engine_host != cfg_.engine.engine_host ||
+            next.engine.engine_port != cfg_.engine.engine_port ||
+            next.engine.device != cfg_.engine.device ||
+            next.engine.request_log != cfg_.engine.request_log ||
+            next.engine.api_key_file != cfg_.engine.api_key_file;
+    }
+
+    if (body.contains("supervisor") && body.at("supervisor").is_object()) {
+        const auto& s = body.at("supervisor");
+        if (s.contains("port")) {
+            const int port = s.value("port", cfg_.port);
+            if (port < 1 || port > 65535) {
+                errors.emplace_back("Dashboard port must be between 1 and 65535");
+            } else {
+                next.port = port;
+            }
+        }
+        if (s.contains("host")) { next.host = s.value("host", cfg_.host); }
+        if (s.contains("bind_any")) { next.bind_any = s.value("bind_any", cfg_.bind_any); }
+        // Refusing this in the UI rather than at startup: a non-loopback host with
+        // bind_any off is a config the supervisor will not start with, and finding
+        // that out at the next login is worse than being told now.
+        if (!next.bind_any && !is_loopback_host(next.host)) {
+            errors.emplace_back("Dashboard host must be a loopback address unless 'bind beyond "
+                                "loopback' is enabled");
+        }
+        if (s.contains("restart") && s.at("restart").is_object()) {
+            const auto& r                     = s.at("restart");
+            next.restart.max_backoff_s        = r.value("max_backoff_s", cfg_.restart.max_backoff_s);
+            next.restart.crash_loop_window_s  = r.value("crash_loop_window_s",
+                                                        cfg_.restart.crash_loop_window_s);
+            next.restart.crash_loop_max       = r.value("crash_loop_max", cfg_.restart.crash_loop_max);
+            next.restart.health_fail_threshold =
+                r.value("health_fail_threshold", cfg_.restart.health_fail_threshold);
+        }
+        supervisor_restart_required = next.host != cfg_.host || next.port != cfg_.port ||
+                                      next.bind_any != cfg_.bind_any;
+    }
+
+    if (!errors.empty()) { return {400, {{"error", "invalid configuration"}, {"details", errors}}}; }
+
+    const bool dry_run = body.value("dry_run", false);
+    if (!dry_run) {
+        try {
+            save_config_json(cfg_.source_path, next);
+        } catch (const std::exception& ex) {
+            return {500, {{"error", ex.what()}}};
+        }
+        cfg_ = next;
+        // The child owns the copy that spawn() reads; without this the file would
+        // change and the next restart would still launch the old parameters.
+        child_.update_config(next);
+    }
+
+    nlohmann::json out          = config_json();
+    out["saved"]                = !dry_run;
+    out["engine_restart_required"]     = engine_restart_required;
+    out["supervisor_restart_required"] = supervisor_restart_required;
+    return {200, out};
+}
+
 nlohmann::json DashboardServer::state_json() {
     const EngineStatus st = child_.status();
     Collected snap        = collector_.snapshot();
@@ -187,6 +431,38 @@ void DashboardServer::run() {
     });
     svr.Post("/api/restart", [this, control](const httplib::Request& req, httplib::Response& res) {
         control(req, res, [this] { child_.restart(); });
+    });
+
+    // Reading the configuration is gated exactly like changing it. The payload
+    // describes how to reach the engine and what it was launched with, which is
+    // not something to hand to any page that can reach the port.
+    svr.Get("/api/config", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!control_allowed(req.remote_addr)) {
+            res.status = 403;
+            res.set_content(nlohmann::json{{"error", "config is loopback-only"}}.dump(),
+                            "application/json");
+            return;
+        }
+        res.set_content(config_json().dump(), "application/json");
+    });
+
+    svr.Post("/api/config", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!control_allowed(req.remote_addr)) {
+            res.status = 403;
+            res.set_content(nlohmann::json{{"error", "config is loopback-only"}}.dump(),
+                            "application/json");
+            return;
+        }
+        if (!supervisor_control_header_ok(
+                req.get_header_value(std::string(kSupervisorControlHeader)))) {
+            res.status = 403;
+            res.set_content(nlohmann::json{{"error", "missing X-NInfer-Supervisor header"}}.dump(),
+                            "application/json");
+            return;
+        }
+        const ConfigResult result = apply_config(req.body);
+        res.status                = result.status;
+        res.set_content(result.body.dump(), "application/json");
     });
 
     const std::string host = cfg_.bind_any ? "0.0.0.0" : cfg_.host;

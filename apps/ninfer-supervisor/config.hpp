@@ -7,6 +7,8 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <filesystem>
+#include <system_error>
 #include <string>
 #include <vector>
 
@@ -26,6 +28,10 @@ struct EngineSpec {
 
 struct SupervisorConfig {
     EngineSpec engine;
+    // Where this config was loaded from. The dashboard writes edits back here, so
+    // it must be the resolved path rather than whatever relative string the CLI
+    // was given -- the supervisor's working directory is not the user's.
+    std::string source_path;
     std::string host = "127.0.0.1";
     int port         = 8099;
     bool bind_any    = false;
@@ -55,6 +61,70 @@ inline std::string read_api_key(const std::string& path) {
         raw.pop_back();
     }
     return raw;
+}
+
+// Serializes a config back to the on-disk shape. Round-trips the fields the loader
+// reads and nothing else, so a hand-written file keeps its meaning after an edit
+// made through the dashboard.
+//
+// The API key is not here and never will be: it lives in the file named by
+// api_key_file, and the supervisor only ever reads that file to talk to the engine.
+inline nlohmann::json config_to_json(const SupervisorConfig& cfg) {
+    nlohmann::json engine = {
+        {"executable", cfg.engine.executable},
+        {"args", cfg.engine.args},
+        {"workdir", cfg.engine.workdir},
+        {"api_key_file", cfg.engine.api_key_file},
+        {"engine_host", cfg.engine.engine_host},
+        {"engine_port", cfg.engine.engine_port},
+        {"request_log", cfg.engine.request_log},
+        {"device", cfg.engine.device},
+        {"unmanaged", cfg.engine.unmanaged},
+    };
+    nlohmann::json supervisor = {
+        {"host", cfg.host},
+        {"port", cfg.port},
+        {"bind_any", cfg.bind_any},
+        {"monitor_only", cfg.monitor_only},
+        {"logs_dir", cfg.logs_dir},
+        {"run_at_login", cfg.run_at_login},
+        {"restart",
+         {{"max_backoff_s", cfg.restart.max_backoff_s},
+          {"crash_loop_window_s", cfg.restart.crash_loop_window_s},
+          {"crash_loop_max", cfg.restart.crash_loop_max},
+          {"health_fail_threshold", cfg.restart.health_fail_threshold}}},
+    };
+    return {{"engine", engine}, {"supervisor", supervisor}};
+}
+
+// Write to a sibling temp file, then rename over the original. A half-written
+// config is a supervisor that will not start at the next login, and the edit that
+// produces it is made from a browser where a refresh mid-write is normal.
+inline void save_config_json(const std::string& path, const SupervisorConfig& cfg) {
+    if (path.empty()) { throw std::runtime_error("no config path to write to"); }
+    const std::string tmp = path + ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out) { throw std::runtime_error("cannot write " + tmp); }
+        out << config_to_json(cfg).dump(2) << "\n";
+        if (!out) { throw std::runtime_error("cannot write " + tmp); }
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) {
+        std::filesystem::remove(tmp, ec);
+        throw std::runtime_error("cannot replace " + path);
+    }
+}
+
+// Same as read_api_key but never throws: used on presentation paths where a
+// missing or unreadable key file is a fact to report, not an error to raise.
+inline std::string read_api_key_quiet(const std::string& path) noexcept {
+    try {
+        return read_api_key(path);
+    } catch (...) {
+        return {};
+    }
 }
 
 inline SupervisorConfig load_config_json(const std::string& json_text,

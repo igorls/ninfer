@@ -95,6 +95,21 @@ void EngineChild::set_desktop_reserve_gib(int gib) {
     desktop_reserve_gib_ = gib;
 }
 
+void EngineChild::update_config(SupervisorConfig cfg) {
+    std::lock_guard lock(mu_);
+    cfg_ = std::move(cfg);
+}
+
+SupervisorConfig EngineChild::config() const {
+    std::lock_guard lock(mu_);
+    return cfg_;
+}
+
+std::string EngineChild::logs_dir() const {
+    std::lock_guard lock(mu_);
+    return cfg_.logs_dir;
+}
+
 // Line-buffers the engine's stderr and asks logic.hpp what each complete line
 // means. This is the only activity signal available for a config with no request
 // log, and it is free: the pipe is already being read to write engine.log.
@@ -276,6 +291,11 @@ void EngineChild::spawn() {
         reserve = desktop_reserve_gib_;
     }
     if (reserve >= 0) { args = with_desktop_reserve(std::move(args), reserve); }
+    // The config's request_log was parsed and then only ever READ: the collector tailed a
+    // file the engine had never been told to write, so every request panel on the dashboard
+    // (TTFT, decode rate, prefix reuse, speculative acceptance) was empty unless someone
+    // also hand-wrote --request-log-jsonl into args. Pass it through.
+    args = with_request_log(std::move(args), cfg_.engine.request_log);
 
     std::wstring cmd = quote_arg(cfg_.engine.executable);
     for (const auto& a : args) {

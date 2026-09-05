@@ -316,15 +316,12 @@ void show_menu(HWND hwnd, TrayIcon* self) {
     }
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(idle), L"Unload when idle");
 
-    // Releasing only the reclaimable caches needs an /admin/vram surface the
-    // engine does not have yet. The reason is the collector's own computed note,
-    // not a hardcoded string, so it stops being wrong the day the engine gains it.
-    std::wstring release_reason = L"needs engine support";
-    try {
-        const auto note = self->collector().vram_control_json().value("note", std::string{});
-        if (!note.empty()) { release_reason = widen(note); }
-    } catch (...) {}
-    append_disabled(menu, kCmdReleaseCache, L"Release cache", release_reason);
+    // No "Release cache" item. It sat here disabled, explaining that it needed engine
+    // support, which read as "pass a flag and this works" -- and no such flag exists.
+    // The engine allocates device memory once at startup and holds it; freeing any of it
+    // needs a residency path in the target that can rebuild what it drops. Until a target
+    // has one there is nothing to release, so the menu does not offer it. The dashboard
+    // reports the same fact from /admin/vram, where it belongs.
 
     AppendMenuW(menu, MF_STRING | (self->start_at_login_enabled() ? MF_CHECKED : 0),
                 kCmdStartAtLogin, L"Start at login");
@@ -359,7 +356,6 @@ void show_menu(HWND hwnd, TrayIcon* self) {
     case TrayAction::Reserve: self->on_reserve_chosen(action.value); break;
     case TrayAction::Idle: self->on_idle_chosen(action.value); break;
     case TrayAction::StartAtLogin: self->on_start_at_login_toggled(); break;
-    case TrayAction::ReleaseCache: break; // disabled; here so the switch is total
     case TrayAction::None: break;
     }
 }

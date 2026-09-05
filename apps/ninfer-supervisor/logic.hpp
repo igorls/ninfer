@@ -457,6 +457,374 @@ inline bool desktop_reserve_pinned(const std::vector<std::string>& args) {
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// Engine launch parameters as data.
+//
+// One table drives four things that used to drift apart: parsing the configured
+// argument vector, validating an edit, rendering the vector back, and describing
+// the form the dashboard draws. Adding a knob means adding a row.
+//
+// What is deliberately NOT here: the executable path and the working directory.
+// Those decide which binary runs, and the dashboard must not be able to change
+// them -- the control gate is a loopback peer check plus a header, which is a
+// CSRF brake, not an authorization system. Parameters are editable; what gets
+// executed is a file-only decision.
+// ---------------------------------------------------------------------------
+
+enum class ParamKind : std::uint8_t {
+    Int,       // "--flag N"
+    Text,      // "--flag STRING"
+    Enum,      // "--flag CHOICE"
+    Flag,      // "--flag" with no value; present or absent
+    IntOrAuto, // "--flag N" or "--flag auto"
+};
+
+struct EngineParamSpec {
+    std::string_view flag;
+    std::string_view key;
+    ParamKind kind{};
+    std::string_view group;
+    std::string_view label;
+    std::string_view help;
+    long long min_value = 0;
+    long long max_value = 0;
+    std::array<std::string_view, 6> choices{};
+};
+
+// Ranges are the engine's own limits where one exists (max_concurrency throws
+// above 8 in the engine, so the form must not offer 16), and otherwise a bound
+// wide enough not to be a policy while still catching a typo'd extra digit.
+inline const std::vector<EngineParamSpec>& engine_param_specs() {
+    static const std::vector<EngineParamSpec> specs = {
+        {"--max-context", "max_context", ParamKind::Int, "capacity", "Max context",
+         "Longest prompt plus generation the engine will admit, in tokens.", 256, 262144, {}},
+        {"--kv-capacity", "kv_capacity", ParamKind::IntOrAuto, "capacity", "KV capacity",
+         "Total KV tokens across all lanes. 'auto' sizes it from free memory.", 1024, 4194304, {}},
+        {"--max-concurrency", "max_concurrency", ParamKind::Int, "capacity", "Max concurrency",
+         "Concurrent decode lanes. The engine refuses to start above 8.", 1, 8, {}},
+        {"--max-pending-requests", "max_pending_requests", ParamKind::Int, "capacity",
+         "Max pending requests", "Queue depth before new requests are rejected.", 1, 4096, {}},
+        {"--pending-timeout-ms", "pending_timeout_ms", ParamKind::Int, "capacity",
+         "Pending timeout (ms)", "How long a request may wait for a lane before it fails.", 0,
+         3600000, {}},
+        {"--prefill-chunk", "prefill_chunk", ParamKind::Int, "capacity", "Prefill chunk",
+         "Tokens per prefill step. Larger is faster and needs more workspace.", 128, 65536, {}},
+
+        {"--desktop-reserve-gib", "desktop_reserve_gib", ParamKind::Int, "memory",
+         "Desktop reserve (GiB)",
+         "Device memory the engine must leave for the desktop. Measured floor is 2 GiB.", 0, 64,
+         {}},
+        {"--kv-dtype", "kv_dtype", ParamKind::Enum, "memory", "KV cache dtype",
+         "FP8 halves KV bytes per token. NVFP4 is not usable on this card.", 0, 0,
+         {"bf16", "int8", "fp8", "nvfp4", "k8v4"}},
+        {"--gdn-state-dtype", "gdn_state_dtype", ParamKind::Enum, "memory", "Recurrent state dtype",
+         "BF16 halves the linear-attention state slots. Error accumulates along a sequence.", 0, 0,
+         {"fp32", "bf16"}},
+        {"--output-head-dtype", "output_head_dtype", ParamKind::Enum, "memory", "Output head dtype",
+         "FP8 saves about 605 MiB and changes greedy output after ~95 tokens.", 0, 0,
+         {"bf16", "fp8"}},
+        {"--token-embedding-dtype", "token_embedding_dtype", ParamKind::Enum, "memory",
+         "Token embedding dtype", "FP8 saves about 605 MiB. Diverges sooner than the head.", 0, 0,
+         {"bf16", "fp8"}},
+        {"--device-state-slots", "device_state_slots", ParamKind::Int, "memory",
+         "Device state slots", "Extra checkpoint capacity on the device. Costs VRAM.", 0, 64, {}},
+        {"--host-state-slots", "host_state_slots", ParamKind::Int, "memory", "Host state slots",
+         "Checkpoints kept in host RAM. Costs no VRAM.", 0, 256, {}},
+        {"--host-kv-mib", "host_kv_mib", ParamKind::Int, "memory", "Host KV (MiB)",
+         "KV offloaded to host RAM. Costs no VRAM.", 0, 262144, {}},
+        {"--max-private-continuations", "max_private_continuations", ParamKind::Int, "memory",
+         "Private continuations", "Per-session checkpoints. Raise for many long agent sessions.", 0,
+         512, {}},
+        {"--max-shared-prefixes", "max_shared_prefixes", ParamKind::Int, "memory",
+         "Shared prefixes", "Cached prefixes shared across sessions.", 0, 512, {}},
+
+        {"--vision", "vision", ParamKind::Flag, "features", "Vision",
+         "Loads the vision encoder. Costs about 1.1 GiB.", 0, 0, {}},
+        {"--spec", "spec", ParamKind::Enum, "features", "Speculative backend",
+         "Draft head. Acceptance is low on this model; measure before enabling.", 0, 0,
+         {"mtp", "dflash"}},
+        {"--draft-tokens", "draft_tokens", ParamKind::Int, "features", "Draft tokens",
+         "Tokens proposed per step when speculation is on.", 1, 8, {}},
+        {"--no-prefix-reuse", "no_prefix_reuse", ParamKind::Flag, "features", "Disable prefix reuse",
+         "Turns off cross-request prefix caching. Multi-turn TTFT gets much worse.", 0, 0, {}},
+        {"--no-cuda-graph", "no_cuda_graph", ParamKind::Flag, "features", "Disable CUDA graphs",
+         "Runs decode eagerly. Slower; use to isolate a graph-related defect.", 0, 0, {}},
+        {"--no-thinking", "no_thinking", ParamKind::Flag, "features", "Disable thinking",
+         "Server-wide default. Reasoning is normally a per-request choice.", 0, 0, {}},
+
+        {"--model-id", "model_id", ParamKind::Text, "api", "Model id",
+         "The name clients send and see. Overrides the artifact's own id.", 0, 0, {}},
+        {"--cors", "cors", ParamKind::Flag, "api", "Send CORS headers",
+         "Allows browser pages from other origins to call the engine.", 0, 0, {}},
+        {"--default-max-tokens", "default_max_tokens", ParamKind::Int, "api", "Default max tokens",
+         "Applied when a request omits max_tokens.", 1, 262144, {}},
+        {"--default-thinking-budget", "default_thinking_budget", ParamKind::Int, "api",
+         "Default thinking budget", "Caps model-origin reasoning tokens per request.", 0, 262144,
+         {}},
+        {"--log-stats-interval-ms", "log_stats_interval_ms", ParamKind::Int, "api",
+         "Throughput log interval (ms)", "0 disables the periodic throughput lines.", 0, 3600000,
+         {}},
+        {"--max-request-mib", "max_request_mib", ParamKind::Int, "api", "Max request (MiB)",
+         "Largest accepted request body.", 1, 4096, {}},
+    };
+    return specs;
+}
+
+inline const EngineParamSpec* find_engine_param(std::string_view key) {
+    for (const auto& spec : engine_param_specs()) {
+        if (spec.key == key) { return &spec; }
+    }
+    return nullptr;
+}
+
+// Flags whose VALUE is a secret. The value is replaced before the argument vector
+// is shown anywhere: supervisor.prod.json embeds a real key, and the dashboard is
+// a web page. A path is not a secret; the bytes at that path are.
+inline bool engine_flag_value_is_secret(std::string_view flag) {
+    return flag == "--api-key";
+}
+
+inline std::vector<std::string> redact_engine_args(std::vector<std::string> args) {
+    for (std::size_t i = 0; i + 1 < args.size(); ++i) {
+        if (engine_flag_value_is_secret(args[i]) && !args[i + 1].empty()) {
+            args[i + 1] = "(redacted)";
+        }
+    }
+    return args;
+}
+
+struct EngineParam {
+    std::string key;
+    std::string value; // Flag kind: "true" when present; absent keys are omitted entirely.
+};
+
+// Parsed view of the configured argument vector: recognised parameters, plus every
+// token this table does not know, preserved verbatim and in order so that rendering
+// after an edit cannot silently drop a flag the operator added by hand.
+struct ParsedEngineArgs {
+    std::string artifact; // first positional (the .ninfer path), if any
+    std::vector<EngineParam> params;
+    std::vector<std::string> passthrough;
+};
+
+inline ParsedEngineArgs parse_engine_args(const std::vector<std::string>& args) {
+    ParsedEngineArgs out;
+    bool artifact_taken = false;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        const std::string& token = args[i];
+        if (!token.starts_with("--")) {
+            if (!artifact_taken) {
+                out.artifact  = token;
+                artifact_taken = true;
+            } else {
+                out.passthrough.push_back(token);
+            }
+            continue;
+        }
+        const EngineParamSpec* spec = nullptr;
+        for (const auto& candidate : engine_param_specs()) {
+            if (candidate.flag == token) {
+                spec = &candidate;
+                break;
+            }
+        }
+        if (spec == nullptr) {
+            out.passthrough.push_back(token);
+            // An unknown flag's value must travel with it, or rendering would
+            // promote the value to a positional argument.
+            if (i + 1 < args.size() && !args[i + 1].starts_with("--")) {
+                out.passthrough.push_back(args[++i]);
+            }
+            continue;
+        }
+        if (spec->kind == ParamKind::Flag) {
+            out.params.push_back({std::string(spec->key), "true"});
+            continue;
+        }
+        if (i + 1 < args.size()) {
+            out.params.push_back({std::string(spec->key), args[++i]});
+        }
+    }
+    return out;
+}
+
+inline const std::string* find_param_value(const std::vector<EngineParam>& params,
+                                           std::string_view key) {
+    for (const auto& p : params) {
+        if (p.key == key) { return &p.value; }
+    }
+    return nullptr;
+}
+
+// Rebuilds the argument vector: artifact first, then parameters in table order so
+// the file stays diffable across edits, then everything unrecognised, unchanged.
+inline std::vector<std::string> render_engine_args(const ParsedEngineArgs& parsed) {
+    std::vector<std::string> args;
+    if (!parsed.artifact.empty()) { args.push_back(parsed.artifact); }
+    for (const auto& spec : engine_param_specs()) {
+        const std::string* value = find_param_value(parsed.params, spec.key);
+        if (value == nullptr) { continue; }
+        if (spec.kind == ParamKind::Flag) {
+            if (*value == "true") { args.emplace_back(spec.flag); }
+            continue;
+        }
+        if (value->empty()) { continue; }
+        args.emplace_back(spec.flag);
+        args.push_back(*value);
+    }
+    for (const auto& token : parsed.passthrough) { args.push_back(token); }
+    return args;
+}
+
+inline bool parse_long_long(std::string_view text, long long& out) {
+    if (text.empty()) { return false; }
+    long long value = 0;
+    std::size_t i   = 0;
+    const bool neg  = text[0] == '-';
+    if (neg) { i = 1; }
+    if (i >= text.size()) { return false; }
+    for (; i < text.size(); ++i) {
+        if (text[i] < '0' || text[i] > '9') { return false; }
+        value = value * 10 + (text[i] - '0');
+        if (value > 4294967296LL) { return false; }
+    }
+    out = neg ? -value : value;
+    return true;
+}
+
+// Returns one message per rejected field. An empty result means the edit is safe
+// to write; the caller never applies a partially valid patch.
+inline std::vector<std::string> validate_engine_params(const std::vector<EngineParam>& params) {
+    std::vector<std::string> errors;
+    for (const auto& p : params) {
+        const EngineParamSpec* spec = find_engine_param(p.key);
+        if (spec == nullptr) {
+            errors.push_back(p.key + " is not an editable parameter");
+            continue;
+        }
+        switch (spec->kind) {
+        case ParamKind::Flag:
+            if (p.value != "true" && p.value != "false") {
+                errors.push_back(std::string(spec->label) + " must be true or false");
+            }
+            break;
+        case ParamKind::Int: {
+            long long value = 0;
+            if (!parse_long_long(p.value, value)) {
+                errors.push_back(std::string(spec->label) + " must be a whole number");
+            } else if (value < spec->min_value || value > spec->max_value) {
+                errors.push_back(std::string(spec->label) + " must be between " +
+                                 std::to_string(spec->min_value) + " and " +
+                                 std::to_string(spec->max_value));
+            }
+            break;
+        }
+        case ParamKind::IntOrAuto: {
+            if (p.value == "auto") { break; }
+            long long value = 0;
+            if (!parse_long_long(p.value, value)) {
+                errors.push_back(std::string(spec->label) + " must be a whole number or 'auto'");
+            } else if (value < spec->min_value || value > spec->max_value) {
+                errors.push_back(std::string(spec->label) + " must be between " +
+                                 std::to_string(spec->min_value) + " and " +
+                                 std::to_string(spec->max_value) + ", or 'auto'");
+            }
+            break;
+        }
+        case ParamKind::Enum: {
+            bool ok = false;
+            for (const auto& choice : spec->choices) {
+                if (!choice.empty() && p.value == choice) {
+                    ok = true;
+                    break;
+                }
+            }
+            if (!ok) { errors.push_back(std::string(spec->label) + " has an unsupported value"); }
+            break;
+        }
+        case ParamKind::Text:
+            // A value is passed to CreateProcess as one argv element and is quoted
+            // there, so spaces are safe; control characters are not, and a newline
+            // would corrupt the config file this is written back into.
+            for (char c : p.value) {
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    errors.push_back(std::string(spec->label) + " must not contain control "
+                                                                "characters");
+                    break;
+                }
+            }
+            break;
+        }
+    }
+    return errors;
+}
+
+// Cross-field rules the per-field pass cannot see.
+inline std::vector<std::string> validate_engine_param_combination(
+    const std::vector<EngineParam>& params) {
+    std::vector<std::string> errors;
+    const std::string* kv_capacity  = find_param_value(params, "kv_capacity");
+    const std::string* max_context  = find_param_value(params, "max_context");
+    const std::string* draft_tokens = find_param_value(params, "draft_tokens");
+    const std::string* spec_backend = find_param_value(params, "spec");
+    if (kv_capacity != nullptr && max_context != nullptr && *kv_capacity != "auto") {
+        long long capacity = 0;
+        long long context  = 0;
+        if (parse_long_long(*kv_capacity, capacity) && parse_long_long(*max_context, context) &&
+            capacity < context) {
+            errors.emplace_back("KV capacity must be at least the max context, or the engine "
+                                "cannot hold one full-length request");
+        }
+    }
+    if (draft_tokens != nullptr && spec_backend == nullptr) {
+        errors.emplace_back("Draft tokens has no effect without a speculative backend");
+    }
+    return errors;
+}
+
+// Keeps the engine's LISTEN address in step with the address the supervisor polls.
+//
+// These are two different things in the config -- `--host`/`--port` in the argument
+// vector decide where the engine listens, while engine_host/engine_port decide where
+// health checks and /admin/vram are fetched from -- and nothing kept them in step.
+// Editing the port in the dashboard would otherwise leave the supervisor polling a
+// port nothing listens on, which presents as an engine that starts and is then
+// permanently unhealthy.
+inline std::vector<std::string> with_engine_endpoint(std::vector<std::string> args,
+                                                     const std::string& host, int port) {
+    auto set_flag = [&args](std::string_view flag, const std::string& value) {
+        for (std::size_t i = 0; i < args.size(); ++i) {
+            if (args[i] != flag) { continue; }
+            if (i + 1 < args.size()) {
+                args[i + 1] = value;
+            } else {
+                args.push_back(value);
+            }
+            return;
+        }
+        args.emplace_back(flag);
+        args.push_back(value);
+    };
+    if (!host.empty()) { set_flag("--host", host); }
+    if (port > 0) { set_flag("--port", std::to_string(port)); }
+    return args;
+}
+
+// Adds --request-log-jsonl PATH unless the caller already passed one explicitly, in which
+// case the explicit flag wins and the config field is ignored -- an operator who wrote the
+// flag by hand meant it. An empty path is a no-op, so a config that does not ask for a
+// request log does not get one.
+inline std::vector<std::string> with_request_log(std::vector<std::string> args,
+                                                 const std::string& path) {
+    if (path.empty()) { return args; }
+    for (const auto& a : args) {
+        if (a == "--request-log-jsonl") { return args; }
+    }
+    args.emplace_back("--request-log-jsonl");
+    args.emplace_back(path);
+    return args;
+}
+
 inline std::vector<std::string> with_desktop_reserve(std::vector<std::string> args, int gib) {
     if (desktop_reserve_pinned(args)) { return args; }
     for (std::size_t i = 0; i < args.size(); ++i) {
@@ -502,7 +870,6 @@ enum class TrayAction : std::uint8_t {
     Quit,
     Reserve,
     Idle,
-    ReleaseCache,
     StartAtLogin,
     OpenLogs,
     CopyUrl,
@@ -526,7 +893,6 @@ inline constexpr unsigned kCmdStart         = kCmdFixedBase + 1;
 inline constexpr unsigned kCmdStop          = kCmdFixedBase + 2;
 inline constexpr unsigned kCmdRestart       = kCmdFixedBase + 3;
 inline constexpr unsigned kCmdQuit          = kCmdFixedBase + 4;
-inline constexpr unsigned kCmdReleaseCache  = kCmdFixedBase + 5;
 inline constexpr unsigned kCmdStartAtLogin  = kCmdFixedBase + 6;
 inline constexpr unsigned kCmdOpenLogs      = kCmdFixedBase + 7;
 inline constexpr unsigned kCmdCopyUrl       = kCmdFixedBase + 8;
@@ -561,7 +927,6 @@ inline TrayCommand decode_tray_command(unsigned cmd) {
     case kCmdStop: return {TrayAction::Stop, 0};
     case kCmdRestart: return {TrayAction::Restart, 0};
     case kCmdQuit: return {TrayAction::Quit, 0};
-    case kCmdReleaseCache: return {TrayAction::ReleaseCache, 0};
     case kCmdStartAtLogin: return {TrayAction::StartAtLogin, 0};
     case kCmdOpenLogs: return {TrayAction::OpenLogs, 0};
     case kCmdCopyUrl: return {TrayAction::CopyUrl, 0};
