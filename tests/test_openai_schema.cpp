@@ -101,6 +101,16 @@ int test_request_envelope_and_sampling() {
     const ninfer::RequestOptions translated = options(request.generation);
     failures +=
         check(translated.execution.sampling.top_k == 17, "top_k reaches Engine request options");
+    {
+        // Clients that carry the llama.cpp/Ollama default of 40 must be served,
+        // not refused: the sampler's candidate domain is 20, so the value is
+        // clamped on the way to the Engine rather than failing the request.
+        Json wide            = body;
+        wide["top_k"]        = 40;
+        const ninfer::RequestOptions clamped = options(parse(wide).generation);
+        failures += check(clamped.execution.sampling.top_k == 20,
+                          "top_k above the candidate domain clamps instead of erroring");
+    }
     failures +=
         check(translated.execution.sampling.min_p && *translated.execution.sampling.min_p == 0.05F,
               "min_p reaches Engine request options");
@@ -610,11 +620,19 @@ int test_stops_and_ranges() {
     failures +=
         check(api_error([&] { (void)parse(body); }).param == "stop", "empty stop string rejected");
 
-    body                                  = base_request();
-    body["top_k"]                         = 21;
-    const GenerationRequest invalid_top_k = parse(body).generation;
-    failures += check(api_error([&] { (void)options(invalid_top_k); }).param == "top_k",
-                      "Engine translator owns sampler value range");
+    // The translator still owns the sampler value range; above the 20-candidate
+    // domain it now clamps instead of erroring, so a client carrying the common
+    // default of 40 is served rather than refused. Negative values remain errors.
+    body                                = base_request();
+    body["top_k"]                       = 21;
+    const GenerationRequest wide_top_k  = parse(body).generation;
+    failures += check(options(wide_top_k).execution.sampling.top_k == 20,
+                      "Engine translator clamps top_k to the candidate domain");
+    body                                 = base_request();
+    body["top_k"]                        = -3;
+    const GenerationRequest bad_top_k    = parse(body).generation;
+    failures += check(api_error([&] { (void)options(bad_top_k); }).param == "top_k",
+                      "Engine translator still rejects negative top_k");
     body["top_k"]                         = 5;
     body["min_p"]                         = 1.1;
     const GenerationRequest invalid_min_p = parse(body).generation;

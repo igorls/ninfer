@@ -126,9 +126,24 @@ ninfer::SamplingOverrides resolve_sampling_overrides(const SamplingParams& reque
     if (sampling.top_p && (*sampling.top_p < 0.0F || *sampling.top_p > 1.0F)) {
         invalid_sampling("top_p must be in [0,1]", "top_p");
     }
-    if (sampling.top_k && (*sampling.top_k < 0 || *sampling.top_k > 20)) {
-        invalid_sampling("top_k must be in [0,20]", "top_k");
+    if (sampling.top_k && *sampling.top_k < 0) {
+        invalid_sampling("top_k must not be negative", "top_k");
     }
+    // Clamp rather than refuse. The sampler's candidate domain really is 20
+    // (kSamplerFastCandidates: each 256-thread block reduces its tile to 20
+    // candidates in shared memory, and widening that costs occupancy), but
+    // llama.cpp and Ollama both default top_k to 40, so every client carrying
+    // that default was getting a hard 400 on its first request against an
+    // otherwise OpenAI-compatible server.
+    //
+    // Clamping is close to free in behaviour: with top_p or min_p also active
+    // over a 248,320-token vocabulary the nucleus almost always closes well
+    // inside 20 candidates, so 40 and 20 select the same token nearly always.
+    // Trading an exact-parameter guarantee for "every client works" is the right
+    // way round for an engine meant to sit behind whatever app the user already
+    // has. The effective value is what the request log records, so a run is
+    // still reproducible from its log rather than from what was asked for.
+    if (sampling.top_k && *sampling.top_k > 20) { sampling.top_k = 20; }
     if (sampling.min_p && (*sampling.min_p < 0.0F || *sampling.min_p > 1.0F)) {
         invalid_sampling("min_p must be in [0,1]", "min_p");
     }
