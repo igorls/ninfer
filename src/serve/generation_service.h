@@ -107,6 +107,14 @@ public:
         return engine_->media_cache_summary();
     }
 
+    // Holds the engine still and runs `work` there. Blocks until it has run.
+    // Requests arriving during the hold wait rather than fail; see
+    // Engine::run_at_quiescence.
+    [[nodiscard]] ninfer::Engine::QuiescenceReport
+    run_at_quiescence(std::function<void()> work) const {
+        return engine_->run_at_quiescence(std::move(work));
+    }
+
     [[nodiscard]] ninfer::ModelSamplingDefaults sampling_defaults() const {
         return engine_->sampling_defaults();
     }

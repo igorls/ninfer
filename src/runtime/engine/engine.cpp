@@ -9,6 +9,8 @@
 #include "runtime/engine/engine_core.h"
 #include "targets/registry.h"
 
+#include <functional>
+#include <future>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -515,6 +517,36 @@ RuntimeStats Engine::runtime_stats() const {
             }
         },
         impl_->core);
+}
+
+Engine::QuiescenceReport Engine::run_at_quiescence(std::function<void()> work) {
+    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+    if (work == nullptr) { throw std::invalid_argument("run_at_quiescence needs work to run"); }
+    auto pending = std::visit(
+        [&work](auto& core) -> std::future<runtime::QuiescenceOutcome> {
+            using CoreState = std::remove_cvref_t<decltype(core)>;
+            if constexpr (std::is_same_v<CoreState, std::monostate>) {
+                throw std::logic_error("Engine core is unavailable");
+            } else if constexpr (requires { core->run_at_quiescence(std::move(work)); }) {
+                return core->run_at_quiescence(std::move(work));
+            } else {
+                // The causal-scoring cores run no worker loop and hold no lanes,
+                // so there is no boundary to fence and nothing to drain. Saying
+                // so beats inventing a no-op that would silently report success
+                // for a residency change that never became safe.
+                throw std::logic_error("this engine core does not schedule work to quiesce");
+            }
+        },
+        impl_->core);
+    // Blocking is the contract: the caller is changing residency and must not
+    // proceed until the engine has actually stopped. get() rethrows whatever the
+    // work threw, on this thread rather than the worker's.
+    const runtime::QuiescenceOutcome outcome = pending.get();
+    QuiescenceReport report;
+    report.drain          = outcome.drain;
+    report.work           = outcome.work;
+    report.requests_held  = outcome.requests_held;
+    return report;
 }
 
 void Engine::reset_memory_peaks() noexcept {

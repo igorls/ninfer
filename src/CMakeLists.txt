@@ -17,6 +17,7 @@ endfunction()
 add_library(ninfer_core STATIC
   core/arena.cu
   core/device.cu
+  core/sparse_device_buffer.cu
   core/dtype.cpp
   core/host_worker_pool.cpp
   core/gdn_replay_records.cpp
@@ -36,6 +37,9 @@ add_library(ninfer_core STATIC
 ninfer_internal_includes(ninfer_core)
 ninfer_cuda_archive(ninfer_core)
 target_link_libraries(ninfer_core PUBLIC CUDA::cudart CUDA::nvtx3 Threads::Threads)
+# SparseDeviceBuffer uses the CUDA driver API (cuMemCreate/cuMemMap) to vary physical
+# backing under a fixed address range; the runtime API has no equivalent.
+target_link_libraries(ninfer_core PUBLIC CUDA::cuda_driver)
 
 # Generic .ninfer framing, binding, and direct final materialization.
 add_library(ninfer_artifact STATIC

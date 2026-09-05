@@ -3,6 +3,7 @@
 #include "ninfer/types.h"
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <string_view>
 #include <vector>
@@ -106,6 +107,29 @@ public:
     [[nodiscard]] RuntimeStats runtime_stats() const;
     [[nodiscard]] MediaCacheSummary media_cache_summary() const;
     void reset_memory_peaks() noexcept;
+
+    // Result of holding the engine still for a moment. Reported rather than
+    // returned as a bare duration because the interesting question when the
+    // engine gives memory back is not "did it work" but "what did it cost the
+    // requests that were waiting".
+    struct QuiescenceReport {
+        std::chrono::nanoseconds drain;   // request accepted -> engine held still
+        std::chrono::nanoseconds work;    // how long the held-still work took
+        std::size_t requests_held = 0;    // waiting requests carried across, none dropped
+    };
+
+    // Runs `work` at a boundary where no execution unit is in flight, no lane is
+    // active and no context transaction is open. Admission is refused from the
+    // call until the work has run, so active lanes drain; requests arriving in
+    // that window WAIT and are admitted afterwards with their deadlines extended
+    // by the time the hold took, so the engine pausing is never itself the reason
+    // a request times out.
+    //
+    // This is the safety fence for changing physical KV residency. It blocks the
+    // caller until the work has run. An exception from `work` propagates here and
+    // does not disturb the engine: a capacity change that cannot proceed is a
+    // refusal, not a failed engine.
+    QuiescenceReport run_at_quiescence(std::function<void()> work);
 
 private:
     class Impl;

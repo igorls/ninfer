@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 
 namespace ninfer::serve {
@@ -469,6 +470,9 @@ void HttpServer::register_routes() {
     server_.Get("/admin/vram", [this](const httplib::Request& req, httplib::Response& res) {
         handle_admin_vram(req, res);
     });
+    server_.Post("/admin/quiesce", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_admin_quiesce(req, res);
+    });
 }
 
 namespace {
@@ -689,6 +693,76 @@ void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& r
                      "residency path exists to release and rebuild it"}}}};
 
     res.set_content(body.dump(), "application/json");
+}
+
+void HttpServer::handle_admin_quiesce(const httplib::Request& req, httplib::Response& res) const {
+    if (service_ == nullptr) {
+        ApiError error;
+        error.status  = 503;
+        error.type    = "service_unavailable";
+        error.message = "engine is not attached";
+        write_openai_error(res, error);
+        return;
+    }
+
+    // An optional hold, so the request-holding behaviour can be observed rather
+    // than inferred from a fence that returns instantly. Bounded because this
+    // stops the engine for everyone: a caller cannot use it to take the server
+    // down. Real residency work will replace it and is not expected to need it.
+    std::int64_t hold_ms = 0;
+    if (!req.body.empty()) {
+        try {
+            const auto parsed = nlohmann::json::parse(req.body);
+            hold_ms           = parsed.value("hold_ms", static_cast<std::int64_t>(0));
+        } catch (const std::exception&) {
+            ApiError error;
+            error.status  = 400;
+            error.type    = "invalid_request_error";
+            error.message = "body must be JSON with an optional integer hold_ms";
+            write_openai_error(res, error);
+            return;
+        }
+    }
+    if (hold_ms < 0 || hold_ms > 10'000) {
+        ApiError error;
+        error.status  = 400;
+        error.type    = "invalid_request_error";
+        error.message = "hold_ms must be between 0 and 10000";
+        write_openai_error(res, error);
+        return;
+    }
+
+    try {
+        const ninfer::Engine::QuiescenceReport report =
+            service_->run_at_quiescence([hold_ms] {
+                if (hold_ms > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+                }
+            });
+        const auto ms = [](std::chrono::nanoseconds value) {
+            return std::chrono::duration<double, std::milli>(value).count();
+        };
+        nlohmann::json body = {
+            {"schema_version", 1},
+            // How long the in-flight work took to finish once admission stopped.
+            // This is the part a residency change cannot avoid paying.
+            {"drain_ms", ms(report.drain)},
+            {"work_ms", ms(report.work)},
+            // Requests that waited through the hold and were carried across with
+            // their admission deadlines extended. None of them were dropped;
+            // that is the property this endpoint exists to demonstrate.
+            {"requests_held", report.requests_held},
+            {"capacity_change", nullptr}};
+        res.set_content(body.dump(), "application/json");
+    } catch (const std::exception& ex) {
+        // A fence that cannot run is a refusal, not a broken engine. The engine
+        // keeps serving either way.
+        ApiError error;
+        error.status  = 409;
+        error.type    = "conflict";
+        error.message = std::string("engine could not be quiesced: ") + ex.what();
+        write_openai_error(res, error);
+    }
 }
 
 void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) const {

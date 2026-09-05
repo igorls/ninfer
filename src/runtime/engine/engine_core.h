@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <deque>
 #include <exception>
+#include <functional>
 #include <future>
 #include <iostream>
 #include <memory>
@@ -33,6 +34,15 @@
 #include <vector>
 
 namespace ninfer::runtime {
+
+// What holding the engine still actually cost. Split because the two halves have
+// different causes: drain is how long the in-flight work took to finish, which the
+// caller cannot shorten, while work is the caller's own hold.
+struct QuiescenceOutcome {
+    std::chrono::nanoseconds drain{};
+    std::chrono::nanoseconds work{};
+    std::size_t requests_held = 0;
+};
 
 template <class Instance>
 class EngineCore {
@@ -257,6 +267,37 @@ public:
             std::scoped_lock lock(execution_mutex_);
             instance_.program->reset_memory_peaks();
         } catch (...) {}
+    }
+
+    // Runs `work` on the worker at a boundary where no execution unit is in
+    // flight, no lane is active, and no context transaction is open -- the only
+    // point at which physical capacity can be retired safely.
+    //
+    // Admission is refused from the moment this is called until the work has run,
+    // so active lanes drain. Requests that arrive meanwhile WAIT rather than
+    // fail: they stay in pending_ and are admitted afterwards, and their
+    // admission deadlines are extended by however long the fence took, so the
+    // engine holding still is never itself the reason a request times out.
+    //
+    // The returned future carries any exception `work` threw. It must not escape
+    // into the worker's own catch, which treats a throw as fatal and exits the
+    // process -- a capacity transition that cannot proceed is a refusal, not a
+    // dead engine.
+    [[nodiscard]] std::future<QuiescenceOutcome> run_at_quiescence(std::function<void()> work) {
+        QuiescenceRequest request;
+        request.work         = std::move(work);
+        request.requested_at = Clock::now();
+        std::future<QuiescenceOutcome> done = request.done.get_future();
+        {
+            std::lock_guard lock(quiescence_mutex_);
+            quiescence_queue_.push_back(std::move(request));
+            quiescence_pending_.store(true, std::memory_order_release);
+        }
+        // The worker may be parked on queue_cv_ with nothing pending and no active
+        // lane, which is exactly the state the fence wants; wake it so the work
+        // runs now instead of at the next arrival.
+        queue_cv_.notify_one();
+        return done;
     }
 
 private:
@@ -961,6 +1002,97 @@ private:
             publish_runtime_stats();
         }
         return have_pending;
+    }
+
+    // True when nothing is executing and nothing owes a host publication, so the
+    // physical page set can be changed underneath the engine.
+    //
+    // No PendingRound needs testing here: each execution unit is issued AND
+    // committed inside a single execution_mutex_ hold (run_decode_round calls
+    // decode() then commit_pending() back to back), so none can survive to a
+    // boundary. The conditions that DO need testing are the ones a device
+    // synchronize would not settle -- an open context transaction on either side
+    // of the resource/program contract, and an in-flight materialization.
+    [[nodiscard]] bool engine_is_quiescent() const {
+        if (materializing_.has_value()) { return false; }
+        for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
+            if (slots_[lane] != nullptr) { return false; }
+        }
+        if (instance_.program->has_context_transaction()) { return false; }
+        if (resources_.context_transaction_kind().has_value()) { return false; }
+        return true;
+    }
+
+    // Called by the worker at a boundary, holding execution_mutex_. Returns true
+    // when work ran, so the caller restarts the loop rather than executing a unit
+    // against state the work may have changed.
+    [[nodiscard]] bool run_quiescence_work_if_ready() {
+        if (!quiescence_pending_.load(std::memory_order_acquire)) { return false; }
+        if (!engine_is_quiescent()) {
+            // Still draining. Admission stays gated by the caller, so the active
+            // lanes finish and this converges instead of being refilled.
+            return false;
+        }
+        QuiescenceRequest request;
+        {
+            std::lock_guard lock(quiescence_mutex_);
+            if (quiescence_queue_.empty()) {
+                quiescence_pending_.store(false, std::memory_order_release);
+                return false;
+            }
+            request = std::move(quiescence_queue_.front());
+            quiescence_queue_.pop_front();
+        }
+        // The work's failure is the caller's to handle. Letting it reach the
+        // worker's catch would run fail_all_locked and exit the process, which
+        // would turn "this capacity change is not possible" into "the engine
+        // died".
+        const auto held_at = Clock::now();
+        std::exception_ptr failure;
+        try {
+            request.work();
+        } catch (...) { failure = std::current_exception(); }
+        const auto released_at = Clock::now();
+
+        // Requests that waited through the fence must not be charged for it.
+        // Without this, holding the engine still for longer than
+        // --pending-timeout-ms would expire exactly the requests the hold was
+        // supposed to protect, which is the failure this mechanism exists to
+        // avoid. Each request is credited only the part of the hold it actually
+        // waited through, so one that arrived mid-drain is not over-credited.
+        std::size_t held = 0;
+        {
+            std::lock_guard lock(queue_mutex_);
+            for (auto& waiting : pending_) {
+                const auto waited_from = std::max(waiting->submitted, request.requested_at);
+                if (released_at > waited_from) {
+                    waiting->deadline += released_at - waited_from;
+                    ++held;
+                }
+            }
+        }
+
+        QuiescenceOutcome outcome;
+        outcome.drain          = held_at - request.requested_at;
+        outcome.work           = released_at - held_at;
+        outcome.requests_held  = held;
+        try {
+            if (failure) {
+                request.done.set_exception(failure);
+            } else {
+                request.done.set_value(outcome);
+            }
+        } catch (...) {}
+
+        {
+            std::lock_guard lock(quiescence_mutex_);
+            if (quiescence_queue_.empty()) {
+                quiescence_pending_.store(false, std::memory_order_release);
+            }
+        }
+        request_admission_check();
+        queue_cv_.notify_all();
+        return true;
     }
 
     void commit_pending(PendingBatch&& pending, std::span<const std::uint32_t> lane_indices,
@@ -1823,13 +1955,21 @@ private:
         for (;;) {
             {
                 std::unique_lock lock(queue_mutex_);
-                if (!stopping_ && pending_.empty()) {
+                if (!stopping_ && pending_.empty() &&
+                    !quiescence_pending_.load(std::memory_order_acquire)) {
                     bool active = materializing_.has_value();
                     for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
                         active = active || slots_[lane] != nullptr;
                     }
                     if (!active) {
-                        queue_cv_.wait(lock, [&] { return stopping_ || !pending_.empty(); });
+                        // An idle engine is already quiescent, so a fence request
+                        // has to be a wake condition too -- otherwise the work
+                        // would sit unrun until the next request happened to
+                        // arrive, which is precisely when it is least welcome.
+                        queue_cv_.wait(lock, [&] {
+                            return stopping_ || !pending_.empty() ||
+                                   quiescence_pending_.load(std::memory_order_acquire);
+                        });
                     }
                 }
                 if (stopping_) {
@@ -1851,11 +1991,23 @@ private:
                 (void)settle_terminal_requests(boundary);
                 const auto cancelled_at_boundary = snapshot_cancellations();
                 cancel_active_requests(cancelled_at_boundary, boundary);
+                // Before admitting anything else: if someone is waiting for the
+                // engine to hold still, see whether it now is. This sits after
+                // settle/cancel so lanes that finished this boundary are already
+                // released, and before admission so the drain can actually reach
+                // zero instead of being refilled every iteration.
+                const bool quiescence_ran = run_quiescence_work_if_ready();
+                if (quiescence_ran) {
+                    previous_unit_was_decode = false;
+                    finish_engine_phase(boundary, EngineHostPhase::Boundary);
+                    continue;
+                }
                 RoundMembership membership =
                     scheduler_.build_round_membership(slots_, max_concurrency_);
                 const bool admission_check_pending =
                     admission_check_pending_.load(std::memory_order_acquire);
-                if (scheduler_.should_attempt_admission(
+                if (!quiescence_pending_.load(std::memory_order_acquire) &&
+                    scheduler_.should_attempt_admission(
                         have_pending, admission_check_pending, !membership.empty(),
                         previous_unit_was_decode, instance_.program->has_context_transaction()) &&
                     consume_admission_check()) {
@@ -1953,6 +2105,28 @@ private:
     const std::chrono::milliseconds pending_timeout_;
     ResourceManagement resources_;
     std::function<void(std::exception_ptr, const std::string&)> on_fatal_error_;
+
+    // A quiescence request: work that must run with the engine holding still.
+    //
+    // Cooperative residency needs to retire physical KV pages, which is only safe
+    // when nothing can be addressing them. The fence is the worker itself: the
+    // worker already holds execution_mutex_ across a whole execution unit and
+    // commits it before releasing (run_decode_round issues and commits in one
+    // hold), so no unit survives a lock release. What the fence adds is refusing
+    // to admit while active lanes drain, then running the work at the boundary.
+    //
+    // Deliberately not a sampled "are we idle yet" check from another thread:
+    // stream synchronization does not consume the target's pending context
+    // result/finalize lifecycle, so a device-complete engine can still owe host
+    // publications. Running on the owner is what makes the exclusion real.
+    struct QuiescenceRequest {
+        std::function<void()> work;
+        std::promise<QuiescenceOutcome> done;
+        Clock::time_point requested_at;
+    };
+    mutable std::mutex quiescence_mutex_;
+    std::deque<QuiescenceRequest> quiescence_queue_;
+    std::atomic<bool> quiescence_pending_{false};
 
     mutable std::mutex execution_mutex_;
     mutable std::mutex queue_mutex_;

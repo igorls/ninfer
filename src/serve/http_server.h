@@ -95,6 +95,11 @@ private:
     // to come with a residency path in the target that can rebuild what it drops; until a
     // target has one, `release.supported` in this payload stays false and says why.
     void handle_admin_vram(const httplib::Request& req, httplib::Response& res) const;
+    // Holds the engine at a boundary where residency can be changed safely, and
+    // reports what the hold cost. Runs no capacity change yet: this is the fence
+    // the change will sit inside, exposed so the drain and the request-holding
+    // behaviour can be exercised against a real engine rather than a fake.
+    void handle_admin_quiesce(const httplib::Request& req, httplib::Response& res) const;
     void handle_admin_stats(const httplib::Request& req, httplib::Response& res) const;
 
     void record_request_start(const RequestLogContext& context);
