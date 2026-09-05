@@ -11,6 +11,7 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <cstdlib>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 namespace {
@@ -21,8 +22,107 @@ constexpr int kConcat      = kHidden * kStreams; // 10,240
 constexpr int kLowRank     = 320;
 constexpr int kNormThreads = 256;
 
+// The fused decode kernel recomputes the group-norm statistics with the legacy norm
+// kernel's thread->chunk mapping, so its block geometry is pinned to the norm kernel's.
+constexpr int kPrepThreads         = kNormThreads;
+constexpr int kPrepChunksPerThread = (kConcat / 8) / kPrepThreads; // 1280 / 256 = 5
+static_assert((kConcat / 8) % kPrepThreads == 0,
+              "low-rank rows must split into whole 16 B chunks per thread");
+
 // =========================================================================
-// Kernel 1: Vectorized 4-Stream Group RMSNorm
+// Shared per-element arithmetic for the decode route.
+//
+// The fused kernel below recomputes what group_norm_vectorized_kernel stores and
+// consumes it in place of low_rank_and_injection_kernel's global read. Bit-exactness
+// between the two routes rests on both evaluating the same float expressions in the
+// same order under the same nvcc contraction decisions; keeping a single copy of each
+// expression in these __forceinline__ helpers (same TU, same flags) removes the way
+// two hand-copied bodies could drift apart. The test pins legacy == fused bitwise.
+// =========================================================================
+
+// Per-thread partial sum of squares over one 2,560-wide stream. The chunk order
+// (tid, tid + 256; threads 0..63 take two chunks) and the fmaf chain feed a
+// block_reduce_sum<256> tree; any other split changes the rounding of the sum.
+__device__ __forceinline__ float hyper_stream_sum_sq_partial(
+    const __nv_bfloat16* __restrict__ in_stream, int tid) {
+    // 2560 elements = 320 ulonglong2 (8 BF16) chunks
+    float sum_sq = 0.0F;
+    for (int chunk = tid; chunk < (kHidden / 8); chunk += kNormThreads) {
+        const auto raw_in = *reinterpret_cast<const ulonglong2*>(in_stream + chunk * 8);
+        const auto* bf_in = reinterpret_cast<const __nv_bfloat16*>(&raw_in);
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const float v = __bfloat162float(bf_in[i]);
+            sum_sq        = fmaf(v, v, sum_sq);
+        }
+    }
+    return sum_sq;
+}
+
+__device__ __forceinline__ float hyper_inv_rms(float sum_sq) {
+    return rsqrtf(sum_sq / static_cast<float>(kHidden) + 1.0e-6F);
+}
+
+// One 8-element chunk of the normalized stream: (v * inv_rms) * (1 + n), one BF16
+// rounding. The legacy route stores this to `normalized` and re-reads it; the fused
+// route feeds it straight into hyper_dot_chunk, which sees the identical BF16 value.
+__device__ __forceinline__ ulonglong2 hyper_normalize_chunk(ulonglong2 raw_in,
+                                                            ulonglong2 raw_norm,
+                                                            float inv_rms) {
+    const auto* bf_in   = reinterpret_cast<const __nv_bfloat16*>(&raw_in);
+    const auto* bf_norm = reinterpret_cast<const __nv_bfloat16*>(&raw_norm);
+    ulonglong2 raw_out;
+    auto* bf_out = reinterpret_cast<__nv_bfloat16*>(&raw_out);
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const float v = __bfloat162float(bf_in[i]);
+        const float n = __bfloat162float(bf_norm[i]);
+        bf_out[i]     = __float2bfloat16_rn(v * inv_rms * (1.0F + n));
+    }
+    return raw_out;
+}
+
+// Materializes one stream of `normalized` for the consumers that read it from global
+// memory (mix_up_and_reduce_kernel, the stage sink, the tests).
+__device__ __forceinline__ void hyper_store_normalized_stream(
+    const __nv_bfloat16* __restrict__ in_stream, const __nv_bfloat16* __restrict__ norm_stream,
+    __nv_bfloat16* __restrict__ out_stream, float inv_rms, int tid) {
+    for (int chunk = tid; chunk < (kHidden / 8); chunk += kNormThreads) {
+        const int col_base  = chunk * 8;
+        const auto raw_in   = *reinterpret_cast<const ulonglong2*>(in_stream + col_base);
+        const auto raw_norm = *reinterpret_cast<const ulonglong2*>(norm_stream + col_base);
+        *reinterpret_cast<ulonglong2*>(out_stream + col_base) =
+            hyper_normalize_chunk(raw_in, raw_norm, inv_rms);
+    }
+}
+
+// Eight fmaf steps of the row dot product, in element order, into the running sum.
+__device__ __forceinline__ float hyper_dot_chunk(ulonglong2 w_raw, ulonglong2 x_raw, float sum) {
+    const auto* w_bf = reinterpret_cast<const __nv_bfloat16*>(&w_raw);
+    const auto* x_bf = reinterpret_cast<const __nv_bfloat16*>(&x_raw);
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        sum = fmaf(__bfloat162float(w_bf[i]), __bfloat162float(x_bf[i]), sum);
+    }
+    return sum;
+}
+
+// Row epilogue after the block reduction: rows < 320 are the SiLU'd low-rank mixer
+// input, rows 320..323 the injection gates (absent on the final/MTP mixer form).
+__device__ __forceinline__ void hyper_low_rank_epilogue(float sum, int row, int token,
+                                                        __nv_bfloat16* __restrict__ low_rank,
+                                                        float* __restrict__ injection) {
+    if (row < kLowRank) {
+        low_rank[static_cast<std::int64_t>(token) * kLowRank + row] =
+            __float2bfloat16_rn(ops::silu(sum * 0.25F));
+    } else if (injection != nullptr) {
+        injection[static_cast<std::int64_t>(token) * kStreams + (row - kLowRank)] =
+            2.0F * ops::sigmoid(sum * 0.25F);
+    }
+}
+
+// =========================================================================
+// Kernel 1 (legacy decode route): Vectorized 4-Stream Group RMSNorm
 // Grid: dim3(4, tokens), Block: 256 threads
 // =========================================================================
 __global__ void __launch_bounds__(kNormThreads)
@@ -42,49 +142,20 @@ group_norm_vectorized_kernel(const __nv_bfloat16* __restrict__ hidden,
     const int stream_offset = stream * kHidden;
     const auto* in_stream   = hidden + static_cast<std::int64_t>(token) * kConcat + stream_offset;
 
-    // 2560 elements = 320 ulonglong2 (8 BF16) chunks
-    float sum_sq = 0.0F;
-    for (int chunk = tid; chunk < (kHidden / 8); chunk += kNormThreads) {
-        const auto raw_in = *reinterpret_cast<const ulonglong2*>(in_stream + chunk * 8);
-        const auto* bf_in = reinterpret_cast<const __nv_bfloat16*>(&raw_in);
-        #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            const float v = __bfloat162float(bf_in[i]);
-            sum_sq        = fmaf(v, v, sum_sq);
-        }
-    }
-
-    sum_sq = ops::block_reduce_sum<kNormThreads>(sum_sq, s_warp_sums);
+    float sum_sq = hyper_stream_sum_sq_partial(in_stream, tid);
+    sum_sq       = ops::block_reduce_sum<kNormThreads>(sum_sq, s_warp_sums);
     if (tid == 0) {
-        s_inv_rms = rsqrtf(sum_sq / static_cast<float>(kHidden) + 1.0e-6F);
+        s_inv_rms = hyper_inv_rms(sum_sq);
     }
     __syncthreads();
 
-    const float inv_rms = s_inv_rms;
-    const auto* norm_stream = norm + stream_offset;
-    auto* out_stream        = normalized + static_cast<std::int64_t>(token) * kConcat + stream_offset;
-
-    for (int chunk = tid; chunk < (kHidden / 8); chunk += kNormThreads) {
-        const int col_base  = chunk * 8;
-        const auto raw_in   = *reinterpret_cast<const ulonglong2*>(in_stream + col_base);
-        const auto* bf_in   = reinterpret_cast<const __nv_bfloat16*>(&raw_in);
-        const auto raw_norm = *reinterpret_cast<const ulonglong2*>(norm_stream + col_base);
-        const auto* bf_norm = reinterpret_cast<const __nv_bfloat16*>(&raw_norm);
-
-        ulonglong2 raw_out;
-        auto* bf_out = reinterpret_cast<__nv_bfloat16*>(&raw_out);
-        #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            const float v = __bfloat162float(bf_in[i]);
-            const float n = __bfloat162float(bf_norm[i]);
-            bf_out[i]     = __float2bfloat16_rn(v * inv_rms * (1.0F + n));
-        }
-        *reinterpret_cast<ulonglong2*>(out_stream + col_base) = raw_out;
-    }
+    hyper_store_normalized_stream(
+        in_stream, norm + stream_offset,
+        normalized + static_cast<std::int64_t>(token) * kConcat + stream_offset, s_inv_rms, tid);
 }
 
 // =========================================================================
-// Kernel 2: Fused Down Projection & Injection Gates
+// Kernel 2 (legacy decode route): Fused Down Projection & Injection Gates
 // Grid: dim3(total_rows, tokens) where total_rows = 324 (or 320)
 // Block: 256 threads (8 warps)
 // 1 CTA per row -> 324 CTAs at T=1 saturate all SMs.
@@ -117,26 +188,104 @@ low_rank_and_injection_kernel(const __nv_bfloat16* __restrict__ normalized,
     for (int chunk = tid; chunk < (kConcat / 8); chunk += 256) {
         const int col_base = chunk * 8;
         const auto w_raw   = *reinterpret_cast<const ulonglong2*>(w_row + col_base);
-        const auto* w_bf   = reinterpret_cast<const __nv_bfloat16*>(&w_raw);
         const auto x_raw   = *reinterpret_cast<const ulonglong2*>(x_token + col_base);
-        const auto* x_bf   = reinterpret_cast<const __nv_bfloat16*>(&x_raw);
-
-        #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            sum = fmaf(__bfloat162float(w_bf[i]), __bfloat162float(x_bf[i]), sum);
-        }
+        sum                = hyper_dot_chunk(w_raw, x_raw, sum);
     }
 
     sum = ops::block_reduce_sum<256>(sum, s_warp_sums);
 
     if (tid == 0) {
-        if (row < kLowRank) {
-            low_rank[static_cast<std::int64_t>(token) * kLowRank + row] =
-                __float2bfloat16_rn(ops::silu(sum * 0.25F));
-        } else if (injection != nullptr) {
-            injection[static_cast<std::int64_t>(token) * kStreams + (row - kLowRank)] =
-                2.0F * ops::sigmoid(sum * 0.25F);
+        hyper_low_rank_epilogue(sum, row, token, low_rank, injection);
+    }
+}
+
+// =========================================================================
+// Kernel 1+2 (default decode route): Group RMSNorm fused into the row dot products
+// Grid: dim3(total_rows, tokens), Block: 256 threads, 48 B static smem
+//
+// group_norm_vectorized_kernel is a 4-CTA launch whose whole duration is latency
+// (two block reductions, 13% warps active, ~3.5 us) and it runs 97 times per token.
+// Every CTA here recomputes the four stream statistics itself: 20 KB of L2-resident
+// `hidden` per CTA plus four block reductions, overlapped with the CTA's own 20 KB
+// DRAM weight-row fetch, which is issued first and held in registers. Rows 0..3 also
+// store their stream of `normalized` because mix_up_and_reduce_kernel still reads it
+// from global memory; no CTA of this kernel reads `normalized`, so there is no race.
+//
+// The row->CTA mapping is deliberately the legacy one (one 256-thread CTA per row,
+// chunks tid + 256k, block_reduce_sum<256>): splitting a row across CTAs or threads
+// would re-associate the fmaf chain and break bitwise identity with the legacy route.
+// =========================================================================
+__global__ void __launch_bounds__(kPrepThreads)
+hyper_norm_low_rank_fused_kernel(const __nv_bfloat16* __restrict__ hidden,        // [10240, T]
+                                 const __nv_bfloat16* __restrict__ norm,          // [10240]
+                                 const __nv_bfloat16* __restrict__ down_weight,   // [320, 10240]
+                                 const __nv_bfloat16* __restrict__ inject_weight, // [4, 10240] or nullptr
+                                 __nv_bfloat16* __restrict__ normalized,          // [10240, T], rows 0..3 write
+                                 __nv_bfloat16* __restrict__ low_rank,            // [320, T]
+                                 float* __restrict__ injection,                   // [4, T] or nullptr
+                                 int tokens, int total_rows) {
+    __shared__ float s_warp_sums[kPrepThreads / 32];
+    __shared__ float s_inv_rms[kStreams];
+
+    const int row   = static_cast<int>(blockIdx.x);
+    const int token = static_cast<int>(blockIdx.y);
+    const int tid   = static_cast<int>(threadIdx.x);
+
+    if (token >= tokens || row >= total_rows) { return; }
+
+    const __nv_bfloat16* w_row = (row < kLowRank)
+        ? (down_weight + static_cast<std::int64_t>(row) * kConcat)
+        : (inject_weight + static_cast<std::int64_t>(row - kLowRank) * kConcat);
+
+    // (1) Weight-row prefetch: the only DRAM traffic of this CTA, independent of the
+    //     activations, so it is in flight while the statistics pass runs from L2.
+    ulonglong2 w_raw[kPrepChunksPerThread];
+    #pragma unroll
+    for (int k = 0; k < kPrepChunksPerThread; ++k) {
+        w_raw[k] = *reinterpret_cast<const ulonglong2*>(w_row + (tid + kPrepThreads * k) * 8);
+    }
+
+    const auto* hid_token = hidden + static_cast<std::int64_t>(token) * kConcat;
+
+    // (2) Statistics, one stream at a time through the legacy reduction tree.
+    //     block_reduce_sum ends with __syncthreads, so s_warp_sums is free for the next
+    //     stream and s_inv_rms[s] is only read after the barrier below.
+    #pragma unroll 1
+    for (int s = 0; s < kStreams; ++s) {
+        float sum_sq = hyper_stream_sum_sq_partial(hid_token + s * kHidden, tid);
+        sum_sq       = ops::block_reduce_sum<kPrepThreads>(sum_sq, s_warp_sums);
+        if (tid == 0) {
+            s_inv_rms[s] = hyper_inv_rms(sum_sq);
         }
+    }
+    __syncthreads();
+
+    // (3) Rows 0..3 materialize `normalized` for stream == row (legacy K1 second loop).
+    if (row < kStreams) {
+        const int stream_offset = row * kHidden;
+        hyper_store_normalized_stream(
+            hid_token + stream_offset, norm + stream_offset,
+            normalized + static_cast<std::int64_t>(token) * kConcat + stream_offset,
+            s_inv_rms[row], tid);
+    }
+
+    // (4) Row dot product with the normalized value recomputed per chunk. Chunk order
+    //     tid + 256k is the legacy K2 loop order; the fmaf chain is unchanged.
+    float sum = 0.0F;
+    #pragma unroll
+    for (int k = 0; k < kPrepChunksPerThread; ++k) {
+        const int chunk     = tid + kPrepThreads * k;
+        const int col_base  = chunk * 8;
+        const float inv_rms = s_inv_rms[chunk / (kHidden / 8)];
+        const auto h_raw    = *reinterpret_cast<const ulonglong2*>(hid_token + col_base);
+        const auto n_raw    = *reinterpret_cast<const ulonglong2*>(norm + col_base);
+        sum = hyper_dot_chunk(w_raw[k], hyper_normalize_chunk(h_raw, n_raw, inv_rms), sum);
+    }
+
+    sum = ops::block_reduce_sum<kPrepThreads>(sum, s_warp_sums);
+
+    if (tid == 0) {
+        hyper_low_rank_epilogue(sum, row, token, low_rank, injection);
     }
 }
 
@@ -540,29 +689,67 @@ void launch_up_prefill_dispatch(const __nv_bfloat16* low_rank, const __nv_bfloat
     }
 }
 
+// Decode-route stage 1: `normalized` (all four streams), `low_rank`, and (when
+// inject_weight != nullptr) `injection`. Both routes leave identical bits in all three.
+void launch_decode_norm_low_rank(FlashNextHyperDecodeRoute route, const __nv_bfloat16* hidden,
+                                 const __nv_bfloat16* norm, const __nv_bfloat16* down_weight,
+                                 const __nv_bfloat16* inject_weight, __nv_bfloat16* normalized,
+                                 __nv_bfloat16* low_rank, float* injection, int tokens,
+                                 int total_rows, cudaStream_t stream) {
+    if (route == FlashNextHyperDecodeRoute::Legacy) {
+        group_norm_vectorized_kernel<<<dim3(kStreams, tokens), kNormThreads, 0, stream>>>(
+            hidden, norm, normalized, tokens);
+        CUDA_CHECK(cudaGetLastError());
+
+        low_rank_and_injection_kernel<<<dim3(total_rows, tokens), 256, 0, stream>>>(
+            normalized, down_weight, inject_weight, low_rank, injection, tokens, total_rows);
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
+
+    hyper_norm_low_rank_fused_kernel<<<dim3(total_rows, tokens), kPrepThreads, 0, stream>>>(
+        hidden, norm, down_weight, inject_weight, normalized, low_rank, injection, tokens,
+        total_rows);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace
+
+FlashNextHyperDecodeRoute flash_next_hyper_decode_route() {
+    // Read once per process: decode graphs are captured with whichever route is active,
+    // and a mid-run flip would make the eager and replayed paths disagree on topology.
+    static const FlashNextHyperDecodeRoute route = [] {
+        const char* env = std::getenv("NINFER_FLASH_NEXT_HYPER_LEGACY");
+        const bool legacy = env != nullptr && env[0] == '1' && env[1] == '\0';
+        return legacy ? FlashNextHyperDecodeRoute::Legacy : FlashNextHyperDecodeRoute::Fused;
+    }();
+    return route;
+}
 
 void flash_next_hyper_prepare_launch(const Tensor& hidden, const HyperConnectionWeights& weights,
                                      FlashNextHyperWorkspace& scratch, Tensor& block_input,
                                      cudaStream_t stream) {
+    flash_next_hyper_prepare_route_launch(hidden, weights, scratch, block_input, stream,
+                                          flash_next_hyper_decode_route());
+}
+
+void flash_next_hyper_prepare_route_launch(const Tensor& hidden,
+                                           const HyperConnectionWeights& weights,
+                                           FlashNextHyperWorkspace& scratch, Tensor& block_input,
+                                           cudaStream_t stream, FlashNextHyperDecodeRoute route) {
     const int tokens = static_cast<int>(hidden.ne[1]);
 
     if (tokens <= 8) {
         // Decode route (T <= 8)
-        group_norm_vectorized_kernel<<<dim3(kStreams, tokens), kNormThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(hidden.data),
-            static_cast<const __nv_bfloat16*>(weights.norm.data),
-            static_cast<__nv_bfloat16*>(scratch.normalized.data), tokens);
-        CUDA_CHECK(cudaGetLastError());
-
         constexpr int kTotalRows = kLowRank + kStreams; // 324
-        low_rank_and_injection_kernel<<<dim3(kTotalRows, tokens), 256, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(scratch.normalized.data),
+        launch_decode_norm_low_rank(
+            route, static_cast<const __nv_bfloat16*>(hidden.data),
+            static_cast<const __nv_bfloat16*>(weights.norm.data),
             static_cast<const __nv_bfloat16*>(weights.input_mix_down.qdata),
             static_cast<const __nv_bfloat16*>(weights.block_inject.qdata),
+            static_cast<__nv_bfloat16*>(scratch.normalized.data),
             static_cast<__nv_bfloat16*>(scratch.low_rank.data),
-            static_cast<float*>(scratch.injection.data), tokens, kTotalRows);
-        CUDA_CHECK(cudaGetLastError());
+            static_cast<float*>(scratch.injection.data), tokens, kTotalRows, stream);
 
         mix_up_and_reduce_kernel<<<dim3(kHidden, tokens), 128, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(scratch.normalized.data),
@@ -612,23 +799,24 @@ void flash_next_hyper_prepare_launch(const Tensor& hidden, const HyperConnection
 void flash_next_hyper_mix_launch(const Tensor& hidden, const HyperMixerWeights& weights,
                                  FlashNextHyperWorkspace& scratch, Tensor& block_input,
                                  cudaStream_t stream) {
+    flash_next_hyper_mix_route_launch(hidden, weights, scratch, block_input, stream,
+                                      flash_next_hyper_decode_route());
+}
+
+void flash_next_hyper_mix_route_launch(const Tensor& hidden, const HyperMixerWeights& weights,
+                                       FlashNextHyperWorkspace& scratch, Tensor& block_input,
+                                       cudaStream_t stream, FlashNextHyperDecodeRoute route) {
     const int tokens = static_cast<int>(hidden.ne[1]);
 
     if (tokens <= 8) {
-        // Decode route (T <= 8)
-        group_norm_vectorized_kernel<<<dim3(kStreams, tokens), kNormThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(hidden.data),
+        // Decode route (T <= 8): 320 rows, no injection gates on the mixer form.
+        launch_decode_norm_low_rank(
+            route, static_cast<const __nv_bfloat16*>(hidden.data),
             static_cast<const __nv_bfloat16*>(weights.norm.data),
-            static_cast<__nv_bfloat16*>(scratch.normalized.data), tokens);
-        CUDA_CHECK(cudaGetLastError());
-
-        low_rank_and_injection_kernel<<<dim3(kLowRank, tokens), 256, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(scratch.normalized.data),
-            static_cast<const __nv_bfloat16*>(weights.input_mix_down.qdata),
-            nullptr,
-            static_cast<__nv_bfloat16*>(scratch.low_rank.data),
-            nullptr, tokens, kLowRank);
-        CUDA_CHECK(cudaGetLastError());
+            static_cast<const __nv_bfloat16*>(weights.input_mix_down.qdata), nullptr,
+            static_cast<__nv_bfloat16*>(scratch.normalized.data),
+            static_cast<__nv_bfloat16*>(scratch.low_rank.data), nullptr, tokens, kLowRank,
+            stream);
 
         mix_up_and_reduce_kernel<<<dim3(kHidden, tokens), 128, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(scratch.normalized.data),
