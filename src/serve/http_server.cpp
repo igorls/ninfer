@@ -5,6 +5,8 @@
 #include "serve/openai_common.h"
 #include "serve/request_log.h"
 
+#include "core/device_memory.h"
+
 #include <nlohmann/json.hpp>
 
 #include <chrono>
@@ -464,6 +466,142 @@ void HttpServer::register_routes() {
     server_.Post("/v1/messages", [this](const httplib::Request& req, httplib::Response& res) {
         handle_messages(req, res);
     });
+    server_.Get("/admin/vram", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_admin_vram(req, res);
+    });
+}
+
+namespace {
+
+const char* kv_cache_storage_name(KvCacheStorage storage) noexcept {
+    switch (storage) {
+        case KvCacheStorage::BFloat16: return "bf16";
+        case KvCacheStorage::Int8Group64: return "int8";
+        case KvCacheStorage::Fp8E4M3Row256: return "fp8";
+        case KvCacheStorage::Nvfp4Group16: return "nvfp4";
+        case KvCacheStorage::Fp8KeyNvfp4Value: return "k8v4";
+    }
+    return "unknown";
+}
+
+nlohmann::json arena_json(const ArenaMemorySummary& arena) {
+    return {{"capacity_bytes", arena.capacity_bytes},
+            {"used_bytes", arena.used_bytes},
+            {"peak_used_bytes", arena.peak_used_bytes}};
+}
+
+} // namespace
+
+// The memory report an operator or supervisor needs, from the process that actually owns the
+// memory. Two rules it exists to enforce:
+//
+//   1. Device-wide free comes from NVML, never cudaMemGetInfo and never the DXGI budget. Both
+//      of those report an empty card while another process holds 70 GiB under WDDM, which is
+//      how this workstation's desktop got starved twice; `device.source` says which one
+//      answered so a reader can distrust the number when NVML is missing.
+//   2. The plan and the live device numbers are reported side by side. The gap between
+//      `plan.runtime_reservation_bytes` and what is actually resident is the engine's own
+//      overshoot; free memory falling without that gap moving is somebody else's doing, and
+//      the two must never be conflated when deciding whether to shed load.
+void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& res) const {
+    if (service_ == nullptr) {
+        ApiError error;
+        error.status  = 503;
+        error.type    = "service_unavailable";
+        error.message = "engine is not attached";
+        write_openai_error(res, error);
+        return;
+    }
+
+    const MemorySummary memory        = service_->memory_summary();
+    const EngineOptions& engine       = service_->engine_options();
+    const DeviceMemorySnapshot device = query_device_memory(engine.device);
+
+    nlohmann::json processes = nlohmann::json::array();
+    for (const ProcessMemoryInfo& process : device.compute_processes) {
+        processes.push_back({{"pid", process.pid}, {"used_bytes", process.used_bytes}});
+    }
+
+    // `runtime_floor_bytes` is the value an allocation is actually checked against at run time
+    // (Sequence D23); `configured_bytes` is what was asked for. They differ when the floor has
+    // not been armed, which is worth seeing rather than assuming.
+    const std::size_t floor = runtime_desktop_reserve_floor();
+    nlohmann::json reserve  = {
+        {"configured_bytes", engine.desktop_reserve_bytes},
+        {"runtime_floor_bytes", floor},
+        {"free_bytes", device.free_bytes},
+        {"holding", floor == 0 || device.free_bytes >= floor}};
+
+    nlohmann::json plan = {
+        {"runtime_reservation_bytes", memory.runtime_reservation_bytes},
+        {"minimum_runtime_reservation_bytes", memory.minimum_runtime_reservation_bytes},
+        {"available_after_weights_bytes", memory.available_after_weights_bytes},
+        {"available_after_startup_bytes", memory.available_after_startup_bytes},
+        {"planned_slack_bytes", memory.planned_slack_bytes},
+        {"workspace_logical_peak_bytes", memory.workspace_logical_peak_bytes},
+        // Inside the reservation but never allocated: headroom for CUDA graphs captured later.
+        // A check of the form "reservation should equal resident bytes" is wrong by this much.
+        {"cuda_graph_allowance_bytes", memory.cuda_graph_allowance_bytes},
+        {"kv_capacity_headroom_bytes", memory.kv_capacity_headroom_bytes}};
+
+    nlohmann::json arenas = {{"weights", arena_json(memory.weights)},
+                             {"sequence", arena_json(memory.sequence)},
+                             {"workspace", arena_json(memory.workspace)}};
+    if (memory.vision_workspace.has_value()) {
+        // Logical regions inside the one physical workspace allocation; they describe layout,
+        // and must not be added to workspace.capacity_bytes.
+        arenas["vision_workspace"] = {
+            {"general_capacity_bytes", memory.vision_workspace->general_capacity_bytes},
+            {"encode_peak_bytes", memory.vision_workspace->encode_peak_bytes},
+            {"handoff_capacity_bytes", memory.vision_workspace->handoff_capacity_bytes},
+            {"aggregate_prompt_tokens", memory.vision_workspace->aggregate_prompt_tokens},
+            {"max_item_tokens", memory.vision_workspace->max_item_tokens}};
+    } else {
+        arenas["vision_workspace"] = nullptr;
+    }
+
+    nlohmann::json kv = {{"capacity_tokens", memory.kv_capacity},
+                         {"page_groups", memory.kv_capacity_page_groups},
+                         {"max_page_groups", memory.kv_capacity_max_page_groups},
+                         {"payload_bytes", memory.kv_payload_bytes},
+                         {"storage", kv_cache_storage_name(memory.kv_cache)},
+                         {"host_state_capacity_slots", memory.host_state_capacity_slots},
+                         {"host_state_occupied_slots", memory.host_state_occupied_slots},
+                         {"host_kv_capacity_bytes", memory.host_kv_capacity_bytes},
+                         {"host_kv_occupied_bytes", memory.host_kv_occupied_bytes}};
+
+    nlohmann::json body = {
+        {"schema_version", 1},
+        {"model_id", public_model_id_},
+        {"device",
+         {{"index", engine.device},
+          {"name", device.device_name},
+          {"pci_bus_id", device.pci_bus_id},
+          {"total_bytes", device.total_bytes},
+          {"free_bytes", device.free_bytes},
+          {"used_bytes", device.used_bytes},
+          {"source", device.is_nvml ? "nvml" : "cudaMemGetInfo"},
+          {"warning", device.warning},
+          {"compute_processes", processes}}},
+        {"desktop_reserve", reserve},
+        {"plan", plan},
+        {"arenas", arenas},
+        {"kv", kv},
+        {"options",
+         {{"max_concurrency", engine.max_concurrency},
+          {"vision", engine.enable_vision},
+          {"output_head_fp8", engine.quantize_output_head_fp8},
+          {"token_embedding_fp8", engine.quantize_token_embedding_fp8},
+          {"gdn_state_storage",
+           engine.gdn_state_storage == GdnStateStorage::FP32 ? "fp32" : "bf16"}}},
+        // Stated rather than implied: nothing here frees memory. A caller that wants device
+        // memory back has one option today, which is to stop the process.
+        {"release",
+         {{"supported", false},
+          {"reason", "this build allocates device memory once at startup and holds it; no "
+                     "residency path exists to release and rebuild it"}}}};
+
+    res.set_content(body.dump(), "application/json");
 }
 
 void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) const {

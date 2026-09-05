@@ -88,9 +88,13 @@ private:
     void handle_response_compact(const httplib::Request& req, httplib::Response& res);
     void handle_models(const httplib::Request& req, httplib::Response& res) const;
     void handle_model(const httplib::Request& req, httplib::Response& res) const;
+    // Read-only memory report: the engine's own plan plus device-wide truth from NVML.
+    // Deliberately has no release/reclaim counterpart. Declarations for those existed here
+    // for months with no definition and no route, so an external supervisor polled a 404
+    // and reported a feature that had never shipped. Anything that frees device memory has
+    // to come with a residency path in the target that can rebuild what it drops; until a
+    // target has one, `release.supported` in this payload stays false and says why.
     void handle_admin_vram(const httplib::Request& req, httplib::Response& res) const;
-    void handle_admin_vram_release(const httplib::Request& req, httplib::Response& res);
-    void handle_admin_vram_reclaim(const httplib::Request& req, httplib::Response& res);
     void handle_admin_stats(const httplib::Request& req, httplib::Response& res) const;
 
     void record_request_start(const RequestLogContext& context);
