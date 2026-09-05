@@ -4,7 +4,9 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -73,11 +75,32 @@ KvCapacityPolicy parse_kv_capacity(const char* text,
     return KvCapacityPolicy::explicit_capacity(static_cast<std::uint32_t>(value), 0);
 }
 
+// A key passed as --api-key is visible to every process running as this user:
+// Windows exposes a process's full command line through WMI and Task Manager's
+// "Command line" column. Reading it from a file keeps the secret off the command
+// line, which is what lets the supervisor -- whose config names a FILE, never a
+// key -- enable authentication without publishing it to the machine.
+std::string read_api_key_file(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) { throw std::invalid_argument("--api-key-file cannot be read: " + path); }
+    std::ostringstream buffer;
+    buffer << in.rdbuf();
+    std::string key = buffer.str();
+    // Trailing newline is what a text editor leaves behind; it is not part of the
+    // key, and comparing it against a client's header would reject every request.
+    while (!key.empty() && (key.back() == '\n' || key.back() == '\r' || key.back() == ' ' ||
+                            key.back() == '\t')) {
+        key.pop_back();
+    }
+    if (key.empty()) { throw std::invalid_argument("--api-key-file is empty: " + path); }
+    return key;
+}
+
 } // namespace
 
 std::string serve_usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
-           " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
+           " <model.ninfer> [--host H] [--port N] [--api-key KEY] [--api-key-file PATH] "
            "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
            "[--clamp-concurrency-to-pool] [--kv-slack-floor-mib N] "
            "[--desktop-reserve-gib N] [--desktop-reserve-mib N] "
@@ -119,6 +142,7 @@ std::string serve_usage_text(const char* argv0) {
            "       --media-cache-mib defaults to 1024; 0 disables retained media reuse\n"
            "       --media-live-mib defaults to 2048 and bounds all live BF16 patch payloads\n"
            "       --media-preprocess-threads defaults to 0 (auto, at most 16 workers)\n"
+           "       --api-key-file reads the key from a file, keeping it off the command line\n"
            "       --request-log-jsonl appends full-precision server/request records\n"
            "       --model-id overrides the artifact identity.model_id reported by the server\n"
            "       Responses state is process-local and bounded to 1024 records / 256 MiB by "
@@ -178,6 +202,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.port = parse_nonnegative_int(require_value("--port"), "port");
         } else if (arg == "--api-key") {
             options.api_key = require_value("--api-key");
+        } else if (arg == "--api-key-file") {
+            options.api_key = read_api_key_file(require_value("--api-key-file"));
         } else if (arg == "--model-id") {
             options.model_id_override = require_value("--model-id");
             if (options.model_id_override->empty()) {

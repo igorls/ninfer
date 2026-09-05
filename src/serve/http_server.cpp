@@ -490,6 +490,88 @@ nlohmann::json arena_json(const ArenaMemorySummary& arena) {
             {"peak_used_bytes", arena.peak_used_bytes}};
 }
 
+// A device snapshot that a request never waits in line for.
+//
+// query_device_memory enumerates the driver's compute processes through NVML, and
+// on a contended Windows box that call has been measured at 18-20 seconds -- it
+// gets worse exactly when the card is under pressure, which is when a monitor is
+// most likely to be polling. Calling it directly from the handler meant every
+// poll parked an HTTP worker for that whole time. A supervisor polling once a
+// second then filled httplib's thread pool, the listen backlog overflowed, and the
+// engine refused ALL connections, inference included, while its core sat idle.
+// Observed: 175 sockets in TIME_WAIT, a live listener, and /health failing to
+// connect in under a millisecond.
+//
+// So: serve the last snapshot immediately, refresh at most one at a time, and let
+// a stale reading through rather than block. At most ONE worker is ever inside
+// NVML, and a reader that arrives during a refresh gets the previous value with
+// its age attached rather than waiting. `age_ms` is reported so a caller can tell
+// a fresh reading from one taken during a stall.
+struct DeviceSnapshotCache {
+    std::mutex value_mu;
+    std::mutex refresh_mu;
+    DeviceMemorySnapshot value;
+    std::chrono::steady_clock::time_point taken{};
+    bool primed = false;
+};
+
+DeviceSnapshotCache& device_snapshot_cache() {
+    static DeviceSnapshotCache cache;
+    return cache;
+}
+
+DeviceMemorySnapshot device_snapshot(int device, std::int64_t& age_ms) {
+    using clock = std::chrono::steady_clock;
+    constexpr auto kFreshFor = std::chrono::seconds(2);
+    DeviceSnapshotCache& cache = device_snapshot_cache();
+
+    {
+        std::lock_guard lock(cache.value_mu);
+        if (cache.primed && clock::now() - cache.taken < kFreshFor) {
+            age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() -
+                                                                          cache.taken)
+                         .count();
+            return cache.value;
+        }
+    }
+
+    // try_lock, never lock: if another request is already inside NVML, this one
+    // returns the stale value instead of forming the queue that took the server
+    // down. The very first caller has nothing to fall back on and must wait.
+    std::unique_lock refresh(cache.refresh_mu, std::try_to_lock);
+    if (!refresh.owns_lock()) {
+        std::lock_guard lock(cache.value_mu);
+        if (cache.primed) {
+            age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() -
+                                                                          cache.taken)
+                         .count();
+            return cache.value;
+        }
+        refresh.lock();
+    }
+
+    // Another thread may have refreshed while this one waited for the lock.
+    {
+        std::lock_guard lock(cache.value_mu);
+        if (cache.primed && clock::now() - cache.taken < kFreshFor) {
+            age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() -
+                                                                          cache.taken)
+                         .count();
+            return cache.value;
+        }
+    }
+
+    DeviceMemorySnapshot fresh = query_device_memory(device);
+    {
+        std::lock_guard lock(cache.value_mu);
+        cache.value  = fresh;
+        cache.taken  = clock::now();
+        cache.primed = true;
+    }
+    age_ms = 0;
+    return fresh;
+}
+
 } // namespace
 
 // The memory report an operator or supervisor needs, from the process that actually owns the
@@ -513,9 +595,10 @@ void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& r
         return;
     }
 
-    const MemorySummary memory        = service_->memory_summary();
-    const EngineOptions& engine       = service_->engine_options();
-    const DeviceMemorySnapshot device = query_device_memory(engine.device);
+    const MemorySummary memory   = service_->memory_summary();
+    const EngineOptions& engine  = service_->engine_options();
+    std::int64_t device_age_ms   = 0;
+    const DeviceMemorySnapshot device = device_snapshot(engine.device, device_age_ms);
 
     nlohmann::json processes = nlohmann::json::array();
     for (const ProcessMemoryInfo& process : device.compute_processes) {
@@ -581,6 +664,10 @@ void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& r
           {"free_bytes", device.free_bytes},
           {"used_bytes", device.used_bytes},
           {"source", device.is_nvml ? "nvml" : "cudaMemGetInfo"},
+          // How old this reading is. Non-zero means it was served from cache
+          // while a refresh was in flight or still fresh; a caller deciding
+          // anything on free memory should know it is not reading the driver.
+          {"age_ms", device_age_ms},
           {"warning", device.warning},
           {"compute_processes", processes}}},
         {"desktop_reserve", reserve},

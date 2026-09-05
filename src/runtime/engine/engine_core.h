@@ -785,6 +785,19 @@ private:
         result.timings.total_seconds =
             request->prepare_seconds +
             std::chrono::duration<double>(Clock::now() - request->submitted).count();
+        // Only qwen3_6 accumulates decode_seconds itself, round by round. Every
+        // other target leaves it at zero, and anything dividing token counts by it
+        // -- the supervisor's decode rate, operational_log's tokens_per_second --
+        // silently reports nothing rather than reporting a wrong number. Derive it
+        // from the two wall-clock stamps just computed above, which every target
+        // gets. Kept subordinate to a target-supplied value: qwen3_6's per-round
+        // sum excludes queueing between rounds and is the better measurement where
+        // it exists.
+        if (result.timings.decode_seconds <= 0.0 && request->first_token &&
+            result.generated_token_ids.size() > 1) {
+            result.timings.decode_seconds = std::max(
+                0.0, result.timings.total_seconds - result.timings.first_token_seconds);
+        }
         request->sequence.reset();
         request->lane.reset();
         request->budget.reset();

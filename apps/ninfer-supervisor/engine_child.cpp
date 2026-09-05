@@ -1,4 +1,6 @@
 #include "engine_child.hpp"
+#include "tray_prefs.hpp"
+#include "reserve_budget.hpp"
 
 #include <windows.h>
 
@@ -93,6 +95,23 @@ EngineStatus EngineChild::status() const {
 void EngineChild::set_desktop_reserve_gib(int gib) {
     std::lock_guard lock(mu_);
     desktop_reserve_gib_ = gib;
+}
+
+bool EngineChild::save_desktop_reserve_gib(int gib) {
+    const auto budget = reserve_budget();
+    if (!budget.value("ok", false) || (gib == 0 ? 8 : gib) > budget.value("max_gib", 0)) return false;
+    std::lock_guard lock(mu_);
+    if (gib < 0 || gib > 64 || desktop_reserve_pinned(cfg_.engine.args) || cfg_.source_path.empty()) return false;
+    if (!update_tray_preference(tray_prefs_path(cfg_.source_path), true, gib)) return false;
+    desktop_reserve_gib_ = gib;
+    return true;
+}
+
+bool EngineChild::reserve_plan_matches_config() const {
+    std::lock_guard lock(mu_);
+    return st_.state == EngineState::Running && launched_spec_.executable == cfg_.engine.executable &&
+        launched_spec_.device == cfg_.engine.device && launched_spec_.workdir == cfg_.engine.workdir &&
+        without_reserve_args(launched_spec_.args) == without_reserve_args(cfg_.engine.args);
 }
 
 void EngineChild::update_config(SupervisorConfig cfg) {
@@ -284,10 +303,12 @@ void EngineChild::spawn() {
     // rewriting main's config object cannot, because that copy is never read
     // again after construction.
     std::vector<std::string> args;
+    EngineSpec launch_spec;
     int reserve = kReserveUnset;
     {
         std::lock_guard lock(mu_);
         args    = cfg_.engine.args;
+        launch_spec = cfg_.engine;
         reserve = desktop_reserve_gib_;
     }
     if (reserve >= 0) { args = with_desktop_reserve(std::move(args), reserve); }
@@ -296,6 +317,10 @@ void EngineChild::spawn() {
     // (TTFT, decode rate, prefix reuse, speculative acceptance) was empty unless someone
     // also hand-wrote --request-log-jsonl into args. Pass it through.
     args = with_request_log(std::move(args), cfg_.engine.request_log);
+    // Same omission, with teeth: api_key_file was read only by the collector, so the
+    // engine ran unauthenticated however it was bound. launch_spec, not cfg_, because
+    // that copy was taken under the lock.
+    args = with_api_key_file(std::move(args), launch_spec.api_key_file);
 
     std::wstring cmd = quote_arg(cfg_.engine.executable);
     for (const auto& a : args) {
@@ -352,6 +377,7 @@ void EngineChild::spawn() {
         std::lock_guard lock(mu_);
         process_handle_      = pi.hProcess;
         st_.pid              = static_cast<std::uint64_t>(pi.dwProcessId);
+        launched_spec_       = std::move(launch_spec);
         st_.state            = EngineState::Running;
         st_.started_unix_ms  = unix_ms();
         st_.ready            = false; // Running means "process exists", not "serving"

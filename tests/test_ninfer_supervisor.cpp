@@ -2,6 +2,7 @@
 #include "config.hpp"
 #include "insights.hpp"
 #include "tray_prefs.hpp"
+#include "reserve_budget.hpp"
 
 #include <algorithm>
 #include <iostream>
@@ -26,6 +27,49 @@ int test_loopback() {
     f += check(is_loopback_peer("127.0.0.1") && is_loopback_peer("::ffff:127.0.0.1"),
                "loopback peers");
     f += check(!is_loopback_peer("10.0.0.8") && !is_loopback_peer(""), "off-box peers");
+    return f;
+}
+
+int test_model_reserve_budget() {
+    using namespace ninfer::supervisor;
+    constexpr std::uint64_t gib = 1073741824ULL;
+    nlohmann::json report{{"plan", {{"runtime_reservation_bytes", 16 * gib}, {"minimum_runtime_reservation_bytes", 9 * gib}, {"available_after_weights_bytes", 18 * gib}, {"cuda_graph_allowance_bytes", gib}}},
+        {"arenas", {{"weights", {{"capacity_bytes", 70 * gib}}}}},
+        {"desktop_reserve", {{"configured_bytes", 4 * gib}}}, {"device", {{"free_bytes", 8 * gib}}}};
+    int f = 0;
+    f += check(model_reserve_budget(report, {"--kv-capacity", "786432"})["max_gib"] == 6,
+               "reserve retains explicit runtime capacity rather than just model minimum");
+    f += check(model_reserve_budget(report, {"--kv-capacity", "auto"})["max_gib"] == 12,
+               "automatic capacity may shrink to its model minimum while retaining slack");
+    f += check(model_reserve_budget(report, {"--kv-capacity", "auto", "--kv-slack-floor-mib", "0"})["max_gib"] == 12,
+               "automatic headroom remains required even with zero slack floor");
+    f += check(model_reserve_budget(report, {"--kv-capacity", "786432", "--kv-slack-floor-mib", "4096"})["max_gib"] == 6,
+               "explicit capacity matches serving policy and ignores automatic slack option");
+    report["device"]["free_bytes"] = 4 * gib;
+    f += check(model_reserve_budget(report, {"--kv-capacity", "auto"})["max_gib"] == 9,
+               "live app pressure still leaves automatic sizing headroom");
+    f += check(model_reserve_budget(report, {})["max_gib"] == 3,
+               "other app pressure and graph headroom reduce limit");
+    report["device"]["free_bytes"] = gib / 2;
+    f += check(model_reserve_budget(report, {})["max_gib"] == 0, "no negative or underflowed reserve limit");
+    f += check(!model_reserve_budget(nullptr, {})["ok"].get<bool>(), "no fabricated limit without model plan");
+    f += check(without_reserve_args({"model.ninfer", "--desktop-reserve-gib", "3", "--kv-capacity", "400"}) == std::vector<std::string>({"model.ninfer", "--kv-capacity", "400"}), "model-setting identity ignores only reserve flags");
+    return f;
+}
+
+int test_engine_probe_destination() {
+    using namespace ninfer::supervisor;
+    EngineSpec spec;
+    int f = 0;
+    spec.engine_host = "0.0.0.0";
+    f += check(engine_connect_host(spec) == "127.0.0.1" && spec.engine_host == "0.0.0.0",
+               "probe wildcard IPv4 engine locally without changing its listener");
+    spec.engine_host = "::";
+    f += check(engine_connect_host(spec) == "::1" && spec.engine_host == "::",
+               "probe wildcard IPv6 engine on IPv6 loopback");
+    spec.engine_host = "192.168.1.8";
+    f += check(engine_connect_host(spec) == "192.168.1.8",
+               "preserve a specifically configured engine destination");
     return f;
 }
 
@@ -482,6 +526,9 @@ int test_with_desktop_reserve() {
                "missing reserve is appended");
 
     const std::vector<std::string> mib{"model.ninfer", "--desktop-reserve-mib", "1700"};
+    f += check(desktop_reserve_launch_mib(mib, 8) == 1700, "MiB pin determines next launch despite standing preference");
+    f += check(desktop_reserve_launch_mib({"--desktop-reserve-gib", "0"}, kReserveUnset) == 0, "explicit zero remains zero");
+    f += check(desktop_reserve_launch_mib(base, 0) == 8192, "engine default preference removes configured reserve");
     f += check(with_desktop_reserve(mib, 8) == mib, "--desktop-reserve-mib is left alone");
 
     const std::vector<std::string> trailing{"model.ninfer", "--desktop-reserve-gib"};
@@ -791,8 +838,12 @@ int test_tray_prefs() {
                "negative reserve is normalised away");
     const auto odd =
         parse_tray_prefs_json(R"({"desktop_reserve_gib":7,"idle_unload_minutes":37})");
-    f += check(odd.desktop_reserve_gib == kReserveUnset && odd.idle_unload_minutes == 0,
-               "off-menu values are normalised away");
+    f += check(odd.desktop_reserve_gib == 7 && odd.idle_unload_minutes == 0,
+               "custom reserve is retained while invalid idle value is normalised");
+    f += check(parse_tray_prefs_json(R"({"desktop_reserve_gib":65})").desktop_reserve_gib == kReserveUnset,
+               "reserve above supported range is rejected");
+    f += check(parse_tray_prefs_json(R"({"desktop_reserve_gib":1})").desktop_reserve_gib == 1,
+               "one GiB custom reserve is retained");
 
     TrayPrefs p;
     p.desktop_reserve_gib = 0;
@@ -895,9 +946,31 @@ int test_with_request_log() {
     return f;
 }
 
+int test_with_api_key_file() {
+    using namespace ninfer::supervisor;
+    int f = 0;
+    const auto added = with_api_key_file({"model.ninfer"}, "P:/models/key.txt");
+    f += check(added.size() == 3 && added[1] == "--api-key-file" && added[2] == "P:/models/key.txt",
+               "the configured key file reaches the engine");
+    // The value must be the path, never the key: a child's command line is readable
+    // by any process running as this user.
+    const auto kept_inline =
+        with_api_key_file({"model.ninfer", "--api-key", "hand-written"}, "P:/models/key.txt");
+    f += check(kept_inline.size() == 3 && kept_inline[2] == "hand-written",
+               "a hand-written --api-key wins over the config field");
+    const auto kept_file =
+        with_api_key_file({"model.ninfer", "--api-key-file", "explicit.txt"}, "P:/models/key.txt");
+    f += check(kept_file.size() == 3 && kept_file[2] == "explicit.txt",
+               "an explicit --api-key-file wins over the config field");
+    f += check(with_api_key_file({"model.ninfer"}, "").size() == 1,
+               "no configured key file leaves the engine unauthenticated, as before");
+    return f;
+}
+
 int main() {
     int failures = 0;
     failures += test_loopback();
+    failures += test_engine_probe_destination();
     failures += test_crash_loop();
     failures += test_backoff();
     failures += test_config_bind();
@@ -915,11 +988,13 @@ int main() {
     failures += test_series_ring();
     failures += test_health_threshold();
     failures += test_with_desktop_reserve();
+    failures += test_model_reserve_budget();
     failures += test_engine_param_round_trip();
     failures += test_engine_param_validation();
     failures += test_redact_engine_args();
     failures += test_engine_endpoint_sync();
     failures += test_with_request_log();
+    failures += test_with_api_key_file();
     failures += test_tray_command_ids();
     failures += test_classify_engine_line();
     failures += test_process_scoped_error();

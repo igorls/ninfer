@@ -421,12 +421,9 @@ private:
 
 // The reserve choices. 0 is "engine default" and means the flag is dropped so
 // the engine's own kDefaultDesktopReserveBytes (8 GiB) applies -- the tray must
-// not silently lower a reserve nobody asked it to change. The floor is measured
-// rather than chosen: on this card a desktop starts missing its 16.7 ms frame
-// budget below ~1.7 GiB free and shows nothing measurable above ~3 GiB. So 2 GiB
-// is the smallest honest option, and 4 is the one to recommend -- twice the
-// measured cliff, leaving room for a real desktop's several applications rather
-// than the one synthetic canary that produced the number.
+// not silently lower a reserve nobody asked it to change. These are shortcuts;
+// the dashboard accepts custom whole-GiB targets. None is a universal minimum
+// or recommendation: app demand depends on the user's workload.
 inline constexpr std::array<int, 7> kReserveChoicesGib{0, 2, 3, 4, 6, 8, 12};
 
 // A duration, not a toggle. Unloading after five minutes would punish anyone who
@@ -512,7 +509,7 @@ inline const std::vector<EngineParamSpec>& engine_param_specs() {
 
         {"--desktop-reserve-gib", "desktop_reserve_gib", ParamKind::Int, "memory",
          "Desktop reserve (GiB)",
-         "Device memory the engine must leave for the desktop. Measured floor is 2 GiB.", 0, 64,
+         "Free GPU memory target at startup; leaves headroom beyond existing app allocations.", 0, 64,
          {}},
         {"--kv-dtype", "kv_dtype", ParamKind::Enum, "memory", "KV cache dtype",
          "FP8 halves KV bytes per token. NVFP4 is not usable on this card.", 0, 0,
@@ -825,6 +822,26 @@ inline std::vector<std::string> with_request_log(std::vector<std::string> args,
     return args;
 }
 
+// Adds --api-key-file PATH so the engine actually authenticates. Without this the
+// config's api_key_file was read only by the supervisor's own collector, and the
+// engine itself ran wide open: /v1/models answered 200 with no key and with a wrong
+// one, on whatever interface it was bound to.
+//
+// The PATH is passed, never the key. A child's command line is readable by every
+// process running as this user, so --api-key would publish the secret to the
+// machine; --api-key-file leaves it in the file it already lives in. An explicit
+// --api-key or --api-key-file in args wins, as with the request log.
+inline std::vector<std::string> with_api_key_file(std::vector<std::string> args,
+                                                  const std::string& path) {
+    if (path.empty()) { return args; }
+    for (const auto& a : args) {
+        if (a == "--api-key" || a == "--api-key-file") { return args; }
+    }
+    args.emplace_back("--api-key-file");
+    args.emplace_back(path);
+    return args;
+}
+
 inline std::vector<std::string> with_desktop_reserve(std::vector<std::string> args, int gib) {
     if (desktop_reserve_pinned(args)) { return args; }
     for (std::size_t i = 0; i < args.size(); ++i) {
@@ -859,6 +876,16 @@ inline int desktop_reserve_from_args(const std::vector<std::string>& args) {
         } catch (...) { return 0; }
     }
     return 0;
+}
+
+inline std::uint64_t desktop_reserve_launch_mib(const std::vector<std::string>& args, int preference) {
+    const auto effective = preference >= 0 ? with_desktop_reserve(args, preference) : args;
+    std::uint64_t mib = 8192;
+    for (std::size_t i = 0; i + 1 < effective.size(); ++i) {
+        if (effective[i] == "--desktop-reserve-gib") mib = std::stoull(effective[i + 1]) * 1024;
+        if (effective[i] == "--desktop-reserve-mib") mib = std::stoull(effective[i + 1]);
+    }
+    return mib;
 }
 
 enum class TrayAction : std::uint8_t {
