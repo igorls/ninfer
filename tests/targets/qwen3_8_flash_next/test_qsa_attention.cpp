@@ -539,6 +539,93 @@ int test_g17_prefill_mma(ninfer::DeviceContext& device,
     return 0;
 }
 
+// The MTP draft head runs decode attention with selected_count == 0 (it never runs an indexer), so
+// it only sees the tail of the current 4-token block. At token_index == 7 the tail is empty
+// ((7 + 1) % 4 == 0) and the kernel's softmax loop never executes: running_sum stays 0. Before the
+// guard that was 0/0 -> NaN, which propagated to the draft logits and made argmax return token 0 on
+// one draft round in four. Both KV storage instantiations of sparse_attention_kernel are covered.
+int test_empty_selection_decode_is_finite(
+    ninfer::DeviceContext& device,
+    const ninfer::targets::qwen3_8_flash_next::detail::AttentionWeights& weights) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    constexpr std::int32_t batch          = 1;
+    constexpr std::int32_t physical_pages = 2;
+    constexpr std::int32_t logical_pages  = 2;
+    constexpr std::int32_t input_dim      = 2'560;
+    constexpr std::int32_t token_index    = 7; // (token_index + 1) % 4 == 0 -> tail_count == 0
+
+    ninfer::DeviceBuffer input(input_dim * batch * sizeof(std::uint16_t));
+    ninfer::DeviceBuffer output(input_dim * batch * sizeof(std::uint16_t));
+    ninfer::DeviceBuffer token_indices(batch * sizeof(std::int32_t));
+    ninfer::DeviceBuffer mrope_positions(batch * 3 * sizeof(std::int32_t));
+    ninfer::DeviceBuffer table_rows(batch * sizeof(std::int32_t));
+    ninfer::DeviceBuffer selected_blocks(512 * batch * sizeof(std::int32_t));
+    ninfer::DeviceBuffer selected_counts(batch * sizeof(std::int32_t));
+    ninfer::DeviceBuffer block_tables(logical_pages * sizeof(std::int32_t));
+
+    std::vector<std::uint16_t> host_input(input_dim * batch, 0);
+    host_input[0] = 0x3F80U; // 1.0 -> non-zero query, so a NaN cannot be masked by a zero query
+    input.copy_from_host(host_input.data(), host_input.size() * sizeof(std::uint16_t));
+    mrope_positions.fill(0);
+    table_rows.fill(0);
+    selected_blocks.fill(0);
+    selected_counts.fill(0); // the MTP head's selected_counts are memset to 0 and never written
+    std::array<std::int32_t, logical_pages> host_block_tables = {0, 1};
+    block_tables.copy_from_host(host_block_tables.data(), sizeof(host_block_tables));
+    const std::int32_t host_token_index = token_index;
+    token_indices.copy_from_host(&host_token_index, sizeof(host_token_index));
+    device.synchronize(); // Ensure legacy stream copies order against device.stream
+
+    ninfer::Tensor input_tensor(input.p, ninfer::DType::BF16, {input_dim, batch});
+    ninfer::Tensor output_tensor(output.p, ninfer::DType::BF16, {input_dim, batch});
+    ninfer::Tensor token_indices_tensor(token_indices.p, ninfer::DType::I32, {batch});
+    ninfer::Tensor mrope_positions_tensor(mrope_positions.p, ninfer::DType::I32, {batch, 3});
+    ninfer::Tensor table_rows_tensor(table_rows.p, ninfer::DType::I32, {batch});
+    ninfer::Tensor selected_blocks_tensor(selected_blocks.p, ninfer::DType::I32, {512, batch});
+    ninfer::Tensor selected_counts_tensor(selected_counts.p, ninfer::DType::I32, {batch});
+
+    for (int fp8_kv = 0; fp8_kv < 2; ++fp8_kv) {
+        const std::size_t element_bytes = fp8_kv != 0 ? 1U : sizeof(std::uint16_t);
+        ninfer::DeviceBuffer key_pages(256ULL * 64 * 2 * physical_pages * element_bytes);
+        ninfer::DeviceBuffer value_pages(256ULL * 64 * 2 * physical_pages * element_bytes);
+        key_pages.fill(0);
+        value_pages.fill(0);
+        output.fill(0xFF); // poison: a kernel that never writes would read as non-finite here
+
+        const ninfer::DType kv_dtype =
+            fp8_kv != 0 ? ninfer::DType::FP8_E4M3FN : ninfer::DType::BF16;
+        QsaAttentionCacheView cache{
+            .key_pages   = ninfer::Tensor(key_pages.p, kv_dtype, {256, 64, 2, physical_pages}),
+            .value_pages = ninfer::Tensor(value_pages.p, kv_dtype, {256, 64, 2, physical_pages}),
+            .block_tables = ninfer::Tensor(block_tables.p, ninfer::DType::I32, {logical_pages, 1}),
+        };
+
+        ninfer::WorkspaceArena workspace(flash_next_qsa_attention_workspace_capacity_bytes(batch));
+        flash_next_qsa_attention_decode(input_tensor, weights, token_indices_tensor,
+                                        mrope_positions_tensor, table_rows_tensor,
+                                        selected_blocks_tensor, selected_counts_tensor, cache,
+                                        workspace, output_tensor, device.stream);
+        device.synchronize();
+
+        std::vector<std::uint16_t> host_output(input_dim * batch);
+        output.copy_to_host(host_output.data(), host_output.size() * sizeof(std::uint16_t));
+        for (std::size_t i = 0; i < host_output.size(); ++i) {
+            // Attended == 0 gates to 0 and the A16Only output linear carries it through exactly, so
+            // the whole row must be BF16 +0. Anything else (0x7FC0/0xFFFF...) is the NaN or the
+            // untouched poison.
+            if (host_output[i] != 0x0000U) {
+                std::cerr << "FAIL: empty-selection decode (" << (fp8_kv != 0 ? "FP8" : "BF16")
+                          << " KV) produced " << bf16_to_float(host_output[i]) << " at idx=" << i
+                          << " (raw 0x" << std::hex << host_output[i] << std::dec
+                          << "), expected finite 0\n";
+                return 1;
+            }
+        }
+    }
+    std::cout << "PASS: empty-selection decode (selected_count=0, token_index=7) is finite\n";
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -733,6 +820,11 @@ int main() {
 
     if (failures != 0) {
         std::cerr << "FAIL: " << failures << " errors in test_qsa_attention\n";
+        return 1;
+    }
+
+    if (test_empty_selection_decode_is_finite(device, weights) != 0) {
+        std::cerr << "FAIL: test_empty_selection_decode_is_finite\n";
         return 1;
     }
 

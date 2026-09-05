@@ -123,6 +123,10 @@ def start_server(exe_path, model_path, port, arm_name, config_mode, req_log_path
         env["NINFER_FLASH_NEXT_DRAFT_HEAD_ROWS"] = "32768"
         env["NINFER_RANKING_PATH"] = RANKING_PATH
         args.extend(["--spec", "mtp", "--draft-tokens", "1", "--lm-head-draft"])
+    elif arm_name == "fullhead":
+        # Speculation through the full 248,320-row output head: no --lm-head-draft.
+        # This is the configuration D3 measured at ~87% acceptance.
+        args.extend(["--spec", "mtp", "--draft-tokens", "1"])
     else:
         raise ValueError(f"Unknown arm {arm_name}")
 
@@ -256,7 +260,7 @@ def main():
 
     workload_prompts = load_fixtures(args.fixtures)
     workload_names = list(workload_prompts.keys())
-    arms = ["spec-off", "32k"]
+    arms = ["spec-off", "32k", "fullhead"]
 
     all_data = []
     if os.path.exists(raw_path):

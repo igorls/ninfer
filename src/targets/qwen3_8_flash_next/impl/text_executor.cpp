@@ -726,15 +726,19 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
             };
             effective_sink = &stage_sink;
         }
+        // The prefill's hyper hidden lives in the scoped workspace arena, so it must be exported
+        // into the round tensor the speculative draft head reads; otherwise the first draft of
+        // every request runs on the previous round's leftovers.
+        Tensor hyper_hidden(alloc_.round_tensors().hyper_hidden.data, DType::BF16, {10'240, 1});
         flash_next_text_prefill_chunk(
             model_, embedding, dev_token_indices, dev_mrope_positions,
             static_cast<std::int32_t>(lane), initial_active_slot, initial_standby_slot,
             gathered_ple, static_cast<std::int32_t>(alloc_.plan().maximum_blocks),
             first_token_index, alloc_.state_view(), alloc_.workspace(), final_hidden, logits,
-            device_.stream, effective_sink, alloc_.plan().config.use_qsa_prefill_mma);
+            device_.stream, effective_sink, alloc_.plan().config.use_qsa_prefill_mma,
+            &hyper_hidden);
 
         round_in_flight_ = true;
-        Tensor hyper_hidden(alloc_.round_tensors().hyper_hidden.data, DType::BF16, {10'240, 1});
         return PendingRound(this, prepared.transaction_id, 1, logits, final_hidden, hyper_hidden);
     } catch (...) {
         pending_is_prefill_chunk_ = false;

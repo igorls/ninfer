@@ -293,8 +293,15 @@ __global__ void sparse_attention_kernel(
         running_max = next_max;
         __syncthreads();
     }
+    // total == 0 is reachable: the MTP head runs this kernel with selected_count == 0 (it never
+    // runs an indexer), so it attends only the tail of the current 4-token block and the loop body
+    // never executes when (token_index + 1) % 4 == 0. Unguarded that is 0/0 -> NaN, which reaches
+    // the draft logits and makes argmax return token 0 on one draft round in four. The backbone
+    // always has running_sum > 0 (its indexer selects at least one block once a block is complete),
+    // and the taken branch keeps the exact same division, so backbone output is bitwise unchanged.
+    const float attended_val = running_sum > 0.0F ? (accumulator / running_sum) : 0.0F;
     output[static_cast<std::int64_t>(batch) * kQueryHeads * kHeadDim + head * kHeadDim + dim] =
-        __float2bfloat16_rn(accumulator / running_sum);
+        __float2bfloat16_rn(attended_val);
 }
 
 __global__ void gate_output_kernel(const __nv_bfloat16* __restrict__ attended,

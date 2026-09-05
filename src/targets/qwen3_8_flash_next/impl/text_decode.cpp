@@ -359,7 +359,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                                    std::int32_t first_token_index, FlashNextDecodeStateView state,
                                    WorkspaceArena& workspace, Tensor& final_hidden, Tensor& logits,
                                    cudaStream_t stream, const FlashNextDecodeStateSink* sink,
-                                   bool use_qsa_prefill_mma) {
+                                   bool use_qsa_prefill_mma, Tensor* out_hyper_hidden) {
     const std::int32_t tokens      = embedding.ne[1];
     const std::int32_t state_slots = state.ple_convolution_states.ne[2];
     if (tokens <= 0 || maximum_blocks <= 0 || maximum_blocks > 65'536 || first_token_index < 0 ||
@@ -478,6 +478,14 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
 
     // 3. Final hyper mixer on last token only -> final_hidden [2560, 1]
     Tensor last_hidden = round_ws.hyper_hidden.slice(1, tokens - 1, 1);
+    // The speculative draft head consumes the pre-final-mixer 4-stream hidden of the last position.
+    // round_ws lives in the scoped arena, so without this copy the first draft of every request
+    // reads whatever the previous request (or the graph warm-up) left in round_tensors().
+    if (out_hyper_hidden != nullptr && out_hyper_hidden->data != nullptr) {
+        CUDA_CHECK(cudaMemcpyAsync(out_hyper_hidden->data, last_hidden.data,
+                                   10'240ULL * sizeof(std::uint16_t), cudaMemcpyDeviceToDevice,
+                                   stream));
+    }
     flash_next_hyper_mix(last_hidden, model.final_mixer, round_ws.single_token_hyper_scratch,
                          final_hidden, stream);
     emit_state("final_hidden", final_hidden);
