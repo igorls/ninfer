@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -38,5 +39,22 @@ std::string format_insufficient_memory_error(
     std::size_t weight_bytes,
     std::size_t desktop_reserve_bytes,
     std::size_t additional_required_bytes = 0);
+
+// Thrown when an allocation would breach the active desktop reserve floor.
+// The runtime desktop reserve floor serves as a backstop against unbounded allocations.
+struct DeviceReserveBreach : public std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+// Runtime desktop reserve floor management (Sequence D23).
+// The desktop reserve floor is an active safety backstop ensuring runtime device allocations
+// never exhaust VRAM below the operating system / desktop compositor reserve floor.
+void set_runtime_desktop_reserve_floor(std::size_t floor_bytes) noexcept;
+std::size_t runtime_desktop_reserve_floor() noexcept;
+
+// Checks whether an allocation of additional_bytes on device_index would violate
+// the active desktop reserve floor. Returns true if safe, false if it would breach.
+bool check_runtime_desktop_reserve(int device_index, std::size_t additional_bytes,
+                                   std::string* error_detail = nullptr);
 
 } // namespace ninfer

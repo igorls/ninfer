@@ -195,29 +195,64 @@ void FlashNextTextExecutor::instantiate_graphs() {
     if (decode_graphs_.buckets.count == 0) { return; }
 
     const std::uint32_t max_concurrency = alloc_.plan().config.max_concurrency;
-    const auto small_blocks = static_cast<std::int32_t>(decode_graphs_.buckets.blocks[0]);
+    const std::uint32_t n_buckets       = decode_graphs_.buckets.count;
+    const std::size_t total_topologies  = static_cast<std::size_t>(max_concurrency) * n_buckets;
+
     decode_graphs_.profiles.clear();
     decode_graphs_.topologies.clear();
-    decode_graphs_.profiles.reserve(max_concurrency);
-    decode_graphs_.topologies.reserve(max_concurrency);
+    decode_graphs_.profiles.reserve(total_topologies);
+    decode_graphs_.topologies.reserve(total_topologies);
 
     std::memset(alloc_.host_ingress(), 0, sizeof(FlashNextDecodeIngress));
     std::memset(const_cast<void*>(ple_pipeline_.fixed_host_buffer()), 0,
                 max_concurrency * 2'560 * sizeof(std::uint16_t));
 
-    pending_custom_embeddings_.clear();
-    for (std::uint32_t B = 1; B <= max_concurrency; ++B) {
-        // Startup captures the smallest bucket only. Larger buckets are lazy.
-        execute_round_body(B, small_blocks, nullptr);
-        device_.synchronize();
+    // Zero out persistent storage and synchronize slot tables before dummy capture runs
+    CUDA_CHECK(cudaMemsetAsync(alloc_.persistent_base(), 0, alloc_.persistent_bytes(), device_.stream));
+    alloc_.sync_slots_to_device(device_.stream);
+    CUDA_CHECK(cudaStreamSynchronize(device_.stream));
 
-        if (!install_captured_graph(B, 0, small_blocks)) {
-            throw std::runtime_error(
-                "FlashNextTextExecutor: failed to capture decode graph for B=" + std::to_string(B) +
-                " bucket=0 blocks=" + std::to_string(small_blocks));
+    pending_custom_embeddings_.clear();
+    for (std::uint32_t bucket_idx = 0; bucket_idx < n_buckets; ++bucket_idx) {
+        const auto bucket_blocks = static_cast<std::int32_t>(decode_graphs_.buckets.blocks[bucket_idx]);
+        for (std::uint32_t B = 1; B <= max_concurrency; ++B) {
+            bool ok = false;
+            try {
+                execute_round_body(B, bucket_blocks, nullptr);
+                device_.synchronize();
+
+                if (install_captured_graph(B, bucket_idx, bucket_blocks)) {
+                    ok = true;
+                }
+            } catch (const std::exception& ex) {
+                std::fprintf(stderr,
+                             "FlashNextTextExecutor: capture failed for B=%u bucket=%u blocks=%d: %s\n",
+                             B, bucket_idx, bucket_blocks, ex.what());
+            } catch (...) {
+                std::fprintf(stderr,
+                             "FlashNextTextExecutor: capture failed for B=%u bucket=%u blocks=%d: unknown exception\n",
+                             B, bucket_idx, bucket_blocks);
+            }
+            device_.synchronize();
+
+            if (!ok) {
+                if (bucket_idx == 0) {
+                    throw std::runtime_error(
+                        "FlashNextTextExecutor: failed to capture decode graph for B=" + std::to_string(B) +
+                        " bucket=0 blocks=" + std::to_string(bucket_blocks));
+                } else {
+                    graph_pinned_eager_[B - 1][bucket_idx] = true;
+                    std::fprintf(stderr,
+                                 "FlashNextTextExecutor: WARNING: pinning B=%u bucket=%u to permanent eager decode\n",
+                                 B, bucket_idx);
+                }
+            }
         }
-        device_.synchronize();
     }
+
+    // Zero out persistent state (KV caches, recurrent states, table rows) modified by dummy capture runs
+    CUDA_CHECK(cudaMemsetAsync(alloc_.persistent_base(), 0, alloc_.persistent_bytes(), device_.stream));
+    CUDA_CHECK(cudaStreamSynchronize(device_.stream));
 }
 
 LaneHandle FlashNextTextExecutor::allocate_lane() {
@@ -306,65 +341,6 @@ bool FlashNextTextExecutor::install_captured_graph(std::uint32_t batch_size,
     topology.executable.upload(device_.stream);
     decode_graphs_.topologies.push_back(std::move(topology));
     return true;
-}
-
-FlashNextTextExecutor::LazyCaptureOutcome
-FlashNextTextExecutor::try_lazy_capture(std::uint32_t batch_size, std::uint32_t bucket_index,
-                                        std::int32_t bucket_blocks) {
-    const std::uint32_t bslot = batch_size - 1;
-    if (graph_pinned_eager_[bslot][bucket_index]) { return LazyCaptureOutcome::NeedEager; }
-
-    // Dummy warmup+capture mutates persistent decode state. Snapshot/restore so the
-    // production round can launch the new graph against the live KV/ingress.
-    const std::size_t persistent_bytes = alloc_.persistent_bytes();
-    if (!lazy_capture_scratch_ || lazy_capture_scratch_->bytes < persistent_bytes) {
-        lazy_capture_scratch_ = std::make_unique<DeviceBuffer>(persistent_bytes);
-    }
-    const std::size_t ple_bytes =
-        static_cast<std::size_t>(alloc_.plan().config.max_concurrency) * 2'560 *
-        sizeof(std::uint16_t);
-    std::vector<std::byte> saved_ple(ple_bytes);
-    std::memcpy(saved_ple.data(), ple_pipeline_.fixed_host_buffer(), ple_bytes);
-    const FlashNextDecodeIngress saved_ing = *alloc_.host_ingress();
-    CUDA_CHECK(cudaMemcpyAsync(lazy_capture_scratch_->p, alloc_.persistent_base(), persistent_bytes,
-                               cudaMemcpyDeviceToDevice, device_.stream));
-
-    bool installed = false;
-    const auto t0  = std::chrono::steady_clock::now();
-    try {
-        std::memset(alloc_.host_ingress(), 0, sizeof(FlashNextDecodeIngress));
-        std::memset(const_cast<void*>(ple_pipeline_.fixed_host_buffer()), 0, ple_bytes);
-        execute_round_body(batch_size, bucket_blocks, nullptr);
-        device_.synchronize();
-        if (!install_captured_graph(batch_size, bucket_index, bucket_blocks)) {
-            throw std::runtime_error("capture produced an empty graph definition");
-        }
-        const auto t1 = std::chrono::steady_clock::now();
-        last_lazy_capture_ms_ = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        graph_capture_failures_[bslot][bucket_index] = 0;
-        installed = true;
-    } catch (const std::exception& ex) {
-        graph_capture_failures_[bslot][bucket_index] =
-            static_cast<std::uint8_t>(graph_capture_failures_[bslot][bucket_index] + 1);
-        std::fprintf(stderr,
-                     "FlashNextTextExecutor: CUDA graph capture failed for B=%u bucket=%u "
-                     "blocks=%d (attempt %u): %s\n",
-                     batch_size, bucket_index, bucket_blocks,
-                     static_cast<unsigned>(graph_capture_failures_[bslot][bucket_index]),
-                     ex.what());
-        if (graph_capture_failures_[bslot][bucket_index] >= 2) {
-            graph_pinned_eager_[bslot][bucket_index] = true;
-            std::fprintf(stderr,
-                         "FlashNextTextExecutor: pinning B=%u bucket=%u to permanent eager decode\n",
-                         batch_size, bucket_index);
-        }
-    }
-
-    CUDA_CHECK(cudaMemcpyAsync(alloc_.persistent_base(), lazy_capture_scratch_->p, persistent_bytes,
-                               cudaMemcpyDeviceToDevice, device_.stream));
-    *alloc_.host_ingress() = saved_ing;
-    std::memcpy(const_cast<void*>(ple_pipeline_.fixed_host_buffer()), saved_ple.data(), ple_bytes);
-    return installed ? LazyCaptureOutcome::Installed : LazyCaptureOutcome::NeedEager;
 }
 
 void FlashNextTextExecutor::execute_round_body(std::uint32_t batch_size,
@@ -550,22 +526,12 @@ PendingRound FlashNextTextExecutor::finish_prepared_round(
             decode_graphs_.buckets, active_blocks);
         bool ran = false;
         if (!force_eager && use_cuda_graph_ && sink == nullptr && !has_custom &&
-            model_.token_embedding.payload != nullptr && decode_graphs_.buckets.count > 0) {
+            model_.token_embedding.payload != nullptr && decode_graphs_.buckets.count > 0 &&
+            !graph_pinned_eager_[batch_size - 1][bucket_index]) {
             if (auto* topology = find_topology(batch_size, bucket_index);
                 topology != nullptr && topology->executable.ready()) {
                 topology->executable.launch(device_.stream);
                 ran = true;
-            } else if (!graph_pinned_eager_[batch_size - 1][bucket_index]) {
-                const auto outcome = try_lazy_capture(batch_size, bucket_index, active_blocks);
-                if (outcome == LazyCaptureOutcome::Installed) {
-                    auto* topology = find_topology(batch_size, bucket_index);
-                    if (topology == nullptr || !topology->executable.ready()) {
-                        throw std::logic_error(
-                            "FlashNextTextExecutor: lazy capture installed without a ready topology");
-                    }
-                    topology->executable.launch(device_.stream);
-                    ran = true;
-                }
             }
         }
         if (!ran) { execute_round_body(batch_size, active_blocks, sink); }

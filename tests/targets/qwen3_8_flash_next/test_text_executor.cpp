@@ -2302,18 +2302,18 @@ int test_decode_graph_bucket_key_layout(ninfer::DeviceContext& device) {
                       << family.buckets.count << "\n";
             return 1;
         }
-        if (family.topologies.size() != 2) {
-            std::cerr << "FAIL: startup should capture only the smallest bucket for B=1..2, got "
+        if (family.topologies.size() != 4) {
+            std::cerr << "FAIL: startup should capture all buckets for B=1..2 (2 buckets * 2 B = 4), got "
                       << family.topologies.size() << " topologies\n";
             return 1;
         }
         for (const auto& topology : family.topologies) {
-            if (topology.bucket_index != 0 || topology.batch_size < 1 || topology.batch_size > 2) {
+            if (topology.bucket_index > 1 || topology.batch_size < 1 || topology.batch_size > 2) {
                 std::cerr << "FAIL: startup topology B=" << topology.batch_size
-                          << " bucket_index=" << topology.bucket_index << " (expected bucket 0)\n";
+                          << " bucket_index=" << topology.bucket_index << " outside legal range\n";
                 return 1;
             }
-            const auto want = flash_next_decode_graph_topology_class(topology.batch_size, 0);
+            const auto want = flash_next_decode_graph_topology_class(topology.batch_size, topology.bucket_index);
             if (topology.topology_class != want) {
                 std::cerr << "FAIL: topology_class=" << topology.topology_class
                           << " expected=" << want << "\n";
@@ -2321,14 +2321,49 @@ int test_decode_graph_bucket_key_layout(ninfer::DeviceContext& device) {
             }
         }
         for (const auto& profile : family.profiles) {
-            if (profile.bucket_index != 0 || profile.bucket_blocks != 512 ||
+            if (profile.bucket_index > 1 ||
+                profile.bucket_blocks != family.buckets.blocks[profile.bucket_index] ||
                 profile.topology_class !=
                     flash_next_decode_graph_topology_class(profile.batch_size, profile.bucket_index)) {
                 std::cerr << "FAIL: profile key layout B=" << profile.batch_size
                           << " bucket=" << profile.bucket_index
                           << " blocks=" << profile.bucket_blocks
                           << " class=" << profile.topology_class << "\n";
-                return 1;
+            }
+        }
+        // Sequence D23 invariant: for every B in [1, max_concurrency] x bucket,
+        // a ready topology exists with profile.bucket_blocks == buckets.blocks[bucket].
+        for (std::uint32_t B = 1; B <= 2; ++B) {
+            for (std::uint32_t bucket = 0; bucket < family.buckets.count; ++bucket) {
+                bool found = false;
+                for (const auto& topology : family.topologies) {
+                    if (topology.batch_size == B && topology.bucket_index == bucket) {
+                        found = true;
+                        if (!topology.executable.ready()) {
+                            std::cerr << "FAIL: topology B=" << B << " bucket=" << bucket
+                                      << " executable is not ready\n";
+                            return 1;
+                        }
+                        if (!topology.installed_profile.has_value() ||
+                            topology.installed_profile.value() >= family.profiles.size()) {
+                            std::cerr << "FAIL: topology B=" << B << " bucket=" << bucket
+                                      << " installed_profile out of range\n";
+                            return 1;
+                        }
+                        const auto& profile = family.profiles[topology.installed_profile.value()];
+                        if (profile.bucket_blocks != family.buckets.blocks[bucket]) {
+                            std::cerr << "FAIL: profile B=" << B << " bucket=" << bucket
+                                      << " blocks=" << profile.bucket_blocks
+                                      << " expected=" << family.buckets.blocks[bucket] << "\n";
+                            return 1;
+                        }
+                        break;
+                    }
+                }
+                if (!found) {
+                    std::cerr << "FAIL: missing topology for B=" << B << " bucket=" << bucket << "\n";
+                    return 1;
+                }
             }
         }
         std::cout << "PASS: test_decode_graph_bucket_key_layout topologies="
@@ -2382,9 +2417,10 @@ int test_cuda_graph_bucketed_decode(ninfer::DeviceContext& device) {
         exec_eager.set_use_cuda_graph(false);
         exec_live.set_use_cuda_graph(false);
 
-        if (exec_graph.decode_graphs().topologies.size() != 1 ||
-            exec_graph.decode_graphs().topologies[0].bucket_index != 0) {
-            std::cerr << "FAIL: graph executor did not start with a single identity-bucket capture\n";
+        if (exec_graph.decode_graphs().topologies.size() != 2 ||
+            exec_graph.decode_graphs().topologies[0].bucket_index != 0 ||
+            exec_graph.decode_graphs().topologies[1].bucket_index != 1) {
+            std::cerr << "FAIL: graph executor did not start with eager capture of both buckets\n";
             return 1;
         }
 
@@ -2465,8 +2501,8 @@ int test_cuda_graph_bucketed_decode(ninfer::DeviceContext& device) {
         prefill_one(exec_eager, lane_e);
         prefill_one(exec_live, lane_l);
 
-        if (exec_graph.decode_graphs().topologies.size() != 1) {
-            std::cerr << "FAIL: prefill must not capture a larger decode bucket, topologies="
+        if (exec_graph.decode_graphs().topologies.size() != 2) {
+            std::cerr << "FAIL: prefill must preserve eager decode bucket count, topologies="
                       << exec_graph.decode_graphs().topologies.size() << "\n";
             return 1;
         }
@@ -2520,7 +2556,7 @@ int test_cuda_graph_bucketed_decode(ninfer::DeviceContext& device) {
             return 1;
         }
         if (exec_graph.decode_graphs().topologies.size() != 2) {
-            std::cerr << "FAIL: expected lazy capture of bucket 1, topologies="
+            std::cerr << "FAIL: crossing must reuse eager bucket 1 without runtime capture, topologies="
                       << exec_graph.decode_graphs().topologies.size() << "\n";
             return 1;
         }
@@ -2535,18 +2571,16 @@ int test_cuda_graph_bucketed_decode(ninfer::DeviceContext& device) {
             std::cerr << "FAIL: missing explicit bucket_index=1 topology after crossing\n";
             return 1;
         }
-        if (!exec_graph.last_lazy_capture_milliseconds().has_value() ||
-            !(exec_graph.last_lazy_capture_milliseconds().value() > 0.0)) {
-            std::cerr << "FAIL: lazy capture latency was not recorded\n";
+        if (exec_graph.last_lazy_capture_milliseconds().has_value()) {
+            std::cerr << "FAIL: lazy capture occurred when eager capture was expected\n";
             return 1;
         }
         if (exec_graph.decode_graph_pinned_eager(1, 1)) {
-            std::cerr << "FAIL: bucket 1 was pinned to eager after a successful capture\n";
+            std::cerr << "FAIL: bucket 1 was pinned to eager unexpectedly\n";
             return 1;
         }
 
-        std::cout << "PASS: test_cuda_graph_bucketed_decode lazy_capture_ms="
-                  << exec_graph.last_lazy_capture_milliseconds().value() << "\n";
+        std::cout << "PASS: test_cuda_graph_bucketed_decode eager startup graphs\n";
         exec_graph.release_lane(lane_g);
         exec_eager.release_lane(lane_e);
         exec_live.release_lane(lane_l);

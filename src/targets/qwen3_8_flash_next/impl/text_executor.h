@@ -198,9 +198,12 @@ public:
     [[nodiscard]] bool use_cuda_graph() const noexcept { return use_cuda_graph_; }
     void set_use_cuda_graph(bool enable) noexcept { use_cuda_graph_ = enable; }
     [[nodiscard]] const DecodeGraphFamily& decode_graphs() const noexcept { return decode_graphs_; }
+    // Retained for interface compatibility: lazy capture is deprecated in Sequence D23 (graphs are captured eagerly at startup).
     [[nodiscard]] std::optional<double> last_lazy_capture_milliseconds() const noexcept {
         return last_lazy_capture_ms_;
     }
+    // Returns true if decode graph for (batch_size, bucket_index) failed capture at startup
+    // and was pinned to eager execution.
     [[nodiscard]] bool decode_graph_pinned_eager(std::uint32_t batch_size,
                                                  std::uint32_t bucket_index) const noexcept;
 
@@ -244,7 +247,6 @@ private:
     std::optional<double> last_lazy_capture_ms_;
     std::uint8_t graph_capture_failures_[8][kFlashNextDecodeGraphMaxBuckets]{};
     bool graph_pinned_eager_[8][kFlashNextDecodeGraphMaxBuckets]{};
-    std::unique_ptr<DeviceBuffer> lazy_capture_scratch_;
 
     // MTP draft buffers & cache
     std::unique_ptr<DeviceBuffer> mtp_key_pages_;
@@ -258,16 +260,12 @@ private:
     std::unique_ptr<DeviceBuffer> mtp_input_embedding_;
     std::unique_ptr<DeviceBuffer> mtp_carried_hidden_;
 
-    enum class LazyCaptureOutcome { Installed, NeedEager };
-
     [[nodiscard]] DecodeGraphTopology* find_topology(std::uint32_t batch_size,
                                                      std::uint32_t bucket_index) noexcept;
     [[nodiscard]] const DecodeGraphTopology* find_topology(std::uint32_t batch_size,
                                                            std::uint32_t bucket_index) const noexcept;
     bool install_captured_graph(std::uint32_t batch_size, std::uint32_t bucket_index,
                                 std::int32_t bucket_blocks);
-    LazyCaptureOutcome try_lazy_capture(std::uint32_t batch_size, std::uint32_t bucket_index,
-                                        std::int32_t bucket_blocks);
     [[nodiscard]] PendingRound
     finish_prepared_round(std::span<const LaneStepRequest> requests,
                           FlashNextLaneLedger::PreparedRound prepared,

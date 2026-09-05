@@ -1,4 +1,5 @@
 #include "core/arena.h"
+#include "core/device_memory.h"
 
 #include <cuda_runtime.h>
 
@@ -55,6 +56,16 @@ void free_pinned(void*& ptr) noexcept {
 
 DeviceBuffer::DeviceBuffer(std::size_t size_bytes) : bytes(size_bytes) {
     if (bytes == 0) { return; }
+
+    const std::size_t floor = runtime_desktop_reserve_floor();
+    if (floor > 0) {
+        int dev = 0;
+        cudaGetDevice(&dev);
+        std::string err_detail;
+        if (!check_runtime_desktop_reserve(dev, size_bytes, &err_detail)) {
+            throw DeviceReserveBreach("DeviceBuffer: " + err_detail);
+        }
+    }
 
     void* ptr             = nullptr;
     const cudaError_t err = cudaMalloc(&ptr, bytes);
@@ -134,6 +145,16 @@ DeviceArena::Scope::Scope(Scope&& other) noexcept
 DeviceArena::DeviceArena(std::size_t capacity_bytes) {
     if (capacity_bytes == 0) {
         throw std::invalid_argument("DeviceArena capacity must be nonzero");
+    }
+
+    const std::size_t floor = runtime_desktop_reserve_floor();
+    if (floor > 0) {
+        int dev = 0;
+        cudaGetDevice(&dev);
+        std::string err_detail;
+        if (!check_runtime_desktop_reserve(dev, capacity_bytes, &err_detail)) {
+            throw DeviceReserveBreach("DeviceArena: " + err_detail);
+        }
     }
 
     void* ptr             = nullptr;

@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include <nvml.h>
 
+#include <atomic>
 #include <cstdio>
 #include <iomanip>
 #include <mutex>
@@ -339,6 +340,44 @@ std::string format_insufficient_memory_error(
                         : "cudaMemGetInfo (single-process fallback; blind to other GPU allocations)")
         << ".";
     return oss.str();
+}
+
+namespace {
+std::atomic<std::size_t> g_runtime_desktop_reserve_floor{0};
+} // namespace
+
+void set_runtime_desktop_reserve_floor(std::size_t floor_bytes) noexcept {
+    g_runtime_desktop_reserve_floor.store(floor_bytes, std::memory_order_relaxed);
+}
+
+std::size_t runtime_desktop_reserve_floor() noexcept {
+    return g_runtime_desktop_reserve_floor.load(std::memory_order_relaxed);
+}
+
+bool check_runtime_desktop_reserve(int device_index, std::size_t additional_bytes,
+                                   std::string* error_detail) {
+    const std::size_t floor = runtime_desktop_reserve_floor();
+    if (floor == 0) {
+        return true;
+    }
+    const DeviceMemorySnapshot mem = query_device_memory(device_index);
+    if (mem.free_bytes < floor || mem.free_bytes - floor < additional_bytes) {
+        if (error_detail != nullptr) {
+            std::ostringstream oss;
+            oss << "Device memory allocation of " << format_device_memory_bytes(additional_bytes)
+                << " would breach runtime desktop reserve floor of "
+                << format_device_memory_bytes(floor)
+                << " (available: " << format_device_memory_bytes(mem.free_bytes)
+                << ", remaining after allocation: "
+                << (mem.free_bytes > additional_bytes
+                        ? format_device_memory_bytes(mem.free_bytes - additional_bytes)
+                        : "0 B")
+                << ").";
+            *error_detail = oss.str();
+        }
+        return false;
+    }
+    return true;
 }
 
 } // namespace ninfer

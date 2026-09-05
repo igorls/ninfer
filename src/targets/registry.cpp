@@ -103,6 +103,7 @@ template <class Target, class Loaded, class Instance>
 ConstructedTarget construct_registered(const EngineOptions& options, DeviceContext& device,
                                        artifact::Reader& reader, Clock::time_point load_start,
                                        std::string_view target_key) {
+    set_runtime_desktop_reserve_floor(0);
     StartupPhaseScope target_plan_phase(options.startup_observer, StartupPhase::TargetPlan);
     const auto& identity                          = reader.identity();
     const auto weights_profile                    = Target::resolve_weights(identity);
@@ -214,6 +215,8 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
     auto loaded = std::make_unique<Loaded>(std::move(model), effective_options);
     frontend_phase.complete();
 
+    const std::size_t available_after_weights_bytes = current_free_device_bytes(device.device);
+
     StartupPhaseScope program_phase(effective_options.startup_observer, StartupPhase::ProgramInitialize);
     auto instance =
         std::make_unique<Instance>(std::move(loaded), capacity_resolution, std::move(sequence_plan),
@@ -230,11 +233,47 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
                  post_startup_free, post_startup_free / (1024ULL * 1024ULL),
                  options.desktop_reserve_bytes / (1024ULL * 1024ULL),
                  options.min_slack_floor_bytes / (1024ULL * 1024ULL));
-    if (post_startup_free < options.desktop_reserve_bytes) {
-        std::fprintf(stderr,
-                     "[kv-sizer] CRITICAL WARNING: Device memory free after startup (%zu bytes) is below the desktop reserve floor (%zu bytes)! Desktop compositor stalls may occur.\n",
-                     post_startup_free, options.desktop_reserve_bytes);
+
+    const std::size_t resident_growth_bytes =
+        (available_after_weights_bytes > post_startup_free)
+            ? (available_after_weights_bytes - post_startup_free)
+            : 0;
+    constexpr std::size_t kGrowthToleranceBytes = 32ULL * 1024ULL * 1024ULL;
+    if (options.desktop_reserve_bytes > 0 && post_startup_free < options.desktop_reserve_bytes) {
+        if (resident_growth_bytes > capacity_resolution.runtime_reservation_bytes + kGrowthToleranceBytes) {
+            throw std::runtime_error(
+                "[kv-sizer] Engine resident memory growth (" +
+                format_device_memory_bytes(resident_growth_bytes) +
+                ") exceeded planned runtime reservation (" +
+                format_device_memory_bytes(capacity_resolution.runtime_reservation_bytes) +
+                ") by " +
+                format_device_memory_bytes(
+                    resident_growth_bytes - capacity_resolution.runtime_reservation_bytes) +
+                ", breaching the desktop reserve floor (" +
+                format_device_memory_bytes(options.desktop_reserve_bytes) +
+                ", free remaining: " + format_device_memory_bytes(post_startup_free) + ").");
+        } else {
+            const std::size_t planned_budget = capacity_resolution.runtime_reservation_bytes;
+            const std::size_t expected_free =
+                (available_after_weights_bytes > planned_budget)
+                    ? (available_after_weights_bytes - planned_budget)
+                    : 0;
+            const std::size_t foreign_usage =
+                (expected_free > post_startup_free)
+                    ? (expected_free - post_startup_free)
+                    : (options.desktop_reserve_bytes - post_startup_free);
+            std::fprintf(stderr,
+                         "[kv-sizer] CRITICAL WARNING: Device memory free after startup (%zu bytes / %zu MiB) is below the desktop reserve floor (%zu MiB)!\n"
+                         "[kv-sizer] Engine resident growth (%zu MiB) respected planned reservation (%zu MiB), but foreign process usage consumed %zu MiB during load.\n"
+                         "[kv-sizer] Desktop compositor stalls may occur.\n",
+                         post_startup_free, post_startup_free / (1024ULL * 1024ULL),
+                         options.desktop_reserve_bytes / (1024ULL * 1024ULL),
+                         resident_growth_bytes / (1024ULL * 1024ULL),
+                         capacity_resolution.runtime_reservation_bytes / (1024ULL * 1024ULL),
+                         foreign_usage / (1024ULL * 1024ULL));
+        }
     }
+    set_runtime_desktop_reserve_floor(options.desktop_reserve_bytes);
 
     LoadSummary summary;
     summary.target               = std::string(target_key);
@@ -273,7 +312,9 @@ Qwen3_6_27BInstance::Qwen3_6_27BInstance(std::unique_ptr<LoadedQwen3_6_27B> stab
       program(Qwen3_6_27B::create_program(*loaded->model, std::move(sequence_plan), device,
                                           startup_observer)) {}
 
-Qwen3_6_27BInstance::~Qwen3_6_27BInstance() = default;
+Qwen3_6_27BInstance::~Qwen3_6_27BInstance() {
+    set_runtime_desktop_reserve_floor(0);
+}
 
 LoadedQwen3_6_35BA3B::LoadedQwen3_6_35BA3B(
     std::unique_ptr<Qwen3_6_35BA3B::LoadedModel> stable_model, const EngineOptions& options)
@@ -291,7 +332,9 @@ Qwen3_6_35BA3BInstance::Qwen3_6_35BA3BInstance(std::unique_ptr<LoadedQwen3_6_35B
       program(Qwen3_6_35BA3B::create_program(*loaded->model, std::move(sequence_plan), device,
                                              startup_observer)) {}
 
-Qwen3_6_35BA3BInstance::~Qwen3_6_35BA3BInstance() = default;
+Qwen3_6_35BA3BInstance::~Qwen3_6_35BA3BInstance() {
+    set_runtime_desktop_reserve_floor(0);
+}
 
 LoadedQwen3_8FlashNext::LoadedQwen3_8FlashNext(
     std::unique_ptr<Qwen3_8FlashNext::LoadedModel> stable_model, const EngineOptions& options)
@@ -308,7 +351,9 @@ Qwen3_8FlashNextInstance::Qwen3_8FlashNextInstance(
       program(Qwen3_8FlashNext::create_program(*loaded->model, std::move(sequence_plan), device,
                                               startup_observer)) {}
 
-Qwen3_8FlashNextInstance::~Qwen3_8FlashNextInstance() = default;
+Qwen3_8FlashNextInstance::~Qwen3_8FlashNextInstance() {
+    set_runtime_desktop_reserve_floor(0);
+}
 
 ConstructedTarget construct_target(const EngineOptions& options, DeviceContext& device) {
     validate_options(options);
