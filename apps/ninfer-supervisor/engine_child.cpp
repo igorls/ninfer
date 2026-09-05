@@ -273,6 +273,21 @@ void EngineChild::observe_health(int http_status) {
             }
         } else {
             st_.health = "unreachable";
+            // An engine that answered /health and then stopped answering is the
+            // worst failure there is: the process is alive, so the crash-loop
+            // breaker never sees an exit, it still owns the port and the GPU
+            // memory, and it serves nothing. Only 503 used to advance the
+            // counter, so this -- the case the supervisor exists for -- was the
+            // one case it never recovered from. Observed: health unreachable for
+            // minutes while state stayed Running and no restart was attempted.
+            //
+            // Guarded on st_.ready, which spawn() clears and only a 200 sets, so
+            // a model that is still loading is legitimately unreachable for its
+            // first seconds and must not be restarted before it ever binds.
+            if (st_.ready && gate_.note_health_fail() && auto_restart_.load()) {
+                st_.last_event = "health restart threshold (unreachable)";
+                restart_now    = true;
+            }
         }
     }
     if (restart_now) { restart(); }
