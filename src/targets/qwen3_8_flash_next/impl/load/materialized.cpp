@@ -6,9 +6,12 @@
 #include "targets/qwen3_8_flash_next/impl/load/quantize_output_head.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <numeric>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -85,6 +88,20 @@ Weight fp8_weight(const artifact::MaterializedArtifact& backing, artifact::Objec
                   std::int32_t rows, std::int32_t columns) {
     return artifact::materialized_weight(backing, handle, NumericFormat::FP8_E4M3FN_ROW_F32S, rows,
                                          columns);
+}
+
+// Host-mapped BF16 payload of a tensor bound with retain_mapped_tensor. The size check is the
+// only guard against quantizing a differently shaped tensor: the mapping is raw file bytes.
+std::span<const std::byte> mapped_bf16_rows(const artifact::MaterializedArtifact& backing,
+                                            artifact::ObjectHandle handle, std::int32_t rows,
+                                            std::int32_t columns) {
+    const std::span<const std::byte> bytes = backing.mapped_tensor_bytes(handle);
+    const std::size_t expected =
+        static_cast<std::size_t>(rows) * columns * sizeof(std::uint16_t);
+    if (bytes.size() != expected) {
+        throw std::logic_error("Flash-Next mapped BF16 tensor has an unexpected payload size");
+    }
+    return bytes;
 }
 
 HyperConnectionWeights load_hyper(const HyperConnectionPlan& plan,
@@ -250,15 +267,31 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
     : backing(std::move(materialized)) {
     frontend = qwen3_6::take_frontend_resources(backing, plan.frontend);
 
-    text.weights_arena     = &backing.device_arena();
-    text.token_embedding   = bf16_weight(backing, plan.token_embedding, 248'320, 2'560);
-    if (quantize_token_embedding_fp8) {
+    text.weights_arena = &backing.device_arena();
+
+    // plan.features carries the *binding* decision made in bind_artifact: when its FP8 flag is set
+    // the BF16 tensor was retained in the file mapping and must be quantized from the host span.
+    // The constructor arguments stay authoritative for StandaloneLoadedModel, which always binds
+    // on the device and therefore quantizes device-to-device (no VRAM saving, same numerics).
+    const bool embedding_mapped = plan.features.quantize_token_embedding_fp8;
+    const bool head_mapped      = plan.features.quantize_output_head_fp8;
+
+    if (embedding_mapped) {
         token_embedding_fp8 = DeviceBuffer(flash_next_fp8_head_payload_bytes(248'320, 2'560));
-        Weight fp8_embedding{};
-        quantize_bf16_head_to_fp8_e4m3_row_f32s(text.token_embedding, token_embedding_fp8,
-                                                fp8_embedding, 248'320, 2'560, cudaStream_t{});
+        quantize_bf16_rows_to_fp8_e4m3_row_f32s(
+            mapped_bf16_rows(backing, plan.token_embedding, 248'320, 2'560).data(),
+            token_embedding_fp8, text.token_embedding, 248'320, 2'560, cudaStream_t{});
         CUDA_CHECK(cudaDeviceSynchronize());
-        text.token_embedding = fp8_embedding;
+    } else {
+        text.token_embedding = bf16_weight(backing, plan.token_embedding, 248'320, 2'560);
+        if (quantize_token_embedding_fp8) {
+            token_embedding_fp8 = DeviceBuffer(flash_next_fp8_head_payload_bytes(248'320, 2'560));
+            Weight fp8_embedding{};
+            quantize_bf16_head_to_fp8_e4m3_row_f32s(text.token_embedding, token_embedding_fp8,
+                                                    fp8_embedding, 248'320, 2'560, cudaStream_t{});
+            CUDA_CHECK(cudaDeviceSynchronize());
+            text.token_embedding = fp8_embedding;
+        }
     }
     std::size_t full_index = 0;
     std::size_t gdn_index  = 0;
@@ -277,16 +310,29 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
     if (full_index != text.full_attention.size() || gdn_index != text.gdn.size()) {
         throw std::logic_error("Flash-Next Text topology materialization is incomplete");
     }
-    text.ple                   = load_ple(plan.ple, backing);
-    const Weight raw_bf16_head = bf16_weight(backing, plan.output_head, 248'320, 2'560);
-    text.output_head           = raw_bf16_head;
-    if (quantize_output_head_fp8) {
+    text.ple = load_ple(plan.ple, backing);
+
+    // Mapped head: the BF16 rows stay in the file mapping, so both the FP8 head and the optimized
+    // proposal head's shortlist rows are produced from `mapped_head` instead of a device view.
+    std::span<const std::byte> mapped_head;
+    Weight raw_bf16_head{};
+    if (head_mapped) {
+        mapped_head     = mapped_bf16_rows(backing, plan.output_head, 248'320, 2'560);
         output_head_fp8 = DeviceBuffer(flash_next_fp8_output_head_payload_bytes());
-        Weight fp8_head{};
-        quantize_bf16_output_head_to_fp8_e4m3_row_f32s(text.output_head, output_head_fp8, fp8_head,
-                                                       cudaStream_t{});
+        quantize_bf16_rows_to_fp8_e4m3_row_f32s(mapped_head.data(), output_head_fp8,
+                                                text.output_head, 248'320, 2'560, cudaStream_t{});
         CUDA_CHECK(cudaDeviceSynchronize());
-        text.output_head = fp8_head;
+    } else {
+        raw_bf16_head    = bf16_weight(backing, plan.output_head, 248'320, 2'560);
+        text.output_head = raw_bf16_head;
+        if (quantize_output_head_fp8) {
+            output_head_fp8 = DeviceBuffer(flash_next_fp8_output_head_payload_bytes());
+            Weight fp8_head{};
+            quantize_bf16_output_head_to_fp8_e4m3_row_f32s(raw_bf16_head, output_head_fp8, fp8_head,
+                                                           cudaStream_t{});
+            CUDA_CHECK(cudaDeviceSynchronize());
+            text.output_head = fp8_head;
+        }
     }
 
     if (plan.features.proposal_head == ProposalHead::Optimized) {
@@ -300,13 +346,20 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
         proposal_head_payload =
             DeviceBuffer(static_cast<std::size_t>(K) * 2'560 * sizeof(std::uint16_t));
         Weight bf16_proposal_head{};
-        gather_head_rows_bf16(raw_bf16_head,
-                              static_cast<const std::int32_t*>(proposal_token_ids.p),
-                              static_cast<std::int32_t>(K), 2'560, proposal_head_payload,
-                              bf16_proposal_head, cudaStream_t{});
+        if (head_mapped) {
+            gather_head_rows_bf16_from_host(mapped_head, shortlist_ids.data(),
+                                            static_cast<std::int32_t>(K), 248'320, 2'560,
+                                            proposal_head_payload, bf16_proposal_head,
+                                            cudaStream_t{});
+        } else {
+            gather_head_rows_bf16(raw_bf16_head,
+                                  static_cast<const std::int32_t*>(proposal_token_ids.p),
+                                  static_cast<std::int32_t>(K), 2'560, proposal_head_payload,
+                                  bf16_proposal_head, cudaStream_t{});
+        }
 
         Weight final_proposal_head = bf16_proposal_head;
-        if (quantize_output_head_fp8) {
+        if (quantize_output_head_fp8 || head_mapped) {
             proposal_head_fp8 = DeviceBuffer(flash_next_fp8_head_payload_bytes(static_cast<std::int32_t>(K), 2'560));
             Weight fp8_proposal_head{};
             quantize_bf16_head_to_fp8_e4m3_row_f32s(bf16_proposal_head, proposal_head_fp8,

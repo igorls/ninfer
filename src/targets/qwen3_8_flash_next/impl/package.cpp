@@ -105,12 +105,16 @@ Package::LoadPlan Package::plan_load(artifact::Binder& binder, const EngineOptio
     if (const char* env = std::getenv("NINFER_FLASH_NEXT_DRAFT_HEAD_ROWS"); env && env[0] != '\0') {
         draft_rows = static_cast<std::uint32_t>(std::strtoul(env, nullptr, 10));
     }
+    // The quantize flags have to reach the binder, not just the materializer: they decide whether
+    // the BF16 head/embedding is uploaded into the artifact arena or left in the file mapping.
     auto target_plan = detail::bind_artifact(
         binder, detail::LoadFeatures{
-                    .vision           = options.enable_vision,
-                    .mtp              = enable_mtp,
-                    .proposal_head    = options.speculative.proposal_head,
-                    .draft_head_rows  = draft_rows,
+                    .vision                       = options.enable_vision,
+                    .mtp                          = enable_mtp,
+                    .proposal_head                = options.speculative.proposal_head,
+                    .draft_head_rows              = draft_rows,
+                    .quantize_output_head_fp8     = options.quantize_output_head_fp8,
+                    .quantize_token_embedding_fp8 = options.quantize_token_embedding_fp8,
                 });
     return LoadPlan(std::make_unique<LoadPlan::Impl>(
         weights_profile, std::move(target_plan), options.quantize_output_head_fp8,

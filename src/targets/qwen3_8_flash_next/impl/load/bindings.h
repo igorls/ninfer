@@ -18,6 +18,12 @@ struct LoadFeatures {
     bool mtp                               = false;
     ProposalHead proposal_head             = ProposalHead::Full;
     std::uint32_t draft_head_rows          = 32'768;
+    // The FP8 flags are a *binding* decision, not only a load-time conversion: when set, the BF16
+    // head / embedding is retained in the artifact's file mapping (zero device bytes) and the FP8
+    // copy is quantized from the host span. Binding them on the device instead made each flag
+    // cost 608 MiB of VRAM rather than saving it (bench/d17 server logs, 2026-09-05).
+    bool quantize_output_head_fp8          = false;
+    bool quantize_token_embedding_fp8      = false;
 };
 
 struct HyperConnectionPlan {

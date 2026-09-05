@@ -287,8 +287,15 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, LoadFeatures features) 
     BindingPlan& plan    = out.bindings;
     plan.features        = features;
     plan.frontend        = qwen3_6::bind_frontend_resources(binder);
-    plan.token_embedding = bind_device(binder, "text/token_embedding", NumericFormat::BF16,
-                                       kBf16Layout, {248'320, 2'560});
+    // FP8 at load: keep the BF16 payload in the file mapping (retain_mapped_tensor adds zero
+    // device bytes) and let LoadedModelData quantize from the host span. Uploading it first would
+    // leave the BF16 copy pinned in the artifact's bump arena, which has no per-object free.
+    plan.token_embedding =
+        features.quantize_token_embedding_fp8
+            ? bind_mapped(binder, "text/token_embedding", NumericFormat::BF16, kBf16Layout,
+                          {248'320, 2'560})
+            : bind_device(binder, "text/token_embedding", NumericFormat::BF16, kBf16Layout,
+                          {248'320, 2'560});
 
     for (std::size_t layer = 0; layer < plan.text_layers.size(); ++layer) {
         const std::string prefix = "text/layers/" + std::to_string(layer) + "/";
@@ -305,9 +312,12 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, LoadFeatures features) 
         }
     }
 
-    plan.ple = bind_ple(binder);
-    plan.output_head =
-        bind_device(binder, "text/output_head", NumericFormat::BF16, kBf16Layout, {248'320, 2'560});
+    plan.ple         = bind_ple(binder);
+    plan.output_head = features.quantize_output_head_fp8
+                           ? bind_mapped(binder, "text/output_head", NumericFormat::BF16,
+                                         kBf16Layout, {248'320, 2'560})
+                           : bind_device(binder, "text/output_head", NumericFormat::BF16,
+                                         kBf16Layout, {248'320, 2'560});
     plan.final_mixer    = bind_mixer(binder, "text/hyper_connection/");
     plan.mtp            = bind_mtp(binder, features.mtp);
     plan.vision         = bind_vision(binder, features.vision);
