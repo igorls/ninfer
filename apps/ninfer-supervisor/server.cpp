@@ -90,8 +90,10 @@ nlohmann::json DashboardServer::state_json() {
                            {"mtp_accepted_per_position", snap.requests.mtp_accepted_per_position},
                            {"mtp_last_accept_rate", snap.requests.mtp_last_accept_rate}};
     nlohmann::json health = {{"status", snap.health_status}, {"body", snap.health_body}};
-    child_.observe_health(snap.health_status);
-    collector_.note_engine_state(state_name(st.state), st.last_event);
+    // Health observation and engine-state transitions are driven by the
+    // Collector's 1 Hz observe_loop, not from here. Doing it here as well made
+    // note_health_fail() count twice per second whenever a dashboard was open,
+    // which halves the effective health-fail threshold.
     const std::string log = child_.log_tail(16 * 1024);
     std::string cap       = extract_kv_capacity_line(log);
     if (cap.empty()) { cap = snap.engine_capacity_line; }
@@ -192,7 +194,10 @@ void DashboardServer::run() {
         std::cerr << "WARNING: ninfer-supervisor is binding " << host
                   << " — control endpoints start/stop the engine. Loopback is the default.\n";
     }
-    svr.listen(host, cfg_.port);
+    // listen() returns false immediately when the bind fails, and true only after
+    // stop(). Ignoring it is how a second supervisor ended up with a silently
+    // dead dashboard while still fighting for the engine port.
+    if (!svr.listen(host, cfg_.port) && !stop_.load()) { listen_failed_ = true; }
     server_ = nullptr;
 }
 

@@ -8,9 +8,11 @@
 #include <atomic>
 #include <cstdint>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace ninfer::supervisor {
@@ -64,6 +66,26 @@ public:
     nlohmann::json insights_report();
     void note_engine_state(const std::string& state, const std::string& last_event);
 
+    // Observation must not depend on somebody having a browser open. Health and
+    // engine-state were previously fed from DashboardServer::state_json(), so
+    // with no dashboard the tray never turned green, health-driven restarts
+    // never fired, and only one of two crash-loop halts reached series.jsonl.
+    // Both must be set BEFORE start_series(); they are read by the 1 Hz thread.
+    using HealthObserver      = std::function<void(int http_status)>;
+    using EngineStateProvider = std::function<std::pair<std::string, std::string>()>;
+    void set_health_observer(HealthObserver obs) { health_observer_ = std::move(obs); }
+    void set_engine_state_provider(EngineStateProvider p) { engine_state_provider_ = std::move(p); }
+
+    // The 1 Hz cached nvidia-smi reading. The tray menu uses this instead of
+    // spawning nvidia-smi on the UI thread: that spawn costs ~51 ms measured, and
+    // its read loop had no timeout, so a wedged nvidia-smi froze the menu.
+    [[nodiscard]] NvidiaSmiMemory last_nvidia();
+
+    // mtime of the engine's request log, or 0 when none is configured. A second,
+    // coarser activity source than the stderr scan: it survives a supervisor
+    // restart, where the stderr clock does not.
+    [[nodiscard]] std::int64_t request_log_last_write_unix_ms();
+
 private:
     void poll_health(Collected& out);
     void poll_admin(Collected& out);
@@ -71,6 +93,7 @@ private:
     void poll_request_log(Collected& out);
     void series_loop();
     void observe_loop();
+    [[nodiscard]] std::int64_t poll_request_log_mtime() const;
     void record_transitions(const Collected& snap);
     void persist_sample(const VramSample& s);
     void persist_event(const VramSeriesEvent& e);
@@ -96,6 +119,9 @@ private:
     std::string last_admin_note_;
     DxgiSnapshot last_dxgi_;
     NvidiaSmiMemory last_nvidia_;
+    HealthObserver health_observer_;
+    EngineStateProvider engine_state_provider_;
+    std::int64_t request_log_mtime_ms_ = 0;
 };
 
 } // namespace ninfer::supervisor

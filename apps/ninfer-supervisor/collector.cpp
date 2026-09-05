@@ -296,6 +296,33 @@ void Collector::stop_series() {
     if (observe_thread_.joinable()) { observe_thread_.join(); }
 }
 
+// One stat() per second. The request log is appended and flushed per record, so
+// its mtime is a precise "last time a request touched this engine" -- and unlike
+// the stderr scan it survives a supervisor restart. Computed as a delta against
+// the file clock's own now(), which avoids clock_cast and its libstdc++/MSVC
+// differences.
+std::int64_t Collector::poll_request_log_mtime() const {
+    if (spec_.request_log.empty()) { return 0; }
+    std::error_code ec;
+    const auto ft = std::filesystem::last_write_time(spec_.request_log, ec);
+    if (ec) { return 0; }
+    const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::filesystem::file_time_type::clock::now() - ft)
+                         .count();
+    const std::int64_t ms = now_ms() - static_cast<std::int64_t>(age);
+    return ms > 0 ? ms : 0;
+}
+
+NvidiaSmiMemory Collector::last_nvidia() {
+    std::lock_guard lock(mu_);
+    return last_nvidia_;
+}
+
+std::int64_t Collector::request_log_last_write_unix_ms() {
+    std::lock_guard lock(mu_);
+    return request_log_mtime_ms_;
+}
+
 void Collector::observe_loop() {
     // Health and /admin/vram are HTTP. They do not belong on the 10 Hz DXGI
     // loop. They also cannot live only inside snapshot() — that is demand-driven
@@ -309,7 +336,16 @@ void Collector::observe_loop() {
             poll_health(tmp);
             poll_admin(tmp);
             record_transitions(tmp);
+            // Outside mu_: the observer reaches into EngineChild, which takes its
+            // own lock and may restart the engine.
+            if (health_observer_) { health_observer_(tmp.health_status); }
+            if (engine_state_provider_) {
+                const auto st = engine_state_provider_();
+                note_engine_state(st.first, st.second);
+            }
+            const std::int64_t log_mtime = poll_request_log_mtime();
             std::lock_guard lock(mu_);
+            request_log_mtime_ms_ = log_mtime;
             detector_last_ran_ms_ = now_ms();
         } catch (...) {
             std::lock_guard lock(mu_);

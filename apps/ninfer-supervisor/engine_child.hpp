@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 
@@ -29,6 +30,20 @@ struct EngineStatus {
     std::string last_event;
     std::string health; // ok / unhealthy / unreachable
     int health_fails           = 0;
+
+    // Why, not just what. The tray's whole failure mode so far has been an amber
+    // dot with no explanation; these come from scanning the engine's own stderr,
+    // which is read for engine.log anyway.
+    std::string last_error_line;
+    std::int64_t last_error_unix_ms    = 0;
+    std::int64_t last_activity_unix_ms = 0;
+    bool ready                         = false; // engine printed `server status=ready`
+    int recent_exits                   = 0;
+    int crash_window_s                 = 0;
+    int desktop_reserve_gib            = 0; // effective at the last spawn; <0 = config default
+    // Requests the engine opened and has not finished, counted from its own
+    // stderr. Non-zero means "do not unload", whatever the activity clock says.
+    int inflight_requests              = 0;
 };
 
 class EngineChild {
@@ -45,9 +60,23 @@ public:
     void request_quit();
     void observe_health(int http_status);
 
+    // The reserve the tray last chose, applied to the argument vector at the
+    // NEXT spawn. This lives here rather than in the tray because EngineChild
+    // owns a *copy* of the config: mutating main's copy from the tray, which is
+    // what the first version did, could never reach the command line.
+    // kReserveUnset leaves the config's own arguments untouched.
+    void set_desktop_reserve_gib(int gib);
+
     [[nodiscard]] EngineStatus status() const;
     [[nodiscard]] std::string log_tail(std::size_t max_bytes) const;
     [[nodiscard]] const SupervisorConfig& config() const noexcept { return cfg_; }
+    [[nodiscard]] std::string logs_dir() const { return cfg_.logs_dir; }
+
+    // Last moment the engine proved it was doing something, from its own stderr.
+    // Atomic because the reader thread writes it and the UI timer reads it.
+    [[nodiscard]] std::int64_t last_activity_unix_ms() const noexcept {
+        return last_activity_ms_.load(std::memory_order_relaxed);
+    }
 
     void run_loop();
 
@@ -56,6 +85,13 @@ private:
     void capture_wait();
     void append_log(const char* data, std::size_t n);
     void rotate_logs_if_needed();
+    void note_engine_output(const char* data, std::size_t n);
+
+    // The output reader owns nothing: it locks mu_ and mutates st_/line_buf_, so
+    // it must never outlive them. Joining is the whole guarantee -- the thread
+    // ends on its own when the child's last write handle to the pipe closes, so
+    // this only makes the ordering explicit. Never call it while holding mu_.
+    void join_reader();
 
     SupervisorConfig cfg_;
     RestartGate gate_;
@@ -64,9 +100,16 @@ private:
     std::atomic<bool> stop_child_{false};
     std::atomic<bool> quit_{false};
     std::atomic<bool> auto_restart_{true};
-    void* process_handle_ = nullptr; // HANDLE
+    std::atomic<std::int64_t> last_activity_ms_{0};
+    int desktop_reserve_gib_ = kReserveUnset; // under mu_
+    std::string line_buf_;                    // under mu_; partial stderr line
+    std::set<std::uint64_t> inflight_;        // under mu_; open request ids
+    void* process_handle_ = nullptr;          // HANDLE
     void* job_handle_     = nullptr;
     std::string log_path_;
+    // Joinable, not detached: see join_reader(). Only the engine thread creates
+    // it, and every join happens after the process handle is gone.
+    std::thread reader_;
 };
 
 } // namespace ninfer::supervisor
