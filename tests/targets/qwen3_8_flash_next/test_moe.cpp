@@ -170,6 +170,200 @@ double relative_l2_error(const std::vector<float>& act, const std::vector<float>
     return std::sqrt(diff_sq) / (std::sqrt(exp_sq) + 1.0e-12);
 }
 
+const char*
+down_kernel_name(ninfer::targets::qwen3_8_flash_next::detail::FlashNextMoeDownKernel kernel) {
+    using ninfer::targets::qwen3_8_flash_next::detail::FlashNextMoeDownKernel;
+    return kernel == FlashNextMoeDownKernel::Legacy ? "legacy" : "path-per-warp";
+}
+
+// Bitwise gate for the decode down projection (K1): the legacy one-warp-per-row kernel, the
+// path-per-warp kernel, and whichever of the two the launcher selects must write byte-identical
+// BF16 [2560, T] outputs from identical inputs. The inputs are random over everything the kernel
+// reads: every code byte of every row (all sixteen E2M1 nibbles are finite), valid E4M3 scales
+// (no sign bit, never the 0x7F NaN), divisors in [0.5, 2), BF16 shared_down, activations, routing
+// ids, alphas and shared scales, for tokens in {1, 2, 3, 4, 5, 6, 7, 8} (grid.y of the decode arm).
+// Non-vacuous: the other tests use constant codes, unit scales and a zero shared expert, so they
+// cannot see a wrong scale tile, a wrong path order, or a wrong shared-path combine. The kernels
+// are chosen through flash_next_moe_down_launch rather than the environment because the launcher
+// reads NINFER_FLASH_NEXT_MOE_DOWN_LEGACY once per process.
+int test_decode_down_bitwise_gate(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    // The kernels only ever form expert * stride: 64 physical expert spans exercise that index
+    // math without the 472 MB a full 512-expert down bank would cost this test.
+    constexpr int kExperts                              = 64;
+    constexpr int kMaxTokens                            = 8;
+    constexpr std::uint64_t down_code_bytes_per_expert  = 2'560ULL * 640 / 2;
+    constexpr std::uint64_t down_scale_bytes_per_expert = 2'560ULL * 640 / 16;
+
+    std::mt19937 rng(0x5EED2026U);
+    std::uniform_int_distribution<int> scale_dist(0x00, 0x7E); // every finite E4M3 magnitude
+    std::uniform_real_distribution<float> divisor_dist(0.5F, 2.0F);
+    std::uniform_real_distribution<float> weight_dist(-0.1F, 0.1F);
+    std::uniform_real_distribution<float> act_dist(-0.5F, 0.5F);
+    std::uniform_real_distribution<float> coef_dist(0.01F, 1.0F);
+    std::uniform_int_distribution<int> id_dist(0, kExperts - 1);
+
+    std::vector<std::uint8_t> h_codes(kExperts * down_code_bytes_per_expert);
+    static_assert((kExperts * down_code_bytes_per_expert) % 4 == 0);
+    for (std::size_t i = 0; i < h_codes.size(); i += 4) {
+        const std::uint32_t word = rng();
+        std::memcpy(&h_codes[i], &word, sizeof(word));
+    }
+    std::vector<std::uint8_t> h_scales(kExperts * down_scale_bytes_per_expert);
+    for (auto& v : h_scales) { v = static_cast<std::uint8_t>(scale_dist(rng)); }
+    std::vector<float> h_divisors(kExperts);
+    for (auto& v : h_divisors) { v = divisor_dist(rng); }
+    std::vector<std::uint16_t> h_shared_down(2'560ULL * 640);
+    for (auto& v : h_shared_down) { v = float_to_bf16(weight_dist(rng)); }
+
+    ninfer::DeviceBuffer d_codes(h_codes.size());
+    ninfer::DeviceBuffer d_scales(h_scales.size());
+    ninfer::DeviceBuffer d_divisors(h_divisors.size() * sizeof(float));
+    ninfer::DeviceBuffer d_shared_down(h_shared_down.size() * sizeof(std::uint16_t));
+    d_codes.copy_from_host(h_codes.data(), h_codes.size());
+    d_scales.copy_from_host(h_scales.data(), h_scales.size());
+    d_divisors.copy_from_host(h_divisors.data(), h_divisors.size() * sizeof(float));
+    d_shared_down.copy_from_host(h_shared_down.data(),
+                                 h_shared_down.size() * sizeof(std::uint16_t));
+
+    // Only shared_down and expert_down are read by the down launch; the rest stays default.
+    MoeWeights weights{
+        .shared_down = bf16_weight(d_shared_down.p, 2'560, 640),
+        .expert_down = {.codes                  = static_cast<const std::byte*>(d_codes.p),
+                        .scales                 = static_cast<const std::byte*>(d_scales.p),
+                        .weight_scale_divisors  = static_cast<const float*>(d_divisors.p),
+                        .experts                = kExperts,
+                        .rows                   = 2'560,
+                        .columns                = 640,
+                        .code_bytes_per_expert  = down_code_bytes_per_expert,
+                        .scale_bytes_per_expert = down_scale_bytes_per_expert},
+    };
+
+    const FlashNextMoeDownKernel selected = flash_next_moe_down_kernel_selection();
+    std::cout << "  launcher default down kernel: " << down_kernel_name(selected) << "\n";
+    for (const FlashNextMoeDownKernel kernel :
+         {FlashNextMoeDownKernel::Legacy, FlashNextMoeDownKernel::PathWarp}) {
+        const FlashNextMoeDownKernelAttributes attributes =
+            flash_next_moe_down_kernel_attributes(kernel);
+        std::cout << "  " << down_kernel_name(kernel) << " kernel: " << attributes.threads_per_block
+                  << " threads, " << attributes.registers_per_thread << " regs/thread, "
+                  << attributes.local_bytes << " B local, " << attributes.static_smem_bytes
+                  << " B static smem, " << attributes.max_blocks_per_sm << " CTAs/SM\n";
+    }
+    // Residency is a performance property, not a correctness one: report loudly, do not fail.
+    const FlashNextMoeDownKernelAttributes pathwarp =
+        flash_next_moe_down_kernel_attributes(FlashNextMoeDownKernel::PathWarp);
+    if (pathwarp.local_bytes != 0) {
+        std::cerr << "WARN: path-per-warp down kernel spills " << pathwarp.local_bytes
+                  << " B/thread to local memory (expected 0)\n";
+    }
+    if (pathwarp.max_blocks_per_sm < 4) {
+        std::cerr << "WARN: path-per-warp down kernel residency is " << pathwarp.max_blocks_per_sm
+                  << " CTAs/SM (designed for 4)\n";
+    }
+
+    ninfer::WorkspaceArena workspace(flash_next_moe_workspace_capacity_bytes(1, kMaxTokens));
+    ninfer::DeviceBuffer out_legacy(2'560ULL * kMaxTokens * sizeof(std::uint16_t));
+    ninfer::DeviceBuffer out_pathwarp(2'560ULL * kMaxTokens * sizeof(std::uint16_t));
+    ninfer::DeviceBuffer out_default(2'560ULL * kMaxTokens * sizeof(std::uint16_t));
+
+    for (const int tokens : {1, 2, 3, 4, 5, 6, 7, 8}) {
+        const auto scope              = workspace.scope();
+        FlashNextMoeWorkspace scratch = allocate_flash_next_moe_workspace(workspace, tokens);
+
+        std::vector<std::int32_t> h_ids(static_cast<std::size_t>(10) * tokens);
+        for (auto& v : h_ids) { v = id_dist(rng); }
+        std::vector<float> h_alpha(h_ids.size());
+        for (auto& v : h_alpha) { v = coef_dist(rng); }
+        std::vector<float> h_shared_scale(static_cast<std::size_t>(tokens));
+        for (auto& v : h_shared_scale) { v = coef_dist(rng); }
+        std::vector<std::uint16_t> h_activations(640ULL * 11 * tokens);
+        for (auto& v : h_activations) { v = float_to_bf16(act_dist(rng)); }
+
+        CUDA_CHECK(cudaMemcpy(scratch.ids.data, h_ids.data(), h_ids.size() * sizeof(std::int32_t),
+                              cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(scratch.alpha.data, h_alpha.data(), h_alpha.size() * sizeof(float),
+                              cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(scratch.shared_scale.data, h_shared_scale.data(),
+                              h_shared_scale.size() * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(scratch.activations.data, h_activations.data(),
+                              h_activations.size() * sizeof(std::uint16_t),
+                              cudaMemcpyHostToDevice));
+        // Distinct fill patterns so an unwritten output cannot match by accident.
+        out_legacy.fill(0x00);
+        out_pathwarp.fill(0xFF);
+        out_default.fill(0x55);
+        // The uploads and memsets above ran on the legacy default stream; the compute stream is
+        // non-blocking, so a stream sync would not order them before the launches.
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        ninfer::Tensor legacy_view(out_legacy.p, ninfer::DType::BF16, {2'560, tokens});
+        ninfer::Tensor pathwarp_view(out_pathwarp.p, ninfer::DType::BF16, {2'560, tokens});
+        ninfer::Tensor default_view(out_default.p, ninfer::DType::BF16, {2'560, tokens});
+        flash_next_moe_down_launch(FlashNextMoeDownKernel::Legacy, weights, scratch, tokens,
+                                   legacy_view, device.stream);
+        flash_next_moe_down_launch(FlashNextMoeDownKernel::PathWarp, weights, scratch, tokens,
+                                   pathwarp_view, device.stream);
+        flash_next_moe_down_launch(selected, weights, scratch, tokens, default_view,
+                                   device.stream);
+        device.synchronize();
+
+        const std::size_t values    = 2'560ULL * tokens;
+        const std::size_t out_bytes = values * sizeof(std::uint16_t);
+        std::vector<std::uint16_t> legacy_bits(values);
+        std::vector<std::uint16_t> pathwarp_bits(values);
+        std::vector<std::uint16_t> default_bits(values);
+        out_legacy.copy_to_host(legacy_bits.data(), out_bytes);
+        out_pathwarp.copy_to_host(pathwarp_bits.data(), out_bytes);
+        out_default.copy_to_host(default_bits.data(), out_bytes);
+
+        // Non-vacuous: the reference must be finite and overwhelmingly nonzero, otherwise two
+        // kernels agreeing on NaN or on an untouched buffer would pass the memcmp below.
+        std::size_t non_finite = 0;
+        std::size_t zeros      = 0;
+        for (const std::uint16_t v : legacy_bits) {
+            if ((v & 0x7F80U) == 0x7F80U) { ++non_finite; }
+            if ((v & 0x7FFFU) == 0U) { ++zeros; }
+        }
+        if (non_finite != 0 || zeros > values / 100) {
+            std::cerr << "FAILED: down gate reference at tokens=" << tokens << " has "
+                      << non_finite << " non-finite and " << zeros << " zero outputs of "
+                      << values << "\n";
+            return 1;
+        }
+
+        const auto report_mismatch = [&](const char* name,
+                                         const std::vector<std::uint16_t>& other) {
+            std::size_t mismatches = 0;
+            std::size_t first      = values;
+            for (std::size_t i = 0; i < values; ++i) {
+                if (legacy_bits[i] != other[i]) {
+                    if (first == values) { first = i; }
+                    ++mismatches;
+                }
+            }
+            std::cerr << "FAILED: " << name << " down kernel differs from legacy at tokens="
+                      << tokens << ": " << mismatches << " of " << values
+                      << " BF16 values; first at token " << first / 2'560 << " row "
+                      << first % 2'560 << " legacy=0x" << std::hex << legacy_bits[first]
+                      << " other=0x" << other[first] << std::dec << "\n";
+        };
+        if (std::memcmp(legacy_bits.data(), pathwarp_bits.data(), out_bytes) != 0) {
+            report_mismatch("path-per-warp", pathwarp_bits);
+            return 1;
+        }
+        if (std::memcmp(legacy_bits.data(), default_bits.data(), out_bytes) != 0) {
+            report_mismatch("launcher-selected", default_bits);
+            return 1;
+        }
+        std::cout << "  tokens=" << tokens << ": legacy == path-per-warp == launcher default ("
+                  << values << " BF16 values, " << non_finite << " non-finite, " << zeros
+                  << " zero)\n";
+    }
+    std::cout << "PASS: test_decode_down_bitwise_gate\n";
+    return 0;
+}
+
 int test_prefill_equivalence_and_benchmark(ninfer::DeviceContext& device) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
     std::mt19937 rng(1337);
@@ -502,6 +696,11 @@ int main() {
         return 1;
     }
     std::cout << "PASS: test_decode_basic_unit\n";
+
+    if (test_decode_down_bitwise_gate(device) != 0) {
+        std::cerr << "FAILED: test_decode_down_bitwise_gate\n";
+        return 1;
+    }
 
     if (test_prefill_workspace_envelope_covers_simt_tail() != 0) {
         std::cerr << "FAILED: test_prefill_workspace_envelope_covers_simt_tail\n";

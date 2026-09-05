@@ -20,6 +20,7 @@
 // transitively before and are now named explicitly.
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 namespace {
@@ -38,6 +39,15 @@ constexpr int kIntermediate = 640;
 constexpr int kTopK         = 10;
 constexpr int kPaths        = kTopK + 1;
 constexpr int kDownWarps    = 8;
+// Path-per-warp decode down kernel: one CTA per (row, token); warps 0..9 own the ten routed
+// paths and warp 10 the shared expert, so the CTA is exactly the eleven partials one row needs.
+constexpr int kDownPathWarps   = kPaths;
+constexpr int kDownPathThreads = kDownPathWarps * 32;
+// Resident CTAs per SM the path-per-warp kernel is compiled for. 4 x 352 threads = 1,408 of the
+// 1,536 per SM (CC 12.0) and 4 x 352 x 40 registers = 56,320 of 65,536; the register allocation
+// granularity (8 per thread) means this bound effectively pins ptxas at the legacy kernel's 40
+// registers per thread -- the design's 46 would already force 3 CTAs per SM.
+constexpr int kDownPathMinBlocksPerSm = 4;
 
 template <int K>
 __device__ __forceinline__ void dot_bf16_pair(const __nv_bfloat16* x, const __nv_bfloat16* first,
@@ -109,6 +119,172 @@ __global__ void flash_next_moe_gate_up_kernel(
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Decode down projection, per-lane bodies shared by the legacy and path-per-warp kernels.
+//
+// Everything below is the arithmetic contract that makes the two kernels bitwise equal: each
+// helper is a pure function of (row, expert data, activations, lane) and never of which warp or
+// CTA executes it. Any change here changes both kernels together; the memcmp gate in
+// tests/targets/qwen3_8_flash_next/test_moe.cpp compares the two kernels, so it can only catch
+// a divergence between them, not a change to this contract itself.
+// ---------------------------------------------------------------------------------------------
+
+// Byte offset of this row's first scale word inside one expert's swizzled scale plane
+// ([m_tile][k_tile][row_mod32][quartile][scale_lane], 512 B per (m_tile, k_tile) tile,
+// storage_layouts.cpp / layouts.py _swizzle_nvfp4_bank_scales); the k_tile stride of 512 B is
+// applied by the lane that loads that tile.
+__device__ __forceinline__ std::int64_t down_scale_row_base(int row) {
+    const int m_tile       = row / 128;
+    const int row_inner    = row % 128;
+    const int row_mod32    = row_inner & 31;
+    const int row_quartile = row_inner >> 5;
+    return static_cast<std::int64_t>(m_tile * 10) * 512 + row_mod32 * 16 + row_quartile * 4;
+}
+
+// One K16 group of one NVFP4 down row against its 16 BF16 activations. Even columns feed sum0
+// and odd columns sum1 as two independent fmaf chains; dw * coef is a separate FMUL because nvcc
+// does not contract an operand of an explicit fmaf, so the rounding sequence is fixed no matter
+// what surrounds the call.
+__device__ __forceinline__ void accumulate_down_group(const std::uint8_t* __restrict__ exp_codes,
+                                                      const __nv_bfloat16* __restrict__ act_path,
+                                                      int row, int group, float coef,
+                                                      float& sum0, float& sum1) {
+    const auto* packed =
+        exp_codes + static_cast<std::int64_t>(row) * (kIntermediate / 2) + group * 8;
+    const uint2 code_words = *reinterpret_cast<const uint2*>(packed);
+
+    const auto* act_ptr = reinterpret_cast<const uint4*>(act_path + group * 16);
+    const uint4 act_v0 = act_ptr[0];
+    const uint4 act_v1 = act_ptr[1];
+
+    const float2 dw[8] = {
+        ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.x)),
+        ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.x >> 8)),
+        ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.x >> 16)),
+        ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.x >> 24)),
+        ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.y)),
+        ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.y >> 8)),
+        ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.y >> 16)),
+        ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.y >> 24))
+    };
+
+    const float2 hv[8] = {
+        ops::bf16x2_bits_to_float2(act_v0.x),
+        ops::bf16x2_bits_to_float2(act_v0.y),
+        ops::bf16x2_bits_to_float2(act_v0.z),
+        ops::bf16x2_bits_to_float2(act_v0.w),
+        ops::bf16x2_bits_to_float2(act_v1.x),
+        ops::bf16x2_bits_to_float2(act_v1.y),
+        ops::bf16x2_bits_to_float2(act_v1.z),
+        ops::bf16x2_bits_to_float2(act_v1.w)
+    };
+
+#pragma unroll
+    for (int pair = 0; pair < 8; ++pair) {
+        sum0 = fmaf(dw[pair].x * coef, hv[pair].x, sum0);
+        sum1 = fmaf(dw[pair].y * coef, hv[pair].y, sum1);
+    }
+}
+
+// Warp-cooperative dot product of NVFP4 down row `row` of `expert` with the BF16 activation
+// vector `act_path`. Lane l owns group l and, for l < 8, group l + 32, accumulated into the same
+// two chains, pre-added, then reduced with the shfl_down tree; the result is meaningful on lane 0
+// only. All 32 lanes must be converged on entry (the scale broadcast is a full-mask shuffle).
+__device__ __forceinline__ float down_routed_path_value(
+    int expert, const std::uint8_t* __restrict__ expert_codes,
+    const std::uint8_t* __restrict__ expert_scales, const float* __restrict__ expert_divisors,
+    std::uint64_t code_stride, std::uint64_t scale_stride,
+    const __nv_bfloat16* __restrict__ act_path, int row, std::int64_t scale_row_base, int lane) {
+    const auto* exp_codes =
+        expert_codes + static_cast<std::uint64_t>(expert) * code_stride;
+    const auto* exp_scales =
+        expert_scales + static_cast<std::uint64_t>(expert) * scale_stride;
+    // IEEE division on purpose: a reciprocal intrinsic would change the coefficient bits.
+    const float inverse = 1.0F / expert_divisors[expert];
+
+    // Lanes 0..9 load the 10 scale words (tiles 0..9) for this row
+    std::uint32_t my_tile = 0;
+    if (lane < 10) {
+        const std::int64_t off = scale_row_base + static_cast<std::int64_t>(lane) * 512;
+        my_tile = *reinterpret_cast<const std::uint32_t*>(exp_scales + off);
+    }
+
+    // Broadcast tile words across the warp with all 32 threads active (zero divergence)
+    const std::uint32_t tile_g0 = __shfl_sync(0xFFFFFFFFU, my_tile, lane >> 2);
+    const std::uint32_t tile_g1 = __shfl_sync(0xFFFFFFFFU, my_tile, 8 + (lane >> 2));
+
+    const std::uint8_t scale_g0 = static_cast<std::uint8_t>(tile_g0 >> ((lane & 3) * 8));
+    const float coef_g0 = ops::detail::decode_nvfp4_e4m3(scale_g0) * inverse;
+
+    const std::uint8_t scale_g1 = static_cast<std::uint8_t>(tile_g1 >> ((lane & 3) * 8));
+    const float coef_g1 = ops::detail::decode_nvfp4_e4m3(scale_g1) * inverse;
+
+    float sum0 = 0.0F;
+    float sum1 = 0.0F;
+
+    // Group 0..31: all 32 lanes active
+    accumulate_down_group(exp_codes, act_path, row, lane, coef_g0, sum0, sum1);
+
+    // Group 32..39: lanes 0..7 active
+    if (lane < 8) {
+        accumulate_down_group(exp_codes, act_path, row, lane + 32, coef_g1, sum0, sum1);
+    }
+
+    return ops::warp_reduce_sum(sum0 + sum1);
+}
+
+// Eight BF16 weight/activation pairs into the single shared-expert chain, in the fixed
+// .x/.y order of the packed words.
+__device__ __forceinline__ void accumulate_shared_uint4(uint4 w, uint4 a, float& shared_sum) {
+    const float2 wv0 = ops::bf16x2_bits_to_float2(w.x);
+    const float2 av0 = ops::bf16x2_bits_to_float2(a.x);
+    const float2 wv1 = ops::bf16x2_bits_to_float2(w.y);
+    const float2 av1 = ops::bf16x2_bits_to_float2(a.y);
+    const float2 wv2 = ops::bf16x2_bits_to_float2(w.z);
+    const float2 av2 = ops::bf16x2_bits_to_float2(a.z);
+    const float2 wv3 = ops::bf16x2_bits_to_float2(w.w);
+    const float2 av3 = ops::bf16x2_bits_to_float2(a.w);
+    shared_sum = fmaf(wv0.x, av0.x, shared_sum);
+    shared_sum = fmaf(wv0.y, av0.y, shared_sum);
+    shared_sum = fmaf(wv1.x, av1.x, shared_sum);
+    shared_sum = fmaf(wv1.y, av1.y, shared_sum);
+    shared_sum = fmaf(wv2.x, av2.x, shared_sum);
+    shared_sum = fmaf(wv2.y, av2.y, shared_sum);
+    shared_sum = fmaf(wv3.x, av3.x, shared_sum);
+    shared_sum = fmaf(wv3.y, av3.y, shared_sum);
+}
+
+// Warp-cooperative BF16 dot product of shared_down row `row` with the shared-path activations
+// of this token: 80 uint4 (640 values) as two full-warp phases plus a 16-lane tail, one fmaf
+// chain per lane, then the shfl_down tree. Meaningful on lane 0 only.
+__device__ __forceinline__ float down_shared_path_value(
+    const __nv_bfloat16* __restrict__ shared_down,
+    const __nv_bfloat16* __restrict__ token_activations, int row, int lane) {
+    // Vectorized 128-bit loads for shared expert dot product directly from L1/L2
+    float shared_sum = 0.0F;
+    const auto* shared_row = reinterpret_cast<const uint4*>(
+        shared_down + static_cast<std::int64_t>(row) * kIntermediate);
+    const auto* shared_act = reinterpret_cast<const uint4*>(
+        token_activations + static_cast<std::int64_t>(kTopK) * kIntermediate);
+
+#pragma unroll
+    for (int phase = 0; phase < 2; ++phase) {
+        const uint4 w = shared_row[phase * 32 + lane];
+        const uint4 a = shared_act[phase * 32 + lane];
+        accumulate_shared_uint4(w, a, shared_sum);
+    }
+    if (lane < 16) {
+        const uint4 w = shared_row[64 + lane];
+        const uint4 a = shared_act[64 + lane];
+        accumulate_shared_uint4(w, a, shared_sum);
+    }
+
+    return ops::warp_reduce_sum(shared_sum);
+}
+
+// Legacy decode down kernel (reference): one warp per output row walks the ten routed paths
+// serially, then the shared expert. Kept selectable (NINFER_FLASH_NEXT_MOE_DOWN_LEGACY=1) as the
+// A/B and bitwise reference for the path-per-warp kernel below.
 __global__ void flash_next_moe_down_kernel(
     const std::int32_t* __restrict__ ids, const float* __restrict__ alpha,
     const float* __restrict__ shared_scale, const __nv_bfloat16* __restrict__ activations,
@@ -124,12 +300,7 @@ __global__ void flash_next_moe_down_kernel(
 
     if (row >= kHidden) { return; }
 
-    const int m_tile       = row / 128;
-    const int row_inner    = row % 128;
-    const int row_mod32    = row_inner & 31;
-    const int row_quartile = row_inner >> 5;
-    const std::int64_t scale_row_base = static_cast<std::int64_t>(m_tile * 10) * 512 +
-                                        row_mod32 * 16 + row_quartile * 4;
+    const std::int64_t scale_row_base = down_scale_row_base(row);
 
     const auto* token_activations =
         activations + static_cast<std::int64_t>(token) * kPaths * kIntermediate;
@@ -139,171 +310,89 @@ __global__ void flash_next_moe_down_kernel(
 #pragma unroll
     for (int path = 0; path < kTopK; ++path) {
         const int expert = ids[token * kTopK + path];
-        const auto* exp_codes =
-            expert_codes + static_cast<std::uint64_t>(expert) * code_stride;
-        const auto* exp_scales =
-            expert_scales + static_cast<std::uint64_t>(expert) * scale_stride;
-        const float inverse = 1.0F / expert_divisors[expert];
         const auto* act_path = token_activations + static_cast<std::int64_t>(path) * kIntermediate;
-
-        // Lanes 0..9 load the 10 scale words (tiles 0..9) for this row
-        std::uint32_t my_tile = 0;
-        if (lane < 10) {
-            const std::int64_t off = scale_row_base + static_cast<std::int64_t>(lane) * 512;
-            my_tile = *reinterpret_cast<const std::uint32_t*>(exp_scales + off);
-        }
-
-        // Broadcast tile words across the warp with all 32 threads active (zero divergence)
-        const std::uint32_t tile_g0 = __shfl_sync(0xFFFFFFFFU, my_tile, lane >> 2);
-        const std::uint32_t tile_g1 = __shfl_sync(0xFFFFFFFFU, my_tile, 8 + (lane >> 2));
-
-        const std::uint8_t scale_g0 = static_cast<std::uint8_t>(tile_g0 >> ((lane & 3) * 8));
-        const float coef_g0 = ops::detail::decode_nvfp4_e4m3(scale_g0) * inverse;
-
-        const std::uint8_t scale_g1 = static_cast<std::uint8_t>(tile_g1 >> ((lane & 3) * 8));
-        const float coef_g1 = ops::detail::decode_nvfp4_e4m3(scale_g1) * inverse;
-
-        float sum0 = 0.0F;
-        float sum1 = 0.0F;
-
-        // Group 0..31: all 32 lanes active
-        {
-            const int group = lane;
-            const auto* packed =
-                exp_codes + static_cast<std::int64_t>(row) * (kIntermediate / 2) + group * 8;
-            const uint2 code_words = *reinterpret_cast<const uint2*>(packed);
-
-            const auto* act_ptr = reinterpret_cast<const uint4*>(act_path + group * 16);
-            const uint4 act_v0 = act_ptr[0];
-            const uint4 act_v1 = act_ptr[1];
-
-            const float2 dw[8] = {
-                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.x)),
-                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.x >> 8)),
-                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.x >> 16)),
-                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.x >> 24)),
-                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.y)),
-                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.y >> 8)),
-                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.y >> 16)),
-                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.y >> 24))
-            };
-
-            const float2 hv[8] = {
-                ops::bf16x2_bits_to_float2(act_v0.x),
-                ops::bf16x2_bits_to_float2(act_v0.y),
-                ops::bf16x2_bits_to_float2(act_v0.z),
-                ops::bf16x2_bits_to_float2(act_v0.w),
-                ops::bf16x2_bits_to_float2(act_v1.x),
-                ops::bf16x2_bits_to_float2(act_v1.y),
-                ops::bf16x2_bits_to_float2(act_v1.z),
-                ops::bf16x2_bits_to_float2(act_v1.w)
-            };
-
-#pragma unroll
-            for (int pair = 0; pair < 8; ++pair) {
-                sum0 = fmaf(dw[pair].x * coef_g0, hv[pair].x, sum0);
-                sum1 = fmaf(dw[pair].y * coef_g0, hv[pair].y, sum1);
-            }
-        }
-
-        // Group 32..39: lanes 0..7 active
-        if (lane < 8) {
-            const int group = lane + 32;
-            const auto* packed =
-                exp_codes + static_cast<std::int64_t>(row) * (kIntermediate / 2) + group * 8;
-            const uint2 code_words = *reinterpret_cast<const uint2*>(packed);
-
-            const auto* act_ptr = reinterpret_cast<const uint4*>(act_path + group * 16);
-            const uint4 act_v0 = act_ptr[0];
-            const uint4 act_v1 = act_ptr[1];
-
-            const float2 dw[8] = {
-                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.x)),
-                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.x >> 8)),
-                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.x >> 16)),
-                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.x >> 24)),
-                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.y)),
-                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.y >> 8)),
-                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.y >> 16)),
-                ops::detail::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(code_words.y >> 24))
-            };
-
-            const float2 hv[8] = {
-                ops::bf16x2_bits_to_float2(act_v0.x),
-                ops::bf16x2_bits_to_float2(act_v0.y),
-                ops::bf16x2_bits_to_float2(act_v0.z),
-                ops::bf16x2_bits_to_float2(act_v0.w),
-                ops::bf16x2_bits_to_float2(act_v1.x),
-                ops::bf16x2_bits_to_float2(act_v1.y),
-                ops::bf16x2_bits_to_float2(act_v1.z),
-                ops::bf16x2_bits_to_float2(act_v1.w)
-            };
-
-#pragma unroll
-            for (int pair = 0; pair < 8; ++pair) {
-                sum0 = fmaf(dw[pair].x * coef_g1, hv[pair].x, sum0);
-                sum1 = fmaf(dw[pair].y * coef_g1, hv[pair].y, sum1);
-            }
-        }
-
-        const float value = ops::warp_reduce_sum(sum0 + sum1);
+        const float value =
+            down_routed_path_value(expert, expert_codes, expert_scales, expert_divisors,
+                                   code_stride, scale_stride, act_path, row, scale_row_base, lane);
         if (lane == 0) { routed = fmaf(alpha[token * kTopK + path], value, routed); }
     }
 
-    // 3. Vectorized 128-bit loads for shared expert dot product directly from L1/L2
-    float shared_sum = 0.0F;
-    const auto* shared_row = reinterpret_cast<const uint4*>(
-        shared_down + static_cast<std::int64_t>(row) * kIntermediate);
-    const auto* shared_act = reinterpret_cast<const uint4*>(
-        token_activations + static_cast<std::int64_t>(kTopK) * kIntermediate);
-
-#pragma unroll
-    for (int phase = 0; phase < 2; ++phase) {
-        const uint4 w = shared_row[phase * 32 + lane];
-        const uint4 a = shared_act[phase * 32 + lane];
-        const float2 wv0 = ops::bf16x2_bits_to_float2(w.x);
-        const float2 av0 = ops::bf16x2_bits_to_float2(a.x);
-        const float2 wv1 = ops::bf16x2_bits_to_float2(w.y);
-        const float2 av1 = ops::bf16x2_bits_to_float2(a.y);
-        const float2 wv2 = ops::bf16x2_bits_to_float2(w.z);
-        const float2 av2 = ops::bf16x2_bits_to_float2(a.z);
-        const float2 wv3 = ops::bf16x2_bits_to_float2(w.w);
-        const float2 av3 = ops::bf16x2_bits_to_float2(a.w);
-        shared_sum = fmaf(wv0.x, av0.x, shared_sum);
-        shared_sum = fmaf(wv0.y, av0.y, shared_sum);
-        shared_sum = fmaf(wv1.x, av1.x, shared_sum);
-        shared_sum = fmaf(wv1.y, av1.y, shared_sum);
-        shared_sum = fmaf(wv2.x, av2.x, shared_sum);
-        shared_sum = fmaf(wv2.y, av2.y, shared_sum);
-        shared_sum = fmaf(wv3.x, av3.x, shared_sum);
-        shared_sum = fmaf(wv3.y, av3.y, shared_sum);
-    }
-    if (lane < 16) {
-        const uint4 w = shared_row[64 + lane];
-        const uint4 a = shared_act[64 + lane];
-        const float2 wv0 = ops::bf16x2_bits_to_float2(w.x);
-        const float2 av0 = ops::bf16x2_bits_to_float2(a.x);
-        const float2 wv1 = ops::bf16x2_bits_to_float2(w.y);
-        const float2 av1 = ops::bf16x2_bits_to_float2(a.y);
-        const float2 wv2 = ops::bf16x2_bits_to_float2(w.z);
-        const float2 av2 = ops::bf16x2_bits_to_float2(a.z);
-        const float2 wv3 = ops::bf16x2_bits_to_float2(w.w);
-        const float2 av3 = ops::bf16x2_bits_to_float2(a.w);
-        shared_sum = fmaf(wv0.x, av0.x, shared_sum);
-        shared_sum = fmaf(wv0.y, av0.y, shared_sum);
-        shared_sum = fmaf(wv1.x, av1.x, shared_sum);
-        shared_sum = fmaf(wv1.y, av1.y, shared_sum);
-        shared_sum = fmaf(wv2.x, av2.x, shared_sum);
-        shared_sum = fmaf(wv2.y, av2.y, shared_sum);
-        shared_sum = fmaf(wv3.x, av3.x, shared_sum);
-        shared_sum = fmaf(wv3.y, av3.y, shared_sum);
-    }
-
-    const float shared_value = ops::warp_reduce_sum(shared_sum);
+    const float shared_value = down_shared_path_value(shared_down, token_activations, row, lane);
 
     if (lane == 0) {
         output[static_cast<std::int64_t>(token) * kHidden + row] =
             __float2bfloat16_rn(fmaf(shared_scale[token], shared_value, routed));
+    }
+}
+
+// Path-per-warp decode down kernel: one CTA per (row, token); warp p < 10 computes routed path
+// p and warp 10 the shared expert, each with the per-lane body above, and thread 0 combines the
+// eleven partials in the legacy order.
+//
+// Why: the legacy launch is 320 CTAs x 8 warps = 0.28 waves on 188 SMs (27% warps active, ncu
+// baseline) and every warp walks its ten paths serially, so only one path's ~360 B of weights is
+// in flight per warp -- roughly 1 MB GPU-wide against the ~1.2 MB Little's-law requirement at
+// 1,568 GB/s x ~0.75 us, which is why it ran at 48-57% of sustained bandwidth. Here the CTA
+// count is 2,560 x T (3.4 waves at T=1 with 4 resident CTAs per SM) and all 4.5 KB of a row's
+// weights are requested at once, ~3.4 MB in flight GPU-wide, so the same 12.51 MB per launch
+// (codes 8.19 MB + scales 1.02 MB + BF16 shared_down 3.28 MB + activations) becomes
+// bandwidth-bound: floor 7.98 us, expected 9-10.5 us vs 14-16.5 us measured for the legacy one.
+//
+// Bitwise contract with the legacy kernel: partials cross warps unmodified (no alpha
+// pre-multiplication, no +=), and the combine is the same fmaf chain in path order from 0.0F
+// with the shared path last, exactly what lane 0 of the legacy warp does.
+__global__ __launch_bounds__(kDownPathThreads, kDownPathMinBlocksPerSm)
+void flash_next_moe_down_pathwarp_kernel(
+    const std::int32_t* __restrict__ ids, const float* __restrict__ alpha,
+    const float* __restrict__ shared_scale, const __nv_bfloat16* __restrict__ activations,
+    const std::uint8_t* __restrict__ expert_codes, const std::uint8_t* __restrict__ expert_scales,
+    const float* __restrict__ expert_divisors, std::uint64_t code_stride,
+    std::uint64_t scale_stride, const __nv_bfloat16* __restrict__ shared_down,
+    __nv_bfloat16* __restrict__ output) {
+    // Lane-0 value of each warp's warp_reduce_sum, indexed by path (10 = shared expert).
+    __shared__ float s_path[kPaths];
+    // alpha[0..9] and shared_scale of this token, staged by warp 10 so that thread 0's combine
+    // does not wait on eleven global loads after the barrier and no warp carries them in
+    // registers (which would lift every thread's allocation and cost a resident CTA per SM).
+    __shared__ float s_coef[kPaths];
+
+    const int token = static_cast<int>(blockIdx.y);
+    const int row   = static_cast<int>(blockIdx.x);
+    const int warp  = static_cast<int>(threadIdx.x) >> 5;
+    const int lane  = static_cast<int>(threadIdx.x) & 31;
+
+    // grid.x == kHidden, so this never fires; it is uniform per CTA, so if it ever did no
+    // thread of the CTA would reach the barrier below.
+    if (row >= kHidden) { return; }
+
+    const std::int64_t scale_row_base = down_scale_row_base(row);
+    const auto* token_activations =
+        activations + static_cast<std::int64_t>(token) * kPaths * kIntermediate;
+
+    float value = 0.0F;
+    if (warp < kTopK) {
+        const int path       = warp;
+        const int expert     = ids[token * kTopK + path];
+        const auto* act_path = token_activations + static_cast<std::int64_t>(path) * kIntermediate;
+        value = down_routed_path_value(expert, expert_codes, expert_scales, expert_divisors,
+                                       code_stride, scale_stride, act_path, row, scale_row_base,
+                                       lane);
+    } else {
+        value = down_shared_path_value(shared_down, token_activations, row, lane);
+        if (lane < kTopK) { s_coef[lane] = alpha[token * kTopK + lane]; }
+        if (lane == kTopK) { s_coef[kTopK] = shared_scale[token]; }
+    }
+    if (lane == 0) { s_path[warp] = value; }
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        float routed = 0.0F;
+#pragma unroll
+        for (int path = 0; path < kTopK; ++path) {
+            routed = fmaf(s_coef[path], s_path[path], routed);
+        }
+        output[static_cast<std::int64_t>(token) * kHidden + row] =
+            __float2bfloat16_rn(fmaf(s_coef[kTopK], s_path[kTopK], routed));
     }
 }
 
@@ -1838,6 +1927,53 @@ __global__ void flash_next_moe_bf16_down_kernel(
     }
 }
 
+// Decode-arm down projection with an explicit kernel choice. The argument list is the same for
+// both kernels; only the grid shape differs (one row per warp vs one row per CTA).
+void launch_down_decode(FlashNextMoeDownKernel kernel, const MoeWeights& weights,
+                        const FlashNextMoeWorkspace& workspace, int tokens, Tensor& output,
+                        cudaStream_t stream) {
+    const auto* ids          = static_cast<const std::int32_t*>(workspace.ids.data);
+    const auto* alpha        = static_cast<const float*>(workspace.alpha.data);
+    const auto* shared_scale = static_cast<const float*>(workspace.shared_scale.data);
+    const auto* activations  = static_cast<const __nv_bfloat16*>(workspace.activations.data);
+    const auto* codes        = reinterpret_cast<const std::uint8_t*>(weights.expert_down.codes);
+    const auto* scales       = reinterpret_cast<const std::uint8_t*>(weights.expert_down.scales);
+    const float* divisors    = weights.expert_down.weight_scale_divisors;
+    const std::uint64_t code_stride  = weights.expert_down.code_bytes_per_expert;
+    const std::uint64_t scale_stride = weights.expert_down.scale_bytes_per_expert;
+    const auto* shared_down  = static_cast<const __nv_bfloat16*>(weights.shared_down.qdata);
+    auto* out                = static_cast<__nv_bfloat16*>(output.data);
+
+    if (kernel == FlashNextMoeDownKernel::Legacy) {
+        const dim3 down_grid(kHidden / kDownWarps, static_cast<unsigned>(tokens));
+        flash_next_moe_down_kernel<<<down_grid, kDownWarps * 32, 0, stream>>>(
+            ids, alpha, shared_scale, activations, codes, scales, divisors, code_stride,
+            scale_stride, shared_down, out);
+    } else {
+        const dim3 down_grid(kHidden, static_cast<unsigned>(tokens));
+        flash_next_moe_down_pathwarp_kernel<<<down_grid, kDownPathThreads, 0, stream>>>(
+            ids, alpha, shared_scale, activations, codes, scales, divisors, code_stride,
+            scale_stride, shared_down, out);
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// Typed so the runtime's template overloads resolve the kernel entry; no function-pointer to
+// void* cast, which is only conditionally supported.
+template <class Kernel>
+FlashNextMoeDownKernelAttributes down_kernel_attributes(Kernel* kernel, int threads_per_block) {
+    FlashNextMoeDownKernelAttributes out{};
+    out.threads_per_block = threads_per_block;
+    cudaFuncAttributes attributes{};
+    CUDA_CHECK(cudaFuncGetAttributes(&attributes, kernel));
+    out.registers_per_thread = attributes.numRegs;
+    out.local_bytes          = attributes.localSizeBytes;
+    out.static_smem_bytes    = attributes.sharedSizeBytes;
+    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&out.max_blocks_per_sm, kernel,
+                                                             threads_per_block, 0));
+    return out;
+}
+
 } // namespace
 
 // Hybrid dispatch threshold:
@@ -1846,6 +1982,36 @@ __global__ void flash_next_moe_bf16_down_kernel(
 // At T >= 512 (e.g. T=512, 2048), tokens per expert is high (>= 10), where Native NVFP4 MMA
 // achieves 1.26x+ higher throughput.
 constexpr int kMmaPrefillThreshold = 512;
+
+FlashNextMoeDownKernel flash_next_moe_down_kernel_selection() {
+    // Read once: this sits on the per-layer decode path (48 launches per token), and a getenv
+    // per launch is host overhead the decode graph would otherwise replay. The bitwise gate
+    // therefore selects kernels through flash_next_moe_down_launch, not by flipping the
+    // environment mid-process.
+    static const FlashNextMoeDownKernel selection = []() {
+        const char* env = std::getenv("NINFER_FLASH_NEXT_MOE_DOWN_LEGACY");
+        const bool legacy = env != nullptr && env[0] != '\0' && std::strcmp(env, "0") != 0;
+        return legacy ? FlashNextMoeDownKernel::Legacy : FlashNextMoeDownKernel::PathWarp;
+    }();
+    return selection;
+}
+
+void flash_next_moe_down_launch(FlashNextMoeDownKernel kernel, const MoeWeights& weights,
+                                const FlashNextMoeWorkspace& workspace, int tokens,
+                                Tensor& output, cudaStream_t stream) {
+    if (tokens < 1 || tokens > 8) {
+        throw std::invalid_argument("Flash-Next MoE decode down launch requires 1 <= tokens <= 8");
+    }
+    launch_down_decode(kernel, weights, workspace, tokens, output, stream);
+}
+
+FlashNextMoeDownKernelAttributes
+flash_next_moe_down_kernel_attributes(FlashNextMoeDownKernel kernel) {
+    if (kernel == FlashNextMoeDownKernel::Legacy) {
+        return down_kernel_attributes(flash_next_moe_down_kernel, kDownWarps * 32);
+    }
+    return down_kernel_attributes(flash_next_moe_down_pathwarp_kernel, kDownPathThreads);
+}
 
 
 void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weights,
@@ -1870,20 +2036,9 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
             static_cast<__nv_bfloat16*>(workspace.activations.data));
         CUDA_CHECK(cudaGetLastError());
 
-        const dim3 down_grid(kHidden / kDownWarps, static_cast<unsigned>(tokens));
-        flash_next_moe_down_kernel<<<down_grid, kDownWarps * 32, 0, stream>>>(
-            static_cast<const std::int32_t*>(workspace.ids.data),
-            static_cast<const float*>(workspace.alpha.data),
-            static_cast<const float*>(workspace.shared_scale.data),
-            static_cast<const __nv_bfloat16*>(workspace.activations.data),
-            reinterpret_cast<const std::uint8_t*>(weights.expert_down.codes),
-            reinterpret_cast<const std::uint8_t*>(weights.expert_down.scales),
-            weights.expert_down.weight_scale_divisors,
-            weights.expert_down.code_bytes_per_expert,
-            weights.expert_down.scale_bytes_per_expert,
-            static_cast<const __nv_bfloat16*>(weights.shared_down.qdata),
-            static_cast<__nv_bfloat16*>(output.data));
-        CUDA_CHECK(cudaGetLastError());
+        // Path-per-warp by default; NINFER_FLASH_NEXT_MOE_DOWN_LEGACY=1 pins the legacy kernel.
+        launch_down_decode(flash_next_moe_down_kernel_selection(), weights, workspace, tokens,
+                           output, stream);
     } else {
         // Prefill path (tokens > 8): Group tokens by expert, load weights once per chunk
         // 1. Group tokens by expert and build active expert list
