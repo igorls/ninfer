@@ -15,6 +15,7 @@ if ORACLE_DIR not in sys.path:
     sys.path.insert(0, ORACLE_DIR)
 import mtp_reference  # noqa: E402  (the vLLM-faithful reference; no second copy here)
 from mtp_reference import (  # noqa: E402
+    ALL_STAGES,
     HAVE_QWEN4_EXP,
     STEM_STAGES,
     dump_stages,
@@ -110,8 +111,11 @@ def compare_tensors(a, b):
 
 def run_parity_test(ninfer_exe: str, dump_dir: str) -> int:
     if not HAVE_QWEN4_EXP:
-        print("transformers has no qwen4_exp module here; running the transformers-free stem check only")
-        return test_stem_semantics_without_transformers()
+        # Full-parity mode never degrades silently: no qwen4_exp means no verdict.
+        print("FAIL: full-parity mode requires transformers with qwen4_exp and this interpreter has none. "
+              "Use E:/NInfer/venv-qwen4exp (see tools/reference/qwen3_8_flash_next/oracle/README.md), "
+              "or pass --stem-only for the dependency-free stem check.")
+        return 2
     Qwen4ExpMTP = mtp_reference.Qwen4ExpMTPReference
     make_mtp_config = mtp_reference.make_mtp_config
 
@@ -158,14 +162,26 @@ def run_parity_test(ninfer_exe: str, dump_dir: str) -> int:
     oracle_tensors = {t["name"]: t for t in manifest["positions"][0]["tensors"]}
 
     passed = True
-    print(f"{'Stage Name':<26} | {'NInfer Norm':<12} | {'Non-Vacuous':<12} | {'Status':<10}")
-    print("-" * 70)
+    canonical = set(ALL_STAGES)
+    print(f"{'Stage Name':<28} | {'NInfer Norm':<12} | {'Kind':<6} | {'Status':<16}")
+    print("-" * 72)
     for name, n_rec in ninfer_tensors.items():
         arr_n = load_tensor(ninfer_dump, n_rec)
         norm_n = float(np.linalg.norm(arr_n))
-        ok = bool(norm_n > 0.0 and np.all(np.isfinite(arr_n)))
+        finite = bool(np.all(np.isfinite(arr_n)))
+        if name in canonical:
+            # A canonical stage must be finite and non-zero: an all-zero hidden is a
+            # wiring bug, not a value.
+            ok, kind = finite and norm_n > 0.0, "stage"
+            status = "OK" if ok else ("FAIL (NaN/Inf)" if not finite else "FAIL (VACUOUS)")
+        else:
+            # Everything else is a diagnostic (indexer selected counts, active blocks,
+            # cache bookkeeping). Zero is a legitimate value there, e.g. for token 0,
+            # so only NaN/Inf fails.
+            ok, kind = finite, "diag"
+            status = "OK" if ok else "FAIL (NaN/Inf)"
         passed &= ok
-        print(f"{name:<26} | {norm_n:<12.4f} | {'YES' if ok else 'NO':<12} | {'OK' if ok else 'FAIL (VACUOUS)':<10}")
+        print(f"{name:<28} | {norm_n:<12.4f} | {kind:<6} | {status:<16}")
 
     # Stale names from the old stem are a failure, not a skip: their presence means
     # the C++ side still mixes-and-repeats.
@@ -174,7 +190,14 @@ def run_parity_test(ninfer_exe: str, dump_dir: str) -> int:
             print(f"FAIL: C++ still emits {stale}; the stem has not been corrected to the vLLM contract")
             passed = False
 
-    for stage in STEM_STAGES + ("mtp_final_hidden",):
+    # Presence: stem and head must both be there. Parity: STEM ONLY. The C++ harness
+    # drives its decoder layer with its own (random) weights while this oracle zeroes
+    # them, so layer and head values are fixture-dependent; they are checked for
+    # presence and finiteness above, never for value.
+    if "mtp_final_hidden" not in ninfer_tensors:
+        print("FAIL: C++ dump is missing canonical stage mtp_final_hidden")
+        passed = False
+    for stage in STEM_STAGES:
         if stage not in ninfer_tensors:
             print(f"FAIL: C++ dump is missing canonical stage {stage}")
             passed = False
