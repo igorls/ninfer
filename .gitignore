@@ -63,6 +63,9 @@ profiles/
 
 # Local production supervisor state (configuration may contain credentials)
 /supervisor.prod.json
+# ...and any backup or temp beside it: save_config_json writes .tmp, and a
+# hand-made .bak of a pre-api-key-file config still holds the key inline.
+/supervisor.prod.json.*
 /supervisor-logs/
 
 # Claude Code personal/local settings (may contain API tokens)

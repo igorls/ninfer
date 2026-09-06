@@ -1,0 +1,117 @@
+{
+  "_comment": [
+    "Example ninfer-supervisor configuration. Copy to supervisor.json and edit.",
+    "The real one is gitignored because its paths are machine-specific.",
+    "",
+    "engine.args is what the supervisor launches. When a models catalog is",
+    "present it is rewritten from the selected entry on every switch, so treat",
+    "it as derived rather than as the place to edit flags.",
+    "",
+    "Never put the key in args. Set api_key_file and the supervisor passes",
+    "--api-key-file, which keeps the secret off a command line that every",
+    "process running as this user can read."
+  ],
+
+  "engine": {
+    "executable": "P:/NInfer/build-win/apps/Release/ninfer-serve.exe",
+    "args": [
+      "P:/models/qwen3_8_27b_nvfp4.ninfer",
+      "--host", "0.0.0.0",
+      "--port", "8010",
+      "--model-id", "qwen3.8-27b-nvfp4",
+      "--max-context", "262144",
+      "--kv-capacity", "851968",
+      "--max-concurrency", "8",
+      "--spec", "mtp",
+      "--draft-tokens", "4",
+      "--lm-head-draft",
+      "--kv-dtype", "int8",
+      "--prefill-chunk", "2048",
+      "--vision",
+      "--cors",
+      "--request-log-jsonl", "P:/NInfer/supervisor-logs/prod.jsonl"
+    ],
+    "workdir": "P:/NInfer",
+    "api_key_file": "P:/models/ninfer-api-key.txt",
+    "engine_host": "127.0.0.1",
+    "engine_port": 8010,
+    "request_log": "P:/NInfer/supervisor-logs/prod.jsonl",
+    "device": 0,
+    "unmanaged": false
+  },
+
+  "_models_comment": [
+    "Optional. Omit the whole array and the supervisor behaves exactly as it did",
+    "before it existed: engine.args is the only configuration.",
+    "",
+    "Each entry carries its OWN flags, because switching models is not a path",
+    "swap. The 27B wants int8 KV and MTP speculation; Flash-Next wants fp8 KV,",
+    "a GDN state dtype, a different capacity, and rejects --host-state-slots",
+    "above its 64 state-slot ceiling. An entry that inherits another model's",
+    "tuning fails in target planning seconds after launch.",
+    "",
+    "GET /api/models validates each artifact as the request is served: exists,",
+    "regular file, readable, and carries the NInfer v2 magic. POST /api/model",
+    "with {\"id\": \"...\"} switches, waits for the new model to actually serve,",
+    "and restores the previous one if it does not."
+  ],
+  "models": [
+    {
+      "id": "qwen3.8-27b-nvfp4",
+      "artifact": "P:/models/qwen3_8_27b_nvfp4.ninfer",
+      "args": [
+        "--host", "0.0.0.0",
+        "--port", "8010",
+        "--model-id", "qwen3.8-27b-nvfp4",
+        "--max-context", "262144",
+        "--kv-capacity", "851968",
+        "--max-concurrency", "8",
+        "--spec", "mtp",
+        "--draft-tokens", "4",
+        "--lm-head-draft",
+        "--kv-dtype", "int8",
+        "--prefill-chunk", "2048",
+        "--vision",
+        "--cors",
+        "--request-log-jsonl", "P:/NInfer/supervisor-logs/prod.jsonl"
+      ]
+    },
+    {
+      "id": "qwen3.8-flash-next",
+      "artifact": "C:/models/Qwen3.8-Flash-Next/qwen3_8_flash_next_mixed.ninfer",
+      "args": [
+        "--host", "0.0.0.0",
+        "--port", "8010",
+        "--model-id", "qwen3.8-flash-next",
+        "--max-context", "262144",
+        "--kv-capacity", "786432",
+        "--max-concurrency", "8",
+        "--max-private-continuations", "48",
+        "--prefill-chunk", "8192",
+        "--kv-dtype", "fp8",
+        "--gdn-state-dtype", "bf16",
+        "--desktop-reserve-gib", "3",
+        "--pending-timeout-ms", "20000",
+        "--vision",
+        "--cors",
+        "--request-log-jsonl", "P:/NInfer/supervisor-logs/prod.jsonl"
+      ]
+    }
+  ],
+  "active_model": "qwen3.8-27b-nvfp4",
+
+  "supervisor": {
+    "host": "127.0.0.1",
+    "port": 8099,
+    "bind_any": false,
+    "monitor_only": false,
+    "logs_dir": "P:/NInfer/supervisor-logs",
+    "run_at_login": true,
+    "restart": {
+      "max_backoff_s": 60,
+      "crash_loop_window_s": 60,
+      "crash_loop_max": 5,
+      "health_fail_threshold": 3
+    }
+  }
+}
