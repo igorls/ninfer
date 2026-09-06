@@ -289,6 +289,40 @@ DashboardServer::ConfigResult DashboardServer::apply_config(const std::string& r
     return {200, out};
 }
 
+// Blocks until the engine answers /health, or the breaker halts, or time runs out.
+//
+// Health, not the process existing: the failure mode being waited on is a process
+// that starts and then exits during target planning, so "is it serving" is the
+// only question worth asking. A Halted breaker short-circuits, since nothing
+// changes by waiting once it has given up.
+bool DashboardServer::wait_until_serving(std::chrono::seconds limit, int replaced_pid) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        const EngineStatus st = child_.status();
+        if (st.state == EngineState::Halted) { return false; }
+        // Two guards, and both are needed.
+        //
+        // The pid must have changed, or a health reading could describe the
+        // engine being replaced rather than the one being waited for. Spawning
+        // is fast -- it is the model load that takes 15 to 60 seconds -- so the
+        // pid turns over almost immediately and this alone is not enough.
+        //
+        // And the probe must be fresh. Using the collector's snapshot here made a
+        // failed switch answer "serving: true" in one second, because that
+        // snapshot is sampled on its own schedule and still held the old
+        // engine's 200 well after the process it described was gone. Asking the
+        // engine directly is the only reading that cannot be stale.
+        if (st.pid == 0 || st.pid == replaced_pid) { continue; }
+        httplib::Client probe(engine_connect_host(cfg_.engine), cfg_.engine.engine_port);
+        probe.set_connection_timeout(1, 0);
+        probe.set_read_timeout(2, 0);
+        // /health is exempt from the engine's API key, so no credential is needed.
+        if (auto res = probe.Get("/health"); res && res->status == 200) { return true; }
+    }
+    return false;
+}
+
 nlohmann::json DashboardServer::models_json() const {
     nlohmann::json models = nlohmann::json::array();
     const std::string active_label = model_label_from_args(cfg_.engine.args);
@@ -354,6 +388,9 @@ DashboardServer::ConfigResult DashboardServer::select_model(const std::string& r
     }
     next.source_stamp = config_file_stamp(cfg_.source_path);
     const SupervisorConfig previous = cfg_;
+    // Captured before the restart: the wait needs to know which process it is
+    // replacing, or a stale health sample from the old one reads as success.
+    const int replaced_pid = child_.status().pid;
     cfg_ = next;
     child_.update_config(next);
     // Restarting is the switch. Loading a different model means tearing down the
@@ -370,35 +407,38 @@ DashboardServer::ConfigResult DashboardServer::select_model(const std::string& r
     // looping until the breaker halts it, and the only way back is another API
     // call that the operator has to know to make. Observed exactly that twice
     // while building this, on a live engine.
-    //
-    // Health, not the process existing: the failure mode here is a process that
-    // starts and exits during planning, so "is it serving" is the only question
-    // that matters.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(180);
-    bool healthy        = false;
-    while (std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::seconds(2));
-        if (collector_.snapshot().health_status == 200) {
-            healthy = true;
-            break;
-        }
-        const EngineStatus st = child_.status();
-        // Halted means the breaker gave up; nothing will change by waiting.
-        if (st.state == EngineState::Halted) { break; }
-    }
+    const bool healthy = wait_until_serving(std::chrono::seconds(180), replaced_pid);
     if (!healthy) {
         cfg_ = previous;
         try {
             save_config_json(cfg_.source_path, previous);
         } catch (const std::exception&) { /* reported below either way */ }
         child_.update_config(previous);
+        const int failed_pid = child_.status().pid;
         child_.restart();
-        nlohmann::json out = models_json();
-        out["error"] = "model " + model->id +
-                       " did not start; rolled back to the previous model. Its flags are "
-                       "probably not valid for this target -- see the engine log for the "
-                       "failing startup phase.";
+        // Wait for the previous model too, and say which of the two things
+        // actually happened.
+        //
+        // Returning as soon as the rollback was REQUESTED made "rolled back to Y"
+        // a claim about an intention, not an observation: the caller was told it
+        // was serving Y while Y was still loading, or had itself failed to come
+        // back. Those are very different situations for whoever is reading it --
+        // one is a bad model entry, the other is an engine that is now down.
+        const bool restored = wait_until_serving(std::chrono::seconds(180), failed_pid);
+        nlohmann::json out   = models_json();
         out["rolled_back_to"] = previous.active_model;
+        out["serving"]        = restored;
+        if (restored) {
+            out["error"] = "model " + model->id + " did not start; rolled back to " +
+                           previous.active_model +
+                           ", which is serving again. Its flags are probably not valid for "
+                           "this target -- see the engine log for the failing startup phase.";
+        } else {
+            out["error"] = "model " + model->id + " did not start, and " +
+                           previous.active_model +
+                           " has not come back either. The engine is down; check the engine "
+                           "log and the crash-loop state.";
+        }
         return {409, out};
     }
 

@@ -5,6 +5,7 @@
 #include "engine_child.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <thread>
@@ -46,6 +47,10 @@ private:
     // the old one's device state, so a restart is the mechanism, not a side
     // effect.
     ConfigResult select_model(const std::string& request_body);
+    // Blocks until the engine answers /health, the crash-loop breaker halts, or
+    // the limit passes. Used on both the switch and the rollback so a reported
+    // "serving" is observed rather than merely requested.
+    [[nodiscard]] bool wait_until_serving(std::chrono::seconds limit, int replaced_pid);
     bool control_allowed(const std::string& remote) const;
 
     SupervisorConfig cfg_;
