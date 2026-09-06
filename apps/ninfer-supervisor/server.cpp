@@ -498,6 +498,7 @@ nlohmann::json DashboardServer::state_json() {
                            {"decode_tok_s_total", snap.requests.decode_tok_s_total},
                            {"prefill_tok_s_total", snap.requests.prefill_tok_s_total},
                            {"running_requests", snap.requests.running_requests},
+                           {"clients_window_minutes", snap.requests.clients_window_minutes},
                            {"reuse_full_reset", snap.requests.reuse_full_reset},
                            {"reuse_append", snap.requests.reuse_append},
                            {"reuse_seed", snap.requests.reuse_seed},
@@ -512,6 +513,19 @@ nlohmann::json DashboardServer::state_json() {
                            {"mtp_rounds", snap.requests.mtp_rounds},
                            {"mtp_accepted_per_position", snap.requests.mtp_accepted_per_position},
                            {"mtp_last_accept_rate", snap.requests.mtp_last_accept_rate}};
+    nlohmann::json clients = nlohmann::json::array();
+    for (const auto& c : snap.requests.clients) {
+        clients.push_back({{"name", c.name},
+                           {"requests", c.requests},
+                           {"from_root", c.from_root},
+                           {"prompt_tokens", c.prompt_tokens},
+                           {"refill_tokens", c.refill_tokens},
+                           {"reuse_percent", c.reuse_percent()},
+                           {"ttft_ms_mean", c.ttft_ms_mean()},
+                           {"tool_count", c.tool_count},
+                           {"last_seen_ms", c.last_seen_ms}});
+    }
+    req["clients"] = std::move(clients);
     nlohmann::json health = {{"status", snap.health_status}, {"body", snap.health_body}};
     // Health observation and engine-state transitions are driven by the
     // Collector's 1 Hz observe_loop, not from here. Doing it here as well made

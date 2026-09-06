@@ -197,6 +197,71 @@ struct ThroughputSample {
     int running           = 0;
 };
 
+// What one app has been doing, rolled up from its completed requests. Keyed by
+// the User-Agent the engine now records, so the dashboard can show WHICH client
+// is re-prefilling its whole context every turn rather than only that somebody
+// is. Clients differ enormously on the same engine: one held 99% prefix reuse
+// all day beside another that held 3%, and the aggregates hid both.
+struct ClientActivity {
+    std::string name;                 // empty means the client sent no User-Agent
+    std::uint64_t requests    = 0;
+    std::uint64_t from_root   = 0;    // conversations that had to start over
+    std::uint64_t prompt_tokens = 0;
+    std::uint64_t refill_tokens = 0;  // of those, the ones actually recomputed
+    std::int64_t last_seen_ms = 0;
+    int tool_count            = 0;
+    double ttft_ms_sum        = 0;
+
+    [[nodiscard]] double reuse_percent() const {
+        if (prompt_tokens == 0) { return 0.0; }
+        const double reused = static_cast<double>(prompt_tokens - refill_tokens);
+        return 100.0 * reused / static_cast<double>(prompt_tokens);
+    }
+    [[nodiscard]] double ttft_ms_mean() const {
+        return requests == 0 ? 0.0 : ttft_ms_sum / static_cast<double>(requests);
+    }
+};
+
+// One completed request, kept only long enough to age out of the window.
+struct ClientRequest {
+    std::int64_t t_ms = 0;
+    std::string client;
+    std::uint64_t prompt_tokens = 0;
+    std::uint64_t refill_tokens = 0;
+    bool from_root              = false;
+    int tool_count              = 0;
+    double ttft_ms              = 0;
+};
+
+// Rolls the window up per client, busiest first. A rolling window rather than
+// totals since startup: the question this answers is "who is on the engine now",
+// and a client that stopped an hour ago should fall off rather than keep its
+// place in the list.
+[[nodiscard]] inline std::vector<ClientActivity>
+summarize_clients(const std::deque<ClientRequest>& window) {
+    std::vector<ClientActivity> out;
+    for (const ClientRequest& r : window) {
+        auto it = std::find_if(out.begin(), out.end(),
+                               [&](const ClientActivity& c) { return c.name == r.client; });
+        if (it == out.end()) {
+            out.push_back(ClientActivity{.name = r.client});
+            it = out.end() - 1;
+        }
+        ++it->requests;
+        it->from_root += r.from_root ? 1U : 0U;
+        it->prompt_tokens += r.prompt_tokens;
+        it->refill_tokens += r.refill_tokens;
+        it->ttft_ms_sum += r.ttft_ms;
+        it->last_seen_ms = std::max(it->last_seen_ms, r.t_ms);
+        it->tool_count   = std::max(it->tool_count, r.tool_count);
+    }
+    std::sort(out.begin(), out.end(), [](const ClientActivity& a, const ClientActivity& b) {
+        if (a.requests != b.requests) { return a.requests > b.requests; }
+        return a.last_seen_ms > b.last_seen_ms;
+    });
+    return out;
+}
+
 // Ring of engine throughput reports (~0.2 Hz). Separate from the 10 Hz VRAM
 // series: this arrives on the engine's own cadence, and folding it into the fast
 // series would decuple series.jsonl for no extra information.

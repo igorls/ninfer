@@ -26,6 +26,10 @@ namespace {
 // a period that has ended, so it is shown as idle rather than as a live rate.
 constexpr std::int64_t kThroughputStaleMs = 12'000;
 
+// Rolling window for the connected-clients panel. Long enough that an app pausing
+// between turns keeps its place, short enough that the list describes now.
+constexpr std::int64_t kClientWindowMs = 15 * 60 * 1000;
+
 // Runs a console command with no visible window and captures its stdout. The supervisor is a
 // windowless process, so `_popen` (which goes through cmd.exe) flashed a console on every poll.
 bool run_hidden_capture(const std::string& command_line, std::string& output, int& exit_code) {
@@ -263,6 +267,8 @@ void Collector::poll_request_log(Collected& out) {
             out.requests.prefill_tok_s_total = samples.back().prefill_tok_s;
             out.requests.running_requests    = samples.back().running;
         }
+        out.requests.clients                = summarize_clients(client_window_);
+        out.requests.clients_window_minutes = static_cast<int>(kClientWindowMs / 60000);
     }
 }
 
@@ -409,6 +415,45 @@ void Collector::tail_throughput_locked() {
         // before it so the next pass reads it whole.
         if (in.eof() && !line.empty() && line.back() != '\n') { break; }
         throughput_offset_ += line.size() + 1U;
+        // request_start names the client; request_done carries what it cost. The
+        // pair is joined on request_id so the panel can attribute re-prefills to
+        // the app responsible for them.
+        if (jsonl_event_is(line, "request_start")) {
+            try {
+                const auto j = nlohmann::json::parse(line);
+                const auto& r = j.at("request");
+                pending_clients_.insert_or_assign(
+                    r.value("request_id", std::uint64_t{0}),
+                    std::pair{r.value("client", std::string{}), r.value("tool_count", 0)});
+                // An engine that dies mid-request leaves its starts unmatched. Cap
+                // the map so a crash loop cannot grow it without bound.
+                if (pending_clients_.size() > 512) { pending_clients_.clear(); }
+            } catch (...) {}
+            continue;
+        }
+        if (jsonl_event_is(line, "request_done")) {
+            try {
+                const auto j  = nlohmann::json::parse(line);
+                const auto& r = j.at("result");
+                const auto id = j.at("request").value("request_id", std::uint64_t{0});
+                ClientRequest c;
+                c.t_ms          = j.value("timestamp_unix_ms", std::int64_t{0});
+                c.prompt_tokens = r.value("prompt_tokens", std::uint64_t{0});
+                c.refill_tokens = r.value("computed_prefill_tokens", std::uint64_t{0});
+                const std::string path = r.value("prefix_reuse_path", std::string{});
+                c.from_root = path == "root" || path == "full_reset";
+                c.ttft_ms   = j.contains("timings_seconds")
+                                  ? j.at("timings_seconds").value("ttft", 0.0) * 1000.0
+                                  : 0.0;
+                if (const auto it = pending_clients_.find(id); it != pending_clients_.end()) {
+                    c.client     = it->second.first;
+                    c.tool_count = it->second.second;
+                    pending_clients_.erase(it);
+                }
+                if (c.t_ms != 0) { client_window_.push_back(std::move(c)); }
+            } catch (...) {}
+            continue;
+        }
         if (!jsonl_event_is(line, "throughput")) { continue; }
         try {
             const auto j = nlohmann::json::parse(line);
@@ -423,6 +468,12 @@ void Collector::tail_throughput_locked() {
             }
             if (s.t_ms != 0) { throughput_.push(s); }
         } catch (...) {}
+    }
+    // Age the window. "Who is on the engine now" means recent, so a client that
+    // stopped an hour ago drops off rather than holding its place in the list.
+    const std::int64_t horizon = now_ms() - kClientWindowMs;
+    while (!client_window_.empty() && client_window_.front().t_ms < horizon) {
+        client_window_.pop_front();
     }
 }
 

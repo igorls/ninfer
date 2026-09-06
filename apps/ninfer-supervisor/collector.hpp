@@ -43,6 +43,9 @@ struct RequestMix {
     std::uint64_t mtp_rounds           = 0;
     std::vector<std::uint64_t> mtp_accepted_per_position;
     double mtp_last_accept_rate        = 0;
+    // Who is actually on the engine, busiest first, over a rolling window.
+    std::vector<ClientActivity> clients;
+    int clients_window_minutes         = 0;
 };
 
 struct Collected {
@@ -122,6 +125,10 @@ private:
     // throughput_offset_, because the log reaches tens of megabytes and re-reading
     // it once a second to compute a rate would cost more than the engine it watches.
     ThroughputRing throughput_;
+    // request_start carries the client, request_done carries the result; they are
+    // joined on request_id, so a started-but-unfinished request waits here.
+    std::unordered_map<std::uint64_t, std::pair<std::string, int>> pending_clients_;
+    std::deque<ClientRequest> client_window_;
     std::uintmax_t throughput_offset_ = 0;
     std::atomic<bool> series_run_{false};
     std::thread series_thread_;

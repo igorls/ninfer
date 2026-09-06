@@ -136,6 +136,17 @@ svg{flex-shrink:0}
 .legend-color.event{width:2px;height:10px;background:#a87825}
 .legend-color.reserve{background:transparent;border-top:2px dashed var(--warn)}
 .legend-color.prefill{background:#5b7fa8}
+.clients-surface{margin:22px 0 0}
+.client-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 16px;padding:14px 0;border-top:1px solid var(--border-dim)}
+.client-row:first-of-type{border-top:0;padding-top:4px}
+.client-name{font-size:14px;font-weight:600;overflow-wrap:anywhere}
+.client-name .kpi-badge{margin-left:8px;vertical-align:2px}
+.client-meta{font-size:12px;color:var(--text-secondary);font-variant-numeric:tabular-nums}
+.client-reuse{text-align:right;font-size:14px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
+.client-reuse span{display:block;font-size:11px;font-weight:400;color:var(--text-muted)}
+.client-reuse.poor{color:var(--warn)}
+.client-note{grid-column:1/-1;font-size:11px;color:var(--warn);overflow-wrap:anywhere}
+@media(max-width:640px){.client-row{grid-template-columns:minmax(0,1fr)}.client-reuse{text-align:left}}
 .throughput-surface{margin:22px 0 0}
 .throughput-surface .chart-wrapper{height:190px}
 #throughput-canvas{display:block;width:100%;height:100%;border-radius:3px}
@@ -476,6 +487,11 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
       <div class="chart-footer"><div class="legend-items"><span><i class="legend-color"></i>Generating</span><span><i class="legend-color prefill"></i>Reading the prompt</span></div><div class="chart-range-wrap"><span id="throughput-range">Live history</span></div></div>
       <p class="context-note">Measured by the engine while the work happens, so long answers are counted as they stream rather than when they finish. Every token the model produces counts, reasoning included. Prompt reading runs far faster than generation, so the two lines use separate scales.</p>
     </section>
+    <section class="surface clients-surface" aria-labelledby="clients-title" id="clients-panel" hidden>
+      <div class="section-heading"><div><h2 id="clients-title">Connected apps</h2><p id="clients-sub">Which apps are using your engine, and how well each one reuses its conversation.</p></div><span id="clients-count" class="kpi-badge">—</span></div>
+      <div id="clients-list"></div>
+      <p class="context-name context-note">Reuse is how much of each prompt the engine could keep instead of reading again. A high number means an app is resending conversations the engine already holds; a low one means it is paying for the whole history every turn.</p>
+    </section>
     <div class="overview-configure">
     <section id="model-catalog" class="model-catalog" aria-labelledby="catalog-title" hidden>
       <div class="section-heading"><div><h2 id="catalog-title">Choose a model</h2><p id="catalog-current">Checking the current model…</p></div><button id="catalog-refresh" class="btn">Refresh models</button></div>
@@ -808,6 +824,59 @@ R"HTML(    document.title = document.getElementById('view-' + activeView).queryS
   // runs an order of magnitude faster than generation, so on one scale the line
   // people care about would be pinned to the floor. Each gets its own axis, in its
   // own colour, and the axis labels say which is which.
+  // One row per app, built from the engine's own record of who sent what. The
+  // panel hides itself when nothing has connected: an empty list would imply a
+  // problem on a machine where the engine is simply idle.
+  function renderClients(reqs) {
+    const list = document.getElementById('clients-list');
+    const panel = document.getElementById('clients-panel');
+    const clients = Array.isArray(reqs.clients) ? reqs.clients : [];
+    panel.hidden = clients.length === 0;
+    if (!clients.length) return;
+    const mins = reqs.clients_window_minutes || 15;
+    document.getElementById('clients-count').textContent = clients.length === 1 ? '1 app' : `${clients.length} apps`;
+    document.getElementById('clients-sub').textContent = `Apps that sent a request in the last ${mins} minutes, busiest first.`;
+    list.replaceChildren();
+    for (const c of clients) {
+      const row = document.createElement('div');
+      row.className = 'client-row';
+      const left = document.createElement('div');
+      const name = document.createElement('div');
+      name.className = 'client-name';
+      // An app that sends no User-Agent cannot be named, and saying so is more
+      // useful than inventing a label or hiding the row.
+      name.textContent = c.name || 'Unidentified app';
+      if (c.tool_count > 0) {
+        const badge = document.createElement('span');
+        badge.className = 'kpi-badge';
+        badge.textContent = `${c.tool_count} tools`;
+        name.append(badge);
+      }
+      const meta = document.createElement('div');
+      meta.className = 'client-meta';
+      const reqCount = `${c.requests} request${c.requests === 1 ? '' : 's'}`;
+      const ttft = c.ttft_ms_mean > 0 ? ` · ${Math.round(c.ttft_ms_mean)} ms to first token` : '';
+      meta.textContent = reqCount + ttft;
+      left.append(name, meta);
+      const reuse = document.createElement('div');
+      const pct = Number.isFinite(c.reuse_percent) ? c.reuse_percent : 0;
+      reuse.className = 'client-reuse' + (pct < 50 ? ' poor' : '');
+      reuse.textContent = `${pct.toFixed(0)}%`;
+      const cap = document.createElement('span');
+      cap.textContent = 'reused';
+      reuse.append(cap);
+      row.append(left, reuse);
+      // Only worth calling out when it is costing something real and repeatedly.
+      if (c.from_root > 1 && pct < 50) {
+        const note = document.createElement('div');
+        note.className = 'client-note';
+        note.textContent = `Started over ${c.from_root} times, re-reading ${(c.refill_tokens / 1000).toFixed(0)}k tokens. This app is not reusing its conversation, which slows it down and takes capacity from the others.`;
+        row.append(note);
+      }
+      list.append(row);
+    }
+  }
+
   function drawThroughput(ser) {
     if (!ser || !isDocumentVisible || activeView !== 'overview') return;
     const t = ser.t_ms || [], dec = ser.decode_tok_s || [], pre = ser.prefill_tok_s || [];
@@ -1297,6 +1366,7 @@ R"HTML(    if (av && av.desktop_reserve) {
     const haveThr = reqs.log_available !== false;
     document.getElementById('thr-decode').textContent = haveThr ? `${thrTotal.toFixed(0)} tok/s` : '—';
     document.getElementById('thr-prefill').textContent = haveThr ? `${(reqs.prefill_tok_s_total || 0).toFixed(0)} tok/s` : '—';
+    renderClients(reqs);
     const running = reqs.running_requests || 0;
     document.getElementById('kpi-thr-window').textContent = running > 0 ? `${running} request${running === 1 ? '' : 's'} running` : 'idle';
     document.getElementById('kpi-ttft').textContent = Number.isFinite(reqs.ttft_ms_mean) ? `${reqs.ttft_ms_mean.toFixed(0)} ms` : 'No data yet';
