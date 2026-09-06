@@ -4,6 +4,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -34,8 +36,79 @@ inline std::string engine_connect_host(const EngineSpec& spec) {
     return spec.engine_host;
 }
 
+// One servable model. `args` is everything the engine needs BESIDES the artifact
+// path, because switching models is not a path swap: the 27B wants
+// --kv-dtype int8 --spec mtp --draft-tokens 4, Flash-Next wants
+// --kv-dtype fp8 --gdn-state-dtype bf16 and a different --kv-capacity. A catalog
+// that carried only paths would produce a configuration that does not start.
+struct ModelEntry {
+    std::string id;
+    std::string artifact;
+    std::vector<std::string> args;
+};
+
+// What a model's artifact looks like on disk right now. Availability is checked
+// rather than assumed: a catalog entry pointing at a moved or half-copied file
+// should say so in the dashboard, not at the next restart when the engine fails
+// to come up.
+struct ModelAvailability {
+    bool available = false;
+    std::string reason;       // empty when available
+    std::uint64_t size_bytes = 0;
+};
+
+// Reads the artifact header. `NINFER\0\2` is the v2 artifact magic (see
+// src/artifact/reader.cpp), so a file that exists but is a partial copy, the
+// wrong format, or a stray rename is caught here instead of costing a failed
+// engine start and a crash-loop backoff.
+inline ModelAvailability check_model_available(const ModelEntry& model) {
+    ModelAvailability out;
+    if (model.artifact.empty()) {
+        out.reason = "no artifact path configured";
+        return out;
+    }
+    std::error_code ec;
+    const std::filesystem::path path(model.artifact);
+    if (!std::filesystem::exists(path, ec) || ec) {
+        out.reason = "artifact not found";
+        return out;
+    }
+    if (!std::filesystem::is_regular_file(path, ec) || ec) {
+        out.reason = "artifact path is not a file";
+        return out;
+    }
+    out.size_bytes = static_cast<std::uint64_t>(std::filesystem::file_size(path, ec));
+    if (ec) {
+        out.size_bytes = 0;
+        out.reason     = "artifact size is unreadable";
+        return out;
+    }
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        out.reason = "artifact cannot be opened for reading";
+        return out;
+    }
+    char magic[8] = {};
+    in.read(magic, sizeof(magic));
+    if (in.gcount() != static_cast<std::streamsize>(sizeof(magic))) {
+        out.reason = "artifact is truncated";
+        return out;
+    }
+    static constexpr char kNinferV2[8] = {'N', 'I', 'N', 'F', 'E', 'R', '\0', '\2'};
+    if (std::memcmp(magic, kNinferV2, sizeof(magic)) != 0) {
+        out.reason = "not an NInfer v2 artifact";
+        return out;
+    }
+    out.available = true;
+    return out;
+}
+
 struct SupervisorConfig {
     EngineSpec engine;
+    // Optional catalog. Empty means the engine's own args are the only
+    // configuration, which is how every config before this worked and still does.
+    std::vector<ModelEntry> models;
+    std::string active_model;
     // Where this config was loaded from. The dashboard writes edits back here, so
     // it must be the resolved path rather than whatever relative string the CLI
     // was given -- the supervisor's working directory is not the user's.
@@ -102,7 +175,35 @@ inline nlohmann::json config_to_json(const SupervisorConfig& cfg) {
           {"crash_loop_max", cfg.restart.crash_loop_max},
           {"health_fail_threshold", cfg.restart.health_fail_threshold}}},
     };
-    return {{"engine", engine}, {"supervisor", supervisor}};
+    nlohmann::json out = {{"engine", engine}, {"supervisor", supervisor}};
+    // Only written when present, so a config that never used a catalog is not
+    // rewritten with empty keys the operator did not ask for.
+    if (!cfg.models.empty()) {
+        nlohmann::json models = nlohmann::json::array();
+        for (const auto& m : cfg.models) {
+            models.push_back({{"id", m.id}, {"artifact", m.artifact}, {"args", m.args}});
+        }
+        out["models"] = models;
+        if (!cfg.active_model.empty()) { out["active_model"] = cfg.active_model; }
+    }
+    return out;
+}
+
+// The full command line for a catalog entry: the artifact first, because the
+// engine takes it positionally, then that model's own flags.
+inline std::vector<std::string> model_engine_args(const ModelEntry& model) {
+    std::vector<std::string> args;
+    args.reserve(model.args.size() + 1);
+    args.push_back(model.artifact);
+    args.insert(args.end(), model.args.begin(), model.args.end());
+    return args;
+}
+
+inline const ModelEntry* find_model(const SupervisorConfig& cfg, const std::string& id) {
+    for (const auto& m : cfg.models) {
+        if (m.id == id) { return &m; }
+    }
+    return nullptr;
 }
 
 // Write to a sibling temp file, then rename over the original. A half-written
@@ -155,6 +256,26 @@ inline SupervisorConfig load_config_json(const std::string& json_text,
             }
         }
     }
+    if (body.contains("models") && body.at("models").is_array()) {
+        for (const auto& m : body.at("models")) {
+            if (!m.is_object()) { continue; }
+            ModelEntry entry;
+            entry.id       = m.value("id", "");
+            entry.artifact = m.value("artifact", "");
+            if (m.contains("args") && m.at("args").is_array()) {
+                for (const auto& a : m.at("args")) {
+                    if (a.is_string()) { entry.args.push_back(a.get<std::string>()); }
+                }
+            }
+            // An entry with no id cannot be selected, and one with no artifact
+            // cannot be launched. Dropping them keeps the catalog honest rather
+            // than surfacing entries that can never work.
+            if (!entry.id.empty() && !entry.artifact.empty()) {
+                cfg.models.push_back(std::move(entry));
+            }
+        }
+    }
+    cfg.active_model = body.value("active_model", "");
     if (body.contains("supervisor") && body.at("supervisor").is_object()) {
         const auto& s = body.at("supervisor");
         cfg.host         = s.value("host", "127.0.0.1");

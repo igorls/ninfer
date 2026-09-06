@@ -289,6 +289,122 @@ DashboardServer::ConfigResult DashboardServer::apply_config(const std::string& r
     return {200, out};
 }
 
+nlohmann::json DashboardServer::models_json() const {
+    nlohmann::json models = nlohmann::json::array();
+    const std::string active_label = model_label_from_args(cfg_.engine.args);
+    for (const auto& model : cfg_.models) {
+        const ModelAvailability status = check_model_available(model);
+        models.push_back({
+            {"id", model.id},
+            {"artifact", model.artifact},
+            {"available", status.available},
+            {"reason", status.reason},
+            {"size_bytes", status.size_bytes},
+            // Active is decided by what the engine is actually configured to
+            // launch, not by the active_model field, so a hand-edited args array
+            // cannot make the dashboard claim a model that is not being served.
+            {"active", !model.artifact.empty() &&
+                           model_label_from_args(model_engine_args(model)) == active_label},
+        });
+    }
+    return {{"models", models},
+            {"active_model", cfg_.active_model},
+            {"active_artifact_label", active_label}};
+}
+
+DashboardServer::ConfigResult DashboardServer::select_model(const std::string& request_body) {
+    if (cfg_.source_path.empty()) {
+        return {409, {{"error", "this supervisor has no config file to write to"}}};
+    }
+    if (cfg_.models.empty()) {
+        return {409, {{"error", "no models are configured; add a \"models\" array to the config"}}};
+    }
+    if (!manages_engine_process(cfg_)) {
+        return {409, {{"error", "this supervisor does not manage the engine process"}}};
+    }
+    nlohmann::json body;
+    try {
+        body = nlohmann::json::parse(request_body);
+    } catch (const std::exception& ex) {
+        return {400, {{"error", std::string("request is not valid JSON: ") + ex.what()}}};
+    }
+    const std::string id = body.value("id", "");
+    if (id.empty()) { return {400, {{"error", "id is required"}}}; }
+    const ModelEntry* model = find_model(cfg_, id);
+    if (model == nullptr) { return {404, {{"error", "no configured model with id " + id}}}; }
+
+    // Checked here and not only in the listing: the file can move between the
+    // dashboard rendering a picker and someone clicking it, and a switch that
+    // fails leaves the engine down and crash-looping on a missing artifact.
+    const ModelAvailability status = check_model_available(*model);
+    if (!status.available) {
+        return {409, {{"error", "model " + id + " is unavailable: " + status.reason}}};
+    }
+
+    SupervisorConfig next = cfg_;
+    next.engine.args      = model_engine_args(*model);
+    next.active_model     = model->id;
+
+    try {
+        save_config_json(cfg_.source_path, next);
+    } catch (const std::exception& ex) {
+        return {500, {{"error", ex.what()}}};
+    }
+    const SupervisorConfig previous = cfg_;
+    cfg_ = next;
+    child_.update_config(next);
+    // Restarting is the switch. Loading a different model means tearing down the
+    // device state that belongs to the old one, so there is no in-place path, and
+    // saying so beats a dashboard that looks changed while the old model serves.
+    child_.restart();
+
+    // Wait for the new model to actually serve, and put the old one back if it
+    // does not.
+    //
+    // A valid artifact is not a valid configuration: flags are per-model, and a
+    // catalog entry carrying another model's tuning fails in target planning
+    // seconds after launch. Without this the switch leaves the engine crash-
+    // looping until the breaker halts it, and the only way back is another API
+    // call that the operator has to know to make. Observed exactly that twice
+    // while building this, on a live engine.
+    //
+    // Health, not the process existing: the failure mode here is a process that
+    // starts and exits during planning, so "is it serving" is the only question
+    // that matters.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(180);
+    bool healthy        = false;
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        if (collector_.snapshot().health_status == 200) {
+            healthy = true;
+            break;
+        }
+        const EngineStatus st = child_.status();
+        // Halted means the breaker gave up; nothing will change by waiting.
+        if (st.state == EngineState::Halted) { break; }
+    }
+    if (!healthy) {
+        cfg_ = previous;
+        try {
+            save_config_json(cfg_.source_path, previous);
+        } catch (const std::exception&) { /* reported below either way */ }
+        child_.update_config(previous);
+        child_.restart();
+        nlohmann::json out = models_json();
+        out["error"] = "model " + model->id +
+                       " did not start; rolled back to the previous model. Its flags are "
+                       "probably not valid for this target -- see the engine log for the "
+                       "failing startup phase.";
+        out["rolled_back_to"] = previous.active_model;
+        return {409, out};
+    }
+
+    nlohmann::json out = models_json();
+    out["switched_to"] = model->id;
+    out["serving"]     = true;
+    return {200, out};
+}
+
 nlohmann::json DashboardServer::state_json() {
     const EngineStatus st = child_.status();
     Collected snap        = collector_.snapshot();
@@ -487,6 +603,39 @@ void DashboardServer::run() {
             return;
         }
         const ConfigResult result = apply_config(req.body);
+        res.status                = result.status;
+        res.set_content(result.body.dump(), "application/json");
+    });
+
+    // The catalog, with each artifact checked as the request is served rather
+    // than at load. A model whose file has been moved or is still copying should
+    // read as unavailable now, not at the next restart when the engine fails to
+    // start and trips the crash-loop breaker.
+    svr.Get("/api/models", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!control_allowed(req.remote_addr)) {
+            res.status = 403;
+            res.set_content(nlohmann::json{{"error", "models are loopback-only"}}.dump(),
+                            "application/json");
+            return;
+        }
+        res.set_content(models_json().dump(), "application/json");
+    });
+
+    svr.Post("/api/model", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!control_allowed(req.remote_addr)) {
+            res.status = 403;
+            res.set_content(nlohmann::json{{"error", "models are loopback-only"}}.dump(),
+                            "application/json");
+            return;
+        }
+        if (!supervisor_control_header_ok(
+                req.get_header_value(std::string(kSupervisorControlHeader)))) {
+            res.status = 403;
+            res.set_content(nlohmann::json{{"error", "missing X-NInfer-Supervisor header"}}.dump(),
+                            "application/json");
+            return;
+        }
+        const ConfigResult result = select_model(req.body);
         res.status                = result.status;
         res.set_content(result.body.dump(), "application/json");
     });

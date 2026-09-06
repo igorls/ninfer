@@ -39,6 +39,13 @@ private:
         nlohmann::json body;
     };
     ConfigResult apply_config(const std::string& request_body);
+    // The configured model catalog with each artifact's availability checked now.
+    [[nodiscard]] nlohmann::json models_json() const;
+    // Switches the served model: validates the artifact, rewrites the engine
+    // args, saves, and restarts. Loading a different model requires tearing down
+    // the old one's device state, so a restart is the mechanism, not a side
+    // effect.
+    ConfigResult select_model(const std::string& request_body);
     bool control_allowed(const std::string& remote) const;
 
     SupervisorConfig cfg_;
