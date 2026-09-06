@@ -207,6 +207,7 @@ Json request_json(const RequestLogContext& context) {
     return Json{{"request_id", context.id},
                 {"protocol", context.protocol},
                 {"client", context.client},
+                {"tools_digest", context.tools_digest},
                 {"model", context.model},
                 {"stream", context.stream},
                 {"message_count", context.message_count},

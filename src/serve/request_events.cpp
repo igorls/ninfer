@@ -1,8 +1,44 @@
 #include "serve/request_events.h"
 
+#include <cstdint>
+#include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 namespace ninfer::serve {
+
+namespace {
+
+// FNV-1a over the rendered tool block. Not a security hash: it only has to change
+// when the block changes, and be cheap enough to run on every request.
+std::string tools_digest_of(const std::vector<ToolDefinition>& tools) {
+    if (tools.empty()) { return {}; }
+    std::uint64_t h = 1469598103934665603ULL;
+    const auto mix  = [&h](std::string_view s) {
+        for (const char c : s) {
+            h ^= static_cast<unsigned char>(c);
+            h *= 1099511628211ULL;
+        }
+        h ^= 0xffU; // separator, so ["ab","c"] and ["a","bc"] differ
+        h *= 1099511628211ULL;
+    };
+    for (const ToolDefinition& t : tools) {
+        mix(t.name);
+        mix(t.description);
+        mix(t.input_schema_json);
+        if (t.input_examples_json) { mix(*t.input_examples_json); }
+    }
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out(16, '0');
+    for (int i = 15; i >= 0; --i) {
+        out[static_cast<std::size_t>(i)] = kHex[h & 0xfU];
+        h >>= 4;
+    }
+    return out;
+}
+
+} // namespace
 
 RequestLogContext make_request_log_context(std::uint64_t id, std::string protocol,
                                            const GenerationRequest& request,
@@ -12,6 +48,7 @@ RequestLogContext make_request_log_context(std::uint64_t id, std::string protoco
     context.id                                 = id;
     context.protocol                           = std::move(protocol);
     context.client                             = std::move(client);
+    context.tools_digest                       = tools_digest_of(request.tools);
     context.model                              = metadata.model;
     context.stream                             = metadata.stream;
     context.message_count                      = request.messages.size();

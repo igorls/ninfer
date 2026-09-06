@@ -20,6 +20,15 @@ struct RequestLogContext {
     // the log shows the damage and cannot name the source -- a real diagnosis
     // came down to guessing from tool_count, and guessed wrong.
     std::string client;
+    // Fingerprint of the tool block exactly as it will be rendered, in order.
+    // Tool definitions are emitted at the very start of the prompt, so anything
+    // that changes them -- a tool added, removed, or reordered -- moves the first
+    // token and costs the ENTIRE prefix. Two consecutive turns of one
+    // conversation carrying different digests is the whole diagnosis; without it
+    // the log shows a conversation re-reading 22k tokens a turn and cannot say
+    // why. Names are listed separately so a membership change is readable rather
+    // than merely detectable.
+    std::string tools_digest;
     std::string model;
     bool stream                             = false;
     std::size_t message_count               = 0;
