@@ -429,10 +429,18 @@ DashboardServer::ConfigResult DashboardServer::select_model(const std::string& r
         out["rolled_back_to"] = previous.active_model;
         out["serving"]        = restored;
         if (restored) {
+            // Do not name a cause. This used to say the flags were probably not
+            // valid, which was wrong often enough to matter: the same entry that
+            // failed here has succeeded on a later attempt with nothing changed
+            // but how much device memory was free at the time. The dashboard
+            // shows this string verbatim, so guessing here becomes a guess the
+            // operator reads as a finding.
             out["error"] = "model " + model->id + " did not start; rolled back to " +
                            previous.active_model +
-                           ", which is serving again. Its flags are probably not valid for "
-                           "this target -- see the engine log for the failing startup phase.";
+                           ", which is serving again. The engine log records the phase it "
+                           "failed in -- commonly this entry's launch settings, or too "
+                           "little free device memory at that moment, in which case "
+                           "retrying can succeed unchanged.";
         } else {
             out["error"] = "model " + model->id + " did not start, and " +
                            previous.active_model +

@@ -623,7 +623,6 @@ R"HTML(  async function refreshModelCatalog() {
     } catch (err) {
       if (epoch === catalogEpoch) {
         modelCatalog = null;
-        catalogPanel.hidden = false;
         catalogMessage('Could not refresh models: ' + err.message + '. Refresh models before switching.', true);
       }
     } finally {if (epoch === catalogEpoch) {catalogLoading = false; updateModelControls();}}
