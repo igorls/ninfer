@@ -98,14 +98,21 @@ svg{flex-shrink:0}
 .badge-bad{background:#fbe9e7;color:#a52e2c}
 .badge-info{background:#eaf1f5;color:#3a5c73}
 .context-note{font-size:12px;line-height:1.65;margin-top:14px}
-.metrics-strip{display:grid;grid-template-columns:repeat(3,1fr);padding:28px 0 29px;gap:28px}
-.metrics-strip>div{display:flex;flex-direction:column;padding-left:25px;border-left:1px solid var(--border-dim)}
+/* Request readings live inside the activity card, beside the chart that shows
+   them over time, rather than floating above the page as a separate strip. The
+   strip repeated the generation figure the card already carried -- the same
+   measurement twice, 776px apart. minmax(0,..) because a plain 1fr track is
+   min-content wide and one long value would push the row past the card. */
+.metrics-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:22px;margin-bottom:22px}
+.metrics-strip>div{display:flex;flex-direction:column;padding-left:22px;border-left:1px solid var(--border-dim);min-width:0}
 .metrics-strip>div:first-child{border-left:none;padding-left:0}
 .metric-label{font-size:12px;font-weight:550;color:var(--text-secondary)}
 .metrics-strip strong{font-size:27px;line-height:1.3;letter-spacing:-.025em;font-weight:600;margin:5px 0;font-variant-numeric:tabular-nums}
 .metric-explainer{font-size:11px;color:var(--text-muted)}
 
-.overview-grid{display:grid;grid-template-columns:minmax(0,1fr) 265px;gap:22px}
+/* margin-top, not a gap on the status band: #monitor-note between them is hidden
+   in the managed case, and without this the status card and the first chart touch. */
+.overview-grid{display:grid;grid-template-columns:minmax(0,1fr) 265px;gap:22px;margin-top:22px}
 .surface{background:var(--bg-surface);border:1px solid var(--border-dim);border-radius:14px;padding:24px;min-width:0}
 .section-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:20px}
 .section-heading p{font-size:12px;margin-top:4px}
@@ -119,13 +126,26 @@ svg{flex-shrink:0}
 .chart-wrapper{height:222px;position:relative}
 #timeline-canvas{display:block;width:100%;height:100%;border-radius:3px}
 .chart-empty{position:absolute;inset:0;display:grid;place-items:center;font-size:13px;color:var(--text-muted);pointer-events:none}
-.chart-tooltip{display:none;position:absolute;right:12px;top:4px;background:#202e34;color:#fff;border-radius:6px;padding:10px 14px;font:11px/1.6 var(--font-mono);pointer-events:none;z-index:2}
+/* Bounded: with no max-width the tooltip grows leftwards out of the card, since
+   .chart-wrapper does not clip. */
+.chart-tooltip{display:none;position:absolute;right:12px;top:4px;max-width:calc(100% - 24px);background:#202e34;color:#fff;border-radius:6px;padding:10px 14px;font:11px/1.6 var(--font-mono);pointer-events:none;z-index:2}
 .chart-footer{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-top:14px;font-size:10px;color:var(--text-muted);flex-wrap:wrap}
 .legend-items{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
 .legend-items span{display:flex;align-items:center;gap:6px}
 .legend-color{display:inline-block;width:14px;height:2px;background:var(--ok)}
 .legend-color.event{width:2px;height:10px;background:#a87825}
 .legend-color.reserve{background:transparent;border-top:2px dashed var(--warn)}
+.legend-color.prefill{background:#5b7fa8}
+.throughput-surface{margin:22px 0 0}
+.throughput-surface .chart-wrapper{height:190px}
+#throughput-canvas{display:block;width:100%;height:100%;border-radius:3px}
+/* The page reads as three bands: what the engine IS, what it is DOING, and what
+   you can CHANGE. Watching and changing were separated by the same 22px as
+   everything else, so nine surfaces read as one undifferentiated stack. This is
+   the one generous interval on the page, and it does the grouping that repeated
+   22px gaps could not. */
+.overview-configure{margin-top:44px}
+.overview-configure>*:first-child{margin-top:0}
 .memory-surface>.context-note{padding-top:14px;border-top:1px solid var(--border-dim)}
 .connect-aside{background:#e5ede8;padding:27px 24px;border-radius:14px;display:flex;flex-direction:column;align-items:flex-start}
 .connect-aside>.icon{width:25px;height:25px;color:var(--ok);margin-bottom:20px}
@@ -135,7 +155,7 @@ svg{flex-shrink:0}
 .connect-aside code{font-size:11px;word-break:break-all;color:#244a38;font-family:var(--font-mono)}
 .connect-aside .btn{width:100%;margin-top:20px;justify-content:space-between}
 .connect-aside p.aside-footnote{font-size:10px;line-height:1.6;margin-top:auto;padding-top:20px;color:#50675b}
-.overview-bottom{display:grid;grid-template-columns:1.2fr 1fr;gap:22px;margin-top:22px}
+.overview-bottom{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:22px;margin-top:44px}
 .device-summary{display:flex;align-items:center;gap:13px;min-width:0;padding:18px 0}
 .device-summary>.icon{color:var(--text-muted)}
 .device-summary h2{font-size:12px;line-height:1.5;overflow-wrap:anywhere}
@@ -254,8 +274,8 @@ input::placeholder{color:#647580}
 .chart-wrapper{height:280px}
 .connect-aside{padding:32px}
 .engine-summary{padding:30px}
-.metrics-strip{padding:33px 0}
-.page-heading{margin-bottom:35px}
+.metrics-strip{gap:24px}
+.page-heading{margin-bottom:22px}
 }
 
 @media(max-width:1200px){.sidebar{width:195px;padding-inline:12px}
@@ -281,7 +301,7 @@ input::placeholder{color:#647580}
 .connect-aside>.btn{grid-column:2;grid-row:1/3;align-self:center;margin:0}
 .overview-bottom{grid-template-columns:1fr;gap:0}
 .troubleshoot-link{border-left:0;border-top:1px solid var(--border-dim);padding-left:0}
-.metrics-strip{gap:14px}
+.metrics-strip{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 14px}
 .metrics-strip>div{padding-left:14px}
 .metrics-strip strong{font-size:23px}
 .guide-layout{grid-template-columns:1fr}
@@ -293,12 +313,15 @@ input::placeholder{color:#647580}
 .facts>div{grid-template-columns:170px 1fr}
 }
 
-@media(max-width:640px){.sidebar{position:static;width:100%;padding:18px 18px 0;border-right:0;border-bottom:1px solid var(--border-dim)}
+/* position:relative, not static: .sidebar-footer below turns absolute at this
+   width, and with no positioned ancestor it resolves against the document and
+   pins to the top-right of the whole page instead of sitting in the header. */
+@media(max-width:640px){.sidebar{position:relative;width:100%;padding:18px 18px 0;border-right:0;border-bottom:1px solid var(--border-dim)}
 .brand{margin:0 0 17px;font-size:19px;gap:9px}
 .brand-mark{font-size:29px}
 .brand small{display:none}
 .navigation{flex-direction:row;gap:3px;justify-content:space-between}
-.navigation a{flex:1;flex-direction:column;gap:5px;padding:8px 3px 10px;font-size:10px;border-radius:6px 6px 0 0;white-space:nowrap}
+.navigation a{flex:1;flex-direction:column;gap:5px;padding:8px 3px 10px;font-size:10px;border-radius:6px 6px 0 0;white-space:nowrap;position:relative}
 .navigation .icon{width:18px;height:18px}
 .nav-count{position:absolute;margin:0 0 0 38px}
 .sidebar-footer{position:absolute;right:18px;top:23px;padding:0;font-size:10px}
@@ -319,7 +342,7 @@ input::placeholder{color:#647580}
 .engine-meta #model-label{max-width:220px}
 .engine-summary>.control-group{margin:2px 0 0 51px}
 .engine-summary .btn{padding:8px 12px;min-height:40px}
-.metrics-strip{gap:10px;padding:25px 0}
+.metrics-strip{grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 10px}
 .metrics-strip>div{padding-left:10px}
 .metric-label{font-size:10px;min-height:30px}
 .metrics-strip strong{font-size:20px;margin:2px 0 5px}
@@ -374,7 +397,7 @@ input::placeholder{color:#647580}
 .gpu-app-row{display:flex;justify-content:space-between;gap:20px;padding:8px 0;border-bottom:1px solid var(--border-dim)}
 .gpu-app-row span{overflow-wrap:anywhere;min-width:0}.gpu-app-row strong{white-space:nowrap;font-variant-numeric:tabular-nums}
 .reserve-surface{margin-top:24px;padding:28px}
-.reserve-layout{display:grid;grid-template-columns:1fr 1fr;gap:40px}
+.reserve-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:40px}
 .reserve-layout h2{margin:0 0 8px}.reserve-layout p{max-width:65ch}
 .reserve-label{display:flex;justify-content:space-between;align-items:center;gap:12px;font-weight:600}
 .reserve-label input{width:82px;padding:7px;border:1px solid var(--border-line);border-radius:8px;background:var(--bg-input);color:var(--text-main)}
@@ -422,25 +445,13 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
   <div id="connection-alert" class="notice warning" role="status" hidden>Live updates are disconnected. Showing the last received values; reconnecting automatically.</div>
   <div id="action-status" class="notice" role="status" hidden></div>
   <section id="view-overview" class="view" aria-labelledby="overview-title">
-    <div class="page-heading"><div><h1 id="overview-title">Overview</h1><p>Your engine, at a glance.</p></div><span class="local-label"><span class="small-dot"></span>On this computer</span></div>
+    <div class="page-heading"><div><h1 id="overview-title">Overview</h1></div><span class="local-label"><span class="small-dot"></span>On this computer</span></div>
     <section class="engine-summary" aria-labelledby="engine-heading">
       <div class="engine-symbol"><svg class="icon"><use href="#i-chip"/></svg></div>
       <div class="engine-message"><div class="engine-title-line"><h2 id="engine-heading">Checking your engine…</h2><span id="kpi-state-badge" class="kpi-badge badge-warn">Connecting</span></div><p id="engine-guidance">Waiting for a health update from the supervisor.</p><div class="engine-meta"><span id="model-label">Model details loading</span><span>Uptime <strong id="kpi-uptime">—</strong></span></div></div>
       <div id="controls" class="control-group"><button class="btn primary" data-act="start" id="btn-start" disabled>Start engine</button><button class="btn" data-act="restart" id="btn-restart" disabled>Restart</button><button class="btn danger-text" data-act="stop" id="btn-stop" disabled>Stop</button></div>
     </section>
     <p id="monitor-note" class="context-note" hidden>This dashboard monitors an engine started elsewhere. Use its original application to start or stop it.</p>
-    <section id="model-catalog" class="model-catalog" aria-labelledby="catalog-title" hidden>
-      <div class="section-heading"><div><h2 id="catalog-title">Choose a model</h2><p id="catalog-current">Checking the current model…</p></div><button id="catalog-refresh" class="btn">Refresh models</button></div>
-      <fieldset id="catalog-options" aria-label="Model to load"></fieldset>
-      <p class="context-note">Artifact size is disk space, not GPU memory use. Available files may still need different launch settings.</p>
-      <div class="control-group"><button id="model-switch" class="btn primary" disabled>Switch model and restart…</button><span id="catalog-hint" class="context-note"></span></div>
-      <p id="catalog-status" class="notice" role="status" hidden></p>
-    </section>
-    <div class="metrics-strip" aria-label="Recent engine activity">
-      <div><span class="metric-label">Average generation speed</span><strong id="kpi-decode-rate">—</strong><span class="metric-explainer">Average tokens generated per second</span></div>
-      <div><span class="metric-label">Time to first token</span><strong id="kpi-ttft">—</strong><span class="metric-explainer">Average wait for a response to begin</span></div>
-      <div><span class="metric-label">Completed requests</span><strong id="kpi-done">—</strong><span class="metric-explainer">In the available request log</span></div>
-    </div>
     <div class="overview-grid">
       <section class="surface memory-surface" aria-labelledby="memory-title">
         <div class="section-heading"><div><h2 id="memory-title">GPU memory</h2><p>Memory used by all apps on your graphics card.</p></div><span id="kpi-vram-pct" class="kpi-badge">—</span></div>
@@ -453,10 +464,31 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
       </section>
       <aside class="connect-aside" aria-labelledby="quick-connect-title"><svg class="icon"><use href="#i-plug"/></svg><h2 id="quick-connect-title">Put your engine to work.</h2><p>Connect an app that supports an OpenAI-compatible API to start using your local model.</p><span class="field-caption">Configured API address</span><code id="overview-endpoint">Loading…</code><p id="overview-connection-pending" class="connection-pending" hidden>Restart required. This saved address may not be active yet.</p><a href="#connect" class="btn primary">Connect an app<svg class="icon"><use href="#i-arrow"/></svg></a><p class="aside-footnote">Your engine runs here. Your app controls where its other data goes.</p></aside>
     </div>
+    <section class="surface throughput-surface" aria-labelledby="throughput-title">
+      <div class="section-heading"><div><h2 id="throughput-title">Inference activity</h2><p>What the card is producing, counted across every request at once.</p></div><span id="kpi-thr-window" class="kpi-badge">—</span></div>
+      <div class="metrics-strip" aria-label="Recent engine activity">
+        <div><span class="metric-label">Generating</span><strong id="thr-decode">—</strong><span class="metric-explainer" id="kpi-decode-explainer">Tokens per second across every request at once</span></div>
+        <div><span class="metric-label">Reading prompts</span><strong id="thr-prefill">—</strong><span class="metric-explainer">Prompt tokens read per second</span></div>
+        <div><span class="metric-label">Time to first token</span><strong id="kpi-ttft">—</strong><span class="metric-explainer">Average wait for a response to begin</span></div>
+        <div><span class="metric-label">Completed requests</span><strong id="kpi-done">—</strong><span class="metric-explainer">In the available request log</span></div>
+      </div>
+      <div class="chart-wrapper"><canvas id="throughput-canvas" role="img" aria-label="Generation and prompt-reading speed over time."></canvas><div id="throughput-empty" class="chart-empty">Waiting for request samples…</div></div>
+      <div class="chart-footer"><div class="legend-items"><span><i class="legend-color"></i>Generating</span><span><i class="legend-color prefill"></i>Reading the prompt</span></div><div class="chart-range-wrap"><span id="throughput-range">Live history</span></div></div>
+      <p class="context-note">Measured by the engine while the work happens, so long answers are counted as they stream rather than when they finish. Every token the model produces counts, reasoning included. Prompt reading runs far faster than generation, so the two lines use separate scales.</p>
+    </section>
+    <div class="overview-configure">
+    <section id="model-catalog" class="model-catalog" aria-labelledby="catalog-title" hidden>
+      <div class="section-heading"><div><h2 id="catalog-title">Choose a model</h2><p id="catalog-current">Checking the current model…</p></div><button id="catalog-refresh" class="btn">Refresh models</button></div>
+      <fieldset id="catalog-options" aria-label="Model to load"></fieldset>
+      <p class="context-note">Artifact size is disk space, not GPU memory use. Available files may still need different launch settings.</p>
+      <div class="control-group"><button id="model-switch" class="btn primary" disabled>Switch model and restart…</button><span id="catalog-hint" class="context-note"></span></div>
+      <p id="catalog-status" class="notice" role="status" hidden></p>
+    </section>
     <section class="surface reserve-surface" aria-labelledby="reserve-title" id="desktop-reserve">
       <div class="reserve-layout"><div><h2 id="reserve-title">Leave room for your other apps</h2><p>Choose how much GPU memory NInfer should leave free when it starts, on top of memory already used by other apps.</p><p class="context-note">More room helps your desktop and GPU-heavy apps, but leaves less capacity for the model and conversations. This is a startup target, not memory locked away from other apps.</p><p id="reserve-current" class="context-note">Checking the running reserve…</p></div>
       <div><label class="reserve-label" for="reserve-amount">Free memory target <span><input id="reserve-amount" type="number" min="1" max="64" step="1" value="8" aria-describedby="reserve-preview-note"> GiB</span></label><input id="reserve-slider" class="reserve-slider" type="range" min="1" max="64" step="1" value="8" aria-label="Free GPU memory target in GiB" aria-describedby="reserve-preview-note"><div class="reserve-scale"><span>More engine capacity</span><span>More room for apps</span></div><div class="reserve-preview" aria-hidden="true"><span id="reserve-engine-preview"></span><span id="reserve-free-preview"></span></div><p id="reserve-preview-note" class="context-note"></p><p id="reserve-status" class="context-note" role="status"></p><div class="reserve-actions"><button class="btn primary" id="reserve-save" disabled>Save for next start</button><button class="btn" id="reserve-default">Use engine default</button><button class="btn" id="reserve-discard" hidden>Discard</button></div></div></div>
     </section>
+    </div>
     <div class="overview-bottom"><section class="device-summary"><svg class="icon"><use href="#i-chip"/></svg><div><h2 id="dt-gpu-name">Graphics card</h2><p id="dt-phys-vram">Waiting for device details</p></div><span id="adapter-tag" class="kpi-badge">GPU</span></section><a href="#diagnostics" class="troubleshoot-link"><div><strong id="attention-title">Need a closer look?</strong><span id="attention-detail">View engine activity and diagnostic details.</span></div><svg class="icon"><use href="#i-arrow"/></svg></a></div>
   </section>
   <section id="view-connect" class="view" aria-labelledby="connect-title" hidden>
@@ -757,8 +789,101 @@ R"HTML(    document.title = document.getElementById('view-' + activeView).queryS
       drawTimeline(lastState.series);
     }
   }
-  window.addEventListener('resize', resizeCanvas);
-  setTimeout(resizeCanvas, 50);
+  const thrCanvas = document.getElementById('throughput-canvas');
+  const thrCtx = thrCanvas.getContext('2d');
+  function resizeThroughput() {
+    const rect = thrCanvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    thrCanvas.width = rect.width * dpr;
+    thrCanvas.height = rect.height * dpr;
+    thrCtx.scale(dpr, dpr);
+    if (rect.width > 0 && lastState && lastState.throughput && isDocumentVisible) {
+      drawThroughput(lastState.throughput);
+    }
+  }
+  window.addEventListener('resize', () => {resizeCanvas(); resizeThroughput();});
+  setTimeout(() => {resizeCanvas(); resizeThroughput();}, 50);
+
+  // Generation and prefill share a time axis but not a value axis: prompt reading
+  // runs an order of magnitude faster than generation, so on one scale the line
+  // people care about would be pinned to the floor. Each gets its own axis, in its
+  // own colour, and the axis labels say which is which.
+  function drawThroughput(ser) {
+    if (!ser || !isDocumentVisible || activeView !== 'overview') return;
+    const t = ser.t_ms || [], dec = ser.decode_tok_s || [], pre = ser.prefill_tok_s || [];
+    const n = Math.min(t.length, dec.length, pre.length);
+    const rect = thrCanvas.getBoundingClientRect();
+    const W = rect.width, H = rect.height;
+    thrCtx.clearRect(0, 0, W, H);
+    document.getElementById('throughput-empty').hidden = n >= 2;
+    if (n < 2 || W <= 0) return;
+
+    const nice = v => {
+      if (!(v > 0)) return 1;
+      const mag = Math.pow(10, Math.floor(Math.log10(v)));
+      return Math.ceil(v / mag) * mag;
+    };
+    const decMax = nice(Math.max(...dec.slice(0, n)) * 1.15) || 1;
+    const preMax = nice(Math.max(...pre.slice(0, n)) * 1.15) || 1;
+
+    const pL = 46, pR = 52, pY = 14, pBottom = 26;
+    const graphW = W - pL - pR, graphH = H - pY - pBottom;
+    if (graphW <= 0 || graphH <= 0) return;
+
+    thrCtx.lineWidth = 1;
+    thrCtx.font = '10px "Segoe UI", sans-serif';
+    const steps = 4;
+    for (let s = 0; s <= steps; s++) {
+      const y = pY + graphH - (graphH * (s / steps));
+      thrCtx.strokeStyle = '#e4e9ec';
+      thrCtx.beginPath();
+      thrCtx.moveTo(pL, y);
+      thrCtx.lineTo(W - pR, y);
+      thrCtx.stroke();
+      const fmt = v => v >= 1000 ? (v / 1000).toFixed(v >= 10000 ? 0 : 1) + 'k' : String(Math.round(v));
+      thrCtx.textAlign = 'right';
+      thrCtx.fillStyle = '#287b60';
+      thrCtx.fillText(fmt((decMax / steps) * s), pL - 6, y + 3);
+      thrCtx.textAlign = 'left';
+      thrCtx.fillStyle = '#5b7fa8';
+      thrCtx.fillText(fmt((preMax / steps) * s), W - pR + 6, y + 3);
+    }
+
+    const getX = i => pL + graphW * (i / (n - 1));
+    const line = (vals, max, colour, fill) => {
+      const getY = v => pY + graphH - (graphH * (Math.max(0, v || 0) / max));
+      if (fill) {
+        const grad = thrCtx.createLinearGradient(0, pY, 0, pY + graphH);
+        grad.addColorStop(0, 'rgba(44, 133, 106, 0.14)');
+        grad.addColorStop(1, 'rgba(44, 133, 106, 0.02)');
+        thrCtx.beginPath();
+        thrCtx.moveTo(getX(0), pY + graphH);
+        for (let i = 0; i < n; i++) thrCtx.lineTo(getX(i), getY(vals[i]));
+        thrCtx.lineTo(getX(n - 1), pY + graphH);
+        thrCtx.closePath();
+        thrCtx.fillStyle = grad;
+        thrCtx.fill();
+      }
+      thrCtx.beginPath();
+      thrCtx.lineWidth = 2;
+      thrCtx.strokeStyle = colour;
+      for (let i = 0; i < n; i++) {
+        if (i === 0) thrCtx.moveTo(getX(i), getY(vals[i]));
+        else thrCtx.lineTo(getX(i), getY(vals[i]));
+      }
+      thrCtx.stroke();
+    };
+    line(pre, preMax, '#5b7fa8', false);
+    line(dec, decMax, '#287b60', true);
+
+    const span = Math.max((t[n - 1] || 0) - (t[0] || 0), 1);
+    document.getElementById('throughput-range').textContent = Math.round(span / 1000) + ' seconds of history';
+    thrCtx.fillStyle = '#657781';
+    thrCtx.textAlign = 'left';
+    thrCtx.fillText('-' + Math.round(span / 1000) + 's', pL, H - 4);
+    thrCtx.textAlign = 'right';
+    thrCtx.fillText('Now', W - pR, H - 4);
+  }
 
   // Draw High-Density 60fps Canvas Timeline
   let mousePos = null;
@@ -1158,7 +1283,22 @@ R"HTML(    if (av && av.desktop_reserve) {
 
     // Inference & Throughput Metrics
     const reqs = s.requests || {};
-    document.getElementById('kpi-decode-rate').textContent = reqs.decode_tok_s_mean > 0 ? `${reqs.decode_tok_s_mean.toFixed(1)} tok/s` : 'No data yet';
+    // The reading is the aggregate: with several agents at once it is what the
+    // card is producing, where the per-response mean stays flat no matter how many
+    // are running. The mean is still worth showing -- it is what a single reply
+    // feels like -- so it sits in the explainer rather than as a second headline.
+    // It had been both, and the page carried the same number twice.
+    const thrTotal = reqs.decode_tok_s_total || 0;
+    document.getElementById('kpi-decode-explainer').textContent = reqs.decode_tok_s_mean > 0
+      ? `All requests together · ${reqs.decode_tok_s_mean.toFixed(1)} tok/s per response`
+      : 'Tokens per second across every request at once';
+    // Zero is a reading, not a missing value: an em dash in this slot renders as a
+    // stray rule beside its label. Only an absent request log is unknown.
+    const haveThr = reqs.log_available !== false;
+    document.getElementById('thr-decode').textContent = haveThr ? `${thrTotal.toFixed(0)} tok/s` : '—';
+    document.getElementById('thr-prefill').textContent = haveThr ? `${(reqs.prefill_tok_s_total || 0).toFixed(0)} tok/s` : '—';
+    const running = reqs.running_requests || 0;
+    document.getElementById('kpi-thr-window').textContent = running > 0 ? `${running} request${running === 1 ? '' : 's'} running` : 'idle';
     document.getElementById('kpi-ttft').textContent = Number.isFinite(reqs.ttft_ms_mean) ? `${reqs.ttft_ms_mean.toFixed(0)} ms` : 'No data yet';
     document.getElementById('kpi-done').textContent = reqs.done != null ? reqs.done.toLocaleString() : '—';
 
@@ -1265,6 +1405,7 @@ R"HTML(    if (av && av.desktop_reserve) {
     // Timeline Rendering
     if (isDocumentVisible) {
       drawTimeline(s.series);
+      drawThroughput(s.throughput);
     }
   }
 
