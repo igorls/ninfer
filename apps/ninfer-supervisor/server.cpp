@@ -486,6 +486,9 @@ nlohmann::json DashboardServer::state_json() {
     nlohmann::json req  = {{"done", snap.requests.done},
                            {"ttft_ms_mean", snap.requests.ttft_ms_mean},
                            {"decode_tok_s_mean", snap.requests.decode_tok_s_mean},
+                           {"decode_tok_s_total", snap.requests.decode_tok_s_total},
+                           {"prefill_tok_s_total", snap.requests.prefill_tok_s_total},
+                           {"running_requests", snap.requests.running_requests},
                            {"reuse_full_reset", snap.requests.reuse_full_reset},
                            {"reuse_append", snap.requests.reuse_append},
                            {"reuse_seed", snap.requests.reuse_seed},
@@ -524,6 +527,7 @@ nlohmann::json DashboardServer::state_json() {
             {"requests", std::move(req)},
             {"insights", insights},
             {"series", collector_.series_json()},
+            {"throughput", collector_.throughput_series_json()},
             {"health", std::move(health)},
             {"log_tail", log}};
 }

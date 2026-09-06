@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -178,6 +179,52 @@ struct VramSeriesEvent {
     std::int64_t t_ms = 0;
     std::string kind;
     std::string label;
+};
+
+// One engine throughput report: tokens per WALL second across everything running
+// at once, which is a different number from the average speed of one response.
+// Taken from the engine's own `throughput` log event rather than derived here.
+//
+// Deriving it from completed requests was the obvious approach and it is wrong:
+// a request only reaches the log when it finishes, so a window over completions
+// reads ZERO for the whole of a long generation -- precisely when the card is
+// busiest. Measured that happening: 207.9 tok/s, then 0.0 with four generations
+// still streaming. The engine emits this every ~5 s while the work is happening.
+struct ThroughputSample {
+    std::int64_t t_ms     = 0;
+    double decode_tok_s   = 0;
+    double prefill_tok_s  = 0;
+    int running           = 0;
+};
+
+// Ring of engine throughput reports (~0.2 Hz). Separate from the 10 Hz VRAM
+// series: this arrives on the engine's own cadence, and folding it into the fast
+// series would decuple series.jsonl for no extra information.
+struct ThroughputRing {
+    explicit ThroughputRing(std::size_t cap = 900) : cap_(cap), buf_(cap) {}
+
+    void push(ThroughputSample s) {
+        if (cap_ == 0) { return; }
+        buf_[head_] = s;
+        head_       = (head_ + 1) % cap_;
+        if (size_ < cap_) { ++size_; }
+    }
+
+    [[nodiscard]] std::vector<ThroughputSample> samples() const {
+        std::vector<ThroughputSample> out;
+        out.reserve(size_);
+        const std::size_t start = size_ < cap_ ? 0 : head_;
+        for (std::size_t i = 0; i < size_; ++i) { out.push_back(buf_[(start + i) % cap_]); }
+        return out;
+    }
+
+    [[nodiscard]] std::size_t size() const noexcept { return size_; }
+
+private:
+    std::size_t cap_  = 0;
+    std::size_t head_ = 0;
+    std::size_t size_ = 0;
+    std::vector<ThroughputSample> buf_;
 };
 
 // Diff last_transition/last_reason, not held_bytes. A 42 ms release finishes

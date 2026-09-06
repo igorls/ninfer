@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <fstream>
 #include <functional>
 #include <mutex>
@@ -20,7 +21,13 @@ namespace ninfer::supervisor {
 struct RequestMix {
     std::uint64_t done                 = 0;
     double ttft_ms_mean                = 0;
+    // Per response: how fast one answer feels. The mean of each request's own rate.
     double decode_tok_s_mean           = 0;
+    // Across everything at once: what the card is actually producing. Concurrent
+    // requests add up here and do not in the mean above.
+    double decode_tok_s_total          = 0;
+    double prefill_tok_s_total         = 0;
+    int running_requests               = 0;
     std::uint64_t reuse_full_reset     = 0;
     std::uint64_t reuse_append         = 0;
     std::uint64_t reuse_seed           = 0;
@@ -63,6 +70,7 @@ public:
     void stop_series();
     Collected snapshot();
     nlohmann::json series_json();
+    nlohmann::json throughput_series_json();
     nlohmann::json vram_control_json();
     nlohmann::json insights_report();
     void note_engine_state(const std::string& state, const std::string& last_event);
@@ -93,6 +101,9 @@ private:
     void poll_nvidia_smi(Collected& out);
     void poll_request_log(Collected& out);
     void series_loop();
+    // Reads only what has been appended since the last call and folds any engine
+    // throughput reports into the ring. Caller holds mu_.
+    void tail_throughput_locked();
     void observe_loop();
     [[nodiscard]] std::int64_t poll_request_log_mtime() const;
     void record_transitions(const Collected& snap);
@@ -107,6 +118,11 @@ private:
     std::ofstream series_file_;
     std::mutex mu_;
     VramSeriesRing series_;
+    // Throughput is derived by tailing the request log incrementally from
+    // throughput_offset_, because the log reaches tens of megabytes and re-reading
+    // it once a second to compute a rate would cost more than the engine it watches.
+    ThroughputRing throughput_;
+    std::uintmax_t throughput_offset_ = 0;
     std::atomic<bool> series_run_{false};
     std::thread series_thread_;
     std::thread observe_thread_;

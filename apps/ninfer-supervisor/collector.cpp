@@ -22,6 +22,10 @@
 namespace ninfer::supervisor {
 namespace {
 
+// The engine reports throughput every ~5 s. Past this the last report describes
+// a period that has ended, so it is shown as idle rather than as a live rate.
+constexpr std::int64_t kThroughputStaleMs = 12'000;
+
 // Runs a console command with no visible window and captures its stdout. The supervisor is a
 // windowless process, so `_popen` (which goes through cmd.exe) flashed a console on every poll.
 bool run_hidden_capture(const std::string& command_line, std::string& output, int& exit_code) {
@@ -243,6 +247,23 @@ void Collector::poll_request_log(Collected& out) {
     }
     if (n_ttft != 0) { out.requests.ttft_ms_mean = ttft_sum / n_ttft; }
     if (n_dec != 0) { out.requests.decode_tok_s_mean = decode_sum / n_dec; }
+    // The aggregate comes from the incrementally tailed spans, which the 1 Hz
+    // thread maintains. Recomputing it from the 32 lines above would report one
+    // response's speed again under a different name.
+    {
+        std::lock_guard lock(mu_);
+        // With no series thread there is nobody tailing the log, so do it here. It
+        // is incremental either way: a seek and whatever was appended.
+        if (!series_run_.load()) { tail_throughput_locked(); }
+        // The newest engine report, and only if it is recent: a stale one would
+        // keep claiming the card is busy long after it went quiet.
+        const auto samples = throughput_.samples();
+        if (!samples.empty() && now_ms() - samples.back().t_ms <= kThroughputStaleMs) {
+            out.requests.decode_tok_s_total  = samples.back().decode_tok_s;
+            out.requests.prefill_tok_s_total = samples.back().prefill_tok_s;
+            out.requests.running_requests    = samples.back().running;
+        }
+    }
 }
 
 std::int64_t Collector::now_ms() {
@@ -347,6 +368,10 @@ void Collector::observe_loop() {
             const std::int64_t log_mtime = poll_request_log_mtime();
             std::lock_guard lock(mu_);
             request_log_mtime_ms_ = log_mtime;
+            // Sampled here rather than in the 10 Hz loop: a throughput point is
+            // only as fresh as the last completed request, and this thread already
+            // owns the once-a-second cadence.
+            tail_throughput_locked();
             detector_last_ran_ms_ = now_ms();
         } catch (...) {
             std::lock_guard lock(mu_);
@@ -356,6 +381,66 @@ void Collector::observe_loop() {
         const auto period  = std::chrono::milliseconds(1000);
         if (elapsed < period) { std::this_thread::sleep_for(period - elapsed); }
     }
+}
+
+void Collector::tail_throughput_locked() {
+    if (spec_.request_log.empty()) { return; }
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(spec_.request_log, ec);
+    if (ec) { return; }
+    // A shorter file is a new one: the engine rotated or the log was cleared.
+    // Reading from a stale offset would splice a record in half and then treat
+    // every later line as garbage, so start over rather than guess.
+    if (size < throughput_offset_) { throughput_offset_ = 0; }
+    if (size == throughput_offset_) { return; }
+    // First pass on a log that already exists: start at the end. Replaying hours
+    // of history would fill the ring with samples from before this supervisor
+    // could have been watching, and the chart claims to be live.
+    if (throughput_offset_ == 0 && size > 0 && throughput_.size() == 0) {
+        throughput_offset_ = size;
+        return;
+    }
+    std::ifstream in(spec_.request_log, std::ios::binary);
+    if (!in) { return; }
+    in.seekg(static_cast<std::streamoff>(throughput_offset_), std::ios::beg);
+    std::string line;
+    while (std::getline(in, line)) {
+        // A partial final line is a record still being written. Leave the offset
+        // before it so the next pass reads it whole.
+        if (in.eof() && !line.empty() && line.back() != '\n') { break; }
+        throughput_offset_ += line.size() + 1U;
+        if (!jsonl_event_is(line, "throughput")) { continue; }
+        try {
+            const auto j = nlohmann::json::parse(line);
+            if (!j.contains("throughput_tokens_per_second")) { continue; }
+            const auto& tp = j.at("throughput_tokens_per_second");
+            ThroughputSample s;
+            s.t_ms          = j.value("timestamp_unix_ms", std::int64_t{0});
+            s.decode_tok_s  = tp.value("decode", 0.0);
+            s.prefill_tok_s = tp.value("prefill", 0.0);
+            if (j.contains("scheduler") && j.at("scheduler").is_object()) {
+                s.running = j.at("scheduler").value("running", 0);
+            }
+            if (s.t_ms != 0) { throughput_.push(s); }
+        } catch (...) {}
+    }
+}
+
+nlohmann::json Collector::throughput_series_json() {
+    std::lock_guard lock(mu_);
+    const auto samples = throughput_.samples();
+    nlohmann::json t_ms    = nlohmann::json::array();
+    nlohmann::json decode  = nlohmann::json::array();
+    nlohmann::json prefill = nlohmann::json::array();
+    for (const auto& s : samples) {
+        t_ms.push_back(s.t_ms);
+        decode.push_back(s.decode_tok_s);
+        prefill.push_back(s.prefill_tok_s);
+    }
+    return {{"source", "engine"},
+            {"t_ms", std::move(t_ms)},
+            {"decode_tok_s", std::move(decode)},
+            {"prefill_tok_s", std::move(prefill)}};
 }
 
 void Collector::series_loop() {
