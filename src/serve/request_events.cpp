@@ -7,10 +7,11 @@ namespace ninfer::serve {
 RequestLogContext make_request_log_context(std::uint64_t id, std::string protocol,
                                            const GenerationRequest& request,
                                            const RequestLogMetadata& metadata,
-                                           const PreparedRequest& prepared) {
+                                           const PreparedRequest& prepared, std::string client) {
     RequestLogContext context;
     context.id                                 = id;
     context.protocol                           = std::move(protocol);
+    context.client                             = std::move(client);
     context.model                              = metadata.model;
     context.stream                             = metadata.stream;
     context.message_count                      = request.messages.size();

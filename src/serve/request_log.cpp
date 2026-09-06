@@ -206,6 +206,7 @@ Json request_json(const RequestLogContext& context) {
     if (context.thinking_budget) { thinking_budget = *context.thinking_budget; }
     return Json{{"request_id", context.id},
                 {"protocol", context.protocol},
+                {"client", context.client},
                 {"model", context.model},
                 {"stream", context.stream},
                 {"message_count", context.message_count},

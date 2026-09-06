@@ -76,6 +76,11 @@ void render_and_write(SseTransport& transport, Render&& render) {
 nlohmann::json parse_json_body(const httplib::Request& request);
 [[nodiscard]] bool client_disconnected(const httplib::Request& request);
 
+// The client's User-Agent, trimmed to something a log can carry. Empty when the
+// client sends none. Recorded so a misbehaving app can be named rather than
+// inferred from the shape of its requests.
+[[nodiscard]] std::string client_label(const httplib::Request& request);
+
 void prepare_sse_response(httplib::Response& response);
 void configure_http_server_socket(socket_t socket) noexcept;
 void set_owned_json_content(httplib::Response& response, std::string body,

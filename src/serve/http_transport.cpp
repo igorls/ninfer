@@ -7,7 +7,10 @@
 #    include <sys/socket.h>
 #endif
 
+#include <algorithm>
+#include <cstddef>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace ninfer::serve {
@@ -35,6 +38,23 @@ nlohmann::json parse_json_body(const httplib::Request& request) {
 
 bool client_disconnected(const httplib::Request& request) {
     return request.is_connection_alive && !request.is_connection_alive();
+}
+
+std::string client_label(const httplib::Request& request) {
+    std::string agent = request.get_header_value("User-Agent");
+    // Bound it: this is attacker-controlled text appended to every request line
+    // of a log that is read back and parsed. Keep printable ASCII only, so a
+    // crafted agent string cannot inject newlines and forge log records.
+    constexpr std::size_t kMaxAgent = 120;
+    std::string out;
+    out.reserve(std::min(agent.size(), kMaxAgent));
+    for (const char c : agent) {
+        if (out.size() >= kMaxAgent) { break; }
+        const auto uc = static_cast<unsigned char>(c);
+        out.push_back(uc >= 0x20 && uc < 0x7f ? c : ' ');
+    }
+    while (!out.empty() && out.back() == ' ') { out.pop_back(); }
+    return out;
 }
 
 void prepare_sse_response(httplib::Response& response) {
