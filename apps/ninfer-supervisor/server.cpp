@@ -276,7 +276,13 @@ DashboardServer::ConfigResult DashboardServer::apply_config(const std::string& r
         } catch (const std::exception& ex) {
             return {500, {{"error", ex.what()}}};
         }
-        cfg_ = next;
+        // Re-read the stamp we just created. `next` still carries the stamp from
+        // BEFORE this write, and storing that makes the supervisor refuse its own
+        // next edit as an external change -- which it did: saving anything here
+        // then blocked every later model switch with "config file changed on disk"
+        // until the supervisor was restarted.
+        next.source_stamp = config_file_stamp(cfg_.source_path);
+        cfg_              = next;
         // The child owns the copy that spawn() reads; without this the file would
         // change and the next restart would still launch the old parameters.
         child_.update_config(next);
@@ -412,6 +418,9 @@ DashboardServer::ConfigResult DashboardServer::select_model(const std::string& r
         cfg_ = previous;
         try {
             save_config_json(cfg_.source_path, previous);
+            // Same reason as the config editor above: the rollback wrote the file,
+            // so the cached stamp has to describe what is on disk now.
+            cfg_.source_stamp = config_file_stamp(cfg_.source_path);
         } catch (const std::exception&) { /* reported below either way */ }
         child_.update_config(previous);
         const int failed_pid = child_.status().pid;
