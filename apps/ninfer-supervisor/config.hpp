@@ -113,6 +113,10 @@ struct SupervisorConfig {
     // it must be the resolved path rather than whatever relative string the CLI
     // was given -- the supervisor's working directory is not the user's.
     std::string source_path;
+    // The file's write stamp as of the last load or save by this process. A
+    // mismatch at save time means someone edited the file while we held it, and
+    // writing our copy would silently revert their change.
+    std::int64_t source_stamp = 0;
     std::string host = "127.0.0.1";
     int port         = 8099;
     bool bind_any    = false;
@@ -206,11 +210,38 @@ inline const ModelEntry* find_model(const SupervisorConfig& cfg, const std::stri
     return nullptr;
 }
 
+// When the config file was last written, as far as this process knows. Used to
+// notice that somebody edited it underneath us.
+inline std::int64_t config_file_stamp(const std::string& path) {
+    if (path.empty()) { return 0; }
+    std::error_code ec;
+    const auto t = std::filesystem::last_write_time(path, ec);
+    if (ec) { return 0; }
+    return static_cast<std::int64_t>(t.time_since_epoch().count());
+}
+
 // Write to a sibling temp file, then rename over the original. A half-written
 // config is a supervisor that will not start at the next login, and the edit that
 // produces it is made from a browser where a refresh mid-write is normal.
-inline void save_config_json(const std::string& path, const SupervisorConfig& cfg) {
+//
+// `expected_stamp` guards against clobbering an external edit. The supervisor
+// holds the config in memory from startup and writes that copy back on every
+// save, so a file edited while it runs is silently reverted at the next save --
+// which is exactly what happened while building the model catalog: a corrected
+// model entry was overwritten by the running supervisor's stale copy, and the
+// resulting failures looked like bad flags rather than a lost edit. Pass 0 to
+// skip the check.
+inline void save_config_json(const std::string& path, const SupervisorConfig& cfg,
+                             std::int64_t expected_stamp = 0) {
     if (path.empty()) { throw std::runtime_error("no config path to write to"); }
+    if (expected_stamp != 0) {
+        const std::int64_t actual = config_file_stamp(path);
+        if (actual != 0 && actual != expected_stamp) {
+            throw std::runtime_error(
+                "config file changed on disk since it was loaded; refusing to overwrite it. "
+                "Restart the supervisor to pick the edit up, or undo the external change.");
+        }
+    }
     const std::string tmp = path + ".tmp";
     {
         std::ofstream out(tmp, std::ios::binary | std::ios::trunc);

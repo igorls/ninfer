@@ -272,7 +272,7 @@ DashboardServer::ConfigResult DashboardServer::apply_config(const std::string& r
     const bool dry_run = body.value("dry_run", false);
     if (!dry_run) {
         try {
-            save_config_json(cfg_.source_path, next);
+            save_config_json(cfg_.source_path, next, cfg_.source_stamp);
         } catch (const std::exception& ex) {
             return {500, {{"error", ex.what()}}};
         }
@@ -346,10 +346,13 @@ DashboardServer::ConfigResult DashboardServer::select_model(const std::string& r
     next.active_model     = model->id;
 
     try {
-        save_config_json(cfg_.source_path, next);
+        save_config_json(cfg_.source_path, next, cfg_.source_stamp);
     } catch (const std::exception& ex) {
-        return {500, {{"error", ex.what()}}};
+        // 409, not 500: the usual cause is that the file was edited while the
+        // supervisor held it, which is the operator's to resolve, not a fault.
+        return {409, {{"error", ex.what()}}};
     }
+    next.source_stamp = config_file_stamp(cfg_.source_path);
     const SupervisorConfig previous = cfg_;
     cfg_ = next;
     child_.update_config(next);

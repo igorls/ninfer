@@ -130,6 +130,10 @@ int main(int argc, char** argv) {
             std::error_code ec;
             const auto resolved = std::filesystem::weakly_canonical(config_path, ec);
             cfg.source_path     = ec ? config_path : resolved.string();
+            // Remembered so a later save can tell that somebody edited the
+            // file while the supervisor held it in memory.
+            cfg.source_stamp =
+                ninfer::supervisor::config_file_stamp(cfg.source_path);
         }
         if (!host_override.empty()) { cfg.host = host_override; }
         if (port_override > 0) { cfg.port = port_override; }
