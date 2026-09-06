@@ -453,6 +453,10 @@ ninfer_add_test(ninfer_host_timing_test
 ninfer_add_test(ninfer_http_error_handler_test
   SOURCES test_http_error_handler.cpp
   LIBRARIES ninfer_serve)
+ninfer_add_test(ninfer_device_snapshot_cache_test
+  SOURCES test_device_snapshot_cache.cpp
+  LIBRARIES ninfer_core)
+set_tests_properties(ninfer_device_snapshot_cache_test PROPERTIES TIMEOUT 10)
 target_include_directories(ninfer_http_error_handler_test PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib)
 if(WIN32)

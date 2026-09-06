@@ -49,6 +49,7 @@ cannot be combined with `--vision`. A later request cannot enable a capability o
 | Method and path | Behavior |
 |---|---|
 | `GET /health` | process health |
+| `GET /admin/vram` | engine memory plan and cached device-memory diagnostics |
 | `GET /v1/models` | configured OpenAI model alias and effective `max_model_len` |
 | `GET /v1/models/{id}` | lookup of the configured alias and effective `max_model_len` |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
@@ -62,6 +63,10 @@ cannot be combined with `--vision`. A later request cannot enable a capability o
 
 Every OpenAI-compatible response carries a unique `x-request-id` header, including streaming and
 error responses. Anthropic endpoints use their separate `request-id` contract.
+
+Device-memory diagnostics refresh at most once every two seconds. While a driver query is in
+progress, concurrent `/admin/vram` requests receive the previous snapshot and its `device.age_ms`,
+or HTTP 503 if no snapshot has been published yet. They do not wait behind the driver query.
 
 All three generation SSE endpoints emit the standard `: keep-alive` comment after five seconds
 without a protocol event. The comment is transport-only: SSE clients ignore it, and it does not

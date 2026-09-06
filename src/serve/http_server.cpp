@@ -1,6 +1,7 @@
 #include "serve/http_server.h"
 
 #include "serve/anthropic_messages.h"
+#include "serve/device_snapshot_cache.h"
 #include "serve/http_transport.h"
 #include "serve/openai_common.h"
 #include "serve/request_log.h"
@@ -494,86 +495,12 @@ nlohmann::json arena_json(const ArenaMemorySummary& arena) {
             {"peak_used_bytes", arena.peak_used_bytes}};
 }
 
-// A device snapshot that a request never waits in line for.
-//
-// query_device_memory enumerates the driver's compute processes through NVML, and
-// on a contended Windows box that call has been measured at 18-20 seconds -- it
-// gets worse exactly when the card is under pressure, which is when a monitor is
-// most likely to be polling. Calling it directly from the handler meant every
-// poll parked an HTTP worker for that whole time. A supervisor polling once a
-// second then filled httplib's thread pool, the listen backlog overflowed, and the
-// engine refused ALL connections, inference included, while its core sat idle.
-// Observed: 175 sockets in TIME_WAIT, a live listener, and /health failing to
-// connect in under a millisecond.
-//
-// So: serve the last snapshot immediately, refresh at most one at a time, and let
-// a stale reading through rather than block. At most ONE worker is ever inside
-// NVML, and a reader that arrives during a refresh gets the previous value with
-// its age attached rather than waiting. `age_ms` is reported so a caller can tell
-// a fresh reading from one taken during a stall.
-struct DeviceSnapshotCache {
-    std::mutex value_mu;
-    std::mutex refresh_mu;
-    DeviceMemorySnapshot value;
-    std::chrono::steady_clock::time_point taken{};
-    bool primed = false;
-};
-
-DeviceSnapshotCache& device_snapshot_cache() {
+// NVML process enumeration can take seconds on Windows. Only the refreshing
+// request waits for the driver; concurrent readers receive the previous snapshot
+// with its age, or unavailable until the first snapshot has been published.
+std::optional<DeviceSnapshotReading> device_snapshot(int device) {
     static DeviceSnapshotCache cache;
-    return cache;
-}
-
-DeviceMemorySnapshot device_snapshot(int device, std::int64_t& age_ms) {
-    using clock = std::chrono::steady_clock;
-    constexpr auto kFreshFor = std::chrono::seconds(2);
-    DeviceSnapshotCache& cache = device_snapshot_cache();
-
-    {
-        std::lock_guard lock(cache.value_mu);
-        if (cache.primed && clock::now() - cache.taken < kFreshFor) {
-            age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() -
-                                                                          cache.taken)
-                         .count();
-            return cache.value;
-        }
-    }
-
-    // try_lock, never lock: if another request is already inside NVML, this one
-    // returns the stale value instead of forming the queue that took the server
-    // down. The very first caller has nothing to fall back on and must wait.
-    std::unique_lock refresh(cache.refresh_mu, std::try_to_lock);
-    if (!refresh.owns_lock()) {
-        std::lock_guard lock(cache.value_mu);
-        if (cache.primed) {
-            age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() -
-                                                                          cache.taken)
-                         .count();
-            return cache.value;
-        }
-        refresh.lock();
-    }
-
-    // Another thread may have refreshed while this one waited for the lock.
-    {
-        std::lock_guard lock(cache.value_mu);
-        if (cache.primed && clock::now() - cache.taken < kFreshFor) {
-            age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() -
-                                                                          cache.taken)
-                         .count();
-            return cache.value;
-        }
-    }
-
-    DeviceMemorySnapshot fresh = query_device_memory(device);
-    {
-        std::lock_guard lock(cache.value_mu);
-        cache.value  = fresh;
-        cache.taken  = clock::now();
-        cache.primed = true;
-    }
-    age_ms = 0;
-    return fresh;
+    return cache.read([device] { return query_device_memory(device); });
 }
 
 } // namespace
@@ -635,8 +562,17 @@ void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& r
                             .count();
     }
     const EngineOptions& engine  = service_->engine_options();
-    std::int64_t device_age_ms   = 0;
-    const DeviceMemorySnapshot device = device_snapshot(engine.device, device_age_ms);
+    const auto reading = device_snapshot(engine.device);
+    if (!reading) {
+        ApiError error;
+        error.status = 503;
+        error.type = "service_unavailable";
+        error.message = "device memory snapshot is not available yet";
+        write_openai_error(res, error);
+        return;
+    }
+    const DeviceMemorySnapshot& device = reading->snapshot;
+    const std::int64_t device_age_ms = reading->age_ms;
 
     nlohmann::json processes = nlohmann::json::array();
     for (const ProcessMemoryInfo& process : device.compute_processes) {
