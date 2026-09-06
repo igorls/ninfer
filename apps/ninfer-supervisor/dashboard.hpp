@@ -34,6 +34,20 @@ svg{flex-shrink:0}
 .icon-defs{position:absolute;width:0;height:0;overflow:hidden}
 [hidden]{display:none!important}
 .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
+.model-catalog{margin:22px 0;padding:22px;background:var(--bg-surface);border:1px solid var(--border-dim);border-radius:14px}
+.model-catalog .section-heading{margin-bottom:12px;flex-wrap:wrap}
+#catalog-options{border:0;padding:0;margin:0;min-width:0}
+.model-option{display:flex;align-items:flex-start;gap:12px;padding:14px 0;border-top:1px solid var(--border-dim);cursor:pointer}
+.model-option input{margin:5px 0 0;flex-shrink:0;width:18px;height:18px}
+.model-details{display:grid;gap:3px;min-width:0;flex:1;overflow-wrap:anywhere}
+.model-details strong{font-size:14px;font-weight:600}
+.model-details span{font-size:12px;color:var(--text-secondary);font-variant-numeric:tabular-nums}
+.model-details code{font:11px/1.5 var(--font-mono);color:var(--text-muted)}
+.model-option.unavailable{cursor:not-allowed}
+.model-option.unavailable strong{color:var(--text-muted)}
+.model-catalog .control-group{margin-top:16px;flex-wrap:wrap}
+.model-catalog .notice{margin-top:16px;overflow-wrap:anywhere}
+@media(max-width:640px){.model-catalog{padding:18px}.model-option{flex-wrap:wrap}.model-option .kpi-badge{margin-left:30px}.model-catalog .control-group{align-items:flex-start;flex-direction:column}}
 .skip-link{position:fixed;top:-60px;left:16px;padding:12px 20px;background:#fff;z-index:200}
 .skip-link:focus{top:12px}
 
@@ -415,6 +429,13 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
       <div id="controls" class="control-group"><button class="btn primary" data-act="start" id="btn-start" disabled>Start engine</button><button class="btn" data-act="restart" id="btn-restart" disabled>Restart</button><button class="btn danger-text" data-act="stop" id="btn-stop" disabled>Stop</button></div>
     </section>
     <p id="monitor-note" class="context-note" hidden>This dashboard monitors an engine started elsewhere. Use its original application to start or stop it.</p>
+    <section id="model-catalog" class="model-catalog" aria-labelledby="catalog-title" hidden>
+      <div class="section-heading"><div><h2 id="catalog-title">Choose a model</h2><p id="catalog-current">Checking the current model…</p></div><button id="catalog-refresh" class="btn">Refresh models</button></div>
+      <fieldset id="catalog-options" aria-label="Model to load"></fieldset>
+      <p class="context-note">Artifact size is disk space, not GPU memory use. Available files may still need different launch settings.</p>
+      <div class="control-group"><button id="model-switch" class="btn primary" disabled>Switch model and restart…</button><span id="catalog-hint" class="context-note"></span></div>
+      <p id="catalog-status" class="notice" role="status" hidden></p>
+    </section>
     <div class="metrics-strip" aria-label="Recent engine activity">
       <div><span class="metric-label">Average generation speed</span><strong id="kpi-decode-rate">—</strong><span class="metric-explainer">Average tokens generated per second</span></div>
       <div><span class="metric-label">Time to first token</span><strong id="kpi-ttft">—</strong><span class="metric-explainer">Average wait for a response to begin</span></div>
@@ -527,6 +548,138 @@ R"HTML(      <section class="guide-step"><span class="step-number">2</span><div>
   let connected = false;
   let actionBusy = false;
   let configBusy = false;
+  let modelBusy = false, modelCatalog = null, modelSelection = '', catalogLoading = false;
+  let catalogEpoch = 0, modelSwitchStarted = 0;
+  let modelUncertain = false;
+  const catalogPanel = document.getElementById('model-catalog');
+  const catalogOptions = document.getElementById('catalog-options');
+  const modelSwitch = document.getElementById('model-switch');
+  const catalogRefresh = document.getElementById('catalog-refresh');
+  function catalogMessage(message, error = false) {
+    const el = document.getElementById('catalog-status');
+    el.textContent = message;
+    el.className = 'notice' + (error ? ' error' : '');
+    el.hidden = !message;
+  }
+  function modelBlockReason() {
+    if (modelBusy) return 'Switch in progress. Other engine changes are paused.';
+    if (modelUncertain) return 'The switch result is unknown. Verify completion before reloading this page to enable changes.';
+    if (catalogLoading) return 'Checking available files…';
+    if (!connected) return 'Reconnect to the supervisor before switching.';
+    if (!cfgData || cfgData.manages_engine === false || (lastState || {}).monitor_only) return 'Switch models in the application that starts this engine.';
+    if (!cfgData.writable) return 'The supervisor configuration is read-only.';
+    if (configBusy || reserveBusy || actionBusy) return 'Wait for the current change to finish.';
+    if (cfgDirtyCount() || reserveDraft != null) return 'Save or discard your unsaved settings before switching.';
+    if (['Starting', 'Stopping', 'BackingOff'].includes(((lastState || {}).engine || {}).state)) return 'Wait for the engine to finish its current transition.';
+    return '';
+  }
+  function updateModelControls() {
+    const reason = modelBlockReason();
+    const selected = modelCatalog && modelCatalog.models.find(m => m.id === modelSelection);
+    modelSwitch.disabled = !!reason || !selected || !selected.available || selected.active;
+    catalogOptions.disabled = modelBusy || catalogLoading || !modelCatalog;
+    catalogRefresh.disabled = modelBusy || catalogLoading;
+    document.getElementById('catalog-hint').textContent = reason || (selected && selected.active ? 'This model is already selected for the engine.' : 'Switching interrupts active requests.');
+  }
+  function renderModelCatalog(data) {
+    modelCatalog = data;
+    catalogPanel.hidden = !data.models.length;
+    const chosen = data.models.find(m => m.id === modelSelection && m.available);
+    if (!chosen) modelSelection = (data.models.find(m => m.active && m.available) || {}).id || '';
+    catalogOptions.replaceChildren();
+    data.models.forEach((model, index) => {
+      const label = document.createElement('label');
+      label.className = 'model-option' + (model.available ? '' : ' unavailable');
+      const input = document.createElement('input');
+      input.type = 'radio'; input.name = 'catalog-model'; input.value = model.id;
+      input.checked = model.id === modelSelection; input.disabled = !model.available;
+      input.setAttribute('aria-describedby', 'catalog-detail-' + index);
+      input.onchange = () => {modelSelection = model.id; updateModelControls();};
+      const details = document.createElement('span'); details.className = 'model-details';
+      const title = document.createElement('strong'); title.textContent = model.id;
+      const detail = document.createElement('span'); detail.id = 'catalog-detail-' + index;
+      detail.textContent = (Number.isFinite(model.size_bytes) && model.size_bytes > 0 ? (model.size_bytes / 1073741824).toFixed(1) + ' GiB artifact on disk' : 'Artifact size unavailable') + (model.available ? '' : ' · Unavailable: ' + model.reason);
+      const artifact = document.createElement('code'); artifact.textContent = model.artifact;
+      details.append(title, detail, artifact); label.append(input, details);
+      if (model.active) {const badge = document.createElement('span'); badge.className = 'kpi-badge'; badge.textContent = 'Current launch'; label.append(badge);}
+      catalogOptions.append(label);
+    });
+    // The catalog describes launch args; health and saved active_model do not prove model identity.
+    const active = data.models.filter(m => m.active).map(m => m.id).join(', ');
+    document.getElementById('catalog-current').textContent = 'Current launch: ' + (active || data.active_artifact_label || 'not identified');
+    if (data.active_artifact_label) document.getElementById('model-label').textContent = data.active_artifact_label;
+    updateModelControls();
+  }
+)HTML"
+R"HTML(  async function refreshModelCatalog() {
+    if (modelBusy || catalogLoading) return;
+    const epoch = ++catalogEpoch;
+    catalogLoading = true; updateModelControls();
+    try {
+      const response = await fetch('/api/models');
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const data = await response.json();
+      if (epoch === catalogEpoch) renderModelCatalog(data);
+    } catch (err) {
+      if (epoch === catalogEpoch) {
+        modelCatalog = null;
+        catalogPanel.hidden = false;
+        catalogMessage('Could not refresh models: ' + err.message + '. Refresh models before switching.', true);
+      }
+    } finally {if (epoch === catalogEpoch) {catalogLoading = false; updateModelControls();}}
+  }
+  catalogRefresh.onclick = refreshModelCatalog;
+  modelSwitch.onclick = () => {
+    if (modelSwitch.disabled) return;
+    showConfirmModal('model', modelSwitch);
+    pendingAction.modelId = modelSelection;
+    modalTitle.textContent = 'Switch to ' + modelSelection + '?';
+    modalDesc.textContent = 'This restarts the engine and interrupts all active requests. Loading can take up to 3 minutes. You can keep using the dashboard while you wait. Saved launch settings will take effect.';
+    modalConfirmBtn.textContent = 'Switch model and restart';
+  };
+  async function switchModel(id) {
+    if (modelBlockReason()) return;
+    modelBusy = true; ++catalogEpoch; modelSwitchStarted = Date.now();
+    document.getElementById('view-settings').inert = true;
+    updateEngineControls(); renderMemoryControls(lastState || {});
+    const progress = () => {const message = 'Loading ' + id + '… ' + Math.floor((Date.now() - modelSwitchStarted) / 1000) + 's elapsed. This can take up to 3 minutes; rollback may take longer. Keep this page open.'; catalogMessage(message); notify(message);};
+    progress(); const timer = setInterval(progress, 1000);
+    try {
+      // Do not impose a browser timeout shorter than the server's 180-second readiness wait.
+      const response = await fetch('/api/model', {method:'POST', headers:{'Content-Type':'application/json','X-NInfer-Supervisor':'1'}, body:JSON.stringify({id})});
+      const data = await response.json();
+      if (Array.isArray(data.models)) renderModelCatalog(data);
+      clearInterval(timer);
+      let message;
+      if (response.ok && data.serving === true) message = 'Now serving ' + data.switched_to + '. Refresh the model list in your connected app.';
+      else if (data.rolled_back_to) message = id + ' did not start. ' + (data.serving === true ? 'Still serving ' + data.rolled_back_to + '.' : 'The previous model, ' + data.rolled_back_to + ', did not recover. The engine is not serving; check Troubleshooting.') + ' ' + (data.error || '');
+      else message = 'Could not switch to ' + id + ': ' + (data.error || 'HTTP ' + response.status) + '. Review the configuration and refresh models before retrying.';
+      catalogMessage(message, !response.ok); notify(message, !response.ok);
+      // A switch replaces launch args. Refresh the existing editor's data while
+      // mutations are still locked, so later saves use the new model's settings.
+      if (data.switched_to || data.rolled_back_to) {
+        try {
+          const configResponse = await fetch('/api/config');
+          if (!configResponse.ok) throw new Error();
+          cfgData = await configResponse.json();
+          updateConnectionGuide(cfgData); renderConfig();
+        } catch (_) {
+          modelUncertain = true;
+          catalogMessage(message + ' Settings could not be refreshed. Reload this page before making further changes.', true);
+          notify(message + ' Settings could not be refreshed. Reload this page before making further changes.', true);
+        }
+      }
+    } catch (err) {
+      modelUncertain = true;
+      const message = 'The switch result is unknown: ' + err.message + '. The engine may still be loading. Changes remain paused. Check Troubleshooting and engine readiness; reload this page only after verifying completion.';
+      catalogMessage(message, true); notify(message, true);
+    } finally {
+      clearInterval(timer); modelBusy = false;
+      document.getElementById('view-settings').inert = modelUncertain;
+      updateEngineControls(); renderMemoryControls(lastState || {});
+      await refreshModelCatalog();
+    }
+  }
   let lastInsightsJson = '';
   let pendingRestartPid = null;
   try { pendingRestartPid = JSON.parse(sessionStorage.getItem('ninfer:pending-restart') || 'null'); } catch (_) {}
@@ -579,9 +732,10 @@ R"HTML(    document.title = document.getElementById('view-' + activeView).queryS
     btnStart.hidden = engine.state === 'Running' || engine.state === 'Stopping';
     btnStop.hidden = engine.state === 'Stopped' || engine.state === 'Halted';
     btnRestart.hidden = engine.state !== 'Running';
-    btnStart.disabled = !connected || !managed || actionBusy || changing;
-    btnStop.disabled = !connected || !managed || actionBusy || engine.state === 'Stopping';
-    btnRestart.disabled = !connected || !managed || actionBusy || changing;
+    btnStart.disabled = !connected || !managed || actionBusy || modelBusy || modelUncertain || changing;
+    btnStop.disabled = !connected || !managed || actionBusy || modelBusy || modelUncertain || engine.state === 'Stopping';
+    btnRestart.disabled = !connected || !managed || actionBusy || modelBusy || modelUncertain || changing;
+    updateModelControls();
   }
   async function copyText(button, value, label) {
     try {
@@ -867,7 +1021,7 @@ R"HTML(    if (id === 'prefix.reuse_mix') return {title:'Reusing earlier convers
     if (document.activeElement !== reserveAmount) reserveAmount.value = gib;
     reserveSlider.value = gib;
     reserveSlider.setAttribute('aria-valuetext', reserveSlider.value + ' GiB free memory target');
-    const disabled = !connected || s.monitor_only || info.pinned || reserveBusy || !budget.ok || max < 1;
+    const disabled = !connected || s.monitor_only || info.pinned || reserveBusy || modelBusy || modelUncertain || !budget.ok || max < 1;
     reserveSlider.disabled = reserveAmount.disabled = disabled;
     document.getElementById('reserve-default').disabled = disabled || max < 8;
     document.getElementById('reserve-default').title = budget.ok && max < 8 ? 'The 8 GiB engine default exceeds this model’s current limit.' : '';
@@ -907,13 +1061,13 @@ R"HTML(    if (id === 'prefix.reuse_mix') return {title:'Reusing earlier convers
       }
     }
   }
-  function changeReserve(value) {reserveDraft = value; renderMemoryControls(lastState || {});}
+  function changeReserve(value) {reserveDraft = value; renderMemoryControls(lastState || {}); updateModelControls();}
   reserveSlider.oninput = () => {reserveAmount.value = reserveSlider.value; changeReserve(Number(reserveSlider.value));};
   reserveAmount.oninput = () => changeReserve(reserveAmount.value === '' ? NaN : Number(reserveAmount.value));
   document.getElementById('reserve-default').onclick = () => changeReserve(0);
   document.getElementById('reserve-discard').onclick = () => {reserveDraft = null; renderMemoryControls(lastState || {});};
   reserveSave.onclick = async () => {
-    if (reserveBusy || reserveDraft == null || !reserveAmount.reportValidity()) return;
+    if (modelBusy || modelUncertain || reserveBusy || reserveDraft == null || !reserveAmount.reportValidity()) return;
     reserveBusy = true; renderMemoryControls(lastState || {});
     try {
       const response = await fetch('/api/desktop-reserve', {method:'POST', headers:{'Content-Type':'application/json','X-NInfer-Supervisor':'1'}, body:JSON.stringify({gib:reserveDraft})});
@@ -1137,11 +1291,14 @@ R"HTML(    if (av && av.desktop_reserve) {
   modalConfirmBtn.onclick = () => {
     if (!pendingAction) return;
     const action = pendingAction.actionName;
+    const modelId = pendingAction.modelId;
     hideConfirmModal();
-    if (action === 'save-restart') cfgApply(true);
+    if (action === 'model') switchModel(modelId);
+    else if (action === 'save-restart') cfgApply(true);
     else runAction(action);
   };
   async function runAction(actionName) {
+    if (modelBusy || modelUncertain) return;
     actionBusy = true;
     updateEngineControls();
     notify(actionName === 'start' ? 'Starting your engine…' : actionName === 'stop' ? 'Stopping your engine…' : 'Restarting your engine…');
@@ -1233,6 +1390,7 @@ R"HTML(      fetch('/api/state').then(r => {if (!r.ok) throw new Error(); return
     cfgSaveRestart.hidden = !!cfgData && cfgData.manages_engine === false;
     cfgRevert.disabled = !n || configBusy;
     cfgBody.inert = configBusy;
+    updateModelControls();
   }
 
   function cfgEdit(section, key, value, original) {
@@ -1501,7 +1659,7 @@ R"HTML(      cfgBody.appendChild(plainField('engine', 'request_log', 'Request lo
   }
 
   async function cfgApply(thenRestart) {
-    if (configBusy) return;
+    if (configBusy || modelBusy || modelUncertain) return;
     const invalid = [...cfgBody.querySelectorAll('input, select')].find(el => !el.checkValidity());
     if (invalid) {invalid.reportValidity(); return;}
     configBusy = true; cfgSetDirtyUi();
@@ -1566,7 +1724,7 @@ R"HTML(      cfgBody.appendChild(plainField('engine', 'request_log', 'Request lo
     const apiUrl = 'http://' + (localHost.includes(':') ? '[' + localHost + ']' : localHost) + ':' + d.engine.engine_port + '/v1';
     document.getElementById('api-address').value = apiUrl;
     document.getElementById('overview-endpoint').textContent = apiUrl;
-    document.getElementById('model-label').textContent = d.engine.artifact ? d.engine.artifact.split(/[\\/]/).pop().replace(/\.ninfer$/, '').replace(/_/g, ' ') : 'Local model';
+    document.getElementById('model-label').textContent = modelCatalog && modelCatalog.active_artifact_label || (d.engine.artifact ? d.engine.artifact.split(/[\\/]/).pop().replace(/\.ninfer$/, '').replace(/_/g, ' ') : 'Local model');
     document.getElementById('model-label').title = d.engine.artifact || '';
     document.getElementById('auth-guidance').textContent = d.engine.api_key_present ? 'API key required. Enter the key configured for this engine into your app. The dashboard does not display or copy that key.' : 'No API key is configured. If your app requires a value in its API key field, use a placeholder such as local. This does not enable authentication.';
   }
@@ -1596,6 +1754,7 @@ R"HTML(      cfgBody.appendChild(plainField('engine', 'request_log', 'Request lo
   setPendingRestart(pendingRestartPid);
   selectView();
   // One stream powers every view; transport failures are visible and recover automatically.
+  refreshModelCatalog();
   const es = new EventSource('/api/events');
   es.onmessage = e => {
     try {
