@@ -2,6 +2,7 @@
 
 #include "ninfer/ops/sampling.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
+#include "targets/qwen3_8_flash_next/impl/mtp_forward.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -121,11 +122,19 @@ compute_fixed_base_bytes(const FlashNextRuntimeConfig& config, std::uint32_t res
         checked_mul<std::size_t>(128ULL * 4ULL * sizeof(std::uint16_t), resolved_state_slots));
     const std::size_t single_raw_pos = checked_align_up_256(
         checked_mul<std::size_t>(3ULL * 4ULL * sizeof(std::int32_t), resolved_state_slots));
+    const std::size_t cache_layers = kFullAttentionLayers +
+                                    (config.speculative_draft_tokens > 0 ? 1ULL : 0ULL);
 
     recurrent_state_bytes = checked_add(
         checked_add(checked_mul(36ULL, single_gdn_conv), checked_mul(36ULL, single_gdn_ssm)),
-        checked_add(ple_conv, checked_add(checked_mul(12ULL, single_raw_keys),
-                                          checked_mul(12ULL, single_raw_pos))));
+        checked_add(ple_conv, checked_add(checked_mul(cache_layers, single_raw_keys),
+                                          checked_mul(cache_layers, single_raw_pos))));
+    if (config.speculative_draft_tokens > 0) {
+        recurrent_state_bytes = checked_add(recurrent_state_bytes, checked_align_up_256(
+            10'240ULL * sizeof(std::uint16_t) * resolved_state_slots));
+        recurrent_state_bytes = checked_add(recurrent_state_bytes, checked_align_up_256(
+            3ULL * sizeof(std::int32_t) * resolved_state_slots));
+    }
 
     // 3. Round buffers (pinned/device ingress & egress, plus gathered PLE, hidden, logits)
     const std::uint32_t round_batch_tokens =
@@ -145,15 +154,27 @@ compute_fixed_base_bytes(const FlashNextRuntimeConfig& config, std::uint32_t res
                         checked_align_up_256(248'320ULL * round_batch_tokens *
                                              sizeof(std::uint16_t)))))));
 
+    if (config.speculative_draft_tokens > 0) {
+        const auto rows = config.proposal_head == ProposalHead::Optimized
+                              ? config.draft_head_rows : 248'320U;
+        round_tensors_bytes = checked_add(round_tensors_bytes,
+            checked_align_up_256(2'560ULL * sizeof(std::uint16_t)) +
+            checked_align_up_256(10'240ULL * sizeof(std::uint16_t)) +
+            checked_align_up_256(rows * sizeof(std::uint16_t)) + 256ULL +
+            checked_align_up_256(sizeof(FlashNextMtpDraftIngress)));
+    }
+
     // 4. Text decode and prefill workspace peak
     const std::uint32_t decode_batch_capacity = std::max(
         config.max_concurrency,
         config.speculative_draft_tokens > 0 ? (config.speculative_draft_tokens + 1U) : 1U);
     const std::size_t decode_workspace =
-        flash_next_text_decode_workspace_capacity_bytes(maximum_blocks, decode_batch_capacity);
+        flash_next_text_decode_workspace_capacity_bytes(maximum_blocks, decode_batch_capacity, config.speculative_draft_tokens > 0);
     const std::size_t prefill_workspace =
-        flash_next_text_prefill_workspace_capacity_bytes(maximum_blocks, config.prefill_chunk);
-    const std::size_t general_workspace = std::max(decode_workspace, prefill_workspace);
+        flash_next_text_prefill_workspace_capacity_bytes(maximum_blocks, config.prefill_chunk, config.speculative_draft_tokens > 0);
+    const std::size_t general_workspace = std::max({decode_workspace, prefill_workspace,
+        config.speculative_draft_tokens > 0
+            ? flash_next_mtp_workspace_capacity_bytes(maximum_blocks, 1) : std::size_t{0}});
     workspace_bytes                     = general_workspace;
 
     if (config.vision_enabled) {
@@ -213,12 +234,14 @@ flash_next_capacity_curve(const FlashNextRuntimeConfig& config) {
     const std::size_t graph_allowance =
         config.use_cuda_graph
             ? checked_mul<std::size_t>(
-                  kFlashNextDecodeGraphBytesPerCapture,
-                  checked_mul<std::size_t>(config.max_concurrency,
-                                           flash_next_decode_graph_buckets(maximum_blocks).count))
+                  kFlashNextDecodeGraphBytesPerCapture * (config.max_concurrency + config.speculative_draft_tokens) +
+                      kFlashNextMtpDraftGraphBytesPerCapture * config.speculative_draft_tokens,
+                  flash_next_decode_graph_buckets(maximum_blocks).count)
             : 0ULL;
 
-    const std::size_t stride_bytes = flash_next_physical_stride_bytes_per_group(config.kv_cache);
+    const std::size_t stride_bytes = flash_next_physical_stride_bytes_per_group(config.kv_cache) /
+        kFullAttentionLayers * (kFullAttentionLayers +
+                               (config.speculative_draft_tokens > 0 ? 1ULL : 0ULL));
     ninfer::runtime::SequenceCapacityCurve curve{};
     curve.main_page_tokens                     = kMainPageGroupTokens;
     curve.minimum_main_page_groups             = min_groups;
@@ -279,11 +302,11 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
         (config.kv_cache == KvCacheStorage::Fp8E4M3Row256) ? 1ULL : sizeof(std::uint16_t);
     const std::size_t single_att_kv_plane = checked_align_up_256(checked_mul<std::size_t>(
         256ULL * 64ULL * 2ULL * kv_element_bytes, plan.attention_physical_pages));
-    plan.attention_kv_bytes               = checked_mul<std::size_t>(24ULL, single_att_kv_plane);
+    plan.attention_kv_bytes = checked_mul<std::size_t>(2ULL * plan.qsa_cache_layers(), single_att_kv_plane);
 
     const std::size_t single_indexer_keys_plane = checked_align_up_256(checked_mul<std::size_t>(
         128ULL * 64ULL * sizeof(std::uint16_t), plan.indexer_physical_pages));
-    plan.indexer_block_keys_bytes = checked_mul<std::size_t>(12ULL, single_indexer_keys_plane);
+    plan.indexer_block_keys_bytes = checked_mul<std::size_t>(plan.qsa_cache_layers(), single_indexer_keys_plane);
 
     const std::size_t fixed_base_bytes = compute_fixed_base_bytes(
         config, resolved_state_slots, plan.attention_logical_pages, plan.indexer_logical_pages,
@@ -293,9 +316,9 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
     const std::size_t graph_allowance =
         config.use_cuda_graph
             ? checked_mul<std::size_t>(
-                  kFlashNextDecodeGraphBytesPerCapture,
-                  checked_mul<std::size_t>(config.max_concurrency,
-                                           flash_next_decode_graph_buckets(plan.maximum_blocks).count))
+                  kFlashNextDecodeGraphBytesPerCapture * (config.max_concurrency + config.speculative_draft_tokens) +
+                      kFlashNextMtpDraftGraphBytesPerCapture * config.speculative_draft_tokens,
+                  flash_next_decode_graph_buckets(plan.maximum_blocks).count)
             : 0ULL;
     plan.cuda_graph_allowance_bytes = graph_allowance;
 
@@ -306,10 +329,10 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
 
     if (config.vision_enabled) {
         const std::size_t decode_workspace =
-            flash_next_text_decode_workspace_capacity_bytes(plan.maximum_blocks, config.max_concurrency);
+            flash_next_text_decode_workspace_capacity_bytes(plan.maximum_blocks, std::max(config.max_concurrency, config.speculative_draft_tokens + 1U), config.speculative_draft_tokens > 0);
         const std::size_t prefill_workspace =
-            flash_next_text_prefill_workspace_capacity_bytes(plan.maximum_blocks, config.prefill_chunk);
-        const std::size_t general_workspace = std::max(decode_workspace, prefill_workspace);
+            flash_next_text_prefill_workspace_capacity_bytes(plan.maximum_blocks, config.prefill_chunk, config.speculative_draft_tokens > 0);
+        const std::size_t general_workspace = std::max({decode_workspace, prefill_workspace, config.speculative_draft_tokens > 0 ? flash_next_mtp_workspace_capacity_bytes(plan.maximum_blocks, 1) : std::size_t{0}});
         const std::uint32_t merged =
             config.max_vision_tokens > 0 ? config.max_vision_tokens : 4096U;
         plan.vision_workspace =

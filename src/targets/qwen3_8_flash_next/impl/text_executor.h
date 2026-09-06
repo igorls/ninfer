@@ -48,6 +48,13 @@ struct DecodeGraphFamily {
     std::vector<DecodeGraphTopology> topologies;
 };
 
+struct MtpDraftGraph {
+    std::uint32_t step_index = 0;
+    std::uint32_t bucket_index = 0;
+    DecodeGraphDefinition definition;
+    DecodeGraphExecutable executable;
+};
+
 class PendingRound {
 public:
     PendingRound() noexcept = default;
@@ -109,11 +116,6 @@ public:
         return ledger_.lane_history(handle);
     }
 
-    [[nodiscard]] const DeviceBuffer* mtp_key_pages() const noexcept { return mtp_key_pages_.get(); }
-    [[nodiscard]] const DeviceBuffer* mtp_value_pages() const noexcept { return mtp_value_pages_.get(); }
-    [[nodiscard]] const DeviceBuffer* mtp_selected_blocks() const noexcept { return mtp_selected_blocks_.get(); }
-    [[nodiscard]] const DeviceBuffer* mtp_selected_counts() const noexcept { return mtp_selected_counts_.get(); }
-    [[nodiscard]] const DeviceBuffer* mtp_carried_hidden() const noexcept { return mtp_carried_hidden_.get(); }
     [[nodiscard]] std::size_t active_lanes_count() const noexcept;
 
     [[nodiscard]] std::size_t available_physical_groups() const noexcept {
@@ -209,7 +211,7 @@ public:
 
     void instantiate_graphs();
     void execute_round_body(std::uint32_t batch_size, std::int32_t active_blocks,
-                            const FlashNextDecodeStateSink* sink);
+                            const FlashNextDecodeStateSink* sink, bool aliased_recurrent_scan = false);
 
     // Production execute_round always uses the selected bucket envelope. Tests use this to
     // run eager decode with an explicit indexer envelope (live frontier).
@@ -230,9 +232,12 @@ private:
 
     bool use_cuda_graph_ = true;
     DecodeGraphFamily decode_graphs_;
+    DecodeGraphFamily speculative_graphs_;
+    std::vector<MtpDraftGraph> mtp_draft_graphs_;
+    void execute_mtp_draft_step(std::uint32_t step_index, std::int32_t active_blocks);
     WorkspaceArena sampling_workspace_;
     CudaCompletionEvent round_completion_;
-    // Nanoseconds spent blocked in round_completion_.synchronize() since the last take.
+    // Nanoseconds blocked on target or draft completion since the last take.
     // Program reclassifies this out of the host bucket; see ExecutionTimingRecorder.
     std::uint64_t round_device_wait_ns_ = 0;
     bool round_in_flight_ = false;
@@ -248,24 +253,14 @@ private:
     std::uint8_t graph_capture_failures_[8][kFlashNextDecodeGraphMaxBuckets]{};
     bool graph_pinned_eager_[8][kFlashNextDecodeGraphMaxBuckets]{};
 
-    // MTP draft buffers & cache
-    std::unique_ptr<DeviceBuffer> mtp_key_pages_;
-    std::unique_ptr<DeviceBuffer> mtp_value_pages_;
-    std::optional<QsaAttentionCacheView> mtp_cache_;
-    std::unique_ptr<WorkspaceArena> mtp_workspace_;
-    std::unique_ptr<DeviceBuffer> mtp_selected_blocks_;
-    std::unique_ptr<DeviceBuffer> mtp_selected_counts_;
-    std::unique_ptr<DeviceBuffer> mtp_draft_logits_;
-    std::unique_ptr<DeviceBuffer> mtp_draft_tokens_;
-    std::unique_ptr<DeviceBuffer> mtp_input_embedding_;
-    std::unique_ptr<DeviceBuffer> mtp_carried_hidden_;
+
 
     [[nodiscard]] DecodeGraphTopology* find_topology(std::uint32_t batch_size,
-                                                     std::uint32_t bucket_index) noexcept;
+                                                     std::uint32_t bucket_index, bool speculative = false) noexcept;
     [[nodiscard]] const DecodeGraphTopology* find_topology(std::uint32_t batch_size,
-                                                           std::uint32_t bucket_index) const noexcept;
+                                                           std::uint32_t bucket_index, bool speculative = false) const noexcept;
     bool install_captured_graph(std::uint32_t batch_size, std::uint32_t bucket_index,
-                                std::int32_t bucket_blocks);
+                                std::int32_t bucket_blocks, bool speculative = false);
     [[nodiscard]] PendingRound
     finish_prepared_round(std::span<const LaneStepRequest> requests,
                           FlashNextLaneLedger::PreparedRound prepared,

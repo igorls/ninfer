@@ -846,9 +846,12 @@ int test_speculative_turn_closure_interaction(ninfer::DeviceContext& device,
         std::array<runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = false}}};
         (void)program1.commit(std::move(*prefill_s2.pending), commit_dec);
 
+        // A one-token budget caps the whole speculative publication, including serve warmup.
+        const std::array<runtime::RoundBudget, 1> one_token_budget{{{.generated_tokens_remaining = 1}}};
         // Run 3 speculative decode rounds
         for (int r = 0; r < 3; ++r) {
-            auto pending = program1.decode(std::span(&seq1, 1), {});
+            auto pending = program1.decode(std::span(&seq1, 1), one_token_budget);
+            if (pending.row_counts()[0] != 1) { throw std::logic_error("speculative publication exceeds one-token budget"); }
             std::array<runtime::CommitDecision, 1> dec = {{{.accepted_tokens = 1, .terminal = false}}};
             (void)program1.commit(std::move(pending), dec);
         }
@@ -873,7 +876,7 @@ int test_speculative_turn_closure_interaction(ninfer::DeviceContext& device,
 
         auto base2 = program1.plan_request(prompt2, exec_options);
         auto cand2 = program1.inspect_admission(
-            prompt2, base2, runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false);
+            prompt2, base2, runtime::LaneId(0), &*fin1.continuation, nullptr, fin1.summary.rewrite->ref, false);
         if (!cand2.has_value() || cand2->summary().reusable_prompt_tokens != 16) {
             std::cerr << "FAIL: Session 2 TurnClosure admission failed\n";
             return 1;
@@ -898,10 +901,11 @@ int test_speculative_turn_closure_interaction(ninfer::DeviceContext& device,
         (void)program1.commit(std::move(*prefill2.pending), commit_dec);
 
         for (int r = 0; r < 5; ++r) {
-            auto pending = program1.decode(std::span(&seq2, 1), {});
+            auto pending = program1.decode(std::span(&seq2, 1), one_token_budget);
             for (size_t t = 0; t < pending.row_counts()[0]; ++t) {
                 spec_resumed_tokens.push_back(pending.tokens()[t]);
             }
+            if (pending.row_counts()[0] != 1) { throw std::logic_error("speculative publication exceeds one-token budget"); }
             std::array<runtime::CommitDecision, 1> dec = {{{.accepted_tokens = 1, .terminal = false}}};
             (void)program1.commit(std::move(pending), dec);
         }
@@ -939,7 +943,7 @@ int test_speculative_turn_closure_interaction(ninfer::DeviceContext& device,
         (void)program_base.commit(std::move(*prefill_base.pending), commit_dec);
 
         for (size_t r = 1; r < spec_resumed_tokens.size(); ++r) {
-            auto pending = program_base.decode(std::span(&seq_base, 1), {});
+            auto pending = program_base.decode(std::span(&seq_base, 1), one_token_budget);
             base_tokens.push_back(pending.tokens()[0]);
             (void)program_base.commit(std::move(pending), commit_dec);
         }
@@ -1030,6 +1034,9 @@ int test_h1_verifier_row_ordering(ninfer::DeviceContext& device, const Synthetic
                 exec_seq.release_lane(lane_seq);
             }
 
+            // Verify the captured sequential recurrence against eager one-row execution.
+            cfg.use_cuda_graph = true;
+            plan = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
             // Speculative verify round: execute all K+1 rows batched in one verify round
             std::vector<int32_t> verify_tokens;
             {
@@ -1049,6 +1056,7 @@ int test_h1_verifier_row_ordering(ninfer::DeviceContext& device, const Synthetic
                 for (size_t i = 0; i <= K; ++i) {
                     verify_tokens.push_back(r_all.sampled_tokens()[i]);
                 }
+                r_all.abort();
                 exec_verify.release_lane(lane_ver);
             }
 
@@ -1070,70 +1078,121 @@ int test_h1_verifier_row_ordering(ninfer::DeviceContext& device, const Synthetic
     }
 }
 
-int test_h2_mtp_allocation_zeroing(ninfer::DeviceContext& device, const SyntheticModel& model) {
-    std::cout << "[AUDIT H2] test_h2_mtp_allocation_zeroing ...\n" << std::flush;
-    using namespace ninfer::targets::qwen3_8_flash_next;
+// Scheduling oracle: evaluate each MTP step separately with a host-visible token
+// dependency. Compare all resulting draft state, not just plausible final tokens.
+int test_draft_sequence_schedule(ninfer::DeviceContext& device, const SyntheticModel& model) {
+    using namespace ninfer;
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
-
-    try {
-        PleIndexMetadata ple_meta{};
-        ple_meta.multipliers = {1, 2, 3};
-        ple_meta.head_offsets.fill(0);
-        ple_meta.head_vocab_sizes.fill(1);
-
-        // 1. Dirty GPU memory pool with poison bytes 0x7B
-        constexpr std::size_t kPoisonBytes = 64ULL * 1024ULL * 1024ULL;
-        void* poison_ptr = nullptr;
-        CUDA_CHECK(cudaMalloc(&poison_ptr, kPoisonBytes));
-        CUDA_CHECK(cudaMemset(poison_ptr, 0x7B, kPoisonBytes));
-        CUDA_CHECK(cudaFree(poison_ptr));
-
-        // 2. Allocate FlashNextTextExecutor with speculative draft tokens
+    struct Result {
+        std::vector<std::int32_t> tokens;
+        std::vector<std::vector<std::byte>> state;
+    };
+    auto run = [&](std::uint32_t K, std::int32_t prompt_size, bool serialized, bool captured) {
         FlashNextRuntimeConfig cfg{
-            .max_concurrency          = 1,
-            .max_context              = 512,
-            .prefill_chunk            = 512,
-            .speculative_draft_tokens = 1,
-            .use_cuda_graph           = false,
+            .max_concurrency = 2, .max_context = 4096, .prefill_chunk = 4096,
+            .speculative_draft_tokens = K, .use_cuda_graph = captured,
         };
         const auto curve = flash_next_capacity_curve(cfg);
-        auto plan = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
-        FlashNextRuntimeAllocation alloc(plan);
+        FlashNextRuntimeAllocation alloc(finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups));
         alloc.initialize(device.stream);
-        FlashNextTextExecutor exec(model.view, ple_meta, device, alloc);
-
-        // 3. Inspect MTP buffers and assert they are zeroed
-        auto check_zero = [&](const ninfer::DeviceBuffer* buf, std::string_view name) -> bool {
-            if (buf == nullptr || buf->p == nullptr) {
-                std::cerr << "FAIL: H2 buffer " << name << " is null\n";
-                return false;
+        PleIndexMetadata meta{};
+        meta.multipliers = {1, 2, 3};
+        meta.head_vocab_sizes.fill(1);
+        FlashNextTextExecutor exec(model.view, meta, device, alloc);
+        auto other = exec.allocate_lane();
+        auto lane = exec.allocate_lane();
+        std::vector<std::int32_t> prompt(prompt_size);
+        std::vector<std::array<std::int32_t, 3>> positions(prompt.size());
+        for (std::size_t i = 0; i < prompt.size(); ++i) {
+            prompt[i] = 100 + static_cast<std::int32_t>(i);
+            positions[i] = {500 + static_cast<int>(i), 700 + static_cast<int>(i), 900 + static_cast<int>(i)};
+        }
+        auto prefill = exec.execute_prefill_chunk(lane, prompt, positions, 0);
+        Tensor backbone = prefill.hyper_hidden();
+        const std::array<LaneCommitDecision, 1> accept{{{.accept = true}}};
+        prefill.commit(accept);
+        std::vector<std::uint16_t> initial(10'240);
+        for (std::size_t i = 0; i < initial.size(); ++i) {
+            initial[i] = float_to_bf16(1.0f + 0.1f * static_cast<float>(i % 31));
+        }
+        CUDA_CHECK(cudaMemcpyAsync(backbone.data, initial.data(), initial.size() * sizeof(std::uint16_t),
+                                   cudaMemcpyHostToDevice, device.stream));
+        Result result;
+        result.tokens.resize(K);
+        const std::int32_t next_index = prompt_size;
+        const std::array<std::int32_t, 3> next_position{1'000, 1'000, 1'000};
+        if (!serialized) {
+            exec.draft_mtp_tokens(lane, 200, next_index, next_position, backbone, K, result.tokens);
+        } else {
+            exec.ledger().reserve_mtp_pages(lane, next_index + K - 1);
+            exec.ledger().sync_tables_if_dirty(alloc, device.stream);
+            auto& round = alloc.round_tensors();
+            std::int32_t token = 200;
+            for (std::uint32_t k = 0; k < K; ++k) {
+                auto* header = alloc.host_ingress();
+                header->token_ids[0] = token;
+                header->token_indices[0] = next_index - 1 + k;
+                for (int axis = 0; axis < 3; ++axis) {
+                    header->mrope_positions[axis] = next_position[axis] - 1 + k;
+                }
+                header->table_rows[0] = lane.lane_index();
+                header->source_slots[0] = alloc.lane_ring_slot(lane.lane_index(), k);
+                header->destination_slots[0] = alloc.lane_ring_slot(lane.lane_index(), k + 1);
+                CUDA_CHECK(cudaMemcpyAsync(alloc.device_ingress_ptr(), header, sizeof(*header),
+                                           cudaMemcpyHostToDevice, device.stream));
+                Tensor pos(round.mrope_positions.data, DType::I32, {1, 3});
+                if (k == 0) {
+                    Tensor saved = alloc.state_view().mtp_backbone_positions.slice(
+                        1, alloc.current_source_slot(lane.lane_index()), 1);
+                    CUDA_CHECK(cudaMemcpyAsync(pos.data, saved.data, 3 * sizeof(std::int32_t),
+                                               cudaMemcpyDeviceToDevice, device.stream));
+                }
+                ops::embedding(round.token_ids.slice(0, 0, 1), model.view.token_embedding,
+                               round.mtp_embedding, device.stream);
+                alloc.workspace().reset();
+                flash_next_mtp_step(model.view, round.mtp_embedding,
+                    k == 0 ? backbone : round.mtp_carried_hidden,
+                    round.token_indices.slice(0, 0, 1), pos, round.table_rows.slice(0, 0, 1),
+                    round.source_slots.slice(0, 0, 1), round.destination_slots.slice(0, 0, 1),
+                    alloc.state_view().qsa_indexer_caches[kFullAttentionLayers],
+                    alloc.state_view().qsa_attention_caches[kFullAttentionLayers],
+                    alloc.plan().maximum_blocks, (next_index + k) / 4, alloc.workspace(),
+                    round.mtp_logits, round.mtp_token, device.stream, nullptr, &round.mtp_carried_hidden);
+                CUDA_CHECK(cudaMemcpyAsync(&token, round.mtp_token.data, sizeof(token),
+                                           cudaMemcpyDeviceToHost, device.stream));
+                device.synchronize();
+                result.tokens[k] = token;
             }
-            const std::size_t bytes_to_check = std::min<std::size_t>(buf->bytes, 65536);
-            std::vector<std::uint8_t> host_buf(bytes_to_check);
-            CUDA_CHECK(cudaMemcpy(host_buf.data(), buf->p, bytes_to_check, cudaMemcpyDeviceToHost));
-            for (std::size_t i = 0; i < bytes_to_check; ++i) {
-                if (host_buf[i] != 0) {
-                    std::cerr << "FAIL: H2 buffer " << name << " nonzero byte at offset " << i
-                              << " (0x" << std::hex << static_cast<int>(host_buf[i]) << std::dec << ")\n";
-                    return false;
+        }
+        const auto indexer = alloc.state_view().qsa_indexer_caches[kFullAttentionLayers];
+        const auto attention = alloc.state_view().qsa_attention_caches[kFullAttentionLayers];
+        for (const auto& tensor : {alloc.round_tensors().mtp_carried_hidden, alloc.round_tensors().mtp_logits,
+                                  indexer.block_keys, indexer.raw_keys, indexer.raw_positions,
+                                  attention.key_pages, attention.value_pages}) {
+            result.state.emplace_back(tensor.bytes());
+            CUDA_CHECK(cudaMemcpy(result.state.back().data(), tensor.data, tensor.bytes(), cudaMemcpyDeviceToHost));
+        }
+        exec.release_lane(lane);
+        exec.release_lane(other);
+        return result;
+    };
+    // 2050 crosses the indexer's identity/scoring boundary inside the draft
+    // window; each graph must select its own bucket to preserve that transition.
+    for (std::int32_t prompt_size : {65, 2050}) {
+        for (std::uint32_t K : {1U, 2U, 3U, 4U}) {
+            const auto reference = run(K, prompt_size, true, false);
+            for (bool captured : {false, true}) {
+                const auto sequence = run(K, prompt_size, false, captured);
+                if (reference.tokens != sequence.tokens || reference.state != sequence.state) {
+                    std::cerr << "FAIL: draft sequence differs from serialized steps for K=" << K
+                              << " prompt=" << prompt_size << " captured=" << captured << '\n';
+                    return 1;
                 }
             }
-            return true;
-        };
-
-        if (!check_zero(exec.mtp_key_pages(), "mtp_key_pages")) return 1;
-        if (!check_zero(exec.mtp_value_pages(), "mtp_value_pages")) return 1;
-        if (!check_zero(exec.mtp_selected_blocks(), "mtp_selected_blocks")) return 1;
-        if (!check_zero(exec.mtp_selected_counts(), "mtp_selected_counts")) return 1;
-        if (!check_zero(exec.mtp_carried_hidden(), "mtp_carried_hidden")) return 1;
-
-        std::cout << "  PASS: all MTP buffers explicitly zeroed at allocation\n";
-        std::cout << "PASS: test_h2_mtp_allocation_zeroing\n";
-        return 0;
-    } catch (const std::exception& e) {
-        std::cerr << "test_h2_mtp_allocation_zeroing exception: " << e.what() << "\n";
-        return 1;
+        }
     }
+    std::cout << "PASS: draft sequence matches serialized tokens, hidden, logits and MTP cache for K=1..4\n";
+    return 0;
 }
 
 int test_h3_multi_step_hidden_carry(ninfer::DeviceContext& device, const SyntheticModel& model) {
@@ -1177,6 +1236,9 @@ int test_h3_multi_step_hidden_carry(ninfer::DeviceContext& device, const Synthet
             {static_cast<int32_t>(prompt.size()), static_cast<int32_t>(prompt.size()),
              static_cast<int32_t>(prompt.size())}, {});
         Tensor backbone_hidden = r0.hyper_hidden();
+        const auto first_sample = r0.sampled_tokens()[0];
+        const std::array<std::int32_t, 1> first_commit{first_sample};
+        r0.commit_speculative(lane.lane_index(), first_commit);
 
         // Populate backbone_hidden with non-uniform channel values to avoid RMSNorm constant collapse
         std::vector<uint16_t> h_init_bb(10240);
@@ -1194,13 +1256,13 @@ int test_h3_multi_step_hidden_carry(ninfer::DeviceContext& device, const Synthet
                               backbone_hidden, 2, drafts);
 
         // 2. Check that carried hidden buffer is populated (non-zero)
-        const DeviceBuffer* carried_buf = exec.mtp_carried_hidden();
-        if (carried_buf == nullptr || carried_buf->p == nullptr) {
+        Tensor carried_buf = alloc.round_tensors().mtp_carried_hidden;
+        if (carried_buf.data == nullptr) {
             std::cerr << "FAIL: H3 mtp_carried_hidden buffer is null\n";
             return 1;
         }
         std::vector<uint16_t> carried_h(10240);
-        CUDA_CHECK(cudaMemcpy(carried_h.data(), carried_buf->p, 10240 * sizeof(uint16_t), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(carried_h.data(), carried_buf.data, 10240 * sizeof(uint16_t), cudaMemcpyDeviceToHost));
         bool has_nonzero = false;
         for (auto v : carried_h) {
             if (v != 0) { has_nonzero = true; break; }
@@ -1211,7 +1273,7 @@ int test_h3_multi_step_hidden_carry(ninfer::DeviceContext& device, const Synthet
         }
 
         // 3. Directly evaluate MTP step 2 with static backbone hidden vs carried hidden
-        WorkspaceArena ws(flash_next_mtp_workspace_capacity_bytes(1));
+        WorkspaceArena ws(flash_next_mtp_workspace_capacity_bytes(plan.maximum_blocks, 1));
         DeviceBuffer d_in_emb(2560 * sizeof(uint16_t));
         Tensor in_emb(d_in_emb.p, DType::BF16, {2560, 1});
         DeviceBuffer d_tok_ids(sizeof(int32_t));
@@ -1235,17 +1297,10 @@ int test_h3_multi_step_hidden_carry(ninfer::DeviceContext& device, const Synthet
         int32_t tbl0 = 0;
         CUDA_CHECK(cudaMemcpy(tbl.data, &tbl0, sizeof(int32_t), cudaMemcpyHostToDevice));
 
-        Tensor sel_blk(const_cast<void*>(exec.mtp_selected_blocks()->p), DType::I32, {512, 1});
-        Tensor sel_cnt(const_cast<void*>(exec.mtp_selected_counts()->p), DType::I32, {1});
-
-        QsaAttentionCacheView mtp_cache{};
-        mtp_cache.key_pages = Tensor(const_cast<void*>(exec.mtp_key_pages()->p), DType::BF16,
-                                     {256, 64, 2, static_cast<int32_t>(plan.attention_physical_pages)});
-        mtp_cache.value_pages = Tensor(const_cast<void*>(exec.mtp_value_pages()->p), DType::BF16,
-                                       {256, 64, 2, static_cast<int32_t>(plan.attention_physical_pages)});
-        mtp_cache.block_tables = alloc.state_view().qsa_attention_caches[0].block_tables;
-
-        // Step 2 with static backbone hidden
+        auto mtp_cache = alloc.state_view().qsa_attention_caches[kFullAttentionLayers];
+        auto indexer_cache = alloc.state_view().qsa_indexer_caches[kFullAttentionLayers];
+        auto source_slots = alloc.round_tensors().source_slots.slice(0, 0, 1);
+        auto destination_slots = alloc.round_tensors().destination_slots.slice(0, 0, 1);
         DeviceBuffer d_logits_static(248320 * sizeof(uint16_t));
         Tensor logits_static(d_logits_static.p, DType::BF16, {248320, 1});
         DeviceBuffer d_tok_static(sizeof(int32_t));
@@ -1255,7 +1310,7 @@ int test_h3_multi_step_hidden_carry(ninfer::DeviceContext& device, const Synthet
 
         ws.reset();
         flash_next_mtp_step(model.view, in_emb, backbone_hidden, tok_idx, mrope, tbl,
-                            sel_blk, sel_cnt, mtp_cache, ws, logits_static, tok_static,
+                            source_slots, destination_slots, indexer_cache, mtp_cache, plan.maximum_blocks, 2, ws, logits_static, tok_static,
                             device.stream, nullptr, &out_hidden_static);
 
         // Step 2 with carried hidden
@@ -1263,12 +1318,12 @@ int test_h3_multi_step_hidden_carry(ninfer::DeviceContext& device, const Synthet
         Tensor logits_carried(d_logits_carried.p, DType::BF16, {248320, 1});
         DeviceBuffer d_tok_carried(sizeof(int32_t));
         Tensor tok_carried(d_tok_carried.p, DType::I32, {1});
-        Tensor carried_hidden_tensor(const_cast<void*>(carried_buf->p), DType::BF16, {10240, 1});
+        Tensor carried_hidden_tensor(const_cast<void*>(carried_buf.data), DType::BF16, {10240, 1});
         DeviceBuffer d_out_hidden_carried(10240 * sizeof(uint16_t));
         Tensor out_hidden_carried(d_out_hidden_carried.p, DType::BF16, {10240, 1});
         ws.reset();
         flash_next_mtp_step(model.view, in_emb, carried_hidden_tensor, tok_idx, mrope, tbl,
-                            sel_blk, sel_cnt, mtp_cache, ws, logits_carried, tok_carried,
+                            source_slots, destination_slots, indexer_cache, mtp_cache, plan.maximum_blocks, 2, ws, logits_carried, tok_carried,
                             device.stream, nullptr, &out_hidden_carried);
         device.synchronize();
 
@@ -1330,7 +1385,7 @@ int main(int argc, char** argv) {
     if (test_speculative_rollback_on_mismatch(device, model) != 0) return 1;
     if (test_speculative_turn_closure_interaction(device, model) != 0) return 1;
     if (test_h1_verifier_row_ordering(device, model) != 0) return 1;
-    if (test_h2_mtp_allocation_zeroing(device, model) != 0) return 1;
+    if (test_draft_sequence_schedule(device, model) != 0) return 1;
     if (test_h3_multi_step_hidden_carry(device, model) != 0) return 1;
 
     std::cout << "ALL MTP SPECULATIVE DECODING TESTS PASSED\n";

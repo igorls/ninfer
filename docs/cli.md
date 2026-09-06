@@ -154,7 +154,11 @@ long-decode, and long-context inputs.
 
 Speculative decoding is disabled by default. Select MTP with one to five draft positions, or the
 35B-A3B text-only DFlash backend with one to fifteen. `--lm-head-draft` selects the optimized
-proposal head and requires a selected backend:
+proposal head and requires a selected backend.
+
+Qwen3.8-Flash-Next supports one to four MTP draft positions. It speculates when the compact
+decode batch contains one request and uses ordinary batched decode when more requests are
+active. Its MTP cache and checkpoint state remain synchronized in both paths.
 
 ```bash
 ./build/apps/ninfer models/qwen3_6_35b_a3b.ninfer \
@@ -194,7 +198,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--device N` | CUDA device index | `0` |
 | `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
 | `--spec mtp\|dflash` | speculative backend | off |
-| `--draft-tokens N` | MTP `1..5`; DFlash `1..15` | unset |
+| `--draft-tokens N` | MTP `1..5` (`1..4` for Flash-Next); DFlash `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--vision` | enable image/video input and load Vision GPU allocations | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |

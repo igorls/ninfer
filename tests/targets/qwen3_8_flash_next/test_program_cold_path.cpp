@@ -376,6 +376,38 @@ int test_plan_request_validations(ninfer::DeviceContext& device) {
     return failures;
 }
 
+int test_mtp_checkpoint_state_isolation(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency = 2,
+        .max_context = 128,
+        .prefill_chunk = 128,
+    };
+    cfg.speculative_draft_tokens = 4;
+    cfg.continuation_capacity = 2;
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan = finalize_flash_next_runtime_plan(cfg, curve.minimum_main_page_groups);
+    ProgramImpl program(nullptr, plan, device);
+    auto& allocation = program.allocation_;
+    auto* hidden = static_cast<std::byte*>(allocation.state_view().mtp_backbone_hidden.data);
+    constexpr std::size_t hidden_bytes = 10'240 * sizeof(std::uint16_t);
+    CUDA_CHECK(cudaMemsetAsync(hidden, 0x21, plan.config.state_slot_capacity * hidden_bytes,
+                               device.stream));
+    CUDA_CHECK(cudaMemsetAsync(hidden, 0x42, hidden_bytes, device.stream));
+    // Publishing both checkpoints from lane 0 must preserve every speculative state
+    // in lane 1, including states which are not its current source or destination.
+    for (const auto& checkpoint : program.continuation_slots_) {
+        program.executor_.copy_state_slot(0, checkpoint.cache_slot);
+    }
+    std::vector<std::byte> actual(5 * hidden_bytes);
+    CUDA_CHECK(cudaMemcpyAsync(actual.data(), hidden + 5 * hidden_bytes, actual.size(),
+                               cudaMemcpyDeviceToHost, device.stream));
+    device.synchronize();
+    return check(std::all_of(actual.begin(), actual.end(),
+                            [](std::byte value) { return value == std::byte{0x21}; }),
+                 "MTP checkpoint publication must not overwrite another lane's state ring");
+}
+
 int test_program_memory_summary_kv_cache(ninfer::DeviceContext& device) {
     using namespace ninfer::targets::qwen3_8_flash_next;
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
@@ -438,6 +470,7 @@ int main() {
     failures += test_plan_request_validations(device);
     failures += test_program_lifecycle(device);
     failures += test_program_memory_summary_kv_cache(device);
+    failures += test_mtp_checkpoint_state_isolation(device);
 
     if (failures == 0) {
         std::cout << "All Program cold path contract tests passed cleanly.\n";

@@ -50,6 +50,33 @@ E:\NInfer\venv-qwen4exp\Scripts\python.exe run_oracle.py `
   --dump-states P:\dumps\oracle_seq
 ```
 
+### MTP reference qualification
+
+`mtp_reference.py` implements the MTP stem and wraps one Transformers decoder layer,
+following the [vLLM MTP implementation](https://github.com/vllm-project/vllm/blob/main/vllm/models/qwen4_exp/nvidia/mtp.py).
+The hidden normalization covers all 10,240 features, its shared projection preserves
+four distinct streams, and the sole mixer follows the decoder layer. The first draft
+pairs the last target hidden with the target's next token; later drafts carry MTP hidden.
+
+Run the focused comparison from the repository root with the environment above:
+
+```powershell
+E:\NInfer\venv-qwen4exp\Scripts\python.exe tests/targets/qwen3_8_flash_next/test_mtp_oracle_parity.py `
+  --ninfer-exe build-win/tests/Release/ninfer_qwen3_8_flash_next_mtp_test.exe `
+  --dump-dir profiles/bench/flash-next-mtp/oracle-parity
+```
+
+This compares the five stem stages against the FP32 reference under shared synthetic
+inputs and weights, and checks the remaining C++ stages for finite, nonzero values.
+It does not compare decoder-layer or head values: their synthetic weights differ.
+Zero indexer counts are legitimate diagnostics. `--stem-only` runs the pure tensor
+semantics check; full mode fails explicitly if Qwen4Exp Transformers is unavailable.
+
+The September 6 C++ comparison passed with maximum stem relative L2 error 0.002428.
+The synthetic Transformers MTP forward also ran successfully. `run_oracle.py --mtp-real`
+supports real-weight teacher seeding and chained drafts, but full real-checkpoint CPU
+MTP parity has not been run and is not implied by those focused checks.
+
 ## 3. Comparing States and Finding First Divergence
 
 Run `compare_states.py` to compare stage tensors across positions:

@@ -1,4 +1,5 @@
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
+#include "targets/qwen3_8_flash_next/impl/mtp_forward.h"
 
 #include "core/device.h"
 #include "ninfer/ops/embedding.h"
@@ -127,7 +128,7 @@ void validate_flash_next_decode_state(const FlashNextDecodeStateView& state,
 }
 
 std::size_t flash_next_text_decode_workspace_capacity_bytes(std::int32_t maximum_blocks,
-                                                            std::int32_t batch) {
+                                                            std::int32_t batch, bool mtp) {
     if (maximum_blocks <= 0 || maximum_blocks > 65'536 || batch <= 0 || batch > 8) {
         throw std::invalid_argument("Flash-Next text decode received an invalid envelope");
     }
@@ -155,11 +156,16 @@ std::size_t flash_next_text_decode_workspace_capacity_bytes(std::int32_t maximum
         auto scope = layout.scope();
         (void)allocate_flash_next_moe_workspace(layout, batch);
     }
+    if (mtp) {
+        auto scope = layout.scope();
+        (void)layout.alloc(DType::BF16, {2'560, batch}, 256);
+        (void)layout.alloc_bytes(flash_next_mtp_teacher_workspace_capacity_bytes(batch), 256);
+    }
     return layout.peak_bytes(256);
 }
 
 std::size_t flash_next_text_prefill_workspace_capacity_bytes(std::int32_t maximum_blocks,
-                                                             std::int32_t tokens) {
+                                                             std::int32_t tokens, bool mtp) {
     if (maximum_blocks <= 0 || maximum_blocks > 65'536 || tokens <= 0) {
         throw std::invalid_argument("Flash-Next text prefill received an invalid envelope");
     }
@@ -198,6 +204,11 @@ std::size_t flash_next_text_prefill_workspace_capacity_bytes(std::int32_t maximu
         auto scope = layout.scope();
         (void)allocate_flash_next_moe_workspace(layout, tokens);
     }
+    if (mtp) {
+        auto scope = layout.scope();
+        (void)layout.alloc(DType::BF16, {2'560, tokens}, 256);
+        (void)layout.alloc_bytes(flash_next_mtp_teacher_workspace_capacity_bytes(tokens), 256);
+    }
     return layout.peak_bytes(256);
 }
 
@@ -209,7 +220,8 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                                  std::int32_t active_blocks, FlashNextDecodeStateView state,
                                  WorkspaceArena& workspace, Tensor& final_hidden, Tensor& logits,
                                  cudaStream_t stream, const FlashNextDecodeStateSink* sink,
-                                 Tensor* out_hyper_hidden, bool aliased_recurrent_scan) {
+                                 Tensor* out_hyper_hidden, bool aliased_recurrent_scan,
+                                 const Tensor* mtp_token_ids) {
     const std::int32_t batch       = embedding.ne[1];
     const std::int32_t state_slots = state.ple_convolution_states.ne[2];
     if (batch <= 0 || batch > 8 || maximum_blocks <= 0 || maximum_blocks > 65'536 ||
@@ -312,6 +324,18 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         emit_state(prefix + "hyper_after_mlp", round_ws.hyper_hidden);
     }
 
+    if (state.mtp_backbone_hidden.data != nullptr) {
+        const auto mtp_scope = workspace.scope();
+        Tensor mtp_embedding = embedding;
+        if (mtp_token_ids != nullptr) {
+            mtp_embedding = workspace.alloc(DType::BF16, {2'560, batch}, 256);
+            ops::embedding(*mtp_token_ids, model.token_embedding, mtp_embedding, stream);
+        }
+        flash_next_mtp_teacher_extend(*model.mtp, mtp_embedding, round_ws.hyper_hidden,
+            token_indices, mrope_positions, table_rows, source_slots, destination_slots,
+            0, 0, 0, 0, false, aliased_recurrent_scan, state, workspace, stream);
+    }
+
     // 3. Final hyper mixer -> final_hidden [2560, B]
     flash_next_hyper_mix(round_ws.hyper_hidden, model.final_mixer, round_ws.hyper_scratch,
                          final_hidden, stream);
@@ -359,7 +383,8 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                                    std::int32_t first_token_index, FlashNextDecodeStateView state,
                                    WorkspaceArena& workspace, Tensor& final_hidden, Tensor& logits,
                                    cudaStream_t stream, const FlashNextDecodeStateSink* sink,
-                                   bool use_qsa_prefill_mma, Tensor* out_hyper_hidden) {
+                                   bool use_qsa_prefill_mma, Tensor* out_hyper_hidden,
+                                   const Tensor* mtp_token_ids) {
     const std::int32_t tokens      = embedding.ne[1];
     const std::int32_t state_slots = state.ple_convolution_states.ne[2];
     if (tokens <= 0 || maximum_blocks <= 0 || maximum_blocks > 65'536 || first_token_index < 0 ||
@@ -474,6 +499,19 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                                 round_ws.hyper_hidden, stream);
         stage_ledger_record(stream, FlashNextStageId::Hyper_InjectMlp);
         emit_state(prefix + "hyper_after_mlp", round_ws.hyper_hidden);
+    }
+
+    if (state.mtp_backbone_hidden.data != nullptr) {
+        const auto mtp_scope = workspace.scope();
+        Tensor mtp_embedding = embedding;
+        if (mtp_token_ids != nullptr) {
+            mtp_embedding = workspace.alloc(DType::BF16, {2'560, tokens}, 256);
+            ops::embedding(*mtp_token_ids, model.token_embedding, mtp_embedding, stream);
+        }
+        flash_next_mtp_teacher_extend(*model.mtp, mtp_embedding, round_ws.hyper_hidden,
+            token_indices, mrope_positions, Tensor{}, Tensor{}, Tensor{}, table_row,
+            source_slot, destination_slot, first_token_index, true, true,
+            state, workspace, stream);
     }
 
     // 3. Final hyper mixer on last token only -> final_hidden [2560, 1]

@@ -62,7 +62,8 @@ ProgramImpl::ProgramImpl(const LoadedModelData* model_data, FlashNextRuntimePlan
     const std::uint32_t cont_cap = plan_.config.continuation_capacity;
     continuation_slots_.resize(cont_cap);
     for (std::uint32_t c = 0; c < cont_cap; ++c) {
-        continuation_slots_[c].cache_slot = 2U * plan_.config.max_concurrency + c;
+        continuation_slots_[c].cache_slot =
+            flash_next_floor_slots(plan_.config.max_concurrency, plan_.config.speculative_draft_tokens) + c;
     }
     if (model_data_ != nullptr && model_data_->vision.has_value() && plan_.config.vision_enabled) {
         if (!plan_.vision_workspace.has_value()) {
@@ -124,29 +125,19 @@ bool ProgramImpl::is_slot_protected(std::size_t slot_idx) const {
     if (slot.role != ContinuationSlotRole::Catalogued) { return false; }
 
     for (const auto& st : lane_states_) {
-        if (st.active) {
-            if (st.reused_from_continuation_index.has_value() &&
-                *st.reused_from_continuation_index == slot_idx &&
-                st.reused_from_continuation_generation == slot.generation) {
-                return true;
-            }
-            if (st.turn_closure_continuation_index.has_value() &&
-                *st.turn_closure_continuation_index == slot_idx) {
-                return true;
-            }
+        if (!st.active) { continue; }
+        if (st.turn_closure_continuation_index == slot_idx) { return true; }
+        if (!st.reused_from_continuation_index.has_value()) { continue; }
+        const auto owner_idx = *st.reused_from_continuation_index;
+        const auto& owner = continuation_slots_[owner_idx];
+        if (owner.role != ContinuationSlotRole::Catalogued ||
+            st.reused_from_continuation_generation != owner.generation) {
+            continue;
         }
-    }
-
-    if (has_context_transaction_ && transaction_has_source_) {
-        if (transaction_lane_.has_value()) {
-            const std::uint32_t lane_idx = transaction_lane_->value;
-            if (lane_idx < lane_states_.size()) {
-                const auto& st = lane_states_[lane_idx];
-                if (st.reused_from_continuation_index.has_value() &&
-                    *st.reused_from_continuation_index == slot_idx) {
-                    return true;
-                }
-            }
+        if (owner_idx == slot_idx ||
+            (owner.paired_rewrite_slot == slot_idx &&
+             owner.paired_rewrite_generation == slot.generation)) {
+            return true;
         }
     }
 
@@ -258,8 +249,12 @@ void ProgramImpl::drop_unpublished_turn_closure(LaneState& st) {
         return;
     }
     for (const auto& other : lane_states_) {
-        if (&other != &st && other.active && other.reused_from_continuation_index.has_value() &&
-            *other.reused_from_continuation_index == idx) {
+        if (&other == &st || !other.active || !other.reused_from_continuation_index.has_value()) {
+            continue;
+        }
+        const auto& owner = continuation_slots_[*other.reused_from_continuation_index];
+        if (owner.generation == other.reused_from_continuation_generation &&
+            owner.paired_rewrite_slot == idx && owner.paired_rewrite_generation == turn.generation) {
             return;
         }
     }
@@ -779,6 +774,8 @@ AssessedPressureTarget PressurePlanningSessionImpl::assess(PressureTargetHandle 
         copy->reusable_tokens = cand.impl_->reusable_tokens;
         copy->source_continuation_index = cand.impl_->source_continuation_index;
         copy->source_continuation_generation = cand.impl_->source_continuation_generation;
+        copy->source_checkpoint_index = cand.impl_->source_checkpoint_index;
+        copy->source_checkpoint_generation = cand.impl_->source_checkpoint_generation;
         copy->has_source = cand.impl_->has_source;
         copy->required_page_groups = cand.impl_->required_page_groups;
         copy->planning_revision = cand.impl_->planning_revision;
@@ -1359,7 +1356,7 @@ std::optional<AdmissionCandidate>
 Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestBasePlan& base,
                           runtime::LaneId destination, const ContinuationHandle* source,
                           const SharedPrefixHandle* shared_source,
-                          std::optional<runtime::CheckpointRef> /*checkpoint*/,
+                          std::optional<runtime::CheckpointRef> checkpoint,
                           bool must_retain_private_source) {
     if (impl_ == nullptr) { throw std::logic_error("Program: instance is empty"); }
 
@@ -1370,114 +1367,51 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestB
     std::uint32_t reusable_tokens = 0;
     const detail::ContinuationSlot* cont_slot = nullptr;
 
-    if (shared_source != nullptr) {
-        return std::nullopt;
+    const bool has_source = source != nullptr || shared_source != nullptr;
+    if ((source != nullptr && shared_source != nullptr) || has_source != checkpoint.has_value()) {
+        throw std::logic_error("Flash-Next admission requires one owner and its selected checkpoint");
     }
+    if (shared_source != nullptr) { return std::nullopt; }
 
-    if (std::getenv("NINFER_FLASH_NEXT_TRACE_KEYS") != nullptr) {
-        std::fprintf(stderr, "[fnkey] inspect_admission source=%d prompt_tokens=%u\n",
-                     source != nullptr ? 1 : 0, prompt_tokens);
-    }
     std::uint32_t matched_slot_index = 0;
     if (source != nullptr) {
-        if (source->owner() != this) {
-            return std::nullopt;
+        if (source->owner() != this || source->index() >= impl_->continuation_slots_.size()) {
+            throw std::logic_error("Flash-Next admission owner does not belong to this Program");
         }
-        const std::uint32_t c_idx = source->index();
-        const std::uint64_t gen   = source->generation();
-        if (c_idx >= impl_->continuation_slots_.size()) {
-            return std::nullopt;
+        const auto& owner = impl_->continuation_slots_[source->index()];
+        if (owner.role != detail::ContinuationSlotRole::Catalogued ||
+            owner.generation != source->generation() ||
+            owner.kind != runtime::CheckpointKind::SessionEndpoint) {
+            throw std::logic_error("Flash-Next admission owner is stale");
         }
-        const auto& c = impl_->continuation_slots_[c_idx];
-        if (c.role != detail::ContinuationSlotRole::Catalogued || c.generation != gen) {
-            return std::nullopt;
-        }
-
-        // Try matching endpoint continuation
-        const std::size_t K = static_cast<std::size_t>(c.committed_frontier);
-        if (K > 0 && K <= prompt_data.token_ids.size() && K <= c.committed_tokens.size()) {
-            bool match = true;
-            std::size_t diverged_at = K;
-            for (std::size_t i = 0; i < K; ++i) {
-                if (prompt_data.token_ids[i] != c.committed_tokens[i]) {
-                    match       = false;
-                    diverged_at = i;
-                    break;
-                }
+        matched_slot_index = source->index();
+        if (checkpoint->kind == runtime::CheckpointKind::TurnClosure) {
+            if (!owner.paired_rewrite_slot.has_value() ||
+                *owner.paired_rewrite_slot >= impl_->continuation_slots_.size()) {
+                throw std::logic_error("Flash-Next catalog rewrite has no checkpoint");
             }
-            if (match) {
-                reusable_tokens    = static_cast<std::uint32_t>(K);
-                cont_slot          = &c;
-                matched_slot_index = c_idx;
-            } else if (std::getenv("NINFER_FLASH_NEXT_TRACE_KEYS") != nullptr) {
-                // Where a reuse candidate stops matching is the whole diagnosis: a
-                // divergence in the last few tokens costs the entire prefix, because
-                // this match is all-or-nothing at K.
-                std::fprintf(stderr,
-                             "[fnkey] endpoint MISMATCH at %zu of K=%zu (prompt=%zu): "
-                             "prompt_tok=%d cached_tok=%d\n",
-                             diverged_at, K, prompt_data.token_ids.size(),
-                             static_cast<int>(prompt_data.token_ids[diverged_at]),
-                             static_cast<int>(c.committed_tokens[diverged_at]));
-            }
-        } else if (std::getenv("NINFER_FLASH_NEXT_TRACE_KEYS") != nullptr) {
-            std::fprintf(stderr,
-                         "[fnkey] endpoint UNUSABLE K=%zu prompt=%zu cached=%zu\n", K,
-                         prompt_data.token_ids.size(), c.committed_tokens.size());
-        }
-
-        // If endpoint didn't match (e.g. omitted reasoning / divergence in multi-turn), check TurnClosure checkpoints
-        if (cont_slot == nullptr && std::getenv("NINFER_FLASH_NEXT_TRACE_KEYS") != nullptr) {
-            std::size_t catalogued = 0, turn_closures = 0;
-            for (const auto& slot : impl_->continuation_slots_) {
-                if (slot.role != detail::ContinuationSlotRole::Catalogued) { continue; }
-                ++catalogued;
-                if (slot.kind == runtime::CheckpointKind::TurnClosure) { ++turn_closures; }
-            }
-            std::fprintf(stderr, "[fnkey] fallback inventory: slots=%zu catalogued=%zu turn_closures=%zu\n",
-                         impl_->continuation_slots_.size(), catalogued, turn_closures);
-        }
-        if (cont_slot == nullptr) {
-            for (std::size_t tc_idx = 0; tc_idx < impl_->continuation_slots_.size(); ++tc_idx) {
-                const auto& tc = impl_->continuation_slots_[tc_idx];
-                if (tc.role == detail::ContinuationSlotRole::Catalogued &&
-                    tc.kind == runtime::CheckpointKind::TurnClosure) {
-                    const std::size_t tc_K = static_cast<std::size_t>(tc.committed_frontier);
-                    if (tc_K > 0 && tc_K <= prompt_data.token_ids.size() && tc_K <= tc.committed_tokens.size()) {
-                        bool match              = true;
-                        std::size_t diverged_at = tc_K;
-                        for (std::size_t i = 0; i < tc_K; ++i) {
-                            if (prompt_data.token_ids[i] != tc.committed_tokens[i]) {
-                                match       = false;
-                                diverged_at = i;
-                                break;
-                            }
-                        }
-                        if (match && tc_K > reusable_tokens) {
-                            reusable_tokens    = static_cast<std::uint32_t>(tc_K);
-                            cont_slot          = &tc;
-                            matched_slot_index = static_cast<std::uint32_t>(tc_idx);
-                        } else if (!match && std::getenv("NINFER_FLASH_NEXT_TRACE_KEYS") != nullptr) {
-                            std::fprintf(stderr,
-                                         "[fnkey] turnclosure[%zu] MISMATCH at %zu of K=%zu: "
-                                         "prompt_tok=%d cached_tok=%d\n",
-                                         tc_idx, diverged_at, tc_K,
-                                         static_cast<int>(prompt_data.token_ids[diverged_at]),
-                                         static_cast<int>(tc.committed_tokens[diverged_at]));
-                        }
-                    } else if (std::getenv("NINFER_FLASH_NEXT_TRACE_KEYS") != nullptr) {
-                        std::fprintf(stderr,
-                                     "[fnkey] turnclosure[%zu] UNUSABLE K=%zu prompt=%zu cached=%zu\n",
-                                     tc_idx, tc_K, prompt_data.token_ids.size(),
-                                     tc.committed_tokens.size());
-                    }
-                }
+            matched_slot_index = *owner.paired_rewrite_slot;
+            if (impl_->continuation_slots_[matched_slot_index].generation != owner.paired_rewrite_generation) {
+                throw std::logic_error("Flash-Next catalog rewrite generation is stale");
             }
         }
-
-        if (cont_slot == nullptr) {
+        const auto& selected = impl_->continuation_slots_[matched_slot_index];
+        if (selected.role != detail::ContinuationSlotRole::Catalogued ||
+            checkpoint->ordinal != 0 || checkpoint->kind != selected.kind ||
+            checkpoint->frontier != static_cast<std::uint32_t>(selected.committed_frontier) ||
+            checkpoint->frontier == 0 || checkpoint->frontier > selected.committed_tokens.size()) {
+            throw std::logic_error("Flash-Next catalog checkpoint disagrees with Program state");
+        }
+        // The Engine has already enumerated candidates and recorded this exact owner/ref.
+        // A token mismatch declines this candidate; it cannot select another owner's state.
+        if (checkpoint->frontier > prompt_data.token_ids.size() ||
+            !std::equal(selected.committed_tokens.begin(),
+                        selected.committed_tokens.begin() + checkpoint->frontier,
+                        prompt_data.token_ids.begin())) {
             return std::nullopt;
         }
+        reusable_tokens = checkpoint->frontier;
+        cont_slot = &selected;
     }
 
     const std::uint32_t total_tokens = prompt_tokens + (effective_out > 0 ? effective_out - 1U : 0U);
@@ -1535,8 +1469,7 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestB
     cand_impl->assessment.physical_status = feasible ? runtime::MaterializationPhysicalStatus::Feasible
                                                    : runtime::MaterializationPhysicalStatus::Infeasible;
     cand_impl->assessment.source_mode =
-        (source != nullptr && (must_retain_private_source ||
-                               (cont_slot != nullptr && cont_slot->kind == runtime::CheckpointKind::TurnClosure)))
+        (source != nullptr && must_retain_private_source)
             ? runtime::PrivateSourceMode::Retain
             : runtime::PrivateSourceMode::ConsumeToActive;
     cand_impl->assessment.expandable                          = true;
@@ -1549,8 +1482,10 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestB
     cand_impl->required_page_groups             = total_required_groups;
     cand_impl->planning_revision                = impl_->resource_revision_;
     if (cont_slot != nullptr) {
-        cand_impl->source_continuation_index      = matched_slot_index;
-        cand_impl->source_continuation_generation = cont_slot->generation;
+        cand_impl->source_continuation_index      = source->index();
+        cand_impl->source_continuation_generation = source->generation();
+        cand_impl->source_checkpoint_index        = matched_slot_index;
+        cand_impl->source_checkpoint_generation   = cont_slot->generation;
     }
 
     std::uint64_t digest = 1469598103934665603ULL;
@@ -1579,6 +1514,8 @@ Program::seal_identity(const AdmissionCandidate& candidate,
     copy->reusable_tokens = candidate.impl_->reusable_tokens;
     copy->source_continuation_index = candidate.impl_->source_continuation_index;
     copy->source_continuation_generation = candidate.impl_->source_continuation_generation;
+    copy->source_checkpoint_index = candidate.impl_->source_checkpoint_index;
+    copy->source_checkpoint_generation = candidate.impl_->source_checkpoint_generation;
     copy->has_source = candidate.impl_->has_source;
     copy->required_page_groups = candidate.impl_->required_page_groups;
     copy->planning_revision = candidate.impl_->planning_revision;
@@ -1722,56 +1659,35 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
     }
 
     if (adm.impl_ != nullptr && adm.impl_->reusable_tokens > 0) {
-        const std::uint32_t c_idx = adm.impl_->source_continuation_index;
-        const std::uint64_t gen   = adm.impl_->source_continuation_generation;
-        if (c_idx < impl_->continuation_slots_.size()) {
-            auto& c_slot = impl_->continuation_slots_[c_idx];
-            if (c_slot.role == detail::ContinuationSlotRole::Catalogued && c_slot.generation == gen) {
-                // Attach physical groups
-                impl_->executor_.attach_physical_groups(
-                    handle, c_slot.physical_groups, c_slot.committed_frontier, c_slot.history);
+        const auto owner_idx = adm.impl_->source_continuation_index;
+        const auto checkpoint_idx = adm.impl_->source_checkpoint_index;
+        auto& owner = impl_->continuation_slots_.at(owner_idx);
+        const auto& selected = impl_->continuation_slots_.at(checkpoint_idx);
+        if (owner.role != detail::ContinuationSlotRole::Catalogued ||
+            owner.generation != adm.impl_->source_continuation_generation ||
+            selected.role != detail::ContinuationSlotRole::Catalogued ||
+            selected.generation != adm.impl_->source_checkpoint_generation) {
+            throw std::logic_error("Flash-Next sealed source checkpoint is stale");
+        }
+        impl_->executor_.attach_physical_groups(
+            handle, selected.physical_groups, selected.committed_frontier, selected.history);
+        const auto active_slot = impl_->executor_.allocation().current_source_slot(lane_idx);
+        impl_->executor_.copy_state_slot(selected.cache_slot, static_cast<std::uint32_t>(active_slot));
 
-                // Copy-on-Resume recurrent state from cache slot to active lane slot
-                const std::int32_t active_slot = impl_->executor_.allocation().current_source_slot(lane_idx);
-                impl_->executor_.copy_state_slot(c_slot.cache_slot, static_cast<std::uint32_t>(active_slot));
+        st.prompt_tokens_processed = adm.impl_->reusable_tokens;
+        st.reused_prompt_tokens = adm.impl_->reusable_tokens;
+        st.last_token_pos = static_cast<std::int32_t>(adm.impl_->reusable_tokens) - 1;
+        st.last_token_index = st.last_token_pos;
+        st.committed_frontier = static_cast<std::int32_t>(adm.impl_->reusable_tokens);
 
-                st.prompt_tokens_processed = adm.impl_->reusable_tokens;
-                st.reused_prompt_tokens    = adm.impl_->reusable_tokens;
-                st.last_token_pos          = static_cast<std::int32_t>(adm.impl_->reusable_tokens) - 1;
-                st.last_token_index        = static_cast<std::int32_t>(adm.impl_->reusable_tokens) - 1;
-                st.committed_frontier      = static_cast<std::int32_t>(adm.impl_->reusable_tokens);
-
-                if (c_slot.kind != runtime::CheckpointKind::TurnClosure) {
-                    // Consumed to active: release continuation cache entry (page groups transferred to active lane)
-                    const auto paired_turn = c_slot.paired_rewrite_slot;
-                    const auto paired_gen  = c_slot.paired_rewrite_generation;
-                    impl_->executor_.release_physical_groups(c_slot.physical_groups);
-                    c_slot.physical_groups.clear();
-                    c_slot.committed_tokens.clear();
-                    c_slot.committed_frontier = 0;
-                    c_slot.role               = detail::ContinuationSlotRole::Vacant;
-                    c_slot.generation++;
-                    c_slot.published_checkpoints     = 1;
-                    c_slot.paired_rewrite_slot.reset();
-                    c_slot.paired_rewrite_generation = 0;
-
-                    // Vacate paired TurnClosure slot unless another active lane is resuming from it
-                    if (paired_turn.has_value() && *paired_turn < impl_->continuation_slots_.size()) {
-                        const auto& turn = impl_->continuation_slots_[*paired_turn];
-                        if (turn.role == detail::ContinuationSlotRole::Catalogued &&
-                            turn.generation == paired_gen &&
-                            turn.kind == runtime::CheckpointKind::TurnClosure &&
-                            !impl_->is_slot_protected(*paired_turn)) {
-                            impl_->vacate_slot(*paired_turn);
-                        }
-                    }
-                } else {
-                    // TurnClosure checkpoint: stays catalogued and immutable for future turns / sibling requests!
-                    c_slot.last_used_epoch = ++impl_->continuation_epoch_;
-                    st.reused_from_continuation_index = c_idx;
-                    st.reused_from_continuation_generation = gen;
-                }
-            }
+        if (adm.impl_->assessment.source_mode == runtime::PrivateSourceMode::ConsumeToActive) {
+            // The active lane now owns the selected pages and copied recurrent state.
+            // Consume the complete Engine owner, including an unselected endpoint/rewrite.
+            impl_->vacate_owner(owner_idx);
+        } else {
+            owner.last_used_epoch = ++impl_->continuation_epoch_;
+            st.reused_from_continuation_index = owner_idx;
+            st.reused_from_continuation_generation = owner.generation;
         }
     }
 
@@ -2313,7 +2229,7 @@ runtime::ContextTransactionReserveStatus Program::reserve_active_capture_with_pr
 }
 
 PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
-                             std::span<const runtime::RoundBudget> /*budgets*/,
+                             std::span<const runtime::RoundBudget> budgets,
                              runtime::ExecutionTiming* failed_timing) {
     if (impl_ == nullptr) { throw std::logic_error("Program: instance is empty"); }
 
@@ -2321,6 +2237,11 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
     const std::size_t B = sequences.size();
     if (B == 0 || B > impl_->plan_.config.max_concurrency) {
         throw std::invalid_argument("decode batch size invalid");
+    }
+    if (budgets.size() != B || std::any_of(budgets.begin(), budgets.end(), [](const auto& budget) {
+            return budget.generated_tokens_remaining == 0;
+        })) {
+        throw std::invalid_argument("decode requires a positive remaining budget for each row");
     }
     if (impl_->pending_round_.valid()) {
         throw std::logic_error("cannot decode while a pending round is uncommitted");
@@ -2343,20 +2264,13 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
         }
 
         const std::uint32_t K =
-            std::min<std::uint32_t>(4U, impl_->plan_.config.speculative_draft_tokens);
-
-        // If draft tokens are not already prepared, draft them from current state
-        if (st.draft_tokens.empty()) {
-            st.draft_tokens.resize(K);
-            Tensor last_hidden = impl_->allocation_.round_tensors().hyper_hidden.slice(1, 0, 1);
-            std::array<std::int32_t, 3> mrope_pos = {st.last_token_pos, st.last_token_pos,
-                                                     st.last_token_pos};
-            impl_->executor_.draft_mtp_tokens(st.lane_handle, st.last_token_id, st.last_token_index,
-                                              mrope_pos, last_hidden, K, st.draft_tokens);
-        }
+            std::min({4U, impl_->plan_.config.speculative_draft_tokens,
+                      budgets[0].generated_tokens_remaining - 1U,
+                      impl_->plan_.config.max_context -
+                          static_cast<std::uint32_t>(st.last_token_index) - 1U});
 
         const std::int32_t last_token_index =
-            st.last_token_index + static_cast<std::int32_t>(st.draft_tokens.size());
+            st.last_token_index + static_cast<std::int32_t>(K);
         const std::size_t req_groups =
             static_cast<std::size_t>(last_token_index /
                                      static_cast<std::int32_t>(detail::kMainPageGroupTokens)) +
@@ -2364,6 +2278,16 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
         const std::size_t owned = impl_->executor_.lane_physical_groups(st.lane_handle).size();
         if (req_groups > owned) {
             impl_->ensure_physical_groups_available(req_groups - owned);
+        }
+
+        // If draft tokens are not already prepared, draft them from current state
+        if (st.draft_tokens.empty()) {
+            st.draft_tokens.resize(K);
+            Tensor last_hidden = impl_->allocation_.state_view().mtp_backbone_hidden.slice(1, impl_->allocation_.current_source_slot(lane_idx), 1);
+            std::array<std::int32_t, 3> mrope_pos = {st.last_token_pos, st.last_token_pos,
+                                                     st.last_token_pos};
+            impl_->executor_.draft_mtp_tokens(st.lane_handle, st.last_token_id, st.last_token_index,
+                                              mrope_pos, last_hidden, K, st.draft_tokens);
         }
 
         std::array<std::int32_t, 3> first_mrope_pos = {st.last_token_pos, st.last_token_pos,
@@ -2581,6 +2505,10 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
         auto& st                     = impl_->lane_states_[lane_idx];
 
         if (dec.accepted_tokens > 0) {
+            if (dec.accepted_tokens > st.pending_accepted_tokens.size()) {
+                throw std::invalid_argument("speculative commit exceeds the verified token count");
+            }
+            st.pending_accepted_tokens.resize(dec.accepted_tokens);
             // Commit accepted tokens via speculative commit
             if (impl_->pending_round_.valid()) {
                 impl_->pending_round_.commit_speculative(lane_idx, st.pending_accepted_tokens);
@@ -2597,21 +2525,7 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
                 st.total_generated_tokens += 1;
             }
 
-            // Draft new MTP tokens for the next round if not terminal
             st.draft_tokens.clear();
-            if (!dec.terminal && impl_->plan_.config.speculative_draft_tokens > 0 &&
-                impl_->has_mtp()) {
-                const std::uint32_t K =
-                    std::min<std::uint32_t>(4U, impl_->plan_.config.speculative_draft_tokens);
-                st.draft_tokens.resize(K);
-                Tensor last_hidden = impl_->allocation_.round_tensors().hyper_hidden.slice(
-                    1, static_cast<std::int32_t>(st.pending_accepted_tokens.size() - 1), 1);
-                std::array<std::int32_t, 3> mrope_pos = {st.last_token_pos, st.last_token_pos,
-                                                         st.last_token_pos};
-                impl_->executor_.draft_mtp_tokens(st.lane_handle, st.last_token_id,
-                                                  st.last_token_index, mrope_pos, last_hidden, K,
-                                                  st.draft_tokens);
-            }
             st.pending_accepted_tokens.clear();
 
             if (dec.terminal) {
@@ -2663,21 +2577,7 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
                 st.last_token_index += 1;
                 ++st.total_generated_tokens;
 
-                // If speculative drafting is configured, draft tokens after prefill completion or standard round
                 st.draft_tokens.clear();
-                if (!dec.terminal && impl_->plan_.config.speculative_draft_tokens > 0 &&
-                    impl_->has_mtp()) {
-                    const std::uint32_t K =
-                        std::min<std::uint32_t>(4U, impl_->plan_.config.speculative_draft_tokens);
-                    st.draft_tokens.resize(K);
-                    Tensor last_hidden = impl_->allocation_.round_tensors().hyper_hidden.slice(
-                        1, static_cast<std::int32_t>(b), 1);
-                    std::array<std::int32_t, 3> mrope_pos = {st.last_token_pos, st.last_token_pos,
-                                                             st.last_token_pos};
-                    impl_->executor_.draft_mtp_tokens(st.lane_handle, st.last_token_id,
-                                                      st.last_token_index, mrope_pos, last_hidden,
-                                                      K, st.draft_tokens);
-                }
 
                 if (dec.terminal) {
                     result.rows[b].disposition = runtime::CommitDisposition::Finishable;
@@ -2710,13 +2610,30 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
 }
 
 DiscardResult Program::abort_pending(PendingBatch&& pending) noexcept {
+    const auto rows = ContractAccess::rows(pending);
+    const auto count = rows.size();
     if (impl_ != nullptr && impl_->pending_round_.valid()) {
         impl_->pending_round_.abort();
+    }
+    if (impl_ != nullptr) {
+        for (const auto& sequence : rows) {
+            const auto lane = sequence.lane().value;
+            if (lane >= impl_->lane_states_.size()) { continue; }
+            auto& state = impl_->lane_states_[lane];
+            if (!state.active || state.epoch != sequence.epoch()) { continue; }
+            impl_->drop_unpublished_turn_closure(state);
+            impl_->executor_.release_lane(state.lane_handle);
+            state.active = false;
+            state.finished = true;
+            state.draft_tokens.clear();
+            state.pending_accepted_tokens.clear();
+            ++impl_->resource_revision_;
+        }
     }
     ContractAccess::consume(pending);
     return DiscardResult{
         .status    = runtime::ConsumeStatus::Consumed,
-        .row_count = 0,
+        .row_count = count,
     };
 }
 

@@ -111,6 +111,7 @@ __global__ void update_key_kernel(
             raw_positions[static_cast<std::int64_t>(source) * 12 + dim];
     }
     __syncthreads();
+    if (token_index < 0) { return; }
     raw_keys[destination_base + tail * kHeadDim + dim] =
         projected[static_cast<std::int64_t>(batch) * kProjectionRows + kRawKeyOffset + dim];
     if (dim < 3) {
@@ -357,18 +358,15 @@ std::size_t flash_next_qsa_indexer_sort_temp_bytes(std::int32_t maximum_blocks,
     return std::max(sort_bytes, topk_bytes);
 }
 
-void flash_next_qsa_indexer_launch(const Tensor& token_indices, const Tensor& mrope_positions,
-                                   const Tensor& table_rows, const Tensor& source_state_slots,
-                                   const Tensor& destination_state_slots, const Tensor& query_norm,
-                                   const Tensor& key_norm, QsaIndexerCacheView cache,
-                                   FlashNextQsaIndexerWorkspace& scratch, int active_blocks,
-                                   Tensor& selected_blocks, Tensor& selected_counts,
-                                   cudaStream_t stream, bool aliased_recurrent_scan) {
+void flash_next_qsa_indexer_store_launch(const Tensor& projected, const Tensor& token_indices,
+    const Tensor& mrope_positions, const Tensor& table_rows, const Tensor& source_state_slots,
+    const Tensor& destination_state_slots, const Tensor& key_norm, QsaIndexerCacheView cache,
+    cudaStream_t stream, bool aliased_recurrent_scan) {
     const int batch = token_indices.ne[0];
     if (aliased_recurrent_scan && batch > 1) {
         for (int r = 0; r < batch; ++r) {
             update_key_kernel<<<1, kHeadDim, 0, stream>>>(
-                static_cast<const __nv_bfloat16*>(scratch.projected.data),
+                static_cast<const __nv_bfloat16*>(projected.data),
                 static_cast<const __nv_bfloat16*>(key_norm.data),
                 static_cast<const std::int32_t*>(token_indices.data),
                 static_cast<const std::int32_t*>(mrope_positions.data),
@@ -382,7 +380,7 @@ void flash_next_qsa_indexer_launch(const Tensor& token_indices, const Tensor& mr
         }
     } else {
         update_key_kernel<<<batch, kHeadDim, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(scratch.projected.data),
+            static_cast<const __nv_bfloat16*>(projected.data),
             static_cast<const __nv_bfloat16*>(key_norm.data),
             static_cast<const std::int32_t*>(token_indices.data),
             static_cast<const std::int32_t*>(mrope_positions.data),
@@ -396,6 +394,19 @@ void flash_next_qsa_indexer_launch(const Tensor& token_indices, const Tensor& mr
     }
     CUDA_CHECK(cudaGetLastError());
 
+}
+
+void flash_next_qsa_indexer_launch(const Tensor& token_indices, const Tensor& mrope_positions,
+                                   const Tensor& table_rows, const Tensor& source_state_slots,
+                                   const Tensor& destination_state_slots, const Tensor& query_norm,
+                                   const Tensor& key_norm, QsaIndexerCacheView cache,
+                                   FlashNextQsaIndexerWorkspace& scratch, int active_blocks,
+                                   Tensor& selected_blocks, Tensor& selected_counts,
+                                   cudaStream_t stream, bool aliased_recurrent_scan) {
+    const int batch = token_indices.ne[0];
+    flash_next_qsa_indexer_store_launch(scratch.projected, token_indices, mrope_positions,
+        table_rows, source_state_slots, destination_state_slots, key_norm, cache, stream,
+        aliased_recurrent_scan);
     if (active_blocks == 0) {
         CUDA_CHECK(cudaMemsetAsync(selected_counts.data, 0,
                                    static_cast<std::size_t>(batch) * sizeof(std::int32_t), stream));
@@ -690,17 +701,15 @@ void score_blocks_chunk_kernel(const __nv_bfloat16* __restrict__ query,
     }
 }
 
-void flash_next_qsa_indexer_prefill_launch(
+void flash_next_qsa_indexer_store_prefill_launch(const Tensor& projected,
     const Tensor& token_indices, const Tensor& mrope_positions, std::int32_t table_row,
-    std::int32_t source_state_slot, std::int32_t destination_state_slot, const Tensor& query_norm,
-    const Tensor& key_norm, QsaIndexerCacheView cache, FlashNextQsaIndexerWorkspace& scratch,
-    std::int32_t maximum_blocks, std::int32_t first_token_index, Tensor& selected_blocks,
-    Tensor& selected_counts, cudaStream_t stream) {
+    std::int32_t source_state_slot, std::int32_t destination_state_slot,
+    const Tensor& key_norm, QsaIndexerCacheView cache, cudaStream_t stream) {
     const int tokens = token_indices.ne[0];
     const int max_complete_blocks = (tokens + 3) / 4;
     if (max_complete_blocks > 0) {
         indexer_publish_complete_blocks_chunk_kernel<<<max_complete_blocks, kHeadDim, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(scratch.projected.data),
+            static_cast<const __nv_bfloat16*>(projected.data),
             static_cast<const __nv_bfloat16*>(key_norm.data),
             static_cast<const std::int32_t*>(token_indices.data),
             static_cast<const std::int32_t*>(mrope_positions.data), source_state_slot,
@@ -713,13 +722,25 @@ void flash_next_qsa_indexer_prefill_launch(
     }
 
     indexer_update_leftover_chunk_kernel<<<1, kHeadDim, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(scratch.projected.data),
+        static_cast<const __nv_bfloat16*>(projected.data),
         static_cast<const std::int32_t*>(token_indices.data),
         static_cast<const std::int32_t*>(mrope_positions.data), source_state_slot,
         destination_state_slot, static_cast<__nv_bfloat16*>(cache.raw_keys.data),
         static_cast<std::int32_t*>(cache.raw_positions.data), tokens);
     CUDA_CHECK(cudaGetLastError());
 
+}
+
+void flash_next_qsa_indexer_prefill_launch(
+    const Tensor& token_indices, const Tensor& mrope_positions, std::int32_t table_row,
+    std::int32_t source_state_slot, std::int32_t destination_state_slot, const Tensor& query_norm,
+    const Tensor& key_norm, QsaIndexerCacheView cache, FlashNextQsaIndexerWorkspace& scratch,
+    std::int32_t maximum_blocks, std::int32_t first_token_index, Tensor& selected_blocks,
+    Tensor& selected_counts, cudaStream_t stream) {
+    const int tokens = token_indices.ne[0];
+    flash_next_qsa_indexer_store_prefill_launch(scratch.projected, token_indices,
+        mrope_positions, table_row, source_state_slot, destination_state_slot, key_norm,
+        cache, stream);
     std::int32_t resolved_first = first_token_index;
     const char* restore         = std::getenv("NINFER_FLASH_NEXT_PREFILL_HOST_SYNC");
     const bool host_sync = restore != nullptr && restore[0] == '1' && restore[1] == '\0';

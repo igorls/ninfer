@@ -2,10 +2,13 @@
 
 #include "artifact/typed_binding.h"
 #include "core/device.h"
+#include "core/host_memory.h"
 #include "targets/qwen3_8_flash_next/impl/load/quantize_nvfp4_expert_bank.h"
 #include "targets/qwen3_8_flash_next/impl/load/quantize_output_head.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -400,6 +403,20 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
         }
     }
     if (plan.features.vision) { vision = load_vision(plan.vision, backing); }
+
+    // PLE is a random-access host weight table. Leaving its mapped pages cold makes
+    // the first code prompt pay thousands of synchronous disk faults per token batch.
+    // Warm only these persistent host weights after device materialization, before ready.
+    const auto warm_started = std::chrono::steady_clock::now();
+    std::size_t host_bytes = 0;
+    for (const auto& shard : text.ple.table.shards) {
+        warm_readonly_host_memory(shard.codes);
+        warm_readonly_host_memory(shard.scales);
+        host_bytes += shard.codes.size() + shard.scales.size();
+    }
+    std::fprintf(stderr, "flash_next host_ple_warm bytes=%zu duration_ms=%.3f\n", host_bytes,
+                 std::chrono::duration<double, std::milli>(
+                     std::chrono::steady_clock::now() - warm_started).count());
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

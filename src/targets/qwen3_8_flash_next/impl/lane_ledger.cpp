@@ -639,12 +639,51 @@ FlashNextLaneLedger::begin_speculative_round(LaneHandle handle,
 
     const std::int32_t last_token_index =
         first_token_index + static_cast<std::int32_t>(num_tokens) - 1;
+    previous_group_counts_[lane] = lane_physical_groups_[lane].size();
+    reserve_mtp_pages(handle, last_token_index);
+
+    std::vector<std::array<std::int64_t, 16>> ple_indices_vec;
+    ple_indices_vec.reserve(num_tokens);
+
+    PleTokenHistory simulated_history = lanes_[lane].history;
+    for (std::uint32_t t = 0; t < num_tokens; ++t) {
+        const std::int32_t cur_token = (t == 0) ? anchor_token_id : draft_tokens[t - 1];
+        std::array<std::int64_t, 16> token_indices = ple_indices(ple_meta, simulated_history, cur_token);
+        ple_indices_vec.push_back(token_indices);
+        simulated_history.commit(cur_token);
+    }
+
+    const std::int32_t max_active_blocks =
+        std::min(static_cast<std::int32_t>(plan_.maximum_blocks), (last_token_index + 1) / 4);
+
+    current_transaction_id_ += 1;
+    pending_requests_.clear();
+    pending_requests_.push_back(LaneStepRequest{.handle = handle, .token_id = anchor_token_id, .token_index = first_token_index});
+    for (std::size_t d = 0; d < draft_tokens.size(); ++d) {
+        pending_requests_.push_back(LaneStepRequest{
+            .handle = handle,
+            .token_id = draft_tokens[d],
+            .token_index = first_token_index + static_cast<std::int32_t>(d + 1)
+        });
+    }
+    pending_lane_indices_ = {lane};
+    has_pending_batch_    = true;
+
+    return PreparedRound{current_transaction_id_, max_active_blocks, std::move(ple_indices_vec)};
+}
+
+void FlashNextLaneLedger::reserve_mtp_pages(LaneHandle handle, std::int32_t last_token_index) {
+    validate_handle(handle, LaneState::Active);
+    if (last_token_index < 0 ||
+        static_cast<std::uint32_t>(last_token_index) >= plan_.config.max_context) {
+        throw std::out_of_range("MTP page reservation exceeds max_context");
+    }
+    const auto lane = handle.lane_index();
     const std::size_t req_groups =
         static_cast<std::size_t>(last_token_index /
                                  static_cast<std::int32_t>(kMainPageGroupTokens)) +
         1U;
     auto& owned_groups           = lane_physical_groups_[lane];
-    previous_group_counts_[lane] = owned_groups.size();
 
     if (req_groups > owned_groups.size()) {
         const std::size_t total_needed = req_groups - owned_groups.size();
@@ -678,34 +717,6 @@ FlashNextLaneLedger::begin_speculative_round(LaneHandle handle,
         }
     }
 
-    std::vector<std::array<std::int64_t, 16>> ple_indices_vec;
-    ple_indices_vec.reserve(num_tokens);
-
-    PleTokenHistory simulated_history = lanes_[lane].history;
-    for (std::uint32_t t = 0; t < num_tokens; ++t) {
-        const std::int32_t cur_token = (t == 0) ? anchor_token_id : draft_tokens[t - 1];
-        std::array<std::int64_t, 16> token_indices = ple_indices(ple_meta, simulated_history, cur_token);
-        ple_indices_vec.push_back(token_indices);
-        simulated_history.commit(cur_token);
-    }
-
-    const std::int32_t max_active_blocks =
-        std::min(static_cast<std::int32_t>(plan_.maximum_blocks), (last_token_index + 1) / 4);
-
-    current_transaction_id_ += 1;
-    pending_requests_.clear();
-    pending_requests_.push_back(LaneStepRequest{.handle = handle, .token_id = anchor_token_id, .token_index = first_token_index});
-    for (std::size_t d = 0; d < draft_tokens.size(); ++d) {
-        pending_requests_.push_back(LaneStepRequest{
-            .handle = handle,
-            .token_id = draft_tokens[d],
-            .token_index = first_token_index + static_cast<std::int32_t>(d + 1)
-        });
-    }
-    pending_lane_indices_ = {lane};
-    has_pending_batch_    = true;
-
-    return PreparedRound{current_transaction_id_, max_active_blocks, std::move(ple_indices_vec)};
 }
 
 void FlashNextLaneLedger::commit_speculative_round(std::uint64_t tx_id,
@@ -721,8 +732,10 @@ void FlashNextLaneLedger::commit_speculative_round(std::uint64_t tx_id,
         alloc.advance_lane_slot(lane, static_cast<std::uint32_t>(accepted_tokens.size()), stream);
     }
 
-    for (const auto tok : accepted_tokens) {
-        lanes_[lane].history.commit(tok);
+    // PLE records the inputs evaluated by the verifier. The final correction/bonus
+    // output is the next round's anchor and has not been consumed yet.
+    for (std::size_t i = 0; i < accepted_tokens.size(); ++i) {
+        lanes_[lane].history.commit(pending_requests_[i].token_id);
     }
     lanes_[lane].committed_frontier += static_cast<std::int32_t>(accepted_tokens.size());
     lanes_[lane].state = LaneState::Active;

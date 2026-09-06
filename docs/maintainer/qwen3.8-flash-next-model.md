@@ -61,7 +61,7 @@ injection_weight = 2 * sigmoid(W_inject(N) / 4)
 H' = H + flatten(block_output[:,None,:] * injection_weight[:,:,None])
 ```
 
-Attention and MoE each own one such transition. The final and MTP input mixers omit
+Attention and MoE each own one such transition. The target and MTP final mixers omit
 `W_inject` and return only `block_input`.
 
 ## 3. Gated DeltaNet layers
@@ -143,6 +143,11 @@ row_h = o_h + floor_mod(h < 8 ? b : g, v_h)
 History begins with `[eos,eos]`; committing EOS resets both history positions. PLE lookup therefore
 participates in speculative accept/rollback rather than mutating history during proposal.
 
+The compressed PLE codes and scales remain in read-only host mappings (32,000,153,600 bytes).
+After device weights are materialized, startup reads ahead and touches these mappings before
+publishing Engine readiness. This moves cold random page faults out of request prefill without
+another copy or GPU allocation. These pages remain reclaimable by the operating system.
+
 The 16 selected 160-wide rows concatenate to a 2560-wide embedding `E`. The layer computes a
 10240-wide key, a 2560-wide value, and normalized four-stream query. Per stream:
 
@@ -158,10 +163,54 @@ to the four-stream hidden state before layer 1's attention hyper-connection.
 
 ## 7. MTP and Vision
 
-MTP normalizes and independently projects the current token embedding and the chosen main hidden
-state, adds them, repeats/mixes the four hyper streams, then executes one full-attention QSA + MoE
-layer with its own weights. Proposal and commit must transactionally include main KV, indexer keys,
-GDN state, PLE token/convolution history, and MTP state.
+MTP pairs target hidden `H[t]` with the text embedding of token `t+1`, at position `t`.
+Its stem applies unit-offset RMSNorm to the embedding (width 2560) and to the complete
+four-stream hidden (width 10240), then applies the same 2560-by-2560 hidden projection
+independently to each stream. The projected embedding is added to each projected stream:
+
+```text
+E = fc_embedding(norm(embedding(token[t+1]), embedding_norm))
+N = reshape(norm(H[t], hidden_norm), [4,2560])
+MTP_input[s] = fc_hidden(N[s]) + E
+```
+
+The four streams remain distinct. There is no stem mixer. One full-attention QSA + MoE
+layer follows; the sole MTP mixer runs at the end to produce the head input. Later draft
+positions carry the MTP layer's post-injection, pre-mixer four-stream hidden, the newly
+drafted token, and incremented positions. For image/video placeholders the drafter uses
+the text embedding table; visual information reaches it through the target hidden.
+
+The MTP attention and indexer have their own cache planes under the lane's shared physical
+page ownership. Target prefill and verification seed these planes with teacher-forced pairs.
+The final target hidden and all three MRoPE coordinates are kept per state slot until the
+next input token is known. Prompt seeding needs only the stem, attention hyper-connection,
+and KV/indexer projections, not the MTP attention output, MoE, or head.
+
+Proposal and commit transactionally include main KV, both indexers' raw keys/positions,
+GDN state, PLE token/convolution history, and the saved target hidden/positions. Verification
+commits the consumed inputs (anchor plus accepted drafts); its correction/bonus token is
+consumed in the next round. The draft window is bounded by context and output budget.
+Sequential verification has separate captured graphs from independent-lane decode.
+
+Draft metadata for the whole window is uploaded once to fixed, aligned device views.
+The first draft uses the saved target hidden and MRoPE position; subsequent drafts consume
+the preceding device token and carried hidden without CPU readback. Each draft position has
+startup-captured graphs for the decode context buckets. Bucket selection occurs per step,
+including windows that cross the QSA identity/scoring boundary. All draft tokens return in
+one pinned transfer after the chain. Draft completion waits are included in the device-wait
+timing bucket, alongside verification waits.
+
+With draft window `K`, each active lane owns `K+1` recurrent-state slots (two when MTP is off).
+Continuation checkpoint slots begin after the complete active ring. A private owner consists of
+its endpoint and optional TurnClosure rewrite. Admission matches only the exact checkpoint offered
+by the Engine. Consuming either checkpoint transfers its state to the active lane and releases
+the complete old owner; sibling-session retention preserves and protects both checkpoints.
+
+With `preserve_thinking=false`, a new real user message removes reasoning from earlier
+assistant messages in the preceding tool-call sequence. Both the latest rolling rewrite and
+the endpoint can then fail prefix identity. Flash-Next currently publishes no inherited
+turn-start anchor, so this case can require root prefill even when the old owner remains
+resident. Keeping reasoning preserves that prefix when the client replays it consistently.
 
 Vision is the checkpoint's 27-block 1152-wide tower: 3D patch projection, learned position
 embedding, non-causal 16-head attention, GELU MLP, and a 2x2 patch merger from 4608 to Text width

@@ -37,6 +37,99 @@ over the loopback OpenAI-compatible HTTP endpoint. Each reported corpus fixture 
 seeds. Values are arithmetic mean ± sample standard deviation, and server warm-up completes before
 the measured requests. The concurrent campaign has its own sustained-wave method below.
 
+## Qwen3.8-Flash-Next MTP on RTX PRO 6000
+
+The September 6, 2026 Windows Release build was measured on an NVIDIA RTX PRO 6000
+Blackwell Workstation Edition (96 GiB), CUDA 13.3, using the mixed Flash-Next artifact.
+The loader quantizes this artifact's BF16 MTP expert bank to NVFP4; these measurements
+use that existing path and require no replacement checkpoint.
+
+Both modes used fresh persistent servers, completed startup warm-up, and received the
+same three requests serially. Settings were 262,144 maximum context, 786,432 KV tokens,
+eight maximum active requests, 8,192-token prefill chunks, FP8 KV, BF16 GDN state,
+Vision enabled, and 3 GiB desktop reserve. Requests used temperature 0, seed 42,
+top-p 0.8, top-k 20, presence penalty 1.5, reasoning disabled, and no streaming.
+Every measured request selected a root prefix and reached its stated output limit.
+
+MTP used `--spec mtp --draft-tokens 4`, eager draft steps, and captured sequential
+verification. Decode throughput below is `(completion_tokens - 1) / decode_seconds`;
+prefill and transport time are excluded. Each row is one matched observation,
+not a repeated corpus average or a general speedup guarantee.
+
+| Workload | Prompt / output tokens | Speculation off tok/s | MTP4 tok/s | Decode speedup | Draft acceptance |
+|---|---:|---:|---:|---:|---:|
+| CPU execution explanation | 43 / 320 | 85.53 | 92.94 | 1.09x | 193 / 502 (38.4%) |
+| Detailed CPU tutorial | 54 / 1,200 | 82.03 | 97.66 | 1.19x | 803 / 1,581 (50.8%) |
+| CPU question after 600 synthetic catalog records | 18,537 / 320 | 55.82 | 79.56 | 1.43x | 204 / 460 (44.3%) |
+
+Accepted drafts by position were `[91,56,28,18]`, `[318,230,154,101]`, and
+`[81,58,40,25]`, respectively. All four draft positions contribute. A repeated
+18.5K-context request reused 18,530 prompt tokens and preserved the output and
+acceptance counts, including a production recheck with captured verification.
+A chart-image request and a
+three-request concurrent wave also completed successfully. Flash-Next currently
+speculates only at decode batch size one; larger batches use ordinary batched
+decode while keeping the MTP teacher state current.
+
+The MTP cache, rollback slots, and graph captures consume part of the runtime memory
+budget. At these settings the planner selected 16 private continuation slots from
+the requested maximum of 48. The maximum active batch and KV token capacity remained
+eight and 786,432. These results do not qualify full real-checkpoint FP32 oracle
+parity; stem mathematics, state transactions, and captured verification have focused
+numerical and integration checks described in the model reference and oracle tools.
+
+### Device-resident MTP drafts
+
+On the same RTX PRO 6000 and mixed artifact, six greedy code-generation requests
+produced 640 tokens each: two prompts at each context length below. The requests were
+identical across fresh servers, with MTP4, concurrency capacity eight, a 262,144-token
+context limit, and 655,360 KV tokens. The smaller KV pool left desktop headroom during
+this test window. Values are the mean of the two requests at each length.
+
+| Prompt tokens | Serialized eager drafts tok/s | Device-resident captured drafts tok/s | Observed change |
+|---:|---:|---:|---:|
+| 74 | 190.29 | 191.51 | +0.6% |
+| 33,348 | 120.90 | 122.86 | +1.6% |
+| 77,767 | 115.49 | 116.76 | +1.1% |
+
+All response text and draft-acceptance counters were identical across the six requests.
+Removing intermediate readbacks without graph capture gave no clear improvement. The
+captured result is a small observed gain from a limited sample, not evidence of a large
+CPU bottleneck. Root TTFT was effectively unchanged: about 4.8 seconds at 33K tokens and
+11.5 seconds at 78K. Draft GPU waits are now classified as device-wait time; the earlier
+host-exposure bucket included those waits and must not be interpreted as CPU execution
+or GPU idle time.
+
+### Cold host PLE and repeated-turn prefill
+
+On the same hardware and serving settings with MTP4 enabled, a root request containing
+about 43.7K tokens of C++/CUDA source took 51.74 seconds to return one token. A temporary
+host timer attributed 46.1 seconds to synchronous compressed PLE gathering. After startup
+warmed the 32.0 GB mapped PLE codes/scales, the same source workload took 6.51 seconds;
+a previously unrequested source region (41.8K tokens) took 6.17 seconds. Each request had
+zero prefix reuse. These are individual client wall-time observations, with a changed
+request label to prevent reuse; they isolate a cold host-page problem, not MTP decode cost.
+The warm pass took 25.52 seconds during startup and does not pin pages against OS reclamation.
+
+A separate 48-turn synthetic conversation began at 18.5K prompt tokens and ended at 52.8K.
+With exact checkpoint ownership and consumption, every follow-up advanced the reuse frontier,
+computed only 735–736 tokens, and completed in 0.18–0.22 seconds. Before this correction,
+reuse stopped advancing after turn 6; turn 17 recomputed 8,751 tokens and took 1.36 seconds.
+The corrected run maintained two checkpoint state slots rather than accumulating old owners.
+From an empty production cache, eight concurrent conversations completed three turns each:
+all 24 requested integer sequences were correct, and all 16 follow-ups reused the expected
+checkpoint (1,602 then 1,680 tokens). Cache capacity remains bounded: a separate run with
+an older ninth conversation already cached had two misses among 16 follow-ups.
+
+A controlled empty-cache conversation with a 33K-token initial prompt, two supplied
+assistant reasoning/tool-call messages, and a new user message isolates another reuse
+limit. Both modes reused 33,349 and then 33,393 tokens during the tool sequence. With
+`preserve_thinking=false`, the new user message removed the earlier reasoning and caused
+root prefill: 33,441 tokens, 4.799 seconds TTFT. With `preserve_thinking=true`, the new
+user request reused 33,437 tokens and took 0.088 seconds TTFT. This is a reproduction of
+the missing inherited turn-start checkpoint, not a claim that the default-mode miss is
+fixed. The frontend test separately verifies the corresponding rendered-prefix change.
+
 ## Single-request serving performance method
 
 | Setting | Value |

@@ -1037,6 +1037,21 @@ int test_rewrite_checkpoint_trace() {
                           next.text.starts_with(turn1.text.substr(0, turn1.rewrite_checkpoint->offset)),
                       "new user turn did not advance checkpoint and preserve turn 1 base prefix");
 
+    // A rolling checkpoint is safe within the tool loop, but a new real user
+    // removes reasoning from the entire preceding query block. A runtime that
+    // wants reuse across that rewrite must retain the original turn-start state.
+    failures += check(open.text.find("first thought") != std::string::npos &&
+                          next.text.find("first thought") == std::string::npos &&
+                          next.text.find("first answer") != std::string::npos &&
+                          next.text.find("result one") != std::string::npos &&
+                          !next.text.starts_with(open.text.substr(0, open.rewrite_checkpoint->offset)),
+                      "new user turn did not strip tool-loop reasoning before the rolling checkpoint");
+    preserve.enable_thinking = true;
+    const auto preserved_next = render_chat(next_turn, preserve);
+    failures += check(preserved_next.text.starts_with(
+                          preserved.text.substr(0, preserved.rewrite_checkpoint->offset)),
+                      "preserve_thinking lost the rolling prefix across a new user turn");
+
     const fi::RenderedChat branch =
         render_chat({chat_message(ninfer::ChatRole::User, "question"),
                      chat_message(ninfer::ChatRole::User, "summarize the conversation")},

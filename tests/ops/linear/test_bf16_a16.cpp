@@ -214,6 +214,10 @@ int run_bf16_linear() {
     for (const std::int32_t tokens : {1, 2, 4, 8, 9, 128, 1024}) {
         failures += run_bf16_linear_case(qsa_indexer_weight, tokens);
     }
+    DeviceWeight mtp_qgkv_weight(make_patterned(13312, 2560, 427U));
+    for (const std::int32_t tokens : {1, 4, 8, 9, 127, 128, 129, 8191}) {
+        failures += run_bf16_linear_case(mtp_qgkv_weight, tokens);
+    }
     DeviceWeight shared_down_weight(make_patterned(2560, 640, 424U));
     for (const std::int32_t tokens : {1, 2, 4, 8, 9, 128, 1024}) {
         failures += run_bf16_linear_case(shared_down_weight, tokens);

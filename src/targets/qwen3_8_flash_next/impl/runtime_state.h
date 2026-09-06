@@ -30,6 +30,10 @@ struct FlashNextRoundTensors {
     Tensor final_hidden;           // BF16 [2560, round_batch_tokens]
     Tensor hyper_hidden;           // BF16 [10240, round_batch_tokens]
     Tensor logits;                 // BF16 [248320, round_batch_tokens]
+    Tensor mtp_embedding;          // BF16 [2560, 1]
+    Tensor mtp_carried_hidden;     // BF16 [10240, 1]
+    Tensor mtp_logits;             // BF16 [draft_head_rows, 1]
+    Tensor mtp_token;              // I32 [1]
 };
 
 class FlashNextRuntimeAllocation {
@@ -78,6 +82,14 @@ public:
     [[nodiscard]] void* device_egress_ptr() noexcept { return device_egress_; }
     [[nodiscard]] const void* device_egress_ptr() const noexcept { return device_egress_; }
 
+    [[nodiscard]] FlashNextMtpDraftIngress* host_mtp_draft_ingress() noexcept {
+        return host_mtp_draft_ingress_
+            ? static_cast<FlashNextMtpDraftIngress*>(host_mtp_draft_ingress_->data()) : nullptr;
+    }
+    [[nodiscard]] FlashNextMtpDraftIngress* device_mtp_draft_ingress() noexcept {
+        return device_mtp_draft_ingress_;
+    }
+
     [[nodiscard]] const ops::SamplingConfig* device_sampling_configs() const noexcept {
         return reinterpret_cast<const ops::SamplingConfig*>(
             static_cast<const std::byte*>(device_ingress_) + offsetof(FlashNextDecodeIngress, sampling));
@@ -124,8 +136,10 @@ private:
 
     PinnedHostBuffer host_ingress_;
     PinnedHostBuffer host_egress_;
+    std::unique_ptr<PinnedHostBuffer> host_mtp_draft_ingress_;
     void* device_ingress_ = nullptr;
     void* device_egress_  = nullptr;
+    FlashNextMtpDraftIngress* device_mtp_draft_ingress_ = nullptr;
 
     FlashNextDecodeStateView state_view_{};
     FlashNextRoundTensors round_tensors_{};

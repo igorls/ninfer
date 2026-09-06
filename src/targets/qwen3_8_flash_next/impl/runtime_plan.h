@@ -115,6 +115,7 @@ inline constexpr std::uint32_t kFlashNextDecodeGraphBucketTokenEnvelopes[3] = {2
 inline constexpr std::uint32_t kFlashNextDecodeGraphMaxBuckets              = 4;
 inline constexpr std::size_t kFlashNextDecodeGraphBytesPerCapture =
     24ULL * 1024ULL * 1024ULL;
+inline constexpr std::size_t kFlashNextMtpDraftGraphBytesPerCapture = 2ULL * 1024ULL * 1024ULL;
 
 struct FlashNextDecodeGraphBuckets {
     std::array<std::uint32_t, kFlashNextDecodeGraphMaxBuckets> blocks{};
@@ -172,6 +173,21 @@ struct FlashNextDecodeEgress {
     std::array<std::int32_t, 8> sampled_tokens{};
 };
 
+// One immutable header per draft step, uploaded before the device-resident chain.
+// Scalar views retain the alignment required by the MTP Op contracts.
+struct FlashNextMtpDraftStep {
+    alignas(16) std::int32_t token_index = 0;
+    alignas(16) std::array<std::int32_t, 3> mrope_positions{};
+    alignas(16) std::int32_t table_row = 0;
+    alignas(16) std::int32_t source_slot = 0;
+    alignas(16) std::int32_t destination_slot = 0;
+};
+
+struct FlashNextMtpDraftIngress {
+    alignas(16) std::int32_t token_id = 0;
+    std::array<FlashNextMtpDraftStep, 4> steps{};
+};
+
 struct FlashNextRuntimeConfig {
     std::uint32_t max_concurrency          = 1;    // 1..8
     std::uint32_t max_context              = 4096; // in tokens: 1..262144
@@ -201,6 +217,10 @@ struct FlashNextRuntimePlan {
     std::uint32_t state_slots              = 0;
     std::uint32_t continuation_slots       = 0;
     std::uint32_t maximum_blocks           = 0; // ceil(max_context / 4)
+
+    [[nodiscard]] std::size_t qsa_cache_layers() const noexcept {
+        return kFullAttentionLayers + (config.speculative_draft_tokens > 0 ? 1U : 0U);
+    }
 
     // Memory breakdown in bytes
     std::size_t attention_kv_bytes         = 0;

@@ -7,6 +7,10 @@
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
+void flash_next_qsa_attention_store_launch(const Tensor& projected, const Tensor& token_indices,
+    const Tensor& mrope_positions, const Tensor& table_rows, int table_row,
+    const Tensor& key_norm, QsaAttentionCacheView cache, Tensor& key, Tensor& value,
+    cudaStream_t stream);
 void flash_next_qsa_attention_launch(const Tensor& token_indices, const Tensor& mrope_positions,
                                      const Tensor& table_rows, const Tensor& selected_blocks,
                                      const Tensor& selected_counts, const Tensor& query_norm,

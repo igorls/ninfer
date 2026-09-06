@@ -88,76 +88,145 @@ ninfer::Weight bf16_weight(void* data, std::int32_t rows, std::int32_t columns) 
     return out;
 }
 
-int test_stem_combine_and_repeat(ninfer::DeviceContext& device) {
-    std::cout << "[TEST 1/4] test_stem_combine_and_repeat ...\n" << std::flush;
+int test_mtp_stem_oracle(ninfer::DeviceContext& device) {
+    using namespace ninfer;
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
-    constexpr std::int32_t batch = 2;
-    constexpr std::int32_t dim   = 2'560;
-
-    ninfer::DeviceArena arena(64 * 1024 * 1024);
-    ninfer::Tensor emb_proj     = arena.alloc(ninfer::DType::BF16, {dim, batch}, 256);
-    ninfer::Tensor hid_proj     = arena.alloc(ninfer::DType::BF16, {dim, batch}, 256);
-    ninfer::Tensor trunk_sum    = arena.alloc(ninfer::DType::BF16, {dim, batch}, 256);
-    ninfer::Tensor hyper_hidden = arena.alloc(ninfer::DType::BF16, {10'240, batch}, 256);
-
-    std::vector<std::uint16_t> host_emb(dim * batch);
-    std::vector<std::uint16_t> host_hid(dim * batch);
-    for (std::size_t i = 0; i < dim * batch; ++i) {
-        host_emb[i] = float_to_bf16(static_cast<float>(i % 100) * 0.1f);
-        host_hid[i] = float_to_bf16(static_cast<float>(i % 50) * 0.2f);
+    constexpr int batch = 2, dim = 2560, streams = 4;
+    DeviceArena arena(64 * 1024 * 1024);
+    Tensor embedding = arena.alloc(DType::BF16, {dim, batch}, 256);
+    Tensor hidden = arena.alloc(DType::BF16, {dim * streams, batch}, 256);
+    Tensor output = arena.alloc(DType::BF16, {dim * streams, batch}, 256);
+    Tensor embedding_norm = arena.alloc(DType::BF16, {dim}, 256);
+    Tensor hidden_norm = arena.alloc(DType::BF16, {dim * streams}, 256);
+    Tensor projection = arena.alloc(DType::BF16, {dim, dim}, 256);
+    std::vector<std::uint16_t> emb(dim * batch), hid(dim * streams * batch);
+    std::vector<std::uint16_t> en(dim), hn(dim * streams), weights(dim * dim, 0);
+    for (int i = 0; i < dim * batch; ++i) {
+        emb[i] = float_to_bf16((static_cast<int>(i % 53) - 26) / 32.0F);
     }
-    cudaMemcpy(emb_proj.data, host_emb.data(), host_emb.size() * sizeof(std::uint16_t),
-               cudaMemcpyHostToDevice);
-    cudaMemcpy(hid_proj.data, host_hid.data(), host_hid.size() * sizeof(std::uint16_t),
-               cudaMemcpyHostToDevice);
-
-    flash_next_mtp_stem_combine_and_repeat_launch(emb_proj, hid_proj, &trunk_sum, hyper_hidden,
-                                                  device.stream);
+    for (int i = 0; i < dim * streams * batch; ++i) {
+        hid[i] = float_to_bf16((static_cast<int>(i % 71) - 35) / 32.0F + (i / dim % 4) * 0.125F);
+    }
+    for (int i = 0; i < dim; ++i) {
+        en[i] = float_to_bf16((i % 5) * 0.0625F);
+        weights[i * dim + i] = float_to_bf16(0.5F + (i % 7) * 0.125F);
+    }
+    for (int i = 0; i < dim * streams; ++i) {
+        hn[i] = float_to_bf16((i % 9) * 0.03125F);
+    }
+    auto upload = [&](Tensor t, const std::vector<std::uint16_t>& v) {
+        CUDA_CHECK(cudaMemcpyAsync(t.data, v.data(), v.size() * 2, cudaMemcpyHostToDevice, device.stream));
+    };
+    upload(embedding, emb); upload(hidden, hid); upload(embedding_norm, en);
+    upload(hidden_norm, hn); upload(projection, weights);
+    MtpModelView mtp{};
+    mtp.embedding_norm = embedding_norm; mtp.hidden_norm = hidden_norm;
+    mtp.embedding_projection = bf16_weight(projection.data, dim, dim);
+    mtp.hidden_projection = mtp.embedding_projection;
+    DeviceBuffer backing(8 * 1024 * 1024);
+    WorkspaceArena workspace(DeviceSpan{backing.p, backing.bytes});
+    flash_next_mtp_stem(mtp, embedding, hidden, workspace, output, device.stream);
     device.synchronize();
-
-    std::vector<std::uint16_t> res_trunk(dim * batch);
-    std::vector<std::uint16_t> res_hyper(10'240 * batch);
-    cudaMemcpy(res_trunk.data(), trunk_sum.data, res_trunk.size() * sizeof(std::uint16_t),
-               cudaMemcpyDeviceToHost);
-    cudaMemcpy(res_hyper.data(), hyper_hidden.data, res_hyper.size() * sizeof(std::uint16_t),
-               cudaMemcpyDeviceToHost);
-
-    double base_sq = 0.0;
-    for (std::size_t i = 0; i < dim * batch; ++i) {
-        float e = bf16_to_float(host_emb[i]);
-        float h = bf16_to_float(host_hid[i]);
-        float expected = bf16_to_float(float_to_bf16(e + h));
-        float actual = bf16_to_float(res_trunk[i]);
-        if (std::abs(expected - actual) > 1e-4f) {
-            std::cerr << "FAIL: stem combine mismatch at " << i << " expected " << expected
-                       << " got " << actual << "\n";
-            return 1;
+    std::vector<std::uint16_t> actual(hid.size());
+    CUDA_CHECK(cudaMemcpy(actual.data(), output.data, actual.size() * 2, cudaMemcpyDeviceToHost));
+    double error = 0, energy = 0, max_error = 0;
+    // FP64 complete formula from represented BF16 inputs and weights, independent
+    // of the GPU's intermediate materializations and reduction association.
+    for (int b = 0; b < batch; ++b) {
+        double emb_ss = 0, hid_ss = 0;
+        for (int c = 0; c < dim; ++c) { const double x = bf16_to_float(emb[b * dim + c]); emb_ss += x*x; }
+        for (int c = 0; c < dim * streams; ++c) { const double x = bf16_to_float(hid[b * dim * streams + c]); hid_ss += x*x; }
+        const double er = 1.0 / std::sqrt(emb_ss / dim + 1e-6);
+        const double hr = 1.0 / std::sqrt(hid_ss / (dim * streams) + 1e-6);
+        for (int c = 0; c < dim * streams; ++c) {
+            const int d = c % dim, idx = b * dim * streams + c;
+            const double w = bf16_to_float(weights[d * dim + d]);
+            const double expected = w * (bf16_to_float(emb[b * dim + d]) * er * (1 + bf16_to_float(en[d]))
+                + bf16_to_float(hid[idx]) * hr * (1 + bf16_to_float(hn[c])));
+            const double delta = bf16_to_float(actual[idx]) - expected;
+            error += delta * delta; energy += expected * expected;
+            max_error = std::max(max_error, std::abs(delta));
         }
-        base_sq += actual * actual;
     }
-    if (base_sq <= 0.0) {
-        std::cerr << "FAIL: trunk_sum is vacuous zero\n";
+    const double relative = std::sqrt(error / energy);
+    if (relative > 0.008 || max_error > 0.04) {
+        std::cerr << "FAIL: MTP stem FP64 oracle relative=" << relative << " max=" << max_error << '\n';
         return 1;
     }
-
-    for (std::int32_t b = 0; b < batch; ++b) {
-        for (std::int32_t s = 0; s < 4; ++s) {
-            for (std::int32_t c = 0; c < dim; ++c) {
-                std::uint16_t trunk_val = res_trunk[b * dim + c];
-                std::uint16_t hyper_val = res_hyper[b * 10'240 + s * dim + c];
-                if (trunk_val != hyper_val) {
-                    std::cerr << "FAIL: hyper broadcast stream " << s << " mismatch at col " << c
-                              << "\n";
-                    return 1;
-                }
+    std::cout << "PASS: MTP stem FP64 oracle, distinct streams and full-width norm, relative=" << relative << '\n';
+    return 0;
+}
+int test_mtp_target_state_alignment(ninfer::DeviceContext& device) {
+    using namespace ninfer;
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    constexpr int width = 10240, tokens = 2, slots = 3;
+    DeviceArena arena(2 * 1024 * 1024);
+    Tensor hidden = arena.alloc(DType::BF16, {width, tokens}, 256);
+    Tensor saved = arena.alloc(DType::BF16, {width, slots}, 256);
+    Tensor positions = arena.alloc(DType::I32, {tokens, 3}, 256);
+    Tensor saved_positions = arena.alloc(DType::I32, {3, slots}, 256);
+    Tensor indices = arena.alloc(DType::I32, {tokens}, 256);
+    Tensor sources = arena.alloc(DType::I32, {tokens}, 256);
+    Tensor destinations = arena.alloc(DType::I32, {tokens}, 256);
+    std::vector<std::uint16_t> hh(width * tokens), hs(width * slots);
+    for (int i = 0; i < width * tokens; ++i) { hh[i] = float_to_bf16((i % 97) / 64.0F); }
+    for (int i = 0; i < width * slots; ++i) { hs[i] = float_to_bf16(-2.0F - (i % 47) / 32.0F); }
+    const std::array<std::int32_t, 6> hp{101, 103, 17, 19, 5, 11};
+    const std::array<std::int32_t, 9> sp{41, 2, 3, 53, 7, 13, 97, 11, 17};
+    const std::array<std::int32_t, 2> ti{64, 65}, src{2, 0}, dst{0, 1};
+    auto copy = [&](Tensor t, const auto& values) {
+        CUDA_CHECK(cudaMemcpyAsync(t.data, values.data(), t.bytes(), cudaMemcpyHostToDevice, device.stream));
+    };
+    copy(hidden, hh); copy(saved, hs); copy(positions, hp); copy(saved_positions, sp);
+    copy(indices, ti); copy(sources, src); copy(destinations, dst);
+    for (const auto mode : {0, 1, 2}) {
+        const bool prefill = mode == 0, chain = mode != 2;
+        const int offset = prefill ? 1 : 0, rows = tokens - offset;
+        const auto scope = arena.scope();
+        Tensor shifted = arena.alloc(DType::BF16, {width, rows}, 256);
+        Tensor shifted_indices = arena.alloc(DType::I32, {rows}, 256);
+        Tensor shifted_positions = arena.alloc(DType::I32, {rows, 3}, 256);
+        flash_next_mtp_shift_inputs_launch(hidden, indices, positions, saved, saved_positions,
+            prefill ? Tensor{} : sources, 2, chain, offset, shifted,
+            shifted_indices, shifted_positions, device.stream);
+        device.synchronize();
+        std::vector<std::uint16_t> got(width * rows);
+        std::vector<std::int32_t> got_indices(rows), got_positions(rows * 3);
+        CUDA_CHECK(cudaMemcpy(got.data(), shifted.data, shifted.bytes(), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(got_indices.data(), shifted_indices.data, shifted_indices.bytes(), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(got_positions.data(), shifted_positions.data, shifted_positions.bytes(), cudaMemcpyDeviceToHost));
+        for (int row = 0; row < rows; ++row) {
+            const int current = row + offset, previous = chain ? current - 1 : -1;
+            const int slot = prefill ? 2 : src[current];
+            if (got_indices[row] != ti[current] - 1) { return 1; }
+            for (int axis = 0; axis < 3; ++axis) {
+                const auto expected = previous >= 0 ? hp[axis * tokens + previous] : sp[slot * 3 + axis];
+                if (got_positions[axis * rows + row] != expected) { return 1; }
+            }
+            for (int dim = 0; dim < width; ++dim) {
+                const auto expected = previous >= 0 ? hh[previous * width + dim] : hs[slot * width + dim];
+                if (got[row * width + dim] != expected) { return 1; }
             }
         }
     }
-
-    std::cout << "PASS: test_stem_combine_and_repeat (base_sq=" << base_sq << ")\n";
+    flash_next_mtp_save_target_launch(hidden, positions, destinations, 0, saved, saved_positions, device.stream);
+    device.synchronize();
+    std::vector<std::uint16_t> saved_after(hs.size());
+    std::array<std::int32_t, 9> positions_after{};
+    CUDA_CHECK(cudaMemcpy(saved_after.data(), saved.data, saved.bytes(), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(positions_after.data(), saved_positions.data, saved_positions.bytes(), cudaMemcpyDeviceToHost));
+    for (int row = 0; row < tokens; ++row) {
+        for (int dim = 0; dim < width; ++dim) {
+            if (saved_after[dst[row] * width + dim] != hh[row * width + dim]) { return 1; }
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+            if (positions_after[dst[row] * 3 + axis] != hp[axis * tokens + row]) { return 1; }
+        }
+    }
+    if (!std::equal(hs.begin() + 2 * width, hs.end(), saved_after.begin() + 2 * width)) { return 1; }
+    std::cout << "PASS: MTP target alignment, stream carry, lane isolation and three-axis positions\n";
     return 0;
 }
-
 int test_mtp_nvfp4_quantizer_unit(ninfer::DeviceContext& device) {
     std::cout << "[TEST 2/4] test_mtp_nvfp4_quantizer_unit ...\n" << std::flush;
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
@@ -385,11 +454,6 @@ void flash_next_mtp_step_bf16_for_test(
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
     const auto scope = workspace.scope();
     const std::int32_t batch = input_embedding.ne[1];
-    ninfer::Tensor emb_norm         = workspace.alloc(ninfer::DType::BF16, {2'560, batch}, 256);
-    ninfer::Tensor emb_proj         = workspace.alloc(ninfer::DType::BF16, {2'560, batch}, 256);
-    ninfer::Tensor hid_mix          = workspace.alloc(ninfer::DType::BF16, {2'560, batch}, 256);
-    ninfer::Tensor hid_proj         = workspace.alloc(ninfer::DType::BF16, {2'560, batch}, 256);
-    ninfer::Tensor trunk_sum        = workspace.alloc(ninfer::DType::BF16, {2'560, batch}, 256);
     ninfer::Tensor mtp_hyper_hidden = workspace.alloc(ninfer::DType::BF16, {10'240, batch}, 256);
     ninfer::Tensor attn_in          = workspace.alloc(ninfer::DType::BF16, {2'560, batch}, 256);
     ninfer::Tensor attn_out         = workspace.alloc(ninfer::DType::BF16, {2'560, batch}, 256);
@@ -400,13 +464,7 @@ void flash_next_mtp_step_bf16_for_test(
     FlashNextHyperWorkspace hyper_scratch = allocate_flash_next_hyper_workspace(workspace, batch);
     const auto& mtp = *model.mtp;
 
-    ops::rmsnorm(input_embedding, mtp.embedding_norm, 1e-6F, false, emb_norm, stream);
-    ops::linear(emb_norm, mtp.embedding_projection, emb_proj, ops::LinearPolicy::A16Only, workspace, stream);
-
-    flash_next_hyper_mix(backbone_hyper_hidden, mtp.mixer, hyper_scratch, hid_mix, stream);
-    ops::linear(hid_mix, mtp.hidden_projection, hid_proj, ops::LinearPolicy::A16Only, workspace, stream);
-
-    flash_next_mtp_stem_combine_and_repeat_launch(emb_proj, hid_proj, &trunk_sum, mtp_hyper_hidden, stream);
+    flash_next_mtp_stem(mtp, input_embedding, backbone_hyper_hidden, workspace, mtp_hyper_hidden, stream);
 
     flash_next_hyper_prepare(mtp_hyper_hidden, mtp.attention_hyper, hyper_scratch, attn_in, stream);
     flash_next_qsa_attention_decode(attn_in, mtp.attention, token_indices, mrope_positions,
@@ -490,6 +548,14 @@ int test_mtp_full_step_synthetic(ninfer::DeviceContext& device, const std::strin
     ninfer::Tensor value_pages  = arena.alloc(ninfer::DType::BF16, {256, 64, 2, 64}, 256);
     ninfer::Tensor block_tables = arena.alloc(ninfer::DType::I32, {64, 1}, 16);
 
+    auto source_slots = arena.alloc(ninfer::DType::I32, {batch}, 16);
+    auto destination_slots = arena.alloc(ninfer::DType::I32, {batch}, 16);
+    QsaIndexerCacheView indexer_cache{
+        .block_keys = arena.alloc(ninfer::DType::BF16, {128, 64, 16}, 256),
+        .block_tables = arena.alloc(ninfer::DType::I32, {16, 1}, 16),
+        .raw_keys = arena.alloc(ninfer::DType::BF16, {128, 4, 1}, 256),
+        .raw_positions = arena.alloc(ninfer::DType::I32, {3, 4, 1}, 16),
+    };
     cudaMemset(arena.base(), 0, arena.capacity());
 
     std::vector<std::uint16_t> diag(dim * dim, 0);
@@ -506,11 +572,14 @@ int test_mtp_full_step_synthetic(ninfer::DeviceContext& device, const std::strin
     cudaMemcpy(head_t.data, head_prefix.data(), head_prefix.size() * 2, cudaMemcpyHostToDevice);
 
     std::vector<std::uint16_t> host_input_emb(dim * batch, 0x3F80U);
-    std::vector<std::uint16_t> host_backbone(10'240 * batch, 0x3F80U);
+    std::vector<std::uint16_t> host_backbone(10'240 * batch);
+    for (std::size_t i = 0; i < host_backbone.size(); ++i) {
+        host_backbone[i] = float_to_bf16(static_cast<float>((i % 10'240) / dim + 1));
+    }
     cudaMemcpy(input_emb.data, host_input_emb.data(), host_input_emb.size() * 2, cudaMemcpyHostToDevice);
     cudaMemcpy(backbone_hidden.data, host_backbone.data(), host_backbone.size() * 2, cudaMemcpyHostToDevice);
 
-    populate_constant_bf16_bank(emb_norm_t.data, dim, 1.0f, device.stream);
+    populate_constant_bf16_bank(emb_norm_t.data, dim, 0.0f, device.stream);
     populate_constant_bf16_bank(hid_norm_t.data, 10'240, 0.0f, device.stream);
     populate_constant_bf16_bank(mix_norm_t.data, 10'240, 0.0f, device.stream);
     populate_constant_bf16_bank(attn_hc_norm_t.data, 10'240, 0.0f, device.stream);
@@ -601,7 +670,7 @@ int test_mtp_full_step_synthetic(ninfer::DeviceContext& device, const std::strin
 
     try {
         flash_next_mtp_step(model, input_emb, backbone_hidden, token_indices, mrope_positions,
-                            table_rows, selected_blocks, selected_counts, mtp_cache, arena,
+                            table_rows, source_slots, destination_slots, indexer_cache, mtp_cache, 1024, 0, arena,
                             draft_logits, draft_tokens, device.stream, sink ? &*sink : nullptr);
         device.synchronize();
     } catch (const std::exception& e) {
@@ -642,7 +711,7 @@ int test_mtp_full_step_synthetic(ninfer::DeviceContext& device, const std::strin
     cudaMemset(draft_logits.data, 0, draft_logits.bytes());
     cudaMemset(draft_tokens.data, 0, draft_tokens.bytes());
     flash_next_mtp_step(model, input_emb, backbone_hidden, token_indices, mrope_positions,
-                        table_rows, selected_blocks, selected_counts, mtp_cache, arena,
+                        table_rows, source_slots, destination_slots, indexer_cache, mtp_cache, 1024, 0, arena,
                         draft_logits, draft_tokens, device.stream, nullptr);
     device.synchronize();
 
@@ -690,7 +759,7 @@ int test_mtp_full_step_synthetic(ninfer::DeviceContext& device, const std::strin
     constexpr int kIters  = 50;
     for (int i = 0; i < kWarmup; ++i) {
         flash_next_mtp_step(model, input_emb, backbone_hidden, token_indices, mrope_positions,
-                            table_rows, selected_blocks, selected_counts, mtp_cache, arena,
+                            table_rows, source_slots, destination_slots, indexer_cache, mtp_cache, 1024, 0, arena,
                             draft_logits, draft_tokens, device.stream, nullptr);
         flash_next_mtp_step_bf16_for_test(model, moe_bf16, input_emb, backbone_hidden, token_indices,
                                           mrope_positions, table_rows, selected_blocks,
@@ -707,7 +776,7 @@ int test_mtp_full_step_synthetic(ninfer::DeviceContext& device, const std::strin
     cudaEventRecord(start, device.stream);
     for (int i = 0; i < kIters; ++i) {
         flash_next_mtp_step(model, input_emb, backbone_hidden, token_indices, mrope_positions,
-                            table_rows, selected_blocks, selected_counts, mtp_cache, arena,
+                            table_rows, source_slots, destination_slots, indexer_cache, mtp_cache, 1024, 0, arena,
                             draft_logits, draft_tokens, device.stream, nullptr);
     }
     cudaEventRecord(stop, device.stream);
@@ -758,7 +827,7 @@ int test_mtp_full_step_synthetic(ninfer::DeviceContext& device, const std::strin
 
         // Run NVFP4
         flash_next_mtp_step(model, input_emb, backbone_hidden, token_indices, mrope_positions,
-                            table_rows, selected_blocks, selected_counts, mtp_cache, arena,
+                            table_rows, source_slots, destination_slots, indexer_cache, mtp_cache, 1024, 0, arena,
                             draft_logits, draft_tokens, device.stream, nullptr);
         device.synchronize();
         std::vector<std::int32_t> tok_nvfp4(1);
@@ -819,7 +888,8 @@ int main(int argc, char** argv) {
 
     ninfer::DeviceContext device(0);
 
-    if (test_stem_combine_and_repeat(device) != 0) return 1;
+    if (test_mtp_stem_oracle(device) != 0) return 1;
+    if (test_mtp_target_state_alignment(device) != 0) return 1;
     if (test_mtp_nvfp4_quantizer_unit(device) != 0) return 1;
     if (test_mtp_moe_nvfp4_synthetic(device) != 0) return 1;
     if (test_mtp_full_step_synthetic(device, dump_dir) != 0) return 1;

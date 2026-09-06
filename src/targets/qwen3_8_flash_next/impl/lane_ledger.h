@@ -143,6 +143,9 @@ public:
     // Synchronizes dirty host block tables to device memory.
     void sync_tables_if_dirty(FlashNextRuntimeAllocation& alloc, cudaStream_t stream);
 
+    // Reserve and publish the page mapping before an MTP proposal can write KV.
+    void reserve_mtp_pages(LaneHandle handle, std::int32_t last_token_index);
+
     // Table introspection for verification
     [[nodiscard]] std::span<const std::int32_t> host_attention_table() const noexcept {
         return host_attention_table_;

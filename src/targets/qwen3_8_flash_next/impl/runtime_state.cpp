@@ -50,6 +50,9 @@ FlashNextRuntimeAllocation::FlashNextRuntimeAllocation(FlashNextRuntimePlan plan
     : plan_(std::move(plan)), host_ingress_(sizeof(FlashNextDecodeIngress)),
       host_egress_(sizeof(FlashNextDecodeEgress)) {
     validate_plan_match(plan_);
+    if (plan_.config.speculative_draft_tokens > 0) {
+        host_mtp_draft_ingress_ = std::make_unique<PinnedHostBuffer>(sizeof(FlashNextMtpDraftIngress));
+    }
 
     const std::uint32_t concurrency = plan_.config.max_concurrency;
     slots_per_lane_ =
@@ -85,7 +88,7 @@ void FlashNextRuntimeAllocation::materialize_views() {
         (plan_.config.kv_cache == KvCacheStorage::Fp8E4M3Row256) ? DType::FP8_E4M3FN : DType::BF16;
     const std::size_t att_kv_bytes = align_up_256(
         256ULL * 64ULL * 2ULL * plan_.attention_physical_pages * kv_element_bytes);
-    for (std::size_t i = 0; i < kFullAttentionLayers; ++i) {
+    for (std::size_t i = 0; i < plan_.qsa_cache_layers(); ++i) {
         state_view_.qsa_attention_caches[i].key_pages =
             Tensor(cur, kv_dtype,
                    {256, 64, 2, static_cast<std::int32_t>(plan_.attention_physical_pages)});
@@ -100,7 +103,7 @@ void FlashNextRuntimeAllocation::materialize_views() {
     // [128, 64, indexer_physical_pages] BF16
     const std::size_t idx_keys_bytes =
         align_up_256(128ULL * 64ULL * plan_.indexer_physical_pages * sizeof(std::uint16_t));
-    for (std::size_t i = 0; i < kFullAttentionLayers; ++i) {
+    for (std::size_t i = 0; i < plan_.qsa_cache_layers(); ++i) {
         state_view_.qsa_indexer_caches[i].block_keys = Tensor(
             cur, DType::BF16, {128, 64, static_cast<std::int32_t>(plan_.indexer_physical_pages)});
         cur += idx_keys_bytes;
@@ -122,7 +125,7 @@ void FlashNextRuntimeAllocation::materialize_views() {
                              static_cast<std::int32_t>(concurrency)});
     cur += idx_table_bytes;
 
-    for (std::size_t i = 0; i < kFullAttentionLayers; ++i) {
+    for (std::size_t i = 0; i < plan_.qsa_cache_layers(); ++i) {
         state_view_.qsa_attention_caches[i].block_tables = shared_att_table;
         state_view_.qsa_indexer_caches[i].block_tables   = shared_idx_table;
     }
@@ -160,7 +163,7 @@ void FlashNextRuntimeAllocation::materialize_views() {
     // 12 QSA raw keys: [128, 4, state_slots] BF16
     const std::size_t raw_keys_bytes =
         align_up_256(128ULL * 4ULL * plan_.state_slots * sizeof(std::uint16_t));
-    for (std::size_t i = 0; i < kFullAttentionLayers; ++i) {
+    for (std::size_t i = 0; i < plan_.qsa_cache_layers(); ++i) {
         state_view_.qsa_indexer_caches[i].raw_keys =
             Tensor(cur, DType::BF16, {128, 4, static_cast<std::int32_t>(plan_.state_slots)});
         cur += raw_keys_bytes;
@@ -169,10 +172,19 @@ void FlashNextRuntimeAllocation::materialize_views() {
     // 12 QSA raw positions: [3, 4, state_slots] I32
     const std::size_t raw_pos_bytes =
         align_up_256(3ULL * 4ULL * plan_.state_slots * sizeof(std::int32_t));
-    for (std::size_t i = 0; i < kFullAttentionLayers; ++i) {
+    for (std::size_t i = 0; i < plan_.qsa_cache_layers(); ++i) {
         state_view_.qsa_indexer_caches[i].raw_positions =
             Tensor(cur, DType::I32, {3, 4, static_cast<std::int32_t>(plan_.state_slots)});
         cur += raw_pos_bytes;
+    }
+
+    if (plan_.config.speculative_draft_tokens > 0) {
+        state_view_.mtp_backbone_hidden =
+            Tensor(cur, DType::BF16, {10'240, static_cast<std::int32_t>(plan_.state_slots)});
+        cur += align_up_256(10'240ULL * plan_.state_slots * sizeof(std::uint16_t));
+        state_view_.mtp_backbone_positions =
+            Tensor(cur, DType::I32, {3, static_cast<std::int32_t>(plan_.state_slots)});
+        cur += align_up_256(3ULL * plan_.state_slots * sizeof(std::int32_t));
     }
 
     // 5. Round buffers (device ingress/egress structs, gathered PLE, final hidden, logits)
@@ -234,6 +246,21 @@ void FlashNextRuntimeAllocation::materialize_views() {
     round_tensors_.logits =
         Tensor(cur, DType::BF16, {248'320, static_cast<std::int32_t>(round_batch_tokens)});
     cur += align_up_256(248'320ULL * round_batch_tokens * sizeof(std::uint16_t));
+
+    if (plan_.config.speculative_draft_tokens > 0) {
+        const auto rows = plan_.config.proposal_head == ProposalHead::Optimized
+                              ? plan_.config.draft_head_rows : 248'320U;
+        round_tensors_.mtp_embedding = Tensor(cur, DType::BF16, {2'560, 1});
+        cur += align_up_256(2'560ULL * sizeof(std::uint16_t));
+        round_tensors_.mtp_carried_hidden = Tensor(cur, DType::BF16, {10'240, 1});
+        cur += align_up_256(10'240ULL * sizeof(std::uint16_t));
+        round_tensors_.mtp_logits = Tensor(cur, DType::BF16, {static_cast<std::int32_t>(rows), 1});
+        cur += align_up_256(rows * sizeof(std::uint16_t));
+        round_tensors_.mtp_token = Tensor(cur, DType::I32, {1});
+        cur += 256;
+        device_mtp_draft_ingress_ = reinterpret_cast<FlashNextMtpDraftIngress*>(cur);
+        cur += align_up_256(sizeof(FlashNextMtpDraftIngress));
+    }
 
     const auto used_bytes = static_cast<std::size_t>(cur - static_cast<std::byte*>(storage_->p));
     if (used_bytes > storage_->bytes) {
@@ -340,7 +367,14 @@ void FlashNextRuntimeAllocation::zero_slot(std::uint32_t slot_index, cudaStream_
                   slot_index * 10'240ULL * 9ULL * sizeof(std::uint16_t);
     CUDA_CHECK(cudaMemsetAsync(ple_p, 0, 10'240ULL * 9ULL * sizeof(std::uint16_t), stream));
 
-    for (std::size_t i = 0; i < kFullAttentionLayers; ++i) {
+    if (state_view_.mtp_backbone_hidden.data != nullptr) {
+        Tensor hidden = state_view_.mtp_backbone_hidden.slice(1, slot_index, 1);
+        CUDA_CHECK(cudaMemsetAsync(hidden.data, 0, 10'240ULL * sizeof(std::uint16_t), stream));
+        Tensor positions = state_view_.mtp_backbone_positions.slice(1, slot_index, 1);
+        CUDA_CHECK(cudaMemsetAsync(positions.data, 0, 3 * sizeof(std::int32_t), stream));
+    }
+
+    for (std::size_t i = 0; i < plan_.qsa_cache_layers(); ++i) {
         auto* key_p = static_cast<std::byte*>(state_view_.qsa_indexer_caches[i].raw_keys.data) +
                       slot_index * 128ULL * 4ULL * sizeof(std::uint16_t);
         CUDA_CHECK(cudaMemsetAsync(key_p, 0, 128ULL * 4ULL * sizeof(std::uint16_t), stream));
@@ -372,6 +406,18 @@ void FlashNextRuntimeAllocation::copy_state_slot(std::uint32_t src_slot, std::ui
     }
     if (src_slot == dst_slot) { return; }
 
+    if (state_view_.mtp_backbone_hidden.data != nullptr) {
+        Tensor source = state_view_.mtp_backbone_hidden.slice(1, src_slot, 1);
+        Tensor destination = state_view_.mtp_backbone_hidden.slice(1, dst_slot, 1);
+        CUDA_CHECK(cudaMemcpyAsync(destination.data, source.data,
+                                   10'240ULL * sizeof(std::uint16_t), cudaMemcpyDeviceToDevice,
+                                   stream));
+        Tensor source_positions = state_view_.mtp_backbone_positions.slice(1, src_slot, 1);
+        Tensor destination_positions = state_view_.mtp_backbone_positions.slice(1, dst_slot, 1);
+        CUDA_CHECK(cudaMemcpyAsync(destination_positions.data, source_positions.data,
+                                   3 * sizeof(std::int32_t), cudaMemcpyDeviceToDevice, stream));
+    }
+
     // 1. GDN Conv & SSM states
     for (std::size_t i = 0; i < kGdnLayers; ++i) {
         const auto* src_conv_p = static_cast<const std::byte*>(state_view_.gdn_convolution_states[i].data) +
@@ -400,7 +446,7 @@ void FlashNextRuntimeAllocation::copy_state_slot(std::uint32_t src_slot, std::ui
                                cudaMemcpyDeviceToDevice, stream));
 
     // 3. QSA Raw Keys & Positions
-    for (std::size_t i = 0; i < kFullAttentionLayers; ++i) {
+    for (std::size_t i = 0; i < plan_.qsa_cache_layers(); ++i) {
         const auto* src_key_p = static_cast<const std::byte*>(state_view_.qsa_indexer_caches[i].raw_keys.data) +
                                 src_slot * 128ULL * 4ULL * sizeof(std::uint16_t);
         auto* dst_key_p = static_cast<std::byte*>(state_view_.qsa_indexer_caches[i].raw_keys.data) +

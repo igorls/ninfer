@@ -704,6 +704,74 @@ int test_g14_workspace_dump(ninfer::DeviceContext& device) {
     return 0;
 }
 
+int test_mtp_checkpoint_state(ninfer::DeviceContext& device) {
+    using namespace ninfer;
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    for (const auto storage : {KvCacheStorage::BFloat16, KvCacheStorage::Fp8E4M3Row256}) {
+        FlashNextRuntimeConfig cfg{
+            .max_concurrency = 2,
+            .max_context = 512,
+            .continuation_capacity = 1,
+            .prefill_chunk = 128,
+            .speculative_draft_tokens = 4,
+            .use_cuda_graph = false,
+            .kv_cache = storage,
+        };
+        auto curve = flash_next_capacity_curve(cfg);
+        auto plan = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+        const auto expected_stride = flash_next_physical_stride_bytes_per_group(storage) / 12 * 13;
+        if (curve.bytes_per_additional_main_page_group != expected_stride ||
+            plan.attention_kv_bytes + plan.indexer_block_keys_bytes !=
+                expected_stride * plan.main_page_groups) {
+            std::cerr << "FAIL: MTP KV is missing from the capacity reservation\n";
+            return 1;
+        }
+        FlashNextRuntimeAllocation alloc(plan);
+        alloc.initialize(device.stream);
+        auto& state = alloc.state_view();
+        auto& indexer = state.qsa_indexer_caches[kFullAttentionLayers];
+        auto& attention = state.qsa_attention_caches[kFullAttentionLayers];
+        if (indexer.block_tables.data != state.qsa_indexer_caches[0].block_tables.data ||
+            attention.block_tables.data != state.qsa_attention_caches[0].block_tables.data) {
+            std::cerr << "FAIL: MTP must follow the lane's physical page ownership\n";
+            return 1;
+        }
+        const auto checkpoint = plan.state_slots - 1;
+        Tensor keys = indexer.raw_keys.slice(2, 0, 1);
+        Tensor positions = indexer.raw_positions.slice(2, 0, 1);
+        Tensor hidden = state.mtp_backbone_hidden.slice(1, 0, 1);
+        Tensor backbone_positions = state.mtp_backbone_positions.slice(1, 0, 1);
+        for (auto tensor : {keys, positions, hidden, backbone_positions}) {
+            CUDA_CHECK(cudaMemsetAsync(tensor.data, 0x35, tensor.bytes(), device.stream));
+        }
+        alloc.copy_state_slot(0, checkpoint, device.stream);
+        alloc.zero_slot(0, device.stream);
+        device.synchronize();
+        for (auto tensor : {indexer.raw_keys.slice(2, checkpoint, 1),
+                            indexer.raw_positions.slice(2, checkpoint, 1),
+                            state.mtp_backbone_hidden.slice(1, checkpoint, 1),
+                            state.mtp_backbone_positions.slice(1, checkpoint, 1)}) {
+            std::vector<std::uint8_t> bytes(tensor.bytes());
+            CUDA_CHECK(cudaMemcpy(bytes.data(), tensor.data, bytes.size(), cudaMemcpyDeviceToHost));
+            if (!std::all_of(bytes.begin(), bytes.end(), [](auto b) { return b == 0x35; })) {
+                std::cerr << "FAIL: checkpoint lost MTP raw keys, positions, or backbone hidden\n";
+                return 1;
+            }
+        }
+        alloc.copy_state_slot(checkpoint, 0, device.stream);
+        alloc.zero_slot(checkpoint, device.stream);
+        device.synchronize();
+        std::vector<std::uint8_t> restored(hidden.bytes());
+        CUDA_CHECK(cudaMemcpy(restored.data(), hidden.data, restored.size(), cudaMemcpyDeviceToHost));
+        if (!std::all_of(restored.begin(), restored.end(), [](auto b) { return b == 0x35; })) {
+            std::cerr << "FAIL: restored MTP state aliases the released checkpoint\n";
+            return 1;
+        }
+    }
+    std::cout << "PASS: test_mtp_checkpoint_state\n";
+    return 0;
+}
+
 int test_256k_allocation(ninfer::DeviceContext& device) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
     FlashNextRuntimeConfig cfg{
@@ -755,6 +823,7 @@ int main() {
     CUDA_CHECK(count_error);
 
     ninfer::DeviceContext device(0);
+    if (test_mtp_checkpoint_state(device) != 0) return 1;
     if (test_runtime_allocation_and_slots(device) != 0) return 1;
     if (test_64k_allocation(device) != 0) return 1;
     if (test_g14_workspace_dump(device) != 0) return 1;

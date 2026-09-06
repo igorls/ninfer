@@ -289,72 +289,96 @@ def register_hooks(model: nn.Module):
 
     return stage_outputs
 
-class Qwen4ExpMTP(nn.Module):
-    def __init__(self, config: Qwen4ExpTextConfig):
-        super().__init__()
-        self.config = config
-        self.pre_fc_norm_embedding = Qwen4ExpTextRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.fc_embedding = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
-        self.hyper_connection_mixer = Qwen4ExpTextGatedResidual(config, use_combine=False)
-        self.fc_hidden = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
-        self.rotary = Qwen4ExpTextRotaryEmbedding(config=config)
-        self.layer = Qwen4ExpTextDecoderLayer(config, layer_idx=0)
-        self.final_mixer = Qwen4ExpTextGatedResidual(config, use_combine=False)
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+# The MTP reference lives in mtp_reference.py, faithful to vLLM's
+# Qwen4ExpMultiTokenPredictor. The class that used to sit here mixed the four
+# hyper streams down in the stem and repeated the result, omitted
+# pre_fc_norm_hidden, and invented a second final mixer; see that module's
+# docstring for the corrected contract and its sources.
+from mtp_reference import (  # noqa: E402
+    ALL_STAGES,
+    Qwen4ExpMTPReference as Qwen4ExpMTP,
+    dump_stages,
+    load_mtp_weights,
+    make_mtp_config,
+)
 
-    def forward(self, input_embedding: torch.Tensor, backbone_hyper_hidden: torch.Tensor):
-        stages = {}
-        emb_norm = self.pre_fc_norm_embedding(input_embedding)
-        stages["mtp_embedding_norm"] = emb_norm
-        emb_proj = self.fc_embedding(emb_norm)
-        stages["mtp_embedding_proj"] = emb_proj
 
-        hid_mix = self.hyper_connection_mixer(backbone_hyper_hidden)
-        stages["mtp_hidden_mix"] = hid_mix
-        hid_proj = self.fc_hidden(hid_mix)
-        stages["mtp_hidden_proj"] = hid_proj
+def run_mtp_real(model_dir: str, ple_dir: str, token_list, draft_steps: int, dump_root: str):
+    """Real-weight MTP reference over a teacher-forced prompt.
 
-        trunk_sum = emb_proj + hid_proj
-        stages["mtp_trunk_input"] = trunk_sum
-        mtp_hyper_init = trunk_sum.unsqueeze(1).repeat(1, 1, 4)
-        stages["mtp_hyper_init"] = mtp_hyper_init.squeeze(1)
+    Scheme A: the target's post-combine multi-stream hidden at every position is
+    the draft's backbone input. Draft slot t = hidden[t] + embedding(token[t+1]) at
+    position t. The first N-1 pairs seed the draft KV. The first draft then uses
+    the last target hidden and the target's greedy next token at position N-1.
+    Later drafts use the previous MTP multi_hidden and its own argmax token,
+    advancing all three MRoPE rows."""
+    from transformers.cache_utils import DynamicCache
 
-        batch = input_embedding.shape[0]
-        pos_ids = torch.zeros((3, batch, 1), dtype=torch.long)
-        pos_emb = self.rotary(mtp_hyper_init, position_ids=pos_ids)
-        attn_mask = torch.zeros((batch, 1, 1, 1), dtype=torch.bool)
+    print(f"Building target reference from {model_dir} ...")
+    model, lm_head_weight = build_oracle(model_dir, ple_dir)
+    stage_outputs = register_hooks(model)
+    input_ids = torch.tensor([token_list], dtype=torch.long)
+    with torch.no_grad():
+        target_output = model(input_ids=input_ids, use_cache=False)
+        anchor = int(F.linear(target_output.last_hidden_state[:, -1, :],
+                              lm_head_weight).argmax(-1).item())
+    # Layer-47 output is the multi-stream state the final mixer consumes: vLLM's
+    # `multi_hidden`, captured into `_mtp_hidden_buffer` for the drafter.
+    backbone_multi = stage_outputs["L47_hyper_after_mlp"]  # [1, N, hc*H]
+    embeds = stage_outputs["embedding"]  # [1, N, H]
+    n = len(token_list)
+    if n < 2:
+        raise SystemExit("--mtp-real needs at least two prompt tokens (hidden[t] pairs with token[t+1])")
 
-        def attn_hc_hook(module, inp, out):
-            stages["mtp_attn_block_input"] = out[0].squeeze(1) if out[0].ndim == 3 else out[0]
-        def attn_hook(module, inp, out):
-            res = out[0] if isinstance(out, tuple) else out
-            stages["mtp_attn_block_output"] = res.squeeze(1) if res.ndim == 3 else res
-        def mlp_hc_hook(module, inp, out):
-            stages["mtp_mlp_block_input"] = out[0].squeeze(1) if out[0].ndim == 3 else out[0]
-        def mlp_hook(module, inp, out):
-            res = out[0] if isinstance(out, tuple) else out
-            stages["mtp_mlp_block_output"] = res.squeeze(1) if res.ndim == 3 else res
+    with open(os.path.join(model_dir, "config.json"), "r", encoding="utf-8") as f:
+        cfg = make_mtp_config(json.load(f)["text_config"])
+    mtp = Qwen4ExpMTP(cfg)
+    mtp.float().eval()
+    load_mtp_weights(mtp, model_dir)
 
-        h1 = self.layer.attn_hyper_connection.register_forward_hook(attn_hc_hook)
-        h2 = self.layer.self_attn.register_forward_hook(attn_hook)
-        h3 = self.layer.mlp_hyper_connection.register_forward_hook(mlp_hc_hook)
-        h4 = self.layer.mlp.register_forward_hook(mlp_hook)
+    manifest = {"positions": []}
+    cache = DynamicCache()
+    slots = n - 1
+    pos_ids = torch.arange(slots, dtype=torch.long).view(1, 1, slots).expand(3, 1, slots)
+    mask = torch.ones((1, 1, slots, slots), dtype=torch.bool).tril()
+    with torch.no_grad():
+        stages = mtp(embeds[:, 1:n, :], backbone_multi[:, 0:slots, :], pos_ids, mask, cache)
+    for t in range(slots):
+        per_pos = {k: v[0, t] for k, v in stages.items()}
+        fed = token_list[t + 1]
+        got = int(per_pos["mtp_draft_tokens"].item())
+        if t + 2 < n:
+            verdict = "HIT" if got == token_list[t + 2] else "miss"
+            print(f"[prefill slot {t:04d}] hidden[{t}] + tok[{t + 1}]={fed} -> draft {got}  next={token_list[t + 2]} {verdict}")
+        else:
+            print(f"[prefill slot {t:04d}] hidden[{t}] + tok[{t + 1}]={fed} -> draft {got}")
+        if dump_root:
+            dump_stages(dump_root, t, fed, (t, t, t), per_pos, manifest)
 
-        hyper_after_layer = self.layer(mtp_hyper_init, position_embeddings=pos_emb, attention_mask=attn_mask)
-        stages["mtp_hyper_after_mlp"] = hyper_after_layer.squeeze(1)
+    # The teacher's last hidden anchors the first draft; only later steps carry MTP hidden.
+    multi = backbone_multi[:, -1:, :]
+    tok = anchor
+    for k in range(draft_steps):
+        p_ = slots + k
+        emb = model.embed_tokens(torch.tensor([[tok]], dtype=torch.long)).float()
+        pid = torch.full((3, 1, 1), p_, dtype=torch.long)
+        vis = cache.get_seq_length() + 1
+        m = torch.ones((1, 1, 1, vis), dtype=torch.bool)
+        with torch.no_grad():
+            st = mtp(emb, multi, pid, m, cache)
+        per_pos = {kk: v[0, 0] for kk, v in st.items()}
+        nxt = int(per_pos["mtp_draft_tokens"].item())
+        print(f"[draft step {k}] fed tok {tok} at pos {p_} -> draft {nxt}")
+        if dump_root:
+            dump_stages(dump_root, p_, tok, (p_, p_, p_), per_pos, manifest)
+        multi, tok = st["mtp_multi_hidden"], nxt
 
-        h1.remove(); h2.remove(); h3.remove(); h4.remove()
+    if dump_root:
+        with open(os.path.join(dump_root, "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+        print(f"Dumped MTP reference states to {dump_root}/manifest.json")
 
-        final_hidden = self.final_mixer(hyper_after_layer.squeeze(1))
-        stages["mtp_final_hidden"] = final_hidden
 
-        logits = self.lm_head(final_hidden)
-        stages["mtp_draft_logits"] = logits
-
-        draft_tokens = torch.argmax(logits, dim=-1)
-        stages["mtp_draft_tokens"] = draft_tokens
-
-        return stages
 
 def main():
     parser = argparse.ArgumentParser(description="Authoritative HF Qwen4Exp CPU FP32 reference oracle for Qwen3.8-Flash-Next")
@@ -364,51 +388,41 @@ def main():
     parser.add_argument("--ids", type=str, default="", help="Comma-separated token IDs to execute in sequence")
     parser.add_argument("--dump-states", type=str, default="", help="Directory to dump state tensors and manifest")
     parser.add_argument("--mtp-synthetic", action="store_true", help="Run MTP synthetic architecture parity step")
+    parser.add_argument("--mtp-real", action="store_true", help="Run the real-weight MTP reference over --ids (scheme A) and chained draft steps")
+    parser.add_argument("--draft-steps", type=int, default=3, help="Chained draft steps after the prompt in --mtp-real")
     args = parser.parse_args()
 
-    if args.mtp_synthetic:
-        print("Running authoritative Qwen4ExpMTP synthetic reference step ...")
-        with open(os.path.join(args.model_dir, "config.json"), "r", encoding="utf-8") as f:
-            text_cfg_dict = json.load(f)["text_config"]
-        text_cfg_dict["layer_types"] = ["full_attention"]
-        text_cfg_dict["num_hidden_layers"] = 1
-        text_cfg_dict["ple_layer_ids"] = []
-        cfg = Qwen4ExpTextConfig(**text_cfg_dict)
+    if args.mtp_real:
+        ids = [int(t.strip()) for t in args.ids.split(",") if t.strip()] if args.ids else [args.token_id]
+        run_mtp_real(args.model_dir, args.ple_dir, ids, args.draft_steps, args.dump_states)
+        return
 
+    if args.mtp_synthetic:
+        print("Running Qwen4ExpMTP synthetic architecture step (vLLM-faithful stem) ...")
+        with open(os.path.join(args.model_dir, "config.json"), "r", encoding="utf-8") as f:
+            cfg = make_mtp_config(json.load(f)["text_config"])
         mtp = Qwen4ExpMTP(cfg)
         mtp.eval()
-
         dim = 2560
         with torch.no_grad():
+            for p in mtp.parameters():
+                p.zero_()
             mtp.fc_embedding.weight.copy_(torch.eye(dim))
             mtp.fc_hidden.weight.copy_(torch.eye(dim))
-            mtp.lm_head.weight.zero_()
             for i in range(100):
                 mtp.lm_head.weight[i, 0] = float(i + 1)
-
-        input_emb = torch.ones(1, dim)
-        backbone_h = torch.ones(1, 10240)
-
+        # Distinct per-stream input so the four streams are visibly different
+        # after the stem; an all-ones backbone could not tell a correct stem from
+        # the old mix-and-repeat one.
+        input_emb = torch.ones(1, 1, dim)
+        backbone_h = torch.arange(1, 5, dtype=torch.float32).repeat_interleave(dim).view(1, 1, 4 * dim)
         with torch.no_grad():
             stages = mtp(input_emb, backbone_h)
-
-        print(f"MTP Reference Output: Draft Token = {stages['mtp_draft_tokens'][0].item()}")
+        stages = {k: v[0, 0] for k, v in stages.items()}
+        print(f"MTP Reference Output: Draft Token = {int(stages['mtp_draft_tokens'].item())}")
         if args.dump_states:
-            pos_dir = os.path.join(args.dump_states, "pos0000")
-            os.makedirs(pos_dir, exist_ok=True)
-            manifest = {"positions": [{"position": 0, "token_id": 0, "mrope_position": [0, 0, 0], "tensors": []}]}
-            for name, tensor in stages.items():
-                f32_arr = tensor.detach().cpu().numpy().astype(np.float32)
-                bin_path = os.path.join(pos_dir, f"{name}.bin")
-                with open(bin_path, "wb") as f:
-                    f.write(f32_arr.tobytes())
-                manifest["positions"][0]["tensors"].append({
-                    "name": name,
-                    "dtype": "FP32",
-                    "shape": list(f32_arr.shape),
-                    "file": f"pos0000/{name}.bin",
-                    "bytes": f32_arr.nbytes,
-                })
+            manifest = {"positions": []}
+            dump_stages(args.dump_states, 0, 0, (0, 0, 0), stages, manifest)
             with open(os.path.join(args.dump_states, "manifest.json"), "w", encoding="utf-8") as f:
                 json.dump(manifest, f, indent=2)
             print(f"Dumped MTP oracle states to {args.dump_states}/manifest.json")

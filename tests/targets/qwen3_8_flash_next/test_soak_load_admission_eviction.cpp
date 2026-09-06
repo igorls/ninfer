@@ -571,7 +571,7 @@ int test_soak_pressure_eviction_and_determinism(ninfer::DeviceContext& device) {
     std::vector<TokenId> golden_a_tokens;
     for (int step = 0; step < 5; ++step) {
         std::array<SequenceHandle, 1> seqs = {seq_a};
-        std::array<ninfer::runtime::RoundBudget, 1> budgets{};
+        std::array<ninfer::runtime::RoundBudget, 1> budgets{{{.generated_tokens_remaining = 1}}};
         auto dec = prog.decode(seqs, budgets);
         golden_a_tokens.push_back(dec.tokens()[0]);
         std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = false}}};
@@ -676,7 +676,7 @@ int test_soak_pressure_eviction_and_determinism(ninfer::DeviceContext& device) {
     std::vector<TokenId> resumed_a_tokens;
     for (int step = 0; step < 5; ++step) {
         std::array<SequenceHandle, 1> seqs = {seq_a2};
-        std::array<ninfer::runtime::RoundBudget, 1> budgets{};
+        std::array<ninfer::runtime::RoundBudget, 1> budgets{{{.generated_tokens_remaining = 1}}};
         auto dec = prog.decode(seqs, budgets);
         resumed_a_tokens.push_back(dec.tokens()[0]);
         std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = false}}};
@@ -720,6 +720,7 @@ int test_soak_multiturn_conversations_and_leaks(ninfer::DeviceContext& device) {
     constexpr int kTurns = 20;
     std::vector<ninfer::TokenId> conversation_tokens;
     std::optional<ContinuationHandle> previous_turn_closure;
+    std::optional<runtime::CheckpointRef> previous_checkpoint;
     std::atomic<bool> cancellation_flag{false};
     ninfer::runtime::CancellationFlagView cancellation{&cancellation_flag};
 
@@ -735,7 +736,7 @@ int test_soak_multiturn_conversations_and_leaks(ninfer::DeviceContext& device) {
         auto base_plan = prog.plan_request(prompt, exec_options);
 
         const ContinuationHandle* src = previous_turn_closure.has_value() ? &*previous_turn_closure : nullptr;
-        auto insp = prog.inspect_admission(prompt, base_plan, ninfer::runtime::LaneId(0), src, nullptr, std::nullopt, false);
+        auto insp = prog.inspect_admission(prompt, base_plan, ninfer::runtime::LaneId(0), src, nullptr, previous_checkpoint, false);
 
         if (!insp.has_value()) {
             std::fprintf(stderr, "FAIL: Turn %d inspect_admission returned nullopt\n", turn);
@@ -765,7 +766,7 @@ int test_soak_multiturn_conversations_and_leaks(ninfer::DeviceContext& device) {
         // Decode 4 tokens
         for (int step = 0; step < 4; ++step) {
             std::array<SequenceHandle, 1> seqs = {seq};
-            std::array<ninfer::runtime::RoundBudget, 1> budgets{};
+            std::array<ninfer::runtime::RoundBudget, 1> budgets{{{.generated_tokens_remaining = 1}}};
             auto dec = prog.decode(seqs, budgets);
             conversation_tokens.push_back(dec.tokens()[0]);
             std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = false}}};
@@ -781,9 +782,11 @@ int test_soak_multiturn_conversations_and_leaks(ninfer::DeviceContext& device) {
         if (previous_turn_closure.has_value()) {
             (void)prog.release_continuation(std::move(*previous_turn_closure));
             previous_turn_closure.reset();
+            previous_checkpoint.reset();
         }
         if (fin.continuation.has_value()) {
             previous_turn_closure = std::move(*fin.continuation);
+            previous_checkpoint = fin.summary.endpoint->ref;
         }
 
         if ((turn + 1) % 5 == 0) {
@@ -896,7 +899,7 @@ int test_soak_pool_exhaustion_failure_mode(ninfer::DeviceContext& device) {
     std::printf("  [Active In-Flight Check] Decoding active sequences...\n");
     for (auto& s : active_seqs) {
         std::array<SequenceHandle, 1> seqs = {s};
-        std::array<ninfer::runtime::RoundBudget, 1> budgets{};
+        std::array<ninfer::runtime::RoundBudget, 1> budgets{{{.generated_tokens_remaining = 1}}};
         auto dec = prog.decode(seqs, budgets);
         std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = false}}};
         (void)prog.commit(std::move(dec), commit_dec);

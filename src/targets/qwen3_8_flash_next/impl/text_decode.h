@@ -18,10 +18,10 @@ struct FlashNextDecodeStateSink {
 };
 
 [[nodiscard]] std::size_t
-flash_next_text_decode_workspace_capacity_bytes(std::int32_t maximum_blocks, std::int32_t batch);
+flash_next_text_decode_workspace_capacity_bytes(std::int32_t maximum_blocks, std::int32_t batch, bool mtp = false);
 
 [[nodiscard]] std::size_t
-flash_next_text_prefill_workspace_capacity_bytes(std::int32_t maximum_blocks, std::int32_t tokens);
+flash_next_text_prefill_workspace_capacity_bytes(std::int32_t maximum_blocks, std::int32_t tokens, bool mtp = false);
 
 void flash_next_text_decode_core(const TextModelView& model, const Tensor& embedding,
                                  const Tensor& token_indices, const Tensor& mrope_positions,
@@ -33,7 +33,8 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                                  cudaStream_t stream,
                                  const FlashNextDecodeStateSink* sink = nullptr,
                                  Tensor* out_hyper_hidden             = nullptr,
-                                 bool aliased_recurrent_scan          = false);
+                                 bool aliased_recurrent_scan          = false,
+                                 const Tensor* mtp_token_ids          = nullptr);
 
 void flash_next_text_decode(const TextModelView& model, const Tensor& token_ids,
                             const Tensor& token_indices, const Tensor& mrope_positions,
@@ -54,6 +55,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                                    cudaStream_t stream,
                                    const FlashNextDecodeStateSink* sink = nullptr,
                                    bool use_qsa_prefill_mma            = false,
-                                   Tensor* out_hyper_hidden            = nullptr);
+                                   Tensor* out_hyper_hidden            = nullptr,
+                                   const Tensor* mtp_token_ids         = nullptr);
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

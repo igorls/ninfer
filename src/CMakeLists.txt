@@ -20,6 +20,7 @@ add_library(ninfer_core STATIC
   core/sparse_device_buffer.cu
   core/dtype.cpp
   core/host_worker_pool.cpp
+  core/host_memory.cpp
   core/gdn_replay_records.cpp
   core/cyclic_kv_cache.cpp
   core/host_kv_arena.cpp

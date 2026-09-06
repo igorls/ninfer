@@ -183,6 +183,7 @@ __global__ void prepare_append_kv_kernel(
     __syncthreads();
 
     const int token         = token_indices[batch];
+    if (token < 0) { return; }
     const int logical_page  = token / kPageTokens;
     const int page_offset   = token % kPageTokens;
     const int physical_page = block_tables[table_rows[batch] * logical_pages + logical_page];
@@ -330,19 +331,9 @@ void flash_next_qsa_attention_launch(const Tensor& token_indices, const Tensor& 
         static_cast<__nv_bfloat16*>(scratch.query.data),
         static_cast<__nv_bfloat16*>(scratch.gate.data), batch);
     CUDA_CHECK(cudaGetLastError());
+    flash_next_qsa_attention_store_launch(scratch.projected, token_indices, mrope_positions,
+        table_rows, 0, key_norm, cache, scratch.key, scratch.value, stream);
     if (cache.key_pages.dtype == DType::FP8_E4M3FN) {
-        prepare_append_kv_kernel<__nv_fp8_e4m3><<<dim3(kKvHeads, batch), kHeadDim, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(scratch.projected.data),
-            static_cast<const __nv_bfloat16*>(key_norm.data),
-            static_cast<const std::int32_t*>(token_indices.data),
-            static_cast<const std::int32_t*>(mrope_positions.data),
-            static_cast<const std::int32_t*>(table_rows.data),
-            static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
-            static_cast<__nv_fp8_e4m3*>(cache.key_pages.data),
-            static_cast<__nv_fp8_e4m3*>(cache.value_pages.data),
-            static_cast<__nv_bfloat16*>(scratch.key.data),
-            static_cast<__nv_bfloat16*>(scratch.value.data), batch);
-        CUDA_CHECK(cudaGetLastError());
         sparse_attention_kernel<__nv_fp8_e4m3><<<dim3(kQueryHeads, batch), kHeadDim, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(scratch.query.data),
             static_cast<const std::int32_t*>(token_indices.data),
@@ -355,18 +346,6 @@ void flash_next_qsa_attention_launch(const Tensor& token_indices, const Tensor& 
             static_cast<__nv_bfloat16*>(scratch.attended.data));
         CUDA_CHECK(cudaGetLastError());
     } else {
-        prepare_append_kv_kernel<__nv_bfloat16><<<dim3(kKvHeads, batch), kHeadDim, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(scratch.projected.data),
-            static_cast<const __nv_bfloat16*>(key_norm.data),
-            static_cast<const std::int32_t*>(token_indices.data),
-            static_cast<const std::int32_t*>(mrope_positions.data),
-            static_cast<const std::int32_t*>(table_rows.data),
-            static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
-            static_cast<__nv_bfloat16*>(cache.key_pages.data),
-            static_cast<__nv_bfloat16*>(cache.value_pages.data),
-            static_cast<__nv_bfloat16*>(scratch.key.data),
-            static_cast<__nv_bfloat16*>(scratch.value.data), batch);
-        CUDA_CHECK(cudaGetLastError());
         sparse_attention_kernel<__nv_bfloat16><<<dim3(kQueryHeads, batch), kHeadDim, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(scratch.query.data),
             static_cast<const std::int32_t*>(token_indices.data),
@@ -456,6 +435,7 @@ __global__ void qsa_prefill_prepare_append_kv_kernel(
     __syncthreads();
 
     const int token_idx     = token_indices[token];
+    if (token_idx < 0) { return; }
     const int logical_page  = token_idx / kPageTokens;
     const int page_offset   = token_idx % kPageTokens;
     const int physical_page = block_tables[table_row * logical_pages + logical_page];
@@ -1162,6 +1142,72 @@ bool flash_next_qsa_mma_sched_new() {
     return std::strcmp(env, "new") == 0 || (env[0] == '1' && env[1] == '\0');
 }
 
+void flash_next_qsa_attention_store_launch(const Tensor& projected, const Tensor& token_indices,
+                                           const Tensor& mrope_positions, const Tensor& table_rows,
+                                           int table_row, const Tensor& key_norm,
+                                           QsaAttentionCacheView cache, Tensor& key, Tensor& value,
+                                           cudaStream_t stream) {
+    const int tokens = token_indices.ne[0];
+    const int batch  = tokens;
+    if (table_rows.data != nullptr) {
+        if (cache.key_pages.dtype == DType::FP8_E4M3FN) {
+            prepare_append_kv_kernel<__nv_fp8_e4m3><<<dim3(kKvHeads, batch), kHeadDim, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(projected.data),
+                static_cast<const __nv_bfloat16*>(key_norm.data),
+                static_cast<const std::int32_t*>(token_indices.data),
+                static_cast<const std::int32_t*>(mrope_positions.data),
+                static_cast<const std::int32_t*>(table_rows.data),
+                static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
+                static_cast<__nv_fp8_e4m3*>(cache.key_pages.data),
+                static_cast<__nv_fp8_e4m3*>(cache.value_pages.data),
+                static_cast<__nv_bfloat16*>(key.data), static_cast<__nv_bfloat16*>(value.data),
+                batch);
+            CUDA_CHECK(cudaGetLastError());
+        } else {
+            prepare_append_kv_kernel<__nv_bfloat16><<<dim3(kKvHeads, batch), kHeadDim, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(projected.data),
+                static_cast<const __nv_bfloat16*>(key_norm.data),
+                static_cast<const std::int32_t*>(token_indices.data),
+                static_cast<const std::int32_t*>(mrope_positions.data),
+                static_cast<const std::int32_t*>(table_rows.data),
+                static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
+                static_cast<__nv_bfloat16*>(cache.key_pages.data),
+                static_cast<__nv_bfloat16*>(cache.value_pages.data),
+                static_cast<__nv_bfloat16*>(key.data), static_cast<__nv_bfloat16*>(value.data),
+                batch);
+            CUDA_CHECK(cudaGetLastError());
+        }
+    } else {
+        if (cache.key_pages.dtype == DType::FP8_E4M3FN) {
+            qsa_prefill_prepare_append_kv_kernel<__nv_fp8_e4m3>
+                <<<dim3(kKvHeads, tokens), kHeadDim, 0, stream>>>(
+                    static_cast<const __nv_bfloat16*>(projected.data),
+                    static_cast<const __nv_bfloat16*>(key_norm.data),
+                    static_cast<const std::int32_t*>(token_indices.data),
+                    static_cast<const std::int32_t*>(mrope_positions.data), table_row,
+                    static_cast<const std::int32_t*>(cache.block_tables.data),
+                    cache.block_tables.ne[0], static_cast<__nv_fp8_e4m3*>(cache.key_pages.data),
+                    static_cast<__nv_fp8_e4m3*>(cache.value_pages.data),
+                    static_cast<__nv_bfloat16*>(key.data), static_cast<__nv_bfloat16*>(value.data),
+                    tokens);
+            CUDA_CHECK(cudaGetLastError());
+        } else {
+            qsa_prefill_prepare_append_kv_kernel<__nv_bfloat16>
+                <<<dim3(kKvHeads, tokens), kHeadDim, 0, stream>>>(
+                    static_cast<const __nv_bfloat16*>(projected.data),
+                    static_cast<const __nv_bfloat16*>(key_norm.data),
+                    static_cast<const std::int32_t*>(token_indices.data),
+                    static_cast<const std::int32_t*>(mrope_positions.data), table_row,
+                    static_cast<const std::int32_t*>(cache.block_tables.data),
+                    cache.block_tables.ne[0], static_cast<__nv_bfloat16*>(cache.key_pages.data),
+                    static_cast<__nv_bfloat16*>(cache.value_pages.data),
+                    static_cast<__nv_bfloat16*>(key.data), static_cast<__nv_bfloat16*>(value.data),
+                    tokens);
+            CUDA_CHECK(cudaGetLastError());
+        }
+    }
+}
+
 void flash_next_qsa_attention_prefill_launch(
     const Tensor& token_indices, const Tensor& mrope_positions, std::int32_t table_row,
     const Tensor& selected_blocks, const Tensor& selected_counts, const Tensor& query_norm,
@@ -1175,20 +1221,10 @@ void flash_next_qsa_attention_prefill_launch(
         static_cast<__nv_bfloat16*>(scratch.query.data),
         static_cast<__nv_bfloat16*>(scratch.gate.data), tokens);
     CUDA_CHECK(cudaGetLastError());
+    flash_next_qsa_attention_store_launch(scratch.projected, token_indices, mrope_positions,
+        Tensor{}, table_row, key_norm, cache, scratch.key, scratch.value, stream);
     const bool is_fp8 = (cache.key_pages.dtype == DType::FP8_E4M3FN);
     if (is_fp8) {
-        qsa_prefill_prepare_append_kv_kernel<__nv_fp8_e4m3><<<dim3(kKvHeads, tokens), kHeadDim, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(scratch.projected.data),
-            static_cast<const __nv_bfloat16*>(key_norm.data),
-            static_cast<const std::int32_t*>(token_indices.data),
-            static_cast<const std::int32_t*>(mrope_positions.data),
-            table_row,
-            static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
-            static_cast<__nv_fp8_e4m3*>(cache.key_pages.data),
-            static_cast<__nv_fp8_e4m3*>(cache.value_pages.data),
-            static_cast<__nv_bfloat16*>(scratch.key.data),
-            static_cast<__nv_bfloat16*>(scratch.value.data), tokens);
-        CUDA_CHECK(cudaGetLastError());
         if (use_mma) {
             const auto* q_ptr  = static_cast<const __nv_bfloat16*>(scratch.query.data);
             const auto* ti_ptr = static_cast<const std::int32_t*>(token_indices.data);
@@ -1225,18 +1261,6 @@ void flash_next_qsa_attention_prefill_launch(
         }
         CUDA_CHECK(cudaGetLastError());
     } else {
-        qsa_prefill_prepare_append_kv_kernel<__nv_bfloat16><<<dim3(kKvHeads, tokens), kHeadDim, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(scratch.projected.data),
-            static_cast<const __nv_bfloat16*>(key_norm.data),
-            static_cast<const std::int32_t*>(token_indices.data),
-            static_cast<const std::int32_t*>(mrope_positions.data),
-            table_row,
-            static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
-            static_cast<__nv_bfloat16*>(cache.key_pages.data),
-            static_cast<__nv_bfloat16*>(cache.value_pages.data),
-            static_cast<__nv_bfloat16*>(scratch.key.data),
-            static_cast<__nv_bfloat16*>(scratch.value.data), tokens);
-        CUDA_CHECK(cudaGetLastError());
         if (use_mma) {
             const auto* q_ptr  = static_cast<const __nv_bfloat16*>(scratch.query.data);
             const auto* ti_ptr = static_cast<const std::int32_t*>(token_indices.data);

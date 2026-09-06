@@ -46,6 +46,22 @@ int check(bool condition, const char* message) {
     return 1;
 }
 
+// The Engine offers exactly ONE (source, checkpoint) pair per admission candidate
+// (resource_manager.h:335-341) and files the answer under that offered entry. A test that supplies
+// a source must therefore supply the ref the Engine would have offered with it: the owner's
+// endpoint, or the owner's paired TurnClosure when the reuse under test is the rewrite. These read
+// the real refs off the finish summary; nothing here searches for or infers a slot.
+std::optional<ninfer::runtime::CheckpointRef> offered_endpoint(const FinishResult& fin) {
+    if (!fin.summary.endpoint.has_value()) { return std::nullopt; }
+    return fin.summary.endpoint->ref;
+}
+
+std::optional<ninfer::runtime::CheckpointRef> offered_rewrite(const FinishResult& fin) {
+    if (!fin.summary.rewrite.has_value()) { return std::nullopt; }
+    return fin.summary.rewrite->ref;
+}
+
+
 inline std::uint16_t float_to_bf16(float f) {
     std::uint32_t x;
     std::memcpy(&x, &f, sizeof(float));
@@ -564,7 +580,7 @@ int test_continuation_lifecycle_and_reuse(ninfer::DeviceContext& device) {
     std::fflush(stdout);
 
     auto candidate2 = program.inspect_admission(
-        prompt2, base_plan2, ninfer::runtime::LaneId(0), &cont_handle, nullptr, std::nullopt, false);
+        prompt2, base_plan2, ninfer::runtime::LaneId(0), &cont_handle, nullptr, offered_endpoint(finish1), false);
     failures += check(candidate2.has_value(), "Turn 2 admission must succeed");
     failures += check(candidate2->summary().reusable_prompt_tokens == 16,
                       "Turn 2 reusable prompt tokens must be 16");
@@ -676,7 +692,7 @@ int test_continuation_mismatch_fallback(ninfer::DeviceContext& device) {
     auto base_plan2                               = program.plan_request(prompt2, exec_options);
 
     auto candidate2 = program.inspect_admission(
-        prompt2, base_plan2, ninfer::runtime::LaneId(0), &cont, nullptr, std::nullopt, false);
+        prompt2, base_plan2, ninfer::runtime::LaneId(0), &cont, nullptr, offered_endpoint(finish1), false);
     failures += check(!candidate2.has_value(), "Admission on divergent prompt with mismatching source must return nullopt");
 
     auto candidate_root = program.inspect_admission(
@@ -734,6 +750,7 @@ int test_continuation_lru_eviction(ninfer::DeviceContext& device) {
     ninfer::runtime::ContextMachineCostModel cost_model{};
 
     std::vector<ContinuationHandle> continuations;
+    std::vector<std::optional<ninfer::runtime::CheckpointRef>> continuation_refs;
 
     // Run 3 requests that finish as continuations
     for (int req = 0; req < 3; ++req) {
@@ -785,6 +802,7 @@ int test_continuation_lru_eviction(ninfer::DeviceContext& device) {
         failures += check(fin.disposition == ninfer::runtime::FinishDisposition::Catalogued,
                           "Request finish must be Catalogued");
         if (fin.continuation.has_value()) {
+            continuation_refs.push_back(offered_endpoint(fin));
             continuations.push_back(std::move(*fin.continuation));
         }
     }
@@ -799,10 +817,17 @@ int test_continuation_lru_eviction(ninfer::DeviceContext& device) {
     for (std::size_t i = 0; i < 8; ++i) { req0_tokens[i] = static_cast<ninfer::TokenId>(i); }
     const auto prompt0 = make_prompt(req0_tokens, true);
     auto base0         = program.plan_request(prompt0, exec_options);
-    auto cand0         = program.inspect_admission(
-        prompt0, base0, ninfer::runtime::LaneId(0), &continuations[0], nullptr, std::nullopt, false);
-    failures += check(!cand0.has_value(),
-                      "Evicted continuation must return nullopt on inspection");
+    // The corrected contract rejects a stale owner outright: the Program throws on
+    // owner/catalog disagreement rather than quietly returning no candidate. Either form of
+    // rejection satisfies the property under test, which is that it is never admitted.
+    bool stale_rejected = false;
+    try {
+        auto cand0 = program.inspect_admission(prompt0, base0, ninfer::runtime::LaneId(0),
+                                               &continuations[0], nullptr, continuation_refs[0],
+                                               false);
+        stale_rejected = !cand0.has_value();
+    } catch (const std::exception&) { stale_rejected = true; }
+    failures += check(stale_rejected, "Evicted continuation must be rejected on inspection");
 
     // Release remaining continuations
     for (auto& c : continuations) {
@@ -975,7 +1000,7 @@ int test_turn_closure_checkpoint_and_multi_turn_reuse(ninfer::DeviceContext& dev
     auto base2 = program.plan_request(prompt2, exec_options);
     std::printf("  [Turn 2] Inspecting admission...\n");
     auto cand2 = program.inspect_admission(
-        prompt2, base2, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false);
+        prompt2, base2, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, offered_rewrite(fin1), true);
     failures += check(cand2.has_value(), "Turn 2 admission with TurnClosure must succeed");
     if (cand2.has_value()) {
         failures += check(cand2->summary().reusable_prompt_tokens == 16,
@@ -1057,7 +1082,7 @@ int test_turn_closure_checkpoint_and_multi_turn_reuse(ninfer::DeviceContext& dev
     std::printf("  [Turn 3] Resuming from same TurnClosure after pool fill...\n");
     auto base3 = program.plan_request(prompt2, exec_options);
     auto cand3 = program.inspect_admission(
-        prompt2, base3, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false);
+        prompt2, base3, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, offered_rewrite(fin1), true);
     failures += check(cand3.has_value(), "Turn 3 admission with TurnClosure must succeed");
     if (cand3.has_value()) {
         failures += check(cand3->summary().reusable_prompt_tokens == 16,
@@ -1185,10 +1210,72 @@ int test_turn_closure_checkpoint_and_multi_turn_reuse(ninfer::DeviceContext& dev
     return failures;
 }
 
-int test_turn_closure_chain_retention(ninfer::DeviceContext& device) {
-    std::printf("[TEST] test_turn_closure_chain_retention\n");
-    int failures = 0;
+// Runs one full turn the way the Engine drives it: admit against the offered (source, checkpoint)
+// pair, materialize, prefill (taking the capture offer so a TurnClosure is published), finish.
+// Returns the finish result so callers can read the REAL refs off fin.summary.
+struct TurnResult {
+    bool admitted                   = false;
+    std::uint32_t reusable          = 0;
+    PrefixReusePath path            = PrefixReusePath::Root;
+    runtime::PrivateSourceMode mode = runtime::PrivateSourceMode::ConsumeToActive;
+    std::optional<FinishResult> finish;
+};
 
+TurnResult run_owned_turn(Program& program, const std::vector<ninfer::TokenId>& tokens,
+                          std::optional<std::uint32_t> boundary, const ContinuationHandle* source,
+                          std::optional<runtime::CheckpointRef> checkpoint, bool must_retain,
+                          runtime::CancellationFlagView cancellation, std::uint32_t lane = 0) {
+    TurnResult out;
+    ninfer::runtime::ResolvedExecutionOptions exec_options{};
+    exec_options.requested_output_tokens                      = 8;
+    std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {
+        {{.accepted_tokens = 1, .terminal = false}}};
+
+    const auto prompt = make_prompt(tokens, true, boundary);
+    auto base         = program.plan_request(prompt, exec_options);
+    auto cand = program.inspect_admission(prompt, base, ninfer::runtime::LaneId(lane), source,
+                                          nullptr, checkpoint, must_retain);
+    if (!cand.has_value()) { return out; }
+    out.admitted = true;
+    out.reusable = cand->summary().reusable_prompt_tokens;
+    out.path     = cand->summary().prefix_reuse_path;
+    out.mode     = cand->identity_assessment().source_mode;
+
+    auto res = program.seal_identity(*cand, prompt);
+    if (!res.has_value()) { return out; }
+    (void)program.start_resource_transaction(std::move(*res), make_prompt(tokens, true, boundary),
+                                             cancellation);
+    auto prog = program.progress_context_transaction(cancellation);
+    auto* mat = std::get_if<MaterializationResult>(&prog);
+    if (mat == nullptr || !mat->published.has_value()) { return out; }
+    SequenceHandle seq = mat->published->sequence;
+    program.finalize_context_transaction();
+
+    auto step = program.advance_prefill(seq);
+    while (!step.complete) {
+        if (step.capture.has_value()) {
+            auto stat = program.reserve_active_capture(std::move(*step.capture), nullptr, nullptr,
+                                                       std::nullopt, cancellation);
+            if (stat == ninfer::runtime::ContextTransactionReserveStatus::Reserved) {
+                (void)program.progress_context_transaction(cancellation);
+                program.finalize_context_transaction();
+            }
+        }
+        auto next = program.advance_prefill(seq);
+        step = std::move(next);
+    }
+    if (step.pending.has_value()) { (void)program.commit(std::move(*step.pending), commit_dec); }
+    out.finish = program.finish(seq);
+    return out;
+}
+
+// Turn N+1 binds its OWN predecessor and, with must_retain false, consumes it. The old suite
+// asserted the opposite (perpetual Retain), which let catalogued slots accumulate one per turn
+// until the pool filled and every later capture was silently skipped.
+int test_turn_closure_chain_consumes_predecessor(ninfer::DeviceContext& device) {
+    std::printf("[RUN] test_turn_closure_chain_consumes_predecessor\n");
+    std::fflush(stdout);
+    int failures  = 0;
     auto model    = make_synthetic_model(device);
     auto ple_meta = make_synthetic_ple_meta();
 
@@ -1201,180 +1288,270 @@ int test_turn_closure_chain_retention(ninfer::DeviceContext& device) {
     };
     const auto curve = flash_next_capacity_curve(cfg);
     auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
-
-    auto program_impl = std::make_unique<ProgramImpl>(nullptr, plan, device, model.view, std::nullopt, ple_meta);
+    auto program_impl =
+        std::make_unique<ProgramImpl>(nullptr, plan, device, model.view, std::nullopt, ple_meta);
     Program program(std::move(program_impl));
 
-    ninfer::runtime::ResolvedExecutionOptions exec_options{};
-    exec_options.requested_output_tokens = 8;
-    ninfer::runtime::ContextMachineCostModel cost_model{};
     std::atomic<bool> flag{false};
     ninfer::runtime::CancellationFlagView cancellation{&flag};
 
-    std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = false}}};
+    std::vector<ninfer::TokenId> t1(20);
+    for (std::size_t i = 0; i < 20; ++i) { t1[i] = static_cast<ninfer::TokenId>(1000 + i); }
+    auto r1 = run_owned_turn(program, t1, 12, nullptr, std::nullopt, false, cancellation);
+    failures += check(r1.admitted && r1.finish.has_value(), "T1 must admit and finish");
+    if (!r1.finish.has_value()) { return failures + 1; }
+    failures += check(r1.finish->continuation.has_value(), "T1 must yield a continuation");
+    failures += check(r1.finish->summary.rewrite.has_value(),
+                      "T1 must publish a paired TurnClosure rewrite");
 
-    // 1. T1: 20 tokens, F1 = 12
-    std::vector<ninfer::TokenId> t1_tokens(20);
-    for (std::size_t i = 0; i < 20; ++i) { t1_tokens[i] = static_cast<ninfer::TokenId>(1000 + i); }
-    const auto prompt1 = make_prompt(t1_tokens, true, 12);
-    auto base1 = program.plan_request(prompt1, exec_options);
-    auto cand1 = program.inspect_admission(prompt1, base1, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
-    failures += check(cand1.has_value(), "T1 admission must succeed");
-    auto res1 = program.seal_identity(*cand1, prompt1);
-    (void)program.start_resource_transaction(std::move(*res1), make_prompt(t1_tokens, true, 12), cancellation);
-    auto prog1 = program.progress_context_transaction(cancellation);
-    SequenceHandle seq1 = std::get_if<MaterializationResult>(&prog1)->published->sequence;
-    program.finalize_context_transaction();
+    const auto slots_after_t1 = program.physical_usage().device_state_slots;
 
-    auto p1_step1 = program.advance_prefill(seq1);
-    failures += check(p1_step1.capture.has_value(), "T1 step 1 must offer capture at 12");
-    auto cap1 = program.reserve_active_capture(std::move(*p1_step1.capture), nullptr, nullptr, std::nullopt, cancellation);
-    failures += check(cap1 == ninfer::runtime::ContextTransactionReserveStatus::Reserved, "T1 capture must reserve");
-    (void)program.progress_context_transaction(cancellation);
-    program.finalize_context_transaction();
+    std::vector<ninfer::TokenId> t2(40);
+    for (std::size_t i = 0; i < 20; ++i) { t2[i] = t1[i]; }
+    for (std::size_t i = 20; i < 40; ++i) { t2[i] = static_cast<ninfer::TokenId>(2000 + i); }
+    auto r2 = run_owned_turn(program, t2, 30, &*r1.finish->continuation, offered_rewrite(*r1.finish),
+                             false, cancellation);
+    failures += check(r2.admitted, "T2 must admit against the offered rewrite of T1");
+    failures += check(r2.reusable == 12, "T2 must reuse exactly the T1 rewrite frontier (12)");
+    failures += check(r2.path == PrefixReusePath::PrivateTurnClosure,
+                      "T2 reuse path must be PrivateTurnClosure");
+    failures += check(r2.mode == runtime::PrivateSourceMode::ConsumeToActive,
+                      "T2 must CONSUME its own predecessor when must_retain is false");
+    failures += check(r2.finish.has_value() && r2.finish->continuation.has_value(),
+                      "T2 must finish and yield a continuation");
+    if (!r2.finish.has_value()) { return failures + 1; }
 
-    auto p1_step2 = program.advance_prefill(seq1);
-    failures += check(p1_step2.complete, "T1 step 2 must complete");
-    if (p1_step2.pending.has_value()) {
-        (void)program.commit(std::move(*p1_step2.pending), commit_dec);
+    // The predecessor was consumed, so the catalogue must not grow by a whole owner every turn.
+    failures += check(program.physical_usage().device_state_slots <= slots_after_t1,
+                      "Consuming the predecessor must not grow the catalogue turn over turn");
+
+    std::vector<ninfer::TokenId> t3(60);
+    for (std::size_t i = 0; i < 40; ++i) { t3[i] = t2[i]; }
+    for (std::size_t i = 40; i < 60; ++i) { t3[i] = static_cast<ninfer::TokenId>(3000 + i); }
+    auto r3 = run_owned_turn(program, t3, 50, &*r2.finish->continuation, offered_rewrite(*r2.finish),
+                             false, cancellation);
+    failures += check(r3.admitted && r3.reusable == 30,
+                      "T3 must reuse exactly the T2 rewrite frontier (30)");
+    failures += check(r3.mode == runtime::PrivateSourceMode::ConsumeToActive,
+                      "T3 must also consume its own predecessor");
+
+    std::printf("[DONE] test_turn_closure_chain_consumes_predecessor, failures: %d\n", failures);
+    std::fflush(stdout);
+    return failures;
+}
+
+// must_retain_private_source is the Engine saying the entry belongs to another session
+// (resource_manager.h:335-338). Retain must be honoured whatever the checkpoint kind, and the
+// owner must survive the borrowing turn intact.
+int test_sibling_retain_preserves_owner(ninfer::DeviceContext& device) {
+    std::printf("[RUN] test_sibling_retain_preserves_owner\n");
+    std::fflush(stdout);
+    int failures  = 0;
+    auto model    = make_synthetic_model(device);
+    auto ple_meta = make_synthetic_ple_meta();
+
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency       = 2,
+        .max_context           = 512,
+        .state_slot_capacity   = 0,
+        .continuation_capacity = 16,
+        .prefill_chunk         = 256,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+    auto program_impl =
+        std::make_unique<ProgramImpl>(nullptr, plan, device, model.view, std::nullopt, ple_meta);
+    Program program(std::move(program_impl));
+
+    std::atomic<bool> flag{false};
+    ninfer::runtime::CancellationFlagView cancellation{&flag};
+
+    std::vector<ninfer::TokenId> owner_tokens(20);
+    for (std::size_t i = 0; i < 20; ++i) { owner_tokens[i] = static_cast<ninfer::TokenId>(700 + i); }
+    auto owner =
+        run_owned_turn(program, owner_tokens, 12, nullptr, std::nullopt, false, cancellation);
+    failures += check(owner.admitted && owner.finish.has_value(), "Owner turn must admit and finish");
+    if (!owner.finish.has_value()) { return failures + 1; }
+    failures += check(owner.finish->summary.rewrite.has_value(), "Owner must publish a rewrite");
+
+    // A different session borrows the same prefix: the Engine passes must_retain = true.
+    std::vector<ninfer::TokenId> sibling_tokens(30);
+    for (std::size_t i = 0; i < 20; ++i) { sibling_tokens[i] = owner_tokens[i]; }
+    for (std::size_t i = 20; i < 30; ++i) {
+        sibling_tokens[i] = static_cast<ninfer::TokenId>(8000 + i);
     }
-    FinishResult fin1 = program.finish(seq1);
-    failures += check(fin1.continuation.has_value(), "T1 finish must yield continuation");
+    auto sibling = run_owned_turn(program, sibling_tokens, 24, &*owner.finish->continuation,
+                                  offered_rewrite(*owner.finish), true, cancellation, 1);
+    failures += check(sibling.admitted, "Sibling must admit against the offered rewrite of the owner");
+    failures += check(sibling.mode == runtime::PrivateSourceMode::Retain,
+                      "must_retain_private_source must force Retain for a sibling session");
+    failures += check(sibling.reusable == 12, "Sibling must reuse the owner rewrite frontier (12)");
 
-    // 2. T2: 40 tokens (first 20 same as T1), F2 = 30
-    std::vector<ninfer::TokenId> t2_tokens(40);
-    for (std::size_t i = 0; i < 20; ++i) { t2_tokens[i] = t1_tokens[i]; }
-    for (std::size_t i = 20; i < 40; ++i) { t2_tokens[i] = static_cast<ninfer::TokenId>(2000 + i); }
-    const auto prompt2 = make_prompt(t2_tokens, true, 30);
-    auto base2 = program.plan_request(prompt2, exec_options);
-    auto cand2 = program.inspect_admission(prompt2, base2, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false);
-    failures += check(cand2.has_value(), "T2 admission must succeed against T1 continuation");
-    if (cand2.has_value()) {
-        failures += check(cand2->summary().reusable_prompt_tokens == 12, "T2 reusable prompt tokens must be 12");
-        failures += check(cand2->summary().prefix_reuse_path == PrefixReusePath::PrivateTurnClosure, "T2 reuse path must be PrivateTurnClosure");
-        failures += check(cand2->identity_assessment().source_mode == runtime::PrivateSourceMode::Retain,
-                          "T2 source disposition must be Retained for TurnClosure");
-    }
-    auto res2 = program.seal_identity(*cand2, prompt2);
-    (void)program.start_resource_transaction(std::move(*res2), make_prompt(t2_tokens, true, 30), cancellation);
-    auto prog2 = program.progress_context_transaction(cancellation);
-    SequenceHandle seq2 = std::get_if<MaterializationResult>(&prog2)->published->sequence;
-    program.finalize_context_transaction();
-
-    auto p2_step1 = program.advance_prefill(seq2);
-    failures += check(p2_step1.capture.has_value(), "T2 step 1 must offer capture at 30");
-    auto cap2 = program.reserve_active_capture(std::move(*p2_step1.capture), nullptr, nullptr, std::nullopt, cancellation);
-    failures += check(cap2 == ninfer::runtime::ContextTransactionReserveStatus::Reserved, "T2 capture must reserve");
-    (void)program.progress_context_transaction(cancellation);
-    program.finalize_context_transaction();
-
-    auto p2_step2 = program.advance_prefill(seq2);
-    failures += check(p2_step2.complete, "T2 step 2 must complete");
-    if (p2_step2.pending.has_value()) {
-        (void)program.commit(std::move(*p2_step2.pending), commit_dec);
-    }
-    FinishResult fin2 = program.finish(seq2);
-    failures += check(fin2.continuation.has_value(), "T2 finish must yield continuation");
-
-    // 3. T3: 60 tokens (first 40 same as T2), F3 = 50
-    std::vector<ninfer::TokenId> t3_tokens(60);
-    for (std::size_t i = 0; i < 40; ++i) { t3_tokens[i] = t2_tokens[i]; }
-    for (std::size_t i = 40; i < 60; ++i) { t3_tokens[i] = static_cast<ninfer::TokenId>(3000 + i); }
-    const auto prompt3 = make_prompt(t3_tokens, true, 50);
-    auto base3 = program.plan_request(prompt3, exec_options);
-    auto cand3 = program.inspect_admission(prompt3, base3, ninfer::runtime::LaneId(0), &*fin2.continuation, nullptr, std::nullopt, false);
-    failures += check(cand3.has_value(), "T3 admission must succeed against T2 continuation");
-    if (cand3.has_value()) {
-        failures += check(cand3->summary().reusable_prompt_tokens == 30, "T3 reusable prompt tokens must be 30");
-        failures += check(cand3->summary().prefix_reuse_path == PrefixReusePath::PrivateTurnClosure, "T3 reuse path must be PrivateTurnClosure");
-        failures += check(cand3->identity_assessment().source_mode == runtime::PrivateSourceMode::Retain,
-                          "T3 source disposition must be Retained for TurnClosure");
-    }
-    auto res3 = program.seal_identity(*cand3, prompt3);
-    (void)program.start_resource_transaction(std::move(*res3), make_prompt(t3_tokens, true, 50), cancellation);
-    auto prog3 = program.progress_context_transaction(cancellation);
-    SequenceHandle seq3 = std::get_if<MaterializationResult>(&prog3)->published->sequence;
-    program.finalize_context_transaction();
-
-    auto p3_step1 = program.advance_prefill(seq3);
-    failures += check(p3_step1.capture.has_value(), "T3 step 1 must offer capture at 50");
-    auto cap3 = program.reserve_active_capture(std::move(*p3_step1.capture), nullptr, nullptr, std::nullopt, cancellation);
-    failures += check(cap3 == ninfer::runtime::ContextTransactionReserveStatus::Reserved, "T3 capture must reserve");
-    (void)program.progress_context_transaction(cancellation);
-    program.finalize_context_transaction();
-
-    auto p3_step2 = program.advance_prefill(seq3);
-    failures += check(p3_step2.complete, "T3 step 2 must complete");
-    if (p3_step2.pending.has_value()) {
-        (void)program.commit(std::move(*p3_step2.pending), commit_dec);
-    }
-    FinishResult fin3 = program.finish(seq3);
-    failures += check(fin3.continuation.has_value(), "T3 finish must yield continuation");
-
-    // 4. Repeating T2 request (or branching from T1): Prompt begins with T1's 20 tokens, but has different 2nd turn
-    std::vector<ninfer::TokenId> t2_repeat_tokens(36);
-    for (std::size_t i = 0; i < 20; ++i) { t2_repeat_tokens[i] = t1_tokens[i]; }
-    for (std::size_t i = 20; i < 36; ++i) { t2_repeat_tokens[i] = static_cast<ninfer::TokenId>(4000 + i); }
-    const auto prompt2_rep = make_prompt(t2_repeat_tokens, true, 28);
-    auto base2_rep = program.plan_request(prompt2_rep, exec_options);
-
-    // Test admission with source = T3 continuation (which is descendant of T2, which is descendant of T1)
-    auto cand2_rep_from_t3 = program.inspect_admission(prompt2_rep, base2_rep, ninfer::runtime::LaneId(0), &*fin3.continuation, nullptr, std::nullopt, false);
-    failures += check(cand2_rep_from_t3.has_value(), "T2 repeated admission against T3 continuation must succeed");
-    if (cand2_rep_from_t3.has_value()) {
-        failures += check(cand2_rep_from_t3->summary().reusable_prompt_tokens == 12,
-                          "T2 repeated reusable tokens must be 12 (from T1's TurnClosure)");
-        failures += check(cand2_rep_from_t3->summary().prefix_reuse_path == PrefixReusePath::PrivateTurnClosure,
-                          "T2 repeated reuse path must be PrivateTurnClosure");
+    // The owner must be untouched: it can still be reused afterwards.
+    ninfer::runtime::ResolvedExecutionOptions exec_options{};
+    exec_options.requested_output_tokens = 8;
+    std::vector<ninfer::TokenId> owner_next(28);
+    for (std::size_t i = 0; i < 20; ++i) { owner_next[i] = owner_tokens[i]; }
+    for (std::size_t i = 20; i < 28; ++i) { owner_next[i] = static_cast<ninfer::TokenId>(900 + i); }
+    const auto probe = make_prompt(owner_next, true, 24);
+    auto probe_base  = program.plan_request(probe, exec_options);
+    auto probe_cand =
+        program.inspect_admission(probe, probe_base, ninfer::runtime::LaneId(0),
+                                  &*owner.finish->continuation, nullptr,
+                                  offered_rewrite(*owner.finish), false);
+    failures += check(probe_cand.has_value(),
+                      "Retained owner must still be reusable after a sibling borrowed it");
+    if (probe_cand.has_value()) {
+        failures += check(probe_cand->summary().reusable_prompt_tokens == 12,
+                          "Retained owner must still offer its full 12-token frontier");
     }
 
-    // Test admission with source = T1 continuation
-    auto cand2_rep_from_t1 = program.inspect_admission(prompt2_rep, base2_rep, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false);
-    failures += check(cand2_rep_from_t1.has_value(), "T2 repeated admission against T1 continuation must succeed");
-    if (cand2_rep_from_t1.has_value()) {
-        failures += check(cand2_rep_from_t1->summary().reusable_prompt_tokens == 12,
-                          "T2 repeated reusable tokens must be 12 (from T1's TurnClosure)");
-        failures += check(cand2_rep_from_t1->summary().prefix_reuse_path == PrefixReusePath::PrivateTurnClosure,
-                          "T2 repeated reuse path must be PrivateTurnClosure");
+    std::printf("[DONE] test_sibling_retain_preserves_owner, failures: %d\n", failures);
+    std::fflush(stdout);
+    return failures;
+}
+
+// ConsumeToActive on a rewrite must release the COMPLETE owner: the TurnClosure AND the paired
+// endpoint. Leaving the endpoint catalogued is how the pool drained at two slots per turn.
+int test_consume_rewrite_frees_complete_owner(ninfer::DeviceContext& device) {
+    std::printf("[RUN] test_consume_rewrite_frees_complete_owner\n");
+    std::fflush(stdout);
+    int failures  = 0;
+    auto model    = make_synthetic_model(device);
+    auto ple_meta = make_synthetic_ple_meta();
+
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency       = 2,
+        .max_context           = 512,
+        .state_slot_capacity   = 0,
+        .continuation_capacity = 16,
+        .prefill_chunk         = 256,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+    auto program_impl =
+        std::make_unique<ProgramImpl>(nullptr, plan, device, model.view, std::nullopt, ple_meta);
+    Program program(std::move(program_impl));
+
+    std::atomic<bool> flag{false};
+    ninfer::runtime::CancellationFlagView cancellation{&flag};
+
+    std::vector<ninfer::TokenId> t1(20);
+    for (std::size_t i = 0; i < 20; ++i) { t1[i] = static_cast<ninfer::TokenId>(400 + i); }
+    auto r1 = run_owned_turn(program, t1, 12, nullptr, std::nullopt, false, cancellation);
+    failures += check(r1.admitted && r1.finish.has_value(), "Turn 1 must admit and finish");
+    if (!r1.finish.has_value()) { return failures + 1; }
+    failures +=
+        check(r1.finish->summary.endpoint.has_value() && r1.finish->summary.rewrite.has_value(),
+              "Turn 1 must publish BOTH an endpoint and a paired rewrite");
+    const auto slots_owner = program.physical_usage().device_state_slots;
+    failures += check(slots_owner >= 2,
+                      "A published owner must hold at least two state slots (endpoint + rewrite)");
+
+    std::vector<ninfer::TokenId> t2(32);
+    for (std::size_t i = 0; i < 20; ++i) { t2[i] = t1[i]; }
+    for (std::size_t i = 20; i < 32; ++i) { t2[i] = static_cast<ninfer::TokenId>(4000 + i); }
+    auto r2 = run_owned_turn(program, t2, 26, &*r1.finish->continuation, offered_rewrite(*r1.finish),
+                             false, cancellation);
+    failures += check(r2.admitted, "Turn 2 must admit against the offered rewrite");
+    failures += check(r2.mode == runtime::PrivateSourceMode::ConsumeToActive,
+                      "Turn 2 must be ConsumeToActive when must_retain is false");
+    failures += check(r2.finish.has_value(), "Turn 2 must finish");
+
+    // The consumed owner endpoint must be gone too, so the successor publication fits.
+    ninfer::runtime::ResolvedExecutionOptions exec_options{};
+    exec_options.requested_output_tokens = 8;
+    const auto stale_prompt              = make_prompt(t1, true, 12);
+    auto stale_base                      = program.plan_request(stale_prompt, exec_options);
+    // Consuming the owner retires BOTH of its slots, so the handle is now stale. The Program
+    // rejects a stale owner by throwing ("Flash-Next admission owner is stale"); either that or an
+    // empty candidate satisfies the property under test, which is that it is not admissible.
+    bool endpoint_rejected = false;
+    try {
+        auto stale_cand =
+            program.inspect_admission(stale_prompt, stale_base, ninfer::runtime::LaneId(0),
+                                      &*r1.finish->continuation, nullptr,
+                                      offered_endpoint(*r1.finish), false);
+        endpoint_rejected = !stale_cand.has_value();
+    } catch (const std::logic_error&) { endpoint_rejected = true; }
+    failures += check(endpoint_rejected,
+                      "The consumed owner endpoint must no longer be admissible");
+
+    std::printf("[DONE] test_consume_rewrite_frees_complete_owner, failures: %d\n", failures);
+    std::fflush(stdout);
+    return failures;
+}
+
+// The Engine offers exactly one (source, checkpoint) pair and files the result under THAT entry.
+// The Program must never substitute a better-matching slot it found by itself.
+int test_offered_checkpoint_only_selection(ninfer::DeviceContext& device) {
+    std::printf("[RUN] test_offered_checkpoint_only_selection\n");
+    std::fflush(stdout);
+    int failures  = 0;
+    auto model    = make_synthetic_model(device);
+    auto ple_meta = make_synthetic_ple_meta();
+
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency       = 2,
+        .max_context           = 512,
+        .state_slot_capacity   = 0,
+        .continuation_capacity = 16,
+        .prefill_chunk         = 256,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan        = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+    auto program_impl =
+        std::make_unique<ProgramImpl>(nullptr, plan, device, model.view, std::nullopt, ple_meta);
+    Program program(std::move(program_impl));
+
+    std::atomic<bool> flag{false};
+    ninfer::runtime::CancellationFlagView cancellation{&flag};
+
+    // Two owners over the SAME token stream: A closes at 12, B closes at 30. Both prefix-match the
+    // probe, and B matches it strictly better.
+    std::vector<ninfer::TokenId> stream(40);
+    for (std::size_t i = 0; i < 40; ++i) { stream[i] = static_cast<ninfer::TokenId>(5000 + i); }
+
+    std::vector<ninfer::TokenId> a_tokens(stream.begin(), stream.begin() + 20);
+    auto owner_a =
+        run_owned_turn(program, a_tokens, 12, nullptr, std::nullopt, false, cancellation, 0);
+    failures += check(owner_a.admitted && owner_a.finish.has_value(), "Owner A must admit and finish");
+
+    std::vector<ninfer::TokenId> b_tokens(stream.begin(), stream.begin() + 36);
+    auto owner_b =
+        run_owned_turn(program, b_tokens, 30, nullptr, std::nullopt, false, cancellation, 1);
+    failures += check(owner_b.admitted && owner_b.finish.has_value(), "Owner B must admit and finish");
+    if (!owner_a.finish.has_value() || !owner_b.finish.has_value()) { return failures + 1; }
+    failures += check(owner_a.finish->summary.rewrite.has_value() &&
+                          owner_b.finish->summary.rewrite.has_value(),
+                      "Both owners must publish rewrites");
+
+    ninfer::runtime::ResolvedExecutionOptions exec_options{};
+    exec_options.requested_output_tokens = 8;
+    const auto probe                     = make_prompt(stream, true, 36);
+    auto probe_base                      = program.plan_request(probe, exec_options);
+
+    // Offered A (frontier 12) while B (frontier 30) is catalogued and matches strictly better.
+    auto cand_a = program.inspect_admission(probe, probe_base, ninfer::runtime::LaneId(0),
+                                            &*owner_a.finish->continuation, nullptr,
+                                            offered_rewrite(*owner_a.finish), false);
+    failures += check(cand_a.has_value(), "Admission against the offered rewrite of A must succeed");
+    if (cand_a.has_value()) {
+        failures += check(cand_a->summary().reusable_prompt_tokens == 12,
+                          "Must reuse ONLY the offered checkpoint frontier (12), never a better "
+                          "foreign match (30)");
     }
 
-    // Run T2 repeated to completion
-    auto res2_rep = program.seal_identity(*cand2_rep_from_t1, prompt2_rep);
-    (void)program.start_resource_transaction(std::move(*res2_rep), make_prompt(t2_repeat_tokens, true, 28), cancellation);
-    auto prog2_rep = program.progress_context_transaction(cancellation);
-    SequenceHandle seq2_rep = std::get_if<MaterializationResult>(&prog2_rep)->published->sequence;
-    program.finalize_context_transaction();
+    // Source without a checkpoint is not a valid offer and must be rejected, not searched.
+    bool threw = false;
+    try {
+        (void)program.inspect_admission(probe, probe_base, ninfer::runtime::LaneId(0),
+                                        &*owner_a.finish->continuation, nullptr, std::nullopt,
+                                        false);
+    } catch (const std::logic_error&) { threw = true; }
+    failures += check(threw, "A source without a paired checkpoint must be rejected");
 
-    auto p2_rep_step1 = program.advance_prefill(seq2_rep);
-    failures += check(p2_rep_step1.summary.reused_prompt_tokens == 12, "T2 repeated step 1 reused tokens must be 12");
-    failures += check(p2_rep_step1.summary.prefix_reuse_path == PrefixReusePath::PrivateTurnClosure,
-                      "T2 repeated step 1 prefix reuse path must be PrivateTurnClosure");
-    if (p2_rep_step1.capture.has_value()) {
-        program.skip_capture(std::move(*p2_rep_step1.capture));
-    }
-    auto p2_rep_step2 = program.advance_prefill(seq2_rep);
-    failures += check(p2_rep_step2.complete, "T2 repeated step 2 must complete");
-    if (p2_rep_step2.pending.has_value()) {
-        (void)program.commit(std::move(*p2_rep_step2.pending), commit_dec);
-    }
-    FinishResult fin2_rep = program.finish(seq2_rep);
-
-    // Release all continuations
-    for (std::size_t c = 0; c < program.impl_->continuation_slots_.size(); ++c) {
-        auto& c_slot = program.impl_->continuation_slots_[c];
-        if (c_slot.role == detail::ContinuationSlotRole::Catalogued) {
-            (void)program.release_continuation(
-                ContinuationHandle(&program, static_cast<std::uint32_t>(c), c_slot.generation));
-        }
-    }
-
-    const auto usage_after = program.physical_usage();
-    failures += check(usage_after.device_state_slots == 0,
-                      "All device state slots must be reclaimed (0)");
-    failures += check(usage_after.device_main_kv_pages == 0,
-                      "All physical page groups must be returned to free list (0 used pages)");
-
-    std::printf("[DONE] test_turn_closure_chain_retention, failures: %d\n", failures);
+    std::printf("[DONE] test_offered_checkpoint_only_selection, failures: %d\n", failures);
     std::fflush(stdout);
     return failures;
 }
@@ -1440,7 +1617,7 @@ int test_turn2_resumed_vs_scratch_divergence(ninfer::DeviceContext& device) {
     for (std::size_t i = 24; i < 48; ++i) { t2_tokens[i] = static_cast<ninfer::TokenId>(600 + i); }
     const auto prompt2_res = make_prompt(t2_tokens, true, 36);
     auto base2_res = program.plan_request(prompt2_res, exec_options);
-    auto cand2_res = program.inspect_admission(prompt2_res, base2_res, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false);
+    auto cand2_res = program.inspect_admission(prompt2_res, base2_res, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, offered_rewrite(fin1), false);
     failures += check(cand2_res.has_value(), "T2 resumed admission must succeed");
     failures += check(cand2_res->summary().reusable_prompt_tokens == 16, "T2 resumed reusable tokens must be 16");
     auto res2_res = program.seal_identity(*cand2_res, prompt2_res);
@@ -1703,7 +1880,7 @@ int test_state_slot_capacity_saturation_and_eviction(ninfer::DeviceContext& devi
     for (std::size_t i = 20; i < 40; ++i) { r4_tokens[i] = static_cast<ninfer::TokenId>(400 + i); }
     const auto prompt4 = make_prompt(r4_tokens, true, 30);
     auto base4 = program.plan_request(prompt4, exec_options);
-    auto cand4 = program.inspect_admission(prompt4, base4, ninfer::runtime::LaneId(1), &*fin3.continuation, nullptr, std::nullopt, false);
+    auto cand4 = program.inspect_admission(prompt4, base4, ninfer::runtime::LaneId(1), &*fin3.continuation, nullptr, offered_rewrite(fin3), false);
     failures += check(cand4.has_value(), "R4 admission must succeed");
 
     std::vector<ContinuationHandle> current_handles_r4;
@@ -1921,6 +2098,7 @@ int test_small_pool_page_pressure_eviction(ninfer::DeviceContext& device) {
     // Decode 2 concurrent rounds with batch size 2
     std::array<SequenceHandle, 2> seqs = {seq_1, seq_2};
     std::array<ninfer::runtime::RoundBudget, 2> budgets{};
+    for (auto& b : budgets) { b.generated_tokens_remaining = 1; }
     std::array<ninfer::runtime::CommitDecision, 2> commit_term = {
         {{.accepted_tokens = 1, .terminal = true}, {.accepted_tokens = 1, .terminal = true}}};
 
@@ -2052,6 +2230,7 @@ int test_repeated_8way_batches_over_full_catalog(ninfer::DeviceContext& device) 
 
         // Decode 2 rounds for all 8 lanes concurrently
         std::array<ninfer::runtime::RoundBudget, 8> budgets{};
+        for (auto& b : budgets) { b.generated_tokens_remaining = 1; }
         std::array<ninfer::runtime::CommitDecision, 8> dec_non_term;
         for (auto& d : dec_non_term) { d = {.accepted_tokens = 1, .terminal = false}; }
         std::array<ninfer::runtime::CommitDecision, 8> dec_term;
@@ -2166,7 +2345,7 @@ int test_resumed_checkpoint_not_evicted_while_lane_runs(ninfer::DeviceContext& d
     for (std::size_t i = 32; i < 64; ++i) { t2_tokens[i] = static_cast<ninfer::TokenId>(600 + i); }
     const auto prompt2 = make_prompt(t2_tokens, true);
     auto base2 = program.plan_request(prompt2, exec_options);
-    auto cand2 = program.inspect_admission(prompt2, base2, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false);
+    auto cand2 = program.inspect_admission(prompt2, base2, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, offered_rewrite(fin1), true);
     failures += check(cand2.has_value(), "Turn 2 admission against TurnClosure must succeed");
     auto res2 = program.seal_identity(*cand2, prompt2);
     (void)program.start_resource_transaction(std::move(*res2), make_prompt(t2_tokens, true), cancellation);
@@ -2174,10 +2353,8 @@ int test_resumed_checkpoint_not_evicted_while_lane_runs(ninfer::DeviceContext& d
     SequenceHandle seq2 = std::get_if<MaterializationResult>(&prog2)->published->sequence;
     program.finalize_context_transaction();
 
-    // Verify Lane 0 is actively referencing tc_slot_idx
-    failures += check(program.impl_->lane_states_[0].reused_from_continuation_index.has_value() &&
-                      *program.impl_->lane_states_[0].reused_from_continuation_index == static_cast<std::uint32_t>(tc_slot_idx),
-                      "Lane 0 must track reused continuation index");
+    failures += check(program.impl_->is_slot_protected(fin1.continuation->index()),
+                      "Retained endpoint owner must be protected while its rewrite is borrowed");
     failures += check(program.impl_->is_slot_protected(tc_slot_idx),
                       "TurnClosure slot must be protected while Lane 0 is active");
 
@@ -2473,7 +2650,7 @@ int test_resume_from_endpoint_consumes_pair(ninfer::DeviceContext& device) {
     auto base2 = program.plan_request(prompt2, exec_options);
 
     auto cand2 = program.inspect_admission(
-        prompt2, base2, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, std::nullopt, false);
+        prompt2, base2, ninfer::runtime::LaneId(0), &*fin1.continuation, nullptr, offered_endpoint(fin1), false);
     failures += check(cand2.has_value(), "Turn 2 admission must succeed");
     if (cand2.has_value()) {
         failures += check(cand2->summary().prefix_reuse_path == ninfer::PrefixReusePath::PrivateEndpoint,
@@ -2549,12 +2726,16 @@ int test_continuation_capacity_saturation_and_lru_reuse(ninfer::DeviceContext& d
     ninfer::runtime::CancellationFlagView cancellation{&flag};
 
     std::vector<const ContinuationHandle*> active_owners;
+    std::optional<ninfer::runtime::CheckpointRef> produced_ref;
 
     auto run_request = [&](const std::vector<ninfer::TokenId>& tokens, std::optional<uint32_t> boundary,
-                           const ContinuationHandle* source = nullptr) -> std::pair<std::optional<ContinuationHandle>, uint32_t> {
+                           const ContinuationHandle* source = nullptr,
+                           std::optional<ninfer::runtime::CheckpointRef> ckpt = std::nullopt)
+        -> std::pair<std::optional<ContinuationHandle>, uint32_t> {
         const auto prompt = make_prompt(tokens, true, boundary);
         auto base = program.plan_request(prompt, exec_options);
-        auto cand = program.inspect_admission(prompt, base, ninfer::runtime::LaneId(0), source, nullptr, std::nullopt, false);
+        auto cand = program.inspect_admission(prompt, base, ninfer::runtime::LaneId(0), source,
+                                             nullptr, ckpt, false);
         if (!cand.has_value()) return {std::nullopt, 0};
         uint32_t reused = cand->summary().reusable_prompt_tokens;
 
@@ -2613,6 +2794,7 @@ int test_continuation_capacity_saturation_and_lru_reuse(ninfer::DeviceContext& d
             (void)program.commit(std::move(*p.pending), commit_dec);
         }
         FinishResult fin = program.finish(seq);
+        produced_ref     = offered_rewrite(fin);
         return {std::move(fin.continuation), reused};
     };
 
@@ -2641,8 +2823,8 @@ int test_continuation_capacity_saturation_and_lru_reuse(ninfer::DeviceContext& d
     if (h3.has_value()) active_owners.push_back(&*h3);
 
     // Request 4: identical prompt to Request 3 (tokens 300..320)
-    // Must match R3's TurnClosure checkpoint (16 tokens) or SessionEndpoint (20 tokens)!
-    auto [h4, reused4] = run_request(t3, 16, h3 ? &*h3 : nullptr);
+    // The repeated prompt selects R3's TurnClosure checkpoint at 16 tokens.
+    auto [h4, reused4] = run_request(t3, 16, h3 ? &*h3 : nullptr, produced_ref);
     failures += check(reused4 > 0, "R4 must reuse R3 prefix (reused > 0) after capacity saturation");
     std::printf("  [Saturation LRU Result] R3 reused=%u, R4 reused=%u\n", reused3, reused4);
 
@@ -2690,13 +2872,17 @@ int test_24k_prompt_reuse_scale(ninfer::DeviceContext& device) {
         tokens1[i] = static_cast<ninfer::TokenId>(1000 + (i % 5000));
     }
 
+    std::optional<ninfer::runtime::CheckpointRef> timing_ref;
     auto run_timing = [&](const std::vector<ninfer::TokenId>& prompt_toks,
                           std::optional<uint32_t> boundary,
-                          const ContinuationHandle* source) -> std::tuple<std::optional<ContinuationHandle>, uint32_t, double> {
+                          const ContinuationHandle* source,
+                          std::optional<ninfer::runtime::CheckpointRef> ckpt)
+        -> std::tuple<std::optional<ContinuationHandle>, uint32_t, double> {
         const auto prompt = make_prompt(prompt_toks, true, boundary);
         const auto t_start = std::chrono::steady_clock::now();
         auto base = program.plan_request(prompt, exec_options);
-        auto cand = program.inspect_admission(prompt, base, ninfer::runtime::LaneId(0), source, nullptr, std::nullopt, false);
+        auto cand = program.inspect_admission(prompt, base, ninfer::runtime::LaneId(0), source,
+                                             nullptr, ckpt, false);
         if (!cand.has_value()) {
             return {std::nullopt, 0, 0.0};
         }
@@ -2733,11 +2919,12 @@ int test_24k_prompt_reuse_scale(ninfer::DeviceContext& device) {
         const auto t_end = std::chrono::steady_clock::now();
         const double ttft_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
         FinishResult fin = program.finish(seq);
+        timing_ref       = offered_rewrite(fin);
         return {std::move(fin.continuation), reused, ttft_ms};
     };
 
     // Run 1 (scratch 24k tokens, preamble checkpoint at 20k):
-    auto [h1, reused1, ttft1_ms] = run_timing(tokens1, static_cast<uint32_t>(kSharedPreamble), nullptr);
+    auto [h1, reused1, ttft1_ms] = run_timing(tokens1, static_cast<uint32_t>(kSharedPreamble), nullptr, std::nullopt);
     failures += check(reused1 == 0, "Run 1 must have reused=0");
     failures += check(h1.has_value(), "Run 1 must catalogue continuation");
     std::printf("  [24k scratch] prefix_cache_hit_tokens=%u, prefill_loop=%.2f ms\n", reused1, ttft1_ms);
@@ -2747,7 +2934,7 @@ int test_24k_prompt_reuse_scale(ninfer::DeviceContext& device) {
     for (std::size_t i = 0; i < 4000; ++i) {
         tokens2.push_back(static_cast<ninfer::TokenId>(8000 + i));
     }
-    auto [h2, reused2, ttft2_ms] = run_timing(tokens2, std::nullopt, h1 ? &*h1 : nullptr);
+    auto [h2, reused2, ttft2_ms] = run_timing(tokens2, std::nullopt, h1 ? &*h1 : nullptr, timing_ref);
     failures += check(reused2 == kSharedPreamble, "Run 2 must reuse 20000 preamble tokens");
     std::printf("  [24k reused ] prefix_cache_hit_tokens=%u, prefill_loop=%.2f ms (%.1fx, fixture only)\n",
                 reused2, ttft2_ms, ttft1_ms / std::max(ttft2_ms, 0.001));
@@ -2777,7 +2964,10 @@ int main() {
         failures += test_continuation_mismatch_fallback(device);
         failures += test_continuation_lru_eviction(device);
         failures += test_turn_closure_checkpoint_and_multi_turn_reuse(device);
-        failures += test_turn_closure_chain_retention(device);
+        failures += test_turn_closure_chain_consumes_predecessor(device);
+        failures += test_sibling_retain_preserves_owner(device);
+        failures += test_consume_rewrite_frees_complete_owner(device);
+        failures += test_offered_checkpoint_only_selection(device);
         failures += test_turn2_resumed_vs_scratch_divergence(device);
         failures += test_state_slot_capacity_saturation_and_eviction(device);
         failures += test_small_pool_page_pressure_eviction(device);

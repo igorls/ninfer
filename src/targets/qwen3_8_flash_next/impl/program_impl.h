@@ -46,6 +46,9 @@ public:
     std::uint32_t reusable_tokens = 0;
     std::uint32_t source_continuation_index = 0;
     std::uint64_t source_continuation_generation = 0;
+    // The Engine owner is the endpoint; the selected checkpoint may be its rewrite.
+    std::uint32_t source_checkpoint_index = 0;
+    std::uint64_t source_checkpoint_generation = 0;
     bool has_source = false;
     std::uint32_t required_page_groups = 0;
     std::uint64_t planning_revision = 0;
