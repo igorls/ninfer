@@ -92,6 +92,52 @@ int test_multiple_calls_and_json_values() {
     return failures;
 }
 
+// A typed parameter the model wrote badly must not cost the whole call. It used
+// to: the raw <tool_call> markup was returned as prose and the client rendered
+// XML into the chat instead of running anything. Observed on real agent traffic,
+// twice in one day, on calls of 722 and 4517 bytes.
+int test_unparseable_typed_parameter_degrades_to_text() {
+    const fi::ToolArgumentTypeContracts contracts = contracts_for(
+        "edit_file", Json{{"explanation", Json{{"type", "string"}}},
+                          {"replacements", Json{{"type", "array"}}}});
+    // Structurally complete, but the array value is not valid JSON.
+    const fi::ParsedToolCallOutput parsed =
+        fi::parse_qwen_tool_call_output("<tool_call>\n"
+                                        "<function=edit_file>\n"
+                                        "<parameter=explanation>\nWhy\n</parameter>\n"
+                                        "<parameter=replacements>\n[{\"a\": `oops`,}]\n</parameter>\n"
+                                        "</function>\n"
+                                        "</tool_call>",
+                                        64, contracts);
+    int failures = 0;
+    failures += check(parsed.is_tool_call_response, "degraded call is still a tool response");
+    failures += check(parsed.tool_calls.size() == 1, "degraded call is still delivered");
+    failures += check(parsed.content.empty(), "degraded call does not leak markup as prose");
+    if (parsed.tool_calls.size() == 1) {
+        const Json args = Json::parse(parsed.tool_calls[0].arguments_json);
+        failures += check(args.at("explanation") == "Why", "sound parameter still typed");
+        failures += check(args.at("replacements").is_string(),
+                          "unparseable parameter passed through as text");
+    }
+    return failures;
+}
+
+// The tolerance above must not extend to structure: arguments the model never
+// finished writing are not safe to hand to a client as if they were complete.
+int test_unterminated_call_still_falls_back_with_contracts() {
+    const fi::ToolArgumentTypeContracts contracts =
+        contracts_for("edit_file", Json{{"replacements", Json{{"type", "array"}}}});
+    const fi::ParsedToolCallOutput parsed =
+        fi::parse_qwen_tool_call_output("<tool_call>\n"
+                                        "<function=edit_file>\n"
+                                        "<parameter=replacements>\n[{\"a\":1}]\n",
+                                        64, contracts);
+    int failures = 0;
+    failures += check(!parsed.is_tool_call_response, "unterminated stays a fallback");
+    failures += check(parsed.tool_calls.empty(), "unterminated yields no calls");
+    return failures;
+}
+
 int test_malformed_falls_back_to_text() {
     const std::string text = "<tool_call>\n<function=get_weather>\n";
     const fi::ParsedToolCallOutput parsed =
@@ -407,6 +453,8 @@ int main() {
     int failures = 0;
     failures += test_single_call();
     failures += test_multiple_calls_and_json_values();
+    failures += test_unparseable_typed_parameter_degrades_to_text();
+    failures += test_unterminated_call_still_falls_back_with_contracts();
     failures += test_malformed_falls_back_to_text();
     failures += test_suffix_after_tool_falls_back_to_text();
     failures += test_trailing_text_opt_in_keeps_calls();

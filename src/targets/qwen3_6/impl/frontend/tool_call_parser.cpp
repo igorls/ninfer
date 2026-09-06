@@ -164,6 +164,18 @@ std::string_view remove_parameter_framing_newlines(std::string_view text) {
     return text.substr(begin, end - begin);
 }
 
+// Degrading is better than discarding, but it is still the model failing to write
+// what it declared, so it must be visible. Named like the fallback diagnostic
+// below so both are greppable from one place.
+void note_degraded_parameter(std::string_view tool, std::string_view parameter,
+                             std::size_t bytes) {
+    std::fprintf(stderr,
+                 "tool_call_parameter_degraded tool=%.*s parameter=%.*s bytes=%zu "
+                 "(value did not parse as its declared type; passed through as text)\n",
+                 static_cast<int>(tool.size()), tool.data(),
+                 static_cast<int>(parameter.size()), parameter.data(), bytes);
+}
+
 bool parse_parameter(std::string_view inner, std::size_t& pos, Json& args,
                      std::string_view tool_name, const ToolArgumentTypeContracts& contracts) {
     constexpr std::string_view kParamOpen  = "<parameter=";
@@ -189,8 +201,25 @@ bool parse_parameter(std::string_view inner, std::size_t& pos, Json& args,
             args[key] = value;
         } else {
             Json parsed = Json::parse(value, nullptr, false);
-            if (parsed.is_discarded()) { return false; }
-            args[key] = std::move(parsed);
+            // A typed parameter whose value will not parse used to discard the
+            // ENTIRE call, and the raw <tool_call> markup was handed back as prose
+            // -- which a client renders as chat text, so the user sees XML and the
+            // tool never runs. Declaring a schema therefore made the parser more
+            // brittle than declaring nothing, since the contract-free branch above
+            // already degrades to the raw string.
+            //
+            // Pass the value through instead and let the client decide. It can
+            // reject an argument of the wrong type, retry, or repair it; it can do
+            // nothing at all with markup in a chat bubble. The call is
+            // structurally complete here -- unterminated and malformed BLOCKS
+            // still fall back, because those may be arguments the model never
+            // finished writing.
+            if (parsed.is_discarded()) {
+                note_degraded_parameter(tool_name, key, value.size());
+                args[key] = value;
+            } else {
+                args[key] = std::move(parsed);
+            }
         }
     }
     pos = value_end + kParamClose.size();
