@@ -111,6 +111,24 @@ block-key plane, plus the four raw keys and positions of the block currently bei
 the same represented result because a completed consecutive block is immutable. Selection uses
 FP32 scores and stable descending order; an exact score tie retains the lower block ID.
 
+Decode evaluates the selected-block attention through the `selected_block_attention` Op, shared
+by target decode and MTP. Each query head partitions its visible tokens across 16 thread blocks;
+four warps per block form FP32 online-softmax statistics and value numerators using coalesced
+feature loads. A second kernel combines the partitions by their maxima and denominators before
+the BF16 output cast. Empty selections with no causal tail produce exact zero. The temporary
+partial buffer is owned by the caller's workspace, included in both decode and MTP capacity
+planning, and retains stable addresses for CUDA Graph replay. This changes the arithmetic
+association, not the selected token set or persistent cache state.
+
+The default prefill route uses the same Op with one page-table row shared across its query tokens.
+Each thread block processes the 12 query heads sharing a KV head. Its 64-token K tile is dead
+after the tensor-core query/key products, so V staging reuses that shared allocation after a
+block-wide barrier. A second barrier completes V staging before value accumulation; the final
+tile barrier protects the next K overwrite. Query/key products, softmax, and weighted-value
+accumulation retain FP32 accumulators, with BF16 input staging and final output storage. The
+physical storage reuse reduces static shared memory from 77,824 to 45,056 bytes without changing
+the attention formula or introducing another device workspace.
+
 ## 5. Mixture of experts
 
 The router computes a 512-way FP32 softmax, selects the top 10 probabilities and renormalizes them
@@ -205,6 +223,14 @@ Continuation checkpoint slots begin after the complete active ring. A private ow
 its endpoint and optional TurnClosure rewrite. Admission matches only the exact checkpoint offered
 by the Engine. Consuming either checkpoint transfers its state to the active lane and releases
 the complete old owner; sibling-session retention preserves and protects both checkpoints.
+Admission includes physical checkpoint capacity as well as KV capacity. Each admitted request
+that publishes a continuation reserves its endpoint and, when planned and the pool has at least
+two slots, its TurnClosure rewrite, after planned eviction and source consumption. The pressure
+planner accounts for both reservations, so a full pool cannot silently suppress the rewrite needed
+by thinking-enabled follow-up requests. Idle lanes reserve none. Capture uses the lane's reserved
+rewrite slot; skipping capture releases it. Finish publishes the endpoint and releases unused
+reservations, while cancellation returns both reservations. A one-slot pool retains endpoint-only
+behavior.
 
 With `preserve_thinking=false`, a new real user message removes reasoning from earlier
 assistant messages in the preceding tool-call sequence. Both the latest rolling rewrite and

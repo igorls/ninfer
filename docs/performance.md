@@ -100,6 +100,249 @@ CPU bottleneck. Root TTFT was effectively unchanged: about 4.8 seconds at 33K to
 host-exposure bucket included those waits and must not be interpreted as CPU execution
 or GPU idle time.
 
+### Flash-Next phase profiling: September 6, 2026
+
+Nsight Systems 2026.1.3 on the RTX PRO 6000 (188 SMs, 128 MiB L2,
+advertised memory bandwidth 1.792 TB/s), driver 596.86, CUDA 13.3, Windows
+Release build. This campaign profiles Flash-Next alone; it is not a cross-model
+comparison. The mixed artifact uses NVFP4 routed experts, FP8 attention projections,
+and a BF16 output head. Runtime settings: concurrency capacity eight, one active
+request, 262,144 maximum context, 655,360 KV tokens, 8,192-token prefill chunks,
+FP8 KV, BF16 GDN state, Vision allocated, 3 GiB desktop reserve. MTP uses four drafts.
+
+The workload requests a Python LRU-cache implementation with expiration, locking,
+and tests, either alone or after a 125,000-character snapshot of engine source.
+Requests are greedy, seed 42, presence penalty zero, reasoning disabled, with 256
+output tokens. Unique leading labels ensure root admission; every request asserts
+zero cached tokens and the complete output budget. A short and long eight-token
+request warm the relevant routes. Two untraced observations per length establish
+the baseline; collection is stopped during those observations, though the process
+is still launched through Nsight. Label differences can change generated content
+and MTP acceptance, so this is not an exact-output profiler-overhead experiment.
+
+| Context | Ordinary decode tok/s | MTP4 decode tok/s | Ordinary root TTFT | MTP4 root TTFT |
+|---|---:|---:|---:|---:|
+| 54 tokens | 132.56–132.59 | 168.20–187.29 | 59–60 ms | 64–103 ms |
+| 30,293 tokens | 65.76–65.80 | 116.80–123.29 | 4.379–4.380 s | 4.320–4.325 s |
+
+Decode rates use 255 post-first-token outputs divided by the logged decode time.
+The `timings_seconds.prefill` field was zero even on the long requests; it is not
+a usable phase timer for this route. Prefill attribution below uses NVTX ranges.
+
+Software CUDA tracing from process start, with graph-node tracing enabled, captures
+the complete ordinary and MTP decode kernels. An initial hardware trace started
+after graph creation recorded graph launches but omitted decode nodes; it is not
+used for decode conclusions. The measured requests are `generate` ranges 3 and 4
+in the complete traces, after startup and the two warm-up requests.
+
+| Phase | NVTX wall time | Kernel-active fraction of wall | Largest kernel costs (% of summed kernel time) |
+|---|---:|---:|---|
+| Ordinary short decode, 255 rounds | 1.939 s | 94.3% | FP8 GDN input 13.7%; MoE gate/up 12.2%; BF16 output head 10.9%; hyper norm 10.3% |
+| Ordinary 30K decode, 255 rounds | 3.877 s | 96.2% | sparse attention 53.4%; FP8 GDN input 6.8%; MoE gate/up 6.0% |
+| MTP4 short decode, 78 rounds | 1.327 s | 94.9% | BF16 output head GEMV 19.1% plus verification head 4.8%; MoE gate/up + down 26.7% |
+| MTP4 30K decode, 84 rounds | 2.241 s | 95.4% | sparse attention 35.1%; both output-head paths 15.3%; MoE gate/up + down 17.1% |
+| Ordinary 30K prefill | 4.283 s | 96.8% | sparse-attention MMA 35.6%; MoE gate/up MMA 19.9%; MoE down MMA 7.7% |
+
+The MTP long-prefill breakdown is similar. Graph-launch correlation IDs separate
+drafts from the final target launch in each MTP round: draft kernels account for
+25.6% and 26.2% of decode GPU kernel time at short and long context, respectively.
+The remaining graph kernel time is target verification. The traced requests accept
+177/308 and 171/336 drafts and emit 255 decode tokens in 78 and 84 rounds.
+
+These measurements distinguish three limits:
+
+- **Long-context decode is primarily limited by the sparse-attention implementation.**
+  `sparse_attention_kernel` takes 0.182 s at short context and 1.990 s at 30K,
+  explaining about 93% of the 1.937-second increase in ordinary decode time.
+  Its single-token launch is 24 CTAs of 256 threads, one CTA per query head, on
+  188 SMs. That permits at most 24 simultaneously participating SMs for this kernel.
+  Each CTA walks selected-token chunks and performs a serial 256-feature dot
+  product per thread, with block-wide reductions and barriers. Splitting selected
+  tokens across more CTAs, with a stable softmax merge, is the first implementation
+  direction to qualify. MTP verification launches up to five token rows together,
+  but the same kernel remains the largest long-context cost.
+- **The output head is already consistent with a bandwidth limit.** Its
+  `[248320,2560]` BF16 matrix is 1.271 GB, versus 128 MiB L2. The approximately
+  0.779 ms GEMV implies a one-pass weight rate of 1.63 TB/s, about 91% of advertised
+  device bandwidth. This is an estimate from known weight bytes and measured time,
+  not a DRAM-counter measurement. MTP pays this cost repeatedly for draft tokens;
+  a large improvement here would likely require reducing transferred head bytes
+  or head evaluations, with separate numerical and acceptance qualification.
+- **Prefill needs attention and MoE work; CPU launch cleanup has a small ceiling.**
+  The QSA and two MoE MMA kernels together consume 63.1% of prefill kernel time.
+  Across measured phases, kernels occupy 94–97% of wall time. This is GPU activity,
+  not SM utilization: a 24-CTA kernel can keep the timeline busy while leaving most
+  SMs unused. CUDA API duration also includes queue backpressure and device waits;
+  it must not be added to GPU duration or described as pure CPU work.
+
+As an attribution bound, halving only the long-context attention kernel would
+improve ordinary decode by about 1.35x and MTP decode by about 1.20x, if all other
+costs remain fixed. Halving only the dominant prefill attention kernel gives about
+1.21x. These are Amdahl estimates, not achieved speedups. No inference implementation
+was changed by this profiling campaign.
+
+The initial Nsight Compute attempt failed with `ERR_NVGPUCTRPERM`; the elevated
+follow-up below resolves counter access. Neither campaign establishes an absolute
+hardware throughput ceiling. Concurrent-request throughput is outside this C=1 sample.
+The separately reported alternating-conversation retention defect is excluded by
+the root-only workload and remains unresolved.
+
+Local evidence is under `profiles/nsys/flash-next-20260906/`: `off-full.nsys-rep`,
+`mtp-full.nsys-rep`, their SQLite exports and phase summaries, request JSONL, and
+the source-context snapshot. Reproduction helpers are
+`tools/bench/profile_flash_next.py --context-file <snapshot> --label <unique-run>
+--output <json>` and `tools/bench/nsys_phase_summary.py <trace.sqlite>`.
+Launch the isolated server through Nsight with
+`--trace=cuda-sw,nvtx --cuda-graph-trace=node --sample=none --cpuctxsw=none`,
+capture from process start, warm both lengths, then issue the measured requests.
+Export with `nsys export --type=sqlite`. The summary tool rejects traces with
+decode ranges but no decode kernel nodes.
+
+#### Elevated hardware counters
+
+Nsight Compute 2026.2.0 ran elevated on the same GPU and artifact. The public CLI
+used the same source snapshot, 30,301 prompt tokens, eight generated tokens, zero
+prefix reuse, a 32,768-token context/KV capacity, 8,192-token prefill chunks, FP8 KV,
+BF16 GDN state, Vision allocations, and ordinary decoding. This smaller C=1
+allocation preserves the relevant operator shapes while leaving profiler headroom;
+it is not the production concurrency/capacity configuration.
+
+Kernel replay attempted to back up the model's memory and exceeded temporary disk
+capacity. The successful capture uses application replay, graph-node profiling,
+NVTX phase filters, and two samples per launch configuration. Ten application
+passes collected the selected counters. Cache flushing and clock control are
+disabled: the application recreates its own cache state on each replay, and timing
+variation remains possible. These are representative operator samples, not a new
+end-to-end speed measurement.
+
+| Prefill kernel | Achieved occupancy | Tensor-pipe activity | DRAM throughput (% peak) | L2 sector hit rate |
+|---|---:|---:|---:|---:|
+| QSA, 8,192-token chunk | 8.33% | 1.54–1.55% | 0.44–0.45% | 98.56% |
+| QSA, final 5,725-token chunk | 8.33% | 1.46–1.47% | 0.45% | 98.52–98.53% |
+| MoE gate/up | 16.21% | 5.59–5.64% | 13.56–14.24% | 84.01–84.17% |
+| MoE down | 24.26–24.62% | 7.63–8.02% | 28.94–33.31% | 72.05–72.47% |
+
+Occupancy is the active-warp percentage relative to the SM's supported warp
+capacity; it is not the fraction of SMs in use. Tensor activity and DRAM throughput
+use the elapsed-time peak percentages reported by Nsight Compute. The requested
+`dram__bytes_read.sum` metric was unavailable; no transferred-byte total is inferred
+from it.
+
+The prefill QSA launch has 132 registers per thread and 77,824 bytes of static
+shared memory, plus 1,024 driver bytes. Shared memory limits it to **one 128-thread
+block per SM**, explaining the four active warps out of 48 and the measured 8.33%
+occupancy. Registers alone would permit three blocks. Smaller K/V staging tiles or
+a different staging schedule are concrete candidates to admit more blocks and
+hide latency; their extra loop/synchronization cost must be measured. The 98.5%
+L2 hit rate and sub-1% DRAM throughput show that device-memory bandwidth is not
+saturated in these attention samples.
+
+MoE gate/up likewise permits only one resident block because it allocates 92,416
+dynamic shared-memory bytes plus driver overhead. MoE down permits three blocks,
+also limited by shared memory. The measured eligible warps per scheduler cycle are
+approximately 0.087 for gate/up and 0.127–0.130 for down. Together with their low
+tensor activity, these favor investigation of staging, load latency and scheduling
+before treating either kernel as close to the tensor-compute ceiling.
+
+For decode, the initial graph-node capture returned only 6–7 microseconds and
+13,296 global-load requests per attention invocation, inconsistent with the
+long-context timeline. Those two records are excluded from decode conclusions;
+matching the kernel name and grid was insufficient to establish representative
+work. A separate application-replay capture disabled CUDA graphs, selected only
+the decode NVTX range, skipped the first 12 matching launches, and collected two
+attention invocations. It also completed ten replay passes.
+
+The eager samples take **648–653 microseconds**, matching the approximately
+650-microsecond production-trace mean. They execute the same sparse-attention
+kernel at grid `(24,1,1)` and block `(256,1,1)` and report:
+
+- SM throughput approximately **1.41%** and DRAM throughput **0.19%** of peak;
+- **16.67%** achieved active-warp occupancy, with only 24 blocks available for
+  188 SMs;
+- approximately **0.08 eligible warps per scheduler cycle**;
+- a long-scoreboard stall ratio of approximately **20.5 per issue-active**, versus
+  approximately **0.38** for barriers; these are profiler ratios, not percentages
+  of kernel wall time;
+- approximately **1.99 million global-load requests** and **7.15 sectors per
+  request**, with an L2 sector hit rate of **91.5–92.9%**.
+
+This combination supports insufficient parallel work and memory-dependency
+latency as the first decode problems to address. It does not support device-memory
+bandwidth saturation. The source's serial key dot products and strided key loads
+give a concrete mechanism to change: distribute feature work across lanes and
+selected-token work across blocks, then merge the partial softmax results. Reuse
+across the 12 query heads sharing a KV head is also worth qualifying, but repeated
+source-level loads must not be described as 12 times the DRAM traffic: caches can
+serve them. The selected-block attention implementation below qualifies the new
+arithmetic against an independent oracle and measures the Engine with graphs and MTP enabled.
+
+Local evidence: `profiles/ncu/flash-next-20260906/targeted-app.ncu-rep`, its raw CSV
+and details export, `decode-eager.ncu-rep` and its exports, `counter-summary.json`,
+and the exact argument vectors in the corresponding `*.argv.json` files.
+
+Operationally, the first production restoration failed its runtime-memory budget
+check. The shared KV pool was reduced from 737,280 to 589,824 tokens to restore
+service, retaining the 262,144 per-request context limit, concurrency eight, MTP4,
+and the 3 GiB desktop reserve. This reduces aggregate KV capacity; it is not a
+kernel optimization or a measured throughput improvement. The user subsequently restored
+737,280 tokens; the September 7 optimization measurements use that restored capacity.
+
+#### Selected-block attention optimization (September 7)
+
+The profiler-directed change replaces serial decode attention with a coalesced,
+16-partition softmax reduction and merge. Target decode and MTP share this Op and
+reserve its complete caller-owned workspace. The default prefill route reuses
+one shared-memory tile for K and then V, separated by synchronization. Its static
+shared memory falls from 77,824 to 45,056 bytes; FP8 compilation retains 132
+registers per thread and no local-memory allocation. This permits two blocks per
+SM under the measured hardware's resource limits; achieved occupancy was not
+remeasured for this candidate.
+
+Paired Engine runs used RTX PRO 6000 Blackwell, CUDA 13.3/sm_120a, the mixed
+Flash-Next artifact, one active request with capacity for eight, a 262,144-token
+context limit, 737,280-token shared KV capacity, 8,192-token prefill chunks, FP8 KV,
+BF16 GDN state, Vision allocations, a 3 GiB desktop reserve, and CUDA graphs.
+Separate processes tested ordinary decoding and MTP4. Each process warmed both
+lengths with eight outputs, then ran two measured requests per length with 256
+outputs. The identical prompts contained 63 or 30,302 tokens. Every request
+confirmed zero prefix reuse. Rates use 255 post-first-token outputs divided by
+the logged decode time. These two-observation ranges are not confidence intervals.
+
+| Mode and context | Baseline decode tok/s | Optimized decode tok/s | Baseline root TTFT | Optimized root TTFT |
+|---|---:|---:|---:|---:|
+| Ordinary, short | 134.44–134.55 | 147.23–147.63 | 0.062–0.063 s | 0.062–0.063 s |
+| Ordinary, 30K | 67.08–67.14 | 132.34–133.22 | 4.302–4.304 s | 3.759–3.761 s |
+| MTP4, short | 167.92–175.79 | 171.78–175.49 | 0.065–0.066 s | 0.067 s |
+| MTP4, 30K | 118.70–122.01 | 168.50–176.85 | 4.333–4.339 s | 3.793–3.795 s |
+
+Ordinary long-context decode improves approximately 98%, and short-context
+ordinary decode approximately 10%. MTP long-context decode improves approximately
+43% by the means of these observations; short-context MTP shows no clear gain.
+MTP acceptance varies between runs, so these measurements do not establish a
+universal speculation speedup. Root TTFT falls approximately 13% for both long
+workloads. TTFT includes preparation, prefill, and first-token work; the existing
+Flash-Next `prefill` timing field remains zero and is not used as a phase measurement.
+An intermediate decode-only binary retained approximately 4.31–4.35 s long TTFT,
+isolating the later TTFT reduction to the prefill change.
+
+Qualification uses an independent FP64 full-softmax oracle over represented BF16
+and FP8 inputs, with a named normwise criterion, finite gross pointwise cap, and
+exact empty-output checks. Coverage includes permuted pages and selection order,
+causal boundaries, full 512-block selections, heterogeneous decode batches through
+eight, prefill through 128 query tokens, amplified logits, and replay with changed
+inputs. QSA integration tests pass for both cache formats and cache updates. The
+decode change also passes the full Text executor, including small-context
+workspace/capture checks and graph batches 1/2/4/8, continuation lifecycle, and CPU
+resource-manager tests. Independent standards and numerical reviews were completed;
+their workspace and contract findings were corrected.
+
+Local evidence is under `profiles/bench/flash-next-20260907/`: `summary.json`,
+paired request JSONL, numerical/integration logs, and compiled resource usage.
+The root request helper is `tools/bench/profile_flash_next.py`; exact server
+arguments are saved in each run's command JSON. These results describe the stated
+single-active-request workloads, not concurrent throughput or a general hardware
+ceiling.
+
 ### Cold host PLE and repeated-turn prefill
 
 On the same hardware and serving settings with MTP4 enabled, a root request containing

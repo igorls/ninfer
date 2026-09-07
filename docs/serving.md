@@ -104,7 +104,7 @@ The endpoint supports:
 - `temperature`, `top_p`, presence/frequency penalties, and signed integer `seed`;
 - the compatible `top_k` (`0..20`) and `min_p` (`0..1`) sampler extensions;
 - up to four non-empty stop strings, applied to both reasoning and answer output;
-- `n:1`, text-only `modalities`, and `response_format: {"type":"text"}`;
+- `n:1`, text-only `modalities`, and `response_format` types `text`, `json_object`, and `json_schema`;
 - non-streaming responses and server-sent event streams;
 - `stream_options.include_usage`;
 - non-strict function tools with `tool_choice` `auto`, `none`, or `allowed_tools` in `auto` mode,
@@ -116,8 +116,8 @@ The endpoint supports:
 - Assistant `reasoning_content` and `reasoning` history aliases.
 
 Options whose observable behavior the Engine cannot provide are rejected when they request that
-behavior. This includes JSON constrained output, nonzero `logit_bias`, requested log probabilities,
-audio/file input or audio output, `strict:true`, required or named tool choice,
+behavior. This includes nonzero `logit_bias`, requested log probabilities,
+audio/file input or audio output, strict function tools, required or named tool choice,
 `parallel_tool_calls:false` with enabled tools, explicit low/high image detail, web search,
 moderation, low/high verbosity, stored Chat Completions, and non-empty legacy `functions`.
 Each capability rejection identifies the affected field and the guarantee NInfer cannot provide.
@@ -337,7 +337,7 @@ wire response contains typed `output` Items.
 | `chat_template_kwargs.enable_thinking` | vLLM-dialect alias for the same option; conflicting values with top-level `enable_thinking` are rejected |
 | `chat_template_kwargs.preserve_thinking` | optional boolean controlling whether closed-turn reasoning remains in reconstructed prompts |
 | `preserve_thinking` | top-level alias for the same option; conflicting values are rejected |
-| `text.format` | omitted or `{"type":"text"}` only |
+| `text.format` | `text`, `json_object`, or flat `json_schema` format (see structured output below) |
 | `tools` | direct function definitions or namespace groups containing function definitions; see below |
 | `tool_choice` | `auto`, `none`, or function-only `allowed_tools` with mode `auto`; a namespaced selection carries both `namespace` and `name` |
 | `parallel_tool_calls` | `true` by default; `false` is accepted only when no effective tool is callable |
@@ -437,7 +437,7 @@ undeclared model output remains ordinary text. `allowed_tools` with mode `auto` 
 without changing declaration order, while `tool_choice:"none"` disables structured tool output even
 when the history contains earlier calls.
 
-NInfer does not execute functions or enforce JSON Schema through constrained decoding, so
+NInfer does not execute functions or constrain function arguments to their tool schema, so
 `strict:true`, required or named tool choice, hosted tools, remote MCP tools, and custom free-form
 tools are rejected. Deferred loading, output schemas, and caller restrictions that exclude direct
 invocation are also rejected because their semantics cannot be honored.
@@ -558,7 +558,7 @@ curl http://127.0.0.1:8080/v1/responses/input_tokens \
 ```
 
 Unsupported Create fields include Conversations, prompt templates, context management, hosted
-moderation, Structured Outputs/JSON mode, non-empty `include`, background execution, compaction,
+moderation, non-empty `include`, background execution, compaction,
 files/audio, and OpenAI-hosted/MCP/custom tools. These are compatibility boundaries, not silently
 accepted placeholders.
 
@@ -828,6 +828,11 @@ by decode rounds during the same interval. The
 owner degradation and eviction, checkpoint drop, pressure search, budget exhaustion, maximal fallback, and historical-fork
 counters as interval deltas; `occupancy` and `last_selection` are end-of-interval gauges. Materialization predictions are
 request-owned and appear only on the corresponding `request_done` event.
+For Programs with a dedicated checkpoint pool, `occupancy.checkpoint_slots_occupied` and
+`checkpoint_slots_capacity` expose physical checkpoint saturation separately from active recurrent
+state and logical catalog entries; both are `null` when unavailable. `checkpoint_slots_reserved`
+counts endpoint slots owned by admitted requests, included in occupied slots. Flash-Next reserves
+one endpoint per admitted cache-enabled request and uses pressure eviction when none is available.
 `pressure.searches` counts plans accepted into Program resource transactions, including a transaction that later ends in
 request-local abort; committed victim counters likewise report the resulting stable cache changes.
 
@@ -916,8 +921,62 @@ a following compatible turn can reuse it. Output-limit and context-capacity fini
 `length`/ `max_tokens`; ordinary model or string stops map to `stop`/ `end_turn`.
 
 Function tools are rendered into the model prompt and generated calls are parsed into protocol
-responses. NInfer does not execute tools and does not enforce client JSON Schema through constrained
-decoding.
+responses. NInfer does not execute tools. Structured response schemas constrain answer text;
+they do not enforce tool argument schemas.
+
+### Structured output
+
+The Engine constrains answer tokens before greedy selection or stochastic top-k/top-p sampling.
+Chat Completions accepts `response_format: {"type":"json_object"}` for a JSON object, or:
+
+```json
+{"response_format":{"type":"json_schema","json_schema":{"name":"result","strict":true,"schema":{"type":"object","properties":{"status":{"type":"string","enum":["confirmed","unknown"]}},"required":["status"],"additionalProperties":false}}}}
+```
+
+Responses uses the flat equivalent under `text.format`:
+`{"type":"json_schema","name":"result","schema":{...}}`.
+Anthropic Messages accepts `output_config.format: {"type":"json_schema","schema":{...}}`.
+The C++ interface is `ExecutionOptions::structured_output`, with `JsonObject` or `JsonSchema`
+and a serialized schema. Schema constraints apply regardless of the optional `strict` flag.
+
+Supported assertions are explicit types (including nullable type arrays), `properties`, `required`,
+`additionalProperties`, `items`, `prefixItems`, `minItems`, `maxItems`, numeric bounds, `enum`,
+`const`, `anyOf`, and unescaped document-local `$ref` paths into `$defs`/`definitions`.
+Typed assertions require an explicit `type`, and required names must be declared in `properties`.
+Reference targets are validated recursively. `$ref` and `anyOf` cannot have sibling assertions;
+`enum` and `const` may additionally specify a matching type. Ordinary schema annotations are
+accepted. Unsupported assertions return HTTP 400 `unsupported_json_schema`; this includes
+`pattern`, string length bounds, `format`, `oneOf`, `allOf`, and `uniqueItems`.
+Unspecified `additionalProperties` retains its JSON Schema meaning (allowed).
+
+Reasoning remains separate and unconstrained; the answer grammar activates after `</think>`.
+An end token is allowed only after a complete matching value. Output/context limits and
+cancellation can still produce an incomplete JSON prefix: inspect the finish reason before
+parsing. Streaming chunks are prefixes and are not individually complete JSON documents.
+Structured output cannot be combined with active function tools, custom stops, raw output,
+or special-token preservation. Prompt instructions remain useful for choosing meaningful values;
+format enforcement does not establish factual or legal correctness.
+
+Compiled grammars are cached per frontend. Each request owns fresh matcher state, including
+requests that reuse a prompt prefix. Flash-Next MTP verification uses a mask for each proposed
+prefix and commits only accepted target tokens. The Qwen3.6 family keeps its configured speculative
+backend state while using zero draft extent for constrained lanes; unconstrained lanes retain
+their normal speculation. Masks occupy stable Program-owned device storage for graph replay.
+
+Qualification uses `ninfer_structured_output_test`, the three protocol schema tests, and the
+CUDA `ninfer_sampling_test`/`ninfer_speculative_round_test`. The live runner
+`tools/bench/structured_output_smoke.py --api-key-file PATH --out NEW_DIRECTORY` checks responses
+with an independent `jsonschema` Draft 2020-12 validator, including streaming, concurrent schemas,
+reasoning boundaries, and explicit length finishes. It uses the already resident model and does
+not restart or switch the server.
+
+Qualification on 2026-09-07 (RTX PRO 6000 Blackwell, CUDA 13.3) passed all six focused tests
+and 21 live checks each on Flash-Next mixed quantization and Qwen3.8-27B NVFP4 with MTP4.
+The shared-runtime run additionally confirmed a forced reasoning close at a 16-token budget.
+Live coverage includes mixed constrained/unconstrained lanes and reused prompt prefixes.
+Other artifacts and DFlash were not tested end to end in this qualification.
+Local results are under `profiles/bench/structured-output-flash-final/` and
+`profiles/bench/structured-output-qwen27-live/`.
 
 Prompt-token usage includes chat-template and expanded media tokens. Generated-token usage comes
 from accepted output token IDs, including a stop token whose decoded text may be withheld.
