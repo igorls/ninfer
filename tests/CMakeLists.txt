@@ -57,6 +57,13 @@ function(ninfer_add_fused_linear_test name source common)
 endfunction()
 
 # Artifact framing and model-independent runtime contracts.
+ninfer_add_test(ninfer_structured_output_test SOURCES test_structured_output.cpp LIBRARIES ninfer_core)
+ninfer_add_op_test(ninfer_selected_block_attention_test
+  SOURCES ops/softmax_attention/test_selected_block_attention.cpp
+  LIBRARIES ninfer_ops)
+add_test(NAME ninfer_selected_block_attention_prefill_test
+  COMMAND ninfer_selected_block_attention_test --prefill-only)
+set_tests_properties(ninfer_selected_block_attention_prefill_test PROPERTIES SKIP_RETURN_CODE 77)
 ninfer_add_test(ninfer_artifact_reader_test
   SOURCES test_ninfer_artifact_reader.cpp
   LIBRARIES ninfer_artifact)

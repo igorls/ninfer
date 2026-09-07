@@ -145,7 +145,7 @@ int test_standard_field_policy() {
     rejected("logit_bias", Json{{"12", 1}}, "logit_bias_not_supported");
     rejected("logprobs", true, "logprobs_not_supported");
     rejected("top_logprobs", 2, "logprobs_not_supported");
-    rejected("response_format", Json{{"type", "json_schema"}}, "response_format_not_supported");
+    rejected("response_format", Json{{"type", "json_schema"}}, "invalid_response_format");
     rejected("modalities", Json::array({"text", "audio"}), "modality_not_supported");
     rejected("web_search_options", Json::object(), "web_search_not_supported");
     rejected("moderation", Json::object(), "moderation_not_supported");
@@ -755,6 +755,18 @@ int test_common_objects() {
 
 int main() {
     int failures = 0;
+    {
+        Json body{{"model", "qwen"}, {"messages", Json::array({Json{{"role", "user"}, {"content", "Return JSON"}}})},
+                  {"response_format", Json{{"type", "json_object"}}}};
+        failures += check(parse(body).generation.structured_output.kind == ninfer::StructuredOutputKind::JsonObject,
+                          "JSON object format reaches generation request");
+        body["response_format"] = Json::parse(R"({"type":"json_schema","json_schema":{"name":"result","strict":true,"schema":{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}}})");
+        failures += check(parse(body).generation.structured_output.kind == ninfer::StructuredOutputKind::JsonSchema,
+                          "JSON schema format reaches generation request");
+        body["response_format"]["json_schema"]["schema"]["unevaluatedProperties"] = false;
+        failures += check(api_error([&] { (void)parse(body); }).code == "unsupported_json_schema",
+                          "unsupported schema keyword is rejected rather than ignored");
+    }
     failures += test_request_envelope_and_sampling();
     failures += test_standard_field_policy();
     failures += test_constrained_decoding_extensions();

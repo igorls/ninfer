@@ -704,8 +704,15 @@ int test_explicit_rejections() {
     value["text"] = Json{{"format", Json{{"type", "json_schema"}}}};
     failures += check(api_code([&] {
                           (void)parse_openai_responses_create_request(value, limits());
-                      }) == "structured_outputs_not_supported",
-                      "structured output is rejected explicitly");
+                      }) == "invalid_response_format",
+                      "structured output without schema is rejected explicitly");
+    value["text"]["format"] = Json{{"type", "json_schema"}, {"name", "result"}, {"strict", true},
+                                    {"schema", Json{{"type", "object"}}}};
+    failures += check(parse_openai_responses_create_request(value, limits()).prompt.generation.structured_output.kind ==
+                      ninfer::StructuredOutputKind::JsonSchema, "Responses schema reaches generation request");
+    const auto formatted_request = parse_openai_responses_create_request(value, limits());
+    failures += check(make_openai_response_object("resp_schema", 1, formatted_request, {}, sample_outcome()).body["text"]["format"] == value["text"]["format"],
+                      "Responses aggregate and terminal format preserves schema descriptor");
 
     value               = base;
     value["background"] = true;

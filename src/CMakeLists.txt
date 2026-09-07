@@ -38,6 +38,8 @@ add_library(ninfer_core STATIC
 ninfer_internal_includes(ninfer_core)
 ninfer_cuda_archive(ninfer_core)
 target_link_libraries(ninfer_core PUBLIC CUDA::cudart CUDA::nvtx3 Threads::Threads)
+target_sources(ninfer_core PRIVATE runtime/contract/structured_output.cpp)
+target_link_libraries(ninfer_core PRIVATE ninfer_xgrammar)
 # SparseDeviceBuffer uses the CUDA driver API (cuMemCreate/cuMemMap) to vary physical
 # backing under a fixed address range; the runtime API has no equivalent.
 target_link_libraries(ninfer_core PUBLIC CUDA::cuda_driver)
@@ -96,6 +98,7 @@ add_library(ninfer_ops STATIC
   ops/launcher/target_logprobs.cu
   ops/launcher/vision_pos_embed.cu
   # Softmax Attention and KV-cache state transitions.
+  ops/softmax_attention/selected_block/selected_block_attention.cu
   ops/softmax_attention/dense/causal_cache/causal_softmax_attention.cpp
   ops/softmax_attention/dense/causal_cache/small_t.cu
   ops/softmax_attention/dense/causal_cache/small_t_fp8.cu

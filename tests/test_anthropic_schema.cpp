@@ -173,8 +173,11 @@ int test_envelope_and_field_policy() {
                       "negative top_k is still rejected");
     body                  = base_request();
     body["output_config"] = Json{{"format", Json{{"type", "json_schema"}}}};
-    failures += check(api_code([&] { (void)parse(body); }) == "output_config_format_not_supported",
-                      "structured output was silently downgraded");
+    failures += check(api_code([&] { (void)parse(body); }) == "invalid_response_format",
+                      "structured output without schema was accepted");
+    body["output_config"]["format"] = Json{{"type", "json_schema"}, {"schema", Json{{"type", "object"}}}};
+    failures += check(parse(body).generation.structured_output.kind == ninfer::StructuredOutputKind::JsonSchema,
+                      "Anthropic output schema reaches generation request");
     body              = base_request();
     body["container"] = "container_1";
     failures += check(api_code([&] { (void)parse(body); }) == "container_not_supported",

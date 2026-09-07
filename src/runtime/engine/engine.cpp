@@ -432,9 +432,18 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
     }
     if (prompt.impl_ == nullptr) { throw std::invalid_argument("PreparedPrompt is empty"); }
 
+    const StructuredOutputOptions structured_output = options.execution.structured_output;
+    if (structured_output.kind != StructuredOutputKind::Text &&
+        (!options.stop.strings.empty() || !options.stop.token_ids.empty() || options.output.raw ||
+         options.output.preserve_special_tokens)) {
+        throw std::invalid_argument("structured output cannot be combined with custom stops or raw/special-token output");
+    }
     runtime::ResolvedRequestOptions resolved_options = resolve_request_options(
         impl_->sampling_defaults, prompt.impl_->sampling_mode, std::move(options));
     const ResolvedSamplingParameters resolved_sampling = resolved_options.execution.sampling;
+    resolved_options.execution.output_constraint = std::visit(
+        [&](const auto& target) { return target->loaded->frontend.compile_output_constraint(structured_output); },
+        impl_->active);
 
     const PromptSummary prompt_summary = prompt.impl_->summary;
     if (prompt_summary.prompt_tokens > impl_->options.max_context) {

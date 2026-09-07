@@ -1,6 +1,7 @@
 #include "targets/qwen3_8_flash_next/impl/qsa_attention_kernels.h"
 
 #include "core/device.h"
+#include "ninfer/ops/selected_block_attention.h"
 #include "ops/common/math.cuh"
 #include "ops/common/mma.cuh"
 #include "ops/common/rowsplit_mma.cuh"
@@ -31,8 +32,6 @@ __device__ __forceinline__ __nv_fp8_e4m3 to_storage<__nv_fp8_e4m3>(__nv_bfloat16
     return __nv_fp8_e4m3(__bfloat162float(x));
 }
 
-__device__ __forceinline__ float to_float(__nv_bfloat16 x) { return __bfloat162float(x); }
-__device__ __forceinline__ float to_float(__nv_fp8_e4m3 x) { return static_cast<float>(x); }
 
 template <typename StorageT>
 struct VectorKV;
@@ -202,109 +201,6 @@ __device__ int selected_token(int ordinal, int selected_count, int complete_bloc
     return complete_blocks * 4 + ordinal - selected_tokens;
 }
 
-template <typename StorageT>
-__global__ void sparse_attention_kernel(
-    const __nv_bfloat16* __restrict__ query, const std::int32_t* __restrict__ token_indices,
-    const std::int32_t* __restrict__ table_rows, const std::int32_t* __restrict__ selected_blocks,
-    const std::int32_t* __restrict__ selected_counts, const std::int32_t* __restrict__ block_tables,
-    int logical_pages, const StorageT* __restrict__ key_pages,
-    const StorageT* __restrict__ value_pages, __nv_bfloat16* __restrict__ output) {
-    __shared__ float scores[256];
-    __shared__ float reduction[256];
-    const int dim             = static_cast<int>(threadIdx.x);
-    const int head            = static_cast<int>(blockIdx.x);
-    const int batch           = static_cast<int>(blockIdx.y);
-    const int kv_head         = head / 12;
-    const int token_index     = token_indices[batch];
-    const int complete_blocks = (token_index + 1) / 4;
-    const int tail_count      = (token_index + 1) & 3;
-    const int selected_count  = selected_counts[batch];
-    const int total           = selected_count * 4 + tail_count;
-    const auto* selected = selected_blocks + static_cast<std::int64_t>(batch) * kSelectedBlocks;
-    const auto* q =
-        query + static_cast<std::int64_t>(batch) * kQueryHeads * kHeadDim + head * kHeadDim;
-    float accumulator = 0.0F;
-    float running_max = -__int_as_float(0x7F800000);
-    float running_sum = 0.0F;
-
-    for (int start = 0; start < total; start += 256) {
-        const int count = min(256, total - start);
-        float score     = -__int_as_float(0x7F800000);
-        if (dim < count) {
-            const int token =
-                selected_token(start + dim, selected_count, complete_blocks, selected);
-            const int logical_page = token / kPageTokens;
-            const int page_offset  = token % kPageTokens;
-            const int physical_page =
-                block_tables[table_rows[batch] * logical_pages + logical_page];
-            const auto* cache_key =
-                key_pages +
-                ((static_cast<std::int64_t>(physical_page) * kKvHeads + kv_head) * kPageTokens +
-                 page_offset) *
-                    kHeadDim;
-            score = 0.0F;
-            for (int feature = 0; feature < kHeadDim; ++feature) {
-                score =
-                    fmaf(__bfloat162float(q[feature]), to_float(cache_key[feature]), score);
-            }
-            score *= kScale;
-        }
-        scores[dim]    = score;
-        reduction[dim] = score;
-        __syncthreads();
-        for (int stride = 128; stride > 0; stride >>= 1) {
-            if (dim < stride) { reduction[dim] = fmaxf(reduction[dim], reduction[dim + stride]); }
-            __syncthreads();
-        }
-        const float chunk_max = reduction[0];
-        // Every thread must have read reduction[0] before thread 0 overwrites it below; without
-        // this barrier a late warp reads a probability instead of the max (intermittent, one
-        // (head, token) output per hit).
-        __syncthreads();
-        const float probability = dim < count ? expf(scores[dim] - chunk_max) : 0.0F;
-        scores[dim]             = probability;
-        reduction[dim]          = probability;
-        __syncthreads();
-        for (int stride = 128; stride > 0; stride >>= 1) {
-            if (dim < stride) { reduction[dim] += reduction[dim + stride]; }
-            __syncthreads();
-        }
-        const float chunk_sum   = reduction[0];
-        const float next_max    = fmaxf(running_max, chunk_max);
-        const float prior_scale = running_sum == 0.0F ? 0.0F : expf(running_max - next_max);
-        const float chunk_scale = expf(chunk_max - next_max);
-        float chunk_value       = 0.0F;
-        for (int local = 0; local < count; ++local) {
-            const int token =
-                selected_token(start + local, selected_count, complete_blocks, selected);
-            const int logical_page = token / kPageTokens;
-            const int page_offset  = token % kPageTokens;
-            const int physical_page =
-                block_tables[table_rows[batch] * logical_pages + logical_page];
-            const std::int64_t cache_index =
-                ((static_cast<std::int64_t>(physical_page) * kKvHeads + kv_head) * kPageTokens +
-                 page_offset) *
-                    kHeadDim +
-                dim;
-            chunk_value =
-                fmaf(scores[local], to_float(value_pages[cache_index]), chunk_value);
-        }
-        accumulator = accumulator * prior_scale + chunk_value * chunk_scale;
-        running_sum = running_sum * prior_scale + chunk_sum * chunk_scale;
-        running_max = next_max;
-        __syncthreads();
-    }
-    // total == 0 is reachable: the MTP head runs this kernel with selected_count == 0 (it never
-    // runs an indexer), so it attends only the tail of the current 4-token block and the loop body
-    // never executes when (token_index + 1) % 4 == 0. Unguarded that is 0/0 -> NaN, which reaches
-    // the draft logits and makes argmax return token 0 on one draft round in four. The backbone
-    // always has running_sum > 0 (its indexer selects at least one block once a block is complete),
-    // and the taken branch keeps the exact same division, so backbone output is bitwise unchanged.
-    const float attended_val = running_sum > 0.0F ? (accumulator / running_sum) : 0.0F;
-    output[static_cast<std::int64_t>(batch) * kQueryHeads * kHeadDim + head * kHeadDim + dim] =
-        __float2bfloat16_rn(attended_val);
-}
-
 __global__ void gate_output_kernel(const __nv_bfloat16* __restrict__ attended,
                                    const __nv_bfloat16* __restrict__ gate,
                                    __nv_bfloat16* __restrict__ gated, int elements) {
@@ -322,7 +218,8 @@ void flash_next_qsa_attention_launch(const Tensor& token_indices, const Tensor& 
                                      const Tensor& table_rows, const Tensor& selected_blocks,
                                      const Tensor& selected_counts, const Tensor& query_norm,
                                      const Tensor& key_norm, QsaAttentionCacheView cache,
-                                     FlashNextQsaAttentionWorkspace& scratch, cudaStream_t stream) {
+                                     FlashNextQsaAttentionWorkspace& scratch, WorkspaceArena& workspace,
+                                     cudaStream_t stream) {
     const int batch = token_indices.ne[0];
     prepare_query_kernel<<<dim3(kQueryHeads, batch), kHeadDim, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(scratch.projected.data),
@@ -333,31 +230,9 @@ void flash_next_qsa_attention_launch(const Tensor& token_indices, const Tensor& 
     CUDA_CHECK(cudaGetLastError());
     flash_next_qsa_attention_store_launch(scratch.projected, token_indices, mrope_positions,
         table_rows, 0, key_norm, cache, scratch.key, scratch.value, stream);
-    if (cache.key_pages.dtype == DType::FP8_E4M3FN) {
-        sparse_attention_kernel<__nv_fp8_e4m3><<<dim3(kQueryHeads, batch), kHeadDim, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(scratch.query.data),
-            static_cast<const std::int32_t*>(token_indices.data),
-            static_cast<const std::int32_t*>(table_rows.data),
-            static_cast<const std::int32_t*>(selected_blocks.data),
-            static_cast<const std::int32_t*>(selected_counts.data),
-            static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
-            static_cast<const __nv_fp8_e4m3*>(cache.key_pages.data),
-            static_cast<const __nv_fp8_e4m3*>(cache.value_pages.data),
-            static_cast<__nv_bfloat16*>(scratch.attended.data));
-        CUDA_CHECK(cudaGetLastError());
-    } else {
-        sparse_attention_kernel<__nv_bfloat16><<<dim3(kQueryHeads, batch), kHeadDim, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(scratch.query.data),
-            static_cast<const std::int32_t*>(token_indices.data),
-            static_cast<const std::int32_t*>(table_rows.data),
-            static_cast<const std::int32_t*>(selected_blocks.data),
-            static_cast<const std::int32_t*>(selected_counts.data),
-            static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
-            static_cast<const __nv_bfloat16*>(cache.key_pages.data),
-            static_cast<const __nv_bfloat16*>(cache.value_pages.data),
-            static_cast<__nv_bfloat16*>(scratch.attended.data));
-        CUDA_CHECK(cudaGetLastError());
-    }
+    ops::selected_block_attention(scratch.query, token_indices, table_rows,
+        selected_blocks, selected_counts, {cache.key_pages, cache.value_pages, cache.block_tables},
+        workspace, scratch.attended, stream);
     const int elements    = kQueryHeads * kHeadDim * batch;
     constexpr int threads = 256;
     gate_output_kernel<<<(elements + threads - 1) / threads, threads, 0, stream>>>(
@@ -711,195 +586,6 @@ constexpr int kMmaThreads   = 32 * kMmaWarps;
 constexpr int kMmaNTiles    = kMmaBN / 8;
 constexpr int kHeadsPerKv   = 12;
 
-template <typename StorageT>
-__global__ __launch_bounds__(kMmaThreads)
-void qsa_prefill_sparse_attention_mma_kernel(
-    const __nv_bfloat16* __restrict__ query, const std::int32_t* __restrict__ token_indices,
-    int table_row, const std::int32_t* __restrict__ selected_blocks,
-    const std::int32_t* __restrict__ selected_counts, const std::int32_t* __restrict__ block_tables,
-    int logical_pages, const StorageT* __restrict__ key_pages,
-    const StorageT* __restrict__ value_pages, __nv_bfloat16* __restrict__ output) {
-    using ops::cp_async_zfill;
-    using ops::cp_commit;
-    using ops::cp_wait;
-    using ops::ldmatrix_x2;
-    using ops::ldmatrix_x4;
-    using ops::mma_bf16;
-    using ops::smem_addr;
-    using ops::detail::gemm_swz64;
-    using Cache = ops::Cache;
-
-    __shared__ __align__(16) __nv_bfloat16 Qs[kMmaHeads * kHeadDim];
-    __shared__ __align__(16) __nv_bfloat16 Ks[kMmaBN * kHeadDim];
-    __shared__ __align__(16) __nv_bfloat16 Vs[kMmaBN * kHeadDim];
-    __shared__ float s_scores[kMmaHeads * kMmaBN];
-
-    const int tid     = static_cast<int>(threadIdx.x);
-    const int warp    = tid >> 5;
-    const int lane    = tid & 31;
-    const int kv_head = static_cast<int>(blockIdx.x);
-    const int token   = static_cast<int>(blockIdx.y);
-    const int q0      = kv_head * kHeadsPerKv;
-
-    const int token_index     = token_indices[token];
-    const int complete_blocks = (token_index + 1) / 4;
-    const int tail_count      = (token_index + 1) & 3;
-    const int selected_count  = selected_counts[token];
-    const int total           = selected_count * 4 + tail_count;
-    const auto* selected      = selected_blocks + static_cast<std::int64_t>(token) * kSelectedBlocks;
-    const bool is_dense = (complete_blocks <= kSelectedBlocks && selected_count == complete_blocks);
-    const auto* block_table_row = block_tables + table_row * logical_pages;
-
-    const auto* q_base =
-        query + static_cast<std::int64_t>(token) * kQueryHeads * kHeadDim + q0 * kHeadDim;
-    for (int item = tid; item < kMmaHeads * (kHeadDim / 8); item += kMmaThreads) {
-        const int row = item / (kHeadDim / 8);
-        const int k8  = item - row * (kHeadDim / 8);
-        auto* dst     = &Qs[row * kHeadDim + gemm_swz64(row, k8 * 8)];
-        const bool valid = row < kHeadsPerKv;
-        const __nv_bfloat16* src = q_base + (valid ? row : 0) * kHeadDim + k8 * 8;
-        cp_async_zfill<16, Cache::cg>(dst, src, valid ? 16 : 0);
-    }
-    cp_commit();
-    cp_wait<0>();
-    __syncthreads();
-
-    float acc[3][8] = {};
-    float running_max[3] = {-__int_as_float(0x7F800000), -__int_as_float(0x7F800000),
-                            -__int_as_float(0x7F800000)};
-    float running_sum[3] = {};
-
-    const int a_mat    = lane >> 3;
-    const int a_rin    = lane & 7;
-    const int a_rowoff = a_rin + ((a_mat & 1) << 3);
-    const int a_coloff = (a_mat >> 1) << 3;
-    const int b_rin    = lane & 7;
-    const int b_koff   = ((lane >> 3) & 1) << 3;
-    const int arow     = a_rowoff;
-
-    for (int start = 0; start < total; start += kMmaBN) {
-        const int count = min(kMmaBN, total - start);
-        for (int item = tid; item < kMmaBN * (kHeadDim / 8); item += kMmaThreads) {
-            const int row = item / (kHeadDim / 8);
-            const int k8  = item - row * (kHeadDim / 8);
-            auto* kdst    = &Ks[row * kHeadDim + gemm_swz64(row, k8 * 8)];
-            auto* vdst    = &Vs[row * kHeadDim + k8 * 8];
-            const bool valid = row < count;
-            int cand = 0;
-            if (valid) {
-                cand = is_dense ? (start + row)
-                                : selected_token(start + row, selected_count, complete_blocks,
-                                                 selected);
-            }
-            const int phys = valid ? block_table_row[cand / kPageTokens] : 0;
-            const std::int64_t kv_off =
-                ((static_cast<std::int64_t>(phys) * kKvHeads + kv_head) * kPageTokens +
-                 (valid ? (cand % kPageTokens) : 0)) *
-                    kHeadDim +
-                k8 * 8;
-            stage_kv_vector(kdst, key_pages + kv_off, valid);
-            stage_kv_vector(vdst, value_pages + kv_off, valid);
-        }
-        if constexpr (std::is_same_v<StorageT, __nv_bfloat16>) {
-            cp_commit();
-            cp_wait<0>();
-        }
-        __syncthreads();
-
-        float tile_score[kMmaNTiles][4] = {};
-        if (warp == 0) {
-#pragma unroll
-            for (int ki = 0; ki < kHeadDim / 16; ++ki) {
-                unsigned af[4];
-                ldmatrix_x4(af[0], af[1], af[2], af[3],
-                            smem_addr(&Qs[arow * kHeadDim + gemm_swz64(arow, ki * 16 + a_coloff)]));
-#pragma unroll
-                for (int nt = 0; nt < kMmaNTiles; ++nt) {
-                    unsigned bf[2];
-                    const int brow = nt * 8 + b_rin;
-                    ldmatrix_x2(bf[0], bf[1],
-                                smem_addr(&Ks[brow * kHeadDim + gemm_swz64(brow, ki * 16 + b_koff)]));
-                    mma_bf16(tile_score[nt][0], tile_score[nt][1], tile_score[nt][2],
-                             tile_score[nt][3], af[0], af[1], af[2], af[3], bf[0], bf[1]);
-                }
-            }
-            const int gid = lane >> 2;
-            const int lid = lane & 3;
-            const int r0  = gid;
-            const int r1  = r0 + 8;
-#pragma unroll
-            for (int nt = 0; nt < kMmaNTiles; ++nt) {
-                const int c0 = nt * 8 + 2 * lid;
-                const int c1 = c0 + 1;
-                auto store = [&](int head, int col, float value) {
-                    const float ninf = -__int_as_float(0x7F800000);
-                    s_scores[head * kMmaBN + col] =
-                        (head < kHeadsPerKv && col < count) ? value * kScale : ninf;
-                };
-                store(r0, c0, tile_score[nt][0]);
-                store(r0, c1, tile_score[nt][1]);
-                store(r1, c0, tile_score[nt][2]);
-                store(r1, c1, tile_score[nt][3]);
-            }
-        }
-        __syncthreads();
-
-#pragma unroll
-        for (int hi = 0; hi < 3; ++hi) {
-            const int head = warp + hi * kMmaWarps;
-            float hmax     = -__int_as_float(0x7F800000);
-            for (int col = lane; col < kMmaBN; col += 32) {
-                hmax = fmaxf(hmax, s_scores[head * kMmaBN + col]);
-            }
-#pragma unroll
-            for (int off = 16; off > 0; off >>= 1) {
-                hmax = fmaxf(hmax, __shfl_xor_sync(0xFFFFFFFF, hmax, off));
-            }
-            float hsum = 0.0F;
-            for (int col = lane; col < kMmaBN; col += 32) {
-                const float p = expf(s_scores[head * kMmaBN + col] - hmax);
-                s_scores[head * kMmaBN + col] = p;
-                hsum += p;
-            }
-#pragma unroll
-            for (int off = 16; off > 0; off >>= 1) {
-                hsum += __shfl_xor_sync(0xFFFFFFFF, hsum, off);
-            }
-            const float next_max    = fmaxf(running_max[hi], hmax);
-            const float prior_scale = running_sum[hi] == 0.0F ? 0.0F : expf(running_max[hi] - next_max);
-            const float chunk_scale = expf(hmax - next_max);
-#pragma unroll
-            for (int i = 0; i < 8; ++i) { acc[hi][i] *= prior_scale; }
-            running_sum[hi] = running_sum[hi] * prior_scale + hsum * chunk_scale;
-            running_max[hi] = next_max;
-
-            for (int col = 0; col < count; ++col) {
-                const float p = s_scores[head * kMmaBN + col] * chunk_scale;
-                const auto* v = &Vs[col * kHeadDim + lane * 8];
-#pragma unroll
-                for (int i = 0; i < 8; ++i) {
-                    acc[hi][i] = fmaf(p, __bfloat162float(v[i]), acc[hi][i]);
-                }
-            }
-        }
-        __syncthreads();
-    }
-
-#pragma unroll
-    for (int hi = 0; hi < 3; ++hi) {
-        const int head      = warp + hi * kMmaWarps;
-        const float inv_sum = 1.0F / running_sum[hi];
-        auto* out_ptr       = output + static_cast<std::int64_t>(token) * kQueryHeads * kHeadDim +
-                        (q0 + head) * kHeadDim + lane * 8;
-        __nv_bfloat16 out_bf16[8];
-#pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            out_bf16[i] = __float2bfloat16_rn(acc[hi][i] * inv_sum);
-        }
-        *reinterpret_cast<float4*>(out_ptr) = *reinterpret_cast<float4*>(out_bf16);
-    }
-}
-
 // G24: QK on all 4 warps (split 64-key N-tiles), PV as m16n8k16 over staged V.
 // BN stays 64 so the online-softmax tile and FP32 order match the G17 kernel.
 // P is rounded to BF16 after the FP32 rescale; that rounding is declared.
@@ -1240,10 +926,9 @@ void flash_next_qsa_attention_prefill_launch(
                     q_ptr, ti_ptr, table_row, sb_ptr, sc_ptr, bt_ptr, cache.block_tables.ne[0], k_ptr,
                     v_ptr, att_ptr);
             } else {
-                qsa_prefill_sparse_attention_mma_kernel<__nv_fp8_e4m3><<<dim3(kKvHeads, tokens), kMmaThreads, 0,
-                                                          stream>>>(
-                    q_ptr, ti_ptr, table_row, sb_ptr, sc_ptr, bt_ptr, cache.block_tables.ne[0], k_ptr,
-                    v_ptr, att_ptr);
+                ops::selected_block_attention(
+                    scratch.query, token_indices, table_row, selected_blocks, selected_counts,
+                    {cache.key_pages, cache.value_pages, cache.block_tables}, scratch.attended, stream);
             }
         } else {
             constexpr int kPrefillWarps   = 4;
@@ -1276,10 +961,9 @@ void flash_next_qsa_attention_prefill_launch(
                     q_ptr, ti_ptr, table_row, sb_ptr, sc_ptr, bt_ptr, cache.block_tables.ne[0], k_ptr,
                     v_ptr, att_ptr);
             } else {
-                qsa_prefill_sparse_attention_mma_kernel<__nv_bfloat16><<<dim3(kKvHeads, tokens), kMmaThreads, 0,
-                                                          stream>>>(
-                    q_ptr, ti_ptr, table_row, sb_ptr, sc_ptr, bt_ptr, cache.block_tables.ne[0], k_ptr,
-                    v_ptr, att_ptr);
+                ops::selected_block_attention(
+                    scratch.query, token_indices, table_row, selected_blocks, selected_counts,
+                    {cache.key_pages, cache.value_pages, cache.block_tables}, scratch.attended, stream);
             }
         } else {
             constexpr int kPrefillWarps   = 4;

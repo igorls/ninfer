@@ -7,6 +7,7 @@
 #include "core/host_kv_arena.h"
 #include "ninfer/ops/gdn_replay.h"
 #include "ninfer/ops/sampling.h"
+#include "runtime/contract/structured_output.h"
 #include "core/decode_graph.h"
 #include <ninfer/targets/qwen3_6/prepared_prompt.h>
 
@@ -182,6 +183,7 @@ struct RequestBasePlanImpl<NINFER_QWEN36_VARIANT> {
     std::uint32_t root_rebuild_tail_begin = 0;
     qwen3_6::PreparedContextCache context_cache;
     ops::SamplingConfig sampling;
+    std::shared_ptr<const runtime::CompiledOutputConstraint> output_constraint;
     std::uint32_t text_kv_page_entitlement    = 0;
     std::uint32_t backend_kv_page_entitlement = 0;
     std::shared_ptr<const qwen3_6::VisionControlPlan> vision_control_plan;
@@ -247,6 +249,7 @@ struct AdmissionCandidateImpl<NINFER_QWEN36_VARIANT> : ResourceCandidateState {
     std::vector<NINFER_QWEN36_RUNTIME_NS::CaptureGroup> capture_groups;
     std::vector<NINFER_QWEN36_RUNTIME_NS::CaptureGroup> shared_candidates;
     ops::SamplingConfig sampling;
+    std::shared_ptr<const runtime::CompiledOutputConstraint> output_constraint;
     std::uint32_t text_kv_page_entitlement    = 0;
     std::uint32_t backend_kv_page_entitlement = 0;
     runtime::LaneId destination{};
@@ -470,6 +473,7 @@ struct RequestControl {
     Lifecycle lifecycle = Lifecycle::Empty;
     PendingCandidate pending;
     ops::SamplingConfig sampling_host;
+    std::unique_ptr<runtime::OutputConstraintState> output_constraint;
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
     detail::PhysicalResources active_resources;
@@ -668,6 +672,7 @@ public:
     Tensor prefill_hidden;
     std::optional<Tensor> score_hidden;
     Tensor sampling_config;
+    Tensor constraint_masks;
     Tensor token_counts;
 
     std::vector<SequenceState> continuation_states;

@@ -938,6 +938,7 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
     }
     token_counts    = plan.persistent.token_counts.bind(backing);
     sampling_config = plan.persistent.sampling_config.bind(backing);
+    constraint_masks = plan.persistent.constraint_masks.bind(backing);
     active_continuations.fill(continuation_capacity);
     for (std::uint32_t lane = 0; lane < max_concurrency; ++lane) { lane_epochs[lane] = 1; }
     for (std::uint32_t index = 0; index < continuation_capacity; ++index) {
@@ -8841,6 +8842,7 @@ runtime::ExecutionTiming ProgramImplCore::append_forced_tokens(
             RequestControl& request  = requests[lane];
             const std::span<const TokenId> forced =
                 row_major_tokens.subspan(row * row_stride, row_stride);
+            if (request.output_constraint) { request.output_constraint->accept(forced); }
             const std::uint32_t base = sequence.execution_frontier;
             const std::uint32_t end  = base + row_stride;
             const auto started       = Clock::now();
@@ -9855,6 +9857,9 @@ void ProgramImplCore::start_sequence(std::uint32_t lane, SequenceState& sequence
             : speculative_backend == SpeculativeBackend::DFlash ? prompt_tokens
                                                                 : 0U;
         materialize_sequence_kv(sequence, prompt_tokens, backend_materialized);
+        request.output_constraint = request_plan.output_constraint
+            ? std::make_unique<runtime::OutputConstraintState>(request_plan.output_constraint, staged.prompt.starts_in_reasoning)
+            : nullptr;
         install_sampling(sequence, request, request_plan.sampling);
         sequence.rope_delta = staged.prompt.rope_delta;
         set_device_i32(io.rope_delta, sequence.rope_delta);
@@ -10105,6 +10110,9 @@ runtime::ExecutionTiming ProgramImplCore::resolve_pending_raw(
                     ? mtp_host_egress->licensed_tokens.data() + row * width
                     : dflash_host_egress->licensed_tokens.data() + row * width;
             sequence.ledger.insert(sequence.ledger.end(), token_base, token_base + committed);
+            if (request.output_constraint) {
+                request.output_constraint->accept(std::span<const TokenId>(token_base, committed));
+            }
             sequence.prefix_identity.append_generated(committed, sequence.rope_delta);
             sequence.prefix_digests.append_generated(
                 std::span<const TokenId>(token_base, committed), sequence.rope_delta);
@@ -11220,6 +11228,13 @@ void ProgramImplCore::install_sampling(SequenceState& sequence, RequestControl& 
     Tensor counts = token_counts.slice(1, static_cast<std::int32_t>(sequence.lane), 1)
                         .view({TextConfig::token_domain});
     request.sampling_host     = config;
+    if (request.output_constraint) {
+        const auto mask = request.output_constraint->next_mask();
+        Tensor row = constraint_masks.slice(1, static_cast<std::int32_t>(sequence.lane), 1);
+        if (mask.size_bytes() != row.bytes()) { throw std::logic_error("structured output mask shape mismatch"); }
+        CUDA_CHECK(cudaMemcpyAsync(row.data, mask.data(), mask.size_bytes(), cudaMemcpyHostToDevice, device.stream));
+        request.sampling_host.allowed_tokens = static_cast<const std::int32_t*>(row.data);
+    }
     request.speculative_stats = SpeculativeStats{
         .backend               = speculative_backend,
         .enabled               = speculative_backend != SpeculativeBackend::None,
@@ -11697,6 +11712,11 @@ ProgramImplCore::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             const StateImageSelectors selectors                 = state_selectors(sequence);
             ordinary_host_ingress->state_source_slots[row]      = selectors.source;
             ordinary_host_ingress->state_destination_slots[row] = selectors.destination;
+            if (request.output_constraint) {
+                const auto mask = request.output_constraint->next_mask();
+                Tensor target = constraint_masks.slice(1, static_cast<std::int32_t>(sequence.lane), 1);
+                CUDA_CHECK(cudaMemcpyAsync(target.data, mask.data(), mask.size_bytes(), cudaMemcpyHostToDevice, device.stream));
+            }
             ordinary_host_ingress->sampling[row]                = request.sampling_host;
             materialize_sequence_kv(sequence, frontier + 1, 0);
         }
@@ -11830,7 +11850,7 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             const std::uint32_t max_by_budget = budgets[row].generated_tokens_remaining > 1
                                                     ? budgets[row].generated_tokens_remaining - 1
                                                     : 0;
-            const std::uint32_t extent =
+            const std::uint32_t extent = request.output_constraint ? 0U :
                 std::min({sequence.mtp_draft_count, draft_window, max_by_budget,
                           capacity - sequence.execution_frontier - 1});
             mtp_host_ingress->anchors[row]        = sequence.ledger.back();
@@ -11856,6 +11876,11 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             mtp_host_ingress->state_source_slots[row]      = selectors.source;
             mtp_host_ingress->state_destination_slots[row] = selectors.destination;
             mtp_host_ingress->rope_deltas[row]             = sequence.rope_delta;
+            if (request.output_constraint) {
+                const auto mask = request.output_constraint->next_mask();
+                Tensor target = constraint_masks.slice(1, static_cast<std::int32_t>(sequence.lane), 1);
+                CUDA_CHECK(cudaMemcpyAsync(target.data, mask.data(), mask.size_bytes(), cudaMemcpyHostToDevice, device.stream));
+            }
             mtp_host_ingress->sampling[row]                = request.sampling_host;
             materialize_sequence_kv(sequence, frontier + extent + 1,
                                     std::min(capacity, frontier + extent + draft_window));
@@ -12026,7 +12051,7 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             const std::uint32_t max_by_budget = budgets[row].generated_tokens_remaining > 1
                                                     ? budgets[row].generated_tokens_remaining - 1U
                                                     : 0U;
-            const std::uint32_t extent =
+            const std::uint32_t extent = request.output_constraint ? 0U :
                 std::min({draft_window, max_by_budget, capacity - frontier - 1U});
             dflash_host_ingress->anchors[row] = sequence.ledger.back();
             dflash_host_ingress->execution_frontiers[row] =
@@ -12043,6 +12068,11 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             const StateImageSelectors selectors          = state_selectors(sequence);
             dflash_host_ingress->state_source_slots[row] = selectors.source;
             dflash_host_ingress->state_destination_slots[row] = selectors.destination;
+            if (request.output_constraint) {
+                const auto mask = request.output_constraint->next_mask();
+                Tensor target = constraint_masks.slice(1, static_cast<std::int32_t>(sequence.lane), 1);
+                CUDA_CHECK(cudaMemcpyAsync(target.data, mask.data(), mask.size_bytes(), cudaMemcpyHostToDevice, device.stream));
+            }
             dflash_host_ingress->sampling[row]                = request.sampling_host;
             materialize_sequence_kv(sequence, frontier + extent + 1U, frontier);
         }
@@ -12199,6 +12229,9 @@ ProgramImplCore::resolve_non_speculative_pending(SequenceState& sequence, Reques
     }
     trim_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
     if (terminal) { sequence.mtp_draft_count = 0; }
+    if (request.output_constraint) {
+        request.output_constraint->accept(std::span<const TokenId>(sequence.ledger.data() + sequence.ledger.size() - accepted_tokens, accepted_tokens));
+    }
     request.lifecycle = terminal ? Lifecycle::Finishable : Lifecycle::Active;
     request.pending   = {};
     return timing.finish();

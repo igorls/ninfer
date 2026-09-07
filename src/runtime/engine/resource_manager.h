@@ -637,10 +637,11 @@ public:
                         program.checkpoint_recovery_work(*entry.handle, checkpoint.ref)),
                 });
             };
+            compute_publication_grace();
             for (std::uint32_t slot = 0; slot < catalog_count_; ++slot) {
                 const CatalogEntry& entry = catalog_[slot];
                 if (entry.state != CatalogState::Catalogued || !entry.handle ||
-                    private_has_active_edge(slot)) {
+                    private_has_active_edge(slot) || private_in_publication_grace(slot)) {
                     continue;
                 }
                 const PlanningOwnerId owner{
@@ -974,7 +975,8 @@ public:
         }
 
         release_active_references(lane);
-        publication.state = CatalogState::Catalogued;
+        publication.state           = CatalogState::Catalogued;
+        publication.published_epoch = ++publication_epoch_;
         assign_continuation_summary(publication.summary, result.summary);
         publication.handle.emplace(std::move(*result.continuation));
         result.continuation.reset();
@@ -1099,6 +1101,9 @@ public:
 
         const auto usage                     = program.physical_usage();
         out.device_state_occupied_slots      = usage.device_state_slots;
+        out.checkpoint_slots_occupied        = usage.checkpoint_slots_occupied;
+        out.checkpoint_slots_capacity        = usage.checkpoint_slots_capacity;
+        out.checkpoint_slots_reserved        = usage.checkpoint_slots_reserved;
         out.host_state_occupied_slots        = usage.host_state_slots;
         out.device_main_kv_occupied_pages    = usage.device_main_kv_pages;
         out.device_backend_kv_occupied_pages = usage.device_backend_kv_pages;
@@ -1160,6 +1165,9 @@ private:
         std::optional<CacheSessionKey> session;
         std::vector<CheckpointObservation> observations;
         RetentionClass retention = RetentionClass::RecentPrivate;
+        // Monotonic stamp of this owner's most recent publication (finish, capture, or
+        // retained republish). Drives the publication grace below; 0 means never published.
+        std::uint64_t published_epoch = 0;
     };
 
     struct SharedCatalogEntry {
@@ -1269,6 +1277,49 @@ private:
     [[nodiscard]] static constexpr ActiveOwnerEdge
     active_edge(CatalogCapability capability) noexcept {
         return ActiveOwnerEdge{.owner = capability.owner, .slot = capability.slot};
+    }
+
+    // Publication grace. On a pool of at least kPublicationGraceMinimumOwners eligible owners,
+    // the min(kPublicationGraceOwners, n - 2) most recently published private owners are not
+    // pressure candidates; at least two candidates always remain.
+    //
+    // Without this, every eviction choice between a conversation that just published and
+    // one that published long ago costs the same at first order (same rebuild work, same
+    // retention class, same portfolio value), and the search's tie-breaks pick the newest
+    // owner, which sits in the lowest slot. Measured on production: a brand-new conversation
+    // was evicted by the next cold admission before its own second turn, every time, once the
+    // pool held sixteen once-reused owners; three new conversations interleaving reused 0 of
+    // 6 follow-ups. Recency is what predicts a return in this workload (a person switching
+    // between a few live chats), so the recent few are simply taken off the table.
+    static constexpr std::uint32_t kPublicationGraceOwners = 6;
+    // Below this many eligible owners the grace does not engage: every owner stays a
+    // candidate. Joint two-owner plans and the small pressure fixtures need that, and a pool
+    // that small is not the situation the grace exists for.
+    static constexpr std::size_t kPublicationGraceMinimumOwners = 8;
+
+    void compute_publication_grace() {
+        grace_scratch_.assign(catalog_count_, 0);
+        std::vector<std::pair<std::uint64_t, std::uint32_t>> eligible;
+        eligible.reserve(catalog_count_);
+        for (std::uint32_t slot = 0; slot < catalog_count_; ++slot) {
+            const CatalogEntry& entry = catalog_[slot];
+            if (entry.state != CatalogState::Catalogued || !entry.handle ||
+                private_has_active_edge(slot)) {
+                continue;
+            }
+            eligible.emplace_back(entry.published_epoch, slot);
+        }
+        if (eligible.size() < kPublicationGraceMinimumOwners) { return; }
+        std::sort(eligible.begin(), eligible.end(),
+                  [](const auto& a, const auto& b) { return a.first > b.first; });
+        // Leave at least two candidates so plans that need two victims stay reachable.
+        const std::size_t protect =
+            std::min<std::size_t>(kPublicationGraceOwners, eligible.size() - 2U);
+        for (std::size_t i = 0; i < protect; ++i) { grace_scratch_[eligible[i].second] = 1; }
+    }
+
+    [[nodiscard]] bool private_in_publication_grace(std::uint32_t slot) const noexcept {
+        return slot < grace_scratch_.size() && grace_scratch_[slot] != 0;
     }
 
     [[nodiscard]] bool private_has_active_edge(std::uint32_t slot) const noexcept {
@@ -1524,6 +1575,24 @@ private:
         return found == observations.end() ? nullptr : &found->observation;
     }
 
+    // A singleton checkpoint (endpoint, turn closure, replay: ordinal 0) keeps its identity
+    // across republication even though its frontier advances every turn. Matching it by exact
+    // ref therefore fails on every republish, and the owner's hit history restarts at zero:
+    // to the planner a conversation that has reused ten times looks identical to one that
+    // never has, and under a full pool the victim order collapses to slot index, which is
+    // exactly where the most recently republished owner sits. Long anchors carry a real
+    // ordinal and are matched exactly.
+    static const RetentionObservation*
+    find_singleton_observation(const std::vector<CheckpointObservation>& observations,
+                               CheckpointRef checkpoint) noexcept {
+        if (checkpoint.ordinal != 0) { return nullptr; }
+        const auto found = std::find_if(
+            observations.begin(), observations.end(), [&](const CheckpointObservation& value) {
+                return value.checkpoint.kind == checkpoint.kind && value.checkpoint.ordinal == 0;
+            });
+        return found == observations.end() ? nullptr : &found->observation;
+    }
+
     void migrate_observations(CatalogEntry& entry, const ContinuationSummary& summary,
                               RetentionClass retention) noexcept {
         observation_scratch_.clear();
@@ -1532,8 +1601,11 @@ private:
                 std::terminate();
             }
             RetentionObservation observation{.retention_class = retention};
-            if (const RetentionObservation* old =
-                    find_observation(entry.observations, checkpoint.ref)) {
+            const RetentionObservation* old = find_observation(entry.observations, checkpoint.ref);
+            if (old == nullptr) {
+                old = find_singleton_observation(entry.observations, checkpoint.ref);
+            }
+            if (old != nullptr) {
                 observation                 = *old;
                 observation.retention_class = retention;
             }
@@ -1559,7 +1631,8 @@ private:
         entry.handle.reset();
         entry.session.reset();
         entry.observations.clear();
-        entry.retention = RetentionClass::RecentPrivate;
+        entry.retention       = RetentionClass::RecentPrivate;
+        entry.published_epoch = 0;
         advance_revision(entry.revision);
     }
 
@@ -1868,10 +1941,11 @@ private:
             owner_policies.reserve(catalog_count_ + shared_catalog_count_);
             checkpoint_policies.reserve(prefix_index_.size());
 
+            compute_publication_grace();
             for (std::uint32_t slot = 0; slot < catalog_count_; ++slot) {
                 const CatalogEntry& entry = catalog_[slot];
                 if (entry.state != CatalogState::Catalogued || !entry.handle ||
-                    private_has_active_edge(slot)) {
+                    private_has_active_edge(slot) || private_in_publication_grace(slot)) {
                     continue;
                 }
                 const PlanningOwnerId owner{.value =
@@ -2848,6 +2922,7 @@ private:
             if (result.source->mode == PrivateSourceMode::Retain) {
                 if (result.source->final_summary) {
                     assign_continuation_summary(source.summary, *result.source->final_summary);
+                    source.published_epoch = ++publication_epoch_;
                     migrate_observations(source, *result.source->final_summary, source.retention);
                     advance_revision(source.revision);
                     refresh_session_owner_revision(capability.owner.id, capability.slot,
@@ -2861,7 +2936,12 @@ private:
                 source.summary.endpoint.reset();
                 source.summary.rewrite.reset();
                 source.summary.long_anchors.clear();
-                source.observations.clear();
+                // The consumed owner republishes into this same cell at finish (the logical
+                // goal binds publication_slot to the source slot). Its observations are the
+                // only record that it was ever reused; observe_selected_hit() stamped them a
+                // few lines above. Clearing them here is what made every republished owner
+                // look never-used to the eviction planner.
+                if (record->publication_slot != capability.slot) { source.observations.clear(); }
                 source.session.reset();
             }
         }
@@ -3077,7 +3157,8 @@ private:
         }
         ActiveEntry& active = active_[record->lane.value];
         if (record->publishes_private) {
-            CatalogEntry& publication = catalog_[active.publication_slot];
+            CatalogEntry& publication   = catalog_[active.publication_slot];
+            publication.published_epoch = ++publication_epoch_;
             assign_continuation_summary(publication.summary, result.active_summary);
             migrate_observations(publication, result.active_summary, active.retention);
             advance_revision(publication.revision);
@@ -3384,6 +3465,8 @@ private:
     std::uint64_t next_shared_prefix_id_ = 1;
     std::uint64_t retention_epoch_       = 0;
     std::uint64_t demand_epoch_          = 0;
+    std::uint64_t publication_epoch_     = 0;
+    std::vector<std::uint8_t> grace_scratch_;
 };
 
 } // namespace ninfer::runtime

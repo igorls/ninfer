@@ -22,7 +22,7 @@ enum SamplePurpose : std::int32_t {
 // Device-resident sampling parameters. token_counts is an optional device I32
 // [token_domain] committed generated-token occurrence-count array used by both penalties.
 struct SamplingConfig {
-    float temperature          = 0.0f; // <= 0 => greedy argmax (bit-identical to argmax())
+    float temperature          = 0.0f; // <= 0 => greedy argmax over allowed, adjusted logits
     std::int32_t top_k         = 20;   // runtime contract is [1,20]; Op defensively caps otherwise
     float top_p                = 1.0f; // >= 1 => disabled
     float min_p                = 0.0f; // <= 0 => disabled
@@ -30,6 +30,7 @@ struct SamplingConfig {
     float frequency_penalty    = 0.0f;
     unsigned long long seed    = 0;
     std::int32_t* token_counts = nullptr; // device [token_domain] i32, or null
+    const std::int32_t* allowed_tokens = nullptr; // device bitset [ceil(token_domain/32)], or null
 };
 
 // Caller-owned transient capacity for every parallel sampling-lane count in the inclusive
@@ -54,6 +55,10 @@ struct SamplingConfig {
  *   adjusted_v = float(logits[v,b])
  *                - configs[b].presence_penalty * (c_v > 0)
  *                - configs[b].frequency_penalty * c_v.
+ * If allowed_tokens is non-null, a zero bit v makes adjusted_v negative infinity before
+ * ranking and filtering. Bit v is (uint32_t(allowed_tokens[v/32]) >> (v%32)) & 1.
+ * The device mask has ceil(token_domain/32) words and is read-only. Each row must permit
+ * at least one finite-logit vocabulary token. Padding bits beyond token_domain are ignored.
  *
  * A greedy row selects min argmax_v adjusted_v and skips filters and RNG. Candidates for a
  * positive-temperature row are sorted by adjusted_v descending with lower token id breaking

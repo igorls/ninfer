@@ -33,6 +33,10 @@ struct PhysicalUsageSnapshot {
     std::uint32_t device_main_kv_pages    = 0;
     std::uint32_t device_backend_kv_pages = 0;
     std::size_t host_kv_bytes             = 0;
+    // Dedicated checkpoint pool, when the Program has one; excludes active recurrent slots.
+    std::optional<std::uint32_t> checkpoint_slots_occupied;
+    std::optional<std::uint32_t> checkpoint_slots_capacity;
+    std::uint32_t checkpoint_slots_reserved = 0;
 
     [[nodiscard]] friend constexpr bool operator==(const PhysicalUsageSnapshot&,
                                                    const PhysicalUsageSnapshot&) noexcept = default;

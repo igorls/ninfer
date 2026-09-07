@@ -263,11 +263,20 @@ struct ThinkingControlOptions {
     std::optional<std::uint32_t> budget;
 };
 
+enum class StructuredOutputKind : std::uint8_t { Text, JsonObject, JsonSchema };
+
+struct StructuredOutputOptions {
+    StructuredOutputKind kind = StructuredOutputKind::Text;
+    // Owning serialized JSON Schema; empty for Text/JsonObject.
+    std::string schema;
+};
+
 struct ExecutionOptions {
     SamplingOverrides sampling;
     std::uint32_t requested_output_tokens = 0;
     bool allow_prefix_reuse               = true;
     ThinkingControlOptions thinking;
+    StructuredOutputOptions structured_output;
 };
 
 struct OutputOptions {
@@ -844,6 +853,9 @@ struct RuntimeStats {
     std::uint64_t pressure_spill_pages                 = 0;
     std::uint64_t partial_tail_cow_pages               = 0;
     std::uint32_t device_state_occupied_slots          = 0;
+    std::optional<std::uint32_t> checkpoint_slots_occupied;
+    std::optional<std::uint32_t> checkpoint_slots_capacity;
+    std::uint32_t checkpoint_slots_reserved = 0;
     std::uint32_t host_state_occupied_slots            = 0;
     std::uint32_t device_main_kv_occupied_pages        = 0;
     std::uint32_t device_backend_kv_occupied_pages     = 0;

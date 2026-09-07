@@ -764,7 +764,7 @@ void FlashNextTextExecutor::abort_transaction(std::uint64_t tx_id) noexcept {
 PendingRound FlashNextTextExecutor::execute_speculative_verify_round(
     LaneHandle handle, std::int32_t anchor_token_id, std::span<const std::int32_t> draft_tokens,
     std::int32_t first_token_index, std::array<std::int32_t, 3> first_mrope_position,
-    const ops::SamplingConfig& sampling) {
+    const ops::SamplingConfig& sampling, std::span<const ops::SamplingConfig> column_sampling) {
     if (handle.owner() != this) {
         throw std::invalid_argument("FlashNextTextExecutor: cross-executor or invalid owner handle");
     }
@@ -774,6 +774,9 @@ PendingRound FlashNextTextExecutor::execute_speculative_verify_round(
     }
 
     const auto num_tokens    = static_cast<std::uint32_t>(1U + draft_tokens.size());
+    if (!column_sampling.empty() && column_sampling.size() != num_tokens) {
+        throw std::invalid_argument("speculative verification requires one sampling configuration per column");
+    }
     const std::uint32_t lane = handle.lane_index();
 
     auto prepared =
@@ -796,7 +799,7 @@ PendingRound FlashNextTextExecutor::execute_speculative_verify_round(
             host_ing->table_rows[i]        = static_cast<std::int32_t>(lane);
             host_ing->source_slots[i]      = alloc_.lane_ring_slot(lane, i);
             host_ing->destination_slots[i] = alloc_.lane_ring_slot(lane, i + 1U);
-            host_ing->sampling[i]          = sampling;
+            host_ing->sampling[i]          = column_sampling.empty() ? sampling : column_sampling[i];
         }
 
         const auto bucket_index = flash_next_decode_graph_select_bucket(

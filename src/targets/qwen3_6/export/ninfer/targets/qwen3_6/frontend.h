@@ -143,6 +143,8 @@ public:
                         const OutputOptions& output            = {},
                         const ThinkingControlOptions& thinking = {}) const;
     [[nodiscard]] const StopPolicy& default_stop_policy() const noexcept;
+    [[nodiscard]] std::shared_ptr<const runtime::CompiledOutputConstraint>
+    compile_output_constraint(const StructuredOutputOptions& options) const;
 
 private:
     class Impl;

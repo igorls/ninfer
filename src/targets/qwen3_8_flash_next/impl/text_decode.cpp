@@ -150,7 +150,7 @@ std::size_t flash_next_text_decode_workspace_capacity_bytes(std::int32_t maximum
     }
     {
         auto scope = layout.scope();
-        (void)allocate_flash_next_qsa_attention_workspace(layout, batch);
+        (void)layout.alloc_bytes(flash_next_qsa_attention_workspace_capacity_bytes(batch), 256);
     }
     {
         auto scope = layout.scope();

@@ -43,7 +43,7 @@ bool same_config(const ops::SamplingConfig& a, const ops::SamplingConfig& b) {
     return a.temperature == b.temperature && a.top_k == b.top_k && a.top_p == b.top_p &&
            a.min_p == b.min_p && a.presence_penalty == b.presence_penalty &&
            a.frequency_penalty == b.frequency_penalty && a.seed == b.seed &&
-           a.token_counts == b.token_counts;
+           a.token_counts == b.token_counts && a.allowed_tokens == b.allowed_tokens;
 }
 
 std::vector<std::uint16_t> bf16_bits(const std::vector<float>& values) {
@@ -591,6 +591,36 @@ int workspace_route_boundary_contract() {
     return failures;
 }
 
+int constrained_sampling_contract() {
+    int failures = 0;
+    for (int domain : {256, 257, 248077}) {
+        for (int batch : {1, 2, 17}) {
+            const int words = (domain + 31) / 32;
+            std::vector<std::int32_t> masks(static_cast<std::size_t>(words) * batch, 0);
+            std::vector<int> expected(batch), positions(batch, 7);
+            std::vector<float> logits(static_cast<std::size_t>(domain + 3) * batch, 100.0f);
+            for (int row = 0; row < batch; ++row) {
+                expected[row] = domain - 1 - row;
+                masks[row * words + expected[row] / 32] = static_cast<std::int32_t>(1U << (expected[row] % 32));
+                logits[row * (domain + 3) + expected[row]] = -10.0f;
+            }
+            DeviceBuffer device_masks = to_device(masks);
+            for (float temperature : {0.0f, 0.8f}) {
+                std::vector<ops::SamplingConfig> configs(batch);
+                for (int row = 0; row < batch; ++row) {
+                    configs[row].temperature = temperature;
+                    configs[row].allowed_tokens = static_cast<const std::int32_t*>(device_masks.p) + row * words;
+                }
+                const auto result = run_batch(logits, domain + 3, domain, configs, positions, ops::kSamplePurposeDecode);
+                failures += result.integrity_failures;
+                failures += verify_exact("mask precedes greedy and top-k with per-row isolation", result.tokens, expected);
+                failures += verify_exact("sampling mask is read-only", from_device<std::int32_t>(device_masks, masks.size()), masks);
+            }
+        }
+    }
+    return failures;
+}
+
 int increment_counts_contract() {
     const std::vector<std::int32_t> ids{1, 3, 1, 7};
     const std::vector<std::int32_t> initial{0, 2, 0, 4, 0, 0, 0, 1};
@@ -642,6 +672,7 @@ int main() {
     failures += rng_key_contract();
     failures += workspace_route_boundary_contract();
     failures += increment_counts_contract();
+    failures += constrained_sampling_contract();
 
     std::cout << (failures == 0 ? "OK" : "FAIL") << " sample public contract\n";
     return failures == 0 ? 0 : 1;

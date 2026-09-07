@@ -179,7 +179,8 @@ public:
                                      std::span<const std::int32_t> draft_tokens,
                                      std::int32_t first_token_index,
                                      std::array<std::int32_t, 3> first_mrope_position,
-                                     const ops::SamplingConfig& sampling);
+                                     const ops::SamplingConfig& sampling,
+                                     std::span<const ops::SamplingConfig> column_sampling = {});
 
     void draft_mtp_tokens(LaneHandle handle, std::int32_t token_id, std::int32_t token_index,
                           std::array<std::int32_t, 3> mrope_pos, const Tensor& backbone_hidden,

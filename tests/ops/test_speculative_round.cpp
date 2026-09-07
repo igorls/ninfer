@@ -123,7 +123,7 @@ int execute_accept_case(const std::string& label, const std::vector<std::int32_t
                         const std::vector<std::int32_t>& drafts, std::int32_t initial_length,
                         int token_domain, ops::SamplingConfig config,
                         const std::vector<std::int32_t>& initial_token_counts,
-                        const AcceptExpected& expected) {
+                        const AcceptExpected& expected, int current_extent = -1) {
     const int k              = static_cast<int>(drafts.size());
     DeviceBuffer d_targets   = to_device(target_tokens);
     DeviceBuffer d_logits    = to_device(logits_bits);
@@ -138,7 +138,7 @@ int execute_accept_case(const std::string& label, const std::vector<std::int32_t
     GuardedDeviceBuffer d_sampled(static_cast<std::size_t>(k + 1) * sizeof(std::int32_t));
     GuardedDeviceBuffer d_num(sizeof(std::int32_t));
     GuardedDeviceBuffer d_accepted(sizeof(std::int32_t));
-    DeviceBuffer d_extent = to_device<std::int32_t>({k});
+    DeviceBuffer d_extent = to_device<std::int32_t>({current_extent < 0 ? k : current_extent});
     initialize(d_length, std::vector<std::int32_t>{initial_length});
     initialize(d_token, std::vector<std::int32_t>{-1234567});
     d_sampled.fill(0x9d);
@@ -269,6 +269,28 @@ int deterministic_sampling_case() {
     return execute_accept_case("speculative sampling deterministic support", targets, logits_bits,
                                physical_rows, drafts, initial_length, token_domain, config,
                                token_counts, expected);
+}
+
+int constrained_zero_extent_case(int token_domain) {
+    const std::vector<std::int32_t> drafts{1, 1};
+    const std::vector<std::int32_t> raw_targets{1, 1, 1};
+    std::vector<std::uint16_t> logits(static_cast<std::size_t>(token_domain) * 3, f32_to_bf16(100.0f));
+    const int permitted = token_domain - 1;
+    for (int col = 0; col < 3; ++col) { logits[col * token_domain + permitted] = f32_to_bf16(-10.0f); }
+    std::vector<std::int32_t> mask((token_domain + 31) / 32, 0);
+    mask[permitted / 32] = static_cast<std::int32_t>(1U << (permitted % 32));
+    DeviceBuffer device_mask = to_device(mask);
+    ops::SamplingConfig config{};
+    config.allowed_tokens = static_cast<const std::int32_t*>(device_mask.p);
+    int failures = 0;
+    for (float temperature : {0.0f, 0.8f}) {
+        config.temperature = temperature;
+        failures += execute_accept_case("speculative constrained zero extent", raw_targets, logits,
+            token_domain, drafts, 100, token_domain, config, std::vector<std::int32_t>(token_domain, 0),
+            accept_state_oracle(drafts, 0, permitted, 100), 0);
+    }
+    failures += verify_exact("speculative mask read-only", from_device<std::int32_t>(device_mask, mask.size()), mask);
+    return failures;
 }
 
 int greedy_penalty_case(int token_domain) {
@@ -462,6 +484,9 @@ int main() {
     failures += greedy_accept_case(15, 7, 257);
     failures += greedy_penalty_case(64);
     failures += greedy_penalty_case(257);
+    failures += constrained_zero_extent_case(64);
+    failures += constrained_zero_extent_case(257);
+    failures += constrained_zero_extent_case(248077);
     failures += deterministic_sampling_case();
     failures += batched_sampling_workspace_stride_case();
     failures += select_hidden_case(5120, 6, 0);

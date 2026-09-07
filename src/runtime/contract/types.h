@@ -18,6 +18,7 @@
 #endif
 
 namespace ninfer::runtime {
+class CompiledOutputConstraint;
 
 using ::ninfer::FinishReason;
 using ::ninfer::KvCapacityMode;
@@ -186,6 +187,7 @@ struct ResolvedExecutionOptions {
     std::uint32_t requested_output_tokens = 0;
     bool allow_prefix_reuse               = true;
     ThinkingControlOptions thinking;
+    std::shared_ptr<const CompiledOutputConstraint> output_constraint;
 };
 
 struct ResolvedRequestOptions {

@@ -1,6 +1,7 @@
 #include "targets/qwen3_8_flash_next/impl/qsa_attention.h"
 
 #include "ninfer/ops/linear.h"
+#include "ninfer/ops/selected_block_attention.h"
 
 #include "core/layout.h"
 #include "targets/qwen3_8_flash_next/impl/qsa_attention_kernels.h"
@@ -76,7 +77,9 @@ std::size_t flash_next_qsa_attention_workspace_capacity_bytes(std::int32_t batch
             QType::FP8_E4M3FN_ROW_F32S, 13'312, 2'560, ops::LinearPolicy::AllowA8, 1, batch);
         const std::size_t out_ws = ops::linear_workspace_capacity_bytes(
             QType::FP8_E4M3FN_ROW_F32S, 2'560, 6'144, ops::LinearPolicy::AllowA8, 1, batch);
-        (void)layout.alloc_bytes(std::max(qgkv_ws, out_ws), 256);
+        const std::size_t attention_ws = batch <= 8
+            ? ops::selected_block_attention_workspace_capacity_bytes(batch) : 0;
+        (void)layout.alloc_bytes(std::max({qgkv_ws, out_ws, attention_ws}), 256);
     }
     return layout.peak_bytes(256);
 }
@@ -122,7 +125,7 @@ void flash_next_qsa_attention_decode(const Tensor& input, const AttentionWeights
                 workspace, stream);
     flash_next_qsa_attention_launch(token_indices, mrope_positions, table_rows, selected_blocks,
                                     selected_counts, weights.query_norm, weights.key_norm, cache,
-                                    scratch, stream);
+                                    scratch, workspace, stream);
     ops::linear(scratch.gated, weights.output, output, ops::LinearPolicy::A16Only, workspace,
                 stream);
 }

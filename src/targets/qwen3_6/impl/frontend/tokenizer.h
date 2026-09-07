@@ -87,6 +87,7 @@ public:
     [[nodiscard]] bool is_special_token(int id) const noexcept;
     [[nodiscard]] bool is_valid_token(int id) const noexcept;
     [[nodiscard]] bool has_exact_token_domain(std::size_t size) const noexcept;
+    [[nodiscard]] std::size_t token_domain() const noexcept { return decoded_token_bytes_.size(); }
 
 private:
     std::vector<std::string> decoded_token_bytes_;

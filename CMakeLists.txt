@@ -126,6 +126,7 @@ if(NINFER_BUILD_MEDIA)
   endif()
 endif()
 find_package(Threads REQUIRED)
+add_subdirectory(third_party/xgrammar)
 add_compile_definitions(NINFER_BUILD_MEDIA_ENABLED=$<BOOL:${NINFER_BUILD_MEDIA}>)
 
 if(NINFER_BUILD_APPS OR BUILD_TESTING)

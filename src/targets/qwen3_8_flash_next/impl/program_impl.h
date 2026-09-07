@@ -6,6 +6,7 @@
 #include "core/arena.h"
 #include "core/device.h"
 #include "ninfer/ops/sampling.h"
+#include "runtime/contract/structured_output.h"
 #include "targets/qwen3_8_flash_next/impl/load/materialized.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_state.h"
@@ -27,6 +28,7 @@ public:
     runtime::RequestPlanSummary summary;
     qwen3_6::PreparedContextCache context_cache;
     ops::SamplingConfig sampling_config;
+    std::shared_ptr<const runtime::CompiledOutputConstraint> output_constraint;
     std::uint32_t requested_output_tokens = 0;
     std::uint32_t effective_output_tokens = 0;
     bool allow_prefix_reuse               = false;
@@ -36,6 +38,7 @@ public:
     qwen3_6::detail::PrefixShortlistDigests prefix_digests;
     std::uint32_t prefix_identity_tag = 0;
     std::uint32_t prefill_chunk       = 0;
+    std::uint32_t checkpoint_slots_required = 0;
 };
 
 class AdmissionCandidateImpl {
@@ -140,6 +143,8 @@ public:
 
 enum class ContinuationSlotRole : std::uint8_t {
     Vacant,
+    ReservedEndpoint,
+    ReservedTurnClosure,
     Catalogued,
 };
 
@@ -185,6 +190,7 @@ struct LaneState {
     std::uint32_t requested_output_tokens = 0;
     std::uint32_t effective_output_tokens = 0;
     ops::SamplingConfig sampling_config{};
+    std::unique_ptr<runtime::OutputConstraintState> output_constraint;
     bool publish_continuation = false;
     bool prefill_completed = false;
     bool finished          = false;
@@ -193,6 +199,9 @@ struct LaneState {
     SpeculativeStats speculative_stats{};
     qwen3_6::detail::PrefixShortlistDigests prefix_digests;
     std::optional<std::uint32_t> turn_closure_continuation_index;
+    // Owned only while this lane is admitted; optional captures cannot consume it.
+    std::optional<std::uint32_t> reserved_endpoint_index;
+    std::optional<std::uint32_t> reserved_turn_closure_index;
     std::uint64_t pending_capture_offer = 0;
     std::optional<std::uint32_t> capture_frontier;
     bool capture_offered = false;
@@ -220,6 +229,8 @@ public:
     void sample_tokens(const Tensor& logits,
                        std::span<const std::uint32_t> lane_indices,
                        std::span<std::int32_t> out_tokens);
+    const std::int32_t* upload_constraint_mask(std::uint32_t lane, std::uint32_t column,
+                                              runtime::OutputConstraintState& constraint);
 
     [[nodiscard]] bool is_slot_protected(std::size_t slot_idx) const;
     [[nodiscard]] std::uint32_t count_freeable_physical_groups(
@@ -231,7 +242,10 @@ public:
     void vacate_owner(std::size_t slot_idx);
     [[nodiscard]] std::uint32_t published_checkpoints_of(std::size_t slot_idx) const noexcept;
     [[nodiscard]] std::uint32_t reserved_unowned_groups() const noexcept;
-    void drop_unpublished_turn_closure(LaneState& st);
+    void drop_unpublished_checkpoints(LaneState& st);
+    void release_checkpoint_reservations(LaneState& st);
+    [[nodiscard]] std::uint32_t vacant_checkpoint_slots() const noexcept;
+    [[nodiscard]] std::uint32_t owner_checkpoint_slots(std::size_t owner) const;
     [[nodiscard]] bool has_mtp() const noexcept {
         return (model_data_ != nullptr ? model_data_->text : text_override_).mtp.has_value();
     }
@@ -276,6 +290,10 @@ public:
     std::vector<std::int32_t> host_sampled_tokens_;
     std::vector<ops::SamplingConfig> host_sampling_configs_;
     std::vector<std::int32_t> host_sampling_positions_;
+    static constexpr std::size_t kConstraintMaskWords = (248077 + 31) / 32;
+    static constexpr std::size_t kConstraintColumns = 5;
+    DeviceBuffer device_constraint_masks_;
+    std::vector<std::int32_t> host_constraint_masks_;
 };
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

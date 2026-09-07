@@ -16,6 +16,8 @@ namespace ninfer::serve {
 std::optional<int> optional_int(const nlohmann::json& object, const char* key);
 std::optional<double> optional_number(const nlohmann::json& object, const char* key);
 bool optional_bool(const nlohmann::json& object, const char* key, bool fallback);
+[[nodiscard]] StructuredOutputOptions parse_structured_output_format(
+    const nlohmann::json& format, std::string_view param, bool nested_schema);
 
 [[nodiscard]] bool valid_tool_name(std::string_view name, std::size_t maximum_length) noexcept;
 

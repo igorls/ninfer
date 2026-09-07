@@ -491,6 +491,9 @@ int main() {
     throughput.current.state_h2d_bytes                  = 132;
     throughput.current.state_h2d_seconds                = 0.25;
     throughput.current.device_state_occupied_slots      = 3;
+    throughput.current.checkpoint_slots_occupied        = 16;
+    throughput.current.checkpoint_slots_capacity        = 16;
+    throughput.current.checkpoint_slots_reserved        = 2;
     throughput.current.host_state_occupied_slots        = 1;
     throughput.current.last_selected_frontier_tokens    = 64;
     throughput.current.pressure_spill_pages             = 4;
@@ -522,6 +525,11 @@ int main() {
     const Json throughput_json =
         Json::parse(format_throughput_json("serve-test", 5000, throughput));
     failures += check(throughput_json.at("event") == "throughput", "throughput event mismatch");
+    const auto& occupancy = throughput_json.at("context_cache").at("occupancy");
+    failures += check(occupancy.at("checkpoint_slots_occupied") == 16 &&
+                          occupancy.at("checkpoint_slots_capacity") == 16 &&
+                          occupancy.at("checkpoint_slots_reserved") == 2,
+                      "Physical checkpoint saturation and active reservations must be visible");
     failures += check(throughput_json.at("tokens").at("computed_prefill") == 100 &&
                           throughput_json.at("tokens").at("committed_decode") == 40,
                       "throughput token deltas mismatch");

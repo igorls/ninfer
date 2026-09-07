@@ -10,6 +10,7 @@
 #include "targets/qwen3_6/impl/frontend/tokenizer.h"
 #include "targets/qwen3_6/impl/frontend/tool_call_parser.h"
 #include "text/unicode.h"
+#include "runtime/contract/structured_output.h"
 
 #include <nlohmann/json.hpp>
 
@@ -21,6 +22,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -901,6 +903,8 @@ public:
     }
 
     fi::CompiledChatTemplate chat_template;
+    mutable std::mutex constraint_mutex;
+    mutable std::unique_ptr<runtime::OutputConstraintCompiler> constraint_compiler;
     std::shared_ptr<const fi::Tokenizer> tokenizer;
     fi::ProcessorOptions processor;
     std::shared_ptr<fi::MediaPreprocessCache> media_cache;
@@ -909,6 +913,27 @@ public:
     bool vision_enabled       = true;
     std::uint32_t max_context = 0;
 };
+
+std::shared_ptr<const runtime::CompiledOutputConstraint>
+Frontend::compile_output_constraint(const StructuredOutputOptions& options) const {
+    runtime::validate_structured_output(options);
+    if (options.kind == StructuredOutputKind::Text) { return nullptr; }
+    std::lock_guard lock(impl_->constraint_mutex);
+    if (!impl_->constraint_compiler) {
+        std::vector<std::string> vocabulary(impl_->tokenizer->token_domain());
+        for (std::size_t i = 0; i < vocabulary.size(); ++i) {
+            if (impl_->tokenizer->is_valid_token(static_cast<int>(i)) &&
+                !impl_->tokenizer->is_special_token(static_cast<int>(i))) {
+                vocabulary[i] = impl_->tokenizer->decode_token_bytes(static_cast<int>(i));
+            }
+        }
+        const auto end = impl_->tokenizer->encode(kThinkClose);
+        if (end.size() != 1) { throw std::invalid_argument("structured output requires an atomic reasoning boundary token"); }
+        impl_->constraint_compiler = std::make_unique<runtime::OutputConstraintCompiler>(
+            std::move(vocabulary), impl_->tokenizer->default_stop_token_ids(), end.front());
+    }
+    return impl_->constraint_compiler->compile(options);
+}
 
 class OutputSession::Impl {
 public:

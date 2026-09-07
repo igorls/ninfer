@@ -165,12 +165,7 @@ std::size_t flash_next_mtp_workspace_capacity_bytes(std::int32_t maximum_blocks,
     // Attention workspace
     {
         auto scope = layout.scope();
-        (void)allocate_flash_next_qsa_attention_workspace(layout, batch);
-        const std::size_t qgkv_ws = ops::linear_workspace_capacity_bytes(
-            QType::BF16_CTRL, 13'312, 2'560, ops::LinearPolicy::A16Only, 1, batch);
-        const std::size_t out_ws = ops::linear_workspace_capacity_bytes(
-            QType::BF16_CTRL, 2'560, 6'144, ops::LinearPolicy::A16Only, 1, batch);
-        (void)layout.alloc_bytes(std::max(qgkv_ws, out_ws), 256);
+        (void)layout.alloc_bytes(flash_next_qsa_attention_workspace_capacity_bytes(batch), 256);
     }
 
     // MoE workspace

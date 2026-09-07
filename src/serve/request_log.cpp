@@ -762,6 +762,11 @@ std::string format_throughput_json(const std::string& server_instance_id, std::u
              {"historical_fork_hits",
               monotonic_delta(previous.historical_fork_hits, current.historical_fork_hits)}}},
         {"occupancy", Json{{"device_state_slots", current.device_state_occupied_slots},
+                           {"checkpoint_slots_occupied", current.checkpoint_slots_occupied
+                               ? Json(*current.checkpoint_slots_occupied) : Json(nullptr)},
+                           {"checkpoint_slots_capacity", current.checkpoint_slots_capacity
+                               ? Json(*current.checkpoint_slots_capacity) : Json(nullptr)},
+                           {"checkpoint_slots_reserved", current.checkpoint_slots_reserved},
                            {"host_state_slots", current.host_state_occupied_slots},
                            {"device_main_kv_pages", current.device_main_kv_occupied_pages},
                            {"device_backend_kv_pages", current.device_backend_kv_occupied_pages},

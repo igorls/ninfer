@@ -57,7 +57,9 @@ ProgramImpl::ProgramImpl(const LoadedModelData* model_data, FlashNextRuntimePlan
       device_sampled_tokens_(plan_.config.max_concurrency * sizeof(std::int32_t)),
       host_sampled_tokens_(plan_.config.max_concurrency, 0),
       host_sampling_configs_(plan_.config.max_concurrency),
-      host_sampling_positions_(plan_.config.max_concurrency, 0) {
+      host_sampling_positions_(plan_.config.max_concurrency, 0),
+      device_constraint_masks_(plan_.config.max_concurrency * kConstraintColumns * kConstraintMaskWords * sizeof(std::int32_t)),
+      host_constraint_masks_(plan_.config.max_concurrency * kConstraintColumns * kConstraintMaskWords) {
     allocation_.initialize(device_.stream);
     const std::uint32_t cont_cap = plan_.config.continuation_capacity;
     continuation_slots_.resize(cont_cap);
@@ -82,6 +84,20 @@ ProgramImpl::ProgramImpl(const LoadedModelData* model_data, FlashNextRuntimePlan
     }
 }
 
+const std::int32_t* ProgramImpl::upload_constraint_mask(std::uint32_t lane, std::uint32_t column,
+                                                       runtime::OutputConstraintState& constraint) {
+    const auto mask = constraint.next_mask();
+    if (mask.size() != kConstraintMaskWords || column >= kConstraintColumns) {
+        throw std::logic_error("structured output mask has an invalid shape");
+    }
+    const auto offset = (lane * kConstraintColumns + column) * kConstraintMaskWords;
+    auto* host = host_constraint_masks_.data() + offset;
+    auto* device = static_cast<std::int32_t*>(device_constraint_masks_.p) + offset;
+    std::copy(mask.begin(), mask.end(), host);
+    CUDA_CHECK(cudaMemcpyAsync(device, host, mask.size_bytes(), cudaMemcpyHostToDevice, device_.stream));
+    return device;
+}
+
 void ProgramImpl::sample_tokens(const Tensor& logits,
                                 std::span<const std::uint32_t> lane_indices,
                                 std::span<std::int32_t> out_tokens) {
@@ -92,7 +108,9 @@ void ProgramImpl::sample_tokens(const Tensor& logits,
 
     for (std::size_t b = 0; b < B; ++b) {
         const std::uint32_t lane_idx = lane_indices[b];
-        const auto& st               = lane_states_[lane_idx];
+        auto& st                     = lane_states_[lane_idx];
+        st.sampling_config.allowed_tokens = st.output_constraint
+            ? upload_constraint_mask(lane_idx, 0, *st.output_constraint) : nullptr;
         host_sampling_configs_[b]   = st.sampling_config;
         host_sampling_positions_[b] = st.last_token_pos;
     }
@@ -192,7 +210,7 @@ std::uint32_t ProgramImpl::count_freeable_physical_groups(
 void ProgramImpl::vacate_slot(std::size_t slot_idx) {
     if (slot_idx >= continuation_slots_.size()) { return; }
     auto& c_slot = continuation_slots_[slot_idx];
-    if (c_slot.role != ContinuationSlotRole::Catalogued) { return; }
+    if (c_slot.role == ContinuationSlotRole::Vacant) { return; }
     executor_.release_physical_groups(c_slot.physical_groups);
     c_slot.physical_groups.clear();
     c_slot.committed_tokens.clear();
@@ -231,6 +249,37 @@ std::uint32_t ProgramImpl::reserved_unowned_groups() const noexcept {
     return reserved;
 }
 
+std::uint32_t ProgramImpl::vacant_checkpoint_slots() const noexcept {
+    return static_cast<std::uint32_t>(std::count_if(
+        continuation_slots_.begin(), continuation_slots_.end(),
+        [](const auto& slot) { return slot.role == ContinuationSlotRole::Vacant; }));
+}
+
+std::uint32_t ProgramImpl::owner_checkpoint_slots(std::size_t owner) const {
+    const auto& slot = continuation_slots_.at(owner);
+    if (slot.role != ContinuationSlotRole::Catalogued) { return 0; }
+    if (slot.paired_rewrite_slot && *slot.paired_rewrite_slot < continuation_slots_.size()) {
+        const auto& rewrite = continuation_slots_[*slot.paired_rewrite_slot];
+        if (rewrite.role == ContinuationSlotRole::Catalogued &&
+            rewrite.generation == slot.paired_rewrite_generation &&
+            !is_slot_protected(*slot.paired_rewrite_slot)) {
+            return 2;
+        }
+    }
+    return 1;
+}
+
+void ProgramImpl::release_checkpoint_reservations(LaneState& st) {
+    if (st.reserved_endpoint_index) {
+        vacate_slot(*st.reserved_endpoint_index);
+        st.reserved_endpoint_index.reset();
+    }
+    if (st.reserved_turn_closure_index) {
+        vacate_slot(*st.reserved_turn_closure_index);
+        st.reserved_turn_closure_index.reset();
+    }
+}
+
 std::uint32_t ProgramImpl::published_checkpoints_of(std::size_t slot_idx) const noexcept {
     return slot_idx < continuation_slots_.size() ? continuation_slots_[slot_idx].published_checkpoints
                                                  : 1U;
@@ -239,7 +288,8 @@ std::uint32_t ProgramImpl::published_checkpoints_of(std::size_t slot_idx) const 
 // A lane that ends without cataloguing an endpoint (Released finish, abort, cancelled commit)
 // loses its Engine entry, and with it the TurnClosure it captured: drop our copy unless a
 // sibling lane is still resuming from it.
-void ProgramImpl::drop_unpublished_turn_closure(LaneState& st) {
+void ProgramImpl::drop_unpublished_checkpoints(LaneState& st) {
+    release_checkpoint_reservations(st);
     if (!st.turn_closure_continuation_index.has_value()) { return; }
     const std::size_t idx = *st.turn_closure_continuation_index;
     if (idx >= continuation_slots_.size()) { return; }
@@ -313,6 +363,9 @@ std::int32_t ProgramImpl::allocate_vacant_continuation_slot() {
 } // namespace ninfer::targets::qwen3_8_flash_next::detail
 
 namespace ninfer::targets::qwen3_8_flash_next {
+
+static std::optional<std::uint32_t>
+derive_turn_closure_frontier(const qwen3_6::PreparedPromptData& prompt_data);
 
 // ---------------------------------------------------------------------------
 // RequestBasePlan
@@ -700,7 +753,19 @@ AssessedPressureTarget PressurePlanningSessionImpl::assess(PressureTargetHandle 
             const std::uint32_t source_groups = (details.reusable_tokens + 256U - 1U) / 256U;
             needed = (needed > source_groups) ? (needed - source_groups) : 0;
         }
-        if (available >= needed) {
+        std::uint32_t checkpoint_slots = program_->vacant_checkpoint_slots();
+        if (details.has_source && details.reusable_tokens > 0 &&
+            details.assessment.source_mode == runtime::PrivateSourceMode::ConsumeToActive) {
+            checkpoint_slots += program_->owner_checkpoint_slots(details.source_continuation_index);
+        }
+        for (std::size_t i = 0; i < owners_.size(); ++i) {
+            if (node.owner_evicted[i] == 1) {
+                checkpoint_slots += program_->owner_checkpoint_slots(owners_[i].continuation_index);
+            }
+        }
+        const bool checkpoint_available =
+            checkpoint_slots >= details.base_plan->checkpoint_slots_required;
+        if (available >= needed && checkpoint_available) {
             status = runtime::MaterializationPhysicalStatus::Feasible;
         } else {
             status = runtime::MaterializationPhysicalStatus::Infeasible;
@@ -1319,6 +1384,12 @@ Program::plan_request(const qwen3_6::PreparedPrompt& prompt,
     base->summary.publish_continuation =
         options.allow_prefix_reuse && prompt_data.identity.reusable &&
         (impl_->plan_.config.continuation_capacity > 0);
+    if (base->summary.publish_continuation) {
+        base->checkpoint_slots_required = 1;
+        if (impl_->continuation_slots_.size() > 1 && derive_turn_closure_frontier(prompt_data)) {
+            ++base->checkpoint_slots_required;
+        }
+    }
 
     const runtime::PrefillWork prefill_work =
         runtime::make_prefill_work(0, base->summary.prompt_tokens, 0, 0,
@@ -1341,6 +1412,7 @@ Program::plan_request(const qwen3_6::PreparedPrompt& prompt,
     base->sampling_config.frequency_penalty = options.sampling.frequency_penalty;
     base->sampling_config.seed              = options.sampling.seed;
     base->sampling_config.token_counts      = nullptr;
+    base->output_constraint = options.output_constraint;
 
     if (prompt_data.has_media()) {
         auto control_plan         = qwen3_6::plan_vision_control(prompt_data);
@@ -1440,7 +1512,13 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestB
     const std::uint32_t total_freeable_groups = free_now > reserved ? free_now - reserved : 0U;
     const bool groups_available = (total_freeable_groups >= additional_groups_needed);
 
-    const bool feasible = lane_available && groups_available && !impl_->has_context_transaction_;
+    std::uint32_t checkpoint_slots = impl_->vacant_checkpoint_slots();
+    if (cont_slot != nullptr && reusable_tokens > 0 && !must_retain_private_source) {
+        checkpoint_slots += impl_->owner_checkpoint_slots(source->index());
+    }
+    const bool checkpoint_available = checkpoint_slots >= base.impl_->checkpoint_slots_required;
+    const bool feasible = lane_available && groups_available && checkpoint_available &&
+                          !impl_->has_context_transaction_;
 
     if (!feasible && std::getenv("NINFER_FLASH_NEXT_TRACE_ADMISSION") != nullptr) {
         std::fprintf(stderr,
@@ -1502,7 +1580,8 @@ Program::seal_identity(const AdmissionCandidate& candidate,
                        const qwen3_6::PreparedPrompt& /*prompt*/,
                        runtime::FinalScheduleIntent /*intent*/) {
     if (impl_ == nullptr) { throw std::logic_error("Program: instance is empty"); }
-    if (candidate.impl_ == nullptr || candidate.impl_->planning_revision != impl_->resource_revision_) {
+    if (candidate.impl_ == nullptr || candidate.impl_->planning_revision != impl_->resource_revision_ ||
+        candidate.impl_->assessment.physical_status != runtime::MaterializationPhysicalStatus::Feasible) {
         return std::nullopt;
     }
     auto copy = std::make_unique<detail::AdmissionCandidateImpl>();
@@ -1638,6 +1717,7 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
     st.last_token_pos          = 0;
     st.last_token_index        = 0;
     st.total_generated_tokens  = 0;
+    st.output_constraint.reset();
     st.requested_output_tokens = summary.requested_output_tokens;
     st.effective_output_tokens = summary.effective_output_tokens;
     st.publish_continuation    = summary.publish_continuation;
@@ -1655,6 +1735,10 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
 
     if (adm.impl_ != nullptr && adm.impl_->base_plan != nullptr) {
         st.sampling_config = adm.impl_->base_plan->sampling_config;
+        if (adm.impl_->base_plan->output_constraint) {
+            st.output_constraint = std::make_unique<runtime::OutputConstraintState>(
+                adm.impl_->base_plan->output_constraint, prompt_data.starts_in_reasoning);
+        }
         st.vision_control  = std::move(adm.impl_->base_plan->vision_control);
     }
 
@@ -1688,6 +1772,24 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
             owner.last_used_epoch = ++impl_->continuation_epoch_;
             st.reused_from_continuation_index = owner_idx;
             st.reused_from_continuation_generation = owner.generation;
+        }
+    }
+
+    if (st.publish_continuation && !impl_->continuation_slots_.empty()) {
+        const auto endpoint = impl_->allocate_vacant_continuation_slot();
+        if (endpoint < 0) {
+            throw std::logic_error("Flash-Next sealed admission has no endpoint checkpoint slot");
+        }
+        auto& slot = impl_->continuation_slots_[endpoint];
+        slot.role = detail::ContinuationSlotRole::ReservedEndpoint;
+        st.reserved_endpoint_index = static_cast<std::uint32_t>(endpoint);
+        if (adm.impl_->base_plan->checkpoint_slots_required > 1) {
+            const auto rewrite = impl_->allocate_vacant_continuation_slot();
+            if (rewrite < 0) {
+                throw std::logic_error("Flash-Next sealed admission has no turn-closure checkpoint slot");
+            }
+            impl_->continuation_slots_[rewrite].role = detail::ContinuationSlotRole::ReservedTurnClosure;
+            st.reserved_turn_closure_index = static_cast<std::uint32_t>(rewrite);
         }
     }
 
@@ -1728,6 +1830,7 @@ Program::progress_context_transaction(runtime::CancellationFlagView cancellation
         if (impl_->transaction_lane_) {
             const std::uint32_t lane_idx = impl_->transaction_lane_->value;
             if (impl_->lane_states_[lane_idx].active) {
+                impl_->release_checkpoint_reservations(impl_->lane_states_[lane_idx]);
                 impl_->executor_.release_lane(impl_->lane_states_[lane_idx].lane_handle);
                 impl_->lane_states_[lane_idx].active = false;
                 ++impl_->resource_revision_;
@@ -1846,7 +1949,7 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
     // Clip at capture frontier F if not yet offered
     const bool can_offer_capture =
         st.publish_continuation && (impl_->plan_.config.continuation_capacity > 0) &&
-        st.capture_frontier.has_value() && !st.capture_offered;
+        st.capture_frontier.has_value() && st.reserved_turn_closure_index.has_value() && !st.capture_offered;
 
     if (can_offer_capture) {
         const std::uint32_t F = *st.capture_frontier;
@@ -2082,19 +2185,9 @@ Program::inspect_capture(const CaptureOffer& offer,
         .frontier     = N,
         .identity_tag = 0,
     };
-    // The merged Engine reserves a private capture only when the assessment is physically
-    // feasible (resource_manager.h gates on publishes_private && physically_feasible). For
-    // Flash-Next feasibility means a vacant continuation slot: the reserve copies the recurrent
-    // state into that slot's cache slot and refcounts the lane's existing page groups.
-    // Unilateral eviction of catalogued slots is prohibited; catalog evictions are coordinated
-    // exclusively by the Engine via pressure planning.
-    for (std::size_t c = 0; c < impl_->continuation_slots_.size(); ++c) {
-        const auto& slot = impl_->continuation_slots_[c];
-        if (slot.role == detail::ContinuationSlotRole::Vacant) {
-            assessment.physically_feasible = true;
-            break;
-        }
-    }
+    // Admission reserves this lane's rewrite together with its endpoint. Capture must not
+    // depend on an unrelated vacant slot surviving until the prefill frontier is reached.
+    assessment.physically_feasible = st.reserved_turn_closure_index.has_value();
     return assessment;
 }
 
@@ -2117,6 +2210,12 @@ void Program::skip_capture(CaptureOffer&& offer) {
     const std::uint32_t lane_idx = offer.lane().value;
     if (lane_idx < impl_->plan_.config.max_concurrency) {
         impl_->lane_states_[lane_idx].pending_capture_offer = 0;
+        auto& st = impl_->lane_states_[lane_idx];
+        if (st.reserved_turn_closure_index) {
+            impl_->vacate_slot(*st.reserved_turn_closure_index);
+            st.reserved_turn_closure_index.reset();
+            ++impl_->resource_revision_;
+        }
     }
     ContractAccess::consume(offer);
 }
@@ -2150,7 +2249,8 @@ Program::reserve_active_capture(CaptureOffer&& offer,
         return runtime::ContextTransactionReserveStatus::Aborted;
     }
 
-    const std::int32_t slot_idx = impl_->allocate_vacant_continuation_slot();
+    const std::int32_t slot_idx = st.reserved_turn_closure_index
+        ? static_cast<std::int32_t>(*st.reserved_turn_closure_index) : -1;
     if (slot_idx < 0) {
         skip_capture(std::move(offer));
         return runtime::ContextTransactionReserveStatus::Aborted;
@@ -2159,6 +2259,7 @@ Program::reserve_active_capture(CaptureOffer&& offer,
     const std::int32_t capture_frontier = static_cast<std::int32_t>(st.prompt_tokens_processed);
     auto& c_slot              = impl_->continuation_slots_[slot_idx];
     c_slot.role               = detail::ContinuationSlotRole::Catalogued;
+    st.reserved_turn_closure_index.reset();
     c_slot.generation         = ++impl_->continuation_epoch_;
     c_slot.committed_tokens.assign(st.prompt_tokens.begin(),
                                    st.prompt_tokens.begin() + capture_frontier);
@@ -2292,9 +2393,22 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
 
         std::array<std::int32_t, 3> first_mrope_pos = {st.last_token_pos, st.last_token_pos,
                                                        st.last_token_pos};
+        std::array<ops::SamplingConfig, 5> verification_sampling;
+        verification_sampling.fill(st.sampling_config);
+        if (st.output_constraint) {
+            auto preview = st.output_constraint->fork();
+            for (std::size_t column = 0; column <= st.draft_tokens.size(); ++column) {
+                verification_sampling[column].allowed_tokens = impl_->upload_constraint_mask(lane_idx, static_cast<std::uint32_t>(column), preview);
+                if (column < st.draft_tokens.size() &&
+                    (!preview.try_accept(st.draft_tokens[column]) || preview.terminated())) {
+                    st.draft_tokens.resize(column);
+                    break;
+                }
+            }
+        }
         impl_->pending_round_ = impl_->executor_.execute_speculative_verify_round(
             st.lane_handle, st.last_token_id, st.draft_tokens, st.last_token_index, first_mrope_pos,
-            st.sampling_config);
+            st.sampling_config, std::span(verification_sampling.data(), st.draft_tokens.size() + 1));
 
         const auto sampled = impl_->pending_round_.sampled_tokens();
 
@@ -2374,6 +2488,9 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
             .mrope_positions = {st.last_token_pos, st.last_token_pos, st.last_token_pos},
             .sampling        = st.sampling_config,
         };
+        if (st.output_constraint) {
+            requests[b].sampling.allowed_tokens = impl_->upload_constraint_mask(lane_idx, 0, *st.output_constraint);
+        }
     }
 
     std::size_t total_needed = 0;
@@ -2441,6 +2558,7 @@ Program::append_forced_tokens(std::span<const SequenceHandle> sequences,
 
         for (std::uint32_t s = 0; s < row_stride; ++s) {
             const TokenId tok = row_major_tokens[b * row_stride + s];
+            if (st.output_constraint) { st.output_constraint->accept(std::span(&tok, 1)); }
             detail::LaneStepRequest req{
                 .handle          = st.lane_handle,
                 .token_id        = static_cast<std::int32_t>(tok),
@@ -2516,6 +2634,7 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
 
             for (const auto tok_i32 : st.pending_accepted_tokens) {
                 const TokenId sampled = static_cast<TokenId>(tok_i32);
+                if (st.output_constraint) { st.output_constraint->accept(std::span(&sampled, 1)); }
                 st.prompt_tokens.push_back(sampled);
                 st.prefix_digests.append_generated(std::span(&sampled, 1), 0);
                 st.last_token_id = tok_i32;
@@ -2539,7 +2658,7 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
             if (impl_->pending_round_.valid()) {
                 impl_->pending_round_.abort();
             }
-            impl_->drop_unpublished_turn_closure(st);
+            impl_->drop_unpublished_checkpoints(st);
             impl_->executor_.release_lane(st.lane_handle);
             st.active   = false;
             st.finished = true;
@@ -2569,6 +2688,7 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
 
             if (dec.accepted_tokens > 0) {
                 const TokenId sampled = pending.tokens()[b];
+                if (st.output_constraint) { st.output_constraint->accept(std::span(&sampled, 1)); }
                 st.prompt_tokens.push_back(sampled);
                 st.prefix_digests.append_generated(std::span(&sampled, 1), 0);
                 st.committed_frontier += 1;
@@ -2587,7 +2707,7 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
             } else {
                 st.draft_tokens.clear();
                 st.pending_accepted_tokens.clear();
-                impl_->drop_unpublished_turn_closure(st);
+                impl_->drop_unpublished_checkpoints(st);
                 impl_->executor_.release_lane(st.lane_handle);
                 st.active   = false;
                 st.finished = true;
@@ -2621,7 +2741,7 @@ DiscardResult Program::abort_pending(PendingBatch&& pending) noexcept {
             if (lane >= impl_->lane_states_.size()) { continue; }
             auto& state = impl_->lane_states_[lane];
             if (!state.active || state.epoch != sequence.epoch()) { continue; }
-            impl_->drop_unpublished_turn_closure(state);
+            impl_->drop_unpublished_checkpoints(state);
             impl_->executor_.release_lane(state.lane_handle);
             state.active = false;
             state.finished = true;
@@ -2653,7 +2773,8 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
                         (st.committed_frontier > 0);
 
                     if (should_catalogue) {
-                        const std::int32_t target_c_idx = impl_->allocate_vacant_continuation_slot();
+                        const std::int32_t target_c_idx = st.reserved_endpoint_index
+                            ? static_cast<std::int32_t>(*st.reserved_endpoint_index) : -1;
                         if (target_c_idx >= 0) {
                             auto& c_slot = impl_->continuation_slots_[target_c_idx];
                             c_slot.role = detail::ContinuationSlotRole::Catalogued;
@@ -2744,6 +2865,8 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
                                 }
                             }
 
+                            st.reserved_endpoint_index.reset();
+                            impl_->release_checkpoint_reservations(st);
                             impl_->executor_.release_lane(st.lane_handle);
                             st.active   = false;
                             st.finished = true;
@@ -2761,7 +2884,7 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
                         }
                     }
 
-                    impl_->drop_unpublished_turn_closure(st);
+                    impl_->drop_unpublished_checkpoints(st);
                     impl_->executor_.release_lane(st.lane_handle);
                     st.active   = false;
                     st.finished = true;
@@ -2801,7 +2924,7 @@ AbortResult Program::abort(SequenceHandle sequence) noexcept {
                 if (impl_->pending_round_.valid()) {
                     impl_->pending_round_.abort();
                 }
-                impl_->drop_unpublished_turn_closure(st);
+                impl_->drop_unpublished_checkpoints(st);
                 impl_->executor_.release_lane(st.lane_handle);
                 st.active   = false;
                 st.finished = true;
@@ -2854,7 +2977,7 @@ void Program::fail_all_cleanup() noexcept {
     for (std::uint32_t l = 0; l < impl_->plan_.config.max_concurrency; ++l) {
         auto& st = impl_->lane_states_[l];
         if (st.active) {
-            impl_->drop_unpublished_turn_closure(st);
+            impl_->drop_unpublished_checkpoints(st);
             impl_->executor_.release_lane(st.lane_handle);
             st.active   = false;
             st.finished = true;
@@ -2891,9 +3014,13 @@ runtime::ProgramResourceRevision Program::resource_revision() const noexcept {
 PhysicalUsageSnapshot Program::physical_usage() const noexcept {
     if (impl_ == nullptr) { return {}; }
     std::uint32_t catalogued_slots = 0;
+    std::uint32_t reserved_slots = 0;
     for (const auto& c : impl_->continuation_slots_) {
         if (c.role == detail::ContinuationSlotRole::Catalogued) {
             ++catalogued_slots;
+        } else if (c.role == detail::ContinuationSlotRole::ReservedEndpoint ||
+                   c.role == detail::ContinuationSlotRole::ReservedTurnClosure) {
+            ++reserved_slots;
         }
     }
     return PhysicalUsageSnapshot{
@@ -2904,6 +3031,9 @@ PhysicalUsageSnapshot Program::physical_usage() const noexcept {
             (impl_->plan_.main_page_groups - impl_->executor_.available_physical_groups()) * 4),
         .device_backend_kv_pages = 0,
         .host_kv_bytes           = 0,
+        .checkpoint_slots_occupied = catalogued_slots + reserved_slots,
+        .checkpoint_slots_capacity = static_cast<std::uint32_t>(impl_->continuation_slots_.size()),
+        .checkpoint_slots_reserved = reserved_slots,
     };
 }
 

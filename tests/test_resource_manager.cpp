@@ -523,6 +523,9 @@ struct FakeDiscardResult {
 };
 
 struct FakePhysicalUsage {
+    std::optional<std::uint32_t> checkpoint_slots_occupied;
+    std::optional<std::uint32_t> checkpoint_slots_capacity;
+    std::uint32_t checkpoint_slots_reserved = 0;
     std::uint32_t device_state_slots      = 0;
     std::uint32_t host_state_slots        = 0;
     std::uint32_t device_main_kv_pages    = 0;
@@ -1147,6 +1150,7 @@ public:
     std::uint64_t abort_calls                 = 0;
     std::uint64_t skipped_captures            = 0;
     std::size_t pressure_target_count_peak    = 0;
+    std::size_t last_pressure_private_owner_count = 0;
     std::uint32_t finish_frontier             = 16;
     std::uint32_t started_source_id           = 0;
     PrivateSourceMode started_source_mode     = PrivateSourceMode::ConsumeToActive;
@@ -1214,6 +1218,7 @@ FakePressurePlanningSession::FakePressurePlanningSession(
         std::max(program.pressure_target_count_peak, targets_.size());
     if (++program.planning_generation_ == 0) { ++program.planning_generation_; }
     ++program.pressure_planning_sessions;
+    program.last_pressure_private_owner_count = private_owners.size();
     generation_ = program.planning_generation_;
 }
 
@@ -2498,6 +2503,109 @@ void test_aborted_source_selection_does_not_create_hit_history() {
             "aborted source selection incorrectly biased later retention policy");
 }
 
+// Retention depth was one in production: A reuses, B (another conversation) takes one turn,
+// A misses. The reuse hit was recorded on A's observation and then cleared three statements
+// later on the consume path, and the republished checkpoint's frontier had moved so the
+// exact-ref lookup rebuilt the observation from zero anyway. Every owner that had ever reused
+// therefore looked never-used, the planner's victim order fell through to slot index, and the
+// just-republished owner sat in the lowest slot. Sequential A,A,A never needs a victim, which
+// is why no sequential soak could see it. The frontier must advance between A's two
+// publications here, as it does on every real turn; at an unchanged frontier the fake harness
+// breaks the resulting tie differently from the planner and the case cannot fail.
+void test_republished_owner_keeps_reuse_history() {
+    constexpr std::uint32_t republish_frontier = 20;
+    FakeManager manager = make_manager(1, 2);
+    FakeProgram program;
+    // A into slot 0, B into slot 1: the private catalog is full. The fake program describes
+    // every pressure victim with its single global finish_frontier, so B is catalogued at the
+    // frontier A will republish at; only A's frontier moves between its two publications.
+    const ActiveRequest a1 = start_active(manager, program, 61, make_base(61), 1);
+    (void)finish_active(manager, program, a1, 16);
+    const ActiveRequest b1 = start_active(manager, program, 62, make_base(62), 2);
+    (void)finish_active(manager, program, b1, republish_frontier);
+
+    // A reuses its own endpoint: consume, then republish into the same cell. This is the hit
+    // that used to be erased. Republishing at a different frontier is the production case.
+    const ActiveRequest a2 = start_active(manager, program, 61, make_base(61), 3);
+    require(program.started_source_mode == PrivateSourceMode::ConsumeToActive,
+            "reuse of an owner's own endpoint was not a consume");
+    (void)finish_active(manager, program, a2, republish_frontier);
+
+    // A cold third conversation needs a slot. The never-reused B must be the victim, not the
+    // owner that reused one request ago.
+    program.required_pressure_actions = 1;
+    program.require_evictions         = true;
+    auto pressure = manager.inspect(program, FakePreparedPrompt{63}, make_base(63), 4);
+    require(pressure.choice.has_value(), "cold admission under a full catalog found no plan");
+    program.abort_start = true;
+    (void)manager.reserve_materialization(program, std::move(*pressure.choice),
+                                          FakePreparedPrompt{63}, {});
+    require(program.started_action_ids.size() == 1,
+            "cold admission under a full catalog did not evict exactly one owner");
+    const std::uint64_t action = program.started_action_ids.front();
+    std::cout << "  victim action " << action << " (reused owner would be "
+              << (2000U + a2.sequence.id) << ", never-reused owner " << (2000U + b1.sequence.id)
+              << ")\n";
+    if (action == 2000U + a2.sequence.id) {
+        require(false, "planner evicted the owner that reused one request ago (retention depth 1)");
+    }
+    require(action == 2000U + b1.sequence.id, "planner did not evict the never-reused owner");
+}
+
+// A conversation that just published must survive the next cold admission even when older
+// owners have reuse history. Every eviction option costs the same at first order in this
+// situation (equal rebuild work, retention class and portfolio value), so the search's
+// tie-breaks used to pick the newest owner: under a full pool a new chat was evicted before
+// its own second turn (three fresh conversations interleaved reused 0 of 6 follow-ups).
+// The publication grace takes the most recently published owners off the candidate list.
+// Pool of eight: A (reused once, then idle), six fillers, then newcomer B. The victim must be
+// one of the two oldest publications, never B or the recent fillers.
+void test_new_owner_survives_cold_admission_under_full_pool() {
+    FakeManager manager = make_manager(1, 8);
+    FakeProgram program;
+    const ActiveRequest a1 = start_active(manager, program, 61, make_base(61), 1);
+    (void)finish_active(manager, program, a1, 16);
+    const ActiveRequest a2 = start_active(manager, program, 61, make_base(61), 2);
+    require(program.started_source_mode == PrivateSourceMode::ConsumeToActive,
+            "reuse of an owner's own endpoint was not a consume");
+    (void)finish_active(manager, program, a2, 16);
+    std::vector<ActiveRequest> fillers;
+    for (std::uint32_t k = 0; k < 6; ++k) {
+        fillers.push_back(start_active(manager, program, 70 + k, make_base(70 + k), 3 + k));
+        (void)finish_active(manager, program, fillers.back(), 16);
+    }
+    const ActiveRequest b1 = start_active(manager, program, 62, make_base(62), 10);
+    (void)finish_active(manager, program, b1, 16);
+
+    program.required_pressure_actions = 1;
+    program.require_evictions         = true;
+    auto pressure = manager.inspect(program, FakePreparedPrompt{63}, make_base(63), 11);
+    require(pressure.choice.has_value(), "cold admission under a full catalog found no plan");
+    // Eight eligible owners, six in grace: exactly the two oldest publications were offered
+    // to the planner as pressure candidates.
+    require(program.last_pressure_private_owner_count == 2,
+            "publication grace did not remove the recently published owners from pressure");
+    program.abort_start = true;
+    (void)manager.reserve_materialization(program, std::move(*pressure.choice),
+                                          FakePreparedPrompt{63}, {});
+    require(program.started_action_ids.size() == 1,
+            "cold admission under a full catalog did not evict exactly one owner");
+    const std::uint64_t action = program.started_action_ids.front();
+    std::cout << "  victim action " << action << " (newcomer " << (2000U + b1.sequence.id)
+              << ", oldest two " << (2000U + a2.sequence.id) << " / "
+              << (2000U + fillers[0].sequence.id) << ")" << std::endl;
+    if (action == 2000U + b1.sequence.id) {
+        require(false, "planner evicted the just-published newcomer");
+    }
+    for (std::size_t k = 1; k < fillers.size(); ++k) {
+        if (action == 2000U + fillers[k].sequence.id) {
+            require(false, "planner evicted a recently published owner inside the grace");
+        }
+    }
+    require(action == 2000U + a2.sequence.id || action == 2000U + fillers[0].sequence.id,
+            "planner did not evict one of the two least recently published owners");
+}
+
 void test_retained_source_is_protected_until_terminal() {
     FakeManager manager = make_manager(2, 3);
     FakeProgram program;
@@ -3272,6 +3380,10 @@ int main() {
              test_uncommitted_pressure_acknowledgement_is_not_degradation);
     run_test("aborted source is not a hit",
              test_aborted_source_selection_does_not_create_hit_history);
+    run_test("republished owner keeps reuse history",
+             test_republished_owner_keeps_reuse_history);
+    run_test("new owner survives cold admission under full pool",
+             test_new_owner_survives_cold_admission_under_full_pool);
     run_test("retained source protection", test_retained_source_is_protected_until_terminal);
     run_test("session publication order", test_session_publication_order_controls_tied_source);
     run_test("canonical pressure", test_canonical_pressure_starts_with_disposable_owner);

@@ -136,12 +136,7 @@ void validate_standard_output_controls(const Json& body) {
         if (!format.is_object() || !format.contains("type") || !format.at("type").is_string()) {
             bad_request("response_format must contain a string type", "response_format");
         }
-        if (format.at("type").get<std::string>() != "text") {
-            bad_request(
-                "this response_format requires constrained output, which NInfer cannot guarantee; "
-                "only {\"type\":\"text\"} is available",
-                "response_format", "response_format_not_supported");
-        }
+        (void)parse_structured_output_format(format, "response_format", true);
     }
 
     if (body.contains("modalities") && !body.at("modalities").is_null()) {
@@ -886,6 +881,9 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
     validate_compatibility_hints(body);
 
     OpenAIChatRequest output;
+    if (body.contains("response_format") && !body["response_format"].is_null()) {
+        output.generation.structured_output = parse_structured_output_format(body["response_format"], "response_format", true);
+    }
     if (!body.contains("model") || !body.at("model").is_string() ||
         body.at("model").get<std::string>().empty()) {
         bad_request("missing required field: model", "model");

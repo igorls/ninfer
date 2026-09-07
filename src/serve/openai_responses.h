@@ -39,6 +39,7 @@ struct OpenAIResponsesPromptRequest {
 struct OpenAIResponsesCreateRequest {
     OpenAIResponsesPromptRequest prompt;
     nlohmann::json metadata    = nlohmann::json::object();
+    nlohmann::json text_format = {{"type", "text"}};
     nlohmann::json tools       = nlohmann::json::array();
     nlohmann::json tool_choice = "auto";
     // Responses beta namespace tools are flattened for the Engine and restored only at the wire

@@ -1091,7 +1091,26 @@ int test_turn_closure_checkpoint_and_multi_turn_reuse(ninfer::DeviceContext& dev
                           "Turn 3 prefix reuse path must be PrivateTurnClosure");
     }
 
-    auto res3 = program.seal_identity(*cand3, prompt2);
+    // Retaining the old two-checkpoint owner needs endpoint and rewrite slots.
+    // Drive pressure exactly when admission reports the full pool; preserve the source.
+    failures += check(cand3->identity_assessment().physical_status ==
+                          runtime::MaterializationPhysicalStatus::Infeasible,
+                      "Retained-source admission must account for full physical checkpoint pool");
+    std::optional<ResourcePlan> res3;
+    {
+        const AdmissionCandidate* candidate = &*cand3;
+        std::array candidate_ids{runtime::PlanningCandidateId{0}};
+        std::array<const ContinuationHandle*, 3> owners{
+            &*fin1.continuation, &*fin2.continuation, &*fin_fill.continuation};
+        std::array owner_ids{runtime::PlanningOwnerId{0}, runtime::PlanningOwnerId{1},
+                             runtime::PlanningOwnerId{2}};
+        auto session = program.begin_pressure_planning(std::span(&candidate, 1), candidate_ids,
+                                                       owners, owner_ids, {}, {});
+        auto assessed = session.assess(session.root_maximal_target(candidate_ids[0]));
+        res3 = session.seal(std::move(assessed), prompt2);
+    }
+    failures += check(res3.has_value(), "Pressure can make room while retaining the source");
+    if (!res3) { return failures; }
     (void)program.start_resource_transaction(std::move(*res3), make_prompt(turn2_tokens, true, 24), cancellation);
     auto prog3 = program.progress_context_transaction(cancellation);
     auto* mat3 = std::get_if<MaterializationResult>(&prog3);
@@ -1129,6 +1148,10 @@ int test_turn_closure_checkpoint_and_multi_turn_reuse(ninfer::DeviceContext& dev
     bool bit_identical = (t2_logits == t3_logits);
     failures += check(bit_identical, "Turn 3 logits must be bit-identical to Turn 2 logits after pool fill");
 
+    // The repeated-turn comparison is complete; free its endpoint so the
+    // independent capture tests can reserve both their endpoint and rewrite.
+    (void)program.release_continuation(std::move(*fin3.continuation));
+
     // 5. Test offer skipped with F < N
     std::printf("  [Skip Test] Testing skip_capture with F=12 < N=16...\n");
     {
@@ -1140,6 +1163,8 @@ int test_turn_closure_checkpoint_and_multi_turn_reuse(ninfer::DeviceContext& dev
             prompt_skip, base_skip, ninfer::runtime::LaneId(0), nullptr, nullptr, std::nullopt, false);
         failures += check(cand_skip.has_value(), "Skip test admission must succeed");
         auto res_skip = program.seal_identity(*cand_skip, prompt_skip);
+        failures += check(res_skip.has_value(), "Skip test must reserve endpoint and rewrite capacity");
+        if (!res_skip.has_value()) return failures;
         (void)program.start_resource_transaction(std::move(*res_skip), make_prompt(skip_tokens, true, 12), cancellation);
         auto prog_skip = program.progress_context_transaction(cancellation);
         auto* mat_skip = std::get_if<MaterializationResult>(&prog_skip);
@@ -2740,7 +2765,10 @@ int test_continuation_capacity_saturation_and_lru_reuse(ninfer::DeviceContext& d
         uint32_t reused = cand->summary().reusable_prompt_tokens;
 
         std::optional<ResourcePlan> res;
-        if (!active_owners.empty() && program.physical_usage().device_state_slots >= 4) {
+        if (cand->identity_assessment().physical_status ==
+            ninfer::runtime::MaterializationPhysicalStatus::Infeasible) {
+            failures += check(!program.seal_identity(*cand, prompt).has_value(),
+                              "Full physical checkpoint pool must reject identity admission");
             std::vector<ninfer::runtime::PlanningOwnerId> owner_ids;
             owner_ids.reserve(active_owners.size());
             for (std::size_t i = 0; i < active_owners.size(); ++i) {
@@ -2829,6 +2857,90 @@ int test_continuation_capacity_saturation_and_lru_reuse(ninfer::DeviceContext& d
     std::printf("  [Saturation LRU Result] R3 reused=%u, R4 reused=%u\n", reused3, reused4);
 
     std::printf("[DONE] test_continuation_capacity_saturation_and_lru_reuse, failures: %d\n", failures);
+    return failures;
+}
+
+int test_endpoint_and_rewrite_reservations_are_owned_by_admitted_lane(ninfer::DeviceContext& device) {
+    std::printf("[RUN] test_endpoint_and_rewrite_reservations_are_owned_by_admitted_lane\n");
+    int failures = 0;
+    auto model = make_synthetic_model(device);
+    const auto ple_meta = make_synthetic_ple_meta();
+    FlashNextRuntimeConfig cfg{
+        .max_concurrency = 3, .max_context = 256, .state_slot_capacity = 0,
+        .continuation_capacity = 4, .prefill_chunk = 128,
+    };
+    const auto curve = flash_next_capacity_curve(cfg);
+    auto plan = finalize_flash_next_runtime_plan(cfg, curve.maximum_main_page_groups);
+    Program program(std::make_unique<ProgramImpl>(nullptr, plan, device, model.view,
+                                                  std::nullopt, ple_meta));
+    std::atomic<bool> cancelled{false};
+    runtime::CancellationFlagView cancellation{&cancelled};
+    runtime::ResolvedExecutionOptions options{};
+    options.requested_output_tokens = 8;
+    std::vector<TokenId> tokens(20, 100);
+    const auto prompt = make_prompt(tokens, true, 16);
+    const auto base = program.plan_request(prompt, options);
+    const auto inspect = [&](std::uint32_t lane) {
+        return program.inspect_admission(prompt, base, runtime::LaneId(lane), nullptr,
+                                         nullptr, std::nullopt, false);
+    };
+    std::vector<SequenceHandle> sequences;
+    for (std::uint32_t lane = 0; lane < 2; ++lane) {
+        auto candidate = inspect(lane);
+        auto sealed = program.seal_identity(*candidate, prompt);
+        failures += check(sealed.has_value(), "Each admission reserves an endpoint and its rewrite");
+        if (!sealed) { return failures; }
+        (void)program.start_resource_transaction(std::move(*sealed), make_prompt(tokens, true, 16), cancellation);
+        auto progress = program.progress_context_transaction(cancellation);
+        sequences.push_back(std::get<MaterializationResult>(progress).published->sequence);
+        program.finalize_context_transaction();
+    }
+    failures += check(program.physical_usage().checkpoint_slots_reserved == 4,
+                      "Two admitted lanes must reserve all four endpoint/rewrite slots");
+    auto blocked = inspect(2);
+    failures += check(blocked->identity_assessment().physical_status ==
+                          runtime::MaterializationPhysicalStatus::Infeasible,
+                      "Endpoint and rewrite reservations block oversubscription despite spare KV and lane");
+    failures += check(!program.seal_identity(*blocked, prompt), "Infeasible identity cannot be sealed");
+
+    auto prefill = program.advance_prefill(sequences[0]);
+    bool captured = false;
+    while (!prefill.complete) {
+        if (prefill.capture) {
+            const auto assessment = program.inspect_capture(*prefill.capture, nullptr, nullptr, std::nullopt);
+            failures += check(assessment.physically_feasible, "Rewrite uses its own reservation at full occupancy");
+            (void)program.reserve_active_capture(std::move(*prefill.capture), nullptr, nullptr,
+                                                  std::nullopt, false, cancellation);
+            auto capture = program.progress_context_transaction(cancellation);
+            auto* published = std::get_if<ActiveCaptureResult>(&capture);
+            captured = published && published->active_summary.rewrite.has_value();
+            program.finalize_context_transaction();
+        }
+        prefill = program.advance_prefill(sequences[0]);
+    }
+    failures += check(captured, "Publish the rewrite at the full reserved pool");
+    std::array<runtime::CommitDecision, 1> decisions{{{.accepted_tokens = 1, .terminal = true}}};
+    (void)program.commit(std::move(*prefill.pending), decisions);
+    auto finished = program.finish(sequences[0]);
+    failures += check(finished.continuation.has_value(), "Reserved endpoint is published at full occupancy");
+    failures += check(finished.summary.rewrite.has_value(), "Finished owner retains its rewrite checkpoint");
+    (void)program.abort(sequences[1]);
+    auto available = inspect(1);
+    failures += check(available->identity_assessment().physical_status ==
+                          runtime::MaterializationPhysicalStatus::Feasible,
+                      "Aborting an admitted lane returns its reservation");
+    auto sealed = program.seal_identity(*available, prompt);
+    (void)program.start_resource_transaction(std::move(*sealed), make_prompt(tokens, true, 16), cancellation);
+    cancelled = true;
+    auto progress = program.progress_context_transaction(cancellation);
+    failures += check(std::get<MaterializationResult>(progress).status == runtime::ContextTransactionStatus::Aborted,
+                      "Cancellation aborts materialization");
+    cancelled = false;
+    available = inspect(1);
+    failures += check(available->identity_assessment().physical_status == runtime::MaterializationPhysicalStatus::Feasible,
+                      "Cancelled materialization returns its endpoint reservation");
+    program.fail_all_cleanup();
+    failures += check(program.physical_usage().device_state_slots == 0, "Cleanup releases all owned state");
     return failures;
 }
 
@@ -2976,6 +3088,7 @@ int main() {
         failures += test_materialization_planner_call_sequence(device);
         failures += test_resume_from_endpoint_consumes_pair(device);
         failures += test_continuation_capacity_saturation_and_lru_reuse(device);
+        failures += test_endpoint_and_rewrite_reservations_are_owned_by_admitted_lane(device);
         failures += test_24k_prompt_reuse_scale(device);
 
         if (failures == 0) {
