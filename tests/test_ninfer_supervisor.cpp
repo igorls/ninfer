@@ -967,8 +967,50 @@ int test_with_api_key_file() {
     return f;
 }
 
+int test_kv_capacity_adaptation() {
+    using namespace ninfer::supervisor;
+    int f = 0;
+    const std::string line =
+        "[2026-09-07 18:23:15.282] [critical] [ninfer-serve] server status=failed phase=startup "
+        "detail=\"requested Engine runtime reservation requires 17572624288 bytes, but only "
+        "16943534080 bytes are available for runtime capacity\"";
+    const auto sf = parse_runtime_reservation_failure(line);
+    f += check(sf.matched && sf.required_bytes == 17572624288LL && sf.available_bytes == 16943534080LL,
+               "runtime reservation shortfall line was not parsed");
+    f += check(!parse_runtime_reservation_failure("[error] request id=7 status=failed").matched,
+               "unrelated error line parsed as a reservation shortfall");
+
+    const std::vector<std::string> args{"model.ninfer", "--max-context", "262144",
+                                        "--kv-capacity", "737280", "--spec", "mtp"};
+    f += check(explicit_kv_capacity(args) == std::optional<std::int64_t>(737280),
+               "explicit kv capacity was not read from args");
+    f += check(!explicit_kv_capacity({"--kv-capacity", "auto"}).has_value(),
+               "auto kv capacity must not be adapted");
+    f += check(kv_capacity_floor_tokens(args) == 262144, "kv floor did not follow --max-context");
+
+    // The production case: 629 MB short at 737280 tokens. Must land below the value that
+    // fit (655360), stay a multiple of 4096, and never below the floor.
+    const auto next = reduced_kv_capacity(737280, sf.required_bytes, sf.available_bytes, 262144);
+    f += check(next < 655360 && next % 4096 == 0 && next >= 262144,
+               "reduced kv capacity is not a safe multiple below the plan that fit");
+    f += check(reduced_kv_capacity(737280, 100, 200, 262144) == 737280,
+               "a plan that fits must not be reduced");
+    f += check(reduced_kv_capacity(300000, 40LL << 30, 1, 262144) == 262144,
+               "reduction must clamp at the floor");
+
+    const auto rewritten = with_kv_capacity(args, next);
+    f += check(explicit_kv_capacity(rewritten) == std::optional<std::int64_t>(next) &&
+                   rewritten.size() == args.size(),
+               "with_kv_capacity did not replace the value in place");
+    const auto appended = with_kv_capacity({"model.ninfer"}, 4096);
+    f += check(appended.size() == 3 && appended[1] == "--kv-capacity" && appended[2] == "4096",
+               "with_kv_capacity did not append when absent");
+    return f;
+}
+
 int main() {
     int failures = 0;
+    failures += test_kv_capacity_adaptation();
     failures += test_loopback();
     failures += test_engine_probe_destination();
     failures += test_crash_loop();

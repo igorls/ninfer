@@ -82,6 +82,15 @@ svg{flex-shrink:0}
 .engine-message p{font-size:13px;margin-top:6px;max-width:65ch}
 .engine-meta{display:flex;gap:18px;margin-top:13px;color:var(--text-muted);font-size:11px;flex-wrap:wrap}
 .engine-meta strong{font-weight:500;font-variant-numeric:tabular-nums}
+.launch-plan{margin-top:14px;padding-top:12px;border-top:1px solid var(--border-dim)}
+.launch-plan .plan-head{display:flex;align-items:center;gap:10px;font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px}
+.launch-plan .plan-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px 18px;font-size:12px}
+.launch-plan .plan-grid dt{color:var(--text-muted);font-size:11px}
+.launch-plan .plan-grid dd{margin:2px 0 0;font-weight:500;font-variant-numeric:tabular-nums}
+.launch-plan .plan-compromise{grid-column:1/-1;margin-top:4px;padding:8px 10px;border-radius:6px;background:var(--warn-bg,#fff7e6);border:1px solid var(--warn,#d9a62b);font-size:12px;line-height:1.45}
+.launch-plan .plan-compromise strong{font-weight:600}
+.launch-plan details{margin-top:8px;font-size:11px;color:var(--text-muted)}
+.launch-plan details code{display:block;margin-top:6px;white-space:pre-wrap;word-break:break-all;font-size:11px;color:var(--text-main)}
 .engine-meta #model-label{max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .control-group{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:38px;padding:8px 14px;border:1px solid var(--border-line);border-radius:7px;background:var(--bg-surface);color:var(--text-main);font-size:12px;font-weight:600;text-decoration:none;transition:background-color .16s ease,border-color .16s ease}
@@ -459,7 +468,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
     <div class="page-heading"><div><h1 id="overview-title">Overview</h1></div><span class="local-label"><span class="small-dot"></span>On this computer</span></div>
     <section class="engine-summary" aria-labelledby="engine-heading">
       <div class="engine-symbol"><svg class="icon"><use href="#i-chip"/></svg></div>
-      <div class="engine-message"><div class="engine-title-line"><h2 id="engine-heading">Checking your engine…</h2><span id="kpi-state-badge" class="kpi-badge badge-warn">Connecting</span></div><p id="engine-guidance">Waiting for a health update from the supervisor.</p><div class="engine-meta"><span id="model-label">Model details loading</span><span>Uptime <strong id="kpi-uptime">—</strong></span></div></div>
+      <div class="engine-message"><div class="engine-title-line"><h2 id="engine-heading">Checking your engine…</h2><span id="kpi-state-badge" class="kpi-badge badge-warn">Connecting</span></div><p id="engine-guidance">Waiting for a health update from the supervisor.</p><div class="engine-meta"><span id="model-label">Model details loading</span><span>Uptime <strong id="kpi-uptime">—</strong></span></div><div id="launch-plan" class="launch-plan" hidden></div></div>
       <div id="controls" class="control-group"><button class="btn primary" data-act="start" id="btn-start" disabled>Start engine</button><button class="btn" data-act="restart" id="btn-restart" disabled>Restart</button><button class="btn danger-text" data-act="stop" id="btn-stop" disabled>Stop</button></div>
     </section>
     <p id="monitor-note" class="context-note" hidden>This dashboard monitors an engine started elsewhere. Use its original application to start or stop it.</p>
@@ -521,7 +530,7 @@ R"HTML(      <section class="guide-step"><span class="step-number">2</span><div>
     <section class="diagnostic-health"><span id="diagnostic-health-label">Checking health…</span><p id="diagnostic-health-detail">Health details will appear when the supervisor responds.</p></section>
     <section class="diagnostics-section"><div class="section-heading"><div><h2>Things to know</h2><p>Findings from the available engine logs. Open an item for its evidence.</p></div><span id="insights-count-badge" class="kpi-badge">—</span></div><div id="insights-container" class="insights-grid"><p class="empty-state">Waiting for diagnostic information…</p></div></section>
     <section class="surface log-panel" aria-labelledby="logs-title"><div class="section-heading"><div><h2 id="logs-title">Engine log</h2><p>Recent engine activity for investigating a problem.</p></div><div class="control-group"><button id="btn-autoscroll" class="btn active" aria-pressed="true">Follow latest</button><button id="btn-copylog" class="btn"><svg class="icon"><use href="#i-copy"/></svg>Copy log</button></div></div><div class="log-toolbar"><div class="log-filters" role="group" aria-label="Log categories"><button class="log-filter-btn active" data-filter="all" aria-pressed="true">All activity</button><button class="log-filter-btn" data-filter="req" aria-pressed="false">Requests</button><button class="log-filter-btn" data-filter="throughput" aria-pressed="false">Speed</button><button class="log-filter-btn" data-filter="warn" aria-pressed="false">Warnings &amp; errors</button></div><input type="search" id="log-search" placeholder="Search this log…" aria-label="Search engine log"></div><div id="log-content" class="log-scroll-pane" tabindex="0" aria-label="Engine log output">Waiting for engine activity…</div></section>
-    <details class="technical-details"><summary>Engine and memory details<span>Advanced</span></summary><div class="details-content"><dl class="facts"><div><dt>Process state</dt><dd id="kpi-state-main">—</dd></div><div><dt>Process ID</dt><dd id="kpi-pid">—</dd></div><div><dt>API port</dt><dd id="kpi-engine-port">—</dd></div><div><dt>Health response</dt><dd id="dt-health-check">—</dd></div><div><dt>Last engine event</dt><dd id="dt-last-event">—</dd></div><div><dt>Memory reserved for your desktop</dt><dd id="dt-reserve">—</dd></div><div><dt>Engine memory plan</dt><dd id="dt-reservation">—</dd></div></dl><h3>Startup capacity report</h3><p class="context-note">The engine’s original memory and request-capacity report.</p><pre id="dt-capacity-text">No capacity report is available yet.</pre></div></details>
+    <details class="technical-details"><summary>Engine and memory details<span>Advanced</span></summary><div class="details-content"><dl class="facts"><div><dt>Process state</dt><dd id="kpi-state-main">—</dd></div><div><dt>Process ID</dt><dd id="kpi-pid">—</dd></div><div><dt>API port</dt><dd id="kpi-engine-port">—</dd></div><div><dt>Health response</dt><dd id="dt-health-check">—</dd></div><div><dt>Last engine event</dt><dd id="dt-last-event">—</dd></div><div><dt>Memory reserved for your desktop</dt><dd id="dt-reserve">—</dd></div><div><dt>Engine memory plan</dt><dd id="dt-reservation">—</dd></div><div><dt>KV capacity</dt><dd id="dt-kv-capacity">—</dd></div></dl><h3>Startup capacity report</h3><p class="context-note">The engine’s original memory and request-capacity report.</p><pre id="dt-capacity-text">No capacity report is available yet.</pre></div></details>
     <details class="technical-details"><summary>Generation acceleration<span>Advanced</span></summary><div class="details-content"><p>Speculative decoding drafts tokens ahead of time and checks them against the model. It is optional; a disabled backend does not indicate an error.</p><dl class="facts"><div><dt>Backend</dt><dd id="dt-mtp-backend">—</dd></div><div><dt>Status</dt><dd id="kpi-mtp-badge">—</dd></div><div><dt>Draft window</dt><dd id="dt-mtp-window">—</dd></div><div><dt>Acceptance rate</dt><dd id="kpi-mtp-pct">—</dd></div><div><dt>Accepted / drafted</dt><dd id="kpi-mtp-ratio">—</dd></div><div><dt>Fallback steps</dt><dd id="kpi-mtp-fallbacks">—</dd></div><div><dt>Prefix reuse</dt><dd id="dt-reuse-mix">—</dd></div></dl><h3>Accepted tokens by draft position <span id="dt-mtp-rate-badge" class="kpi-badge">—</span></h3><div id="mtp-bars-container" class="mtp-bars"><div class="mtp-col"><div class="mtp-bar-track"><div class="mtp-bar"></div></div><span>P1</span></div><div class="mtp-col"><div class="mtp-bar-track"><div class="mtp-bar"></div></div><span>P2</span></div><div class="mtp-col"><div class="mtp-bar-track"><div class="mtp-bar"></div></div><span>P3</span></div><div class="mtp-col"><div class="mtp-bar-track"><div class="mtp-bar"></div></div><span>P4</span></div><div class="mtp-col"><div class="mtp-bar-track"><div class="mtp-bar"></div></div><span>P5</span></div></div><p class="context-note">Conversation-prefix reuse can avoid processing the same opening text again. Seed, append, and reset describe how the engine reused that state.</p></div></details>
   </section>
   <section id="view-settings" class="view" aria-labelledby="settings-title" hidden>
@@ -547,6 +556,52 @@ R"HTML(      <section class="guide-step"><span class="step-number">2</span><div>
     if (bytes == null || isNaN(bytes)) return '—';
     return (bytes / 1048576).toFixed(1) + ' MiB';
   }
+  // The plan the engine is actually running, on the card that says it is ready: the flags
+  // the process was launched with (after every supervisor adjustment) and the engine's own
+  // capacity report. A reduced KV plan is the one compromise the supervisor makes on its
+  // own, so it is called out with the reason rather than left for the details section.
+  function renderLaunchPlan(eng, s) {
+    const el = document.getElementById('launch-plan');
+    if (!el) return;
+    const args = Array.isArray(eng.launch_args) ? eng.launch_args : [];
+    if (args.length === 0) { el.hidden = true; return; }
+    const flags = {};
+    for (let i = 0; i < args.length; i++) {
+      if (!args[i].startsWith('--')) continue;
+      const next = args[i + 1];
+      if (next !== undefined && !next.startsWith('--')) { flags[args[i]] = next; i++; }
+      else flags[args[i]] = true;
+    }
+    const cap = {};
+    (s.engine_capacity_line || '').split(' ').forEach(tok => {
+      const eq = tok.indexOf('=');
+      if (eq > 0) cap[tok.slice(0, eq)] = tok.slice(eq + 1);
+    });
+    const num = v => Number.isFinite(Number(v)) ? Number(v).toLocaleString() : (v || '—');
+    const gib = v => Number.isFinite(Number(v)) ? (Number(v) / 1073741824).toFixed(2) + ' GiB' : '—';
+    const esc = t => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const reduced = eng.kv_capacity_effective > 0;
+    const kvRunning = cap.kv_capacity_tokens || (reduced ? eng.kv_capacity_effective : flags['--kv-capacity']);
+    const rows = [
+      ['KV capacity', reduced ? `${num(kvRunning)} of ${num(eng.kv_capacity_configured)} configured` : `${num(kvRunning)} tokens`],
+      ['Max context', num(flags['--max-context'])],
+      ['Concurrent requests', num(flags['--max-concurrency'])],
+      ['Speculation', flags['--spec'] ? `${flags['--spec']}${flags['--draft-tokens'] ? ', ' + flags['--draft-tokens'] + ' drafts' : ''}` : 'off'],
+      ['KV cache', flags['--kv-dtype'] || 'default'],
+      ['Desktop reserve', flags['--desktop-reserve-gib'] ? flags['--desktop-reserve-gib'] + ' GiB' : 'engine default'],
+      ['Engine reservation', gib(cap.runtime_reservation_bytes)],
+      ['Left after startup', gib(cap.available_after_startup_bytes)],
+    ];
+    let html = '<div class="plan-head"><span>Running plan</span>' + (reduced ? '<span class="kpi-badge badge-warn">Reduced by supervisor</span>' : '<span class="kpi-badge badge-ok">As configured</span>') + '</div><dl class="plan-grid">';
+    rows.forEach(([k, v]) => { html += `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`; });
+    if (reduced) {
+      html += `<div class="plan-compromise"><strong>Compromise:</strong> ${esc(eng.kv_capacity_note || 'the configured KV capacity did not fit beside other apps on the card.')}</div>`;
+    }
+    html += '</dl><details><summary>Exact launch command</summary><code>' + esc(args.join(' ')) + '</code></details>';
+    el.innerHTML = html;
+    el.hidden = false;
+  }
+
   function formatUptime(seconds) {
     if (seconds == null || isNaN(seconds)) return '—';
     const h = Math.floor(seconds / 3600);
@@ -1302,6 +1357,7 @@ R"HTML(    if (id === 'prefix.reuse_mix') return {title:'Reusing earlier convers
 
     document.getElementById('kpi-pid').textContent = eng.pid || '—';
     document.getElementById('kpi-uptime').textContent = formatUptime(eng.uptime_s);
+    renderLaunchPlan(eng, s);
 
     // VRAM Metrics
     const nv = s.nvidia_smi || {};
@@ -1344,6 +1400,16 @@ R"HTML(    if (av && av.desktop_reserve) {
     document.getElementById('dt-gpu-name').textContent = dxgi.adapter_name || 'NVIDIA GPU';
     document.getElementById('dt-phys-vram').textContent = usedBytes == null ? 'Device memory information is unavailable.' : `${gib(usedBytes)} used · ${gib(totalBytes)} total`;
     document.getElementById('dt-last-event').textContent = eng.last_event || '—';
+    const kvEl = document.getElementById('dt-kv-capacity');
+    if (kvEl) {
+      if (eng.kv_capacity_effective > 0) {
+        kvEl.textContent = eng.kv_capacity_effective.toLocaleString() + ' of ' + eng.kv_capacity_configured.toLocaleString() + ' tokens configured. ' + (eng.kv_capacity_note || '');
+      } else if (eng.kv_capacity_configured > 0) {
+        kvEl.textContent = eng.kv_capacity_configured.toLocaleString() + ' tokens, as configured';
+      } else {
+        kvEl.textContent = '—';
+      }
+    }
     document.getElementById('dt-health-check').textContent = s.health ? `HTTP ${s.health.status} (${s.health.body || 'OK'})` : '—';
 
     document.getElementById('dt-capacity-text').textContent = s.engine_capacity_line || 'No capacity report is available yet.';

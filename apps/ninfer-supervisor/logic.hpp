@@ -978,6 +978,102 @@ inline std::vector<std::string> with_desktop_reserve(std::vector<std::string> ar
     return args;
 }
 
+// The engine refuses to start when its runtime reservation does not fit beside what the
+// desktop currently holds, and says so on one line:
+//   server status=failed phase=startup detail="requested Engine runtime reservation
+//   requires 17572624288 bytes, but only 16943534080 bytes are available for runtime capacity"
+// A fixed --kv-capacity demands a fixed reservation whatever else is resident, so the same
+// plan fails the same way on every retry; the supervisor looped seven times on it. Parsed
+// here so the retry can shrink the plan instead.
+struct RuntimeReservationShortfall {
+    bool matched                 = false;
+    std::int64_t required_bytes  = 0;
+    std::int64_t available_bytes = 0;
+};
+
+inline RuntimeReservationShortfall parse_runtime_reservation_failure(std::string_view line) {
+    RuntimeReservationShortfall out;
+    const auto read_number = [&](std::string_view text, std::size_t from, std::int64_t& value) {
+        std::size_t i = from;
+        while (i < text.size() && text[i] == ' ') { ++i; }
+        std::int64_t v = 0;
+        bool any      = false;
+        while (i < text.size() && text[i] >= '0' && text[i] <= '9') {
+            v   = v * 10 + (text[i] - '0');
+            any = true;
+            ++i;
+        }
+        value = v;
+        return any;
+    };
+    const std::string_view key = "runtime reservation requires ";
+    const auto pos             = line.find(key);
+    if (pos == std::string_view::npos) { return out; }
+    if (!read_number(line, pos + key.size(), out.required_bytes)) { return out; }
+    const std::string_view key2 = "but only ";
+    const auto pos2             = line.find(key2, pos);
+    if (pos2 == std::string_view::npos) { return out; }
+    if (!read_number(line, pos2 + key2.size(), out.available_bytes)) { return out; }
+    out.matched = out.required_bytes > 0 && out.available_bytes >= 0;
+    return out;
+}
+
+// The configured KV capacity when it is an explicit token count. 'auto' or an absent flag
+// returns nullopt: the engine sizes those itself and there is nothing to adapt.
+inline std::optional<std::int64_t> explicit_kv_capacity(const std::vector<std::string>& args) {
+    for (std::size_t i = 0; i + 1 < args.size(); ++i) {
+        if (args[i] != "--kv-capacity") { continue; }
+        const std::string& v = args[i + 1];
+        if (v.empty() || v.find_first_not_of("0123456789") != std::string::npos) { return std::nullopt; }
+        return std::stoll(v);
+    }
+    return std::nullopt;
+}
+
+// The engine must still admit one full-context request, so the plan never shrinks below
+// --max-context (or a modest default when the flag is absent).
+inline std::int64_t kv_capacity_floor_tokens(const std::vector<std::string>& args) {
+    for (std::size_t i = 0; i + 1 < args.size(); ++i) {
+        if (args[i] != "--max-context") { continue; }
+        const std::string& v = args[i + 1];
+        if (!v.empty() && v.find_first_not_of("0123456789") == std::string::npos) { return std::stoll(v); }
+    }
+    return 32768;
+}
+
+// Tokens to run at after a shortfall. The supervisor does not know the model's KV bytes per
+// token, so it assumes no more than 8 KiB (Flash-Next FP8 is about 12 KiB, BF16 twice that):
+// assuming less removes more tokens, which is the safe direction. Adds a 256 MiB margin so
+// a second attempt is not itself a few megabytes short, rounds down to a 4096-token boundary,
+// and never goes below the floor.
+inline std::int64_t reduced_kv_capacity(std::int64_t current_tokens, std::int64_t required_bytes,
+                                        std::int64_t available_bytes, std::int64_t floor_tokens) {
+    constexpr std::int64_t kKvBytesPerTokenFloor = 8LL * 1024;
+    constexpr std::int64_t kMarginBytes          = 256LL * 1024 * 1024;
+    if (required_bytes <= available_bytes) { return current_tokens; }
+    const std::int64_t shortfall = required_bytes - available_bytes + kMarginBytes;
+    const std::int64_t drop      = (shortfall + kKvBytesPerTokenFloor - 1) / kKvBytesPerTokenFloor;
+    std::int64_t next            = current_tokens - drop;
+    next -= next % 4096;
+    if (next < floor_tokens) { next = floor_tokens; }
+    return next;
+}
+
+inline std::vector<std::string> with_kv_capacity(std::vector<std::string> args, std::int64_t tokens) {
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        if (args[i] != "--kv-capacity") { continue; }
+        if (i + 1 < args.size()) {
+            args[i + 1] = std::to_string(tokens);
+        } else {
+            args.emplace_back(std::to_string(tokens));
+        }
+        return args;
+    }
+    args.emplace_back("--kv-capacity");
+    args.emplace_back(std::to_string(tokens));
+    return args;
+}
+
 // The reserve the config file already asks for, so the menu can put a checkmark
 // on it before the user has ever chosen one. 0 when the flag is absent.
 inline int desktop_reserve_from_args(const std::vector<std::string>& args) {

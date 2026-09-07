@@ -120,6 +120,9 @@ private:
     void* hwnd_      = nullptr;
     void* hicon_     = nullptr;
     int last_status_ = -1;
+    // Last KV plan announced. A reduced plan is a compromise the person should hear about
+    // once, from the shell, not discover on the dashboard.
+    std::int64_t last_kv_effective_ = 0;
     // refresh_icon() early-outs on an unchanged key. The key has to include the
     // error text, or a tooltip that gained a reason without changing colour
     // would never be written to the shell.

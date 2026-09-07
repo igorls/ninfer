@@ -752,6 +752,22 @@ void TrayIcon::refresh_icon() {
         login_install_pending_ = false;
     }
 
+    // The engine could not reserve the memory its configured plan needed and the
+    // supervisor launched a smaller one. Say so, once per plan, with the numbers.
+    if (est.kv_capacity_effective > 0 && est.kv_capacity_effective != last_kv_effective_) {
+        const std::wstring body =
+            L"KV capacity is " + std::to_wstring(est.kv_capacity_effective) + L" of the configured " +
+            std::to_wstring(est.kv_capacity_configured) +
+            L" tokens: other apps hold GPU memory the full plan needed. The dashboard shows "
+            L"the running plan.";
+        if (notify(L"NInfer reduced the engine's memory plan", body,
+                   NIIF_WARNING | NIIF_RESPECT_QUIET_TIME)) {
+            last_kv_effective_ = est.kv_capacity_effective;
+        }
+    } else if (est.kv_capacity_effective == 0) {
+        last_kv_effective_ = 0;
+    }
+
     const bool status_changed = static_cast<int>(status) != last_status_;
     // Readiness is announced too: the recovery balloon waits for it, and it
     // arrives without any change to the status enum.

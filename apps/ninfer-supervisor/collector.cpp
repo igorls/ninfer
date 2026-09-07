@@ -277,31 +277,77 @@ std::int64_t Collector::now_ms() {
     return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
 }
 
+// The memory series is sampled at 10 Hz and appended to series.jsonl on every tick, but
+// only the last 2 MiB (about ten minutes, the size of the in-memory ring) is ever read
+// back. Left alone the file grew without bound: 638 MB and 7.6 million lines after two
+// weeks, all of it unread. Keep the file the size of what we load.
+constexpr std::int64_t kSeriesKeepBytes   = 2LL * 1024 * 1024;
+constexpr std::int64_t kSeriesRotateBytes = 32LL * 1024 * 1024;
+
+// Reads the last kSeriesKeepBytes of the series file, aligned to a line boundary.
+static std::string read_series_tail(const std::string& path, std::int64_t& size_out) {
+    size_out = 0;
+    std::ifstream in(path, std::ios::binary);
+    if (!in) { return {}; }
+    in.seekg(0, std::ios::end);
+    size_out = static_cast<std::int64_t>(in.tellg());
+    if (size_out > kSeriesKeepBytes) { in.seekg(size_out - kSeriesKeepBytes, std::ios::beg); }
+    else {
+        in.seekg(0, std::ios::beg);
+    }
+    std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const auto nl = body.find('\n');
+    if (size_out > kSeriesKeepBytes && nl != std::string::npos) { body.erase(0, nl + 1); }
+    return body;
+}
+
+// Rewrites the series file to hold only `tail`, through a temp file and rename so a crash
+// mid-write leaves either the old file or the new one, never a torn one.
+static void rewrite_series_file(const std::string& path, const std::string& tail) {
+    const std::string tmp = path + ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out) { return; }
+        out << tail;
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) { std::filesystem::remove(tmp, ec); }
+}
+
 void Collector::load_persisted_series() {
     if (logs_dir_.empty()) { return; }
     std::filesystem::create_directories(logs_dir_);
     series_path_ = (std::filesystem::path(logs_dir_) / "series.jsonl").string();
-    std::ifstream in(series_path_, std::ios::binary);
-    if (in) {
-        in.seekg(0, std::ios::end);
-        const auto sz = static_cast<std::int64_t>(in.tellg());
-        const std::int64_t keep = 2 * 1024 * 1024;
-        if (sz > keep) { in.seekg(sz - keep, std::ios::beg); }
-        else {
-            in.seekg(0, std::ios::beg);
-        }
-        std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        auto nl = body.find('\n');
-        if (sz > keep && nl != std::string::npos) { body.erase(0, nl + 1); }
-        series_.load_jsonl(body);
-    }
+    std::int64_t size = 0;
+    const std::string body = read_series_tail(series_path_, size);
+    if (!body.empty()) { series_.load_jsonl(body); }
+    if (size > kSeriesRotateBytes) { rewrite_series_file(series_path_, body); }
+    series_file_.open(series_path_, std::ios::app);
+    series_bytes_since_check_ = 0;
+}
+
+// Caller holds mu_. Every so often, if the file has outgrown the rotate threshold, shrink it
+// back to the tail we would load anyway. Cheap: one stat per ~10k samples.
+void Collector::rotate_series_file_locked() {
+    if (!series_file_.is_open() || series_path_.empty()) { return; }
+    series_bytes_since_check_ = 0;
+    std::error_code ec;
+    const auto size = static_cast<std::int64_t>(std::filesystem::file_size(series_path_, ec));
+    if (ec || size <= kSeriesRotateBytes) { return; }
+    series_file_.close();
+    std::int64_t unused = 0;
+    rewrite_series_file(series_path_, read_series_tail(series_path_, unused));
     series_file_.open(series_path_, std::ios::app);
 }
 
 void Collector::persist_sample(const VramSample& s) {
     if (!series_file_.is_open()) { return; }
-    series_file_ << format_series_sample_line(s) << '\n';
+    const std::string line = format_series_sample_line(s);
+    series_file_ << line << '\n';
     series_file_.flush();
+    series_bytes_since_check_ += static_cast<std::int64_t>(line.size()) + 1;
+    if (series_bytes_since_check_ >= kSeriesKeepBytes) { rotate_series_file_locked(); }
 }
 
 void Collector::persist_event(const VramSeriesEvent& e) {
@@ -480,10 +526,23 @@ void Collector::tail_throughput_locked() {
 nlohmann::json Collector::throughput_series_json() {
     std::lock_guard lock(mu_);
     const auto samples = throughput_.samples();
+    // The ring holds 900 reports (over an hour at 5 s), which drew as an unreadable wall
+    // next to a memory chart that shows ten minutes. Return the same window the memory
+    // series covers so the two charts describe the same span; the ring keeps the rest for
+    // the request-log panels.
+    std::int64_t window_start_ms = 0;
+    {
+        const auto memory = series_.samples();
+        if (!memory.empty()) { window_start_ms = memory.front().t_ms - 5000; }
+        else {
+            window_start_ms = now_ms() - 600'000;
+        }
+    }
     nlohmann::json t_ms    = nlohmann::json::array();
     nlohmann::json decode  = nlohmann::json::array();
     nlohmann::json prefill = nlohmann::json::array();
     for (const auto& s : samples) {
+        if (s.t_ms < window_start_ms) { continue; }
         t_ms.push_back(s.t_ms);
         decode.push_back(s.decode_tok_s);
         prefill.push_back(s.prefill_tok_s);

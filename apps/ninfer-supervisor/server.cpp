@@ -475,6 +475,10 @@ nlohmann::json DashboardServer::state_json() {
         {"last_exit_code", st.last_exit_code},
         {"last_event", st.last_event},
         {"crash_loop_halted", st.crash_loop_halted},
+        {"kv_capacity_configured", st.kv_capacity_configured},
+        {"kv_capacity_effective", st.kv_capacity_effective},
+        {"kv_capacity_note", st.kv_capacity_note},
+        {"launch_args", st.launch_args},
         {"uptime_s", st.started_unix_ms == 0
                          ? 0
                          : now_unix_s() - st.started_unix_ms / 1000},

@@ -113,12 +113,14 @@ private:
     void persist_sample(const VramSample& s);
     void persist_event(const VramSeriesEvent& e);
     void load_persisted_series();
+    void rotate_series_file_locked();
     static std::int64_t now_ms();
 
     EngineSpec spec_;
     std::string logs_dir_;
     std::string series_path_;
     std::ofstream series_file_;
+    std::int64_t series_bytes_since_check_ = 0;
     std::mutex mu_;
     VramSeriesRing series_;
     // Throughput is derived by tailing the request log incrementally from
