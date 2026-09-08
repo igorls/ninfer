@@ -91,7 +91,8 @@ cmake -S . -B build-win -G "Visual Studio 18 2026" -A x64 -DNINFER_BUILD_MEDIA=O
 cmake --build build-win --config Release -j
 ```
 
-Binaries are under `build-win/apps/Release/`. Tests and benchmarks are opt-in through
+Binaries for the CLI and HTTP engine are under `build-win/apps/Release/`; Supervisor is under
+`build-win/apps/ninfer-supervisor/Release/`. Tests and benchmarks are opt-in through
 `BUILD_TESTING` and `NINFER_BUILD_BENCHMARKS`.
 
 For images/video, configure with `-DNINFER_BUILD_MEDIA=ON` and provide FFmpeg development libraries
@@ -153,11 +154,23 @@ full Ollama API compatibility.
 
 Edit a copy of the [example configuration](apps/ninfer-supervisor/supervisor.example.json) with
 your executable, artifact, working directory and API-key paths. With the Visual Studio build above,
-the executable path must include `apps/Release/ninfer-serve.exe`. Then launch:
+the executable path must include `apps/Release/ninfer-serve.exe`. Install the Windows app:
 
 ```powershell
-.\build-win\apps\Release\ninfer-supervisor.exe --config .\supervisor.local.json
+.\scripts\windows\install.ps1 -ConfigPath .\supervisor.local.json
 ```
+
+This installs binaries and runtime DLLs under `%LOCALAPPDATA%\Programs\NInfer`, adds a
+**NInfer** Start menu entry and **Settings → Apps → Installed apps** entry, and enables startup
+at sign-in. Configuration and logs live under `%LOCALAPPDATA%\NInfer`. The app is launched
+by Windows Explorer and keeps running when the terminal, editor or coding agent closes.
+The tray's **Start at login** setting controls subsequent sign-in startup. Signing out ends
+this user-session app; it does not run as a system service before sign-in.
+
+The installer copies the supplied configuration on first install, resolves artifact paths and
+uses the installed engine executable. Models stay in their existing directories. Later installs
+update the binaries and preserve the installed configuration and tray preferences. Build the
+Release applications first; see [Windows app operations](docs/windows-app.md) for updates and removal.
 
 The example dashboard listens at `http://127.0.0.1:8099`. Supervisor owns the child engine's lifecycle;
 stop a manually launched server before managing the same port through Supervisor. An optional
@@ -179,7 +192,8 @@ cmake --build build -j
 
 Use `-DNINFER_BUILD_MEDIA=OFF` for a text-only build. This fork's recent workstation qualification
 is on Windows; retaining the Linux build path is not a claim that every fork change has been
-requalified on Linux. There is no installed C++ SDK or packaged binary distribution.
+requalified on Linux. There is no installed C++ SDK or downloadable binary distribution;
+the Windows app installer packages a local Release build.
 
 ## Measurement and application evaluation
 

@@ -7,6 +7,7 @@
 #include "tray.hpp"
 #include "tray_prefs.hpp"
 #include "reserve_budget.hpp"
+#include "desktop_launch.hpp"
 
 #include <windows.h>
 #include <shellapi.h>
@@ -38,6 +39,8 @@ void usage() {
     std::cout
         << "usage: ninfer-supervisor --config FILE [--host 127.0.0.1] [--port 8099] [--bind-any]\n"
            "                         [--monitor-only] [--install-login] [--uninstall-login]\n"
+           "                         [--background]\n"
+           "  --background asks Windows Explorer to launch independently of this terminal.\n"
            "  Dashboard binds loopback by default. --bind-any is required for 0.0.0.0 and prints\n"
            "  a warning. Control POST /api/start|stop|restart is loopback-peer only, requires\n"
            "  header X-NInfer-Supervisor: 1, and returns 409 in --monitor-only / unmanaged mode.\n"
@@ -78,6 +81,7 @@ int main(int argc, char** argv) {
         bool monitor_only = false;
         bool install      = false;
         bool uninstall    = false;
+        bool background   = false;
         for (int i = 1; i < argc; ++i) {
             const std::string a = argv[i];
             auto need           = [&](const char* name) -> const char* {
@@ -101,6 +105,8 @@ int main(int argc, char** argv) {
                 install = true;
             } else if (a == "--uninstall-login") {
                 uninstall = true;
+            } else if (a == "--background") {
+                background = true;
             } else {
                 throw std::invalid_argument("unknown argument: " + a);
             }
@@ -144,6 +150,19 @@ int main(int argc, char** argv) {
                       << (cfg.host.empty() ? "0.0.0.0" : cfg.host) << ":" << cfg.port << "\n";
         } else if (!ninfer::supervisor::is_loopback_host(cfg.host)) {
             throw std::invalid_argument("--host must be loopback without --bind-any");
+        }
+        if (background) {
+            std::string args = "--config \"" + config_abs + "\"";
+            if (!host_override.empty()) { args += " --host " + host_override; }
+            if (port_override > 0) { args += " --port " + std::to_string(port_override); }
+            if (bind_any) { args += " --bind-any"; }
+            if (monitor_only) { args += " --monitor-only"; }
+            if (install) { args += " --install-login"; }
+            ninfer::supervisor::launch_from_desktop(
+                ninfer::supervisor::widen_utf8(ninfer::supervisor::module_path_utf8()),
+                ninfer::supervisor::widen_utf8(args),
+                std::filesystem::path(config_abs).parent_path().wstring());
+            return 0;
         }
         const std::string login_cmd = ninfer::supervisor::run_at_login_command(
             ninfer::supervisor::module_path_utf8(), config_abs);

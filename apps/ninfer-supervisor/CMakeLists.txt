@@ -22,6 +22,8 @@ target_link_options(ninfer-supervisor PRIVATE
   "LINKER:/DEFAULTLIB:dxgi"
   "LINKER:/DEFAULTLIB:pdh"
   "LINKER:/DEFAULTLIB:ole32"
+  "LINKER:/DEFAULTLIB:oleaut32"
+  "LINKER:/DEFAULTLIB:uuid"
   "LINKER:/DEFAULTLIB:shell32"
   "LINKER:/DEFAULTLIB:user32"
   "LINKER:/DEFAULTLIB:gdi32"

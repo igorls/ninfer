@@ -147,9 +147,8 @@ int small_icon_size() {
     return size > 0 ? size : 16;
 }
 
-// Drawn rather than shipped as an .ico resource: no build-system change, no
-// binary asset in the tree, correct at whatever SM_CXSMICON the display scaling
-// reports, and the fill colour can carry status.
+// Drawn separately from the application's launcher icon so the fill colour
+// carries status at whatever SM_CXSMICON the display scaling reports.
 //
 // The colour bitmap is an explicit 24bpp DIB section, NOT CreateCompatibleBitmap.
 // A screen-compatible DDB is 32bpp on any modern display, and CreateIconIndirect
