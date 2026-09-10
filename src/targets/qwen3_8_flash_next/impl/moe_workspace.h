@@ -8,6 +8,8 @@
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
+inline constexpr std::int32_t kFlashNextMoeMmaPrefillThreshold = 256;
+
 struct FlashNextMoeWorkspace {
     Tensor scores;
     Tensor ids;
@@ -54,13 +56,14 @@ FlashNextMoeWorkspace allocate_flash_next_moe_workspace(Arena& arena, std::int32
         out.grouped_paths     = arena.alloc(DType::I32, {10 * tokens}, 16);
         out.grouped_experts   = arena.alloc(DType::I32, {10 * tokens}, 16);
         out.token_to_pos      = arena.alloc(DType::I32, {10 * tokens}, 16);
-        if (tokens >= 512) {
+        if (tokens >= kFlashNextMoeMmaPrefillThreshold) {
             // MMA arm: BF16 staged routed outputs [2560, 10 * tokens], reduced in fixed order.
             // The envelope is computed by calling this with the chunk capacity, but a tail chunk
-            // of 9..511 tokens takes the SIMT arm and carves an FP32 [2560, 10, T] intermediate,
-            // which is larger than the BF16 staging when tokens < 1022. Pad the staging so the
-            // envelope covers the worst SIMT tail (T = 511) at every capacity.
-            constexpr std::int32_t kSimtTailColumns = 10 * 511 * 2; // FP32 [2560,10,511] in BF16 columns
+            // below the MMA threshold takes the SIMT arm and carves an FP32 [2560, 10, T]
+            // intermediate. Pad the staging so a capacity sized through the MMA arm still covers
+            // the largest possible SIMT tail.
+            constexpr std::int32_t kSimtTailColumns =
+                10 * (kFlashNextMoeMmaPrefillThreshold - 1) * 2;
             const std::int32_t staged_columns       = std::max(10 * tokens, kSimtTailColumns);
             out.staged_down   = arena.alloc(DType::BF16, {2'560, staged_columns}, 256);
         } else {

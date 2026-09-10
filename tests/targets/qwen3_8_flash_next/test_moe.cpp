@@ -451,7 +451,7 @@ int test_prefill_equivalence_and_benchmark(ninfer::DeviceContext& device) {
     float time_512_us = 0.0F;
     float time_2048_us = 0.0F;
 
-    for (int tokens : {128, 512, 2048}) {
+    for (int tokens : {128, 319, 512, 2048}) {
         std::vector<std::uint16_t> h_input(static_cast<std::size_t>(tokens) * 2'560);
         for (auto& v : h_input) { v = float_to_bf16(dist_act(rng)); }
 
@@ -510,14 +510,14 @@ int test_prefill_equivalence_and_benchmark(ninfer::DeviceContext& device) {
         std::cout << "  Tokens T=" << tokens << " Prefill vs Decode Rel-L2 Error: "
                   << std::scientific << std::setprecision(6) << err << "\n" << std::flush;
 
-        if (tokens < 512) {
-            // T < 512 runs SIMT path: should match decode reference tightly
+        if (tokens < kFlashNextMoeMmaPrefillThreshold) {
+            // The SIMT path should match the decode reference tightly.
             if (err > 1.0e-3) {
                 std::cerr << "FAILED: SIMT prefill T=" << tokens << " rel-L2 error exceeded tolerance 1e-3: " << err << "\n";
                 return 1;
             }
         } else {
-            // T >= 512 runs Native NVFP4 MMA path: dynamic W4A4 quant introduces ~11-14% Rel-L2 difference
+            // The MMA path dynamically quantizes activations to W4A4.
             if (err > 0.20) {
                 std::cerr << "FAILED: MMA prefill T=" << tokens << " rel-L2 error exceeded tolerance 0.20: " << err << "\n";
                 return 1;
@@ -538,7 +538,7 @@ int test_prefill_equivalence_and_benchmark(ninfer::DeviceContext& device) {
         flash_next_moe_kernels_launch(in_view, weights, scratch, out_prefill_view, device.stream);
         device.synchronize();
 
-        if (tokens >= 512) {
+        if (tokens >= kFlashNextMoeMmaPrefillThreshold) {
             const std::size_t id_bytes =
                 static_cast<std::size_t>(tokens) * 10U * sizeof(std::int32_t);
             std::vector<std::int32_t> ids_old(static_cast<std::size_t>(tokens) * 10U);
@@ -646,15 +646,17 @@ int test_prefill_equivalence_and_benchmark(ninfer::DeviceContext& device) {
 } // namespace
 
 // Sequence 14 envelope guard: the MoE workspace envelope is computed once at the chunk capacity,
-// but a tail chunk of 9..511 tokens takes the SIMT arm and carves an FP32 [2560, 10, T]
+// but a tail chunk below the MMA threshold takes the SIMT arm and carves an FP32 [2560, 10, T]
 // intermediate instead of the BF16 [2560, 10 * T] staging. Every SIMT tail must fit inside the
-// envelope at every capacity. Non-vacuous: at capacity 512 the unpadded staging (26.2 MB) is
-// smaller than the T=511 FP32 intermediate (52.3 MB), so this test fails without the pad.
+// envelope at every capacity.
 int test_prefill_workspace_envelope_covers_simt_tail() {
     using ninfer::targets::qwen3_8_flash_next::detail::allocate_flash_next_moe_workspace;
     using ninfer::targets::qwen3_8_flash_next::detail::flash_next_moe_workspace_capacity_bytes;
-    const std::array<std::int32_t, 5> capacities = {512, 768, 1024, 2048, 4096};
-    const std::array<std::int32_t, 4> tails      = {9, 256, 511, 512};
+    using ninfer::targets::qwen3_8_flash_next::detail::kFlashNextMoeMmaPrefillThreshold;
+    const std::array<std::int32_t, 5> capacities = {256, 512, 1024, 2048, 4096};
+    const std::array<std::int32_t, 4> tails = {
+        9, kFlashNextMoeMmaPrefillThreshold - 1, kFlashNextMoeMmaPrefillThreshold,
+        kFlashNextMoeMmaPrefillThreshold + 1};
     int checked = 0;
     for (const std::int32_t capacity : capacities) {
         const std::size_t envelope = flash_next_moe_workspace_capacity_bytes(1, capacity);
@@ -676,7 +678,7 @@ int test_prefill_workspace_envelope_covers_simt_tail() {
         std::cerr << "FAILED: envelope test checked " << checked << " cases, expected 20\n";
         return 1;
     }
-    std::cout << "  envelope covers SIMT tails at capacities 512..4096 (" << checked << " cases)\n";
+    std::cout << "  envelope covers SIMT tails at capacities 256..4096 (" << checked << " cases)\n";
     return 0;
 }
 
