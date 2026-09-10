@@ -311,10 +311,15 @@ int test_declared_type_mismatches_are_forwarded_without_coercion() {
     const std::string invalid =
         "<tool_call>\n<function=configure>\n<parameter=python_boolean>\nTrue\n</parameter>\n"
         "</function>\n</tool_call>";
-    const auto rejected = fi::parse_qwen_tool_call_output(invalid, 64, contracts);
-    failures += check(!rejected.is_tool_call_response && rejected.content == invalid &&
-                          rejected.tool_calls.empty(),
-                      "non-JSON value for a declared non-string parameter did not fall back");
+    const auto degraded = fi::parse_qwen_tool_call_output(invalid, 64, contracts);
+    failures += check(degraded.is_tool_call_response && degraded.tool_calls.size() == 1,
+                      "non-JSON value for a declared non-string parameter discarded the call");
+    if (degraded.tool_calls.size() == 1) {
+        const Json degraded_args = Json::parse(degraded.tool_calls.at(0).arguments_json);
+        failures += check(degraded_args.at("python_boolean").is_string() &&
+                              degraded_args.at("python_boolean") == "True",
+                          "non-JSON value was not forwarded as text");
+    }
     return failures;
 }
 
