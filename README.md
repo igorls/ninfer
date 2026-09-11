@@ -8,6 +8,9 @@ engine and explicitly registered `.ninfer` artifacts. The fork focuses on native
 the NVIDIA RTX PRO 6000 Blackwell workstation, and Qwen3.8-Flash-Next, while retaining the upstream
 Qwen 27B and 35B-A3B execution packages and Linux build path.
 
+The matching Flash-Next artifact is published at
+[igorls/Qwen3.8-Flash-Next-mixed-NInfer](https://huggingface.co/igorls/Qwen3.8-Flash-Next-mixed-NInfer).
+
 The intended product is a dependable local inference service: efficient prefill and decode,
 correct continuation reuse across long agent sessions, constrained JSON responses for applications,
 and operational visibility into latency, memory pressure and failures. Performance changes must
@@ -57,7 +60,7 @@ not be presented as measurements of this fork or of Flash-Next.
 
 | Model | Registered weight profile | Artifact / reference |
 |---|---|---|
-| Qwen3.8-Flash-Next | `mixed-nvfp4-fp8-ple-int4` | `qwen3_8_flash_next_mixed.ninfer` — [artifact contract](docs/maintainer/qwen3.8-flash-next-artifact.md), [converter](tools/convert/qwen3_8_flash_next/) |
+| Qwen3.8-Flash-Next | `mixed-nvfp4-fp8-ple-int4` | [Published artifact on Hugging Face](https://huggingface.co/igorls/Qwen3.8-Flash-Next-mixed-NInfer) — [artifact contract](docs/maintainer/qwen3.8-flash-next-artifact.md), [converter](tools/convert/qwen3_8_flash_next/) |
 | Qwen3.8-27B | `nvfp4` | `qwen3_8_27b_nvfp4.ninfer` — [upstream artifact](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) |
 | Qwen3.8-27B | `groupwise-int` | `qwen3_8_27b.ninfer` — [upstream artifact](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) |
 | Qwen3.6-27B | `nvfp4` | `qwen3_6_27b_nvfp4.ninfer` — [upstream artifact](https://huggingface.co/neroued/Qwen3.6-27B-nvfp4-NInfer) |
@@ -114,9 +117,17 @@ hf download neroued/Qwen3.8-27B-nvfp4-NInfer qwen3_8_27b_nvfp4.ninfer --local-di
   --kv-dtype fp8 --spec mtp --draft-tokens 3
 ```
 
-With a prepared Flash-Next artifact on a workstation with sufficient device and host memory:
+For Flash-Next, read the [release model card](https://huggingface.co/igorls/Qwen3.8-Flash-Next-mixed-NInfer/blob/main/README.md)
+for the compatible engine revision, memory requirements, quantization details and Qwen license.
+The engineering preview is a 113.30 GB download and does not establish application quality.
+On a workstation with sufficient device and host memory:
 
 ```powershell
+hf download igorls/Qwen3.8-Flash-Next-mixed-NInfer `
+  qwen3_8_flash_next_mixed.ninfer artifact-manifest.json SHA256SUMS `
+  LICENSE NOTICE.md LICENSE-APACHE-2.0.txt README.md `
+  --local-dir models
+
 .\build-win\apps\Release\ninfer-serve.exe .\models\qwen3_8_flash_next_mixed.ninfer `
   --host 127.0.0.1 --port 8010 --model-id qwen3.8-flash-next `
   --max-context 32768 --kv-capacity 65536 --max-concurrency 2 `
