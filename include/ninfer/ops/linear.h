@@ -82,7 +82,8 @@ enum class LinearPolicy : std::uint8_t {
  * packed-weight problems accept
  * every positive column extent T. A matrix column does not
  * inherently represent a text token.
- * FP32_CTRL is unsupported.
+ * W8 also registers `[5120,25600]`, and BF16_CTRL registers `[256,5120]`, at every
+ * positive T for DFlash2. FP32_CTRL is unsupported.
  *
  * @par Numerical contract
  * Test fixture code materializes the persistent weight as its logical FP32 dequantized matrix.

@@ -1,4 +1,5 @@
 #include <ninfer/targets/qwen3_8_flash_next/package.h>
+#include "artifact/binder.h"
 #include "artifact/reader.h"
 #include "artifact_fixture.h"
 #include "targets/registry.h"
@@ -126,6 +127,31 @@ int test_unregistered_identity_rejection() {
     return failures;
 }
 
+int test_unsupported_speculation_rejection() {
+    Json dir = {
+        {"identity", {{"model_id", "qwen3.8-flash-next"},
+                      {"weights_id", "mixed-nvfp4-fp8-ple-int4"}}},
+        {"objects", Json::array({{{"name", "dummy"}, {"kind", "resource"},
+                                  {"encoding", "raw-bytes-v1"}, {"offset", 0}, {"bytes", 4}}})},
+    };
+    const auto fixture = write_fixture(dir, "unsupported_flash_speculation.ninfer");
+    const ninfer::artifact::Reader reader(fixture.path);
+    int failures = 0;
+    for (auto backend : {ninfer::SpeculativeBackend::DFlash, ninfer::SpeculativeBackend::DFlash2}) {
+        ninfer::artifact::Binder binder(reader);
+        ninfer::EngineOptions options;
+        options.speculative = {.backend = backend, .draft_tokens = 7};
+        try {
+            (void)Package::plan_load(binder, options, Package::WeightsProfile::MixedNvfp4Fp8PleInt4);
+            failures += check(false, "Flash-Next silently accepted an unsupported speculative backend");
+        } catch (const std::invalid_argument& error) {
+            failures += check(std::string(error.what()).find("ordinary decoding and MTP") != std::string::npos,
+                              error.what());
+        }
+    }
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -133,6 +159,7 @@ int main() {
     failures += test_package_identity();
     failures += test_sampling_defaults();
     failures += test_unregistered_identity_rejection();
+    failures += test_unsupported_speculation_rejection();
 
     if (failures == 0) {
         std::cout << "All registry tests passed cleanly.\n";

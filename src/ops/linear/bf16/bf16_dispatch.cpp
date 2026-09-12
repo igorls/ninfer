@@ -9,6 +9,7 @@
 namespace ninfer::ops::detail {
 
 Bf16Launch select_bf16_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
+    const bool n256_k5120 = n == 256 && k == 5120;
     const bool qsa_indexer       = n == 640 && k == 2560;
     const bool ple_key           = n == 10240 && k == 2560;
     const bool ple_value         = n == 2560 && k == 2560;
@@ -29,7 +30,7 @@ Bf16Launch select_bf16_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t
     const bool vision_merged     = vision_merger_fc1 || vision_merger_fc2;
     const bool flash_next_vision = vision_raw || vision_merged;
     const bool supported_problem = (n == 14336 && k == 5120) || (n == 5120 && k == 6144) ||
-                                   flash_next_text || flash_next_vision;
+                                   flash_next_text || flash_next_vision || n256_k5120;
     if (!supported_problem || t <= 0) {
         throw std::invalid_argument("bf16 linear: unsupported shape or T");
     }
@@ -46,6 +47,7 @@ Bf16Launch select_bf16_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t
     }
     if (flash_next_vision) { return launch_bf16_mma; }
     if (shared_down) { return launch_bf16_mma; }
+    if (n256_k5120) { return launch_bf16_n256_k5120; }
     if (t == 1) { return launch_bf16_decode; }
     const std::int32_t small_t_end =
         flash_next_text ? 8 : (n == 5120 ? kBf16SmallTMaxTokens : kBf16LinearSmallTDispatchEnd);

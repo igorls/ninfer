@@ -203,12 +203,23 @@ public:
     [[nodiscard]] PrefillChunkResult
     prefill_chunk(const qwen3_6::PreparedPromptData& input, std::uint32_t begin,
                   std::uint32_t nominal_length, VisionPrefillSession& vision, bool finalize_at_end);
+    [[nodiscard]] PrefillChunkResult prefill_chunk(const qwen3_6::PreparedPromptData& input,
+                                                   std::uint32_t begin,
+                                                   std::uint32_t nominal_length,
+                                                   VisionPrefillSession& vision,
+                                                   bool finalize_at_end, DFlashFeatureSink& sink);
     void ordinary_decode_batch(const Tensor& ids, const Tensor& cache_positions,
                                const Tensor& rope_positions, const Tensor& kv_table_rows,
                                const Tensor& linear_state_source_slots,
                                const Tensor& linear_state_destination_slots,
                                ops::CausalAttentionExecutionEnvelope envelope, Tensor& hidden,
                                Tensor& logits);
+    void ordinary_decode_batch(const Tensor& ids, const Tensor& cache_positions,
+                                const Tensor& rope_positions, const Tensor& kv_table_rows,
+                                const Tensor& linear_state_source_slots,
+                                const Tensor& linear_state_destination_slots,
+                                ops::CausalAttentionExecutionEnvelope envelope, Tensor& hidden,
+                                Tensor& logits, DFlashFeatureSink& sink);
     void target_verify_batch(const Tensor& ids, const Tensor& cache_positions,
                              const Tensor& rope_positions, const Tensor& valid_columns,
                              const Tensor& kv_table_rows, const Tensor& linear_state_source_slots,
@@ -247,6 +258,13 @@ private:
     void run_layers(Tensor& x, Phase phase);
     template <class Tap>
     void run_layers(Tensor& x, Phase phase, Tap& tap);
+    template <class Tap>
+    void ordinary_decode_batch_impl(const Tensor& ids, const Tensor& cache_positions,
+                                     const Tensor& rope_positions, const Tensor& kv_table_rows,
+                                     const Tensor& linear_state_source_slots,
+                                     const Tensor& linear_state_destination_slots,
+                                     ops::CausalAttentionExecutionEnvelope envelope,
+                                     Tensor& hidden, Tensor& logits, Tap& tap);
     template <class Tap>
     void target_verify_batch_impl(const Tensor& ids, const Tensor& cache_positions,
                                   const Tensor& rope_positions, const Tensor& valid_columns,

@@ -63,6 +63,8 @@ struct OrdinaryBatchContext {
     const qwen3_6::OrdinaryDecodeIngress& host_ingress;
     qwen3_6::OrdinaryDecodeEgress& host_egress;
     Tensor& continuation_hidden_store;
+    const qwen3_6::PagedKVCache* mtp_cache = nullptr;
+    DFlashPersistentState* dflash = nullptr;
 };
 
 struct MtpBatchContext {
@@ -115,6 +117,8 @@ struct TargetVerifyFrameView {
     Tensor target_tokens;
     Tensor drafts;
     Tensor current_extents;
+    Tensor candidate_ids;
+    Tensor proposal_q;
     Tensor frontiers;
     Tensor anchors;
     Tensor licensed_tokens;

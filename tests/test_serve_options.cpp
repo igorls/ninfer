@@ -197,6 +197,22 @@ int main() {
     failures += check(dflash.speculative.proposal_head == ninfer::ProposalHead::Optimized,
                       "--lm-head-draft did not select the optimized proposal head");
 
+    for (const char* width : {"1", "7", "15"}) {
+        const ServeOptions dflash2 = parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2",
+                                           "--draft-tokens", width, "--vision"});
+        failures += check(dflash2.speculative.backend == ninfer::SpeculativeBackend::DFlash2 &&
+                              dflash2.speculative.draft_tokens == std::stoul(width),
+                          "DFlash2 did not preserve its backend and draft window");
+    }
+    for (const char* width : {"0", "16"}) {
+        bool rejected = false;
+        try {
+            (void)parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2",
+                         "--draft-tokens", width});
+        } catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "unsupported DFlash2 draft window was accepted");
+    }
+
     bool dflash_vision_rejected = false;
     try {
         (void)parse({"ninfer-serve", "model.ninfer", "--spec", "dflash", "--draft-tokens", "15",
@@ -211,21 +227,21 @@ int main() {
     failures += check(implicit_backend_rejected, "--draft-tokens selected a backend implicitly");
 
     const ServeOptions mtp_valid = parse({"ninfer-serve", "model.ninfer", "--spec", "mtp",
-                                          "--max-concurrency", "8", "--draft-tokens", "4"});
+                                          "--max-concurrency", "8", "--draft-tokens", "5"});
     failures += check(mtp_valid.speculative.backend == ninfer::SpeculativeBackend::Mtp,
                       "--spec mtp did not select Mtp");
-    failures += check(mtp_valid.speculative.draft_tokens == 4,
-                      "--draft-tokens did not preserve draft tokens 4");
+    failures += check(mtp_valid.speculative.draft_tokens == 5,
+                      "--draft-tokens did not preserve dense draft tokens 5");
 
-    bool mtp_c8_dt5_rejected = false;
+    bool mtp_c8_dt6_rejected = false;
     try {
         (void)parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--max-concurrency", "8",
-                     "--draft-tokens", "5"});
+                     "--draft-tokens", "6"});
     } catch (const std::invalid_argument& e) {
-        mtp_c8_dt5_rejected = (std::string(e.what()).find("max-concurrency 8") != std::string::npos &&
-                               std::string(e.what()).find("[1, 4]") != std::string::npos);
+        mtp_c8_dt6_rejected = (std::string(e.what()).find("max-concurrency 8") != std::string::npos &&
+                               std::string(e.what()).find("[1, 5]") != std::string::npos);
     }
-    failures += check(mtp_c8_dt5_rejected, "MTP draft-tokens 5 at c=8 was not rejected with bounds");
+    failures += check(mtp_c8_dt6_rejected, "MTP draft-tokens 6 at c=8 was not rejected with bounds");
 
     bool mtp_c8_dt0_rejected = false;
     try {
@@ -233,7 +249,7 @@ int main() {
                      "--draft-tokens", "0"});
     } catch (const std::invalid_argument& e) {
         mtp_c8_dt0_rejected = (std::string(e.what()).find("max-concurrency 8") != std::string::npos &&
-                               std::string(e.what()).find("[1, 4]") != std::string::npos);
+                               std::string(e.what()).find("[1, 5]") != std::string::npos);
     }
     failures += check(mtp_c8_dt0_rejected, "MTP draft-tokens 0 at c=8 was not rejected with bounds");
 

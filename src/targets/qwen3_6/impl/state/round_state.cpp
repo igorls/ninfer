@@ -1,4 +1,5 @@
 #include <ninfer/targets/qwen3_6/round_state.h>
+#include <ninfer/targets/qwen3_6/startup_features.h>
 
 #include <algorithm>
 #include <limits>
@@ -23,20 +24,17 @@ std::int32_t checked_i32(std::uint64_t value, const char* label) {
 }
 
 void validate_spec(const RoundStateSpec& spec) {
-    if (spec.enable_mtp && spec.enable_dflash) {
-        throw std::invalid_argument("RoundState speculative extensions are mutually exclusive");
-    }
     if (spec.hidden <= 0) { throw std::invalid_argument("RoundState hidden must be positive"); }
     if (spec.output_rows <= 0) {
         throw std::invalid_argument("RoundState output_rows must be positive");
     }
-    if (spec.enable_mtp && spec.draft_window == 0) {
+    if (spec.backend == SpeculativeBackend::Mtp && spec.draft_window == 0) {
         throw std::invalid_argument("RoundState cannot enable MTP with an empty draft window");
     }
-    if (spec.enable_mtp && spec.draft_window > kMtpDecodeMaximumDrafts) {
+    if (spec.backend == SpeculativeBackend::Mtp && spec.draft_window > kMtpDecodeMaximumDrafts) {
         throw std::invalid_argument("RoundState MTP draft window exceeds the decode frame domain");
     }
-    if (spec.enable_dflash &&
+    if (is_masked_draft_backend(spec.backend) &&
         (spec.draft_window == 0 || spec.draft_window > kDFlashDecodeMaximumDrafts)) {
         throw std::invalid_argument(
             "RoundState DFlash draft window exceeds the decode frame domain");
@@ -54,8 +52,8 @@ RoundStateLayout begin_round_state_layout(LayoutBuilder& builder, const RoundSta
     validate_spec(spec);
     RoundStateLayout layout;
     layout.spec = spec;
-    if (!spec.enable_mtp && !spec.enable_dflash) {
-        OrdinaryDecodeStateLayout& ordinary = layout.ordinary.emplace();
+    {
+        OrdinaryDecodeStateLayout& ordinary = layout.ordinary;
         ordinary.ingress =
             builder.add(sizeof(OrdinaryDecodeIngress), 256, "ordinary decode ingress");
         ordinary.egress = builder.add(sizeof(OrdinaryDecodeEgress), 256, "ordinary decode egress");
@@ -95,9 +93,15 @@ OrdinaryDecodeState::OrdinaryDecodeState(DeviceSpan backing,
     };
     tokens          = ingress_tensor(offsetof(OrdinaryDecodeIngress, tokens), DType::I32);
     cache_positions = ingress_tensor(offsetof(OrdinaryDecodeIngress, cache_positions), DType::I32);
+    next_cache_positions =
+        ingress_tensor(offsetof(OrdinaryDecodeIngress, next_cache_positions), DType::I32);
     rope_positions  = ingress_tensor(offsetof(OrdinaryDecodeIngress, rope_positions), DType::I32);
     text_kv_table_rows =
         ingress_tensor(offsetof(OrdinaryDecodeIngress, text_kv_table_rows), DType::I32);
+    backend_kv_table_rows =
+        ingress_tensor(offsetof(OrdinaryDecodeIngress, backend_kv_table_rows), DType::I32);
+    active_lanes = ingress_tensor(offsetof(OrdinaryDecodeIngress, active_lanes), DType::I32);
+    valid_columns = ingress_tensor(offsetof(OrdinaryDecodeIngress, valid_columns), DType::I32);
     state_source_slots =
         ingress_tensor(offsetof(OrdinaryDecodeIngress, state_source_slots), DType::I32);
     state_destination_slots =
@@ -123,7 +127,7 @@ void complete_round_state_layout(LayoutBuilder& builder, RoundStateLayout& layou
     const auto i32            = [&](std::int32_t count, const char* label) {
         return add_tensor(builder, DType::I32, {count}, label);
     };
-    if (layout.spec.enable_mtp) {
+    if (layout.spec.backend == SpeculativeBackend::Mtp) {
         layout.mtp.emplace();
         const auto ar_steps =
             checked_i32(std::max<std::uint64_t>(1ULL, layout.spec.draft_window - 1ULL),
@@ -173,7 +177,7 @@ void complete_round_state_layout(LayoutBuilder& builder, RoundStateLayout& layou
         decode.ar_valid_columns  = add_tensor(builder, DType::I32, {batch, ar_steps},
                                               "MTP decode autoregressive valid columns");
     }
-    if (layout.spec.enable_dflash) {
+    if (is_masked_draft_backend(layout.spec.backend)) {
         layout.dflash_prefill.emplace().produced_count = i32(1, "DFlash prefill produced count");
         DFlashDecodeStateLayout& decode                = layout.dflash_decode.emplace();
         decode.ingress =
@@ -186,6 +190,14 @@ void complete_round_state_layout(LayoutBuilder& builder, RoundStateLayout& layou
             add_tensor(builder, DType::I32, {columns, batch}, "DFlash proposal ids");
         decode.proposal_positions =
             add_tensor(builder, DType::I32, {columns, batch}, "DFlash proposal positions");
+        decode.verify_positions =
+            add_tensor(builder, DType::I32, {columns, batch}, "target verify cache positions");
+        if (layout.spec.backend == SpeculativeBackend::DFlash2) {
+            decode.candidate_ids =
+                add_tensor(builder, DType::I32, {16, columns - 1, batch}, "DFlash2 candidate ids");
+            decode.proposal_q = add_tensor(builder, DType::FP32, {16, columns - 1, batch},
+                                           "DFlash2 sampled proposal q");
+        }
         decode.append_positions =
             add_tensor(builder, DType::I32, {columns, batch}, "DFlash append positions");
         decode.append_counts = add_tensor(builder, DType::I32, {batch}, "DFlash append counts");
@@ -321,6 +333,13 @@ DFlashDecodeState::DFlashDecodeState(DeviceSpan backing, const DFlashDecodeState
         ingress_tensor(offsetof(DFlashDecodeIngress, proposal_extents), DType::I32, {batch});
     target_valid_columns =
         ingress_tensor(offsetof(DFlashDecodeIngress, target_valid_columns), DType::I32, {batch});
+    proposal_valid_columns =
+        ingress_tensor(offsetof(DFlashDecodeIngress, proposal_valid_columns), DType::I32, {batch});
+    verify_positions = layout.verify_positions.bind(backing);
+    if (layout.candidate_ids) { candidate_ids = layout.candidate_ids->bind(backing); }
+    if (layout.proposal_q) { proposal_q = layout.proposal_q->bind(backing); }
+    target_rope_positions = ingress_tensor(offsetof(DFlashDecodeIngress, target_rope_positions),
+                                           DType::I32, {width, batch});
     text_kv_table_rows =
         ingress_tensor(offsetof(DFlashDecodeIngress, text_kv_table_rows), DType::I32, {batch});
     dflash_kv_table_rows =
@@ -352,9 +371,7 @@ DFlashDecodeState::DFlashDecodeState(DeviceSpan backing, const DFlashDecodeState
 
 RoundState::RoundState(DeviceSpan backing, const RoundStateLayout& layout) {
     if (!layout.complete) { throw std::invalid_argument("RoundState layout is incomplete"); }
-    if (layout.ordinary) {
-        ordinary.emplace(backing, *layout.ordinary, layout.spec.batch_capacity);
-    }
+    ordinary = OrdinaryDecodeState(backing, layout.ordinary, layout.spec.batch_capacity);
     token                = layout.token.bind(backing);
     pos                  = layout.pos.bind(backing);
     rope_pos             = layout.rope_pos.bind(backing);

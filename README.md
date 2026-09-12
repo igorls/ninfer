@@ -74,8 +74,11 @@ count alone does not determine its storage requirements or execution cost.
 
 Capabilities and memory policies differ by target. Flash-Next currently accepts BF16 or FP8 KV and
 up to four MTP drafts; the Qwen3.6-family targets have additional KV formats and Device/Host cache
-tiering. The 35B-A3B package has DFlash support. Qwen3.8-27B DFlash2 has not been integrated into this
-fork. Consult the target references rather than transferring options between models unchanged.
+tiering. The 35B-A3B package has DFlash support. Qwen3.8-27B artifacts with companion weights can
+select DFlash2 with `--spec dflash2 --draft-tokens 7 --lm-head-draft`; native Windows qualification
+passes on the RTX PRO 6000, including concurrent requests, Host prefix restore, Vision and
+structured output. See the [measurements and limits](docs/performance.md) before choosing between
+DFlash2 and MTP. Consult the target references rather than transferring options between models unchanged.
 
 ## Build on Windows
 
@@ -187,6 +190,19 @@ The example dashboard listens at `http://127.0.0.1:8099`. Supervisor owns the ch
 stop a manually launched server before managing the same port through Supervisor. An optional
 explicit model catalog stores each artifact's own arguments. Supervisor is a Windows application;
 the CLI and HTTP engine can also run directly.
+
+The example catalog includes **27B Interactive — DFlash2** (7 draft tokens) and
+**27B Concurrent — MTP** (5 draft tokens). Both use the combined DFlash2 artifact,
+FP8 KV, eight lanes and a 32K shared KV pool; that pool is shared across requests,
+not 32K per lane. These text presets match the performance qualification setup.
+Select a preset in the dashboard model launcher and switch to load it. DFlash2
+requires the [companion conversion](docs/maintainer/qwen3.8-27b-dflash2.md).
+
+Under **Settings → Model features**, select the speculative backend, draft-token count
+and optimized draft head. Backend choices follow the artifact identity; MTP allows
+up to 5 drafts (4 for Flash-Next), and DFlash/DFlash2 up to 15. Turning speculation
+off clears its dependent options. Save and restart applies the settings and keeps
+them in the selected preset. Engine startup still validates companion weights.
 
 ## Linux build
 

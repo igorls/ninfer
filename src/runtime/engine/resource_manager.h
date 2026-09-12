@@ -316,7 +316,9 @@ public:
         candidates.reserve(1U + prefix_index_.size());
         std::optional<AdmissionCandidate> root = program.inspect_admission(
             prompt, base, *destination, nullptr, nullptr, std::nullopt, false);
-        if (!root) { throw std::logic_error("Program rejected isolated root planning"); }
+        // Isolated feasibility does not imply that an active Program is at a materialization
+        // boundary. An unfinished StateImage fork must settle before admission can be planned.
+        if (!root) { return {.readiness = Readiness::TemporarilyBlocked}; }
         candidates.push_back(Candidate{.plan = std::move(*root)});
 
         if (cache_enabled_) {

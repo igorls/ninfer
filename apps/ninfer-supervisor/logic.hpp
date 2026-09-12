@@ -650,10 +650,12 @@ inline const std::vector<EngineParamSpec>& engine_param_specs() {
         {"--vision", "vision", ParamKind::Flag, "features", "Vision",
          "Loads the vision encoder. Costs about 1.1 GiB.", 0, 0, {}},
         {"--spec", "spec", ParamKind::Enum, "features", "Speculative backend",
-         "Draft head. Acceptance is low on this model; measure before enabling.", 0, 0,
-         {"mtp", "dflash"}},
+         "MTP suits concurrent work; DFlash2 accelerates interactive 27B generation and requires a companion artifact.", 0, 0,
+         {"mtp", "dflash", "dflash2"}},
         {"--draft-tokens", "draft_tokens", ParamKind::Int, "features", "Draft tokens",
-         "Tokens proposed per step when speculation is on.", 1, 8, {}},
+         "Tokens proposed per step. Start with 5 for 27B MTP or 7 for DFlash2.", 1, 15, {}},
+        {"--lm-head-draft", "lm_head_draft", ParamKind::Flag, "features", "Optimized draft head",
+         "Uses the optimized proposal head for faster speculation. Recommended for the 27B presets.", 0, 0, {}},
         {"--no-prefix-reuse", "no_prefix_reuse", ParamKind::Flag, "features", "Disable prefix reuse",
          "Turns off cross-request prefix caching. Multi-turn TTFT gets much worse.", 0, 0, {}},
         {"--no-cuda-graph", "no_cuda_graph", ParamKind::Flag, "features", "Disable CUDA graphs",
@@ -870,7 +872,7 @@ inline std::vector<std::string> validate_engine_params(const std::vector<EngineP
 
 // Cross-field rules the per-field pass cannot see.
 inline std::vector<std::string> validate_engine_param_combination(
-    const std::vector<EngineParam>& params) {
+    const std::vector<EngineParam>& params, std::string_view model_identity = {}) {
     std::vector<std::string> errors;
     const std::string* kv_capacity  = find_param_value(params, "kv_capacity");
     const std::string* max_context  = find_param_value(params, "max_context");
@@ -887,6 +889,24 @@ inline std::vector<std::string> validate_engine_param_combination(
     }
     if (draft_tokens != nullptr && spec_backend == nullptr) {
         errors.emplace_back("Draft tokens has no effect without a speculative backend");
+    }
+    const auto* head = find_param_value(params, "lm_head_draft");
+    if (head != nullptr && *head == "true" && spec_backend == nullptr) {
+        errors.emplace_back("Optimized draft head requires a speculative backend");
+    }
+    if (spec_backend != nullptr) {
+        const bool flash = model_identity == "qwen3.8-flash-next";
+        const int limit = *spec_backend == "mtp" ? (flash ? 4 : 5) : 15;
+        long long count = 0;
+        if (draft_tokens && parse_long_long(*draft_tokens, count) && (count < 1 || count > limit)) {
+            errors.emplace_back("Draft tokens must be between 1 and " + std::to_string(limit) +
+                                " for this model and backend");
+        }
+        if (!model_identity.empty() &&
+            ((*spec_backend == "dflash2" && model_identity != "qwen3.8-27b") ||
+             (*spec_backend == "dflash" && model_identity != "qwen3.6-35b-a3b"))) {
+            errors.emplace_back("Selected speculative backend is not supported by this model");
+        }
     }
     return errors;
 }

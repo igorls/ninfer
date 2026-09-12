@@ -117,7 +117,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--gdn-state-dtype fp32|bf16] "
            "[--output-head-fp8] [--output-head-dtype bf16|fp8] "
            "[--token-embedding-fp8] [--token-embedding-dtype bf16|fp8] "
-           "[--spec mtp|dflash --draft-tokens N] "
+           "[--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--no-qsa-prefill-mma] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "

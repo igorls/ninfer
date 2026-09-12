@@ -16,6 +16,7 @@
 
 #include <cuda_runtime.h>
 
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cmath>
@@ -711,6 +712,14 @@ int test_program_vision_request_and_chunk_clipping(DeviceContext& device) {
         return 1;
     }
 
+    const auto aborted = program.abort(seq);
+    const double elapsed = static_cast<double>(p1.timing.elapsed_ns() + p2.timing.elapsed_ns() +
+                                                p3.timing.elapsed_ns()) * 1.0e-9;
+    if (aborted.timings.prefill_seconds <= 0.0 || aborted.timings.vision_seconds <= 0.0 ||
+        std::abs(aborted.timings.prefill_seconds + aborted.timings.vision_seconds - elapsed) > 1.0e-9) {
+        std::cerr << "FAIL: chunked Vision request did not partition its elapsed phase timing\n";
+        return 1;
+    }
     std::cout << "PASS: test_program_vision_request_and_chunk_clipping" << std::endl;
     return 0;
 }
@@ -902,6 +911,7 @@ int test_g16_stale_vision_embeddings(DeviceContext& device) {
 
     auto run_one_image = [&](std::uint32_t seed, std::vector<std::uint16_t>& handoff,
                              std::uint64_t expected_encodes) -> int {
+        const double vision_before = program.impl_->vision_session_->elapsed_seconds();
         const G16ImageSpec spec{.begin = 10, .count = 4, .seed = seed};
         auto prompt = make_g16_prompt(24, std::span(&spec, 1));
         SequenceHandle seq{};
@@ -914,7 +924,13 @@ int test_g16_stale_vision_embeddings(DeviceContext& device) {
             return 1;
         }
         if (!g16_copy_handoff(program, handoff)) { return 1; }
-        (void)program.abort(seq);
+        const auto aborted = program.abort(seq);
+        const double encoded = program.impl_->vision_session_->elapsed_seconds() - vision_before;
+        if (encoded <= 0.0 || aborted.timings.prefill_seconds <= 0.0 ||
+            std::abs(aborted.timings.vision_seconds - encoded) > 1.0e-9) {
+            std::cerr << "FAIL: Vision timing includes another request's encode work\n";
+            return 1;
+        }
         return 0;
     };
 
@@ -953,7 +969,7 @@ int test_g16_stale_vision_embeddings(DeviceContext& device) {
         SequenceHandle seq{};
         if (!g16_admit(program, text_prompt, seq)) { return 1; }
         auto p = program.advance_prefill(seq);
-        if (!p.complete || p.processed_prompt_tokens != 16) {
+        if (!p.complete || p.processed_prompt_tokens != 16 || !p.pending) {
             std::cerr << "G16 text-only prefill failed processed=" << p.processed_prompt_tokens
                       << " complete=" << p.complete << "\n";
             return 1;
@@ -962,7 +978,17 @@ int test_g16_stale_vision_embeddings(DeviceContext& device) {
             std::cerr << "G16 text-only mutated encode_count=" << g16_encode_count(program) << "\n";
             return 1;
         }
-        (void)program.abort(seq);
+        const std::array<ninfer::runtime::CommitDecision, 1> decisions{{
+            {.accepted_tokens = 1, .terminal = true}}};
+        (void)program.commit(std::move(*p.pending), decisions);
+        const auto finished = program.finish(seq);
+        const double elapsed = static_cast<double>(p.timing.elapsed_ns()) * 1.0e-9;
+        if (finished.disposition != ninfer::runtime::FinishDisposition::Released ||
+            finished.timings.vision_seconds != 0.0 || elapsed <= 0.0 ||
+            std::abs(finished.timings.prefill_seconds - elapsed) > 1.0e-9) {
+            std::cerr << "FAIL: text request inherited Vision time or lost released-finish timing\n";
+            return 1;
+        }
     }
 
     if (run_one_image(3, emb_c, 3) != 0) { return 1; }

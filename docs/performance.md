@@ -37,6 +37,99 @@ over the loopback OpenAI-compatible HTTP endpoint. Each reported corpus fixture 
 seeds. Values are arithmetic mean ± sample standard deviation, and server warm-up completes before
 the measured requests. The concurrent campaign has its own sustained-wave method below.
 
+## Qwen3.8-27B DFlash2 on RTX PRO 6000
+
+Native Windows qualification on September 7–8, 2026 uses the RTX PRO 6000 Blackwell 96 GB,
+MSVC 19.51, CUDA 13.3.33 and `sm_120a`. The target is the existing Qwen3.8-27B NVFP4 artifact
+with every base payload preserved, extended with the
+[incoai DFlash2 companion](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2).
+See the [artifact conversion](maintainer/qwen3.8-27b-artifact.md) and
+[execution/state contract](maintainer/qwen3.8-27b-dflash2.md).
+
+The matched serving campaign uses one final Release executable, FP8 KV, CUDA graphs, capacity
+eight, a 32,768-token context limit and KV pool, 2,048-token prefill chunks, and no prefix reuse
+or Vision allocation. Each process receives a 256-token warmup before two repetitions. The
+Python and translation fixtures use non-thinking mode; the AIME fixture uses `xhigh` reasoning.
+Sampling is greedy with no presence/frequency penalty and a 1,024-token output budget. Values
+are committed output tokens divided by complete client wall time, including prefill. At eight
+active requests, the numerator sums the wave and the denominator is its makespan. This is not
+a steady-state decode-only measurement. Naturally completed translations remain valid samples.
+
+| Active requests | Workload | Ordinary tok/s | MTP5 tok/s | DFlash2 K7 tok/s |
+|---:|---|---:|---:|---:|
+| 1 | Python | 64.7 | 183.7 | **195.6** |
+| 1 | Translation | 64.5 | 169.0 | **175.7** |
+| 1 | Mathematics reasoning | 65.1 | 159.4 | **187.0** |
+| 8 | Python | 425.3 | **1,016.3** | 987.4 |
+| 8 | Translation | 389.5 | **896.5** | 821.7 |
+| 8 | Mathematics reasoning | 423.2 | 827.5 | **839.3** |
+
+These are two-repetition means, not confidence intervals. DFlash2 improves the single-request
+wall rate by 4–17% over MTP5 in these cases, and by 2.7–3.0x over ordinary decoding. At eight
+requests, MTP5 leads on Python and translation; the mathematics difference is small. Start with
+`--spec dflash2 --draft-tokens 7 --lm-head-draft` for interactive decode, and MTP5 with the
+optimized head for concurrent Python/translation throughput. Backend selection remains fixed
+at Engine startup; these observations do not establish a universal winner at other contexts.
+
+Strict JSON reaches 64.0 / 61.2 / 61.9 tok/s with ordinary / MTP5 / DFlash2 at one active request,
+and 383.8 / 374.9 / 377.5 aggregate tok/s at eight. Every result passes the schema validator;
+the single-request JSON text is identical across the three modes. In a separate paired
+capacity-one experiment, replacing padded zero-draft verification with the width-one target
+route improved DFlash2 JSON from 52.9 to 63.0 tok/s, about 19%, without a clear unconstrained
+throughput regression. Backend state maintenance still has a small cost.
+
+For the 7,680-token long-context execution probe, mean prefill / server TTFT is 764.8 / 770.0 ms
+with ordinary decoding, 811.6 / 816.5 ms with MTP5, and 812.6 / 817.6 ms with DFlash2. DFlash2
+does not improve prefill in this comparison; its benefit is generated-token decode.
+
+| Startup mode, capacity eight | Materialized weights GiB | Runtime reservation GiB |
+|---|---:|---:|
+| Ordinary | 18.976 | 2.578 |
+| MTP5, optimized head | 19.729 | 3.390 |
+| DFlash2 K7, optimized head | 21.383 | 6.128 |
+
+The runtime reservation includes the KV pool, state/workspace and unallocated CUDA-graph
+headroom. These values describe this 32K configuration; they are not measured peak process VRAM.
+
+The fixtures are `scenario_code_python`, `scenario_translation_markdown`, and
+`long_decode_aime26_15` under `examples/cli/messages/`. A separate strict JSON-schema case asks
+for twelve job-runner implementation steps and is independently validated. The `long_niah_8k`
+fixture exercises the longer attention path; its short answer and explicit answer in the prompt
+make it an execution/TTFT probe, not retrieval-quality evidence.
+
+An earlier capacity-one sweep tested draft counts 2, 3, 5, 7, 11 and 15 and both proposal-head
+routes. K=7 with the optimized head gave the best observed DFlash2 results for these workloads.
+Larger draft blocks did not compensate for their additional verification work. Keep that sweep
+separate from the final capacity-eight comparison.
+
+Profiling a K=7, capacity-one native benchmark with 512 prompt tokens and 256 output tokens
+shows 2,038 ms of kernel execution inside a 2,131 ms decode range. Of summed kernel time,
+89.8% is target verification and 8.5% is drafting plus selection. The largest contributors
+are target NVFP4 gate/up (455 ms), fused FP8 GDN input (377 ms), and NVFP4 down (288 ms).
+These measurements identify target verification as the next optimization focus; they do not
+measure hardware occupancy or bandwidth saturation. A forced A8 GDN input route was slower,
+and materialized A16 did not improve its fused baseline; both experiments were reverted.
+Nsight Compute counters were unavailable (`ERR_NVGPUCTRPERM`).
+
+Qualification passes the independent numerical Op checks, variable-width sparse acceptance,
+graph and eager/full-head execution, K=7/K=15 with eight requests, partial terminal blocks,
+cancellation, page/ring boundaries, Host restore, and image/video input. A reproduced concurrent
+admission failure now waits for an unfinished StateImage fork to settle; the CPU regression and
+repeated real pressure runs pass. MTP5 and DFlash2 K7 each pass all 21 live structured-output
+protocol checks. All-constrained batches use width-one target execution while maintaining the
+selected backend state; mixed batches retain masked speculative execution.
+
+Actual response text was read manually. Translations retain the required table, code and
+identifiers, with prose differences; Python and mathematics hit their output budgets and cannot
+establish completed-code or final-answer quality. The JSON plans are valid and relevant to the
+request. Greedy text can differ across verification widths because qualified FP8/NVFP4 arithmetic
+routes differ. This integration is not advertised as bitwise lossless, and these performance
+fixtures do not establish Tribuno legal-workflow acceptance. The real checkpoint qualification
+here is NVFP4; it does not qualify every supported weight profile or production context length.
+
+Local request text, timings and counters are under `profiles/bench/dflash2-20260907/final-*`;
+the phase breakdown is under `profiles/nsys/dflash2-20260907/`. Source changes are uncommitted.
+
 ## Qwen3.8-Flash-Next MTP on RTX PRO 6000
 
 The September 6, 2026 Windows Release build was measured on an NVIDIA RTX PRO 6000

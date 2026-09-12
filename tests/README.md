@@ -35,8 +35,8 @@ benchmark-report, and external protocol behavior. Repository verification princi
   records;
 - `test_http_error_handler.cpp` — protocol-shaped payload-limit errors and application-error
   preservation;
-- `test_ninfer_bench_support.cpp` — product benchmark CLI, timing boundary, and schema-v13 reports;
-- `test_bench_matrix.py` — schema-v13 report consumption by the Python matrix summarizer;
+- `test_ninfer_bench_support.cpp` — product benchmark CLI, timing boundary, and schema-v14 reports;
+- `test_bench_matrix.py` — schema-v14 report consumption by the Python matrix summarizer;
 - `test_serve_corpus.py` — current serving request-log identity at the measurement consumer;
 - device/tensor/arena tests — reusable lower-component behavior; KV tests cover the core physical
   container, family runtime tests cover dimension-driven GDN storage/view mechanics, and Op tests
@@ -115,6 +115,30 @@ runs the real engine:
 NINFER_QWEN3_6_27B_WEIGHTS=$PWD/out/qwen3_6_27b.ninfer \
   ctest --test-dir build -R ninfer_qwen3_6_27b_prefix_real_test --output-on-failure
 ```
+
+The MTP and DFlash real-engine tests also exercise speculative verification from token 63 across
+a KV page boundary, stopping at the committed token-64 frontier and then continuing with and
+without reuse. The context-store test checks the exact mapping, frontier and reservation
+accounting behind this transition: an already-covered request cannot shorten speculative
+coverage, and only explicit settlement truncates the uncommitted page.
+Set `NINFER_PREFIX_REAL_SCENARIO=speculative-page-boundary` to run only the MTP boundary fixture
+with an explicitly configured Qwen3.6 or Qwen3.8 27B artifact.
+
+The opt-in `ninfer_qwen3_8_27b_dflash2_real_test` uses
+`NINFER_QWEN3_8_27B_DFLASH2_WEIGHTS` pointing to an artifact with the complete companion. Its
+arguments are draft count, graph flag, optimized-head flag, concurrency, KV codec, Vision flag,
+and Device StateImage slots. For example, `7 1 1 8 fp8 0 3` checks the serving configuration;
+`15 1 1 8 fp8 0 2` stresses concurrent admission and state pressure; `7 1 1 1 fp8 1 1` forces
+Host restore and exercises image/video input. The suite checks partial terminals, cancellation,
+budgets, cyclic-context wrap/replacement, page boundaries, changing concurrent schemas and
+unconstrained neighbors. Host restore must perform real transfers and match a fresh continuation.
+The resource-manager CPU test separately protects admission waiting for an unfinished Program
+state transition, followed by successful retry without disturbing the active request.
+
+For Qwen3.8-27B NVFP4, `NINFER_PREFIX_REAL_SCENARIO=shared-rewrite-materialization` selects the
+long tool-history regression with aliased shared/private checkpoints. The default prefix suite
+also checks private-only and shared-alias rewrite rotation, including retained owners under
+Device/Host pressure.
 
 The causal-scoring integration test uses the same artifact variable and checks a full 1,024-column
 score tile, overlapping target suffixes, and repeated-window State/KV isolation:

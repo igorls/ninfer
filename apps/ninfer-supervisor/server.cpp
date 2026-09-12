@@ -62,6 +62,7 @@ const char* param_kind_name(ParamKind kind) noexcept {
 
 nlohmann::json DashboardServer::config_json() const {
     const ParsedEngineArgs parsed = parse_engine_args(cfg_.engine.args);
+    const std::string identity = artifact_model_identity(parsed.artifact);
 
     // The form's field list comes from the engine parameter table, so a knob added
     // in C++ appears in the page with its own label, help text and bounds, and no
@@ -70,7 +71,11 @@ nlohmann::json DashboardServer::config_json() const {
     for (const auto& spec : engine_param_specs()) {
         nlohmann::json choices = nlohmann::json::array();
         for (const auto& choice : spec.choices) {
-            if (!choice.empty()) { choices.push_back(std::string(choice)); }
+            if (choice.empty()) { continue; }
+            if (spec.key == "spec" && !identity.empty() &&
+                ((choice == "dflash2" && identity != "qwen3.8-27b") ||
+                 (choice == "dflash" && identity != "qwen3.6-35b-a3b"))) { continue; }
+            choices.push_back(std::string(choice));
         }
         schema.push_back({{"key", std::string(spec.key)},
                           {"flag", std::string(spec.flag)},
@@ -88,6 +93,7 @@ nlohmann::json DashboardServer::config_json() const {
 
     return {
         {"config_path", cfg_.source_path},
+        {"model_identity", identity},
         {"writable", !cfg_.source_path.empty()},
         {"manages_engine", manages_engine_process(cfg_)},
         {"engine",
@@ -181,7 +187,8 @@ DashboardServer::ConfigResult DashboardServer::apply_config(const std::string& r
             std::erase_if(merged, [&](const EngineParam& p) { return p.key == param.key; });
             if (!remove) { merged.push_back(param); }
         }
-        for (const auto& message : validate_engine_param_combination(merged)) {
+        for (const auto& message : validate_engine_param_combination(
+                 merged, artifact_model_identity(parsed.artifact))) {
             errors.push_back(message);
         }
         parsed.params            = std::move(merged);
@@ -269,6 +276,14 @@ DashboardServer::ConfigResult DashboardServer::apply_config(const std::string& r
 
     if (!errors.empty()) { return {400, {{"error", "invalid configuration"}, {"details", errors}}}; }
 
+    // Keep the selected preset in sync, so selecting it again preserves edits.
+    for (auto& model : next.models) {
+        if (model.id == cfg_.active_model && model_engine_args(model) == cfg_.engine.args) {
+            model.args.assign(next.engine.args.begin() + 1, next.engine.args.end());
+            break;
+        }
+    }
+
     const bool dry_run = body.value("dry_run", false);
     if (!dry_run) {
         try {
@@ -336,6 +351,8 @@ nlohmann::json DashboardServer::models_json() const {
         const ModelAvailability status = check_model_available(model);
         models.push_back({
             {"id", model.id},
+            {"name", model.name.empty() ? model.id : model.name},
+            {"description", model.description},
             {"artifact", model.artifact},
             {"available", status.available},
             {"reason", status.reason},
@@ -343,8 +360,7 @@ nlohmann::json DashboardServer::models_json() const {
             // Active is decided by what the engine is actually configured to
             // launch, not by the active_model field, so a hand-edited args array
             // cannot make the dashboard claim a model that is not being served.
-            {"active", !model.artifact.empty() &&
-                           model_label_from_args(model_engine_args(model)) == active_label},
+            {"active", model_engine_args(model) == cfg_.engine.args},
         });
     }
     return {{"models", models},
@@ -379,6 +395,14 @@ DashboardServer::ConfigResult DashboardServer::select_model(const std::string& r
     const ModelAvailability status = check_model_available(*model);
     if (!status.available) {
         return {409, {{"error", "model " + id + " is unavailable: " + status.reason}}};
+    }
+    const auto parsed = parse_engine_args(model_engine_args(*model));
+    auto errors = validate_engine_params(parsed.params);
+    const auto combinations = validate_engine_param_combination(
+        parsed.params, artifact_model_identity(model->artifact));
+    errors.insert(errors.end(), combinations.begin(), combinations.end());
+    if (!errors.empty()) {
+        return {400, {{"error", "invalid launch preset"}, {"details", errors}}};
     }
 
     SupervisorConfig next = cfg_;

@@ -186,7 +186,7 @@ void test_address_space_store(const ninfer::DeviceContext& device) {
     expect(addresses.bound_row(*addr) == 0, "Bound row is 0");
 
     // Materialize 65 tokens (spans across 2 64-token pages) with real stream
-    addresses.materialize_to_tokens(*addr, 65, device.stream);
+    addresses.ensure_mapped_to_tokens(*addr, 65, device.stream);
     expect(addresses.mapped_pages(*addr) == 2, "Mapped pages is 2");
 
     addresses.commit_frontier(*addr, 65);

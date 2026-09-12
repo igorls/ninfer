@@ -37,6 +37,53 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 using FlashNextPressureHandleHelper =
     ninfer::targets::qwen3_6::detail::PressurePlanningSessionImpl<ninfer::targets::qwen3_6::detail::FlashNextPressureHandleAccess>;
 
+// A prefill request can yield between chunks and checkpoint captures. Sum only its Program
+// execution units, using the same elapsed observations returned to Engine, rather than timing
+// the whole interval from admission to the first token. VisionSession is Program-owned and its
+// timer is cumulative, so only this call's encode delta belongs to this request.
+class PrefillTimingScope {
+public:
+    PrefillTimingScope(GenerationTimings& totals, runtime::ExecutionTimingRecorder& recorder,
+                       const FlashNextVisionSession* vision,
+                       runtime::ExecutionTiming* failed_timing) noexcept
+        : totals_(totals), recorder_(recorder), vision_(vision),
+          vision_before_(vision != nullptr ? vision->elapsed_seconds() : 0.0),
+          failed_timing_(failed_timing) {}
+
+    PrefillTimingScope(const PrefillTimingScope&) = delete;
+    PrefillTimingScope& operator=(const PrefillTimingScope&) = delete;
+
+    ~PrefillTimingScope() noexcept {
+        if (recorded_) { return; }
+        const auto elapsed = finish();
+        // finish() consumes the underlying recorder. Preserve its abandoned-call contract
+        // when unwinding, as well as the request's work completed before cancellation/failure.
+        if (failed_timing_ != nullptr) { *failed_timing_ += elapsed; }
+    }
+
+    [[nodiscard]] runtime::ExecutionTiming finish() noexcept {
+        const auto elapsed = recorder_.finish();
+        if (!recorded_) {
+            const double vision = vision_ != nullptr
+                                      ? std::max(0.0, vision_->elapsed_seconds() - vision_before_)
+                                      : 0.0;
+            totals_.vision_seconds += vision;
+            totals_.prefill_seconds +=
+                std::max(0.0, static_cast<double>(elapsed.elapsed_ns()) * 1.0e-9 - vision);
+            recorded_ = true;
+        }
+        return elapsed;
+    }
+
+private:
+    GenerationTimings& totals_;
+    runtime::ExecutionTimingRecorder& recorder_;
+    const FlashNextVisionSession* vision_;
+    double vision_before_;
+    runtime::ExecutionTiming* failed_timing_;
+    bool recorded_ = false;
+};
+
 ProgramImpl::ProgramImpl(const LoadedModelData* model_data, FlashNextRuntimePlan plan_in,
                          DeviceContext& dev, TextModelView text_override,
                          std::optional<VisionModelView> vision_override,
@@ -1687,6 +1734,7 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
     auto& st                     = impl_->lane_states_[lane_idx];
     st.active                    = true;
     st.epoch                     = handle.epoch();
+    st.generation_timings         = {};
     st.lane_handle               = handle;
     st.planned_groups            = (summary.prompt_tokens +
                                     (summary.effective_output_tokens > 0 ? summary.effective_output_tokens - 1U : 0U) +
@@ -1896,6 +1944,9 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
     if (st.prefill_completed) {
         throw std::logic_error("prefill is already completed for this sequence");
     }
+    detail::PrefillTimingScope prefill_timing(
+        st.generation_timings, timing,
+        impl_->vision_session_ ? &*impl_->vision_session_ : nullptr, failed_timing);
 
     const std::size_t N         = st.prompt_tokens.size();
     const std::uint32_t start_i = st.prompt_tokens_processed;
@@ -1934,7 +1985,7 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
         // Attribute the round's blocking device stall to the wait bucket rather than
         // leaving it in the submit residual. See ExecutionTimingRecorder.
         timing.reclassify_submit_as_wait(impl_->executor_.take_round_device_wait_ns());
-        progress.timing                       = timing.finish();
+        progress.timing                       = prefill_timing.finish();
         progress.pending                      = ContractAccess::make_pending(
             this, 1, std::span(&sequence, 1),
             std::span(impl_->pending_batch_tokens_.data(), 1),
@@ -2061,7 +2112,7 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
         // Attribute the round's blocking device stall to the wait bucket rather than
         // leaving it in the submit residual. See ExecutionTimingRecorder.
         timing.reclassify_submit_as_wait(impl_->executor_.take_round_device_wait_ns());
-        progress.timing                       = timing.finish();
+        progress.timing                       = prefill_timing.finish();
 
         if (is_capture_split) {
             st.capture_offered             = true;
@@ -2102,7 +2153,7 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
         // Attribute the round's blocking device stall to the wait bucket rather than
         // leaving it in the submit residual. See ExecutionTimingRecorder.
         timing.reclassify_submit_as_wait(impl_->executor_.take_round_device_wait_ns());
-        progress.timing                       = timing.finish();
+        progress.timing                       = prefill_timing.finish();
         progress.capture                      = ContractAccess::make_capture_offer(
             this, sequence.lane(), sequence.epoch(), capture_id);
         return progress;
@@ -2146,7 +2197,7 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
     // Attribute the round's blocking device stall to the wait bucket rather than
     // leaving it in the submit residual. See ExecutionTimingRecorder.
     timing.reclassify_submit_as_wait(impl_->executor_.take_round_device_wait_ns());
-    progress.timing                       = timing.finish();
+    progress.timing                       = prefill_timing.finish();
     progress.pending                      = ContractAccess::make_pending(
         this, 1, std::span(&sequence, 1),
         std::span(impl_->pending_batch_tokens_.data(), 1),
@@ -2621,6 +2672,7 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
         const auto& dec              = decisions[0];
         const std::uint32_t lane_idx = seq.lane().value;
         auto& st                     = impl_->lane_states_[lane_idx];
+        result.rows[0].timings       = st.generation_timings;
 
         if (dec.accepted_tokens > 0) {
             if (dec.accepted_tokens > st.pending_accepted_tokens.size()) {
@@ -2685,6 +2737,7 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
             const auto& dec              = decisions[b];
             const std::uint32_t lane_idx = seq.lane().value;
             auto& st                     = impl_->lane_states_[lane_idx];
+            result.rows[b].timings       = st.generation_timings;
 
             if (dec.accepted_tokens > 0) {
                 const TokenId sampled = pending.tokens()[b];
@@ -2758,7 +2811,15 @@ DiscardResult Program::abort_pending(PendingBatch&& pending) noexcept {
 }
 
 FinishResult Program::finish(SequenceHandle sequence) noexcept {
+    GenerationTimings completed_timings;
     if (impl_ != nullptr) {
+        const auto lane = sequence.lane().value;
+        if (lane < impl_->lane_states_.size()) {
+            const auto& st = impl_->lane_states_[lane];
+            if (st.active && st.epoch == sequence.epoch()) {
+                completed_timings = st.generation_timings;
+            }
+        }
         try {
             if (impl_->pending_round_.valid()) {
                 impl_->pending_round_.abort();
@@ -2801,6 +2862,7 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
                             }
 
                             FinishResult out;
+                            out.timings = completed_timings;
                             CheckpointSummary cp;
                             cp.ref = runtime::CheckpointRef{
                                 .frontier = static_cast<std::uint32_t>(st.committed_frontier),
@@ -2896,6 +2958,7 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
                     return FinishResult{
                         .status      = runtime::ConsumeStatus::Consumed,
                         .disposition = runtime::FinishDisposition::Released,
+                        .timings     = completed_timings,
                         .speculative = std::move(lane_spec),
                     };
                 }
@@ -2911,6 +2974,7 @@ FinishResult Program::finish(SequenceHandle sequence) noexcept {
     return FinishResult{
         .status      = runtime::ConsumeStatus::Consumed,
         .disposition = runtime::FinishDisposition::Released,
+        .timings     = completed_timings,
     };
 }
 
@@ -2935,6 +2999,7 @@ AbortResult Program::abort(SequenceHandle sequence) noexcept {
                 ++impl_->resource_revision_;
                 return AbortResult{
                     .status      = runtime::ConsumeStatus::Consumed,
+                    .timings     = st.generation_timings,
                     .speculative = std::move(lane_spec),
                 };
             }

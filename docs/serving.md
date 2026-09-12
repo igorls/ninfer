@@ -32,6 +32,9 @@ pinned Host KV retain inactive continuations under Device pressure. Active reque
 Other artifacts use the same command shape with their own path. For 35B-A3B text-only DFlash,
 replace the MTP selection with `--spec dflash --draft-tokens 7 --lm-head-draft`; DFlash cannot be
 combined with `--vision`.
+Qwen3.8-27B artifacts with DFlash2 companion weights accept
+`--spec dflash2 --draft-tokens 7 --lm-head-draft`. DFlash2 supports draft counts 1 through 15,
+and can be combined with `--vision`.
 
 When `--model-id` is omitted, the server advertises and accepts the loaded container's exact
 `identity.model_id`. An explicit `--model-id` remains a public HTTP alias override and does not
@@ -40,7 +43,7 @@ select or alter the artifact.
 Vision is disabled by default: its weights and Vision-specific unified-workspace extent are not
 allocated, and media requests and token-count requests fail with HTTP 400 `vision_disabled`. Add
 `--vision` when the server must accept image or video input. Speculative residency is likewise
-frozen by `--spec mtp|dflash` and `--draft-tokens`; omitting `--spec` loads neither backend.
+frozen by `--spec mtp|dflash|dflash2` and `--draft-tokens`; omitting `--spec` loads no speculative backend.
 `--lm-head-draft` additionally loads the optimized proposal head. DFlash is 35B-A3B text-only and
 cannot be combined with `--vision`. A later request cannot enable a capability omitted at startup.
 
@@ -689,8 +692,8 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--response-store-max-records N` | maximum locally retained Responses objects | `1024` |
 | `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |
 | `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
-| `--spec mtp\|dflash` | speculative backend | off |
-| `--draft-tokens N` | MTP `1..5`; DFlash `1..15` | unset |
+| `--spec mtp\|dflash\|dflash2` | speculative backend | off |
+| `--draft-tokens N` | MTP `1..5` (`1..4` for Flash-Next); DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--default-max-tokens N` | output limit when omitted by a request | `8192` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
@@ -819,7 +822,7 @@ preparation and token-count-only calls are not measurement requests and do not r
 By default the server also reports aggregate activity every five seconds. `prefill` counts prompt
 suffix tokens actually computed during the interval, excluding prefix-cache hits; `decode` counts
 tokens finally committed by decode rounds, excluding the first token produced by prefill. For MTP
-and DFlash this is the accepted committed output, not draft or rejected tokens.
+and DFlash/DFlash2 this is the accepted committed output, not draft or rejected tokens.
 The operational field `average_decode_batch` and JSONL `average_size` are decode row-rounds divided
 by decode rounds during the same interval. The
 `running`, `prefilling`, `decode_ready`, `waiting`, `materializing`, `capture_pending`, and
@@ -916,7 +919,7 @@ history remains eligible for `private_endpoint`. If the client modifies, removes
 historical system message, the token prefix genuinely differs and a miss/reset is correct.
 
 Speculative backends preserve protocol output shapes, stop behavior, and usage accounting. If a stop
-truncates a multi-token MTP or DFlash round, the Engine commits the exact accepted target prefix so
+truncates a multi-token MTP, DFlash or DFlash2 round, the Engine commits the exact accepted target prefix so
 a following compatible turn can reuse it. Output-limit and context-capacity finishes map to
 `length`/ `max_tokens`; ordinary model or string stops map to `stop`/ `end_turn`.
 
@@ -961,7 +964,10 @@ Compiled grammars are cached per frontend. Each request owns fresh matcher state
 requests that reuse a prompt prefix. Flash-Next MTP verification uses a mask for each proposed
 prefix and commits only accepted target tokens. The Qwen3.6 family keeps its configured speculative
 backend state while using zero draft extent for constrained lanes; unconstrained lanes retain
-their normal speculation. Masks occupy stable Program-owned device storage for graph replay.
+their normal speculation. If every lane is constrained or has only one output/context position
+left, it runs the width-one target schedule and maintains the selected backend's committed state,
+without generating proposals. Mixed batches keep the speculative schedule. Masks occupy stable
+Program-owned device storage for graph replay.
 
 Qualification uses `ninfer_structured_output_test`, the three protocol schema tests, and the
 CUDA `ninfer_sampling_test`/`ninfer_speculative_round_test`. The live runner
@@ -977,6 +983,11 @@ Live coverage includes mixed constrained/unconstrained lanes and reused prompt p
 Other artifacts and DFlash were not tested end to end in this qualification.
 Local results are under `profiles/bench/structured-output-flash-final/` and
 `profiles/bench/structured-output-qwen27-live/`.
+
+The subsequent DFlash2 integration also passed all 21 live checks on Qwen3.8-27B NVFP4 with
+DFlash2 K=7 and MTP K=5, each at capacity eight with prefix reuse enabled. The real DFlash2
+Engine suite additionally exercises all-constrained eight-lane batches and transitions back to
+unconstrained work. Results are under `profiles/bench/dflash2-20260907/http-{dflash2,mtp5}-final/`.
 
 Prompt-token usage includes chat-template and expanded media tokens. Generated-token usage comes
 from accepted output token IDs, including a stop token whose decoded text may be withheld.

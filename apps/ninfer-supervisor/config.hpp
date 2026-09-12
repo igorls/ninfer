@@ -45,7 +45,27 @@ struct ModelEntry {
     std::string id;
     std::string artifact;
     std::vector<std::string> args;
+    std::string name;
+    std::string description;
 };
+
+// Inspect only the small directory, never model payloads. The engine remains
+// responsible for complete artifact binding and numerical compatibility.
+inline std::string artifact_model_identity(const std::string& path) {
+    try {
+        std::ifstream in(std::filesystem::path(path), std::ios::binary);
+        unsigned char prefix[16]{};
+        in.read(reinterpret_cast<char*>(prefix), sizeof(prefix));
+        if (!in || std::memcmp(prefix, "NINFER\0\2", 8) != 0) { return {}; }
+        std::uint64_t size = 0;
+        for (unsigned i = 0; i < 8; ++i) { size |= std::uint64_t(prefix[8 + i]) << (8 * i); }
+        if (size == 0 || size > 16 * 1024 * 1024) { return {}; }
+        std::string directory(static_cast<std::size_t>(size), '\0');
+        in.read(directory.data(), static_cast<std::streamsize>(size));
+        if (!in) { return {}; }
+        return nlohmann::json::parse(directory).at("identity").at("model_id").get<std::string>();
+    } catch (const std::exception&) { return {}; }
+}
 
 // What a model's artifact looks like on disk right now. Availability is checked
 // rather than assumed: a catalog entry pointing at a moved or half-copied file
@@ -185,7 +205,8 @@ inline nlohmann::json config_to_json(const SupervisorConfig& cfg) {
     if (!cfg.models.empty()) {
         nlohmann::json models = nlohmann::json::array();
         for (const auto& m : cfg.models) {
-            models.push_back({{"id", m.id}, {"artifact", m.artifact}, {"args", m.args}});
+            models.push_back({{"id", m.id}, {"artifact", m.artifact}, {"args", m.args},
+                              {"name", m.name}, {"description", m.description}});
         }
         out["models"] = models;
         if (!cfg.active_model.empty()) { out["active_model"] = cfg.active_model; }
@@ -293,6 +314,8 @@ inline SupervisorConfig load_config_json(const std::string& json_text,
             ModelEntry entry;
             entry.id       = m.value("id", "");
             entry.artifact = m.value("artifact", "");
+            entry.name = m.value("name", "");
+            entry.description = m.value("description", "");
             if (m.contains("args") && m.at("args").is_array()) {
                 for (const auto& a : m.at("args")) {
                     if (a.is_string()) { entry.args.push_back(a.get<std::string>()); }

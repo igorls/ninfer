@@ -100,6 +100,10 @@ Package::WeightsProfile Package::resolve_weights(const artifact::ArtifactIdentit
 Package::LoadPlan Package::plan_load(artifact::Binder& binder, const EngineOptions& options,
                                      WeightsProfile weights_profile) {
     (void)weights_profile;
+    if (options.speculative.backend != SpeculativeBackend::None &&
+        options.speculative.backend != SpeculativeBackend::Mtp) {
+        throw std::invalid_argument("Flash-Next supports only ordinary decoding and MTP");
+    }
     const bool enable_mtp = options.speculative.backend == SpeculativeBackend::Mtp;
     std::uint32_t draft_rows = 32'768;
     if (const char* env = std::getenv("NINFER_FLASH_NEXT_DRAFT_HEAD_ROWS"); env && env[0] != '\0') {

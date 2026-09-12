@@ -197,6 +197,8 @@ struct LaneState {
     std::vector<std::int32_t> draft_tokens;
     std::vector<std::int32_t> pending_accepted_tokens;
     SpeculativeStats speculative_stats{};
+    // Request-owned execution time, never retained with a reusable checkpoint.
+    GenerationTimings generation_timings{};
     qwen3_6::detail::PrefixShortlistDigests prefix_digests;
     std::optional<std::uint32_t> turn_closure_continuation_index;
     // Owned only while this lane is admitted; optional captures cannot consume it.

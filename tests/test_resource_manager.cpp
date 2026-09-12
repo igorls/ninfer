@@ -638,6 +638,7 @@ public:
                       const FakeSharedPrefixHandle* shared_source,
                       std::optional<CheckpointRef> checkpoint, bool must_retain_source) {
         ++admission_inspections;
+        if (!admission_boundary_ready) { return std::nullopt; }
         if (source != nullptr) {
             inspected_private_sources.push_back(source->id);
             if (source->content_key != prompt.content_key || !checkpoint) { return std::nullopt; }
@@ -1124,6 +1125,7 @@ public:
     std::uint64_t pressure_checkpoint_recovery_ns        = 100;
     bool require_evictions                               = false;
     bool abort_start                                     = false;
+    bool admission_boundary_ready                        = true;
     bool abort_progress                                  = false;
     bool malform_last_private_victim                     = false;
     bool malform_last_capture_private_victim             = false;
@@ -2606,6 +2608,35 @@ void test_new_owner_survives_cold_admission_under_full_pool() {
             "planner did not evict one of the two least recently published owners");
 }
 
+void test_admission_waits_for_program_boundary() {
+    FakeManager manager = make_manager(2, 3);
+    FakeProgram program;
+    const ActiveRequest active = start_active(manager, program, 9, make_base(9), 1);
+    const auto starts = program.start_calls;
+    const auto planning_sessions = program.pressure_planning_sessions;
+
+    // An active lane can have an unfinished StateImage fork even with a free destination
+    // lane and enough physical capacity. Pressure cannot complete that state transition.
+    program.admission_boundary_ready = false;
+    auto blocked = manager.inspect(program, FakePreparedPrompt{77}, make_base(77), 2);
+    require(blocked.readiness == Readiness::TemporarilyBlocked && !blocked.choice,
+            "unfinished Program boundary was treated as infeasibility or a fatal root error");
+    require(program.start_calls == starts &&
+                program.pressure_planning_sessions == planning_sessions &&
+                program.started_action_ids.empty() && program.released_continuations.empty() &&
+                program.abort_calls == 0,
+            "blocked admission changed active ownership or started pressure planning");
+
+    program.admission_boundary_ready = true;
+    const ActiveRequest admitted = start_active(manager, program, 77, make_base(77), 3);
+    require(admitted.lane != active.lane && program.start_calls == starts + 1,
+            "settled Program boundary did not admit the waiting request on the free lane");
+    (void)finish_active(manager, program, admitted);
+    (void)finish_active(manager, program, active);
+    require(program.finish_calls == 2,
+            "retry admission damaged the already active request");
+}
+
 void test_retained_source_is_protected_until_terminal() {
     FakeManager manager = make_manager(2, 3);
     FakeProgram program;
@@ -3385,6 +3416,7 @@ int main() {
     run_test("new owner survives cold admission under full pool",
              test_new_owner_survives_cold_admission_under_full_pool);
     run_test("retained source protection", test_retained_source_is_protected_until_terminal);
+    run_test("admission waits for Program boundary", test_admission_waits_for_program_boundary);
     run_test("session publication order", test_session_publication_order_controls_tied_source);
     run_test("canonical pressure", test_canonical_pressure_starts_with_disposable_owner);
     run_test("all preserving pressure alternatives",

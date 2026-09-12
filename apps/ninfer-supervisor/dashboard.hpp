@@ -699,16 +699,20 @@ R"HTML(      <section class="guide-step"><span class="step-number">2</span><div>
       input.setAttribute('aria-describedby', 'catalog-detail-' + index);
       input.onchange = () => {modelSelection = model.id; updateModelControls();};
       const details = document.createElement('span'); details.className = 'model-details';
-      const title = document.createElement('strong'); title.textContent = model.id;
+      const title = document.createElement('strong'); title.textContent = model.name || model.id;
       const detail = document.createElement('span'); detail.id = 'catalog-detail-' + index;
       detail.textContent = (Number.isFinite(model.size_bytes) && model.size_bytes > 0 ? (model.size_bytes / 1073741824).toFixed(1) + ' GiB artifact on disk' : 'Artifact size unavailable') + (model.available ? '' : ' · Unavailable: ' + model.reason);
       const artifact = document.createElement('code'); artifact.textContent = model.artifact;
       details.append(title, detail, artifact); label.append(input, details);
+      if (model.description) {
+        const description = document.createElement('span'); description.textContent = model.description;
+        details.insertBefore(description, detail);
+      }
       if (model.active) {const badge = document.createElement('span'); badge.className = 'kpi-badge'; badge.textContent = 'Current launch'; label.append(badge);}
       catalogOptions.append(label);
     });
     // The catalog describes launch args; health and saved active_model do not prove model identity.
-    const active = data.models.filter(m => m.active).map(m => m.id).join(', ');
+    const active = data.models.filter(m => m.active).map(m => m.name || m.id).join(', ');
     document.getElementById('catalog-current').textContent = 'Current launch: ' + (active || data.active_artifact_label || 'not identified');
     if (data.active_artifact_label) document.getElementById('model-label').textContent = data.active_artifact_label;
     updateModelControls();
@@ -1680,6 +1684,12 @@ R"HTML(      fetch('/api/state').then(r => {if (!r.ok) throw new Error(); return
   }
 
   function fieldRow(spec, value) {
+    spec = {...spec};
+    const backend = Object.prototype.hasOwnProperty.call(cfgEdits.params, 'spec')
+      ? cfgEdits.params.spec : (cfgData.params || {}).spec;
+    if (spec.key === 'draft_tokens') {
+      spec.max = backend === 'mtp' ? (cfgData.model_identity === 'qwen3.8-flash-next' ? 4 : 5) : 15;
+    }
     const original = value;
     if (Object.prototype.hasOwnProperty.call(cfgEdits.params, spec.key)) value = String(cfgEdits.params[spec.key]);
     const wrap = document.createElement('div');
@@ -1720,7 +1730,7 @@ R"HTML(      fetch('/api/state').then(r => {if (!r.ok) throw new Error(); return
       // is not the same as the engine's default, which the engine picks itself.
       const none = document.createElement('option');
       none.value = '';
-      none.textContent = '(not set)';
+      none.textContent = spec.key === 'spec' ? 'Off — ordinary decoding' : '(not set)';
       input.appendChild(none);
       spec.choices.forEach(c => {
         const o = document.createElement('option');
@@ -1732,6 +1742,22 @@ R"HTML(      fetch('/api/state').then(r => {if (!r.ok) throw new Error(); return
       input.onchange = () => {
         cfgEdit('params', spec.key, input.value, original || '');
         input.classList.toggle('dirty', input.value !== (original || ''));
+        if (spec.key === 'spec') {
+          if (!input.value) {
+            cfgEdit('params', 'draft_tokens', '', (cfgData.params || {}).draft_tokens || '');
+            cfgEdit('params', 'lm_head_draft', false, (cfgData.params || {}).lm_head_draft === 'true');
+          } else {
+            const limit = input.value === 'mtp' ? (cfgData.model_identity === 'qwen3.8-flash-next' ? 4 : 5) : 15;
+            const draft = Object.prototype.hasOwnProperty.call(cfgEdits.params, 'draft_tokens')
+              ? cfgEdits.params.draft_tokens : (cfgData.params || {}).draft_tokens;
+            if (!draft || Number(draft) > limit) {
+              cfgEdit('params', 'draft_tokens', String(input.value === 'mtp' ? limit : 7),
+                (cfgData.params || {}).draft_tokens || '');
+            }
+          }
+          renderConfig();
+          document.getElementById('param-spec').focus();
+        }
       };
       wrap.appendChild(input);
     } else {
@@ -1751,6 +1777,7 @@ R"HTML(      fetch('/api/state').then(r => {if (!r.ok) throw new Error(); return
     const help = document.createElement('div');
     help.className = 'cfg-help';
     input.id = 'param-' + spec.key;
+    if (spec.key === 'draft_tokens' || spec.key === 'lm_head_draft') input.disabled = !backend;
     label.id = input.id + '-label';
     input.setAttribute('aria-labelledby', label.id);
     input.setAttribute('aria-describedby', input.id + '-help');

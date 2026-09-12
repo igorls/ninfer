@@ -411,12 +411,13 @@ AdmittedRequest admit_request(FlashNextResourceManager& manager, Program& prog,
     }
 }
 
-void execute_prefill_and_capture(FlashNextResourceManager& manager, Program& prog, AdmittedRequest& req,
-                                std::vector<TokenId>& generated) {
+double execute_prefill_and_capture(FlashNextResourceManager& manager, Program& prog, AdmittedRequest& req,
+                                  std::vector<TokenId>& generated) {
     std::atomic<bool> cancellation_flag{false};
     ninfer::runtime::CancellationFlagView cancellation{&cancellation_flag};
 
     auto p = prog.advance_prefill(req.sequence);
+    double prefill_seconds = static_cast<double>(p.timing.elapsed_ns()) * 1.0e-9;
     while (!p.complete) {
         if (p.capture.has_value()) {
             auto cap_res = manager.reserve_active_capture(
@@ -435,19 +436,23 @@ void execute_prefill_and_capture(FlashNextResourceManager& manager, Program& pro
             }
         }
         p = prog.advance_prefill(req.sequence);
+        prefill_seconds += static_cast<double>(p.timing.elapsed_ns()) * 1.0e-9;
     }
     if (p.pending.has_value()) {
         generated.push_back(p.pending->tokens()[0]);
         std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = false}}};
         (void)prog.commit(std::move(*p.pending), commit_dec);
     }
+    return prefill_seconds;
 }
 
-void decode_and_finish(FlashNextResourceManager& manager, Program& prog, AdmittedRequest& req, int num_decode_tokens,
-                       std::vector<TokenId>& generated) {
+ninfer::GenerationTimings decode_and_finish(FlashNextResourceManager& manager, Program& prog,
+                                           AdmittedRequest& req, int num_decode_tokens,
+                                           std::vector<TokenId>& generated) {
     for (int step = 0; step < num_decode_tokens; ++step) {
         std::array<SequenceHandle, 1> seqs = {req.sequence};
-        std::array<ninfer::runtime::RoundBudget, 1> budgets{};
+        const std::array<ninfer::runtime::RoundBudget, 1> budgets{{
+            {.generated_tokens_remaining = static_cast<std::uint32_t>(num_decode_tokens - step)}}};
         auto dec = prog.decode(seqs, budgets);
         generated.push_back(dec.tokens()[0]);
         std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = false}}};
@@ -458,6 +463,7 @@ void decode_and_finish(FlashNextResourceManager& manager, Program& prog, Admitte
     if (fin.status != ninfer::runtime::ConsumeStatus::Consumed) {
         throw std::runtime_error("finish failed to consume sequence");
     }
+    return fin.timings;
 }
 
 } // namespace
@@ -548,15 +554,66 @@ int main() {
 
         AdmittedRequest req = admit_request(manager, prog, std::move(prompt), pub_order++);
         std::vector<TokenId> generated;
-        execute_prefill_and_capture(manager, prog, req, generated);
-        decode_and_finish(manager, prog, req, 4, generated);
+        const double prefill_seconds = execute_prefill_and_capture(manager, prog, req, generated);
+        const auto timings = decode_and_finish(manager, prog, req, 4, generated);
+        // Compare public completed-request timing with the execution-unit observations. This
+        // covers chunk/capture boundaries and verifies that each reused lane starts at zero;
+        // time spent by ResourceManager between units must not enter the prefill denominator.
+        if (prefill_seconds <= 0.0 || timings.vision_seconds != 0.0 ||
+            std::abs(timings.prefill_seconds - prefill_seconds) > 1.0e-9) {
+            throw std::runtime_error("prefill timing lost chunks, included capture gaps, or leaked across requests");
+        }
 
         // Append actual generated tokens to conversation history for next turn
         conversation_history.insert(conversation_history.end(), generated.begin(), generated.end());
         expected_reuse = turn_closure_frontier;
     }
 
-    std::printf("-> ALL 8 TURNS PASSED: Prefix reuse successfully active and monotonically growing!\n");
+    // Cancellation after a completed chunk preserves its measured work.
+    {
+        const std::vector<TokenId> tokens(600, 1700);
+        auto req = admit_request(manager, prog, make_prompt(tokens), pub_order++);
+        const auto progress = prog.advance_prefill(req.sequence);
+        if (progress.complete || progress.processed_prompt_tokens != config.prefill_chunk) {
+            throw std::runtime_error("partial-prefill cancellation fixture did not yield after one chunk");
+        }
+        const auto aborted = manager.abort(prog, req.lane, req.sequence);
+        const double elapsed = static_cast<double>(progress.timing.elapsed_ns()) * 1.0e-9;
+        if (elapsed <= 0.0 || std::abs(aborted.timings.prefill_seconds - elapsed) > 1.0e-9 ||
+            aborted.timings.vision_seconds != 0.0) {
+            throw std::runtime_error("aborted request lost its completed prefill timing");
+        }
+    }
+    // A lane cancelled before execution cannot inherit the preceding request's counters.
+    {
+        const std::vector<TokenId> tokens(16, 1800);
+        auto req = admit_request(manager, prog, make_prompt(tokens), pub_order++);
+        const auto aborted = manager.abort(prog, req.lane, req.sequence);
+        if (aborted.timings.prefill_seconds != 0.0 || aborted.timings.vision_seconds != 0.0) {
+            throw std::runtime_error("lane admission did not reset request timing");
+        }
+    }
+    // Engine consumes the CommitRowResult directly when cancellation releases a pending Begin.
+    {
+        const std::vector<TokenId> tokens(16, 1900);
+        auto req = admit_request(manager, prog, make_prompt(tokens), pub_order++);
+        auto progress = prog.advance_prefill(req.sequence);
+        if (!progress.complete || !progress.pending) {
+            throw std::runtime_error("pending-Begin cancellation fixture did not complete prefill");
+        }
+        const std::array<ninfer::runtime::CommitDecision, 1> decisions{{
+            {.accepted_tokens = 0, .terminal = true}}};
+        const auto committed = prog.commit(std::move(*progress.pending), decisions);
+        const std::array lanes{req.lane};
+        manager.apply_commit(lanes, committed);
+        const double elapsed = static_cast<double>(progress.timing.elapsed_ns()) * 1.0e-9;
+        if (committed.rows[0].disposition != ninfer::runtime::CommitDisposition::CancelledReleased ||
+            elapsed <= 0.0 || std::abs(committed.rows[0].timings.prefill_seconds - elapsed) > 1.0e-9) {
+            throw std::runtime_error("cancelled commit lost its completed prefill timing");
+        }
+    }
+
+    std::printf("-> ALL 8 TURNS PASSED: Prefix reuse and request-owned timing remain isolated.\n");
     return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL EXCEPTION: %s\n", e.what());

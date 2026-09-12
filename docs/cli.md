@@ -77,9 +77,10 @@ output capacity for the inserted suffix and the answer:
 
 GPU residency is frozen when the Engine starts:
 
-- no `--spec` omits MTP/DFlash weights and state and the optimized proposal head;
+- no `--spec` omits MTP/DFlash/DFlash2 weights and state and the optimized proposal head;
 - `--spec mtp` loads only MTP, while `--spec dflash` loads only the 35B-A3B text-only DFlash
   backend;
+- `--spec dflash2` loads only the Qwen3.8-27B DFlash2 companion;
 - a speculative backend with the full proposal head omits the optimized proposal head;
 - Vision is disabled by default, omitting its weights and Vision-specific unified-workspace extent;
 - `--vision` loads the weights, expands the one Program workspace for Vision encode/handoff, and
@@ -90,6 +91,7 @@ GPU residency is frozen when the Engine starts:
 The complete `.ninfer` inventory is still validated. These choices are not lazy loading: a
 text-only Engine rejects media and cannot enable Vision later. DFlash and Vision are mutually
 exclusive. The default speculative and Vision settings produce the smallest resident profile.
+DFlash2 can be combined with Vision; speculation accelerates generated-text decode after prefill.
 
 ## Structured messages
 
@@ -152,8 +154,8 @@ long-decode, and long-context inputs.
 
 ## Speculative decoding
 
-Speculative decoding is disabled by default. Select MTP with one to five draft positions, or the
-35B-A3B text-only DFlash backend with one to fifteen. `--lm-head-draft` selects the optimized
+Speculative decoding is disabled by default. Select MTP with one to five draft positions, the
+35B-A3B text-only DFlash backend, or Qwen3.8-27B DFlash2 with one to fifteen. `--lm-head-draft` selects the optimized
 proposal head and requires a selected backend.
 
 Qwen3.8-Flash-Next supports one to four MTP draft positions. It speculates when the compact
@@ -180,10 +182,17 @@ For DFlash:
   --spec dflash --draft-tokens 7 --lm-head-draft
 ```
 
-MTP and DFlash cannot be enabled together. The published [performance results](performance.md)
-use MTP with three draft tokens and DFlash with seven draft tokens (block length eight), both with
-the optimized proposal head. DFlash accepts one to fifteen draft tokens; seven forms the measured
-block length eight, while fifteen uses the full native block.
+For Qwen3.8-27B artifacts containing the DFlash2 companion, use
+`--spec dflash2 --draft-tokens 7 --lm-head-draft`. Supported draft counts are 1 through 15;
+seven is the checkpoint recommendation. The full proposal head is selected by omitting
+`--lm-head-draft`. DFlash2 shares the Engine's graph execution, concurrency and prefix reuse.
+Artifacts without the complete companion report a missing capability when DFlash2 is selected.
+Its [state and acceptance contract](maintainer/qwen3.8-27b-dflash2.md) describes the integration.
+
+Only one speculative backend can be enabled per Engine. The [performance results](performance.md)
+identify the draft count, proposal head and request concurrency for each measurement. Seven draft
+tokens form a block of eight positions, including the anchor. A larger block does not necessarily
+improve throughput: target verification cost and accepted output per round both matter.
 
 ## Common options
 
@@ -197,8 +206,8 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--max-new N` | requested output-token limit | `128` |
 | `--device N` | CUDA device index | `0` |
 | `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
-| `--spec mtp\|dflash` | speculative backend | off |
-| `--draft-tokens N` | MTP `1..5` (`1..4` for Flash-Next); DFlash `1..15` | unset |
+| `--spec mtp\|dflash\|dflash2` | speculative backend | off |
+| `--draft-tokens N` | MTP `1..5` (`1..4` for Flash-Next); DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--vision` | enable image/video input and load Vision GPU allocations | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |

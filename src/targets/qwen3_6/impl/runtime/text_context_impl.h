@@ -168,7 +168,8 @@ void DFlashFeatureSink::capture_layer(int layer, const Tensor& value, cudaStream
     if (batch_features != nullptr) {
         Tensor source = value.view({value.ne[0], batch_width, batch_size});
         Tensor target =
-            batch_features->slice(0, static_cast<std::int32_t>(index) * value.ne[0], value.ne[0]);
+            batch_features->slice(0, static_cast<std::int32_t>(index) * value.ne[0], value.ne[0])
+                .slice(1, 0, batch_width);
         ops::scatter_bf16_batch(source, *batch_lanes, *batch_valid_columns, target, stream);
         captured_mask |= 1U << index;
         return;
@@ -643,12 +644,13 @@ void TextContext::mtp_forward_ar_step(const Tensor& token, const Tensor& previou
     proposal_argmax(mtp_hidden, logits, draft_token);
 }
 
-void TextContext::ordinary_decode_batch(const Tensor& ids, const Tensor& cache_positions,
+template <class Tap>
+void TextContext::ordinary_decode_batch_impl(const Tensor& ids, const Tensor& cache_positions,
                                         const Tensor& rope_positions, const Tensor& kv_table_rows,
                                         const Tensor& linear_state_source_slots,
                                         const Tensor& linear_state_destination_slots,
                                         ops::CausalAttentionExecutionEnvelope envelope,
-                                        Tensor& hidden, Tensor& logits) {
+                                        Tensor& hidden, Tensor& logits, Tap& tap) {
     const std::int32_t batch = ids.ne[0];
     if (batch <= 0 || batch > static_cast<std::int32_t>(kMaximumConcurrency)) {
         throw std::invalid_argument("ordinary decode batch size must be in [1,8]");
@@ -680,12 +682,38 @@ void TextContext::ordinary_decode_batch(const Tensor& ids, const Tensor& cache_p
 
         Tensor x = work_.alloc(DType::BF16, {kCfg.hidden, batch});
         ops::embedding(ids, *embed_, x, stream);
-        NullTap tap;
+        if constexpr (Tap::enabled) { tap.begin(x); }
         run_layers(x, Phase::Verify, tap);
+        if constexpr (requires { tap.capture_positions(cache_positions, stream); }) {
+            tap.capture_positions(cache_positions.view({1, batch}), stream);
+        }
         ops::rmsnorm(x, *final_norm_, kCfg.rms_eps, true, hidden, stream);
         ops::linear(hidden, *lm_head_, logits, stream);
     }
     work_.reset();
+}
+
+void TextContext::ordinary_decode_batch(const Tensor& ids, const Tensor& cache_positions,
+                                        const Tensor& rope_positions, const Tensor& kv_table_rows,
+                                        const Tensor& linear_state_source_slots,
+                                        const Tensor& linear_state_destination_slots,
+                                        ops::CausalAttentionExecutionEnvelope envelope,
+                                        Tensor& hidden, Tensor& logits) {
+    NullTap tap;
+    ordinary_decode_batch_impl(ids, cache_positions, rope_positions, kv_table_rows,
+                                linear_state_source_slots, linear_state_destination_slots,
+                                envelope, hidden, logits, tap);
+}
+
+void TextContext::ordinary_decode_batch(const Tensor& ids, const Tensor& cache_positions,
+                                        const Tensor& rope_positions, const Tensor& kv_table_rows,
+                                        const Tensor& linear_state_source_slots,
+                                        const Tensor& linear_state_destination_slots,
+                                        ops::CausalAttentionExecutionEnvelope envelope,
+                                        Tensor& hidden, Tensor& logits, DFlashFeatureSink& sink) {
+    ordinary_decode_batch_impl(ids, cache_positions, rope_positions, kv_table_rows,
+                                linear_state_source_slots, linear_state_destination_slots,
+                                envelope, hidden, logits, sink);
 }
 
 template <class Tap>
@@ -885,7 +913,7 @@ void TextContext::gdn_mix(const GdnLayerW& w, Tensor& x, int gidx, Phase ph) {
     Tensor g           = control.g;
     Tensor beta        = control.beta;
     Variant::gdn_norm_control_projection(x, *w.input_norm, kCfg.rms_eps, *w.projection, h, g, beta,
-                                         work_, s);
+                                         work_, ctx_.execution_view());
 
     const auto projection = workspace_recipe::gdn_projection<TextConfig>(work_, T);
     Tensor z              = projection.output_gate.view({kCfg.gdn_v_dim, kCfg.gdn_v_heads, T});
@@ -1352,6 +1380,20 @@ PrefillChunkResult TextContext::prefill_chunk(const qwen3_6::PreparedPromptData&
     const MultimodalPrefill multimodal{tokens, input.positions, &vision, begin, input.rope_delta};
     NullTap tap;
     return prefill_impl(tokens.subspan(begin, nominal_length), nullptr, &multimodal, tap,
+                        finalize_at_end);
+}
+
+PrefillChunkResult TextContext::prefill_chunk(const qwen3_6::PreparedPromptData& input,
+                                              std::uint32_t begin, std::uint32_t nominal_length,
+                                              VisionPrefillSession& vision, bool finalize_at_end,
+                                              DFlashFeatureSink& sink) {
+    if (begin >= input.token_ids.size() || nominal_length == 0 ||
+        nominal_length > input.token_ids.size() - begin) {
+        throw std::invalid_argument("multimodal prefill chunk is outside the prompt");
+    }
+    const std::span<const int> tokens(input.token_ids);
+    const MultimodalPrefill multimodal{tokens, input.positions, &vision, begin, input.rope_delta};
+    return prefill_impl(tokens.subspan(begin, nominal_length), nullptr, &multimodal, sink,
                         finalize_at_end);
 }
 

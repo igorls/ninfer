@@ -109,6 +109,16 @@ int test_backoff() {
 
 int test_config_bind() {
     int f = 0;
+    {
+        auto c = ninfer::supervisor::load_config_json(
+            R"({"engine":{"executable":"x"},"models":[{"id":"interactive","name":"27B Interactive","description":"DFlash2, seven drafts","artifact":"model.ninfer","args":["--spec","dflash2","--draft-tokens","7","--lm-head-draft"]}]})");
+        const auto restored = ninfer::supervisor::load_config_json(
+            ninfer::supervisor::config_to_json(c).dump());
+        f += check(restored.models.size() == 1 && restored.models[0].name == "27B Interactive" &&
+                   restored.models[0].description == "DFlash2, seven drafts" &&
+                   restored.models[0].args == c.models[0].args,
+                   "preset names, descriptions and launch flags survive configuration saves");
+    }
     const char* ok =
         R"({"engine":{"executable":"C:/ninfer-serve.exe"},"supervisor":{"host":"127.0.0.1"}})";
     try {
@@ -893,6 +903,19 @@ int test_engine_param_round_trip() {
 int test_engine_param_validation() {
     using namespace ninfer::supervisor;
     int f = 0;
+    f += check(validate_engine_param_combination({{"spec", "dflash2"}, {"draft_tokens", "15"},
+                {"lm_head_draft", "true"}}, "qwen3.8-27b").empty(), "DFlash2 permits 15 drafts");
+    f += check(!validate_engine_param_combination({{"spec", "mtp"}, {"draft_tokens", "6"}},
+                "qwen3.8-27b").empty(), "MTP rejects six drafts");
+    f += check(!validate_engine_param_combination({{"spec", "mtp"}, {"draft_tokens", "5"}},
+                "qwen3.8-flash-next").empty(), "Flash MTP rejects five drafts");
+    f += check(!validate_engine_param_combination({{"spec", "dflash2"}},
+                "qwen3.8-flash-next").empty(), "Flash rejects DFlash2");
+    f += check(!validate_engine_param_combination({{"lm_head_draft", "true"}}).empty(),
+               "draft head requires speculation");
+    const auto head = parse_engine_args({"model.ninfer", "--spec", "dflash2", "--lm-head-draft"});
+    f += check(head.passthrough.empty() && find_param_value(head.params, "lm_head_draft"),
+               "draft head is editable instead of passthrough");
     f += check(validate_engine_params({{"max_concurrency", "8"}}).empty(), "in-range value passes");
     f += check(!validate_engine_params({{"max_concurrency", "16"}}).empty(),
                "the engine's own concurrency limit is enforced");

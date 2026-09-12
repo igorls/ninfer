@@ -90,7 +90,7 @@ std::string usage_text(const char* argv0) {
            "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--gdn-state-dtype fp32|bf16]\n"
            "       [--output-head-fp8] [--output-head-dtype bf16|fp8]\n"
            "       [--token-embedding-fp8] [--token-embedding-dtype bf16|fp8]\n"
-           "       [--spec mtp|dflash --draft-tokens N] [--lm-head-draft]\n"
+           "       [--spec mtp|dflash|dflash2 --draft-tokens N] [--lm-head-draft]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
            "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"
            "       [--stop-token-id N]... [--stop <text>]... [--reasoning-stop <text>]...\n"
