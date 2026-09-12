@@ -111,6 +111,32 @@
         "--lm-head-draft",
         "--cors"
       ]
+    },
+    {
+      "id": "qwen3.8-27b-orcarouter",
+      "name": "27B OrcaRouter Uncensored",
+      "description": "OrcaRouter NVFP4 with original BF16 embeddings and output head. Text and vision; speculation is optional.",
+      "artifact": "C:/models/OrcaRouter-Qwen3.8-27B-NVFP4/qwen3_8_27b_orcarouter_nvfp4.ninfer",
+      "args": [
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8010",
+        "--model-id",
+        "qwen3.8-27b-orcarouter",
+        "--max-context",
+        "32768",
+        "--kv-capacity",
+        "65536",
+        "--max-concurrency",
+        "4",
+        "--prefill-chunk",
+        "2048",
+        "--kv-dtype",
+        "fp8",
+        "--vision",
+        "--cors"
+      ]
     }
   ],
   "active_model": "qwen3.8-27b-dflash2",

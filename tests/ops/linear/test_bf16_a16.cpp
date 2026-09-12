@@ -348,14 +348,22 @@ int run_bf16_linear() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     if (ninfer::test::cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
 
     try {
-        const int failures = run_bf16_linear();
+        int failures = 0;
+        if (argc == 2 && std::string_view(argv[1]) == "--orcarouter-only") {
+            DeviceWeight head(make_patterned(248320, 5120, 449U));
+            for (const int tokens : {1, 2, 8, 9, 33, 129}) {
+                failures += run_bf16_linear_case(head, tokens);
+            }
+        } else {
+            failures = run_bf16_linear();
+        }
         std::cout << (failures == 0 ? "OK" : "FAIL") << " BF16_A16 Linear\n";
         return failures == 0 ? 0 : 1;
     } catch (const std::exception& error) {

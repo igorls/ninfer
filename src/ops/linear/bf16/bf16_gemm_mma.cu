@@ -49,6 +49,10 @@ void launch_geometry(const Tensor& x, const Weight& weight, Tensor& out, cudaStr
 } // namespace
 
 void launch_bf16_mma(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+    if (weight.n == 248320 && weight.k == 5120) {
+        launch_geometry<Bf16GemvGeometry<248320, 5120>>(x, weight, out, stream);
+        return;
+    }
     if (weight.n == 14336 && weight.k == 5120) {
         launch_geometry<Bf16GemvGeometry<14336, 5120>>(x, weight, out, stream);
         return;

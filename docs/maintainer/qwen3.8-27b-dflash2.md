@@ -2,7 +2,11 @@
 
 DFlash2 is a startup-selected speculative backend of the shared Qwen family Program. It uses
 the public `.ninfer` Engine route, request scheduling, Frontend settlement and output publication.
-It is available only for Qwen3.8-27B artifacts containing the complete companion bundle.
+It is available for canonical Qwen3.8-27B and the separately registered
+`qwen3.8-27b-orcarouter/nvfp4` artifacts containing the complete companion bundle.
+OrcaRouter's full proposal head uses its BF16 source weights through the BF16 LinearTopK route;
+the optional optimized head is derived from those same weights. The companion was trained for
+the canonical model, so useful acceptance on the derivative requires separate measurement.
 Native Windows performance and qualification results belong in [performance.md](../performance.md).
 The [artifact reference](qwen3.8-27b-artifact.md) owns tensor inventory and storage formats.
 

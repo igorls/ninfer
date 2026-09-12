@@ -16,6 +16,7 @@ namespace {
 enum class HeadProfile : std::uint8_t {
     W8Full,
     Fp8Full,
+    Bf16Full,
     Q4Optimized,
 };
 
@@ -44,6 +45,9 @@ HeadProfile resolve_profile(QType qtype, std::int32_t head_rows, std::int32_t in
     if (head_rows == detail::kLinearTopKFullRows && qtype == QType::FP8_E4M3FN_ROW_BF16S) {
         return HeadProfile::Fp8Full;
     }
+    if (head_rows == detail::kLinearTopKFullRows && qtype == QType::BF16_CTRL) {
+        return HeadProfile::Bf16Full;
+    }
     if (head_rows == detail::kLinearTopKOptimizedRows && qtype == QType::Q4G64_F16S) {
         return HeadProfile::Q4Optimized;
     }
@@ -57,6 +61,11 @@ struct Plan {
 };
 
 Plan plan_for(HeadProfile profile, int columns) {
+    if (profile == HeadProfile::Bf16Full) {
+        if (columns <= 32) return {64, 32};
+        if (columns <= 64) return {64, 64};
+        return {64, 128, 64};
+    }
     if (profile == HeadProfile::Q4Optimized) {
         if (columns <= 16) return {16, 0};
         if (columns <= 32) return {64, 32};
@@ -134,9 +143,10 @@ void require_no_weight_overlap(const Weight& head, const Tensor& hidden,
                                const Tensor* id_map, const detail::LinearTopKWorkspace& scratch) {
     const std::size_t code_bytes = head.qtype == QType::Q4G64_F16S
                                        ? static_cast<std::size_t>(head.n) * head.k / 2
-                                       : static_cast<std::size_t>(head.n) * head.k;
+                                       : static_cast<std::size_t>(head.n) * head.k *
+                                             (head.qtype == QType::BF16_CTRL ? 2 : 1);
     const std::size_t scale_bytes =
-        head.qtype == QType::W8G32_F16S
+        head.qtype == QType::BF16_CTRL ? 0 : head.qtype == QType::W8G32_F16S
             ? static_cast<std::size_t>(head.n) * (head.k / 32) * sizeof(std::uint16_t)
         : head.qtype == QType::Q4G64_F16S
             ? static_cast<std::size_t>(head.n) * (head.k / 64) * sizeof(std::uint16_t)
@@ -200,6 +210,9 @@ void execute(const Tensor& hidden, const Weight& head, const Tensor* id_map, Ten
         else if (profile == HeadProfile::Fp8Full)
             detail::linear_topk_fp8_launch(x, head, detail::kLinearTopKFullValidRows, scratch,
                                            stream);
+        else if (profile == HeadProfile::Bf16Full)
+            detail::linear_topk_bf16_launch(x, head, detail::kLinearTopKFullValidRows, scratch,
+                                            stream);
         else
             detail::linear_topk_q4_launch(x, head, *id_map, scratch, stream);
         detail::linear_topk_merge_launch(scratch, out_ids, out_scores, stream);
@@ -247,6 +260,13 @@ void linear_topk(const Tensor& hidden, const Weight& head, std::int32_t valid_ro
     }
     if (profile == HeadProfile::W8Full) {
         require_w8(head);
+    } else if (profile == HeadProfile::Bf16Full) {
+        if (head.layout != QuantLayout::Contiguous || !aligned_to(head.qdata, 16) ||
+            head.scales != nullptr || head.qhigh != nullptr || head.high_plane_bytes != 0 ||
+            head.ndim != 2 || head.shape[0] != head.n || head.shape[1] != head.k ||
+            head.payload_bytes < static_cast<std::size_t>(head.n) * head.k * 2) {
+            throw std::invalid_argument("linear_topk: invalid BF16 full head");
+        }
     } else {
         (void)detail::validate_fp8_weight(head, "linear_topk FP8 full head");
     }

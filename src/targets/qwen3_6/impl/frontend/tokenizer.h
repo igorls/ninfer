@@ -155,6 +155,7 @@ public:
 
 private:
     std::vector<std::string> decoded_token_bytes_;
+    bool split_unicode_marks_as_letters_ = true;
     std::vector<bool> valid_token_ids_;
     std::vector<bool> special_token_ids_;
     std::unordered_map<std::string, int> vocab_token_to_id_;

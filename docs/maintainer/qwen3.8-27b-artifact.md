@@ -1,9 +1,10 @@
 # Qwen3.8-27B artifact reference
 
-This reference defines both registered Qwen3.8-27B `.ninfer` storage contracts: identity, object
+This reference defines the registered Qwen3.8-27B `.ninfer` storage contracts: identity, object
 inventory, shapes, numeric formats, storage layouts, fused row order, aliases, fixed sources, and
 source-to-object transforms. Sections 1 through 12 define the `nvfp4` profile and the DFlash2
-suffix shared by both profiles; Section 13 defines the `groupwise-int` base allocation.
+suffix shared by the canonical profiles; Section 13 defines the `groupwise-int` base allocation.
+Section 14 defines the separately registered OrcaRouter NVFP4 derivative.
 
 The NVFP4 profile is a registered Engine identity implemented by the target converter, exact
 binder, and Qwen3.8 execution leaves. The generic artifact registry resolves its version-2
@@ -933,3 +934,53 @@ python3 -m tools.convert.qwen3_8_27b.convert \
 The converter validates the official and DFlash2 checkpoints, frontend resources, complete object
 plan, and numeric recipes before opening the output, then writes the sibling
 `qwen3_8_27b.ninfer.conversion.json` report.
+
+## 14. OrcaRouter NVFP4 derivative
+
+`qwen3.8-27b-orcarouter/nvfp4` is a separate registered checkpoint identity using the same
+27B execution package. It is imported from
+[OrcaRouter Qwen3.8-27B-Uncensored-NVFP4](https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-NVFP4),
+revision `69d21348b2d6c11439fb69368f40414c2256e44e`, with recipe
+`qwen3_8_27b_orcarouter_nvfp4-v1`. The source may require Hugging Face access authorization.
+The converter consumes an explicitly downloaded source directory; it does not accept model gates.
+
+The 1190-object inventory has the same names and shapes as the canonical mixed artifact, with
+two changed storage descriptors: `text/token_embedding` and `text/output_head` are both
+BF16 `[248320,5120]`, `contiguous-le-v1`. Both retain the source bytes exactly. The selected
+checkpoint already contains BF16 embeddings, full output head, MTP and Vision components;
+all base-model components come from that source. No official BF16 checkpoint is mixed in.
+The importer preserves the existing 168 NVFP4 and 232 FP8 matrix allocation and uses the
+canonical conversions for MTP, Vision and the Q4 optimized proposal head. Its special-token
+shortlist includes the 21 special IDs defined in `tokenizer.json`, even when
+`tokenizer_config.json` omits `added_tokens_decoder`.
+
+The six frontend resources are embedded verbatim and admitted by source-specific hashes.
+Vocabulary and BPE merges agree with the canonical checkpoint, but its word-splitting regex
+groups Unicode letters without combining marks. The shared tokenizer executes that source
+profile with NFC normalization. Missing `add_bos_token` means no automatic BOS; the standalone
+chat template remains authoritative when no duplicate is embedded in tokenizer config.
+The source's serialized 2048-token truncation setting does not replace the Engine's explicit
+request/context budget. The independent tokenizer fixture covers combining marks, multilingual
+text, special-token/literal options, whitespace and a 3613-token input.
+
+The converter includes the same separately sourced DFlash2 companion described in Section 12:
+
+```bash
+python3 -m tools.convert.qwen3_8_27b.convert_orcarouter_nvfp4 \
+  --model /path/to/OrcaRouter-Qwen3.8-27B-Uncensored-NVFP4 \
+  --dflash2-model /path/to/Qwen3.8-27B-DFlash2 \
+  --out out/qwen3_8_27b_orcarouter_nvfp4.ninfer \
+  --device cuda
+```
+
+The resulting artifact is 26,268,462,848 bytes. Its sibling conversion report records both
+component sources and BF16 endpoint preservation. The canonical DFlash2 splicing command is
+unnecessary for this complete artifact. Ordinary decoding, MTP and DFlash2 use the same public
+Engine, with native BF16 full-head Linear and LinearTopK execution. Speculation remains optional;
+the default sampler penalties are neutral, matching the canonical Qwen3.8 defaults.
+
+The Supervisor example includes a separate **27B OrcaRouter Uncensored** launcher entry and
+client model ID `qwen3.8-27b-orcarouter`. Set its artifact path for the local installation.
+The dashboard can select MTP or DFlash2 and the optimized proposal head. Full task-quality
+equivalence to Unsloth Studio requires matched workloads and runtime settings; successful
+loading, numerical tests and short serving checks alone do not establish it.

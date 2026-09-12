@@ -367,7 +367,8 @@ ConstructedTarget construct_target(const EngineOptions& options, DeviceContext& 
         return construct_registered<Qwen3_6_27B, LoadedQwen3_6_27B, Qwen3_6_27BInstance>(
             options, device, reader, load_start, Qwen3_6_27B::target_key);
     }
-    if (identity.model_id == Qwen3_6_27B::qwen3_8_model_id) {
+    if (identity.model_id == Qwen3_6_27B::qwen3_8_model_id ||
+        identity.model_id == Qwen3_6_27B::orcarouter_model_id) {
         return construct_registered<Qwen3_6_27B, LoadedQwen3_6_27B, Qwen3_6_27BInstance>(
             options, device, reader, load_start, Qwen3_6_27B::qwen3_8_target_key);
     }

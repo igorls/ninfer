@@ -1062,3 +1062,44 @@ Each category contains three fixtures and five seeds per fixture, for 15 samples
 
 The baseline and speculative-decode suites intentionally measure different supported workloads.
 No per-scenario baseline/speculative speedup is reported.
+
+
+## OrcaRouter NVFP4 integration probe
+
+On 2026-09-12, the separately registered `qwen3.8-27b-orcarouter/nvfp4` artifact was exercised
+on RTX PRO 6000 Blackwell with ECC enabled, driver 616.92, CUDA 13.3 and a native Windows Release
+build. It preserves the pinned OrcaRouter source's BF16 embeddings and output head. These are
+initial integration measurements, not a benchmark suite or an Unsloth Studio comparison.
+
+Each mode received the same 169-token Python queue-repair prompt, greedy non-thinking sampling,
+neutral penalties and a 1536-token output budget. Startup used four active lanes, a 32K per-request
+limit, 64K shared FP8 KV, 2048-token prefill chunks, CUDA graphs and Vision enabled. The timed
+coding request ran alone; separate checks exercised two concurrent requests. Responses terminated
+naturally and differed in content and length, so elapsed-time ratios are not fixed-output speedups.
+Decode rates below use engine-reported decode time and exclude the first output token.
+
+| Backend | Completion tokens | Decode tok/s | Accepted / drafted | Generated tests passing |
+|---|---:|---:|---:|---:|
+| Ordinary | 1296 | 70.8 | — | 1/2 |
+| MTP K5, optimized head | 1465 | 196.0 | 1068/1985 (53.8%) | 2/2 |
+| DFlash2 K7, optimized head | 1310 | 208.8 | 975/2338 (41.7%) | 2/2 |
+| DFlash2 K7, full BF16 head | 1295 | 206.4 | 975/2240 (43.5%) | 1/2 |
+
+Actual answers were reviewed and their Python unittest examples executed with Python 3.14. The
+ordinary response incorrectly calls `Task.exception()` expecting a returned `CancelledError`;
+that method raises it. The full-head DFlash2 response references a nonexistent public
+`Queue.unfinished_tasks` attribute. The optimized DFlash2 response's own tests pass, but its
+worker re-raises a job failure and dies, so remaining queued jobs can still make `join()` hang.
+Its passing tests therefore do not establish a successful production repair. These observations
+are too small a sample to rank model quality or attribute errors to speculation.
+
+All four modes passed ordinary Chat Completions, constrained JSON Schema,
+low-thinking output and two-request concurrency checks. Named tool calls also passed in the
+installed build, which included a separate, pending forced-tool implementation; that observation
+does not qualify forced-tool support in the standalone OrcaRouter change. The installed ordinary-decoding route
+also correctly read a synthetic image's counts/shapes, streamed SSE through `[DONE]`, and reused
+2764 tokens through a Responses `previous_response_id` continuation. Source-specific tokenizer
+checks cover 17 independent reference cases; BF16 Linear and LinearTopK pass their independent
+numerical oracles, including the existing FP8 top-k regression. These establish integration,
+not long-horizon coding quality. The launcher defaults this derivative to ordinary decoding and
+exposes both speculative backends for deliberate testing.

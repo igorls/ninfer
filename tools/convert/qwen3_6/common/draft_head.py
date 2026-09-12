@@ -40,24 +40,27 @@ def load_total_counts(path: str | Path, vocab: int) -> np.ndarray:
 
 
 def read_special_ids(tokenizer_dir: str | Path) -> tuple[int, ...]:
-    """Return sorted special IDs from ``added_tokens_decoder``."""
+    """Return special IDs using the frontend's merged added-token definitions."""
 
-    config_path = Path(tokenizer_dir) / "tokenizer_config.json"
-    if not config_path.is_file():
-        return ()
-    with config_path.open(encoding="utf-8") as handle:
-        config = json.load(handle)
-    return tuple(
-        sorted(
-            {
-                int(token_id)
-                for token_id, metadata in config.get(
-                    "added_tokens_decoder", {}
-                ).items()
-                if isinstance(metadata, dict) and metadata.get("special", False)
-            }
-        )
-    )
+    directory = Path(tokenizer_dir)
+    definitions: dict[int, dict] = {}
+    tokenizer_path = directory / "tokenizer.json"
+    if tokenizer_path.is_file():
+        with tokenizer_path.open(encoding="utf-8") as handle:
+            tokenizer = json.load(handle)
+        definitions.update({int(token["id"]): token for token in tokenizer.get("added_tokens", [])})
+    config_path = directory / "tokenizer_config.json"
+    if config_path.is_file():
+        with config_path.open(encoding="utf-8") as handle:
+            config = json.load(handle)
+        for token_id, metadata in config.get("added_tokens_decoder", {}).items():
+            if isinstance(metadata, dict):
+                token_id = int(token_id)
+                if token_id in definitions and bool(definitions[token_id].get("special", False)) != bool(metadata.get("special", False)):
+                    raise ValueError(f"conflicting special-token definition for id {token_id}")
+                definitions[token_id] = metadata
+    return tuple(sorted(token_id for token_id, metadata in definitions.items()
+                        if metadata.get("special", False)))
 
 
 def select_shortlist(

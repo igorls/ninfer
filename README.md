@@ -62,6 +62,7 @@ not be presented as measurements of this fork or of Flash-Next.
 |---|---|---|
 | Qwen3.8-Flash-Next | `mixed-nvfp4-fp8-ple-int4` | [Published artifact on Hugging Face](https://huggingface.co/igorls/Qwen3.8-Flash-Next-mixed-NInfer) — [artifact contract](docs/maintainer/qwen3.8-flash-next-artifact.md), [converter](tools/convert/qwen3_8_flash_next/) |
 | Qwen3.8-27B | `nvfp4` | `qwen3_8_27b_nvfp4.ninfer` — [upstream artifact](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) |
+| Qwen3.8-27B OrcaRouter Uncensored | `nvfp4` | Separate `qwen3.8-27b-orcarouter` identity, preserving BF16 embeddings/output head — [source and conversion](docs/maintainer/qwen3.8-27b-artifact.md#14-orcarouter-nvfp4-derivative) |
 | Qwen3.8-27B | `groupwise-int` | `qwen3_8_27b.ninfer` — [upstream artifact](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) |
 | Qwen3.6-27B | `nvfp4` | `qwen3_6_27b_nvfp4.ninfer` — [upstream artifact](https://huggingface.co/neroued/Qwen3.6-27B-nvfp4-NInfer) |
 | Qwen3.6-27B | `groupwise-int` | `qwen3_6_27b.ninfer` — [upstream artifact](https://huggingface.co/neroued/Qwen3.6-27B-NInfer) |

@@ -903,7 +903,8 @@ inline std::vector<std::string> validate_engine_param_combination(
                                 " for this model and backend");
         }
         if (!model_identity.empty() &&
-            ((*spec_backend == "dflash2" && model_identity != "qwen3.8-27b") ||
+            ((*spec_backend == "dflash2" && model_identity != "qwen3.8-27b" &&
+              model_identity != "qwen3.8-27b-orcarouter") ||
              (*spec_backend == "dflash" && model_identity != "qwen3.6-35b-a3b"))) {
             errors.emplace_back("Selected speculative backend is not supported by this model");
         }

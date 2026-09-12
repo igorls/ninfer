@@ -73,7 +73,8 @@ nlohmann::json DashboardServer::config_json() const {
         for (const auto& choice : spec.choices) {
             if (choice.empty()) { continue; }
             if (spec.key == "spec" && !identity.empty() &&
-                ((choice == "dflash2" && identity != "qwen3.8-27b") ||
+                ((choice == "dflash2" && identity != "qwen3.8-27b" &&
+                  identity != "qwen3.8-27b-orcarouter") ||
                  (choice == "dflash" && identity != "qwen3.6-35b-a3b"))) { continue; }
             choices.push_back(std::string(choice));
         }

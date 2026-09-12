@@ -53,7 +53,7 @@ constexpr ModelSamplingDefaults kQwen3_6Defaults{
                      .top_k             = 20,
                      .top_p             = 0.80F,
                      .min_p             = 0.0F,
-                     .presence_penalty  = 1.5F,
+                     .presence_penalty  = 0.0F,
                      .frequency_penalty = 0.0F},
 };
 
@@ -68,7 +68,7 @@ constexpr ModelSamplingDefaults kQwen3_8Defaults{
                      .top_k             = 20,
                      .top_p             = 0.80F,
                      .min_p             = 0.0F,
-                     .presence_penalty  = 1.5F,
+                     .presence_penalty  = 0.0F,
                      .frequency_penalty = 0.0F},
 };
 
@@ -77,12 +77,16 @@ constexpr ModelSamplingDefaults kQwen3_8Defaults{
 ModelSamplingDefaults Package::sampling_defaults(std::string_view model) {
     if (model == model_id) { return kQwen3_6Defaults; }
     if (model == qwen3_8_model_id) { return kQwen3_8Defaults; }
+    if (model == orcarouter_model_id) { return kQwen3_8Defaults; }
     throw std::runtime_error("model '" + std::string(model) +
                              "' has no sampling defaults in target package '" +
                              std::string(target_key) + "'");
 }
 
 Package::WeightsProfile Package::resolve_weights(const artifact::ArtifactIdentity& identity) {
+    if (identity.model_id == orcarouter_model_id && identity.weights_id == "nvfp4") {
+        return WeightsProfile::Qwen38OrcaRouterNvfp4;
+    }
     if (identity.model_id == model_id && identity.weights_id == "groupwise-int") {
         return WeightsProfile::Qwen36GroupwiseInt;
     }

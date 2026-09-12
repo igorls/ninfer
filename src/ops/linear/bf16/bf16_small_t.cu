@@ -40,6 +40,7 @@ using QsaIndexerGeometry = Bf16GemvGeometry<640, 2560>;
 using PleKeyGeometry     = Bf16GemvGeometry<10240, 2560>;
 using PleValueGeometry   = Bf16GemvGeometry<2560, 2560>;
 using OutputHeadGeometry = Bf16GemvGeometry<248320, 2560>;
+using OrcaRouterHeadGeometry = Bf16GemvGeometry<248320, 5120>;
 using MtpQgkvGeometry    = Bf16GemvGeometry<13312, 2560>;
 using MtpOutputGeometry  = Bf16GemvGeometry<2560, 6144>;
 
@@ -51,6 +52,8 @@ constexpr auto kPleValueLaunchers =
     make_launchers<PleValueGeometry>(std::make_index_sequence<7>{}); // T=2..8
 constexpr auto kOutputHeadLaunchers =
     make_launchers<OutputHeadGeometry>(std::make_index_sequence<7>{}); // T=2..8
+constexpr auto kOrcaRouterHeadLaunchers =
+    make_launchers<OrcaRouterHeadGeometry>(std::make_index_sequence<7>{}); // T=2..8
 constexpr auto kMtpQgkvLaunchers =
     make_launchers<MtpQgkvGeometry>(std::make_index_sequence<7>{}); // T=2..8
 constexpr auto kMtpOutputLaunchers =
@@ -64,6 +67,10 @@ constexpr auto kOutputLaunchers = make_launchers<OutputGeometry>(
 
 void launch_bf16_small_t(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
     const std::size_t index = static_cast<std::size_t>(x.ne[1] - kBf16SmallTMinTokens);
+    if (weight.n == OrcaRouterHeadGeometry::kOutputRows && weight.k == OrcaRouterHeadGeometry::kInputRows) {
+        kOrcaRouterHeadLaunchers[index](x, weight, out, stream);
+        return;
+    }
     if (weight.n == QsaIndexerGeometry::kOutputRows && weight.k == QsaIndexerGeometry::kInputRows) {
         kQsaIndexerLaunchers[index](x, weight, out, stream);
         return;

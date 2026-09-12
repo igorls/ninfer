@@ -905,6 +905,11 @@ int test_engine_param_validation() {
     int f = 0;
     f += check(validate_engine_param_combination({{"spec", "dflash2"}, {"draft_tokens", "15"},
                 {"lm_head_draft", "true"}}, "qwen3.8-27b").empty(), "DFlash2 permits 15 drafts");
+    f += check(validate_engine_param_combination({{"spec", "dflash2"}, {"draft_tokens", "7"},
+                {"lm_head_draft", "true"}}, "qwen3.8-27b-orcarouter").empty(),
+                "OrcaRouter permits DFlash2 with its separate artifact identity");
+    f += check(!validate_engine_param_combination({{"spec", "mtp"}, {"draft_tokens", "6"}},
+                "qwen3.8-27b-orcarouter").empty(), "OrcaRouter MTP rejects six drafts");
     f += check(!validate_engine_param_combination({{"spec", "mtp"}, {"draft_tokens", "6"}},
                 "qwen3.8-27b").empty(), "MTP rejects six drafts");
     f += check(!validate_engine_param_combination({{"spec", "mtp"}, {"draft_tokens", "5"}},

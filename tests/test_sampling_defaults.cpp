@@ -61,8 +61,10 @@ int main() {
         .top_k            = 20,
         .top_p            = 0.8F,
         .min_p            = 0.0F,
-        .presence_penalty = 1.5F,
+        .presence_penalty = 0.0F,
     };
+    auto moe_non_thinking = dense_non_thinking;
+    moe_non_thinking.presence_penalty = 1.5F;
     const ninfer::SamplingPreset moe_thinking{
         .temperature      = 1.0F,
         .top_k            = 20,
@@ -79,7 +81,7 @@ int main() {
                           same_preset(qwen3_8.non_thinking, dense_non_thinking),
                       "Qwen3.8-27B defaults mismatch");
     failures += check(same_preset(qwen3_6_35.thinking, moe_thinking) &&
-                          same_preset(qwen3_6_35.non_thinking, dense_non_thinking),
+                          same_preset(qwen3_6_35.non_thinking, moe_non_thinking),
                       "Qwen3.6-35B-A3B defaults mismatch");
     failures += check(same_preset(flash_next.thinking, dense_thinking) &&
                           same_preset(flash_next.non_thinking, dense_non_thinking),
@@ -97,7 +99,7 @@ int main() {
                           thinking.presence_penalty == 0.0F && thinking.seed == 0,
                       "omitted overrides did not select Qwen3.8 thinking defaults");
     failures += check(non_thinking.temperature == 0.7F && non_thinking.top_p == 0.8F &&
-                          non_thinking.presence_penalty == 1.5F,
+                          non_thinking.presence_penalty == 0.0F,
                       "omitted overrides did not select Qwen3.8 non-thinking defaults");
 
     ninfer::SamplingOverrides overrides;
