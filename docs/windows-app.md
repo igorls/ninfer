@@ -1,5 +1,24 @@
 # Windows app
 
+For image/video input, use a media-enabled build. FFmpeg must include its C/C++ headers and
+MSVC import libraries, as well as the matching runtime DLLs; an `ffmpeg.exe` command-line
+installation alone is insufficient. A shared Windows build linked from
+[FFmpeg's download page](https://ffmpeg.org/download.html) supplies those files. Build or install
+a shared libcurl with headers and an MSVC import library; Schannel uses Windows' native TLS and
+certificate store. Set the dependency locations for your machine:
+
+```powershell
+$env:PATH = "C:/deps/ffmpeg/bin;C:/deps/curl/bin;$env:PATH"
+cmake -S . -B build-win -DNINFER_BUILD_MEDIA=ON `
+  -DFFMPEG_ROOT=C:/deps/ffmpeg -DCURL_ROOT=C:/deps/curl
+```
+
+Add `--vision` to the configured model's engine arguments to load its Vision allocations.
+The media-enabled binaries still accept text-only profiles without that flag. The installer
+packages the discovered media runtime DLLs alongside the applications, so the installed app does
+not depend on a developer shell's `PATH`. After updating an existing installation, change the
+installed configuration through the dashboard or its JSON file and restart the engine.
+
 Build and install for the current Windows user, without administrator access:
 
 ```powershell
