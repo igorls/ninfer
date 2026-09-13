@@ -153,6 +153,7 @@ int main(int argc, char** argv) {
         engine_options.max_context   = max_context;
         engine_options.kv_capacity   = ninfer::KvCapacityPolicy::explicit_capacity(max_context);
         engine_options.prefill_chunk = options.prefill_chunk;
+        engine_options.desktop_reserve_bytes = options.desktop_reserve_bytes;
         engine_options.kv_cache      = options.kv_cache;
         engine_options.speculative.backend       = options.mtp_draft_tokens == 0
                                                        ? ninfer::SpeculativeBackend::None

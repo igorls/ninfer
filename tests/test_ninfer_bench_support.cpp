@@ -77,6 +77,8 @@ int test_cli_contract() {
         "2",
         "--max-ctx",
         "4096",
+        "--desktop-reserve-gib",
+        "2",
         "--prefill-chunk",
         "128",
         "--kv-dtype",
@@ -101,6 +103,7 @@ int test_cli_contract() {
                        "combined list");
     failures += expect(parsed.repetitions == 3 && parsed.warmup == 2, "repetition settings");
     failures += expect(parsed.max_context == std::optional<std::uint32_t>(4096), "max context");
+    failures += expect(parsed.desktop_reserve_bytes == (2ULL << 30), "desktop reserve in GiB");
     failures += expect(parsed.prefill_chunk == 128, "prefill chunk");
     failures += expect(parsed.kv_cache == ninfer::KvCacheStorage::Int8Group64, "INT8 KV");
     failures += expect(parsed.mtp_draft_tokens == 5, "MTP window");

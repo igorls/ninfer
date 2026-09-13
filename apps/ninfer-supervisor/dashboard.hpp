@@ -106,7 +106,8 @@ svg{flex-shrink:0}
 .badge-warn{background:#fbf0d9;color:#79530e}
 .badge-bad{background:#fbe9e7;color:#a52e2c}
 .badge-info{background:#eaf1f5;color:#3a5c73}
-.context-note{font-size:12px;line-height:1.65;margin-top:14px}
+)HTML"
+R"HTML(.context-note{font-size:12px;line-height:1.65;margin-top:14px}
 /* Request readings live inside the activity card, beside the chart that shows
    them over time, rather than floating above the page as a separate strip. The
    strip repeated the generation figure the card already carried -- the same
@@ -602,7 +603,8 @@ R"HTML(      <section class="guide-step"><span class="step-number">2</span><div>
     el.hidden = false;
   }
 
-  function formatUptime(seconds) {
+)HTML"
+R"HTML(  function formatUptime(seconds) {
     if (seconds == null || isNaN(seconds)) return '—';
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
@@ -1017,7 +1019,8 @@ R"HTML(    document.title = document.getElementById('view-' + activeView).queryS
     keyboardScrubIdx = null;
     if (lastState && lastState.series && isDocumentVisible) drawTimeline(lastState.series);
   });
-  canvas.addEventListener('mouseleave', () => {
+)HTML"
+R"HTML(  canvas.addEventListener('mouseleave', () => {
     mousePos = null;
     if (keyboardScrubIdx == null) tooltip.style.display = 'none';
     if (lastState && lastState.series && isDocumentVisible) drawTimeline(lastState.series);
