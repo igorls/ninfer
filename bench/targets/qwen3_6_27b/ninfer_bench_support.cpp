@@ -296,6 +296,7 @@ std::string usage_text(std::string_view program) {
         << "  --warmup <n>                discarded repetitions (default: " << kDefaultWarmup
         << ")\n"
         << "  --max-ctx <tokens>          override auto-sized context capacity\n"
+        << "  --desktop-reserve-gib <n>   desktop GPU memory reserve (default: 8 GiB)\n"
         << "  --prefill-chunk <tokens>    multiple of " << kPrefillChunkAlignment
         << " (default: " << kDefaultPrefillChunk << ")\n"
         << "  --kv-dtype <bf16|int8|fp8|nvfp4|k8v4>  KV cache storage (default: bf16)\n"
@@ -349,6 +350,9 @@ BenchOptions parse_args(int argc, char** argv) {
             options.warmup = parse_nonnegative(value("--warmup"), "warmup");
         } else if (arg == "--max-ctx") {
             options.max_context = parse_u32(value("--max-ctx"), "max-ctx");
+        } else if (arg == "--desktop-reserve-gib") {
+            options.desktop_reserve_bytes = static_cast<std::size_t>(
+                parse_u32(value("--desktop-reserve-gib"), "desktop-reserve-gib", true)) << 30;
         } else if (arg == "--prefill-chunk") {
             options.prefill_chunk = parse_u32(value("--prefill-chunk"), "prefill-chunk");
         } else if (arg == "--kv-dtype") {

@@ -48,6 +48,7 @@ ninfer_bench --weights <artifact.ninfer>
           [-pg, --prompt-gen <P,G;P,G...>]
           [-r, --repetitions <n>] [--warmup <n>]
           [--max-ctx <tokens>] [--prefill-chunk <tokens>]
+          [--desktop-reserve-gib <n>]
           [--kv-dtype <bf16|int8|fp8|nvfp4|k8v4>]
           [--mtp-draft-tokens <0..5>] [--lm-head-draft]
           [--device <id>] [--no-cuda-graph] [--profile-measured]
@@ -69,6 +70,12 @@ Example:
 MTP is enabled with
 `--mtp-draft-tokens`; `--lm-head-draft` selects the optimized proposal head. CUDA Graph decode is
 enabled by default.
+
+`--desktop-reserve-gib` selects the same startup memory reserve exposed by CLI and Serve;
+the default remains 8 GiB. Set it explicitly when benchmarking a desktop profile with a different
+reserve, for example `--desktop-reserve-gib 2`. The full invocation is retained in JSON reports.
+Other applications' GPU allocations are still accounted for separately. Record background GPU
+activity when interpreting workstation measurements.
 
 `--profile-measured` is a benchmark-only profiler boundary. It requires exactly one selected test
 and `-r 1`, synchronizes after warmup, and brackets only the measured repetition with

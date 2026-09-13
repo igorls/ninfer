@@ -61,6 +61,7 @@ struct BenchOptions {
     int warmup      = kDefaultWarmup;
     std::optional<std::uint32_t> max_context;
     std::uint32_t prefill_chunk    = kDefaultPrefillChunk;
+    std::size_t desktop_reserve_bytes = kDefaultDesktopReserveBytes;
     KvCacheStorage kv_cache        = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     int device                     = 0;

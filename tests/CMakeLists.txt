@@ -28,8 +28,19 @@ function(ninfer_add_test name)
   add_test(NAME ${name} COMMAND ${name})
   set_property(TEST ${name} PROPERTY SKIP_RETURN_CODE 77)
   if(WIN32)
-    set_property(TEST ${name} PROPERTY
-      ENVIRONMENT "PATH=P:/third_party/ffmpeg/ffmpeg-master-latest-win64-gpl-shared/bin\\;P:/third_party/curl-inst/bin\\;C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.3/bin\\;$ENV{PATH}")
+    # Preserve the test runner's PATH and use the dependencies selected at configure time.
+    # ENVIRONMENT would split a Windows PATH into separate CMake list elements.
+    set_property(TEST ${name} APPEND PROPERTY ENVIRONMENT_MODIFICATION
+      "PATH=path_list_prepend:${CUDAToolkit_BIN_DIR}"
+      "PATH=path_list_prepend:${CUDAToolkit_BIN_DIR}/x64")
+    if(NINFER_BUILD_MEDIA)
+      foreach(root IN ITEMS FFMPEG_ROOT CURL_ROOT)
+        if(${root})
+          set_property(TEST ${name} APPEND PROPERTY ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:${${root}}/bin")
+        endif()
+      endforeach()
+    endif()
   endif()
 endfunction()
 

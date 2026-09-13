@@ -84,9 +84,12 @@ DFlash2 and MTP. Consult the target references rather than transferring options 
 ## Build on Windows
 
 Use a 64-bit Visual Studio C++ build environment and a CUDA-compatible host compiler. The example
-below matches the local **Visual Studio 2026, CUDA 13.3 and CMake 4.3** toolchain. The project's
-minimums are CUDA 13.1 and CMake 3.28, but the selected Visual Studio generator may require a newer
-CMake version; not every compiler/CUDA combination is qualified.
+below matches the local **Visual Studio 2026, CUDA 13.3 and CMake 4.3** toolchain. Use CUDA 13.3
+for this Windows build: the compiled Flash-Next package requires the CCCL header
+`cub/device/device_topk.cuh`, which CUDA 13.1 does not provide, even though it passes the project's
+CUDA version check. This also applies when serving a 27B model because all execution packages are
+compiled. CMake must be at least 3.28; the selected Visual Studio generator may require a newer
+version. Not every compiler/CUDA combination is qualified.
 
 Start with a text-only build, which does not need FFmpeg or libcurl:
 
@@ -113,13 +116,18 @@ Make the matching runtime DLLs available on `PATH`. A text-only build rejects Vi
 For an initial run, obtain the published 27B artifact with the Hugging Face CLI:
 
 ```powershell
-hf download neroued/Qwen3.8-27B-nvfp4-NInfer qwen3_8_27b_nvfp4.ninfer --local-dir models
+hf download neroued/Qwen3.8-27B-nvfp4-NInfer qwen3_8_27b_nvfp4.ninfer `
+  --revision 204e3d92c30d9d05f3300d2f52e443ad1edf6ddf --local-dir models
 
 .\build-win\apps\Release\ninfer-serve.exe .\models\qwen3_8_27b_nvfp4.ninfer `
   --host 127.0.0.1 --port 8010 --model-id qwen3.8-27b `
   --max-context 32768 --kv-capacity 65536 --max-concurrency 2 `
   --kv-dtype fp8 --spec mtp --draft-tokens 3
 ```
+
+The pinned 27B revision matches this fork's [NVFP4 model card](model-cards/Qwen3.8-27B-nvfp4-NInfer/README.md).
+It provides the target artifact used by the MTP example above. For DFlash2, use an artifact
+containing the complete companion bundle described in [the DFlash2 reference](docs/maintainer/qwen3.8-27b-dflash2.md).
 
 For Flash-Next, read the [release model card](https://huggingface.co/igorls/Qwen3.8-Flash-Next-mixed-NInfer/blob/main/README.md)
 for the compatible engine revision, memory requirements, quantization details and Qwen license.
