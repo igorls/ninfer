@@ -556,6 +556,151 @@ int test_insights_speculative() {
     return f;
 }
 
+int test_insights_capacity() {
+    using namespace ninfer::supervisor;
+    int f = 0;
+    auto find = [](const nlohmann::json& report) -> const nlohmann::json* {
+        for (const auto& it : report.at("insights")) {
+            if (it.at("id") == "capacity.context_kv_pressure") { return &it; }
+        }
+        return nullptr;
+    };
+    const std::string start =
+        R"({"event":"server_start","server_instance_id":"s","timestamp_unix_ms":10,"engine":{"max_context":8192,"max_concurrency":4,"kv_capacity":16384,"kv_capacity_page_groups":64,"kv_capacity_max_page_groups":128,"prefix_reuse":true}})"
+        "\n";
+    auto done = [](int id, int prompt, int completion) {
+        return std::string(R"({"event":"request_done","server_instance_id":"s","timestamp_unix_ms":)") +
+               std::to_string(1000 + id) + R"(,"request":{"request_id":)" + std::to_string(id) +
+               R"(,"message_count":1},"result":{"finish_reason":"stop_token","completion_tokens":)" +
+               std::to_string(completion) + R"(,"prompt_tokens":)" + std::to_string(prompt) +
+               R"(},"timings_seconds":{}})" "\n";
+    };
+    auto sample = [](int t, int pages, int running, int waiting, int evicted) {
+        return std::string(R"({"event":"throughput","server_instance_id":"s","timestamp_unix_ms":)") +
+               std::to_string(t) + R"(,"scheduler":{"running":)" + std::to_string(running) +
+               R"(,"waiting":)" + std::to_string(waiting) +
+               R"(},"context_cache":{"occupancy":{"device_main_kv_pages":)" + std::to_string(pages) +
+               R"(},"pressure":{"private_owners_evicted":)" + std::to_string(evicted) +
+               R"(,"shared_owners_evicted":0,"spill_pages":0,"search_budget_exhaustions":0,"checkpoints_dropped":0}}})"
+               "\n";
+    };
+
+    // Comfortable: small prompts, half the pool, one request at a time.
+    const auto comfy_report = analyze_request_log_jsonl(
+        start + done(1, 900, 100) + done(2, 1500, 200) + sample(2000, 20, 1, 0, 0) + sample(7000, 32, 1, 0, 0),
+        "mem");
+    const auto* comfy = find(comfy_report);
+    f += check(comfy != nullptr && comfy->at("availability") == "available" &&
+                   comfy->at("severity") == "info" && comfy->at("evidence").at("kind") == "comfortable",
+               "comfortable workload is info");
+    if (comfy != nullptr) {
+        const auto& e = comfy->at("evidence");
+        f += check(e.at("config").at("max_context") == 8192 && e.at("config").at("kv_page_groups") == 64 &&
+                       e.at("config").at("tokens_per_page_group") == 256,
+                   "configured capacity carried");
+        f += check(e.at("requests").at("count") == 2 && e.at("requests").at("prompt_tokens").at("max") == 1500 &&
+                       e.at("requests").at("largest_total_tokens") == 1700,
+                   "prompt distribution measured");
+        f += check(e.at("kv").at("pages_high_water") == 32 && e.at("kv").at("pages_now") == 32 &&
+                       std::fabs(e.at("kv").at("utilization_high_water").get<double>() - 0.5) < 1e-9,
+                   "KV high-water measured against page-group capacity");
+        f += check(!comfy->contains("recommendation"), "comfortable carries no recommendation");
+    }
+
+    // Near max context: one request at 7900 of 8192 tokens.
+    const auto big_report = analyze_request_log_jsonl(
+        start + done(1, 900, 100) + done(2, 7500, 400) + sample(2000, 40, 1, 0, 0), "mem");
+    const auto* big = find(big_report);
+    f += check(big != nullptr && big->at("severity") == "warning" &&
+                   big->at("evidence").at("kind") == "large_prompt",
+               "near-max-context request warns as large_prompt");
+    if (big != nullptr) {
+        const auto& e = big->at("evidence");
+        f += check(e.at("requests").at("near_limit_count") == 1 &&
+                       e.at("largest_requests").at(0).at("request_id") == 2 &&
+                       e.at("largest_requests").at(0).at("total_tokens") == 7900,
+                   "largest request is the representative sample");
+        f += check(big->at("recommendation").get<std::string>().find("Inferred") != std::string::npos,
+                   "capacity advice is marked inferred");
+    }
+
+    // Concurrency-driven KV pressure: small prompts, pool at 97% with three of four lanes
+    // running, requests waiting and one expiring before admission.
+    const std::string expired =
+        R"({"event":"request_error","server_instance_id":"s","timestamp_unix_ms":7500,"request":{"request_id":9},"error":{"message":"inference request expired while waiting for admission"}})"
+        "\n";
+    const auto conc_report = analyze_request_log_jsonl(
+        start + done(1, 1200, 300) + done(2, 1100, 300) + done(3, 1300, 300) + done(4, 1000, 300) +
+            sample(2000, 30, 2, 0, 0) + sample(7000, 62, 3, 2, 3) + expired + sample(12000, 40, 1, 0, 0),
+        "mem");
+    const auto* conc = find(conc_report);
+    f += check(conc != nullptr && conc->at("severity") == "warning" &&
+                   conc->at("evidence").at("kind") == "kv_admission",
+               "queueing with free lanes and a full pool warns as kv_admission");
+    if (conc != nullptr) {
+        const auto& e = conc->at("evidence");
+        f += check(e.at("scheduler").at("peak_running") == 3 && e.at("scheduler").at("peak_waiting") == 2 &&
+                       e.at("scheduler").at("admission_expired") == 1 &&
+                       e.at("scheduler").at("admission_expired_request_ids").at(0) == 9 &&
+                       e.at("pressure").at("private_owners_evicted") == 3 && e.at("kv").at("pages_now") == 40,
+                   "scheduler peaks, admission expiries, summed pressure deltas and current occupancy measured");
+    }
+
+    // Queueing with every lane busy is the concurrency cap, not the pool.
+    const auto lanes_report = analyze_request_log_jsonl(
+        start + done(1, 1200, 300) + sample(2000, 30, 4, 2, 0), "mem");
+    const auto* lanes = find(lanes_report);
+    f += check(lanes != nullptr && lanes->at("severity") == "notice" &&
+                   lanes->at("evidence").at("kind") == "lanes_full",
+               "queueing with all lanes busy is lanes_full");
+
+    // Full pool, evictions, nobody waiting: retained state churned, nothing failed.
+    const auto churn_report = analyze_request_log_jsonl(
+        start + done(1, 1200, 300) + sample(2000, 62, 2, 0, 5), "mem");
+    const auto* churn = find(churn_report);
+    f += check(churn != nullptr && churn->at("severity") == "notice" &&
+                   churn->at("evidence").at("kind") == "cache_churn" &&
+                   churn->at("recommendation").get<std::string>().find("does not") != std::string::npos,
+               "evictions without queueing are cache churn, and concurrency advice is withheld");
+
+    // Full pool with no evictions and no queue is retained cache, not pressure.
+    const auto cache_report = analyze_request_log_jsonl(
+        start + done(1, 1200, 300) + sample(2000, 63, 1, 0, 0), "mem");
+    const auto* cache = find(cache_report);
+    f += check(cache != nullptr && cache->at("severity") == "info" &&
+                   cache->at("evidence").at("kind") == "retained_cache",
+               "full pool without pressure events is info");
+
+    // Missing telemetry: no server_start at all, or a start with no occupancy samples yet.
+    const auto nostart_report = analyze_request_log_jsonl(done(1, 900, 100) + sample(2000, 20, 1, 0, 0), "mem");
+    const auto* nostart = find(nostart_report);
+    f += check(nostart != nullptr && nostart->at("availability") == "unavailable" &&
+                   nostart->at("evidence").at("requests").at("count") == 1,
+               "no capacity configuration is unavailable, with the prompt sizes still reported");
+    const auto nosample_report = analyze_request_log_jsonl(start + done(1, 900, 100), "mem");
+    const auto* nosample = find(nosample_report);
+    f += check(nosample != nullptr && nosample->at("availability") == "unavailable" &&
+                   !nosample->at("evidence").contains("kv"),
+               "no occupancy sample is unavailable, not zero utilization");
+
+    // An earlier instance's traffic and limits do not leak into the latest one.
+    const std::string old_instance =
+        R"({"event":"server_start","server_instance_id":"old","timestamp_unix_ms":1,"engine":{"max_context":2048,"max_concurrency":1,"kv_capacity":2048,"kv_capacity_page_groups":8,"prefix_reuse":false}})"
+        "\n"
+        R"({"event":"request_done","server_instance_id":"old","timestamp_unix_ms":5,"request":{"request_id":7},"result":{"finish_reason":"stop_token","completion_tokens":100,"prompt_tokens":1900},"timings_seconds":{}})"
+        "\n"
+        R"({"event":"throughput","server_instance_id":"old","timestamp_unix_ms":6,"scheduler":{"running":1,"waiting":0},"context_cache":{"occupancy":{"device_main_kv_pages":8},"pressure":{"private_owners_evicted":9}}})"
+        "\n";
+    const auto scoped_report = analyze_request_log_jsonl(
+        old_instance + start + done(1, 900, 100) + sample(2000, 20, 1, 0, 0), "mem");
+    const auto* scoped = find(scoped_report);
+    f += check(scoped != nullptr && scoped->at("evidence").at("kind") == "comfortable" &&
+                   scoped->at("evidence").at("requests").at("count") == 1 &&
+                   scoped->at("evidence").at("pressure").at("private_owners_evicted") == 0,
+               "older instance does not leak into the latest verdict");
+    return f;
+}
+
 int test_insights_prefix_collapse() {
     using namespace ninfer::supervisor;
     std::string jsonl =
@@ -1216,6 +1361,7 @@ int main() {
     failures += test_insights_prefix();
     failures += test_insights_prefix_collapse();
     failures += test_insights_speculative();
+    failures += test_insights_capacity();
     failures += test_admin_vram_markers();
     failures += test_insights_pinned_tier();
     failures += test_jsonl_event_key();

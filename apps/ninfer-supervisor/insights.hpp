@@ -77,8 +77,10 @@ inline nlohmann::json analyze_request_log_jsonl(std::string_view jsonl, std::str
     std::unordered_map<std::string, std::uint32_t> host_state_capacities;
     std::string latest_server_instance;
     std::int64_t latest_server_start = 0;
+    nlohmann::json latest_engine     = nlohmann::json::object();
     std::vector<nlohmann::json> dones;
     std::vector<nlohmann::json> throughputs;
+    std::vector<nlohmann::json> errors;
     std::int64_t tmin = 0;
     std::int64_t tmax = 0;
     int parsed        = 0;
@@ -103,6 +105,7 @@ inline nlohmann::json analyze_request_log_jsonl(std::string_view jsonl, std::str
             if (!instance.empty() && ts >= latest_server_start) {
                 latest_server_instance = instance;
                 latest_server_start    = ts;
+                latest_engine          = engine;
             }
             if (!instance.empty() && engine.contains("context_cache")) {
                 const auto capacity = json_i64(engine.at("context_cache"), "host_state_slots");
@@ -119,6 +122,8 @@ inline nlohmann::json analyze_request_log_jsonl(std::string_view jsonl, std::str
             dones.push_back(std::move(j));
         } else if (event == "throughput") {
             throughputs.push_back(std::move(j));
+        } else if (event == "request_error") {
+            errors.push_back(std::move(j));
         }
     }
 
@@ -756,6 +761,281 @@ inline nlohmann::json analyze_request_log_jsonl(std::string_view jsonl, std::str
                  {"low_acceptance_samples", spec.low_acceptance_samples},
                  {"high_fallback_samples", spec.high_fallback_samples}},
                 recommendation, "measured", spec_over));
+        }
+    }
+
+    // Context and KV capacity pressure on the latest server instance: the configured limits come
+    // from its server_start, traffic from its request_done records, occupancy and pressure from
+    // its throughput samples. Occupancy counts retained checkpoints while prefix reuse is on, so a
+    // full pool is only pressure when the engine also evicted, spilled or queued.
+    {
+        constexpr double kNearContextRatio = 0.90;
+        constexpr double kHighKvRatio      = 0.90;
+        auto in_scope = [&](const nlohmann::json& j) {
+            return latest_server_instance.empty() ||
+                   j.value("server_instance_id", "") == latest_server_instance;
+        };
+        auto pct = [](double ratio) {
+            std::ostringstream o;
+            o << std::fixed << std::setprecision(1) << (ratio * 100.0) << "%";
+            return o.str();
+        };
+
+        const auto max_context     = json_i64(latest_engine, "max_context");
+        const auto max_concurrency = json_i64(latest_engine, "max_concurrency");
+        const auto kv_tokens       = json_i64(latest_engine, "kv_capacity");
+        const auto kv_page_groups  = json_i64(latest_engine, "kv_capacity_page_groups");
+        const bool prefix_reuse    = latest_engine.value("prefix_reuse", false);
+        const bool have_config     = max_context > 0 && kv_page_groups > 0;
+
+        struct Largest {
+            std::int64_t id = 0;
+            std::int64_t prompt = 0;
+            std::int64_t completion = 0;
+            std::int64_t total = 0;
+            std::string finish;
+        };
+        std::vector<std::int64_t> prompts;
+        std::vector<Largest> largest;
+        for (const auto& done : dones) {
+            if (!in_scope(done)) { continue; }
+            const auto& req    = done.contains("request") ? done.at("request") : nlohmann::json::object();
+            const auto& result = done.contains("result") ? done.at("result") : nlohmann::json::object();
+            Largest l;
+            l.id         = json_i64(req, "request_id");
+            l.prompt     = std::max<std::int64_t>(0, json_i64(result, "prompt_tokens"));
+            l.completion = std::max<std::int64_t>(0, json_i64(result, "completion_tokens"));
+            l.total      = l.prompt + l.completion;
+            l.finish     = result.value("finish_reason", "");
+            prompts.push_back(l.prompt);
+            largest.push_back(std::move(l));
+        }
+        std::sort(prompts.begin(), prompts.end());
+        std::sort(largest.begin(), largest.end(),
+                  [](const Largest& a, const Largest& b) { return a.total > b.total; });
+        const std::size_t n_req = prompts.size();
+        const std::int64_t prompt_median = n_req ? prompts[(n_req - 1) / 2] : 0;
+        const std::int64_t prompt_p90 = n_req ? prompts[std::min(n_req - 1, (n_req * 9) / 10)] : 0;
+        const std::int64_t prompt_max = n_req ? prompts.back() : 0;
+        const std::int64_t largest_total = largest.empty() ? 0 : largest.front().total;
+        const double largest_ratio =
+            max_context > 0 ? static_cast<double>(largest_total) / static_cast<double>(max_context) : 0.0;
+        int near_limit = 0;
+        nlohmann::json largest_samples = nlohmann::json::array();
+        for (const auto& l : largest) {
+            const double ratio =
+                max_context > 0 ? static_cast<double>(l.total) / static_cast<double>(max_context) : 0.0;
+            if (ratio >= kNearContextRatio) { ++near_limit; }
+            if (largest_samples.size() < 8) {
+                largest_samples.push_back({{"request_id", l.id},
+                                           {"prompt_tokens", l.prompt},
+                                           {"completion_tokens", l.completion},
+                                           {"total_tokens", l.total},
+                                           {"context_ratio", ratio},
+                                           {"finish_reason", l.finish}});
+            }
+        }
+
+        std::size_t occupancy_samples = 0;
+        std::int64_t kv_now = 0;
+        std::int64_t kv_high = 0;
+        std::int64_t peak_running = 0;
+        std::int64_t peak_waiting = 0;
+        std::int64_t checkpoints_dropped = 0;
+        std::int64_t private_evicted = 0;
+        std::int64_t shared_evicted = 0;
+        std::int64_t spill_pages = 0;
+        std::int64_t search_exhaustions = 0;
+        for (const auto& tp : throughputs) {
+            if (!in_scope(tp)) { continue; }
+            if (tp.contains("scheduler") && tp.at("scheduler").is_object()) {
+                const auto& sch = tp.at("scheduler");
+                peak_running    = std::max(peak_running, json_i64(sch, "running"));
+                peak_waiting    = std::max(peak_waiting, json_i64(sch, "waiting"));
+            }
+            if (!tp.contains("context_cache") || !tp.at("context_cache").is_object()) { continue; }
+            const auto& cache = tp.at("context_cache");
+            if (cache.contains("occupancy") && cache.at("occupancy").is_object() &&
+                cache.at("occupancy").contains("device_main_kv_pages")) {
+                const auto pages = json_i64(cache.at("occupancy"), "device_main_kv_pages", -1);
+                if (pages >= 0) {
+                    ++occupancy_samples;
+                    kv_now  = pages;
+                    kv_high = std::max(kv_high, pages);
+                }
+            }
+            if (cache.contains("pressure") && cache.at("pressure").is_object()) {
+                // Throughput records carry per-interval deltas, so sums are window totals.
+                const auto& pr = cache.at("pressure");
+                checkpoints_dropped += json_i64(pr, "checkpoints_dropped");
+                private_evicted += json_i64(pr, "private_owners_evicted");
+                shared_evicted += json_i64(pr, "shared_owners_evicted");
+                spill_pages += json_i64(pr, "spill_pages");
+                search_exhaustions += json_i64(pr, "search_budget_exhaustions");
+            }
+        }
+        int admission_expired = 0;
+        nlohmann::json admission_expired_ids = nlohmann::json::array();
+        for (const auto& err : errors) {
+            if (!in_scope(err)) { continue; }
+            const auto& e = err.contains("error") ? err.at("error") : nlohmann::json::object();
+            if (e.value("message", "").find("waiting for admission") == std::string::npos) { continue; }
+            ++admission_expired;
+            if (admission_expired_ids.size() < 8) {
+                const auto& req = err.contains("request") ? err.at("request") : nlohmann::json::object();
+                admission_expired_ids.push_back(json_i64(req, "request_id"));
+            }
+        }
+        const double kv_now_ratio =
+            kv_page_groups > 0 ? static_cast<double>(kv_now) / static_cast<double>(kv_page_groups) : 0.0;
+        const double kv_high_ratio =
+            kv_page_groups > 0 ? static_cast<double>(kv_high) / static_cast<double>(kv_page_groups) : 0.0;
+        const std::int64_t pressure_events =
+            private_evicted + shared_evicted + spill_pages + search_exhaustions;
+
+        nlohmann::json config = {{"max_context", max_context},
+                                 {"max_concurrency", max_concurrency},
+                                 {"kv_capacity_tokens", kv_tokens},
+                                 {"kv_page_groups", kv_page_groups},
+                                 {"tokens_per_page_group",
+                                  kv_page_groups > 0 ? kv_tokens / kv_page_groups : 0},
+                                 {"prefix_reuse", prefix_reuse}};
+        nlohmann::json requests_evidence = {
+            {"count", n_req},
+            {"prompt_tokens", {{"median", prompt_median}, {"p90", prompt_p90}, {"max", prompt_max}}},
+            {"largest_total_tokens", largest_total},
+            {"largest_context_ratio", largest_ratio},
+            {"near_limit_count", near_limit},
+            {"near_limit_ratio", kNearContextRatio}};
+        nlohmann::json kv_evidence = {{"pages_now", kv_now},
+                                      {"pages_high_water", kv_high},
+                                      {"pages_capacity", kv_page_groups},
+                                      {"utilization_now", kv_now_ratio},
+                                      {"utilization_high_water", kv_high_ratio},
+                                      {"samples", occupancy_samples},
+                                      {"includes_retained_checkpoints", prefix_reuse}};
+        nlohmann::json scheduler_evidence = {{"peak_running", peak_running},
+                                             {"peak_waiting", peak_waiting},
+                                             {"admission_expired", admission_expired},
+                                             {"admission_expired_request_ids", admission_expired_ids}};
+        nlohmann::json pressure_evidence = {{"checkpoints_dropped", checkpoints_dropped},
+                                            {"private_owners_evicted", private_evicted},
+                                            {"shared_owners_evicted", shared_evicted},
+                                            {"spill_pages", spill_pages},
+                                            {"search_budget_exhaustions", search_exhaustions}};
+        const auto cap_over = nlohmann::json{{"requests", n_req},
+                                             {"throughput_events", occupancy_samples},
+                                             {"server_instance_id", latest_server_instance}};
+
+        if (!have_config) {
+            insights.push_back(insight_unavailable(
+                "capacity.context_kv_pressure", "Capacity limits are not in the log window",
+                "the latest server instance has no server_start with max_context and "
+                "kv_capacity_page_groups, so traffic cannot be compared to a limit; prompt "
+                "sizes are reported without a pressure verdict",
+                {{"server_instance_id", latest_server_instance},
+                 {"requests", requests_evidence},
+                 {"largest_requests", largest_samples}},
+                cap_over));
+        } else if (occupancy_samples == 0) {
+            insights.push_back(insight_unavailable(
+                "capacity.context_kv_pressure", "KV occupancy has not been sampled yet",
+                "the latest server instance has capacity configuration but no throughput record "
+                "with context_cache.occupancy.device_main_kv_pages; KV utilization is unknown, "
+                "not zero",
+                {{"server_instance_id", latest_server_instance},
+                 {"config", config},
+                 {"requests", requests_evidence},
+                 {"largest_requests", largest_samples}},
+                cap_over));
+        } else {
+            std::string kind = "comfortable";
+            std::string severity = "info";
+            std::ostringstream rec;
+            if (near_limit > 0) {
+                kind     = "large_prompt";
+                severity = "warning";
+                rec << "Measured: " << near_limit << " request(s) used at least "
+                    << pct(kNearContextRatio) << " of max_context " << max_context
+                    << "; the largest reached " << largest_total << " tokens. Inferred: raise "
+                       "--max-context (and --kv-capacity to hold it) if VRAM allows, or shorten "
+                       "those conversations; a request over the limit is rejected at admission.";
+            } else if ((peak_waiting > 0 || admission_expired > 0) &&
+                       max_concurrency > 0 && peak_running >= max_concurrency) {
+                // Every lane was busy while requests waited: the concurrency cap, not the pool.
+                kind     = "lanes_full";
+                severity = admission_expired > 0 ? "warning" : "notice";
+                rec << "Measured: requests waited (peak " << peak_waiting << " waiting, "
+                    << admission_expired << " expired before admission) while all "
+                    << max_concurrency << " lanes were running; KV occupancy peaked at "
+                    << pct(kv_high_ratio) << ". Inferred: the concurrency limit is what queued "
+                       "them; raise --max-concurrency only if KV capacity and VRAM leave room "
+                       "for another request's context.";
+            } else if ((peak_waiting > 0 || admission_expired > 0) && kv_high_ratio >= kHighKvRatio) {
+                // Lanes were free but requests still waited: the pool could not admit them.
+                kind     = "kv_admission";
+                severity = "warning";
+                rec << "Measured: requests waited (peak " << peak_waiting << " waiting, "
+                    << admission_expired << " expired before admission) with only "
+                    << peak_running << " of " << max_concurrency << " lanes running and KV "
+                       "occupancy at " << pct(kv_high_ratio) << ", while the largest single "
+                       "request used " << pct(largest_ratio) << " of max_context. Inferred: "
+                       "concurrent requests exhausted the KV pool; raise --kv-capacity if VRAM "
+                       "allows, otherwise lower --max-context so each request reserves less.";
+            } else if (kv_high_ratio >= kHighKvRatio && pressure_events > 0) {
+                // No queueing: the engine made room by evicting retained state. Follow-ups on
+                // the evicted conversations re-prefill; nothing failed.
+                kind     = "cache_churn";
+                severity = "notice";
+                rec << "Measured: KV occupancy peaked at " << pct(kv_high_ratio) << " and the "
+                       "engine evicted " << (private_evicted + shared_evicted)
+                    << " retained conversation states (" << checkpoints_dropped
+                    << " checkpoints dropped) with no request waiting. Follow-ups on evicted "
+                       "conversations re-prefill instead of reusing. Inferred: raise "
+                       "--kv-capacity if VRAM allows; lowering --max-concurrency does not "
+                       "help this.";
+            } else if (kv_high_ratio >= kHighKvRatio) {
+                kind = "retained_cache";
+                rec << "Measured: KV occupancy peaked at " << pct(kv_high_ratio)
+                    << " without evictions, spills or queueing. With prefix reuse "
+                    << (prefix_reuse ? "on" : "off")
+                    << " the pool holds retained checkpoints, so a full pool alone is not "
+                       "pressure. Nothing to change from this window.";
+            }
+
+            std::ostringstream stmt;
+            stmt << "Configured max_context " << max_context << " tokens, KV capacity " << kv_tokens
+                 << " tokens (" << kv_page_groups << " page groups), max concurrency "
+                 << max_concurrency << ", prefix reuse " << (prefix_reuse ? "on" : "off") << ". Over "
+                 << n_req << " request_done on the latest server instance: prompt tokens median "
+                 << prompt_median << ", p90 " << prompt_p90 << ", max " << prompt_max
+                 << "; largest request " << largest_total << " tokens = " << pct(largest_ratio)
+                 << " of max_context, " << near_limit << " within " << pct(kNearContextRatio)
+                 << " of it. KV pages " << kv_now << " of " << kv_page_groups << " now ("
+                 << pct(kv_now_ratio) << "), high-water " << kv_high << " (" << pct(kv_high_ratio)
+                 << ") over " << occupancy_samples << " samples"
+                 << (prefix_reuse ? ", including retained checkpoints" : "")
+                 << ". Scheduler peak running " << peak_running << " of " << max_concurrency
+                 << ", waiting " << peak_waiting << ", " << admission_expired
+                 << " expired before admission. Pressure over the window: checkpoints dropped "
+                 << checkpoints_dropped << ", owners evicted " << private_evicted << " private / "
+                 << shared_evicted << " shared, spill pages " << spill_pages
+                 << ", search budget exhaustions " << search_exhaustions << ". Verdict: " << kind
+                 << ".";
+
+            insights.push_back(insight_available(
+                "capacity.context_kv_pressure", severity, "Context and KV capacity pressure",
+                stmt.str(),
+                {{"server_instance_id", latest_server_instance},
+                 {"kind", kind},
+                 {"config", config},
+                 {"requests", requests_evidence},
+                 {"largest_requests", largest_samples},
+                 {"kv", kv_evidence},
+                 {"scheduler", scheduler_evidence},
+                 {"pressure", pressure_evidence},
+                 {"high_kv_ratio", kHighKvRatio}},
+                rec.str(), "measured", cap_over));
         }
     }
 
