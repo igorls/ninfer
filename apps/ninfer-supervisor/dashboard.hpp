@@ -1250,6 +1250,16 @@ R"HTML(  canvas.addEventListener('mouseleave', () => {
     if (id.startsWith('latency.ttft_')) return {title:'How long responses take to begin',body:Number.isFinite(e.mean_ttft_s) ? `Responses began after an average of ${Math.round(e.mean_ttft_s * 1000)} ms in the recorded requests. Processing your prompt, preparing media, and waiting for the engine can all contribute.` : 'The engine is collecting response-start timing. Open the evidence for the available measurements.'};
     if (id.startsWith('latency.')) return {title:'Where response time is spent',body:e.queued > 0 ? `${e.queued} recorded requests spent most of their time waiting for engine capacity.` : 'The recorded requests do not show queueing as the main source of delay. Open the evidence for processing and generation timings.',action:e.queued > 0 ? 'Try fewer simultaneous requests. Advanced capacity settings can help if enough GPU memory is available.' : ''};
 )HTML"
+R"HTML(    if (id === 'speculative.draft_acceptance') {
+      const pct = r => Math.round((r || 0) * 100) + '%';
+      if (it.availability === 'unavailable') return {title:'Draft-token acceptance is not measurable yet',body:e.backend ? `Speculative decoding (${e.backend}) is configured, but the recorded requests have no draft rounds yet.` : 'The recorded requests carry no speculative decoding activity. This is expected when speculation is turned off.'};
+      const curve = (e.per_position_rate || []).map((r, i) => `P${i + 1} ${pct(r)}`).join(', ');
+      const actions = [];
+      if (it.severity === 'warning') actions.push('Many tokens were generated without a draft. Open the evidence to see which requests, and compare them with requests that drafted normally.');
+      if (Number.isInteger(e.inferred_draft_window)) actions.push(`Later draft positions are rarely accepted. A draft window of ${e.inferred_draft_window} may generate faster; this is inferred from the curve, so measure before keeping it.`);
+      return {title:'How many drafted tokens were accepted',body:`${pct(e.acceptance_ratio)} of ${(e.drafted_tokens || 0).toLocaleString()} drafted tokens were accepted across ${e.requests_with_drafts || 0} requests${curve ? ` (by position: ${curve})` : ''}. The engine decoded without a draft on ${pct(e.fallback_share)} of steps.`,action:actions.join(' ')};
+    }
+)HTML"
 R"HTML(    if (id === 'prefix.reuse_mix') return {title:'Reusing earlier conversation text',body:e.multi_turn_prompt_tokens > 0 ? `${((e.multi_turn_hit_ratio || 0) * 100).toFixed(0)}% of conversation prompt tokens were reused in the available log. Reuse can make follow-up responses start sooner.` : 'No multi-turn prompt samples are available yet. Reuse can make follow-up responses start sooner.'};
     if (id === 'client.narrated_tool_intent') return {title:'Tool behavior needs a conversation sample',body:'The log records whether tools were provided, but not what the model said. It cannot explain a promised tool action that did not happen.'};
     if (id === 'client.content_fields') return {title:'Reply text is not stored in this log',body:'To investigate an empty or unexpected reply, compare the conversation in your app with the engine log.'};

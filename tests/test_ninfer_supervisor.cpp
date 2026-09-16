@@ -5,6 +5,7 @@
 #include "reserve_budget.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <string>
 
@@ -389,6 +390,169 @@ int test_insights_prefix() {
         }
     }
     f += check(mix && miss, "prefix insights present");
+    return f;
+}
+
+int test_insights_speculative() {
+    using namespace ninfer::supervisor;
+    int f = 0;
+    auto find = [](const nlohmann::json& report) -> const nlohmann::json* {
+        for (const auto& it : report.at("insights")) {
+            if (it.at("id") == "speculative.draft_acceptance") { return &it; }
+        }
+        return nullptr;
+    };
+    auto done = [](int id, const char* speculative, int completion = 64) {
+        return std::string(R"({"event":"request_done","server_instance_id":"a","timestamp_unix_ms":)") +
+               std::to_string(1000 + id) + R"(,"request":{"request_id":)" + std::to_string(id) +
+               R"(,"message_count":1},"result":{"finish_reason":"stop","completion_tokens":)" +
+               std::to_string(completion) + R"(,"prompt_tokens":100},"timings_seconds":{"total":0.5,"prepare":0.01,"prefill":0.1,"decode":0.39,"ttft":0.11,"vision":0},"speculative":)" +
+               speculative + "}\n";
+    };
+
+    // Strong early acceptance, weak late positions: the measured curve decays and the window
+    // advice is inferred from it. 100 draft rounds of window 5 per request, no fallback.
+    const std::string decaying =
+        done(1, R"({"backend":"mtp","draft_window":5,"rounds":100,"drafted_tokens":500,"accepted_tokens":210,"fallback_steps":0,"accepted_per_position":[90,70,40,8,2]})") +
+        done(2, R"({"backend":"mtp","draft_window":5,"rounds":100,"drafted_tokens":500,"accepted_tokens":210,"fallback_steps":0,"accepted_per_position":[90,70,40,8,2]})");
+    const auto decaying_report = analyze_request_log_jsonl(decaying, "mem");
+    const auto* decay          = find(decaying_report);
+    f += check(decay != nullptr, "speculative insight present when telemetry exists");
+    if (decay != nullptr) {
+        const auto& e = decay->at("evidence");
+        f += check(decay->at("availability") == "available" && decay->at("confidence") == "measured",
+                   "acceptance counters are measured");
+        f += check(decay->at("severity") == "info", "no fallback pressure is info, not warning");
+        f += check(e.at("backend") == "mtp" && e.at("draft_window") == 5, "backend and window carried");
+        f += check(e.at("drafted_tokens") == 1000 && e.at("accepted_tokens") == 420 &&
+                       e.at("draft_rounds") == 200,
+                   "counters summed over the window");
+        f += check(std::fabs(e.at("acceptance_ratio").get<double>() - 0.42) < 1e-9, "acceptance ratio");
+        f += check(e.at("accepted_per_position") == nlohmann::json({180, 140, 80, 16, 4}),
+                   "per-position acceptance summed");
+        const auto& rate = e.at("per_position_rate");
+        f += check(rate.size() == 5 && std::fabs(rate.at(0).get<double>() - 0.9) < 1e-9 &&
+                       std::fabs(rate.at(2).get<double>() - 0.4) < 1e-9 &&
+                       std::fabs(rate.at(4).get<double>() - 0.02) < 1e-9,
+                   "per-position rate is accepted / draft rounds covering that position");
+        f += check(e.at("effective_draft_window") == 3 && e.at("inferred_draft_window") == 3,
+                   "positions 4..5 below 20% -> effective window 3");
+        f += check(decay->contains("recommendation") &&
+                       decay->at("recommendation").get<std::string>().find("Inferred") != std::string::npos &&
+                       decay->at("recommendation").get<std::string>().find("--draft-tokens 3") != std::string::npos,
+                   "window advice is marked inferred and names the window");
+        f += check(e.at("fallback_steps") == 0 && e.at("fallback_share") == 0.0, "no fallback measured");
+        f += check(e.at("sample_request_ids") == nlohmann::json({1, 2}), "representative request ids");
+        f += check(decay->at("measured_over").at("requests") == 2 &&
+                       decay->at("measured_over").at("examined_requests") == 2,
+                   "measured_over counts requests with drafts and examined");
+    }
+
+    // A healthy curve gives counters but no window advice.
+    const std::string healthy =
+        done(3, R"({"backend":"mtp","draft_window":4,"rounds":100,"drafted_tokens":400,"accepted_tokens":300,"fallback_steps":0,"accepted_per_position":[95,85,70,50]})");
+    const auto healthy_report = analyze_request_log_jsonl(healthy, "mem");
+    const auto* fine          = find(healthy_report);
+    f += check(fine != nullptr && fine->at("evidence").at("inferred_draft_window").is_null() &&
+                   !fine->contains("recommendation"),
+               "healthy curve carries no inferred window");
+
+    // Too few draft rounds for advice even when the curve decays.
+    const std::string few =
+        done(4, R"({"backend":"mtp","draft_window":5,"rounds":10,"drafted_tokens":50,"accepted_tokens":21,"fallback_steps":0,"accepted_per_position":[9,7,4,1,0]})");
+    const auto few_report    = analyze_request_log_jsonl(few, "mem");
+    const auto* short_window = find(few_report);
+    f += check(short_window != nullptr && short_window->at("evidence").at("effective_draft_window") == 3 &&
+                   short_window->at("evidence").at("inferred_draft_window").is_null(),
+               "under 50 draft rounds measures the curve but does not advise");
+
+    // Fallback pressure: half the decode steps ran without a draft -> warning, measured share.
+    const std::string fallback =
+        done(5, R"({"backend":"mtp","draft_window":4,"rounds":100,"drafted_tokens":200,"accepted_tokens":150,"fallback_steps":50,"accepted_per_position":[48,42,35,25]})");
+    const auto fallback_report = analyze_request_log_jsonl(fallback, "mem");
+    const auto* pressure       = find(fallback_report);
+    f += check(pressure != nullptr && pressure->at("severity") == "warning", "high fallback share warns");
+    if (pressure != nullptr) {
+        f += check(std::fabs(pressure->at("evidence").at("fallback_share").get<double>() - 0.5) < 1e-9,
+                   "fallback share = fallback / (draft rounds + fallback)");
+        f += check(pressure->at("recommendation").get<std::string>().find("Measured") == 0,
+                   "fallback statement leads with what was measured");
+        const auto& samples = pressure->at("evidence").at("high_fallback_samples");
+        f += check(samples.size() == 1 && samples.at(0).at("request_id") == 5 &&
+                       samples.at(0).at("fallback_steps") == 50 && samples.at(0).at("draft_rounds") == 50,
+                   "fallback-heavy requests are sampled with their request fields");
+    }
+
+    // Rising fallback across the window: quiet first half, fallback-heavy second half.
+    const std::string rising =
+        done(6, R"({"backend":"mtp","draft_window":4,"rounds":100,"drafted_tokens":400,"accepted_tokens":300,"fallback_steps":0,"accepted_per_position":[95,85,70,50]})") +
+        done(7, R"({"backend":"mtp","draft_window":4,"rounds":100,"drafted_tokens":400,"accepted_tokens":300,"fallback_steps":0,"accepted_per_position":[95,85,70,50]})") +
+        done(8, R"({"backend":"mtp","draft_window":4,"rounds":115,"drafted_tokens":400,"accepted_tokens":300,"fallback_steps":15,"accepted_per_position":[95,85,70,50]})") +
+        done(9, R"({"backend":"mtp","draft_window":4,"rounds":115,"drafted_tokens":400,"accepted_tokens":300,"fallback_steps":15,"accepted_per_position":[95,85,70,50]})");
+    const auto rising_report = analyze_request_log_jsonl(rising, "mem");
+    const auto* rise         = find(rising_report);
+    f += check(rise != nullptr && rise->at("severity") == "warning" &&
+                   rise->at("evidence").at("fallback_share_first_half") == 0.0 &&
+                   std::fabs(rise->at("evidence").at("fallback_share_second_half").get<double>() - 30.0 / 230.0) < 1e-9,
+               "fallback rising across the window warns with both halves measured");
+
+    // Missing telemetry: backend none, or no speculative object at all -> unavailable, not 0%.
+    const std::string off =
+        done(10, R"({"backend":"none","draft_window":0,"rounds":0,"drafted_tokens":0,"accepted_tokens":0,"fallback_steps":0,"accepted_per_position":[]})") +
+        R"({"event":"request_done","server_instance_id":"a","timestamp_unix_ms":2011,"request":{"request_id":11,"message_count":1},"result":{"finish_reason":"stop","completion_tokens":3},"timings_seconds":{}})"
+        "\n";
+    const auto off_report = analyze_request_log_jsonl(off, "mem");
+    const auto* none      = find(off_report);
+    f += check(none != nullptr && none->at("availability") == "unavailable", "no telemetry is unavailable");
+    if (none != nullptr) {
+        f += check(none->at("evidence").at("requests_backend_none") == 1 &&
+                       none->at("measured_over").at("requests") == 0 &&
+                       none->at("measured_over").at("examined_requests") == 2,
+                   "unavailable still reports what was examined");
+        f += check(!none->at("evidence").contains("acceptance_ratio"), "unavailable carries no ratio");
+    }
+
+    // A round near the output limit drafts fewer tokens than the window; rounds still counts it.
+    const std::string partial =
+        done(13, R"({"backend":"mtp","draft_window":4,"rounds":3,"drafted_tokens":10,"accepted_tokens":6,"fallback_steps":0,"accepted_per_position":[3,2,1,0]})");
+    const auto partial_report = analyze_request_log_jsonl(partial, "mem");
+    const auto* partial_ins   = find(partial_report);
+    f += check(partial_ins != nullptr && partial_ins->at("evidence").at("draft_rounds") == 3 &&
+                   std::fabs(partial_ins->at("evidence").at("per_position_rate").at(0).get<double>() - 1.0) < 1e-9,
+               "partial last window does not inflate per-position rates");
+
+    // Only the latest server instance is measured: an older launch with window 5 must not blend
+    // into the current window-4 curve, and the older requests are reported as out of scope.
+    const std::string relaunched =
+        std::string(R"({"event":"server_start","server_instance_id":"old","timestamp_unix_ms":10,"engine":{}})") + "\n" +
+        R"({"event":"request_done","server_instance_id":"old","timestamp_unix_ms":1001,"request":{"request_id":1,"message_count":1},"result":{"finish_reason":"stop","completion_tokens":64},"timings_seconds":{},"speculative":{"backend":"mtp","draft_window":5,"rounds":100,"drafted_tokens":500,"accepted_tokens":210,"fallback_steps":0,"accepted_per_position":[90,70,40,8,2]}})" "\n" +
+        R"({"event":"server_start","server_instance_id":"new","timestamp_unix_ms":5000,"engine":{}})" "\n" +
+        R"({"event":"request_done","server_instance_id":"new","timestamp_unix_ms":6001,"request":{"request_id":1,"message_count":1},"result":{"finish_reason":"stop","completion_tokens":64},"timings_seconds":{},"speculative":{"backend":"mtp","draft_window":4,"rounds":100,"drafted_tokens":400,"accepted_tokens":300,"fallback_steps":0,"accepted_per_position":[95,85,70,50]}})" "\n";
+    const auto relaunched_report = analyze_request_log_jsonl(relaunched, "mem");
+    const auto* scoped           = find(relaunched_report);
+    f += check(scoped != nullptr && scoped->at("availability") == "available", "latest instance measured");
+    if (scoped != nullptr) {
+        const auto& e = scoped->at("evidence");
+        f += check(e.at("server_instance_id") == "new" && e.at("draft_window") == 4 &&
+                       e.at("draft_windows_seen") == nlohmann::json({{"4", 1}}) &&
+                       e.at("drafted_tokens") == 400,
+                   "older launch does not blend into the current curve");
+        f += check(scoped->at("measured_over").at("requests") == 1 &&
+                       scoped->at("measured_over").at("examined_requests") == 1 &&
+                       scoped->at("measured_over").at("other_instance_requests") == 1,
+                   "out-of-scope requests are counted, not silently dropped");
+        f += check(e.at("inferred_draft_window").is_null(), "healthy current curve has no advice");
+    }
+
+    // Configured backend that has not drafted: unavailable with the configuration named.
+    const std::string idle =
+        done(12, R"({"backend":"mtp","draft_window":4,"rounds":0,"drafted_tokens":0,"accepted_tokens":0,"fallback_steps":0,"accepted_per_position":[0,0,0,0]})", 0);
+    const auto idle_report = analyze_request_log_jsonl(idle, "mem");
+    const auto* no_drafts  = find(idle_report);
+    f += check(no_drafts != nullptr && no_drafts->at("availability") == "unavailable" &&
+                   no_drafts->at("evidence").at("backend") == "mtp" &&
+                   no_drafts->at("evidence").at("drafted_tokens") == 0,
+               "zero drafts is unavailable, not a 0% acceptance");
     return f;
 }
 
@@ -1051,6 +1215,7 @@ int main() {
     failures += test_insights_honesty();
     failures += test_insights_prefix();
     failures += test_insights_prefix_collapse();
+    failures += test_insights_speculative();
     failures += test_admin_vram_markers();
     failures += test_insights_pinned_tier();
     failures += test_jsonl_event_key();

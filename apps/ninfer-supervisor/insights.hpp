@@ -8,7 +8,9 @@
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <iomanip>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -176,6 +178,53 @@ inline nlohmann::json analyze_request_log_jsonl(std::string_view jsonl, std::str
     std::uint64_t multi_hit_tokens    = 0;
     std::vector<nlohmann::json> reset_multi_samples;
 
+    // Speculative decoding, as the engine writes it per request_done: backend, draft_window,
+    // rounds, drafted/accepted tokens, fallback_steps and accepted_per_position, where position
+    // p counts the draft rounds in which the p-th drafted token was accepted. Flash-Next counts a
+    // fallback step as a round too and the 27B path does not, and a round near the output limit
+    // drafts fewer than draft_window tokens, so neither "rounds" nor drafted/draft_window is the
+    // number of rounds that drafted. max(rounds - fallback, ceil(drafted / window)) is exact on
+    // Flash-Next and a lower bound on the 27B path; per-position rates are clamped to 1.
+    // The backend and window are launch configuration, so only the latest server instance is
+    // measured: a whole-file sum would blend windows 4, 5 and 7 from different launches into one
+    // curve that belongs to none of them.
+    struct SpecPosition {
+        std::uint64_t accepted = 0;
+        std::uint64_t rounds   = 0;
+    };
+    struct Spec {
+        std::string backend;
+        int draft_window                = 0;
+        int requests_with_telemetry     = 0;
+        int requests_with_drafts        = 0;
+        int requests_backend_none       = 0;
+        int requests_other_instance     = 0;
+        std::uint64_t rounds_reported   = 0;
+        std::uint64_t draft_rounds      = 0;
+        std::uint64_t drafted           = 0;
+        std::uint64_t accepted          = 0;
+        std::uint64_t fallback          = 0;
+        std::uint64_t first_half_steps  = 0;
+        std::uint64_t first_half_fallback  = 0;
+        std::uint64_t second_half_steps = 0;
+        std::uint64_t second_half_fallback = 0;
+        std::vector<SpecPosition> positions;
+        std::vector<std::int64_t> sample_ids;
+        std::vector<nlohmann::json> low_acceptance_samples;
+        std::vector<nlohmann::json> high_fallback_samples;
+        std::map<int, int> windows_seen;
+        std::int64_t tmin = 0;
+        std::int64_t tmax = 0;
+    } spec;
+    std::size_t spec_scope_dones = 0;
+    for (const auto& done : dones) {
+        if (latest_server_instance.empty() ||
+            done.value("server_instance_id", "") == latest_server_instance) {
+            ++spec_scope_dones;
+        }
+    }
+    std::size_t spec_scope_index = 0;
+
     for (const auto& done : dones) {
         const auto& req = done.contains("request") ? done.at("request") : nlohmann::json::object();
         const auto id   = json_i64(req, "request_id");
@@ -220,6 +269,77 @@ inline nlohmann::json analyze_request_log_jsonl(std::string_view jsonl, std::str
             ++reuse_append;
         } else if (!reuse.empty()) {
             ++reuse_other;
+        }
+
+        if (!latest_server_instance.empty() &&
+            done.value("server_instance_id", "") != latest_server_instance) {
+            ++spec.requests_other_instance;
+        } else if (done.contains("speculative") && done.at("speculative").is_object()) {
+            const std::size_t scope_index = spec_scope_index++;
+            const auto& sp             = done.at("speculative");
+            const auto done_ts         = json_i64(done, "timestamp_unix_ms");
+            if (spec.tmin == 0 || done_ts < spec.tmin) { spec.tmin = done_ts; }
+            if (done_ts > spec.tmax) { spec.tmax = done_ts; }
+            const std::string backend  = sp.value("backend", "");
+            const int window           = static_cast<int>(json_i64(sp, "draft_window"));
+            if (backend.empty() || backend == "none" || window <= 0) {
+                ++spec.requests_backend_none;
+            } else {
+                ++spec.requests_with_telemetry;
+                spec.backend      = backend;
+                spec.draft_window = std::max(spec.draft_window, window);
+                ++spec.windows_seen[window];
+                auto count = [&](const char* key) {
+                    return static_cast<std::uint64_t>(std::max<std::int64_t>(0, json_i64(sp, key)));
+                };
+                const auto drafted       = count("drafted_tokens");
+                const auto accepted      = count("accepted_tokens");
+                const auto fallback      = count("fallback_steps");
+                const auto rounds        = count("rounds");
+                const auto full_windows  = (drafted + static_cast<std::uint64_t>(window) - 1) /
+                                          static_cast<std::uint64_t>(window);
+                const auto draft_rounds  = std::max(rounds > fallback ? rounds - fallback : std::uint64_t{0}, full_windows);
+                spec.rounds_reported += rounds;
+                spec.draft_rounds += draft_rounds;
+                spec.drafted += drafted;
+                spec.accepted += accepted;
+                spec.fallback += fallback;
+                const bool second_half = scope_index * 2 >= spec_scope_dones;
+                (second_half ? spec.second_half_steps : spec.first_half_steps) += draft_rounds + fallback;
+                (second_half ? spec.second_half_fallback : spec.first_half_fallback) += fallback;
+                if (sp.contains("accepted_per_position") && sp.at("accepted_per_position").is_array()) {
+                    const auto& pos = sp.at("accepted_per_position");
+                    if (spec.positions.size() < pos.size()) { spec.positions.resize(pos.size()); }
+                    for (std::size_t p = 0; p < pos.size(); ++p) {
+                        if (!pos.at(p).is_number()) { continue; }
+                        spec.positions[p].accepted += pos.at(p).get<std::uint64_t>();
+                        if (static_cast<int>(p) < window) { spec.positions[p].rounds += draft_rounds; }
+                    }
+                }
+                if (fallback >= 8 && fallback * 2 >= draft_rounds + fallback &&
+                    spec.high_fallback_samples.size() < 8) {
+                    spec.high_fallback_samples.push_back(
+                        {{"request_id", id},
+                         {"fallback_steps", fallback},
+                         {"draft_rounds", draft_rounds},
+                         {"completion_tokens", completion},
+                         {"message_count", messages},
+                         {"media_item_count", json_i64(req, "media_item_count")},
+                         {"enable_thinking", req.value("enable_thinking", false)}});
+                }
+                if (drafted > 0) {
+                    ++spec.requests_with_drafts;
+                    if (spec.sample_ids.size() < 8) { spec.sample_ids.push_back(id); }
+                    const double ratio = static_cast<double>(accepted) / static_cast<double>(drafted);
+                    if (draft_rounds >= 8 && ratio < 0.25 && spec.low_acceptance_samples.size() < 8) {
+                        spec.low_acceptance_samples.push_back({{"request_id", id},
+                                                               {"drafted_tokens", drafted},
+                                                               {"accepted_tokens", accepted},
+                                                               {"fallback_steps", fallback},
+                                                               {"completion_tokens", completion}});
+                    }
+                }
+            }
         }
 
         const auto& timings =
@@ -484,6 +604,159 @@ inline nlohmann::json analyze_request_log_jsonl(std::string_view jsonl, std::str
             "Check seed store / turn checkpoints. restore_turn_checkpoint or seed_prefix "
             "should fire when message_count>=2.",
             "measured", over));
+    }
+
+    // Speculative decoding: the counters are measured; any draft-window advice is inferred from
+    // the position curve and says so. No telemetry or no drafts is unavailable, never 0%.
+    {
+        constexpr double kMinUsefulPositionRate = 0.20;
+        constexpr std::uint64_t kMinDraftRoundsForAdvice = 50;
+        auto pct = [](double ratio) {
+            std::ostringstream o;
+            o << std::fixed << std::setprecision(1) << (ratio * 100.0) << "%";
+            return o.str();
+        };
+        const auto spec_over = nlohmann::json{{"requests", spec.requests_with_drafts},
+                                              {"requests_with_telemetry", spec.requests_with_telemetry},
+                                              {"examined_requests", spec_scope_dones},
+                                              {"other_instance_requests", spec.requests_other_instance},
+                                              {"server_instance_id", latest_server_instance},
+                                              {"draft_rounds", spec.draft_rounds},
+                                              {"window_s", spec.tmax > spec.tmin
+                                                               ? static_cast<double>(spec.tmax - spec.tmin) / 1000.0
+                                                               : 0.0}};
+        if (spec.requests_with_telemetry == 0) {
+            std::ostringstream stmt;
+            stmt << "no request_done of the latest server instance carries speculative telemetry "
+                 << "with a configured backend; " << spec.requests_backend_none << " of "
+                 << spec_scope_dones << " report backend none and the rest have no speculative object";
+            insights.push_back(insight_unavailable(
+                "speculative.draft_acceptance", "Speculative decoding telemetry is not in the window",
+                stmt.str(),
+                {{"requests_backend_none", spec.requests_backend_none},
+                 {"requests", spec_scope_dones},
+                 {"server_instance_id", latest_server_instance}},
+                {{"requests", 0},
+                 {"examined_requests", spec_scope_dones},
+                 {"other_instance_requests", spec.requests_other_instance}}));
+        } else if (spec.drafted == 0) {
+            std::ostringstream stmt;
+            stmt << "backend " << spec.backend << " with draft window " << spec.draft_window
+                 << " is configured, but the " << spec.requests_with_telemetry
+                 << " request_done with telemetry recorded 0 drafted tokens ("
+                 << spec.fallback << " fallback steps); acceptance cannot be measured from zero drafts";
+            insights.push_back(insight_unavailable(
+                "speculative.draft_acceptance", "Speculative decoding has not drafted yet", stmt.str(),
+                {{"backend", spec.backend},
+                 {"draft_window", spec.draft_window},
+                 {"drafted_tokens", 0},
+                 {"fallback_steps", spec.fallback},
+                 {"requests_with_telemetry", spec.requests_with_telemetry},
+                 {"server_instance_id", latest_server_instance}},
+                spec_over));
+        } else {
+            nlohmann::json per_position_accepted = nlohmann::json::array();
+            nlohmann::json per_position_rate     = nlohmann::json::array();
+            int effective_window                 = 0;
+            bool prefix_useful                   = true;
+            std::ostringstream curve;
+            for (std::size_t p = 0; p < spec.positions.size(); ++p) {
+                const auto& pos   = spec.positions[p];
+                const double rate = pos.rounds > 0
+                                        ? std::min(1.0, static_cast<double>(pos.accepted) /
+                                                            static_cast<double>(pos.rounds))
+                                        : 0.0;
+                per_position_accepted.push_back(pos.accepted);
+                per_position_rate.push_back(rate);
+                if (prefix_useful && rate >= kMinUsefulPositionRate) {
+                    ++effective_window;
+                } else {
+                    prefix_useful = false;
+                }
+                curve << (p == 0 ? "" : ", ") << "P" << (p + 1) << " " << pct(rate);
+            }
+            const double acceptance =
+                static_cast<double>(spec.accepted) / static_cast<double>(spec.drafted);
+            const std::uint64_t steps = spec.draft_rounds + spec.fallback;
+            auto share = [](std::uint64_t part, std::uint64_t whole) {
+                return whole > 0 ? static_cast<double>(part) / static_cast<double>(whole) : 0.0;
+            };
+            const double fallback_share = share(spec.fallback, steps);
+            const double first_share    = share(spec.first_half_fallback, spec.first_half_steps);
+            const double second_share   = share(spec.second_half_fallback, spec.second_half_steps);
+            const bool fallback_high    = spec.fallback >= 10 && fallback_share >= 0.20;
+            const bool fallback_rising  = spec.second_half_fallback >= 10 &&
+                                         second_share >= first_share + 0.10;
+            const bool advise_window = spec.draft_rounds >= kMinDraftRoundsForAdvice &&
+                                       effective_window >= 1 &&
+                                       effective_window < spec.draft_window;
+
+            nlohmann::json windows_seen = nlohmann::json::object();
+            for (const auto& [w, n] : spec.windows_seen) { windows_seen[std::to_string(w)] = n; }
+
+            std::ostringstream stmt;
+            stmt << "Backend " << spec.backend << ", draft window " << spec.draft_window << ": "
+                 << spec.accepted << " of " << spec.drafted << " drafted tokens accepted ("
+                 << pct(acceptance) << ") over " << spec.draft_rounds << " draft rounds in "
+                 << spec.requests_with_drafts << " requests with drafts ("
+                 << spec.requests_with_telemetry << " with telemetry, " << spec_scope_dones
+                 << " examined on the latest server instance). Acceptance by draft position: "
+                 << curve.str() << ". Fallback steps " << spec.fallback << " = "
+                 << pct(fallback_share) << " of " << steps << " decode steps (first half "
+                 << pct(first_share) << ", second half " << pct(second_share) << ").";
+
+            std::ostringstream rec;
+            if (fallback_high || fallback_rising) {
+                rec << "Measured: the engine decoded without a draft on " << pct(fallback_share)
+                    << " of steps";
+                if (fallback_rising) {
+                    rec << ", rising from " << pct(first_share) << " to " << pct(second_share)
+                        << " across the window";
+                }
+                rec << ". The log records that those steps ran on the ordinary decode path, not why. "
+                       "Inferred: compare the high_fallback_samples (media, thinking, message "
+                       "count) with requests that drafted normally, and check the engine log "
+                       "around them, before changing the draft window. ";
+            }
+            if (advise_window) {
+                rec << "Inferred, not measured: draft positions " << (effective_window + 1) << ".."
+                    << spec.draft_window << " are accepted in under "
+                    << pct(kMinUsefulPositionRate) << " of draft rounds, so a draft window of "
+                    << effective_window << " would drop mostly rejected work. Verify with "
+                    << "--draft-tokens " << effective_window
+                    << " and compare decode tok/s before keeping it.";
+            }
+            std::string recommendation = rec.str();
+            while (!recommendation.empty() && recommendation.back() == ' ') { recommendation.pop_back(); }
+            insights.push_back(insight_available(
+                "speculative.draft_acceptance", (fallback_high || fallback_rising) ? "warning" : "info",
+                "Speculative draft acceptance", stmt.str(),
+                {{"backend", spec.backend},
+                 {"server_instance_id", latest_server_instance},
+                 {"draft_window", spec.draft_window},
+                 {"draft_windows_seen", windows_seen},
+                 {"draft_rounds", spec.draft_rounds},
+                 {"rounds_reported", spec.rounds_reported},
+                 {"drafted_tokens", spec.drafted},
+                 {"accepted_tokens", spec.accepted},
+                 {"acceptance_ratio", acceptance},
+                 {"accepted_per_position", per_position_accepted},
+                 {"per_position_rate", per_position_rate},
+                 {"min_useful_position_rate", kMinUsefulPositionRate},
+                 {"effective_draft_window", effective_window},
+                 {"inferred_draft_window",
+                  advise_window ? nlohmann::json(effective_window) : nlohmann::json(nullptr)},
+                 {"fallback_steps", spec.fallback},
+                 {"fallback_share", fallback_share},
+                 {"fallback_share_first_half", first_share},
+                 {"fallback_share_second_half", second_share},
+                 {"requests_with_drafts", spec.requests_with_drafts},
+                 {"requests_with_telemetry", spec.requests_with_telemetry},
+                 {"sample_request_ids", spec.sample_ids},
+                 {"low_acceptance_samples", spec.low_acceptance_samples},
+                 {"high_fallback_samples", spec.high_fallback_samples}},
+                recommendation, "measured", spec_over));
+        }
     }
 
     // Content/reasoning_content are not in schema_version 10 request logs.
