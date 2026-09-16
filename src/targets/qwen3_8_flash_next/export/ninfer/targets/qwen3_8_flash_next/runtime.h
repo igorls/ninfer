@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -37,6 +38,7 @@ using ContinuationSummary   = qwen3_6::ContinuationSummary;
 using SharedPrefixSummary   = qwen3_6::SharedPrefixSummary;
 using CaptureAssessment     = qwen3_6::CaptureAssessment;
 using PressureTargetHandle  = qwen3_6::PressureTargetHandle;
+using PressureConstructionCursor = qwen3_6::PressureConstructionCursor;
 using PhysicalUsageSnapshot = qwen3_6::PhysicalUsageSnapshot;
 using CommitRowResult       = qwen3_6::CommitRowResult;
 
@@ -343,6 +345,7 @@ private:
 struct PressureExpansionView {
     std::span<const PressureTargetHandle> children;
     std::uint32_t new_canonical_count = 0;
+    bool complete                     = true;
 };
 
 class CapturePressurePlan {
@@ -457,13 +460,21 @@ public:
     identity_target(runtime::PlanningCandidateId candidate) const;
     [[nodiscard]] PressureTargetHandle
     root_maximal_target(runtime::PlanningCandidateId root_candidate);
+    [[nodiscard]] PressureTargetHandle maximal_target(runtime::PlanningCandidateId candidate);
+    [[nodiscard]] PressureConstructionCursor begin_construction(PressureTargetHandle target,
+                                                                bool restore = false);
+    [[nodiscard]] runtime::PressureConstructionStep
+    next_construction_option(PressureConstructionCursor& cursor);
+    void choose_construction(PressureConstructionCursor& cursor,
+                             runtime::PressureConstructionOptionId option);
     [[nodiscard]] std::optional<PressureTargetHandle>
-    guided_closure_target(runtime::PlanningCandidateId candidate,
-                          std::span<const runtime::PlanningOwnerId> preferred_owner_ids);
+    construction_target(const PressureConstructionCursor& cursor);
     [[nodiscard]] runtime::PressureTargetGuidance guidance(PressureTargetHandle target);
     [[nodiscard]] AssessedPressureTarget assess(PressureTargetHandle target);
     void retain_assessment(PressureTargetHandle target);
-    [[nodiscard]] PreparedPressureExpansion prepare_expansion(PressureTargetHandle parent);
+    [[nodiscard]] PreparedPressureExpansion
+    prepare_expansion(PressureTargetHandle parent,
+                      std::uint32_t maximum_owners = std::numeric_limits<std::uint32_t>::max());
     [[nodiscard]] PressureExpansionView
     commit_expansion(PreparedPressureExpansion&& prepared);
     void discard_expansion(PreparedPressureExpansion&& prepared) noexcept;

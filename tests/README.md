@@ -30,6 +30,7 @@ benchmark-report, and external protocol behavior. Repository verification princi
   `test_openai_responses_store.cpp`, `test_anthropic_schema.cpp`, and
   `test_tool_call_parser.cpp` — current protocol translation, Responses Item/state/SSE behavior,
   and incremental tool-call behavior;
+- `test_materialization_budget.cpp` — deterministic planning-budget and shared admission-boundary behavior;
 - `test_request_log.cpp` — the consumed request JSONL schema and exact measurement fields, plus
   Serve-owned failure severity and exclusion of arbitrary client error text from operational
   records;

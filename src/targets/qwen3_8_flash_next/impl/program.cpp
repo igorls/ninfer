@@ -29,6 +29,14 @@ struct PressurePlanningSessionImpl<FlashNextPressureHandleAccess> {
     static const void* get_session(const PressureTargetHandle& h) noexcept { return h.session_; }
     static std::uint32_t get_generation(const PressureTargetHandle& h) noexcept { return h.generation_; }
     static std::uint32_t get_index(const PressureTargetHandle& h) noexcept { return h.index_; }
+    static PressureConstructionCursor
+    make_cursor(const void* session, std::uint32_t slot, std::uint32_t generation,
+                void (*release)(const void*, std::uint32_t, std::uint32_t) noexcept) {
+        return PressureConstructionCursor(session, slot, generation, release);
+    }
+    static const void* cursor_session(const PressureConstructionCursor& c) noexcept { return c.session_; }
+    static std::uint32_t cursor_slot(const PressureConstructionCursor& c) noexcept { return c.slot_; }
+    static std::uint32_t cursor_generation(const PressureConstructionCursor& c) noexcept { return c.generation_; }
 };
 }
 
@@ -662,6 +670,155 @@ PressureTargetHandle PressurePlanningSessionImpl::root_maximal_target(runtime::P
     return FlashNextPressureHandleHelper::make_handle(this, session_generation_, target_idx);
 }
 
+std::uint32_t PressurePlanningSessionImpl::intern_node(PressurePlanningTargetNode node) {
+    const auto it = std::find_if(targets_.begin(), targets_.end(), [&](const auto& item) {
+        return item.candidate_index == node.candidate_index &&
+               item.owner_evicted == node.owner_evicted;
+    });
+    if (it != targets_.end()) { return static_cast<std::uint32_t>(it - targets_.begin()); }
+    node.stable_ordinal = static_cast<std::uint32_t>(targets_.size());
+    targets_.push_back(std::move(node));
+    return static_cast<std::uint32_t>(targets_.size() - 1);
+}
+
+bool PressurePlanningSessionImpl::owner_protected(std::uint32_t candidate_index,
+                                                  std::size_t owner) const {
+    const auto& cand_impl = *candidates_[candidate_index]->impl_;
+    const auto& item      = owners_[owner];
+    if (cand_impl.has_source && cand_impl.source_continuation_index == item.continuation_index &&
+        cand_impl.source_continuation_generation == item.generation) {
+        return true;
+    }
+    return program_->is_slot_protected(item.continuation_index);
+}
+
+// Every eligible victim evicted, for any candidate. Unlike root_maximal_target it does not mark
+// the node as the mandatory fallback: the planner assesses it as an ordinary rescue target.
+PressureTargetHandle PressurePlanningSessionImpl::maximal_target(runtime::PlanningCandidateId candidate) {
+    if (scratch_live_) { throw std::logic_error("pressure expansion scratch is still live"); }
+    const std::uint32_t cand_idx = candidate_index(candidate);
+    PressurePlanningTargetNode node{
+        .candidate_index = cand_idx,
+        .owner_evicted = std::vector<std::uint8_t>(owners_.size(), 0),
+    };
+    for (std::size_t i = 0; i < owners_.size(); ++i) {
+        if (!owner_protected(cand_idx, i)) { node.owner_evicted[i] = 1; }
+    }
+    const std::uint32_t idx = intern_node(std::move(node));
+    return FlashNextPressureHandleHelper::make_handle(this, session_generation_, idx);
+}
+
+PressureConstructionCursor
+PressurePlanningSessionImpl::begin_construction(PressureTargetHandle target, bool restore) {
+    if (!valid(target) || scratch_live_) {
+        throw std::logic_error("invalid pressure construction parent");
+    }
+    const auto& node = targets_[FlashNextPressureHandleHelper::get_index(target)];
+    for (std::uint32_t index = 0; index < construction_slots_.size(); ++index) {
+        auto& slot = construction_slots_[index];
+        if (slot.leased) { continue; }
+        slot.choices = node.owner_evicted;
+        slot.options.clear();
+        slot.next_owner = slot.next_option = 0;
+        slot.candidate_index               = node.candidate_index;
+        slot.restore                       = restore;
+        slot.leased                        = true;
+        if (++construction_generation_ == 0) { ++construction_generation_; }
+        slot.generation      = construction_generation_;
+        slot.scan_generation = 1;
+        return FlashNextPressureHandleHelper::make_cursor(this, index, slot.generation,
+                                                          &release_construction);
+    }
+    throw std::length_error("all pressure construction cursors are leased");
+}
+
+void PressurePlanningSessionImpl::release_construction(const void* owner, std::uint32_t index,
+                                                       std::uint32_t lease) noexcept {
+    auto& session = *const_cast<PressurePlanningSessionImpl*>(
+        static_cast<const PressurePlanningSessionImpl*>(owner));
+    if (index < session.construction_slots_.size()) {
+        auto& slot = session.construction_slots_[index];
+        if (slot.generation == lease) {
+            slot.leased = false;
+            slot.options.clear();
+        }
+    }
+}
+
+PressureConstructionSlot&
+PressurePlanningSessionImpl::construction_slot(const PressureConstructionCursor& cursor) {
+    const std::uint32_t index = FlashNextPressureHandleHelper::cursor_slot(cursor);
+    if (FlashNextPressureHandleHelper::cursor_session(cursor) != this ||
+        index >= construction_slots_.size() || scratch_live_ || program_ == nullptr ||
+        program_->resource_revision_ != resource_revision_) {
+        throw std::logic_error("pressure construction cursor is stale");
+    }
+    auto& slot = construction_slots_[index];
+    if (!slot.leased || slot.generation != FlashNextPressureHandleHelper::cursor_generation(cursor)) {
+        throw std::logic_error("pressure construction lease is stale");
+    }
+    return slot;
+}
+
+runtime::PressureConstructionStep
+PressurePlanningSessionImpl::next_construction_option(PressureConstructionCursor& cursor) {
+    auto& slot = construction_slot(cursor);
+    if (slot.next_option < slot.options.size()) {
+        const auto index   = static_cast<std::uint32_t>(slot.next_option++);
+        const auto& option = slot.options[index];
+        PressurePlanningTargetNode node{
+            .candidate_index = slot.candidate_index,
+            .owner_evicted = slot.choices,
+        };
+        node.owner_evicted[option.owner] = option.evicted;
+        return {.guidance = guidance_for_node(node, 0),
+                .option   = {.cursor_generation = slot.generation,
+                             .scan_generation   = slot.scan_generation,
+                             .index             = index}};
+    }
+    if (slot.next_owner == owners_.size()) { return {.exhausted = true}; }
+    const std::size_t owner    = slot.next_owner++;
+    const std::uint8_t current = slot.choices[owner];
+    if (slot.restore) {
+        // The less-destructive neighbour of an evicting target keeps this owner.
+        if (current != 0) { slot.options.push_back({.owner = owner, .evicted = 0}); }
+    } else if (current == 0 && !owner_protected(slot.candidate_index, owner)) {
+        slot.options.push_back({.owner = owner, .evicted = 1});
+    }
+    return {}; // one owner's successor generation is a separately metered operation
+}
+
+void PressurePlanningSessionImpl::choose_construction(PressureConstructionCursor& cursor,
+                                                      runtime::PressureConstructionOptionId id) {
+    auto& slot = construction_slot(cursor);
+    if (id.cursor_generation != slot.generation || id.scan_generation != slot.scan_generation ||
+        id.index >= slot.options.size()) {
+        throw std::logic_error("stale pressure construction option");
+    }
+    const auto& option          = slot.options[id.index];
+    slot.choices[option.owner]  = option.evicted;
+    slot.next_owner = slot.next_option = 0;
+    slot.options.clear();
+    if (++slot.scan_generation == 0) { ++slot.scan_generation; }
+}
+
+std::optional<PressureTargetHandle>
+PressurePlanningSessionImpl::construction_target(const PressureConstructionCursor& cursor) {
+    auto& slot = construction_slot(cursor);
+    const bool exists = std::any_of(targets_.begin(), targets_.end(), [&](const auto& item) {
+        return item.candidate_index == slot.candidate_index && item.owner_evicted == slot.choices;
+    });
+    constexpr std::size_t kOptionalTargetCapacity = 4096;
+    if (!exists && targets_.size() >= candidates_.size() + 1U + kOptionalTargetCapacity) {
+        return std::nullopt;
+    }
+    const std::uint32_t idx = intern_node(PressurePlanningTargetNode{
+        .candidate_index = slot.candidate_index,
+        .owner_evicted = slot.choices,
+    });
+    return FlashNextPressureHandleHelper::make_handle(this, session_generation_, idx);
+}
+
 AssessedPressureTarget PressurePlanningSessionImpl::assess(PressureTargetHandle target) {
     if (!valid(target) || scratch_live_) {
         throw std::logic_error("pressure target assessment is stale or conflicts with expansion");
@@ -905,7 +1062,15 @@ runtime::PressureTargetGuidance PressurePlanningSessionImpl::guidance(PressureTa
         throw std::logic_error("pressure target guidance is stale or conflicts with expansion");
     }
     const std::uint32_t target_idx = FlashNextPressureHandleHelper::get_index(target);
-    const auto& node = targets_[target_idx];
+    return guidance_for_node(targets_[target_idx], targets_[target_idx].stable_ordinal);
+}
+
+// Guidance for a node that may not be interned yet (a construction option). Flash-Next has no
+// host tier and no partial spills: an evicted owner is rebuilt by prefill, so the recovery
+// estimate is complete by construction and no restore transfers are involved.
+runtime::PressureTargetGuidance
+PressurePlanningSessionImpl::guidance_for_node(const PressurePlanningTargetNode& node,
+                                               std::uint32_t ordinal) {
     const auto& cand = *candidates_[node.candidate_index];
     const auto& details = *cand.impl_;
 
@@ -986,13 +1151,18 @@ runtime::PressureTargetGuidance PressurePlanningSessionImpl::guidance(PressureTa
             .unsatisfied_constraints = deficit > 0 ? 1U : 0U,
             .estimated_remaining_steps = (deficit + 3U) / 4U,
             .normalized_residual_q20 = normalized_q20,
+            .requires_exact_feedback = false,
         },
         .estimated_machine_work = details.assessment.machine_work,
         .owner_outcomes = guidance_outcomes_,
         .candidate = candidate_ids_[node.candidate_index],
-        .stable_target_ordinal = node.stable_ordinal,
+        .stable_target_ordinal = ordinal,
         .degradation_units = total_degradation,
         .dropped_checkpoints = total_dropped,
+        .source_mode = details.assessment.source_mode,
+        .checkpoint_changes = {},
+        .recovery_estimates = {},
+        .recovery_estimate_complete = true,
     };
 }
 
@@ -1003,144 +1173,28 @@ void PressurePlanningSessionImpl::retain_assessment(PressureTargetHandle target)
     retained_target_idx_ = FlashNextPressureHandleHelper::get_index(target);
 }
 
-std::optional<PressureTargetHandle>
-PressurePlanningSessionImpl::guided_closure_target(
-    runtime::PlanningCandidateId candidate, std::span<const runtime::PlanningOwnerId> preferred_owner_ids) {
-    if (scratch_live_) {
-        throw std::logic_error("guided pressure closure conflicts with expansion scratch");
-    }
-    const std::uint32_t cand_idx = candidate_index(candidate);
-    const auto& cand_impl = *candidates_[cand_idx]->impl_;
-
-    PressurePlanningTargetNode target{
-        .candidate_index = cand_idx,
-        .owner_evicted = std::vector<std::uint8_t>(owners_.size(), 0),
-        .stable_ordinal = 0,
-        .root_maximal = false,
-    };
-
-    std::uint32_t needed = cand_impl.required_page_groups;
-    if (cand_impl.has_source && cand_impl.reusable_tokens > 0) {
-        const std::uint32_t source_groups = (cand_impl.reusable_tokens + 256U - 1U) / 256U;
-        needed = (needed > source_groups) ? (needed - source_groups) : 0;
-    }
-
-    const auto check_feasible = [&](const PressurePlanningTargetNode& node) -> bool {
-        std::uint32_t available = static_cast<std::uint32_t>(program_->executor_.available_physical_groups());
-        const std::uint32_t reserved = program_->reserved_unowned_groups();
-        available = available > reserved ? available - reserved : 0U;
-
-        std::unordered_map<std::uint32_t, std::uint32_t> refs_in_target;
-        const auto add_slot = [&](std::size_t s) {
-            if (s >= program_->continuation_slots_.size()) { return; }
-            const auto& slot = program_->continuation_slots_[s];
-            if (slot.role != ContinuationSlotRole::Catalogued) { return; }
-            for (const std::uint32_t g : slot.physical_groups) { refs_in_target[g] += 1; }
-        };
-        for (std::size_t i = 0; i < owners_.size(); ++i) {
-            if (node.owner_evicted[i] != 1) { continue; }
-            const std::size_t s = owners_[i].continuation_index;
-            add_slot(s);
-            if (s < program_->continuation_slots_.size()) {
-                const auto& slot = program_->continuation_slots_[s];
-                if (slot.paired_rewrite_slot.has_value() &&
-                    *slot.paired_rewrite_slot < program_->continuation_slots_.size() &&
-                    program_->continuation_slots_[*slot.paired_rewrite_slot].generation ==
-                        slot.paired_rewrite_generation &&
-                    !program_->is_slot_protected(*slot.paired_rewrite_slot)) {
-                    add_slot(*slot.paired_rewrite_slot);
-                }
-            }
-        }
-        for (const auto& [g, refs] : refs_in_target) {
-            if (program_->executor_.group_refcount(g) == refs) { available += 1; }
-        }
-        return available >= needed;
-    };
-
-    if (check_feasible(target)) {
-        return identity_target(candidate);
-    }
-
-    std::vector<std::size_t> owner_order;
-    owner_order.reserve(owners_.size());
-    for (const runtime::PlanningOwnerId id : preferred_owner_ids) {
-        for (std::size_t i = 0; i < owners_.size(); ++i) {
-            if (owners_[i].owner_id == id) {
-                if (std::find(owner_order.begin(), owner_order.end(), i) == owner_order.end()) {
-                    owner_order.push_back(i);
-                }
-                break;
-            }
-        }
-    }
-    for (std::size_t i = 0; i < owners_.size(); ++i) {
-        if (std::find(owner_order.begin(), owner_order.end(), i) == owner_order.end()) {
-            owner_order.push_back(i);
-        }
-    }
-
-    for (const std::size_t owner_idx : owner_order) {
-        const auto& owner = owners_[owner_idx];
-        bool is_protected = false;
-        if (cand_impl.has_source &&
-            cand_impl.source_continuation_index == owner.continuation_index &&
-            cand_impl.source_continuation_generation == owner.generation) {
-            is_protected = true;
-        }
-        if (program_->is_slot_protected(owner.continuation_index)) {
-            is_protected = true;
-        }
-        if (is_protected) { continue; }
-
-        target.owner_evicted[owner_idx] = 1;
-        if (check_feasible(target)) {
-            auto it = std::find_if(targets_.begin(), targets_.end(), [&](const auto& item) {
-                return item.candidate_index == target.candidate_index &&
-                       item.owner_evicted == target.owner_evicted;
-            });
-            std::uint32_t target_idx = 0;
-            if (it != targets_.end()) {
-                target_idx = static_cast<std::uint32_t>(it - targets_.begin());
-            } else {
-                target.stable_ordinal = static_cast<std::uint32_t>(targets_.size());
-                targets_.push_back(std::move(target));
-                target_idx = static_cast<std::uint32_t>(targets_.size() - 1);
-            }
-            return FlashNextPressureHandleHelper::make_handle(this, session_generation_, target_idx);
-        }
-    }
-
-    return std::nullopt;
-}
-
-PreparedPressureExpansion PressurePlanningSessionImpl::prepare_expansion(PressureTargetHandle parent) {
-    if (!valid(parent) || scratch_live_) {
+PreparedPressureExpansion PressurePlanningSessionImpl::prepare_expansion(PressureTargetHandle parent,
+                                                                         std::uint32_t maximum_owners) {
+    if (!valid(parent) || scratch_live_ || maximum_owners == 0) {
         throw std::logic_error("pressure expansion parent is stale or scratch is busy");
     }
     const std::uint32_t parent_idx = FlashNextPressureHandleHelper::get_index(parent);
     const auto& node = targets_[parent_idx];
-    const auto& details = *candidates_[node.candidate_index]->impl_;
 
     expansion_scratch_.clear();
     scratch_new_count_ = 0;
     scratch_parent_index_ = parent_idx;
+    // Expand owners in batches; the parent remembers where the next batch starts.
+    prepared_owner_end_ = static_cast<std::uint32_t>(std::min<std::size_t>(
+        owners_.size(), static_cast<std::size_t>(node.next_expansion_owner) + maximum_owners));
 
-    for (std::size_t i = 0; i < owners_.size(); ++i) {
+    for (std::size_t i = node.next_expansion_owner; i < prepared_owner_end_; ++i) {
         if (node.owner_evicted[i] == 0) {
-            bool is_protected = false;
-            if (details.has_source &&
-                details.source_continuation_index == owners_[i].continuation_index &&
-                details.source_continuation_generation == owners_[i].generation) {
-                is_protected = true;
-            }
-            if (program_->is_slot_protected(owners_[i].continuation_index)) {
-                is_protected = true;
-            }
-            if (!is_protected) {
+            if (!owner_protected(node.candidate_index, i)) {
                 PressurePlanningTargetNode child = node;
                 child.owner_evicted[i] = 1;
                 child.root_maximal = false;
+                child.next_expansion_owner = 0;
 
                 const bool in_scratch = std::any_of(expansion_scratch_.begin(), expansion_scratch_.end(),
                     [&](const auto& item) {
@@ -1194,6 +1248,8 @@ PressureExpansionView PressurePlanningSessionImpl::commit_expansion(PreparedPres
     }
 
     const std::uint32_t count = scratch_new_count_;
+    targets_[scratch_parent_index_].next_expansion_owner = prepared_owner_end_;
+    const bool complete = prepared_owner_end_ == owners_.size();
     expansion_scratch_.clear();
     scratch_new_count_ = 0;
     scratch_live_ = false;
@@ -1201,6 +1257,7 @@ PressureExpansionView PressurePlanningSessionImpl::commit_expansion(PreparedPres
     return PressureExpansionView{
         .children = committed_children_,
         .new_canonical_count = count,
+        .complete = complete,
     };
 }
 
@@ -1269,17 +1326,40 @@ void PressurePlanningSession::retain_assessment(PressureTargetHandle target) {
     impl_->retain_assessment(target);
 }
 
-std::optional<PressureTargetHandle>
-PressurePlanningSession::guided_closure_target(
-    runtime::PlanningCandidateId candidate, std::span<const runtime::PlanningOwnerId> preferred_owner_ids) {
+PressureTargetHandle
+PressurePlanningSession::maximal_target(runtime::PlanningCandidateId candidate) {
     if (impl_ == nullptr) { throw std::logic_error("PressurePlanningSession: instance is empty"); }
-    return impl_->guided_closure_target(candidate, preferred_owner_ids);
+    return impl_->maximal_target(candidate);
+}
+
+PressureConstructionCursor
+PressurePlanningSession::begin_construction(PressureTargetHandle target, bool restore) {
+    if (impl_ == nullptr) { throw std::logic_error("PressurePlanningSession: instance is empty"); }
+    return impl_->begin_construction(target, restore);
+}
+
+runtime::PressureConstructionStep
+PressurePlanningSession::next_construction_option(PressureConstructionCursor& cursor) {
+    if (impl_ == nullptr) { throw std::logic_error("PressurePlanningSession: instance is empty"); }
+    return impl_->next_construction_option(cursor);
+}
+
+void PressurePlanningSession::choose_construction(PressureConstructionCursor& cursor,
+                                                  runtime::PressureConstructionOptionId option) {
+    if (impl_ == nullptr) { throw std::logic_error("PressurePlanningSession: instance is empty"); }
+    impl_->choose_construction(cursor, option);
+}
+
+std::optional<PressureTargetHandle>
+PressurePlanningSession::construction_target(const PressureConstructionCursor& cursor) {
+    if (impl_ == nullptr) { throw std::logic_error("PressurePlanningSession: instance is empty"); }
+    return impl_->construction_target(cursor);
 }
 
 PreparedPressureExpansion
-PressurePlanningSession::prepare_expansion(PressureTargetHandle parent) {
+PressurePlanningSession::prepare_expansion(PressureTargetHandle parent, std::uint32_t maximum_owners) {
     if (impl_ == nullptr) { throw std::logic_error("PressurePlanningSession: instance is empty"); }
-    return impl_->prepare_expansion(parent);
+    return impl_->prepare_expansion(parent, maximum_owners);
 }
 
 PressureExpansionView

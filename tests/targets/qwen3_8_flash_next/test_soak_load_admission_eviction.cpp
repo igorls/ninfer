@@ -605,10 +605,26 @@ int test_soak_pressure_eviction_and_determinism(ninfer::DeviceContext& device) {
 
     auto pressure_sess = prog.begin_pressure_planning(std::span(&cand_b_ptr, 1), cand_ids, owners, ordinals, {}, {});
 
-    // Test Task 1 guided_closure_target, guidance, retain_assessment
-    auto guided_target = pressure_sess.guided_closure_target(cand_ids[0], ordinals);
+    // Construction walk from the identity target: the only option evicts A. Then guidance,
+    // retain_assessment and assessment on the constructed target.
+    std::optional<PressureTargetHandle> guided_target;
+    {
+        auto cursor = pressure_sess.begin_construction(pressure_sess.identity_target(cand_ids[0]));
+        std::optional<ninfer::runtime::PressureConstructionOptionId> chosen;
+        for (;;) {
+            const auto step = pressure_sess.next_construction_option(cursor);
+            if (step.guidance.has_value() && !chosen.has_value()) { chosen = step.option; }
+            if (step.exhausted) { break; }
+        }
+        if (!chosen.has_value()) {
+            std::fprintf(stderr, "FAIL: construction offered no eviction option\n");
+            return 1;
+        }
+        pressure_sess.choose_construction(cursor, *chosen);
+        guided_target = pressure_sess.construction_target(cursor);
+    }
     if (!guided_target.has_value()) {
-        std::fprintf(stderr, "FAIL: guided_closure_target could not find eviction target\n");
+        std::fprintf(stderr, "FAIL: construction could not intern the eviction target\n");
         return 1;
     }
 

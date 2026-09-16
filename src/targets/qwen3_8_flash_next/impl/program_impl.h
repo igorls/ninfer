@@ -72,6 +72,28 @@ struct PressurePlanningTargetNode {
     std::vector<std::uint8_t> owner_evicted;
     std::uint32_t stable_ordinal = 0;
     bool root_maximal = false;
+    // Ordinary expansion resumes here so a batch-limited expansion can be completed later.
+    std::uint32_t next_expansion_owner = 0;
+};
+
+// One resumable construction walk. Flash-Next owners have exactly one destructive option
+// (evict the continuation and its paired TurnClosure), so an option is an owner plus the new
+// eviction bit; restore walks offer the retain bit for owners the parent evicts.
+struct PressureConstructionOption {
+    std::size_t owner    = 0;
+    std::uint8_t evicted = 0;
+};
+
+struct PressureConstructionSlot {
+    std::vector<std::uint8_t> choices;
+    std::vector<PressureConstructionOption> options;
+    std::size_t next_owner        = 0;
+    std::size_t next_option       = 0;
+    std::uint32_t candidate_index = 0;
+    std::uint32_t generation      = 0;
+    std::uint32_t scan_generation = 1;
+    bool restore                  = false;
+    bool leased                   = false;
 };
 
 class PressurePlanningSessionImpl {
@@ -92,13 +114,23 @@ public:
 
     [[nodiscard]] PressureTargetHandle identity_target(runtime::PlanningCandidateId candidate) const;
     [[nodiscard]] PressureTargetHandle root_maximal_target(runtime::PlanningCandidateId root_candidate);
+    [[nodiscard]] PressureTargetHandle maximal_target(runtime::PlanningCandidateId candidate);
+    [[nodiscard]] PressureConstructionCursor begin_construction(PressureTargetHandle target,
+                                                                bool restore = false);
+    [[nodiscard]] runtime::PressureConstructionStep
+    next_construction_option(PressureConstructionCursor& cursor);
+    void choose_construction(PressureConstructionCursor& cursor,
+                             runtime::PressureConstructionOptionId option);
+    [[nodiscard]] std::optional<PressureTargetHandle>
+    construction_target(const PressureConstructionCursor& cursor);
     [[nodiscard]] runtime::PressureTargetGuidance guidance(PressureTargetHandle target);
+    [[nodiscard]] runtime::PressureTargetGuidance
+    guidance_for_node(const PressurePlanningTargetNode& node, std::uint32_t ordinal);
     [[nodiscard]] AssessedPressureTarget assess(PressureTargetHandle target);
     void retain_assessment(PressureTargetHandle target);
-    [[nodiscard]] std::optional<PressureTargetHandle>
-    guided_closure_target(runtime::PlanningCandidateId candidate,
-                          std::span<const runtime::PlanningOwnerId> preferred_owner_ids);
-    [[nodiscard]] PreparedPressureExpansion prepare_expansion(PressureTargetHandle parent);
+    [[nodiscard]] PreparedPressureExpansion
+    prepare_expansion(PressureTargetHandle parent,
+                      std::uint32_t maximum_owners = std::numeric_limits<std::uint32_t>::max());
     [[nodiscard]] PressureExpansionView commit_expansion(PreparedPressureExpansion&& prepared);
     void discard_expansion(PreparedPressureExpansion&& prepared) noexcept;
     [[nodiscard]] std::optional<ResourcePlan>
@@ -126,7 +158,18 @@ public:
     std::uint32_t scratch_generation_ = 0;
     std::uint32_t scratch_parent_index_ = 0;
     std::uint32_t scratch_new_count_ = 0;
+    std::uint32_t prepared_owner_end_ = 0;
     bool scratch_live_ = false;
+    std::array<PressureConstructionSlot, 4> construction_slots_;
+    std::uint32_t construction_generation_ = 0;
+
+private:
+    [[nodiscard]] std::uint32_t intern_node(PressurePlanningTargetNode node);
+    [[nodiscard]] bool owner_protected(std::uint32_t candidate_index, std::size_t owner) const;
+    [[nodiscard]] PressureConstructionSlot&
+    construction_slot(const PressureConstructionCursor& cursor);
+    static void release_construction(const void* owner, std::uint32_t index,
+                                     std::uint32_t lease) noexcept;
 };
 
 class SequencePlanImpl {

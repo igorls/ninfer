@@ -784,10 +784,13 @@ the template has no tiered default. A preparation rejection always leaves the re
 
 `request_done.materialization` is the immutable decision committed for that request. It reports predicted immediate,
 future-loss and total nanoseconds; evaluated targets and projection work; planning/search nanoseconds; stop reason;
-the budget-exhausted flag; selected degradation units; and whether the selected target was the maximal root fallback.
-Stop reasons are `no_pressure`, `queue_exhausted`, `target_budget`, `expansion_capacity`, `time_budget`, and
-`value_of_next_expansion`. Search is bounded and heuristic; these diagnostics do not claim model or global optimality.
-Aborted planning attempts are not published.
+the budget-exhausted flag; selected degradation units; whether the selected target was the maximal root fallback;
+and the search record (`initial_predicted_total_ns`, `first_improvement_ns`, `incumbent_improvements`,
+`search_work`, `search_granted_ns`, `search_renewals`, `search_discovery_used`, `search_overshoot_ns`,
+`search_stop_phase`, `search_boundary_limited`). Stop reasons are `no_pressure`, `queue_exhausted`,
+`target_budget`, `expansion_capacity`, `time_budget`, `work_budget`, and `insufficient_expected_gain`. Search is
+bounded and heuristic; these diagnostics do not claim model or global optimality. Aborted planning attempts are
+not published.
 
 `request_done.timings_seconds` contains `prepare`, `ttft`, `vision`, `prefill`, `decode`, and `total`
 as full-precision JSON numbers. Its `speculative` object contains `backend`, `draft_window`, `rounds`,
