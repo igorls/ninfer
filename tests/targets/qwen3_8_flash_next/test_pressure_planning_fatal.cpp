@@ -444,7 +444,7 @@ void execute_prefill_and_capture(FlashNextResourceManager& manager, Program& pro
 void decode_and_finish(FlashNextResourceManager& manager, Program& prog, AdmittedRequest& req, int num_decode_tokens) {
     for (int step = 0; step < num_decode_tokens; ++step) {
         std::array<SequenceHandle, 1> seqs = {req.sequence};
-        std::array<ninfer::runtime::RoundBudget, 1> budgets{};
+        std::array<ninfer::runtime::RoundBudget, 1> budgets{{{.generated_tokens_remaining = 1}}};
         auto dec = prog.decode(seqs, budgets);
         std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = false}}};
         (void)prog.commit(std::move(dec), commit_dec);

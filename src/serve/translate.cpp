@@ -106,6 +106,9 @@ ninfer::SamplingOverrides resolve_sampling_overrides(const SamplingParams& reque
     if (request.frequency_penalty) {
         sampling.frequency_penalty = static_cast<float>(*request.frequency_penalty);
     }
+    if (request.repetition_penalty) {
+        sampling.repetition_penalty = static_cast<float>(*request.repetition_penalty);
+    }
     if (request.seed) {
         sampling.seed = *request.seed;
     } else if (server.sampling_overrides.seed) {
@@ -118,7 +121,7 @@ ninfer::SamplingOverrides resolve_sampling_overrides(const SamplingParams& reque
         return !value || std::isfinite(*value);
     };
     if (!finite(sampling.temperature) || !finite(sampling.top_p) || !finite(sampling.min_p) ||
-        !finite(sampling.presence_penalty) || !finite(sampling.frequency_penalty)) {
+        !finite(sampling.presence_penalty) || !finite(sampling.frequency_penalty) || !finite(sampling.repetition_penalty)) {
         invalid_sampling("sampling parameters must be finite", "sampling");
     }
     if (sampling.temperature && (*sampling.temperature < 0.0F || *sampling.temperature > 2.0F)) {
@@ -156,6 +159,9 @@ ninfer::SamplingOverrides resolve_sampling_overrides(const SamplingParams& reque
         (*sampling.frequency_penalty < -2.0F || *sampling.frequency_penalty > 2.0F)) {
         invalid_sampling("frequency_penalty must be in [-2,2]", "frequency_penalty");
     }
+    if (sampling.repetition_penalty && *sampling.repetition_penalty <= 0.0F) {
+        invalid_sampling("repetition_penalty must be positive", "repetition_penalty");
+    }
     if (server.greedy) { sampling.temperature = 0.0F; }
     return sampling;
 }
@@ -169,7 +175,7 @@ std::vector<const ToolDefinition*> effective_tools(const GenerationRequest& requ
 }
 
 std::string render_tool_definition(const ToolDefinition& tool) {
-    using Json  = nlohmann::json;
+    using Json  = nlohmann::ordered_json;
     Json schema = Json::parse(tool.input_schema_json);
     Json function{{"name", tool.name}, {"parameters", std::move(schema)}, {"strict", false}};
     if (!tool.description.empty()) { function["description"] = tool.description; }
@@ -374,6 +380,13 @@ ninfer::RequestOptions to_request_options(const GenerationRequest& request,
                                           bool allow_prefix_reuse) {
     ninfer::RequestOptions options;
     options.execution.structured_output = request.structured_output;
+    if (request.tool_choice.mode == ToolChoiceMode::Required) {
+        if (request.tools.empty()) { bad_request("required tool choice needs at least one tool", "tool_choice"); }
+        if (!request.stop_strings.empty()) {
+            bad_request("required tool choice conflicts with custom stop strings", "stop", "tool_choice_conflict");
+        }
+        for (const auto& tool : request.tools) { options.execution.required_tool_names.push_back(tool.name); }
+    }
     if (request.structured_output.kind != StructuredOutputKind::Text &&
         (request.uses_tools() || !request.stop_strings.empty())) {
         bad_request("structured output cannot be combined with active tools or custom stop strings", "response_format", "structured_output_conflict");

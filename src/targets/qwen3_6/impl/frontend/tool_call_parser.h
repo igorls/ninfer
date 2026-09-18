@@ -12,6 +12,9 @@
 
 namespace ninfer::targets::qwen3_6::frontend_internal {
 
+// Complete native Qwen call, including delimiter-safe raw parameter text.
+[[nodiscard]] std::string required_tool_call_grammar(const std::vector<std::string>& names);
+
 // Qwen's tool syntax carries each top-level argument as text between parameter tags. This
 // contract records only whether an explicit JSON Schema type admits a string or requires JSON
 // decoding. It intentionally does not perform full Schema validation.

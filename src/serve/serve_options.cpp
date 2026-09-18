@@ -122,7 +122,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--vision] [--no-qsa-prefill-mma] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
-           "[--frequency-penalty F] [--seed N] [--greedy]\n\n"
+           "[--frequency-penalty F] [--repetition-penalty F] [--seed N] [--greedy]\n\n"
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
            "       --no-qsa-prefill-mma selects the scalar QSA prefill attention kernel. The\n"
            "                         tiled-MMA kernel is the default: equal accuracy against the\n"
@@ -414,6 +414,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--frequency-penalty") {
             options.sampling_overrides.frequency_penalty = parse_float_in(
                 require_value("--frequency-penalty"), "frequency-penalty", -2.0f, 2.0f);
+        } else if (arg == "--repetition-penalty") {
+            options.sampling_overrides.repetition_penalty = parse_float_in(require_value("--repetition-penalty"), "repetition-penalty", 0.0F, std::numeric_limits<float>::max());
+            if (*options.sampling_overrides.repetition_penalty <= 0) { throw std::invalid_argument("repetition-penalty must be positive"); }
         } else if (arg == "--seed") {
             options.sampling_overrides.seed = parse_u64(require_value("--seed"), "seed");
         } else if (arg == "--greedy") {

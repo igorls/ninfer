@@ -76,7 +76,7 @@ int test_sampling_defaults() {
         failures += check(defaults.thinking.top_p == 0.95F, "thinking top_p mismatch");
         failures += check(defaults.non_thinking.temperature == 0.7F, "non-thinking temperature mismatch");
         failures += check(defaults.non_thinking.top_p == 0.80F, "non-thinking top_p mismatch");
-        failures += check(defaults.non_thinking.presence_penalty == 1.5F, "non-thinking presence_penalty mismatch");
+        failures += check(defaults.non_thinking.presence_penalty == 0.0F, "non-thinking presence_penalty mismatch");
     } catch (const std::exception& ex) {
         std::cerr << "Unexpected failure querying sampling_defaults: " << ex.what() << '\n';
         failures += 1;

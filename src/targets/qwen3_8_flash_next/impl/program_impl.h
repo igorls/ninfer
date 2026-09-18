@@ -274,6 +274,7 @@ public:
     void sample_tokens(const Tensor& logits,
                        std::span<const std::uint32_t> lane_indices,
                        std::span<std::int32_t> out_tokens);
+    void commit_sampling_history(std::uint32_t lane, std::span<const TokenId> tokens);
     const std::int32_t* upload_constraint_mask(std::uint32_t lane, std::uint32_t column,
                                               runtime::OutputConstraintState& constraint);
 
@@ -339,6 +340,11 @@ public:
     static constexpr std::size_t kConstraintColumns = 5;
     DeviceBuffer device_constraint_masks_;
     std::vector<std::int32_t> host_constraint_masks_;
+    DeviceBuffer device_token_counts_;
+    DeviceBuffer device_prompt_presence_;
+    DeviceBuffer device_history_tokens_;
+    std::vector<std::int32_t> host_prompt_presence_;
+    std::vector<std::int32_t> host_history_tokens_;
 };
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

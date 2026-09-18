@@ -92,7 +92,7 @@ std::string usage_text(const char* argv0) {
            "       [--token-embedding-fp8] [--token-embedding-dtype bf16|fp8]\n"
            "       [--spec mtp|dflash|dflash2 --draft-tokens N] [--lm-head-draft]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
-           "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"
+           "       [--presence-penalty F] [--frequency-penalty F] [--repetition-penalty F] [--seed N] [--greedy]\n"
            "       [--stop-token-id N]... [--stop <text>]... [--reasoning-stop <text>]...\n"
            "       [--raw-output] [--print-token-ids] [--no-thinking] [--thinking-budget N]\n"
            "       [--reasoning-effort low|medium|xhigh] [--vision]\n"
@@ -230,6 +230,9 @@ Options parse_options(int argc, char** argv) {
         } else if (arg == "--frequency-penalty") {
             options.sampling.frequency_penalty =
                 parse_float(value(arg), "frequency-penalty", -2.0F, 2.0F);
+        } else if (arg == "--repetition-penalty") {
+            options.sampling.repetition_penalty = parse_float(value(arg), "repetition-penalty", 0.0F, std::numeric_limits<float>::max());
+            if (*options.sampling.repetition_penalty <= 0) { throw std::invalid_argument("repetition-penalty must be positive"); }
         } else if (arg == "--seed") {
             options.sampling.seed = parse_u64(value(arg), "seed");
         } else if (arg == "--greedy") {

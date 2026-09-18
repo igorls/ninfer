@@ -15,7 +15,7 @@
 namespace ninfer::serve {
 namespace {
 
-using Json = nlohmann::json;
+using Json = nlohmann::ordered_json;
 
 void require_object(const Json& value, std::string_view name = "request body") {
     if (!value.is_object()) { bad_request(std::string(name) + " must be a JSON object"); }
@@ -841,9 +841,9 @@ void filter_allowed_tools(const Json& choice, ParsedPromptFields& out) {
     if (!choice.contains("mode") || !choice.at("mode").is_string()) {
         bad_request("allowed_tools tool_choice must contain a string mode", "tool_choice");
     }
-    if (choice.at("mode").get<std::string>() != "auto") {
-        bad_request("allowed_tools mode 'required' cannot be enforced", "tool_choice",
-                    "tool_choice_not_supported");
+    const auto mode = choice.at("mode").get<std::string>();
+    if (mode != "auto" && mode != "required") {
+        bad_request("allowed_tools mode must be auto or required", "tool_choice");
     }
     if (!choice.contains("tools") || !choice.at("tools").is_array()) {
         bad_request("allowed_tools tool_choice must contain a tools array", "tool_choice");
@@ -879,6 +879,10 @@ void filter_allowed_tools(const Json& choice, ParsedPromptFields& out) {
         if (selected.contains(tool.name)) { effective.push_back(std::move(tool)); }
     }
     out.prompt.generation.tools = std::move(effective);
+    out.prompt.generation.tool_choice.mode = mode == "required" ? ToolChoiceMode::Required : ToolChoiceMode::Auto;
+    if (mode == "required" && out.prompt.generation.tools.empty()) {
+        bad_request("required tool choice needs at least one tool", "tool_choice");
+    }
 }
 
 void parse_tool_choice(const Json& body, ParsedPromptFields& out) {
@@ -894,8 +898,10 @@ void parse_tool_choice(const Json& body, ParsedPromptFields& out) {
         } else if (value == "none") {
             out.prompt.generation.tool_choice.mode = ToolChoiceMode::None;
         } else if (value == "required") {
-            bad_request("tool_choice 'required' cannot be guaranteed by the Engine", "tool_choice",
-                        "tool_choice_not_supported");
+            if (out.prompt.generation.tools.empty()) {
+                bad_request("required tool choice needs at least one tool", "tool_choice");
+            }
+            out.prompt.generation.tool_choice.mode = ToolChoiceMode::Required;
         } else {
             bad_request("tool_choice must be 'auto', 'none', or a supported object", "tool_choice");
         }
@@ -904,6 +910,12 @@ void parse_tool_choice(const Json& body, ParsedPromptFields& out) {
     }
     if (!choice.is_object() || !choice.contains("type") || !choice.at("type").is_string()) {
         bad_request("tool_choice must be a string or typed object", "tool_choice");
+    }
+    if (choice.at("type").get<std::string>() == "function") {
+        filter_allowed_tools(Json{{"type", "allowed_tools"}, {"mode", "required"},
+                                  {"tools", Json::array({choice})}}, out);
+        out.wire_tool_choice = choice;
+        return;
     }
     if (choice.at("type").get<std::string>() != "allowed_tools") {
         bad_request("named or hosted tool_choice cannot be enforced", "tool_choice",
@@ -1039,7 +1051,8 @@ ParsedPromptFields parse_prompt_fields(const Json& body, const RequestLimits& li
     parse_tools(body, out);
     parse_tool_choice(body, out);
     out.parallel_tool_calls = optional_bool(body, "parallel_tool_calls", true);
-    if (!out.parallel_tool_calls && out.prompt.generation.uses_tools()) {
+    if (!out.parallel_tool_calls && out.prompt.generation.uses_tools() &&
+        out.prompt.generation.tool_choice.mode != ToolChoiceMode::Required) {
         bad_request("parallel_tool_calls=false cannot be guaranteed when callable tools are "
                     "present",
                     "parallel_tool_calls", "parallel_tool_calls_not_supported");
@@ -1052,7 +1065,7 @@ ParsedPromptFields parse_prompt_fields(const Json& body, const RequestLimits& li
     return out;
 }
 
-void validate_metadata(const Json& body, Json& metadata) {
+void validate_metadata(const Json& body, nlohmann::json& metadata) {
     if (!body.contains("metadata") || body.at("metadata").is_null()) { return; }
     if (!body.at("metadata").is_object()) { bad_request("metadata must be an object", "metadata"); }
     if (body.at("metadata").size() > 16) {
@@ -1115,6 +1128,7 @@ void validate_common_top_level(const Json& body, bool create) {
                                                                   "prompt_cache_options",
                                                                   "prompt_cache_retention",
                                                                   "reasoning",
+                                                                  "repetition_penalty",
                                                                   "safety_identifier",
                                                                   "service_tier",
                                                                   "store",
@@ -1249,6 +1263,10 @@ OpenAIResponsesCreateRequest parse_openai_responses_create_request(const Json& b
         if (*top_p < 0.0 || *top_p > 1.0) { bad_request("top_p must be in [0,1]", "top_p"); }
         out.prompt.generation.sampling.top_p = *top_p;
     }
+    if (const auto penalty = optional_number(body, "repetition_penalty")) {
+        if (*penalty <= 0.0) { bad_request("repetition_penalty must be positive", "repetition_penalty"); }
+        out.prompt.generation.sampling.repetition_penalty = *penalty;
+    }
     if (const std::optional<int> max_output = optional_int(body, "max_output_tokens")) {
         if (*max_output < 0) {
             bad_request("max_output_tokens must be non-negative", "max_output_tokens");
@@ -1269,6 +1287,17 @@ parse_openai_responses_input_tokens_request(const Json& body, const RequestLimit
                     "personality_not_supported");
     }
     return std::move(parse_prompt_fields(body, limits).prompt);
+}
+
+OpenAIResponsesCreateRequest parse_openai_responses_create_request(const nlohmann::json& body,
+                                                                   const RequestLimits& limits) {
+    return parse_openai_responses_create_request(nlohmann::ordered_json(body), limits);
+}
+
+OpenAIResponsesPromptRequest
+parse_openai_responses_input_tokens_request(const nlohmann::json& body,
+                                            const RequestLimits& limits) {
+    return parse_openai_responses_input_tokens_request(nlohmann::ordered_json(body), limits);
 }
 
 } // namespace ninfer::serve

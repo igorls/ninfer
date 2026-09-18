@@ -219,8 +219,9 @@ and MTP acceptance, so this is not an exact-output profiler-overhead experiment.
 | 30,293 tokens | 65.76–65.80 | 116.80–123.29 | 4.379–4.380 s | 4.320–4.325 s |
 
 Decode rates use 255 post-first-token outputs divided by the logged decode time.
-The `timings_seconds.prefill` field was zero even on the long requests; it is not
-a usable phase timer for this route. Prefill attribution below uses NVTX ranges.
+The `timings_seconds.prefill` field was zero in these recordings, even on the long
+requests. Prefill attribution below uses NVTX ranges; the later timing correction
+does not retroactively supply phase measurements for these runs.
 
 Software CUDA tracing from process start, with graph-node tracing enabled, captures
 the complete ordinary and MTP decode kernels. An initial hardware trace started
@@ -414,7 +415,7 @@ ordinary decode approximately 10%. MTP long-context decode improves approximatel
 MTP acceptance varies between runs, so these measurements do not establish a
 universal speculation speedup. Root TTFT falls approximately 13% for both long
 workloads. TTFT includes preparation, prefill, and first-token work; the existing
-Flash-Next `prefill` timing field remains zero and is not used as a phase measurement.
+Flash-Next `prefill` timing field was zero in these runs and is not used as a phase measurement.
 An intermediate decode-only binary retained approximately 4.31–4.35 s long TTFT,
 isolating the later TTFT reduction to the prefill change.
 
@@ -435,6 +436,102 @@ The root request helper is `tools/bench/profile_flash_next.py`; exact server
 arguments are saved in each run's command JSON. These results describe the stated
 single-active-request workloads, not concurrent throughput or a general hardware
 ceiling.
+
+#### Half-width MoE gate/up staging (September 7)
+
+The routed NVFP4 gate/up prefill kernel now stages two K=1,280 tiles instead of
+retaining K=2,560. The output tile remains 16 gate/up pairs by 32 tokens, and both
+halves feed the same accumulators in the original forty K64 MMA steps. Dynamic
+shared memory falls from 92,416 to 46,336 bytes and compiled registers from 106 to
+57, with no spills. CUDA's occupancy query reports two resident 256-thread CTAs
+instead of one on the RTX PRO 6000. This is a residency limit, not measured achieved
+occupancy. Weight tiles are reloaded for each token chunk; the experiment measures
+whether additional parallel work repays those copies.
+
+The isolated kernel gate uses signed E2M1 codes, independently varied per-group
+E4M3 scales, all 512 experts, and uniform routing or a skew that places 75% of tokens
+among 32 experts. At T=512, 513, 2,048 and 8,192, every routed output is written and
+finite, the unused shared-expert output remains a sentinel, and all routed BF16
+values match the original kernel bitwise. The odd T=513 case exercises partial
+token pairs. A no-op candidate fails the sentinel check. An independent FP64 oracle
+decodes the represented packed inputs and stored scales, evaluates both complete
+dot products and SiLU(gate)*up, and checks 256 selected outputs across these cases.
+The maximum relative error is 0.003785, within the 0.0041 BF16 rounding criterion
+(denominator floor 1e-4). Bitwise implementation comparison supplements that oracle.
+
+Six alternating A/B observations per case time a graph containing twenty kernel
+nodes. Median kernel-time reductions are 18.5%, 17.6%, 13.4% and 4.8% for uniform
+routing, and 17.2%, 11.3%, 12.7% and 9.8% for skewed routing at those four extents.
+These are operator measurements, not request speedups.
+
+Public Engine qualification uses native Windows Release, MSVC 19.51, CUDA 13.3.33,
+the same mixed Flash-Next artifact and BF16 output head, FP8 KV, BF16 GDN state,
+Vision allocations, CUDA graphs, an 8,192-token prefill chunk, a 65,536-token context
+limit, a 196,608-token KV pool, capacity for eight requests and one active request.
+The unchanged kernel and candidate are built from the same source/toolchain and
+run in separate processes, with ordinary decoding and MTP4 tested independently.
+An initial comparison against the older production executable also changed
+untouched decode throughput substantially; it is excluded from attribution.
+
+Each process warms a short and long prompt, then runs three fixed root prompts per
+length (52, 3,952 or 30,282 tokens), with 256 outputs, temperature zero, seed 42 and
+reasoning disabled. Root requests assert zero prefix reuse. Each long request is
+followed immediately by a continuation with 128 outputs. All 60 requests across
+the four processes pass, including one schema-constrained request per process.
+
+| Mode and root prompt | Baseline TTFT | Candidate TTFT | Mean TTFT reduction |
+|---|---:|---:|---:|
+| Ordinary, 3,952 tokens | 0.515–0.520 s | 0.505–0.508 s | 2.2% |
+| Ordinary, 30,282 tokens | 4.074–4.094 s | 4.022–4.042 s | 1.3% |
+| MTP4, 3,952 tokens | 0.525–0.532 s | 0.515–0.524 s | 1.7% |
+| MTP4, 30,282 tokens | 4.192–4.230 s | 4.111–4.135 s | 2.2% |
+
+The primary production-mode result is about 92 ms less root TTFT on the 30K MTP4
+workload. Unchanged short MTP decode averages 165.22 versus 165.02 committed tok/s;
+long MTP decode averages 135.04 versus 135.94 tok/s. Ordinary decode also varies
+slightly between processes. No decode-speed improvement is attributed to this
+prefill change. Ranges describe three observations, not confidence intervals or a
+universal gain. The Flash-Next `prefill` timer was zero in these runs, so TTFT is
+reported rather than relabelled as isolated prefill time.
+
+Baseline and candidate return identical text in every paired request and identical
+MTP acceptance counts at every draft position. This is a regression observation,
+not a legal-quality evaluation. Continued prompts reuse 30,275 of 30,561 prompt
+tokens; both variants deliver approximately 0.20–0.21 s TTFT for that short suffix,
+without a material reuse gain. The actual-launcher MoE integration test passes.
+Production was restored to its original executable after isolated qualification; this result
+does not by itself claim deployment of the candidate.
+
+Local evidence is in the isolated worktree's `profiles/moe-staging/`: the corrected
+oracle/graph harness and negative control, `moe-test.log`, paired request/response
+records, exact commands, VRAM snapshots and `paired-aggregate.json`. This campaign
+does not measure concurrent-request throughput or the vendor's 90% prefix-hit point.
+
+The initial upstream RMSNorm candidate `9954867a` is deferred for Flash-Next.
+Its changed D=2,560 embedding route accounts for only 1.19–1.30 ms across the complete
+short/long MTP decode ranges in the retained September 6 traces (0.09%/0.06% of
+summed kernel time). Flash-Next's D=10,240 hidden norm uses the generic kernel,
+which that commit does not change, and its gated 170-SM crossover is not reached.
+Those traces predate the selected-block attention improvement above; the tiny
+absolute time bound does not justify a full Engine experiment for this cherry-pick.
+
+### Request-owned prefill timing
+
+Flash-Next now accumulates the execution time of each `advance_prefill` call in
+the admitted request and exports completed work on finish, abort and cancellation.
+The sum includes host submission and device completion waits, while excluding
+scheduling gaps and checkpoint materialization outside those calls. Vision uses
+the current call's encode-time delta and is reported separately. Timings reset at
+admission and do not travel with reusable checkpoints. TTFT remains wall time.
+
+Focused reuse and Vision fixtures check chunk accumulation, eight reused turns,
+admission reset, partial-work cancellation, and image/text request isolation. A
+real-artifact check on Windows/RTX PRO 6000 reported 0.4164 s prefill for 2,290 cold
+tokens and 0.0750 s for a continuation computing 48 tokens after reusing 2,283.
+Both values were positive and below TTFT. An active background upload makes these
+accounting checks unsuitable for a performance comparison. For reused requests,
+divide computed prompt tokens by prefill time, rather than counting the cached
+prefix as newly computed work.
 
 ### Cold host PLE and repeated-turn prefill
 

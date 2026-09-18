@@ -82,6 +82,8 @@ void constrained_batch(ninfer::Engine& engine, const std::vector<ninfer::TokenId
             const bool structured = pass >= 2 || row % 2 == 0;
             auto options = request(structured ? 64 : 24, true);
             if (structured) {
+                options.execution.sampling.repetition_penalty = 1.1F;
+                options.execution.sampling.presence_penalty = 0.25F;
                 const auto value = pass * batch + row;
                 const nlohmann::json schema = {
                     {"type", "object"},
@@ -256,10 +258,15 @@ int main(int argc, char** argv) {
         } else {
             throw std::invalid_argument("KV codec must be bf16, int8, or fp8");
         }
-        std::vector<ninfer::TokenId> prompt, reference, penalty_reference;
+        std::vector<ninfer::TokenId> prompt, reference, penalty_reference, repetition_reference;
         auto penalty                                 = request(24);
         penalty.execution.sampling.presence_penalty  = 0.5F;
         penalty.execution.sampling.frequency_penalty = 0.25F;
+        // The bounded counting segment has stable margins across single-token and
+        // speculative target kernels; later free-form prose can cross close logit margins.
+        auto repetition = penalty;
+        repetition.execution.requested_output_tokens = 16;
+        repetition.execution.sampling.repetition_penalty = 1.1F;
         {
             auto ordinary_options            = options;
             ordinary_options.max_concurrency = 1;
@@ -272,6 +279,8 @@ int main(int argc, char** argv) {
                 ordinary.generate(ordinary.prepare_tokens(prompt), request(24)).generated_token_ids;
             penalty_reference =
                 ordinary.generate(ordinary.prepare_tokens(prompt), penalty).generated_token_ids;
+            repetition_reference =
+                ordinary.generate(ordinary.prepare_tokens(prompt), repetition).generated_token_ids;
         }
         options.speculative.backend      = ninfer::SpeculativeBackend::DFlash2;
         options.speculative.draft_tokens = k;
@@ -288,6 +297,13 @@ int main(int argc, char** argv) {
         valid(penalized, 24);
         require(penalized.generated_token_ids == penalty_reference,
                 "DFlash2 committed token counts differ from ordinary decoding");
+
+        const auto repetition_result = engine.generate(engine.prepare_tokens(prompt), repetition);
+        valid(repetition_result, 16);
+        require(repetition_result.generated_token_ids == repetition_reference,
+                "DFlash2 repetition history differs from ordinary decoding");
+        require(!std::equal(repetition_reference.begin(), repetition_reference.end(), reference.begin()),
+                "penalized counting fixture did not exercise adjusted token selection");
 
         // All rows share a known target prefix, while their budgets force P=0, partial and full W.
         std::vector<ninfer::GenerationHandle> handles;
@@ -308,6 +324,7 @@ int main(int argc, char** argv) {
         sampled.execution.sampling.top_k             = 20;
         sampled.execution.sampling.presence_penalty  = 0.3F;
         sampled.execution.sampling.frequency_penalty = 0.2F;
+        sampled.execution.sampling.repetition_penalty = 1.1F;
         sampled.execution.sampling.seed              = 42;
         const auto sample1 = engine.generate(engine.prepare_tokens(prompt), sampled);
         const auto sample2 = engine.generate(engine.prepare_tokens(prompt), sampled);
@@ -334,8 +351,11 @@ int main(int argc, char** argv) {
         continuation.insert(continuation.end(), retained.generated_token_ids.begin(),
                             retained.generated_token_ids.end());
         continuation.push_back(198);
-        const auto reused = engine.generate(engine.prepare_tokens(continuation), request(8, true));
-        const auto fresh  = engine.generate(engine.prepare_tokens(continuation), request(8, false));
+        auto reuse_penalty = request(8, true);
+        reuse_penalty.execution.sampling.repetition_penalty = 1.1F;
+        const auto reused = engine.generate(engine.prepare_tokens(continuation), reuse_penalty);
+        reuse_penalty.execution.allow_prefix_reuse = false;
+        const auto fresh = engine.generate(engine.prepare_tokens(continuation), reuse_penalty);
         require(reused.reused_prompt_tokens != 0 &&
                     reused.generated_token_ids == fresh.generated_token_ids,
                 "DFlash2 prefix restore did not preserve target and local context state");

@@ -28,7 +28,7 @@ __launch_bounds__(kSamplerBlock) __global__
     if (!(cfg.temperature > 0.0f)) {
         float bv             = -CUDART_INF_F;
         int bi               = INT_MAX;
-        const bool penalties = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f || cfg.allowed_tokens != nullptr;
+        const bool penalties = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f || cfg.repetition_penalty != 1.0f || cfg.allowed_tokens != nullptr;
         if (!penalties) {
             for (int v = tid; v < token_domain; v += blockDim.x) {
                 const float x = __bfloat162float(logits[base + v]);
@@ -59,7 +59,7 @@ __launch_bounds__(kSamplerBlock) __global__
         }
         if (tid == 0) {
             out[row] = red_idx[0];
-            if (cfg.token_counts != nullptr) { atomicAdd(&cfg.token_counts[red_idx[0]], 1); }
+            if (cfg.token_counts != nullptr && cfg.commit_token_counts) { atomicAdd(&cfg.token_counts[red_idx[0]], 1); }
         }
         return;
     }
@@ -100,7 +100,7 @@ __launch_bounds__(kSamplerBlock) __global__
         }
     }
     out[row] = picked;
-    if (cfg.token_counts != nullptr) { atomicAdd(&cfg.token_counts[picked], 1); }
+    if (cfg.token_counts != nullptr && cfg.commit_token_counts) { atomicAdd(&cfg.token_counts[picked], 1); }
 }
 
 __launch_bounds__(kSamplerBlock) __global__
@@ -117,7 +117,7 @@ __launch_bounds__(kSamplerBlock) __global__
     unsigned long long keys[kSamplerItemsPerThread];
 
     const bool greedy       = !(cfg.temperature > 0.0f);
-    const bool penalties    = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f || cfg.allowed_tokens != nullptr;
+    const bool penalties    = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f || cfg.repetition_penalty != 1.0f || cfg.allowed_tokens != nullptr;
     const int cap           = greedy ? 1 : sampling_candidate_cap(cfg, token_domain);
     const std::int64_t base = static_cast<std::int64_t>(col) * physical_rows;
     const int tile_start    = partial * kSamplerPartialTileItems;
@@ -210,7 +210,7 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void sampling_group_finalize_sa
         if (tid == 0) {
             const int picked = sampling_key_index(best);
             out[col]         = picked;
-            if (cfg.token_counts != nullptr) { atomicAdd(&cfg.token_counts[picked], 1); }
+            if (cfg.token_counts != nullptr && cfg.commit_token_counts) { atomicAdd(&cfg.token_counts[picked], 1); }
             workspace.group_done[col] = 0;
         }
         return;
@@ -289,7 +289,7 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void sampling_group_finalize_sa
             }
         }
         out[col] = picked;
-        if (cfg.token_counts != nullptr) { atomicAdd(&cfg.token_counts[picked], 1); }
+        if (cfg.token_counts != nullptr && cfg.commit_token_counts) { atomicAdd(&cfg.token_counts[picked], 1); }
         workspace.group_done[col] = 0;
     }
 }

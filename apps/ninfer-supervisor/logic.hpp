@@ -608,9 +608,9 @@ inline const std::vector<EngineParamSpec>& engine_param_specs() {
         {"--max-context", "max_context", ParamKind::Int, "capacity", "Max context",
          "Longest prompt plus generation the engine will admit, in tokens.", 256, 262144, {}},
         {"--kv-capacity", "kv_capacity", ParamKind::IntOrAuto, "capacity", "KV capacity",
-         "Total KV tokens across all lanes. 'auto' sizes it from free memory.", 1024, 4194304, {}},
+         "Shared KV pool for every active request. 'auto' sizes it from free memory.", 1024, 4194304, {}},
         {"--max-concurrency", "max_concurrency", ParamKind::Int, "capacity", "Max concurrency",
-         "Concurrent decode lanes. The engine refuses to start above 8.", 1, 8, {}},
+         "How many requests may be active at once. 8 is the Engine's compile-time lane maximum, not a GPU-memory guess.", 1, 8, {}},
         {"--max-pending-requests", "max_pending_requests", ParamKind::Int, "capacity",
          "Max pending requests", "Queue depth before new requests are rejected.", 1, 4096, {}},
         {"--pending-timeout-ms", "pending_timeout_ms", ParamKind::Int, "capacity",
@@ -885,6 +885,21 @@ inline std::vector<std::string> validate_engine_param_combination(
             capacity < context) {
             errors.emplace_back("KV capacity must be at least the max context, or the engine "
                                 "cannot hold one full-length request");
+        } else if (parse_long_long(*kv_capacity, capacity) && parse_long_long(*max_context, context)) {
+            // Same page bounds the Engine uses: M in [max(L, C), C*L] with 64-token pages.
+            long long lanes = 1;
+            const std::string* conc = find_param_value(params, "max_concurrency");
+            if (conc != nullptr) { parse_long_long(*conc, lanes); }
+            if (lanes < 1) { lanes = 1; }
+            const auto pages = [](long long tokens) { return (tokens + 63) / 64; };
+            const long long logical = pages(context);
+            const long long pool    = pages(capacity);
+            const long long minimum = logical > lanes ? logical : lanes;
+            const long long maximum = lanes * logical;
+            if (pool < minimum || pool > maximum) {
+                errors.emplace_back("KV pool must fit between one full-length request and "
+                                    "max-concurrency full-length requests");
+            }
         }
     }
     if (draft_tokens != nullptr && spec_backend == nullptr) {

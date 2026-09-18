@@ -368,11 +368,12 @@ int test_tools() {
     body                = base_request();
     body["tools"]       = Json::array({ordinary_tool()});
     body["tool_choice"] = Json{{"type", "any"}};
-    failures += check(api_code([&] { (void)parse(body); }) == "tool_choice_not_supported",
-                      "forced any-tool choice was silently downgraded");
+    failures += check(parse(body).generation.tool_choice.mode == ToolChoiceMode::Required,
+                      "any-tool choice requires a generated call");
     body["tool_choice"] = Json{{"type", "tool"}, {"name", "weather"}};
-    failures += check(api_code([&] { (void)parse(body); }) == "tool_choice_not_supported",
-                      "named tool choice was silently downgraded");
+    failures += check(parse(body).generation.tool_choice.mode == ToolChoiceMode::Required &&
+                          parse(body).generation.tools.size() == 1,
+                      "named tool choice narrows and requires a call");
     body["tool_choice"] = Json{{"type", "auto"}, {"disable_parallel_tool_use", true}};
     failures += check(api_code([&] { (void)parse(body); }) == "parallel_tool_use_not_supported",
                       "active single-tool-call guarantee was silently downgraded");

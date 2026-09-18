@@ -17,8 +17,11 @@ namespace {
 void validate_sampling(const ResolvedSamplingParameters& sampling) {
     if (!std::isfinite(sampling.temperature) || !std::isfinite(sampling.top_p) ||
         !std::isfinite(sampling.min_p) || !std::isfinite(sampling.presence_penalty) ||
-        !std::isfinite(sampling.frequency_penalty)) {
+        !std::isfinite(sampling.frequency_penalty) || !std::isfinite(sampling.repetition_penalty)) {
         throw std::invalid_argument("sampling parameters must be finite");
+    }
+    if (sampling.repetition_penalty <= 0.0F) {
+        throw std::invalid_argument("repetition_penalty must be positive");
     }
     if (sampling.top_p < 0.0F || sampling.top_p > 1.0F) {
         throw std::invalid_argument("top_p must be in [0,1]");
@@ -36,6 +39,7 @@ ops::SamplingConfig translate_sampling(const ResolvedSamplingParameters& source)
     out.min_p             = source.min_p;
     out.presence_penalty  = source.presence_penalty;
     out.frequency_penalty = source.frequency_penalty;
+    out.repetition_penalty = source.repetition_penalty;
     out.seed              = source.seed;
     out.token_counts      = nullptr;
     return out;

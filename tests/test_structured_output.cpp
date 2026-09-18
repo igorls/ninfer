@@ -84,6 +84,11 @@ int main() {
         require(!accepts(OutputConstraintState(tuple, false), "[true,1]"), "tuple position schema ignored");
         require(!accepts(OutputConstraintState(tuple, false), "[1,true,null]"), "items:false ignored");
         require(!accepts(initial.fork(), std::string("{\"x\":\"raw") + '\t' + "tab\"}"), "raw JSON control admitted");
+        const std::string order_schema = R"({"type":"object","properties":{"zebra":{"type":"string"},"alpha":{"type":"string"}},"required":["zebra","alpha"],"additionalProperties":false})";
+        auto order_compiled = compiler.compile({StructuredOutputKind::JsonSchema, order_schema});
+        OutputConstraintState order_state(order_compiled, false);
+        require(accepts(order_state.fork(), R"({"zebra":"z","alpha":"a"})"), "schema property declaration order rejected");
+        require(!accepts(order_state.fork(), R"({"alpha":"a","zebra":"z"})"), "alphabetical property order admitted over schema declaration order");
         std::cout << "structured output grammar, masks, schema, reasoning and fork tests passed\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

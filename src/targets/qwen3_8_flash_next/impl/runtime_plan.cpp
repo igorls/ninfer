@@ -191,7 +191,7 @@ compute_fixed_base_bytes(const FlashNextRuntimeConfig& config, std::uint32_t res
             248'320, 1, static_cast<std::int32_t>(config.max_concurrency)));
     const std::size_t sampling_arrays_bytes = checked_align_up_256(
         config.max_concurrency * (sizeof(ops::SamplingConfig) + 2 * sizeof(std::int32_t))) +
-        config.max_concurrency * 5 * ((248077 + 31) / 32) * sizeof(std::int32_t);
+        config.max_concurrency * (6 * ((248077 + 31) / 32) + 248077 + 5) * sizeof(std::int32_t);
 
     return checked_add(
         block_tables_bytes,

@@ -23,6 +23,8 @@ struct OpenAIChatRequest {
     bool output_tokens_explicit = false;
 };
 
+OpenAIChatRequest parse_chat_completion_request(const nlohmann::ordered_json& body,
+                                                const RequestLimits& limits);
 OpenAIChatRequest parse_chat_completion_request(const nlohmann::json& body,
                                                 const RequestLimits& limits);
 

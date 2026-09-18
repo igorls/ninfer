@@ -232,6 +232,9 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
         add_tensor(builder, DType::I32,
                    {TextConfig::token_domain, static_cast<std::int32_t>(plan.max_concurrency)},
                    "sampling token counts");
+    out.prompt_presence = add_tensor(builder, DType::I32,
+        {(TextConfig::token_domain + 31) / 32, static_cast<std::int32_t>(plan.max_concurrency)},
+        "sampling prompt presence");
     const auto config_words = static_cast<std::int32_t>(
         (sizeof(ops::SamplingConfig) + sizeof(std::int32_t) - 1) / sizeof(std::int32_t));
     out.sampling_config = add_tensor(

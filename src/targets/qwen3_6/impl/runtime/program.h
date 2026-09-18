@@ -474,6 +474,7 @@ struct RequestControl {
     Lifecycle lifecycle = Lifecycle::Empty;
     PendingCandidate pending;
     ops::SamplingConfig sampling_host;
+    std::vector<std::int32_t> prompt_presence_host;
     std::unique_ptr<runtime::OutputConstraintState> output_constraint;
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
@@ -675,6 +676,7 @@ public:
     Tensor sampling_config;
     Tensor constraint_masks;
     Tensor token_counts;
+    Tensor prompt_presence;
 
     std::vector<SequenceState> continuation_states;
     std::vector<ContinuationSlot> continuation_slots;
@@ -1205,7 +1207,7 @@ private:
     void release_sequence_state(SequenceState& sequence) noexcept;
     void prepare_graphs();
     void install_sampling(SequenceState& sequence, RequestControl& request,
-                          const ops::SamplingConfig& config);
+                          const ops::SamplingConfig& config, std::span<const TokenId> prompt);
     void set_device_i32(Tensor& tensor, std::int32_t value);
     void copy_tail(SequenceState& sequence, const Tensor& source);
     void copy_round_token();

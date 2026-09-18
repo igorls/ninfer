@@ -21,7 +21,7 @@ bool same_preset(const ninfer::SamplingPreset& actual, const ninfer::SamplingPre
     return actual.temperature == expected.temperature && actual.top_k == expected.top_k &&
            actual.top_p == expected.top_p && actual.min_p == expected.min_p &&
            actual.presence_penalty == expected.presence_penalty &&
-           actual.frequency_penalty == expected.frequency_penalty;
+           actual.frequency_penalty == expected.frequency_penalty && actual.repetition_penalty == expected.repetition_penalty;
 }
 
 bool throws_invalid(const auto& operation) {
@@ -63,8 +63,6 @@ int main() {
         .min_p            = 0.0F,
         .presence_penalty = 0.0F,
     };
-    auto moe_non_thinking = dense_non_thinking;
-    moe_non_thinking.presence_penalty = 1.5F;
     const ninfer::SamplingPreset moe_thinking{
         .temperature      = 1.0F,
         .top_k            = 20,
@@ -73,6 +71,8 @@ int main() {
         .presence_penalty = 1.5F,
     };
 
+    auto moe_non_thinking = dense_non_thinking;
+    moe_non_thinking.presence_penalty = 1.5F;
     failures += check(same_preset(qwen3_6.thinking, dense_thinking),
                       "Qwen3.6-27B thinking defaults mismatch");
     failures += check(same_preset(qwen3_6.non_thinking, dense_non_thinking),
@@ -99,7 +99,7 @@ int main() {
                           thinking.presence_penalty == 0.0F && thinking.seed == 0,
                       "omitted overrides did not select Qwen3.8 thinking defaults");
     failures += check(non_thinking.temperature == 0.7F && non_thinking.top_p == 0.8F &&
-                          non_thinking.presence_penalty == 0.0F,
+                          non_thinking.presence_penalty == 0.0F && non_thinking.repetition_penalty == 1.0F,
                       "omitted overrides did not select Qwen3.8 non-thinking defaults");
 
     ninfer::SamplingOverrides overrides;
@@ -124,6 +124,17 @@ int main() {
                       }),
                       "top_k beyond the executable candidate domain was accepted");
     overrides.top_k = 0;
+
+    overrides.repetition_penalty = 1.1F;
+    failures += check(ninfer::runtime::resolve_sampling(qwen3_8, ninfer::SamplingMode::Thinking,
+                          overrides).repetition_penalty == 1.1F, "repetition override was lost");
+    for (float invalid : {0.0F, -1.0F, std::numeric_limits<float>::infinity()}) {
+        overrides.repetition_penalty = invalid;
+        failures += check(throws_invalid([&] {
+            (void)ninfer::runtime::resolve_sampling(qwen3_8, ninfer::SamplingMode::Thinking, overrides);
+        }), "invalid repetition penalty was accepted");
+    }
+    overrides.repetition_penalty = 1.0F;
 
     overrides.temperature = std::numeric_limits<float>::quiet_NaN();
     failures += check(throws_invalid([&] {

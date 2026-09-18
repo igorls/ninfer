@@ -1246,6 +1246,16 @@ int test_engine_param_validation() {
                                                    {"max_context", "262144"}})
                     .empty(),
                "a KV pool smaller than one full context is refused");
+    f += check(!validate_engine_param_combination({{"kv_capacity", "4194304"},
+                                                   {"max_context", "32768"},
+                                                   {"max_concurrency", "8"}})
+                    .empty(),
+               "a KV pool larger than concurrency times max context is refused");
+    f += check(validate_engine_param_combination({{"kv_capacity", "262144"},
+                                                  {"max_context", "32768"},
+                                                  {"max_concurrency", "8"}})
+                   .empty(),
+               "eight 32K lanes may share a 256K pool");
     return f;
 }
 

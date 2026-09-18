@@ -21,7 +21,7 @@ enum SamplePurpose : std::int32_t {
 };
 
 // Device-resident sampling parameters. token_counts is an optional device I32
-// [token_domain] committed generated-token occurrence-count array used by both penalties.
+// [token_domain] generated-token occurrence-count array used by all penalties.
 struct SamplingConfig {
     float temperature          = 0.0f; // <= 0 => greedy argmax over allowed, adjusted logits
     std::int32_t top_k         = 20;   // runtime contract is [1,20]; Op defensively caps otherwise
@@ -29,9 +29,14 @@ struct SamplingConfig {
     float min_p                = 0.0f; // <= 0 => disabled
     float presence_penalty     = 0.0f;
     float frequency_penalty    = 0.0f;
+    float repetition_penalty   = 1.0f;
     unsigned long long seed    = 0;
     std::int32_t* token_counts = nullptr; // device [token_domain] i32, or null
     const std::int32_t* allowed_tokens = nullptr; // device bitset [ceil(token_domain/32)], or null
+    const std::int32_t* prompt_presence = nullptr; // immutable prompt-membership bitset
+    const std::int32_t* history_overlay = nullptr; // read-only provisional prefix, or null
+    std::int32_t history_overlay_size = 0;
+    bool commit_token_counts = true; // false: caller commits only the licensed output
 };
 
 // Caller-owned transient capacity for every parallel sampling-lane count in the inclusive
@@ -48,12 +53,15 @@ struct SamplingConfig {
  * rows v in [0,token_domain) participate. `configs` is a device-resident contiguous
  * SamplingConfig[B] array. Greedy and stochastic rows may coexist in one invocation.
  *
- * For row b with configs[b].temperature<=0:
- *
  * With either greedy or positive-temperature sampling, let
- * c_v=configs[b].token_counts[v] (or zero when the pointer is null):
+ * logit_v=float(logits[v,b]) and c_v=configs[b].token_counts[v] (or zero when null)
+ * plus the number of occurrences of v in history_overlay[0:history_overlay_size]:
  *
- *   adjusted_v = float(logits[v,b])
+ *   prompt_v = prompt_presence != null && ((uint32(prompt_presence[v/32]) >> (v%32)) & 1).
+ *   repeated_v = prompt_v || c_v > 0.
+ *   penalized_v = repeated_v ? (logit_v < 0 ? logit_v * repetition_penalty
+ *                                          : logit_v / repetition_penalty) : logit_v.
+ *   adjusted_v = penalized_v
  *                - configs[b].presence_penalty * (c_v > 0)
  *                - configs[b].frequency_penalty * c_v.
  * If allowed_tokens is non-null, a zero bit v makes adjusted_v negative infinity before
@@ -73,8 +81,12 @@ struct SamplingConfig {
  * Row b uses counter-based RNG key
  * (configs[b].seed,logical_positions[b],purpose), without mutable RNG state or dependence on the
  * compact row index. In every mode the selected token atomically increments
- * configs[b].token_counts when it is non-null. Non-null token-count arrays belonging to distinct
- * active requests must not alias. `out` must not overlap logits, configs, logical_positions, or any
+ * configs[b].token_counts when it is non-null and commit_token_counts is true.
+ * The overlay contributes to generated counts for all three penalties. Prompt membership affects
+ * only repetition penalty. A repetition penalty must be finite and positive; 1 is neutral.
+ * Read-only count arrays may alias across verification columns; a mutable array must belong to
+ * exactly one row. Overlay and prompt bitsets are read-only and must remain live through execution.
+ * `out` must not overlap logits, configs, logical_positions, or any
  * token-count array. The Op writes all of out, uses caller-owned transient storage reported by
  * sampling_workspace_capacity_bytes(), and has no other persistent-state side effect.
  */

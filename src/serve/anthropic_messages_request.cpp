@@ -17,7 +17,7 @@
 namespace ninfer::serve {
 namespace {
 
-using Json = nlohmann::json;
+using Json = nlohmann::ordered_json;
 
 constexpr std::size_t kMaxToolNameLength = 128;
 
@@ -784,19 +784,17 @@ void lower_tools(const Json& body, GenerationRequest& request) {
         if (std::none_of(definitions.begin(), definitions.end(), named)) {
             bad_request("tool_choice references unknown tool: " + selection.name, "tool_choice");
         }
-        bad_request("tool_choice.type='tool' requires that exact tool to be called, which NInfer "
-                    "cannot guarantee",
-                    "tool_choice", "tool_choice_not_supported");
+        std::erase_if(definitions, [&](const ParsedTool& tool) {
+            return tool.definition.name != selection.name;
+        });
     }
     if (selection.kind == ToolSelectionKind::Any) {
         if (definitions.empty()) { bad_request("tool_choice requires tools", "tool_choice"); }
-        bad_request("tool_choice.type='any' requires at least one tool call, which NInfer cannot "
-                    "guarantee",
-                    "tool_choice", "tool_choice_not_supported");
     }
 
     request.tool_choice.mode =
-        selection.kind == ToolSelectionKind::None ? ToolChoiceMode::None : ToolChoiceMode::Auto;
+        selection.kind == ToolSelectionKind::None ? ToolChoiceMode::None :
+        (selection.kind == ToolSelectionKind::Auto ? ToolChoiceMode::Auto : ToolChoiceMode::Required);
     if (selection.kind == ToolSelectionKind::None) {
         for (ParsedTool& tool : definitions) {
             if (tool.source == ToolSource::UserDefined) {
@@ -978,7 +976,7 @@ void apply_anthropic_prompt_cache_policy(const Json& body, GenerationRequest& re
 
     const std::optional<CacheBoundary::Ttl> automatic_ttl = cache_boundary(body, "cache_control");
     if (!automatic_ttl) { return; }
-    request.allow_engine_automatic_shared_prefixes = false;
+    // Engine automatic shared prefixes remain enabled for Anthropic requests.
 
     std::optional<CacheBoundary>* automatic_target = nullptr;
     for (auto turn = request.messages.rbegin(); turn != request.messages.rend(); ++turn) {
@@ -1077,6 +1075,18 @@ parse_anthropic_count_tokens_request(const Json& body, const AnthropicThinkingSi
     parse_common_prompt(body, result.generation, ParsePurpose::CountTokens,
                         std::numeric_limits<int>::max(), signer);
     return result;
+}
+
+AnthropicMessagesRequest parse_anthropic_messages_request(const nlohmann::json& body,
+                                                          const RequestLimits& limits,
+                                                          const AnthropicThinkingSigner& signer) {
+    return parse_anthropic_messages_request(nlohmann::ordered_json(body), limits, signer);
+}
+
+AnthropicCountTokensRequest
+parse_anthropic_count_tokens_request(const nlohmann::json& body,
+                                     const AnthropicThinkingSigner& signer) {
+    return parse_anthropic_count_tokens_request(nlohmann::ordered_json(body), signer);
 }
 
 } // namespace ninfer::serve

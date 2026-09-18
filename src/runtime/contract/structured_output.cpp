@@ -191,6 +191,14 @@ OutputConstraintCompiler::compile(const StructuredOutputOptions& options) {
     } catch (const std::exception& error) { throw std::invalid_argument(std::string("unsupported or invalid JSON Schema: ") + error.what()); }
 }
 
+std::shared_ptr<const CompiledOutputConstraint>
+OutputConstraintCompiler::compile_grammar(const std::string& ebnf) {
+    std::lock_guard lock(impl_->mutex);
+    auto grammar = impl_->compiler.CompileGrammar(xgrammar::Grammar::FromEBNF(ebnf));
+    return std::make_shared<const CompiledOutputConstraint>(
+        std::make_shared<const CompiledOutputConstraint::Impl>(std::move(grammar), impl_->end_thinking));
+}
+
 class OutputConstraintState::Impl {
 public:
     std::shared_ptr<const CompiledOutputConstraint> compiled;

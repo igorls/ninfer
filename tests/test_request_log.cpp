@@ -62,6 +62,7 @@ int main() {
     options.preserve_thinking              = true;
     options.default_thinking_budget        = 512;
     options.sampling_overrides.temperature = 0.6F;
+    options.sampling_overrides.repetition_penalty = 1.25F;
     options.startup_argv = {"ninfer-serve", options.artifact_path, "--api-key", "<redacted>"};
 
     ninfer::EngineOptions engine_options;
@@ -218,6 +219,9 @@ int main() {
         "resolved context-cache configuration missing");
     failures += check(server.at("server").at("default_preserve_thinking") == true,
                       "server preserve-thinking default missing");
+    failures += check(server.at("sampling_defaults").at("thinking").at("repetition_penalty") == 1.0 &&
+                          server.at("sampling_defaults").at("server_overrides").at("repetition_penalty") == 1.25,
+                      "repetition penalty defaults or override missing from server log");
     failures +=
         check(server.at("sampling_defaults").at("thinking").at("temperature") == 1.0 &&
                   server.at("sampling_defaults").at("non_thinking").at("presence_penalty") == 1.5,
@@ -269,6 +273,7 @@ int main() {
     prepared.sampling.min_p                            = 0.0F;
     prepared.sampling.presence_penalty                 = 1.0F;
     prepared.sampling.frequency_penalty                = 0.0F;
+    prepared.sampling.repetition_penalty               = 1.25F;
     prepared.sampling.seed                             = 7632647173703958409ULL;
     prepared.acquisition_seconds                       = 0.004;
     prepared.preparation.seconds                       = 0.12;
@@ -288,6 +293,8 @@ int main() {
     const RequestLogContext context =
         make_request_log_context(7, "openai_chat_completions", request, metadata, prepared);
     const Json started = Json::parse(format_request_start_json("serve-test", 2000, context));
+    failures += check(started.at("request").at("sampling").at("repetition_penalty") == 1.25,
+                      "effective repetition penalty missing from request log");
     failures +=
         check(started.at("request").at("request_id") == 7, "request id missing from start record");
     failures += check(started.at("request").at("requested_output_tokens") == 4096,

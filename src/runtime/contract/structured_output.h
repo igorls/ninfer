@@ -26,6 +26,7 @@ public:
                              int end_thinking_token);
     ~OutputConstraintCompiler();
     std::shared_ptr<const CompiledOutputConstraint> compile(const StructuredOutputOptions& options);
+    std::shared_ptr<const CompiledOutputConstraint> compile_grammar(const std::string& ebnf);
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;

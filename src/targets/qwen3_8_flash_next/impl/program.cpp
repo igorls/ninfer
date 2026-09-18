@@ -1,6 +1,7 @@
 #include "targets/qwen3_8_flash_next/impl/program_impl.h"
 #include <ninfer/targets/qwen3_8_flash_next/package.h>
 #include "runtime/engine/context_cost.h"
+#include "runtime/sampling_history.h"
 
 #include "targets/qwen3_8_flash_next/impl/load/materialized.h"
 
@@ -114,7 +115,12 @@ ProgramImpl::ProgramImpl(const LoadedModelData* model_data, FlashNextRuntimePlan
       host_sampling_configs_(plan_.config.max_concurrency),
       host_sampling_positions_(plan_.config.max_concurrency, 0),
       device_constraint_masks_(plan_.config.max_concurrency * kConstraintColumns * kConstraintMaskWords * sizeof(std::int32_t)),
-      host_constraint_masks_(plan_.config.max_concurrency * kConstraintColumns * kConstraintMaskWords) {
+      host_constraint_masks_(plan_.config.max_concurrency * kConstraintColumns * kConstraintMaskWords),
+      device_token_counts_(plan_.config.max_concurrency * 248077 * sizeof(std::int32_t)),
+      device_prompt_presence_(plan_.config.max_concurrency * kConstraintMaskWords * sizeof(std::int32_t)),
+      device_history_tokens_(plan_.config.max_concurrency * kConstraintColumns * sizeof(std::int32_t)),
+      host_prompt_presence_(plan_.config.max_concurrency * kConstraintMaskWords),
+      host_history_tokens_(plan_.config.max_concurrency * kConstraintColumns) {
     allocation_.initialize(device_.stream);
     const std::uint32_t cont_cap = plan_.config.continuation_capacity;
     continuation_slots_.resize(cont_cap);
@@ -151,6 +157,22 @@ const std::int32_t* ProgramImpl::upload_constraint_mask(std::uint32_t lane, std:
     std::copy(mask.begin(), mask.end(), host);
     CUDA_CHECK(cudaMemcpyAsync(device, host, mask.size_bytes(), cudaMemcpyHostToDevice, device_.stream));
     return device;
+}
+
+void ProgramImpl::commit_sampling_history(std::uint32_t lane, std::span<const TokenId> tokens) {
+    auto* counts = lane_states_[lane].sampling_config.token_counts;
+    if (!counts || tokens.empty()) { return; }
+    auto* host = host_history_tokens_.data() + lane * kConstraintColumns;
+    auto* device = static_cast<std::int32_t*>(device_history_tokens_.p) + lane * kConstraintColumns;
+    if (tokens.size() > kConstraintColumns) { throw std::logic_error("sampling history exceeds round width"); }
+    {
+        const auto count = tokens.size();
+        std::copy_n(tokens.data(), count, host);
+        CUDA_CHECK(cudaMemcpyAsync(device, host, count * sizeof(TokenId), cudaMemcpyHostToDevice, device_.stream));
+        Tensor ids(device, DType::I32, {static_cast<std::int32_t>(count)});
+        Tensor count_tensor(counts, DType::I32, {248077});
+        ops::increment_token_counts(ids, count_tensor, device_.stream);
+    }
 }
 
 void ProgramImpl::sample_tokens(const Tensor& logits,
@@ -1480,8 +1502,11 @@ Program::plan_request(const qwen3_6::PreparedPrompt& prompt,
     }
     if (!std::isfinite(options.sampling.temperature) || !std::isfinite(options.sampling.top_p) ||
         !std::isfinite(options.sampling.min_p) || !std::isfinite(options.sampling.presence_penalty) ||
-        !std::isfinite(options.sampling.frequency_penalty)) {
+        !std::isfinite(options.sampling.frequency_penalty) || !std::isfinite(options.sampling.repetition_penalty)) {
         throw std::invalid_argument("sampling parameters must be finite");
+    }
+    if (options.sampling.repetition_penalty <= 0.0F) {
+        throw std::invalid_argument("repetition_penalty must be positive");
     }
     if (options.sampling.top_p < 0.0F || options.sampling.top_p > 1.0F) {
         throw std::invalid_argument("top_p must be in [0,1]");
@@ -1537,6 +1562,7 @@ Program::plan_request(const qwen3_6::PreparedPrompt& prompt,
     base->sampling_config.min_p             = options.sampling.min_p;
     base->sampling_config.presence_penalty  = options.sampling.presence_penalty;
     base->sampling_config.frequency_penalty = options.sampling.frequency_penalty;
+    base->sampling_config.repetition_penalty = options.sampling.repetition_penalty;
     base->sampling_config.seed              = options.sampling.seed;
     base->sampling_config.token_counts      = nullptr;
     base->output_constraint = options.output_constraint;
@@ -1863,6 +1889,21 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
 
     if (adm.impl_ != nullptr && adm.impl_->base_plan != nullptr) {
         st.sampling_config = adm.impl_->base_plan->sampling_config;
+        st.sampling_config.commit_token_counts = false;
+        const bool penalties = st.sampling_config.presence_penalty != 0.0F ||
+            st.sampling_config.frequency_penalty != 0.0F || st.sampling_config.repetition_penalty != 1.0F;
+        if (penalties) {
+            st.sampling_config.token_counts = static_cast<std::int32_t*>(impl_->device_token_counts_.p) + lane_idx * 248077;
+            CUDA_CHECK(cudaMemsetAsync(st.sampling_config.token_counts, 0, 248077 * sizeof(std::int32_t), impl_->device_.stream));
+        }
+        if (st.sampling_config.repetition_penalty != 1.0F) {
+            const auto mask = runtime::prompt_token_presence(st.prompt_tokens, 248077);
+            auto* host = impl_->host_prompt_presence_.data() + lane_idx * detail::ProgramImpl::kConstraintMaskWords;
+            auto* device = static_cast<std::int32_t*>(impl_->device_prompt_presence_.p) + lane_idx * detail::ProgramImpl::kConstraintMaskWords;
+            std::copy(mask.begin(), mask.end(), host);
+            CUDA_CHECK(cudaMemcpyAsync(device, host, mask.size() * sizeof(std::int32_t), cudaMemcpyHostToDevice, impl_->device_.stream));
+            st.sampling_config.prompt_presence = device;
+        }
         if (adm.impl_->base_plan->output_constraint) {
             st.output_constraint = std::make_unique<runtime::OutputConstraintState>(
                 adm.impl_->base_plan->output_constraint, prompt_data.starts_in_reasoning);
@@ -2526,6 +2567,16 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
                                                        st.last_token_pos};
         std::array<ops::SamplingConfig, 5> verification_sampling;
         verification_sampling.fill(st.sampling_config);
+        if (st.sampling_config.token_counts && !st.draft_tokens.empty()) {
+            auto* host = impl_->host_history_tokens_.data() + lane_idx * detail::ProgramImpl::kConstraintColumns;
+            auto* device = static_cast<std::int32_t*>(impl_->device_history_tokens_.p) + lane_idx * detail::ProgramImpl::kConstraintColumns;
+            std::copy(st.draft_tokens.begin(), st.draft_tokens.end(), host);
+            CUDA_CHECK(cudaMemcpyAsync(device, host, st.draft_tokens.size() * sizeof(TokenId), cudaMemcpyHostToDevice, impl_->device_.stream));
+            for (std::size_t column = 0; column <= st.draft_tokens.size(); ++column) {
+                verification_sampling[column].history_overlay = device;
+                verification_sampling[column].history_overlay_size = static_cast<std::int32_t>(column);
+            }
+        }
         if (st.output_constraint) {
             auto preview = st.output_constraint->fork();
             for (std::size_t column = 0; column <= st.draft_tokens.size(); ++column) {
@@ -2707,6 +2758,7 @@ Program::append_forced_tokens(std::span<const SequenceHandle> sequences,
             auto round = impl_->executor_.execute_round(std::span(&req, 1));
             std::array<detail::LaneCommitDecision, 1> decision = {{{.accept = true}}};
             round.commit(decision);
+            impl_->commit_sampling_history(lane_idx, std::span(&tok, 1));
 
             st.last_token_id    = req.token_id;
             st.last_token_pos   = req.mrope_positions[0];
@@ -2759,6 +2811,7 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
                 throw std::invalid_argument("speculative commit exceeds the verified token count");
             }
             st.pending_accepted_tokens.resize(dec.accepted_tokens);
+            impl_->commit_sampling_history(lane_idx, st.pending_accepted_tokens);
             // Commit accepted tokens via speculative commit
             if (impl_->pending_round_.valid()) {
                 impl_->pending_round_.commit_speculative(lane_idx, st.pending_accepted_tokens);
@@ -2821,6 +2874,7 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
 
             if (dec.accepted_tokens > 0) {
                 const TokenId sampled = pending.tokens()[b];
+                impl_->commit_sampling_history(lane_idx, std::span(&sampled, 1));
                 if (st.output_constraint) { st.output_constraint->accept(std::span(&sampled, 1)); }
                 st.prompt_tokens.push_back(sampled);
                 st.prefix_digests.append_generated(std::span(&sampled, 1), 0);

@@ -4,6 +4,7 @@
 
 #include "core/nvtx.h"
 #include "core/startup.h"
+#include "runtime/sampling_history.h"
 #include "targets/qwen3_6/impl/runtime/schedule.h"
 #include "ninfer/ops/gdn_replay.h"
 #include "ninfer/ops/linear.h"
@@ -928,6 +929,7 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
         score_hidden = plan.persistent.score_hidden->bind(backing);
     }
     token_counts    = plan.persistent.token_counts.bind(backing);
+    prompt_presence = plan.persistent.prompt_presence.bind(backing);
     sampling_config = plan.persistent.sampling_config.bind(backing);
     constraint_masks = plan.persistent.constraint_masks.bind(backing);
     active_continuations.fill(continuation_capacity);
@@ -9896,7 +9898,7 @@ void ProgramImplCore::start_sequence(std::uint32_t lane, SequenceState& sequence
         request.output_constraint = request_plan.output_constraint
             ? std::make_unique<runtime::OutputConstraintState>(request_plan.output_constraint, staged.prompt.starts_in_reasoning)
             : nullptr;
-        install_sampling(sequence, request, request_plan.sampling);
+        install_sampling(sequence, request, request_plan.sampling, staged.prompt.token_ids);
         sequence.rope_delta = staged.prompt.rope_delta;
         set_device_i32(io.rope_delta, sequence.rope_delta);
 
@@ -11255,7 +11257,7 @@ void ProgramImplCore::prepare_graphs() {
 }
 
 void ProgramImplCore::install_sampling(SequenceState& sequence, RequestControl& request,
-                                       const ops::SamplingConfig& config) {
+                                       const ops::SamplingConfig& config, std::span<const TokenId> prompt) {
     Tensor counts = token_counts.slice(1, static_cast<std::int32_t>(sequence.lane), 1)
                         .view({TextConfig::token_domain});
     request.sampling_host     = config;
@@ -11273,10 +11275,19 @@ void ProgramImplCore::install_sampling(SequenceState& sequence, RequestControl& 
         .accepted_per_position = std::vector<std::uint64_t>(draft_window, 0),
     };
     const bool penalties = request.sampling_host.presence_penalty != 0.0F ||
-                           request.sampling_host.frequency_penalty != 0.0F;
+                           request.sampling_host.frequency_penalty != 0.0F ||
+                           request.sampling_host.repetition_penalty != 1.0F;
     if (penalties) { CUDA_CHECK(cudaMemsetAsync(counts.data, 0, counts.bytes(), device.stream)); }
     request.sampling_host.token_counts =
         penalties ? static_cast<std::int32_t*>(counts.data) : nullptr;
+    request.sampling_host.prompt_presence = nullptr;
+    if (config.repetition_penalty != 1.0F) {
+        request.prompt_presence_host = runtime::prompt_token_presence(prompt, TextConfig::token_domain);
+        Tensor mask = prompt_presence.slice(1, static_cast<std::int32_t>(sequence.lane), 1);
+        CUDA_CHECK(cudaMemcpyAsync(mask.data, request.prompt_presence_host.data(), mask.bytes(),
+                                   cudaMemcpyHostToDevice, device.stream));
+        request.sampling_host.prompt_presence = static_cast<const std::int32_t*>(mask.data);
+    }
     Tensor config_lane = sampling_config.slice(1, static_cast<std::int32_t>(sequence.lane), 1);
     CUDA_CHECK(cudaMemcpyAsync(config_lane.data, &request.sampling_host,
                                sizeof(request.sampling_host), cudaMemcpyHostToDevice,

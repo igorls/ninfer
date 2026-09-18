@@ -27,6 +27,10 @@ The converter consumes only these pinned sources:
 
 This is a converter splice, not a Transformers-loadable checkpoint directory. It replaces exactly
 128 BF16 PLE tensors and consumes all other 296502 source tensors assigned by the recipe.
+The released artifact described below stores MTP expert banks as BF16. Its SHA256 and inspected
+inventory are recorded in the [release manifest](../../model-cards/Qwen3.8-Flash-Next-mixed-NInfer/artifact-manifest.json).
+The historical conversion report did not record a converter Git revision; the release's compatible
+engine revision must not be interpreted as that missing provenance.
 
 ## Closed object inventory
 
@@ -34,16 +38,19 @@ The artifact contains 1566 objects: six raw frontend resources and 1560 tensors.
 
 | Format | Layout | Objects | Placement with all features |
 |---|---|---:|---|
-| `BF16` | `contiguous-le-v1` | 1237 | Device |
+| `BF16` | `contiguous-le-v1` | 1237 | Device, except two host-mapped MTP expert banks |
 | `FP8_E4M3FN_ROW_F32S` | `row-scale-f32-v1` | 96 | Device |
 | `NVFP4` | `expert-blockscale-k16-m128x4-v1` | 96 | Device |
 | `I64` | `contiguous-le-v1` | 3 | mapped host metadata |
 | `U4Z8G16_F16S` | `packed-u4-g16-v1` | 128 | mapped host PLE |
 | resource | `raw-bytes-v1` | 6 | retained host bytes |
 
-With Text, MTP, and Vision enabled, the exact binder consumes every object and plans 1429 device
-objects, 131 mapped tensors, and six host resources. Device materialization capacity is
-81285117440 bytes (75.70 GiB). The mapped PLE plus metadata is 29.80 GiB. The complete local file is
+With Text, MTP, and Vision enabled and default BF16 token embedding/output head, the exact binder
+consumes every object and plans 1427 device objects, 133 mapped tensors, and six host resources.
+Device-bound artifact tensor payload is 76251938528 bytes (71.02 GiB), excluding padding and the
+1415581696-byte NVFP4 MTP device buffers created by the loader. These figures exclude runtime
+workspaces, graphs, recurrent state and KV caches; they are not total VRAM requirements. The mapped
+PLE plus indexing metadata occupies 32000162072 bytes (29.80 GiB). The complete released file is
 113298397952 bytes (105.52 GiB); it is intentionally not all-resident in VRAM.
 
 MTP and Vision objects remain mandatory artifact members. Disabling either feature validates its
@@ -89,16 +96,24 @@ tensors and 128 packed table shards remain file-mapped for the lifetime of the l
 Each shard is `[2500012,160]`. For a row, 80 low-nibble-first U4Z8 bytes are read from the shard's
 code plane and ten FP16 group multipliers are read from its separately aligned scale plane. A value
 is `(code - 8) * scale`. Runtime gathers only the 16 rows selected for a token; artifact
-materialization must not pre-touch or copy the complete PLE table.
+materialization must not copy the complete PLE table into VRAM. After device materialization, the
+loader explicitly warms the mapped PLE code and scale pages before marking the model ready. The
+table then uses host RAM page cache; host-memory pressure can evict pages and affect latency.
 
 ## MTP, Vision, and frontend
 
-MTP has 29 BF16 objects, including dense `[512,...]` expert banks and one full-attention QSA layer.
+The released artifact has 29 BF16 MTP objects, including dense `[512,...]` expert banks and one
+full-attention QSA layer. When MTP is enabled, the binder retains the two BF16 expert banks on the
+host and the loader quantizes them into NVFP4 device banks before execution. This changes runtime
+storage, not the published artifact bytes. The binder also accepts the optional artifact produced
+by `tools/convert/qwen3_8_flash_next/splice_mtp.py`, whose two MTP expert banks are already NVFP4;
+that artifact has 1235 BF16 and 98 NVFP4 objects and is not the production artifact released here.
+The current converter inventory describes that pre-spliced layout, so it must not be used as an
+inventory report for the original released file.
 Vision has 333 BF16 objects covering the patch stem, 27 blocks, and merger. The six retained
 resources are tokenizer JSON, tokenizer configuration, chat template, generation configuration,
 image preprocessor configuration, and video preprocessor configuration.
 
 The active binder lives under `src/targets/qwen3_8_flash_next`; it checks every name, shape, format,
 layout, and placement and fails if any artifact directory object is missing, extra, or consumed
-twice. Target registration remains prohibited until the complete Program can execute this contract.
-
+twice. The registered Flash-Next Program executes this contract through the public Engine.

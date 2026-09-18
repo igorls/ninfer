@@ -28,9 +28,15 @@ struct AnthropicCountTokensRequest {
     GenerationRequest generation;
 };
 
+AnthropicMessagesRequest parse_anthropic_messages_request(const nlohmann::ordered_json& body,
+                                                          const RequestLimits& limits,
+                                                          const AnthropicThinkingSigner& signer);
 AnthropicMessagesRequest parse_anthropic_messages_request(const nlohmann::json& body,
                                                           const RequestLimits& limits,
                                                           const AnthropicThinkingSigner& signer);
+AnthropicCountTokensRequest
+parse_anthropic_count_tokens_request(const nlohmann::ordered_json& body,
+                                     const AnthropicThinkingSigner& signer);
 AnthropicCountTokensRequest
 parse_anthropic_count_tokens_request(const nlohmann::json& body,
                                      const AnthropicThinkingSigner& signer);

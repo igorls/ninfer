@@ -144,7 +144,8 @@ public:
                         const ThinkingControlOptions& thinking = {}) const;
     [[nodiscard]] const StopPolicy& default_stop_policy() const noexcept;
     [[nodiscard]] std::shared_ptr<const runtime::CompiledOutputConstraint>
-    compile_output_constraint(const StructuredOutputOptions& options) const;
+    compile_output_constraint(const StructuredOutputOptions& options,
+                              const std::vector<std::string>& required_tool_names = {}) const;
 
 private:
     class Impl;

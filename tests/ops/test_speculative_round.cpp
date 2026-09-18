@@ -166,7 +166,10 @@ struct SparseAcceptSuite {
                     ++count;
                 }
             }
-            if (count > 0) value -= config.presence_penalty;
+            if (count > 0) {
+                value = value < 0 ? value * config.repetition_penalty : value / config.repetition_penalty;
+                value -= config.presence_penalty;
+            }
             value -= config.frequency_penalty * static_cast<double>(count);
             return value;
         };
@@ -666,6 +669,9 @@ struct SparseAcceptSuite {
             cfg.min_p             = kind == 3 ? 0.3f : 0.0f;
             cfg.presence_penalty  = kind == 1 || kind == 3 ? 0.5f : 0.0f;
             cfg.frequency_penalty = kind == 1 || kind == 3 ? 0.125f : 0.0f;
+            // Binary-exact scale factors keep FP64 and device FP32 ranking ties
+            // unambiguous for this deterministic stochastic-path qualification.
+            cfg.repetition_penalty = kind == 1 ? 2.0f : kind == 3 ? 0.5f : 1.0f;
             cfg.seed              = 10007 + 31 * row + 17 * kSparseDrafts;
             lengths[row]          = 9000 + 37 * row;
             const int extent      = row == kSparseBatch - 1 ? kSparseDrafts

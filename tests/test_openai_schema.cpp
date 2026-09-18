@@ -15,7 +15,7 @@
 
 namespace {
 
-using Json = nlohmann::json;
+using Json = nlohmann::ordered_json;
 using namespace ninfer::serve;
 
 int check(bool condition, const std::string& label) {
@@ -248,12 +248,31 @@ int test_tools() {
         check(!none.generation.uses_tools() && prompt(none.generation).options.tool_jsons.empty(),
               "tool_choice none makes parallel_tool_calls neutral and removes executable tools");
 
+    body.erase("parallel_tool_calls");
     body["tool_choice"] = "required";
-    failures += check(api_error([&] { (void)parse(body); }).code == "tool_choice_not_supported",
-                      "required tool choice rejected");
+    try {
+        const auto required = parse(body).generation;
+        failures += check(required.tool_choice.mode == ToolChoiceMode::Required &&
+                              options(required).execution.required_tool_names == std::vector<std::string>{"weather"},
+                          "required tool choice reaches Engine constraint");
+    } catch (const ApiException& error) {
+        std::cerr << "FAIL: required tool choice rejected: " << error.what() << '\n';
+        ++failures;
+    }
     body["tool_choice"] = Json{{"type", "function"}, {"function", Json{{"name", "weather"}}}};
-    failures += check(api_error([&] { (void)parse(body); }).code == "tool_choice_not_supported",
-                      "named tool choice rejected");
+    failures += check(options(parse(body).generation).execution.required_tool_names == std::vector<std::string>{"weather"},
+                      "named tool choice constrains the selected function");
+    body["tool_choice"]["function"]["name"] = "missing";
+    failures += check(api_error([&] { (void)parse(body); }).param == "tool_choice",
+                      "named choice rejects undeclared function");
+    body["tool_choice"] = "required";
+    body["stop"] = "</tool_call>";
+    failures += check(api_error([&] { (void)options(parse(body).generation); }).code == "tool_choice_conflict",
+                      "custom stop cannot bypass required call completion");
+    body.erase("stop");
+    body.erase("tools");
+    failures += check(api_error([&] { (void)parse(body); }).param == "tool_choice",
+                      "required choice rejects empty tool set");
 
     body          = base_request();
     body["tools"] = Json::array({function_tool(), function_tool("search")});
@@ -275,11 +294,8 @@ int test_tools() {
     failures += check(direct_allowed.tools.size() == 1 && direct_allowed.tools[0].name == "weather",
                       "direct allowed_tools compatibility shape is accepted");
     body["tool_choice"]["mode"]     = "required";
-    const ApiError required_allowed = api_error([&] { (void)parse(body); });
-    failures +=
-        check(required_allowed.code == "tool_choice_not_supported" &&
-                  required_allowed.message.find("at least one tool call") != std::string::npos,
-              "required allowed_tools reports the unenforceable guarantee");
+    failures += check(options(parse(body).generation).execution.required_tool_names == std::vector<std::string>{"weather"},
+                      "required allowed_tools reaches Engine with narrowed set");
     body["tool_choice"]["mode"]             = "auto";
     body["tool_choice"]["tools"][0]["name"] = "missing";
     failures += check(api_error([&] { (void)parse(body); }).param == "tool_choice",
@@ -766,6 +782,19 @@ int main() {
         body["response_format"]["json_schema"]["schema"]["unevaluatedProperties"] = false;
         failures += check(api_error([&] { (void)parse(body); }).code == "unsupported_json_schema",
                           "unsupported schema keyword is rejected rather than ignored");
+        body["response_format"] = Json::parse(R"({"type":"json_schema","json_schema":{"name":"result","strict":true,"schema":{"type":"object","properties":{"zebra":{"type":"string"},"alpha":{"type":"string"}},"required":["zebra","alpha"],"additionalProperties":false}}})");
+        const auto ordered_schema = parse(body).generation.structured_output.schema;
+        const auto zebra_pos = ordered_schema.find("\"zebra\"");
+        const auto alpha_pos = ordered_schema.find("\"alpha\"");
+        failures += check(zebra_pos != std::string::npos && alpha_pos != std::string::npos && zebra_pos < alpha_pos,
+                          "schema properties retain declaration order instead of alphabetical sort");
+        const auto default_req = parse(body);
+        failures += check(default_req.generation.allow_engine_automatic_shared_prefixes,
+                          "automatic prefix reuse is enabled by default");
+        body["prompt_cache_options"] = Json{{"mode", "explicit"}};
+        const auto explicit_req = parse(body);
+        failures += check(!explicit_req.generation.allow_engine_automatic_shared_prefixes,
+                          "explicit cache mode disables automatic shared prefix reuse");
     }
     failures += test_request_envelope_and_sampling();
     failures += test_standard_field_policy();

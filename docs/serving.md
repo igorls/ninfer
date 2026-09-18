@@ -110,18 +110,27 @@ The endpoint supports:
 - `n:1`, text-only `modalities`, and `response_format` types `text`, `json_object`, and `json_schema`;
 - non-streaming responses and server-sent event streams;
 - `stream_options.include_usage`;
-- non-strict function tools with `tool_choice` `auto`, `none`, or `allowed_tools` in `auto` mode,
-  parallel calls enabled, assistant tool-call history, tool-result messages, and legacy
+- non-strict function tools with `tool_choice` `auto`, `none`, `required`, named function choice,
+  or `allowed_tools` in `auto`/`required` mode, assistant tool-call history, tool-result messages, and legacy
   function-call history;
 - the top-level `reasoning_effort` field;
 - `enable_thinking` and `preserve_thinking`, either at top level or in
   `chat_template_kwargs`;
 - Assistant `reasoning_content` and `reasoning` history aliases.
 
+Forced tool selection (`required` or a named function, and Anthropic `any`/`tool`) uses the native
+token-mask constraint to emit one complete Qwen tool call to an effective declared function.
+It accepts `parallel_tool_calls:false` (Anthropic `disable_parallel_tool_use:true`) because the
+forced answer contains one call. Reasoning may precede it. EOS and answer prose are masked until
+the call is complete; output-token limits and cancellation can still interrupt generation and
+are reported as such. This constrains call structure and function selection, not strict argument
+schema validity. Custom stop strings and structured answer formats conflict with forced calls.
+`auto` retains ordinary model-driven tool generation, including parallel calls.
+
 Options whose observable behavior the Engine cannot provide are rejected when they request that
 behavior. This includes nonzero `logit_bias`, requested log probabilities,
-audio/file input or audio output, strict function tools, required or named tool choice,
-`parallel_tool_calls:false` with enabled tools, explicit low/high image detail, web search,
+audio/file input or audio output, strict function tools,
+`parallel_tool_calls:false` with `auto` tools, explicit low/high image detail, web search,
 moderation, low/high verbosity, stored Chat Completions, and non-empty legacy `functions`.
 Each capability rejection identifies the affected field and the guarantee NInfer cannot provide.
 Known constrained-decoding aliases (`grammar`, `structured_outputs`, `guided_json`, `guided_regex`,
@@ -140,8 +149,17 @@ tool identity, prompt rendering, or output. Non-string values are malformed; non
 other message roles remain unsupported because they carry participant identity that the loaded chat
 template cannot represent.
 
-For commonly generated OpenAI-compatible payloads, `repetition_penalty` is accepted only at its
-neutral value `1`, and `mm_processor_kwargs` when empty or containing only null values. String-form
+Chat Completions and Responses accept `repetition_penalty` as a finite positive number, default
+`1` (neutral). For tokens present in the complete prepared prompt or committed generated output,
+negative logits are multiplied by this value and nonnegative logits are divided by it, before
+presence/frequency penalties and sampling filters. Prompt tokens do not contribute to presence or
+frequency counts. Speculative verification includes only the preceding draft prefix for each
+column, and discarded drafts never enter committed history. Prefix reuse preserves these semantics.
+Values above `1` discourage repetition; values below `1` encourage it. Penalties are opt-in for
+27B and Flash-Next; neutral settings preserve the unadjusted sampling fast paths. A penalty can
+change speculative acceptance and throughput, so enable it for a workload only after evaluation.
+
+`mm_processor_kwargs` is accepted when empty or containing only null values. String-form
 image/video URLs are also accepted. Other non-null `chat_template_kwargs` are rejected rather than
 silently changing prompt semantics.
 
@@ -342,7 +360,7 @@ wire response contains typed `output` Items.
 | `preserve_thinking` | top-level alias for the same option; conflicting values are rejected |
 | `text.format` | `text`, `json_object`, or flat `json_schema` format (see structured output below) |
 | `tools` | direct function definitions or namespace groups containing function definitions; see below |
-| `tool_choice` | `auto`, `none`, or function-only `allowed_tools` with mode `auto`; a namespaced selection carries both `namespace` and `name` |
+| `tool_choice` | `auto`, `none`, `required`, named function, or function-only `allowed_tools` with mode `auto`/`required`; a namespaced selection carries both `namespace` and `name` |
 | `parallel_tool_calls` | `true` by default; `false` is accepted only when no effective tool is callable |
 | `max_tool_calls` | non-negative integer accepted as a hosted-tool no-op; NInfer does not execute hosted tools |
 | `truncation` | omitted or `disabled`; overlong input fails instead of silently dropping Items |
@@ -436,12 +454,12 @@ NInfer renders these definitions in the Qwen prompt and parses model output into
 `function_call` output Items. Each output has a protocol Item `id` (`fc_...`) and a distinct
 `call_id` (`call_...`). The client executes the function and sends a `function_call_output` Item in
 a later request. Only functions in the current effective tool set can become structured calls;
-undeclared model output remains ordinary text. `allowed_tools` with mode `auto` filters that set
+undeclared model output remains ordinary text. `allowed_tools` with mode `auto` or `required` filters that set
 without changing declaration order, while `tool_choice:"none"` disables structured tool output even
 when the history contains earlier calls.
 
 NInfer does not execute functions or constrain function arguments to their tool schema, so
-`strict:true`, required or named tool choice, hosted tools, remote MCP tools, and custom free-form
+`strict:true`, hosted tools, remote MCP tools, and custom free-form
 tools are rejected. Deferred loading, output schemas, and caller restrictions that exclude direct
 invocation are also rejected because their semantics cannot be honored.
 
@@ -605,8 +623,8 @@ closed-turn Qwen reasoning history. `output_config.effort` is checked against th
 declared effort capability.
 
 User-defined, non-strict tools support `name`, `description`, object `input_schema`, and
-`input_examples`. `tool_choice:auto` and `none` are executable. Forced or named choice,
-`strict:true`, active single-call enforcement, deferred tools, tools that exclude direct model
+`input_examples`. `tool_choice:auto`, `none`, `any`, and named `tool` choice are executable.
+`strict:true`, single-call enforcement with `auto`, deferred tools, tools that exclude direct model
 calls, Anthropic-provided/server tools, toolsets, MCP, and containers are rejected because their
 required constraint or executor is absent. `tool_result` preserves text/image order and marks
 `is_error:true` explicitly in the model prompt. For a visible Assistant tool-use turn, the next
@@ -677,7 +695,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--model-id ID` | override the public OpenAI model alias | artifact `identity.model_id` |
 | `--max-context N` | logical context ceiling of each sequence | `8192` |
 | `--kv-capacity N\|auto` | explicit shared Main Text KV capacity, or maximize it from remaining GPU memory; omitted means `--max-context` | `8192` |
-| `--max-concurrency N` | maximum admitted requests; valid range `1..8` | `1` |
+| `--max-concurrency N` | maximum active generation requests; valid range `1..8` | `1` |
 | `--max-pending-requests N` | additional requests allowed to wait for admission | `16` |
 | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `30000` |
 | `--prefill-chunk N` | text-prefill chunk | `1024` |
@@ -714,6 +732,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--top-k N` | process-level top-k override (`0..20`; zero selects the top-20 cap) | unset |
 | `--min-p F` | process-level min-p override | unset |
 | `--presence-penalty F` | process-level presence-penalty override | unset |
+| `--repetition-penalty F` | process-level repetition penalty (finite, positive) | unset (`1`) |
 | `--frequency-penalty F` | process-level frequency-penalty override | unset |
 | `--seed N` | fixed seed when a request omits one | fresh random seed per request |
 | `--greedy` | force exact argmax for all requests | off |
@@ -724,10 +743,10 @@ file aborts startup; the operational context-cost record and JSONL `server_start
 selected source.
 
 Engine selects sampling defaults from the loaded model and the request's resolved thinking mode.
-Qwen3.6-27B and Qwen3.8-27B use `1.0/0.95/20/0/0` for
-temperature/top-p/top-k/min-p/presence penalty in thinking mode and `0.7/0.80/20/0/1.5` in
-non-thinking mode. Qwen3.6-35B-A3B differs only in its thinking presence penalty, which is `1.5`.
-Frequency penalty is `0` for all registered presets. Process flags override registered values,
+Qwen3.6-27B, Qwen3.8-27B and Flash-Next use `1.0/0.95/20/0/0` for
+temperature/top-p/top-k/min-p/presence penalty in thinking mode and `0.7/0.80/20/0/0` in
+non-thinking mode. Qwen3.6-35B-A3B retains presence penalty `1.5` in both modes.
+Frequency penalty is `0` and repetition penalty is `1` for all registered presets. Process flags override registered values,
 request fields override process flags, and `--greedy` finally forces temperature `0`.
 
 For `C=--max-concurrency` and `H=--device-state-slots`, total Device StateImage capacity is `C+H`:
@@ -859,7 +878,13 @@ raw counters and seconds over rounded stderr rates.
 ## Execution behavior
 
 The server owns one resident Engine with a startup-fixed capacity of `1..8` active generation
-requests. At each decode boundary, every decode-ready request is compacted into one batch and
+requests. That eight is `kMaximumConcurrency` in `include/ninfer/types.h`: every lane table, decode
+kernel profile, and CUDA Graph topology is compiled for exact batch `B=1..8`. It is the product
+workload (one GPU, one resident model, compact decode batch), not a VRAM formula and not “how many
+full-length sequences fit in KV.” Raising it would recapture graphs and retarget those arrays;
+lowering `--max-concurrency` only enables fewer of the eight lanes.
+
+At each decode boundary, every decode-ready request is compacted into one batch and
 processed by one model traversal and, when graphs are enabled, one exact-batch CUDA Graph replay. A
 request joins that batch only after its single-request prefill finishes; when it completes or is
 cancelled, the next boundary rebuilds the batch without an empty row.
@@ -878,10 +903,16 @@ media request retains the same cancellation and timeout deadline. Model output i
 same finite request count and each request's effective output-token limit; output callbacks and
 network serialization run outside the GPU executor and do not delay formation of the next batch.
 
-`--max-context` is each sequence's logical ceiling. `--kv-capacity` fixes the shared Main Text KV
-pool used by active requests and retained prefixes. `auto` accounts for the complete enabled runtime
-and leaves 1 GiB of sizing headroom; omitting the option makes it follow `--max-context`. Capacity
-resolves once at startup.
+`--max-context` is each sequence's logical ceiling. `--kv-capacity` is the shared Main Text KV
+pool used by active requests and retained prefixes; it is not divided equally among lanes.
+An explicit pool must be at least one full `--max-context` and at most
+`--max-concurrency × --max-context` (page-aligned, 64-token pages). How many full-length
+requests can run together is `min(max_concurrency, floor(kv_capacity / max_context))`. Extra
+active lanes beyond that share the pool and must be shorter. `auto` accounts for the complete
+enabled runtime and leaves 1 GiB of sizing headroom; omitting the option makes it follow
+`--max-context`. Capacity resolves once at startup. The Windows Supervisor Request capacity
+page edits these three together: pool first, per-request context inside it, then lane count,
+with a live full-length-slot preview.
 
 Admission reserves the full prompt-plus-effective-output page entitlement through request
 completion. A request remains queued until a legal resource plan can satisfy that entitlement.

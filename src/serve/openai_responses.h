@@ -72,9 +72,14 @@ struct BuiltOpenAIResponse {
     std::vector<ChatTurn> output_history;
 };
 
+OpenAIResponsesCreateRequest parse_openai_responses_create_request(const nlohmann::ordered_json& body,
+                                                                   const RequestLimits& limits);
 OpenAIResponsesCreateRequest parse_openai_responses_create_request(const nlohmann::json& body,
                                                                    const RequestLimits& limits);
 
+OpenAIResponsesPromptRequest
+parse_openai_responses_input_tokens_request(const nlohmann::ordered_json& body,
+                                            const RequestLimits& limits);
 OpenAIResponsesPromptRequest
 parse_openai_responses_input_tokens_request(const nlohmann::json& body,
                                             const RequestLimits& limits);

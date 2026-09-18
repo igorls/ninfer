@@ -252,10 +252,20 @@ __device__ __forceinline__ float sampling_adjusted_logit(float raw, int v, const
         !(static_cast<unsigned int>(c.allowed_tokens[v / 32]) & (1U << (v % 32)))) {
         return -CUDART_INF_F;
     }
-    if (c.presence_penalty == 0.0f && c.frequency_penalty == 0.0f) { return x; }
+    if (c.presence_penalty == 0.0f && c.frequency_penalty == 0.0f && c.repetition_penalty == 1.0f) { return x; }
     int cnt = c.token_counts != nullptr ? c.token_counts[v] : 0;
+    for (int j = 0; j < c.history_overlay_size; ++j) {
+        if (c.history_overlay[j] == v) { ++cnt; }
+    }
     for (int j = 0; j < overlay_len; ++j) {
         if (overlay[j] == v) { ++cnt; }
+    }
+    if (c.repetition_penalty != 1.0f) {
+        const bool in_prompt = c.prompt_presence != nullptr &&
+            (static_cast<unsigned int>(c.prompt_presence[v / 32]) & (1U << (v % 32)));
+        if (in_prompt || cnt > 0) {
+            x = x < 0.0f ? x * c.repetition_penalty : x / c.repetition_penalty;
+        }
     }
     if (cnt > 0) { x -= c.presence_penalty; }
     if (c.frequency_penalty != 0.0f) { x -= c.frequency_penalty * static_cast<float>(cnt); }

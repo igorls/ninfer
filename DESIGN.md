@@ -169,6 +169,30 @@ Compact, legible controls use the primary and secondary tokens above. Normal but
 
 Native inputs, selects, and checkboxes retain familiar interaction. Fields have a 40px minimum height; explanatory text and command-line flags remain adjacent to labels. Read-only values use a muted surface, dirty fields use amber borders with a pale tint, and save errors receive a textual notice. Connection addresses use monospace read-only fields and a separate Copy button.
 
+Request capacity treats KV capacity as the shared token pool and max context as the
+longest one request may be inside that pool. The KV slider is first: engine-default
+(omit the flag; the engine uses max context), Auto sizing from free memory, and
+power-of-two presets that still fit the Engine’s pool range. Max context offers
+4K–256K presets and an engine-default stop, but when KV is an explicit count those
+context stops cannot exceed the pool. An explicit pool must cover one full-length
+request and cannot exceed `max_concurrency × max_context`. Lowering the pool pulls
+max context down with it. Raising max context cannot pass the pool; enlarge the pool
+first. Exact token fields remain; K means 1,024 tokens and M means 1,048,576. Valid
+custom counts retain their exact value and their own slider stop when they still fit.
+
+Max concurrency is how many of the Engine’s eight lanes may be active. That eight is
+`kMaximumConcurrency`: a compile-time product bound for exact-batch CUDA Graphs,
+lane tables, and kernels built for batch 1–8. It is not derived from GPU memory or
+from the KV pool. Omitting the flag uses one lane. A live preview under the pair
+shows `floor(pool / max context)` full-length slots against the configured lane
+count, drawn as eight ticks (the Engine maximum): filled ticks are full-length
+slots, pale ticks are configured lanes that must share, and empty ticks are unused
+Engine lanes. Copy states the slot count, the lane count, and that eight is the
+Engine cap. Auto and engine-default pools explain themselves in words rather than
+inventing a size. Keyboard changes, typed counts, category navigation, discard, and
+save share the existing draft state; moving a slider does not save settings or
+restart the engine.
+
 ### Navigation
 
 Desktop navigation uses 44px minimum targets, outlined icons, and a pale green selected destination identified by `aria-current=page`. Hover has a cool gray tint. The phone version keeps every destination visible in a top row. Settings categories are separate native buttons, with selected and unsaved states remaining visible.

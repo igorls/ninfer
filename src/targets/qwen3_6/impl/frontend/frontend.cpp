@@ -908,6 +908,7 @@ public:
     fi::CompiledChatTemplate chat_template;
     mutable std::mutex constraint_mutex;
     mutable std::unique_ptr<runtime::OutputConstraintCompiler> constraint_compiler;
+    mutable std::unique_ptr<runtime::OutputConstraintCompiler> tool_constraint_compiler;
     std::shared_ptr<const fi::Tokenizer> tokenizer;
     fi::ProcessorOptions processor;
     std::shared_ptr<fi::MediaPreprocessCache> media_cache;
@@ -918,24 +919,33 @@ public:
 };
 
 std::shared_ptr<const runtime::CompiledOutputConstraint>
-Frontend::compile_output_constraint(const StructuredOutputOptions& options) const {
+Frontend::compile_output_constraint(const StructuredOutputOptions& options,
+                                    const std::vector<std::string>& required_tool_names) const {
     runtime::validate_structured_output(options);
-    if (options.kind == StructuredOutputKind::Text) { return nullptr; }
+    if (options.kind == StructuredOutputKind::Text && required_tool_names.empty()) { return nullptr; }
+    if (options.kind != StructuredOutputKind::Text && !required_tool_names.empty()) {
+        throw std::invalid_argument("required tool calls conflict with structured answer output");
+    }
     std::lock_guard lock(impl_->constraint_mutex);
-    if (!impl_->constraint_compiler) {
+    auto& compiler = required_tool_names.empty() ? impl_->constraint_compiler : impl_->tool_constraint_compiler;
+    if (!compiler) {
         std::vector<std::string> vocabulary(impl_->tokenizer->token_domain());
         for (std::size_t i = 0; i < vocabulary.size(); ++i) {
-            if (impl_->tokenizer->is_valid_token(static_cast<int>(i)) &&
-                !impl_->tokenizer->is_special_token(static_cast<int>(i))) {
-                vocabulary[i] = impl_->tokenizer->decode_token_bytes(static_cast<int>(i));
+            if (impl_->tokenizer->is_valid_token(static_cast<int>(i))) {
+                const auto bytes = impl_->tokenizer->decode_token_bytes(static_cast<int>(i));
+                if (!impl_->tokenizer->is_special_token(static_cast<int>(i)) ||
+                    (!required_tool_names.empty() && (bytes == "<tool_call>" || bytes == "</tool_call>"))) {
+                    vocabulary[i] = bytes;
+                }
             }
         }
         const auto end = impl_->tokenizer->encode(kThinkClose);
         if (end.size() != 1) { throw std::invalid_argument("structured output requires an atomic reasoning boundary token"); }
-        impl_->constraint_compiler = std::make_unique<runtime::OutputConstraintCompiler>(
+        compiler = std::make_unique<runtime::OutputConstraintCompiler>(
             std::move(vocabulary), impl_->tokenizer->default_stop_token_ids(), end.front());
     }
-    return impl_->constraint_compiler->compile(options);
+    return required_tool_names.empty() ? compiler->compile(options)
+        : compiler->compile_grammar(fi::required_tool_call_grammar(required_tool_names));
 }
 
 class OutputSession::Impl {

@@ -9,7 +9,7 @@ namespace {
 void validate(const ResolvedSamplingParameters& sampling) {
     if (!std::isfinite(sampling.temperature) || !std::isfinite(sampling.top_p) ||
         !std::isfinite(sampling.min_p) || !std::isfinite(sampling.presence_penalty) ||
-        !std::isfinite(sampling.frequency_penalty)) {
+        !std::isfinite(sampling.frequency_penalty) || !std::isfinite(sampling.repetition_penalty)) {
         throw std::invalid_argument("sampling parameters must be finite");
     }
     if (sampling.temperature < 0.0F || sampling.temperature > 2.0F) {
@@ -17,6 +17,9 @@ void validate(const ResolvedSamplingParameters& sampling) {
     }
     if (sampling.top_k < 1 || sampling.top_k > 20) {
         throw std::invalid_argument("resolved top_k must be in [1,20]");
+    }
+    if (sampling.repetition_penalty <= 0.0F) {
+        throw std::invalid_argument("repetition_penalty must be positive");
     }
     if (sampling.top_p < 0.0F || sampling.top_p > 1.0F) {
         throw std::invalid_argument("top_p must be in [0,1]");
@@ -44,6 +47,7 @@ ResolvedSamplingParameters resolve_sampling(const ModelSamplingDefaults& default
         .min_p             = overrides.min_p.value_or(preset.min_p),
         .presence_penalty  = overrides.presence_penalty.value_or(preset.presence_penalty),
         .frequency_penalty = overrides.frequency_penalty.value_or(preset.frequency_penalty),
+        .repetition_penalty = overrides.repetition_penalty.value_or(preset.repetition_penalty),
         .seed              = overrides.seed.value_or(0),
     };
     // The registered sampling pipeline has an exact top-20 candidate domain. Preserve the

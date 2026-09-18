@@ -13,7 +13,7 @@
 namespace ninfer::serve {
 namespace {
 
-using Json = nlohmann::json;
+using Json = nlohmann::ordered_json;
 
 void require_object(const Json& value, const char* message, const char* param = nullptr) {
     if (!value.is_object()) { bad_request(message, param == nullptr ? "" : param); }
@@ -671,18 +671,14 @@ void apply_allowed_tools(const Json& config, GenerationRequest& output) {
         }
     }
 
-    if (mode == "required") {
-        bad_request(
-            "tool_choice.allowed_tools mode='required' requires at least one tool call, which "
-            "NInfer cannot guarantee",
-            "tool_choice", "tool_choice_not_supported");
-    }
-
     std::erase_if(output.tools, [&](const ToolDefinition& tool) {
         return std::find(allowed_names.begin(), allowed_names.end(), tool.name) ==
                allowed_names.end();
     });
-    output.tool_choice.mode = ToolChoiceMode::Auto;
+    output.tool_choice.mode = (mode == "required" ? ToolChoiceMode::Required : ToolChoiceMode::Auto);
+    if (mode == "required" && output.tools.empty()) {
+        bad_request("required tool choice needs at least one tool", "tool_choice");
+    }
 }
 
 void parse_tool_choice(const Json& body, GenerationRequest& output) {
@@ -695,10 +691,10 @@ void parse_tool_choice(const Json& body, GenerationRequest& output) {
         } else if (value == "none") {
             output.tool_choice.mode = ToolChoiceMode::None;
         } else if (value == "required") {
-            bad_request(
-                "tool_choice='required' requires at least one tool call, which NInfer cannot "
-                "guarantee",
-                "tool_choice", "tool_choice_not_supported");
+            if (output.tools.empty()) {
+                bad_request("required tool choice needs at least one tool", "tool_choice");
+            }
+            output.tool_choice.mode = ToolChoiceMode::Required;
         } else {
             bad_request("tool_choice must be 'auto', 'none', 'required', or a function choice",
                         "tool_choice");
@@ -716,10 +712,17 @@ void parse_tool_choice(const Json& body, GenerationRequest& output) {
                 bad_request("function tool_choice must contain a function object", "tool_choice");
             }
             const std::string name = require_function_name(choice.at("function"), "tool_choice");
-            bad_request(
-                "tool_choice for function '" + name +
-                    "' requires that exact function to be called, which NInfer cannot guarantee",
-                "tool_choice", "tool_choice_not_supported");
+            const bool declared =
+                std::any_of(output.tools.begin(), output.tools.end(),
+                            [&](const ToolDefinition& tool) { return tool.name == name; });
+            if (!declared) {
+                bad_request("named tool choice references undeclared function '" + name + "'",
+                            "tool_choice");
+            }
+            std::erase_if(output.tools, [&](const ToolDefinition& tool) {
+                return tool.name != name;
+            });
+            output.tool_choice.mode = ToolChoiceMode::Required;
         } else if (type == "custom") {
             bad_request(
                 "custom tool_choice requires custom tool output, which NInfer does not provide",
@@ -906,6 +909,10 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
     output.generation.preserve_thinking    = template_options.preserve_thinking;
     apply_openai_prompt_cache_policy(output.generation, cache_policy);
     return output;
+}
+
+OpenAIChatRequest parse_chat_completion_request(const nlohmann::json& body, const RequestLimits& limits) {
+    return parse_chat_completion_request(nlohmann::ordered_json(body), limits);
 }
 
 } // namespace ninfer::serve

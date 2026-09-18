@@ -221,9 +221,10 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--min-p F` | min-p-threshold override | registered model/mode default |
 | `--presence-penalty F` | presence-penalty override | registered model/mode default |
 | `--frequency-penalty F` | frequency-penalty override | registered model/mode default (`0`) |
+| `--repetition-penalty F` | finite positive prompt/output repetition penalty | `1` (neutral) |
 | `--seed N` | sampling seed | `0` |
 
-When a sampling flag is omitted, Engine selects the official general-task preset registered for
+When a sampling flag is omitted, Engine selects the local general-task preset registered for
 the loaded model and the rendered prompt mode. The current presets are:
 
 | Model | Prompt mode | Temperature | Top-p | Top-k | Min-p | Presence penalty |
@@ -232,10 +233,15 @@ the loaded model and the rendered prompt mode. The current presets are:
 | Qwen3.6-27B | non-thinking | `0.7` | `0.80` | `20` | `0` | `0` |
 | Qwen3.8-27B | thinking | `1.0` | `0.95` | `20` | `0` | `0` |
 | Qwen3.8-27B | non-thinking | `0.7` | `0.80` | `20` | `0` | `0` |
+| Qwen3.8-Flash-Next | thinking | `1.0` | `0.95` | `20` | `0` | `0` |
+| Qwen3.8-Flash-Next | non-thinking | `0.7` | `0.80` | `20` | `0` | `0` |
 | Qwen3.6-35B-A3B | thinking | `1.0` | `0.95` | `20` | `0` | `1.5` |
 | Qwen3.6-35B-A3B | non-thinking | `0.7` | `0.80` | `20` | `0` | `1.5` |
 
-Frequency penalty is `0` in every registered preset. Task-specific profiles such as Qwen's
+Frequency penalty is `0` and repetition penalty is `1` in every registered preset. Penalties
+are opt-in for 27B and Flash-Next pending workload-specific evidence. Repetition penalty rescales
+logits for tokens already in the prompt or output; it is applied before presence/frequency penalties
+and filtering, including greedy and speculative verification. Task-specific profiles such as Qwen's
 precise-coding profile use explicit sampling overrides.
 
 Repeat `--stop-token-id`, `--stop`, or `--reasoning-stop` to add stop conditions. Use
@@ -252,7 +258,10 @@ Artifact identity selects the weight profile;
 `--kv-dtype` selects runtime KV storage. The prepared prompt must fit
 `--max-context`; generation stops at the remaining context capacity when necessary.
 `--kv-capacity N` controls the shared physical Main Text KV pool independently and is rounded up to
-the 64-token page size. `--kv-capacity auto` loads the selected weights, measures the remaining GPU
+the 64-token page size. Concurrent serving additionally limits that pool to at most
+`max_concurrency × max_context` pages; `max_concurrency` itself is `1..8` because the Engine
+compiles exact-batch decode graphs and lane tables for eight active requests, not because of
+GPU size. The one-request CLI does not expose `--max-concurrency`. `--kv-capacity auto` loads the selected weights, measures the remaining GPU
 memory, and directly chooses the largest legal page capacity for the complete enabled runtime
 layout. This includes the selected speculative backend, fixed sequence state, unified workspace,
 and CUDA Graph allowance, while leaving the default 1 GiB automatic headroom

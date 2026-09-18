@@ -206,6 +206,7 @@ struct SamplingPreset {
     float min_p             = 0.0F;
     float presence_penalty  = 0.0F;
     float frequency_penalty = 0.0F;
+    float repetition_penalty = 1.0F;
 };
 
 struct ModelSamplingDefaults {
@@ -226,6 +227,7 @@ struct SamplingOverrides {
     std::optional<float> min_p;
     std::optional<float> presence_penalty;
     std::optional<float> frequency_penalty;
+    std::optional<float> repetition_penalty;
     std::optional<std::uint64_t> seed;
 };
 
@@ -237,6 +239,7 @@ struct ResolvedSamplingParameters {
     float min_p             = 0.0F;
     float presence_penalty  = 0.0F;
     float frequency_penalty = 0.0F;
+    float repetition_penalty = 1.0F;
     std::uint64_t seed      = 0;
 };
 
@@ -279,6 +282,9 @@ struct ExecutionOptions {
     bool allow_prefix_reuse               = true;
     ThinkingControlOptions thinking;
     StructuredOutputOptions structured_output;
+    // If nonempty, constrain the answer to one complete call to a listed function.
+    // Argument schemas remain non-strict. Output limits/cancellation can interrupt a call.
+    std::vector<std::string> required_tool_names;
 };
 
 struct OutputOptions {

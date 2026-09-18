@@ -433,6 +433,11 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
     if (prompt.impl_ == nullptr) { throw std::invalid_argument("PreparedPrompt is empty"); }
 
     const StructuredOutputOptions structured_output = options.execution.structured_output;
+    const auto required_tool_names = options.execution.required_tool_names;
+    if (!required_tool_names.empty() &&
+        (!options.stop.strings.empty() || !options.stop.token_ids.empty() || options.output.raw)) {
+        throw std::invalid_argument("required tool calls cannot be combined with custom stops or raw output");
+    }
     if (structured_output.kind != StructuredOutputKind::Text &&
         (!options.stop.strings.empty() || !options.stop.token_ids.empty() || options.output.raw ||
          options.output.preserve_special_tokens)) {
@@ -442,7 +447,7 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
         impl_->sampling_defaults, prompt.impl_->sampling_mode, std::move(options));
     const ResolvedSamplingParameters resolved_sampling = resolved_options.execution.sampling;
     resolved_options.execution.output_constraint = std::visit(
-        [&](const auto& target) { return target->loaded->frontend.compile_output_constraint(structured_output); },
+        [&](const auto& target) { return target->loaded->frontend.compile_output_constraint(structured_output, required_tool_names); },
         impl_->active);
 
     const PromptSummary prompt_summary = prompt.impl_->summary;

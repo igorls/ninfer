@@ -43,6 +43,7 @@ struct PersistentLayout {
     TensorLayout prefill_hidden;
     std::optional<TensorLayout> score_hidden;
     TensorLayout token_counts;
+    TensorLayout prompt_presence;
     TensorLayout sampling_config;
     TensorLayout constraint_masks;
     std::size_t bytes            = 0;

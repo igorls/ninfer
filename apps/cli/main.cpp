@@ -71,7 +71,7 @@ std::string format_sampling(const ninfer::ResolvedSamplingParameters& sampling) 
     output << std::fixed << std::setprecision(2) << "temp=" << sampling.temperature
            << " top_p=" << sampling.top_p << " top_k=" << sampling.top_k
            << " min_p=" << sampling.min_p << " presence=" << sampling.presence_penalty
-           << " freq=" << sampling.frequency_penalty << " seed=" << sampling.seed;
+           << " repeat=" << sampling.repetition_penalty << " freq=" << sampling.frequency_penalty << " seed=" << sampling.seed;
     return output.str();
 }
 

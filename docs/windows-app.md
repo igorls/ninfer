@@ -76,6 +76,24 @@ For local command-line operations:
 `stop` stops the managed engine while leaving the tray/dashboard available. `start` launches the
 installed app if needed, or starts its engine. Dashboard controls provide the same engine actions.
 
+## Request capacity
+
+Settings → Request capacity sizes three related Engine startup values:
+
+1. **KV capacity** is the shared token pool for every active request. Engine default omits the
+   flag so the pool follows max context. Auto sizes the pool from free GPU memory at startup.
+2. **Max context** is the longest one request may be. It cannot exceed an explicit pool; enlarge
+   the pool first. Lowering the pool pulls max context down.
+3. **Max concurrency** is how many requests may be Active at once. The control’s maximum of 8 is
+   the Engine compile-time lane cap (`kMaximumConcurrency`): CUDA Graphs and kernels are built
+   for exact batch `1..8`. It is not a GPU-memory estimate. Omitting it uses 1 lane.
+
+An explicit pool must cover one full-length request and cannot exceed
+`max concurrency × max context`. The live preview shows how many full-length requests the pool
+can hold against the configured lane count. Extra lanes share the pool and must use shorter
+requests. Save does not restart the engine; use Save & restart or Overview when the new
+capacity should take effect.
+
 To update, rebuild Release and rerun `install.ps1` without `-ConfigPath`. The installer validates
 runtime dependencies before stopping the installed app, replaces the binaries, retains one previous
 binary directory, and relaunches through Explorer. Configuration, logs and tray preferences remain.

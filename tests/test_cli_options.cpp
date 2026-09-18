@@ -32,6 +32,16 @@ int check(bool condition, const char* message) {
 
 int main() {
     int failures = 0;
+    const auto repetition = parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                   "--repetition-penalty", "1.25"});
+    failures += check(repetition.sampling.repetition_penalty == 1.25f,
+                      "CLI did not preserve repetition penalty");
+    for (const auto value : {"0", "-1", "nan", "inf"}) {
+        failures += check(rejects([&] {
+                              (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                           "--repetition-penalty", value});
+                          }), "CLI accepted an invalid repetition penalty");
+    }
     const ninfer::cli::Options configured =
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--thinking-budget", "37"});
     failures += check(configured.thinking_budget == 37,

@@ -292,6 +292,60 @@ bool allow_trailing_text_after_tool_calls() {
 
 } // namespace
 
+std::string required_tool_call_grammar(const std::vector<std::string>& names) {
+    if (names.empty()) { throw std::invalid_argument("required tool call needs declared names"); }
+    std::string grammar =
+        "root ::= ws \"<tool_call>\" ws \"<function=\" name \">\" ws "
+        "parameter* \"</function>\" ws \"</tool_call>\" ws\n"
+        "ws ::= [ \\t\\r\\n]*\n"
+        "parameter ::= \"<parameter=\" [^ \\t\\r\\n<>]+ \">\" data-0 \"</parameter>\" ws\n"
+        "name ::= ";
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        if (!valid_function_name(names[i], 128)) {
+            throw std::invalid_argument("invalid required tool name: " + names[i]);
+        }
+        if (i != 0) { grammar += " | "; }
+        grammar += Json(names[i]).dump();
+    }
+    grammar += '\n';
+
+    // Raw Qwen arguments may contain code, HTML, or JSON. Admit all text except the three
+    // complete delimiters consumed by the parser. A prefix automaton preserves '<', closing
+    // HTML tags, and partial delimiter prefixes without letting them terminate the wrong frame.
+    const std::vector<std::string> forbidden{"</parameter>", "</function>", "</tool_call>"};
+    std::vector<std::string> prefixes{std::string{}};
+    std::string alphabet;
+    for (const auto& word : forbidden) {
+        for (std::size_t n = 1; n < word.size(); ++n) {
+            const auto prefix = word.substr(0, n);
+            if (std::find(prefixes.begin(), prefixes.end(), prefix) == prefixes.end()) {
+                prefixes.push_back(prefix);
+            }
+        }
+        for (char c : word) {
+            if (alphabet.find(c) == std::string::npos) { alphabet += c; }
+        }
+    }
+    for (std::size_t i = 0; i < prefixes.size(); ++i) {
+        grammar += "data-" + std::to_string(i) + " ::= \"\" | [^" + alphabet + "] data-0";
+        for (char c : alphabet) {
+            const auto next = prefixes[i] + c;
+            if (std::any_of(forbidden.begin(), forbidden.end(), [&](const auto& word) {
+                    return next.ends_with(word);
+                })) { continue; }
+            std::size_t target = 0;
+            for (std::size_t j = 1; j < prefixes.size(); ++j) {
+                if (prefixes[j].size() > prefixes[target].size() && next.ends_with(prefixes[j])) {
+                    target = j;
+                }
+            }
+            grammar += " | " + Json(std::string(1, c)).dump() + " data-" + std::to_string(target);
+        }
+        grammar += '\n';
+    }
+    return grammar;
+}
+
 std::shared_ptr<const ToolCallOutputContract>
 build_tool_call_output_contract(std::span<const std::string> tool_jsons, bool enabled) {
     if (!enabled) { return {}; }

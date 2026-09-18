@@ -671,7 +671,10 @@ int test_soak_pressure_eviction_and_determinism(ninfer::DeviceContext& device) {
         std::array<ninfer::runtime::CommitDecision, 1> commit_dec = {{{.accepted_tokens = 1, .terminal = false}}};
         (void)prog.commit(std::move(*p_b.pending), commit_dec);
     }
-    (void)prog.finish(seq_b);
+    FinishResult fin_b = prog.finish(seq_b);
+    if (fin_b.continuation.has_value()) {
+        (void)prog.release_continuation(std::move(*fin_b.continuation));
+    }
     std::printf("  [Sequence B] Successfully executed and finished; freed all 4 groups.\n");
 
     // 3. Now re-admit Sequence A from prompt to verify exact token determinism

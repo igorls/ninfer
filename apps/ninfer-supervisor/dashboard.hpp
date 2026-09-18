@@ -270,6 +270,22 @@ summary:hover{color:var(--accent)}
 .cfg-input[readonly]{background:#edf1f4;color:var(--text-muted)}
 .cfg-input.dirty,.cfg-select.dirty{border-color:#a57b32;background:#fffbef}
 .cfg-help{font-size:11px;color:var(--text-muted);line-height:1.7;margin-top:7px}
+.cfg-token-controls{margin-top:10px}
+.cfg-token-summary{display:flex;justify-content:space-between;gap:12px;font-size:12px;color:var(--text-muted)}
+.cfg-token-summary output{color:var(--text-main);font-weight:600;font-variant-numeric:tabular-nums}
+.cfg-token-slider{display:block;width:100%;height:40px;margin:0;accent-color:var(--accent);cursor:pointer}
+.cfg-token-slider:disabled{cursor:not-allowed;opacity:.48}
+.cfg-token-scale{position:relative;height:18px;font-size:11px;color:var(--text-muted);font-variant-numeric:tabular-nums}
+.cfg-token-scale span{position:absolute;transform:translateX(-50%)}
+.cfg-token-scale span:first-child{transform:none}.cfg-token-scale span:last-child{transform:translateX(-100%)}
+.cfg-capacity-pair{grid-column:1/-1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px 40px;padding-bottom:18px;margin-bottom:8px;border-bottom:1px solid var(--border-dim)}
+.cfg-capacity-preview{grid-column:1/-1}
+.cfg-capacity-preview p{margin:0;max-width:75ch;font-size:12px;color:var(--text-muted);line-height:1.7}
+.cfg-capacity-slots{display:flex;gap:4px;height:10px;margin:0 0 10px}
+.cfg-capacity-slots span{flex:1;min-width:0;border-radius:3px;background:#edf1f4}
+.cfg-capacity-slots span.fit{background:var(--accent)}
+.cfg-capacity-slots span.share{background:#c2d5cc}
+@media(max-width:1200px){.cfg-capacity-pair{grid-template-columns:1fr}}
 .cfg-check{display:flex;align-items:center;gap:9px;padding:9px 0;min-height:40px;font-size:12px}
 .cfg-check input{width:17px;height:17px}
 .cfg-note{grid-column:1/-1;padding:14px 0;border-top:1px solid var(--border-dim);font-size:12px;color:var(--text-muted);line-height:1.7;max-width:80ch}
@@ -1704,7 +1720,222 @@ R"HTML(      fetch('/api/state').then(r => {if (!r.ok) throw new Error(); return
     cfgSetDirtyUi();
   }
 
-  function fieldRow(spec, value) {
+  function tokenFieldValue(el) {
+    if (!el) return {kind: 'missing'};
+    const raw = el.value;
+    if (raw === 'auto') return {kind: 'auto'};
+    if (raw === '') return {kind: 'default'};
+    if (/^\d+$/.test(raw)) {
+      const n = Number(raw);
+      if (Number.isInteger(n)) return {kind: 'num', n};
+    }
+    return {kind: 'invalid'};
+  }
+
+  function parsedConcurrency() {
+    const el = document.getElementById('param-max_concurrency');
+    const raw = el ? el.value : ((cfgData && cfgData.params || {}).max_concurrency || '');
+    if (el && el.value === '') return {n: 1, explicit: false};
+    if (/^\d+$/.test(String(raw))) {
+      const n = Number(raw);
+      if (n >= 1 && n <= 8) return {n, explicit: true};
+    }
+    return {n: 1, explicit: false};
+  }
+
+  let capacityPairBusy = false;
+
+  function updateCapacityPreview() {
+    const preview = document.getElementById('capacity-preview');
+    if (!preview) return;
+    const slotsEl = document.getElementById('capacity-slots');
+    const noteEl = document.getElementById('capacity-preview-note');
+    const ctx = tokenFieldValue(document.getElementById('param-max_context'));
+    const kv = tokenFieldValue(document.getElementById('param-kv_capacity'));
+    const lanes = parsedConcurrency();
+    const marks = [];
+    let note = '';
+    const shortSize = n => n >= 1048576 ? (n / 1048576) + 'M' : n % 1024 === 0 ? (n / 1024) + 'K' : n.toLocaleString();
+    const laneWords = lanes.explicit
+      ? (lanes.n + ' active lane' + (lanes.n === 1 ? '' : 's'))
+      : 'the engine default of 1 active request';
+    if (kv.kind === 'auto') {
+      note = ctx.kind === 'num'
+        ? 'Auto sizes the shared pool from free GPU memory at startup. Each request is still limited to ' + shortSize(ctx.n) + '. Up to 8 requests can be active; that 8 is the Engine lane cap, not a memory estimate.'
+        : 'Auto sizes the shared pool from free GPU memory at startup. Up to 8 requests can be active; that 8 is the Engine lane cap, not a memory estimate.';
+    } else if (kv.kind === 'default') {
+      note = 'The pool follows max context, so one full-length request fills it. Extra concurrent requests share that length. ' + (lanes.explicit ? lanes.n + ' of 8 Engine lanes are enabled.' : 'Omitting max concurrency uses 1 of 8 Engine lanes.');
+      marks.push('fit');
+      for (let i = 1; i < lanes.n; i++) marks.push('share');
+    } else if (kv.kind === 'num' && ctx.kind === 'num') {
+      const fit = ctx.n > 0 ? Math.floor(kv.n / ctx.n) : 0;
+      const usable = Math.min(fit, lanes.n);
+      for (let i = 0; i < usable; i++) marks.push('fit');
+      for (let i = usable; i < lanes.n; i++) marks.push('share');
+      if (fit < 1) {
+        note = 'This pool cannot hold one request at ' + shortSize(ctx.n) + ' tokens. Raise KV capacity or lower max context.';
+      } else if (fit >= lanes.n) {
+        note = 'This pool holds ' + fit + ' full-length request' + (fit === 1 ? '' : 's') + ' at ' + shortSize(ctx.n) + '. ' + laneWords + ' can each take a full-length request. 8 is the Engine maximum, not GPU memory.';
+      } else {
+        note = 'This pool holds ' + fit + ' full-length request' + (fit === 1 ? '' : 's') + ' at ' + shortSize(ctx.n) + '. ' + laneWords + ' share the pool, so extra concurrent requests must be shorter. 8 is the Engine maximum.';
+      }
+    } else if (kv.kind === 'num') {
+      note = 'Shared pool: ' + shortSize(kv.n) + ' tokens. Set max context to see how many full-length requests fit. Max concurrency is how many of the Engine’s 8 lanes are enabled.';
+    } else {
+      note = 'Set the KV pool first, then max context inside it. Max concurrency chooses how many of the Engine’s 8 lanes may be active.';
+    }
+    while (marks.length < 8) marks.push('');
+    slotsEl.replaceChildren();
+    marks.slice(0, 8).forEach(kind => {
+      const tick = document.createElement('span');
+      if (kind) tick.className = kind;
+      slotsEl.appendChild(tick);
+    });
+    noteEl.textContent = note;
+  }
+
+  function enforceCapacityPair(sourceId, reason) {
+    if (capacityPairBusy) return;
+    const ctxEl = document.getElementById('param-max_context');
+    const kvEl = document.getElementById('param-kv_capacity');
+    if (!ctxEl || !kvEl) return;
+    const ctx = tokenFieldValue(ctxEl);
+    const kv = tokenFieldValue(kvEl);
+    const clamp = reason === 'slider' || reason === 'blur' || reason === 'sync';
+    const lanes = parsedConcurrency();
+    const poolCap = ctx.kind === 'num' ? lanes.n * ctx.n : null;
+    if (kv.kind === 'num' && ctx.kind === 'num' && ctx.n > kv.n) {
+      if (clamp) {
+        capacityPairBusy = true;
+        ctxEl.value = String(kv.n);
+        ctxEl.oninput();
+        capacityPairBusy = false;
+      } else if (sourceId === 'param-max_context') {
+        ctxEl.setCustomValidity('Max context cannot exceed the KV pool (' + kv.n.toLocaleString() + ' tokens). Enlarge the pool first.');
+      } else if (sourceId === 'param-kv_capacity') {
+        kvEl.setCustomValidity('KV pool must cover max context (' + ctx.n.toLocaleString() + ' tokens).');
+      }
+    } else if (kv.kind === 'num' && poolCap != null && kv.n > poolCap) {
+      if (clamp) {
+        capacityPairBusy = true;
+        kvEl.value = String(poolCap);
+        kvEl.oninput();
+        capacityPairBusy = false;
+      } else {
+        kvEl.setCustomValidity('KV pool cannot exceed ' + lanes.n + ' × max context (' + poolCap.toLocaleString() + ' tokens). Raise max context or max concurrency.');
+      }
+    }
+    if (ctxEl._capacitySync) ctxEl._capacitySync(true);
+    if (kvEl._capacitySync) kvEl._capacitySync(true);
+    updateCapacityPreview();
+  }
+
+  function capacitySlider(spec, input) {
+    const controls = document.createElement('div');
+    controls.className = 'cfg-token-controls';
+    const summary = document.createElement('div');
+    summary.className = 'cfg-token-summary';
+    const caption = document.createElement('span');
+    caption.textContent = spec.key === 'kv_capacity' ? 'Shared pool' : 'Per request';
+    const output = document.createElement('output');
+    output.htmlFor = input.id;
+    summary.append(caption, output);
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.className = 'cfg-token-slider';
+    slider.id = input.id + '-slider';
+    slider.min = 0;
+    slider.step = 1;
+    slider.setAttribute('aria-label', spec.label + ' common sizes');
+    slider.setAttribute('aria-describedby', input.id + '-help');
+    const scale = document.createElement('div');
+    scale.className = 'cfg-token-scale';
+    scale.setAttribute('aria-hidden', 'true');
+    const automatic = spec.kind === 'int_or_auto';
+    const specials = automatic ? ['', 'auto'] : [''];
+    const shortSize = n => n >= 1048576 ? (n / 1048576) + 'M' : (n / 1024) + 'K';
+    const presets = [];
+    for (let n = automatic ? 8192 : 4096; n <= spec.max; n *= 2) {
+      if (n >= spec.min) presets.push(n);
+    }
+    let stops = [];
+    function stopLabel(value) {
+      if (value === '') return 'Default';
+      if (value === 'auto') return 'Auto';
+      const n = Number(value);
+      return Number.isFinite(n) ? shortSize(n) : value;
+    }
+    function numericMax() {
+      if (spec.key === 'max_context') {
+        const kv = tokenFieldValue(document.getElementById('param-kv_capacity'));
+        return kv.kind === 'num' ? Math.min(spec.max, kv.n) : spec.max;
+      }
+      if (spec.key === 'kv_capacity') {
+        const ctx = tokenFieldValue(document.getElementById('param-max_context'));
+        if (ctx.kind === 'num') return Math.min(spec.max, parsedConcurrency().n * ctx.n);
+      }
+      return spec.max;
+    }
+    function sync(rebuild = true) {
+      const raw = input.value;
+      const n = Number(raw);
+      const maxN = numericMax();
+      const inRange = /^\d+$/.test(raw) && Number.isInteger(n) && n >= spec.min && n <= spec.max;
+      const numeric = inRange && n <= maxN;
+      const isAuto = automatic && raw === 'auto';
+      let valid = numeric || isAuto || raw === '';
+      let validity = valid ? '' : 'Enter a whole token count from ' + spec.min + ' to ' + spec.max + (automatic ? ', or auto.' : '.');
+      if (inRange && n > maxN) {
+        valid = false;
+        validity = spec.key === 'kv_capacity'
+          ? 'KV pool cannot exceed max concurrency × max context (' + maxN.toLocaleString() + ' tokens).'
+          : 'Max context cannot exceed the KV pool (' + maxN.toLocaleString() + ' tokens). Enlarge the pool first.';
+      }
+      input.setCustomValidity(validity);
+      if (rebuild) {
+        const sizes = presets.filter(p => p <= maxN);
+        if (numeric && !sizes.includes(n)) sizes.push(n);
+        sizes.sort((a, b) => a - b);
+        stops = [...specials, ...sizes.map(String)];
+        slider.max = Math.max(0, stops.length - 1);
+      }
+      slider.disabled = input.disabled;
+      const idx = numeric ? stops.indexOf(String(n)) : isAuto ? stops.indexOf('auto') : 0;
+      slider.value = idx < 0 ? 0 : idx;
+      const custom = numeric && !presets.includes(n);
+      output.textContent = numeric ? (custom ? 'Custom · ' + n.toLocaleString() : shortSize(n)) + ' tokens'
+        : isAuto ? 'Auto' : raw === '' ? 'Engine default' : 'Check token count';
+      slider.setAttribute('aria-valuetext', numeric ? n.toLocaleString() + ' tokens' + (custom ? ' (custom)' : '')
+        : isAuto ? 'Auto: size from free memory' : raw === '' ? (automatic ? 'Engine default: follow max context' : 'Engine default') : 'Choose a valid size');
+      scale.replaceChildren();
+      const last = stops.length - 1;
+      const tickAt = last <= 0 ? [0] : [0, Math.ceil(last / 2), last];
+      const seen = new Set();
+      for (const index of tickAt) {
+        if (seen.has(index) || !stops[index] && stops[index] !== '') continue;
+        seen.add(index);
+        const tick = document.createElement('span');
+        tick.textContent = stopLabel(stops[index]);
+        tick.style.left = last === 0 ? '0%' : (index / last * 100) + '%';
+        scale.appendChild(tick);
+      }
+    }
+    input._capacitySync = sync;
+    slider.oninput = () => {
+      input.value = stops[Number(slider.value)];
+      input.oninput();
+      enforceCapacityPair(input.id, 'slider');
+      sync(false);
+    };
+    input.addEventListener('input', () => { sync(); if (!capacityPairBusy) enforceCapacityPair(input.id, 'type'); });
+    input.addEventListener('blur', () => enforceCapacityPair(input.id, 'blur'));
+    sync();
+    controls.append(summary, slider, scale);
+    return controls;
+  }
+
+)HTML"
+R"HTML(  function fieldRow(spec, value) {
     spec = {...spec};
     const backend = Object.prototype.hasOwnProperty.call(cfgEdits.params, 'spec')
       ? cfgEdits.params.spec : (cfgData.params || {}).spec;
@@ -1803,10 +2034,21 @@ R"HTML(      fetch('/api/state').then(r => {if (!r.ok) throw new Error(); return
     input.setAttribute('aria-labelledby', label.id);
     input.setAttribute('aria-describedby', input.id + '-help');
     input.classList.toggle('dirty', Object.prototype.hasOwnProperty.call(cfgEdits.params, spec.key));
+    if (spec.key === 'max_context' || spec.key === 'kv_capacity') {
+      wrap.appendChild(capacitySlider(spec, input));
+    }
     help.id = input.id + '-help';
     help.textContent = (spec.kind === 'int' || spec.kind === 'int_or_auto')
       ? spec.help + ' Range ' + spec.min + '-' + spec.max + '.'
       : spec.help;
+    if (spec.key === 'max_context' || spec.key === 'kv_capacity') {
+      help.textContent += ' Pick a common size or enter an exact count. K = 1,024 tokens; M = 1,048,576.';
+      if (spec.key === 'kv_capacity') {
+        help.textContent += ' This is the shared pool. It must cover one full-length request and cannot exceed max concurrency × max context. Engine default omits the flag and follows max context. Auto sizes from free memory.';
+      } else {
+        help.textContent += ' Cannot exceed an explicit KV pool; enlarge the pool first.';
+      }
+    }
     wrap.appendChild(help);
     return wrap;
   }
@@ -1890,7 +2132,7 @@ R"HTML(      fetch('/api/state').then(r => {if (!r.ok) throw new Error(); return
   function renderConfig() {
     if (!cfgData) { return; }
     cfgBody.innerHTML = '';
-    const category = {network:['Connection','Set the address apps use to reach your engine. Most local setups can keep these values.'],api:['API & access','Control API authentication and request logging.'],capacity:['Request capacity','Advanced: balance context length and concurrent requests against available GPU memory.'],memory:['Memory & precision','Advanced: these settings can affect both memory use and generated responses.'],features:['Model features','Advanced: available options depend on the model and engine build.'],raw:['Launch details','Read-only information about the model and the command used to launch it.']}[cfgTab];
+    const category = {network:['Connection','Set the address apps use to reach your engine. Most local setups can keep these values.'],api:['API & access','Control API authentication and request logging.'],capacity:['Request capacity','Size the shared KV pool first. Max context is how long one request may be inside that pool. Max concurrency chooses how many of the Engine’s 8 lanes may be active.'],memory:['Memory & precision','Advanced: these settings can affect both memory use and generated responses.'],features:['Model features','Advanced: available options depend on the model and engine build.'],raw:['Launch details','Read-only information about the model and the command used to launch it.']}[cfgTab];
     document.getElementById('settings-section-title').textContent = category[0];
     document.getElementById('settings-section-help').textContent = category[1];
     const eng = cfgData.engine || {};
@@ -1940,7 +2182,38 @@ R"HTML(      cfgBody.appendChild(plainField('engine', 'request_log', 'Request lo
       }
     } else {
       const group = cfgTab;
-      (cfgData.schema || []).filter(x => x.group === group && x.key !== 'desktop_reserve_gib').forEach(spec => {
+      const specs = (cfgData.schema || []).filter(x => x.group === group && x.key !== 'desktop_reserve_gib');
+      if (group === 'capacity') {
+        const pair = document.createElement('div');
+        pair.className = 'cfg-capacity-pair';
+        const kvSpec = specs.find(s => s.key === 'kv_capacity');
+        const ctxSpec = specs.find(s => s.key === 'max_context');
+        if (kvSpec) pair.appendChild(fieldRow(kvSpec, (cfgData.params || {}).kv_capacity));
+        if (ctxSpec) pair.appendChild(fieldRow(ctxSpec, (cfgData.params || {}).max_context));
+        const preview = document.createElement('div');
+        preview.className = 'cfg-capacity-preview';
+        preview.id = 'capacity-preview';
+        const slots = document.createElement('div');
+        slots.className = 'cfg-capacity-slots';
+        slots.id = 'capacity-slots';
+        slots.setAttribute('aria-hidden', 'true');
+        const note = document.createElement('p');
+        note.id = 'capacity-preview-note';
+        note.setAttribute('role', 'status');
+        preview.append(slots, note);
+        pair.appendChild(preview);
+        cfgBody.appendChild(pair);
+        specs.filter(s => s.key !== 'kv_capacity' && s.key !== 'max_context').forEach(spec => {
+          cfgBody.appendChild(fieldRow(spec, (cfgData.params || {})[spec.key]));
+        });
+        const conc = document.getElementById('param-max_concurrency');
+        if (conc) {
+          conc.addEventListener('input', () => enforceCapacityPair(conc.id, 'type'));
+          conc.addEventListener('blur', () => enforceCapacityPair(conc.id, 'blur'));
+        }
+        enforceCapacityPair('', 'sync');
+      } else {
+      specs.forEach(spec => {
         cfgBody.appendChild(fieldRow(spec, (cfgData.params || {})[spec.key]));
       });
       if (group === 'memory') {
@@ -1949,6 +2222,7 @@ R"HTML(      cfgBody.appendChild(plainField('engine', 'request_log', 'Request lo
         reserveLink.onclick = () => setTimeout(() => document.getElementById('reserve-slider').focus(), 0);
         cfgBody.appendChild(reserveLink);
         cfgBody.appendChild(cfgNote('Quantization changes what the model outputs, not only what it costs. On this model the FP8 output head diverges from BF16 after about 95 greedy tokens and the FP8 KV cache diverges later. Measure before trusting a saving.'));
+      }
       }
     }
     if (cfgTab === 'network') {
