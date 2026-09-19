@@ -161,7 +161,10 @@ $installedConfig = Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json
 $dashboard.TargetPath = "http://127.0.0.1:$($installedConfig.supervisor.port)/"
 $dashboard.Save()
 
-New-Item -Path $runKey -Force | Out-Null
+# The Run key is shared with every other application's autostart entry, and
+# New-Item -Force on an existing registry key deletes all of its values: it
+# emptied the whole key on every update, taking this product's own entry with it.
+if (!(Test-Path -LiteralPath $runKey)) { New-Item -Path $runKey | Out-Null }
 $login = '"' + $appExe + '" --config "' + $configFile + '"'
 if (!$updating -or $firstConfiguration -or (Get-ItemProperty -Path $runKey -Name NInferSupervisor -ErrorAction SilentlyContinue)) {
     New-ItemProperty -Path $runKey -Name NInferSupervisor -Value $login -PropertyType String -Force | Out-Null

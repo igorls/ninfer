@@ -1416,9 +1416,22 @@ inline std::string run_at_login_command(std::string_view module_path,
 // whichever config happened to be running -- including the one the entry does
 // not point at, whose toggle would then delete the other's entry. Compare the
 // stored command instead. Whitespace-tolerant because the value may have been
-// hand-edited in regedit.
+// hand-edited in regedit; slash- and case-insensitive because the installer
+// and regedit write native "C:\..." paths while the supervisor spells its
+// canonical config path with forward slashes. Comparing those literally made
+// the installer's own entry show as unchecked, and a click then replaced or
+// removed an entry that was already correct.
 inline bool run_at_login_command_matches(std::string_view stored, std::string_view expected) {
-    return !trim_sv(expected).empty() && trim_sv(stored) == trim_sv(expected);
+    const auto fold = [](std::string_view s) {
+        std::string out(trim_sv(s));
+        for (char& c : out) {
+            if (c == '\\') { c = '/'; }
+            if (c >= 'A' && c <= 'Z') { c = static_cast<char>(c - 'A' + 'a'); }
+        }
+        return out;
+    };
+    const std::string want = fold(expected);
+    return !want.empty() && fold(stored) == want;
 }
 
 } // namespace ninfer::supervisor

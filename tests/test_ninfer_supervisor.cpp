@@ -1130,6 +1130,15 @@ int test_run_at_login_command() {
                "a hand-edited entry with stray whitespace still matches");
     f += check(!run_at_login_command_matches("", cmd), "no entry does not match");
     f += check(!run_at_login_command_matches("", ""), "an empty expectation never matches");
+    // The installer writes the entry with native backslashes; the supervisor
+    // spells the same config path with forward slashes. Windows paths are also
+    // case-insensitive. Both must read as the same entry, or the tray shows the
+    // installer's entry as unchecked and a click replaces or removes it.
+    f += check(run_at_login_command_matches(
+                   "\"C:\\Program Files\\NInfer\\ninfer-supervisor.exe\" --config "
+                   "\"c:\\ninfer\\Supervisor.json\"",
+                   cmd),
+               "an installer-written native path matches the supervisor's canonical form");
     return f;
 }
 
