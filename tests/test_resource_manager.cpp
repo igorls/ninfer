@@ -3185,6 +3185,46 @@ void test_shared_capture_combines_two_pressure_owners() {
     (void)finish_active(manager, program, active);
 }
 
+// A shared capture with pressure evidence builds its owner records without the owners in
+// publication grace, then listed every catalogued private owner as a pressure candidate. Once
+// the pool held enough owners for the grace to apply, the first graced owner had no record and
+// the capture threw "capture owner has no planning ID": an HTTP 500 on every in-flight request.
+// Eight owners, six in grace: the capture must offer exactly the two oldest publications.
+void test_shared_capture_pressure_skips_owners_in_publication_grace() {
+    FakeManager manager = make_manager(1, 9, 1);
+    FakeProgram program;
+    for (std::uint32_t k = 0; k < 8; ++k) {
+        const ActiveRequest owner =
+            start_active(manager, program, 70 + k, make_base(70 + k), 1 + k);
+        (void)finish_active(manager, program, owner);
+    }
+
+    FakeRequestBasePlan shared_request = make_base(43);
+    shared_request.cache.opportunities.push_back(FakeContextCache::Opportunity{
+        .kind     = ninfer::PromptCacheMarkerKind::SharedStablePrefix,
+        .evidence = ninfer::SharedCandidateEvidence::ExplicitBoundary,
+        .frontier = 64,
+    });
+    const ActiveRequest active           = start_active(manager, program, 43, shared_request, 9);
+    program.required_pressure_actions    = 1;
+    program.pressure_action_immediate_ns = 0;
+    program.capture_assessment           = FakeCaptureAssessment{
+                  .shortlist_key          = FakeShortlistKey{.digest = 43, .frontier = 64},
+                  .shared_evidence        = ninfer::SharedCandidateEvidence::ExplicitBoundary,
+                  .protected_rebuild_work = PrefillWork{.tokens = 64},
+                  .publishes_shared       = true,
+                  .physically_feasible    = false,
+    };
+
+    const auto reserved =
+        manager.reserve_active_capture(program, active.lane, FakeCaptureOffer{.id = 8}, 0, {});
+    require(reserved == FakeManager::ActiveCaptureReserveResult::Reserved,
+            "shared capture under a graced pool did not reserve a pressure target");
+    require(program.last_pressure_private_owner_count == 2,
+            "shared capture offered owners inside the publication grace as pressure candidates");
+    program.required_pressure_actions = 0;
+}
+
 void test_aborted_shared_capture_start_rolls_back_logical_claims() {
     FakeManager manager = make_manager(1, 4, 1);
     FakeProgram program;
@@ -3660,6 +3700,8 @@ int main() {
              test_shared_fanout_keeps_owner_edges_live_across_summary_refresh);
     run_test("shared capture multi-owner pressure",
              test_shared_capture_combines_two_pressure_owners);
+    run_test("shared capture pressure under publication grace",
+             test_shared_capture_pressure_skips_owners_in_publication_grace);
     run_test("aborted shared capture logical rollback",
              test_aborted_shared_capture_start_rolls_back_logical_claims);
     run_test("validate complete capture result before adoption",

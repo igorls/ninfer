@@ -742,7 +742,7 @@ public:
                     for (std::uint32_t slot = 0; slot < catalog_count_; ++slot) {
                         const CatalogEntry& entry = catalog_[slot];
                         if (entry.state != CatalogState::Catalogued || !entry.handle ||
-                            private_has_active_edge(slot)) {
+                            private_has_active_edge(slot) || private_in_publication_grace(slot)) {
                             continue;
                         }
                         private_owners.push_back(&*entry.handle);
