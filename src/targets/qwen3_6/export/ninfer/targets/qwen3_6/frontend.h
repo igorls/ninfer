@@ -136,6 +136,9 @@ public:
     [[nodiscard]] PreparedPrompt prepare_tokens(std::vector<TokenId> token_ids,
                                                 bool allow_prefix_identity = true) const;
     [[nodiscard]] std::vector<TokenId> tokenize_text(std::string_view text) const;
+    // Exact bytes one token decodes to; special tokens keep their literal text. The bytes of a
+    // single token need not be valid UTF-8 on their own.
+    [[nodiscard]] std::string token_bytes(TokenId token) const;
     [[nodiscard]] PromptCapabilities prompt_capabilities() const noexcept;
     [[nodiscard]] MediaCacheSummary media_cache_summary() const;
     [[nodiscard]] OutputSession

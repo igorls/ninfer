@@ -165,6 +165,8 @@ struct RequestRecord {
     std::optional<BeginSummary> admitted_begin;
     std::optional<BeginSummary> begin;
     std::vector<TokenId> generated;
+    // Parallel to `generated` when the request enabled token logprobs, otherwise empty.
+    std::vector<TokenLogprobs> token_logprobs;
     std::string content;
     std::string reasoning;
     std::optional<LaneId> lane;

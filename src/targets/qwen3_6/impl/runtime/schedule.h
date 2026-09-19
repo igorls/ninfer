@@ -54,6 +54,8 @@ struct PrefillContext {
     std::int32_t state_destination_slot                     = 0;
     std::uint32_t mtp_proposal_extent                       = 0;
     const qwen3_6::DFlashDecodeIngress* dflash_host_ingress = nullptr;
+    // Pinned host destination for the first generated token's target logits, or null.
+    std::uint16_t* first_token_logits_host                  = nullptr;
 };
 
 struct OrdinaryBatchContext {

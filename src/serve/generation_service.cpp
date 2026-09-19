@@ -3,6 +3,7 @@
 #include "product/media_acquire/acquire.h"
 #include "serve/translate.h"
 
+#include <limits>
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -301,6 +302,32 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
         resolve_prompt_semantics(request, options_, prompt_capabilities_);
     ninfer::RequestOptions request_options = to_request_options(
         request, options_, semantics, cache_participation == CacheParticipation::ReadWrite);
+    if (request.logprobs) {
+        ninfer::TokenLogprobOptions& logprobs = request_options.execution.logprobs;
+        logprobs.enabled                      = true;
+        logprobs.top                          = static_cast<std::uint32_t>(request.top_logprobs);
+        logprobs.candidates.reserve(request.logprob_candidates.size());
+        for (const LogprobCandidate& candidate : request.logprob_candidates) {
+            if (candidate.token_id) {
+                if (*candidate.token_id < 0 ||
+                    *candidate.token_id > std::numeric_limits<ninfer::TokenId>::max()) {
+                    const std::invalid_argument error("logprob candidate token id is out of range");
+                    throw_invalid_input(error, "invalid_logprob_candidate");
+                }
+                logprobs.candidates.push_back(static_cast<ninfer::TokenId>(*candidate.token_id));
+                continue;
+            }
+            // A closed-set option is scored at one position, so it has to be one token there.
+            const std::vector<ninfer::TokenId> tokens = engine_->tokenize_text(candidate.text);
+            if (tokens.size() != 1) {
+                const std::invalid_argument error(
+                    "logprob candidate \"" + candidate.text + "\" encodes to " +
+                    std::to_string(tokens.size()) + " tokens; each candidate must be one token");
+                throw_invalid_input(error, "invalid_logprob_candidate");
+            }
+            logprobs.candidates.push_back(tokens.front());
+        }
+    }
     prepared.enable_thinking            = semantics.enable_thinking;
     prepared.thinking_budget            = request_options.execution.thinking.budget;
     prepared.effective_reasoning_effort = semantics.effective_reasoning_effort;
@@ -418,6 +445,27 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     outcome.thinking            = result.thinking;
     outcome.finish_reason       = result.finish_reason;
     outcome.matched_stop_string = std::move(result.matched_stop_string);
+    if (!result.token_logprobs.empty()) {
+        const auto describe = [&](const ninfer::TokenLogprob& value) {
+            TokenLogprobEntry entry{.token_id    = value.token,
+                                    .logprob     = value.logprob,
+                                    .raw_logprob = value.raw_logprob};
+            // The vocabulary has unassigned ids; they can appear among alternatives.
+            try {
+                entry.bytes = engine_->token_bytes(value.token);
+            } catch (const std::out_of_range&) {}
+            return entry;
+        };
+        outcome.token_logprobs.reserve(result.token_logprobs.size());
+        for (const ninfer::TokenLogprobs& position : result.token_logprobs) {
+            TokenLogprobPosition out{.forced = position.forced, .sampled = describe(position.sampled)};
+            for (const auto& value : position.top) { out.top.push_back(describe(value)); }
+            for (const auto& value : position.candidates) {
+                out.candidates.push_back(describe(value));
+            }
+            outcome.token_logprobs.push_back(std::move(out));
+        }
+    }
 
     outcome.metrics.prepare_seconds = prepared.prepare_seconds;
     outcome.metrics.ttft_seconds =

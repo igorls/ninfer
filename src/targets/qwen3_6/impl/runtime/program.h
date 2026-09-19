@@ -8,6 +8,7 @@
 #include "ninfer/ops/gdn_replay.h"
 #include "ninfer/ops/sampling.h"
 #include "runtime/contract/structured_output.h"
+#include "runtime/contract/token_logprobs.h"
 #include "core/decode_graph.h"
 #include <ninfer/targets/qwen3_6/prepared_prompt.h>
 
@@ -184,6 +185,7 @@ struct RequestBasePlanImpl<NINFER_QWEN36_VARIANT> {
     qwen3_6::PreparedContextCache context_cache;
     ops::SamplingConfig sampling;
     std::shared_ptr<const runtime::CompiledOutputConstraint> output_constraint;
+    TokenLogprobOptions logprobs;
     std::uint32_t text_kv_page_entitlement    = 0;
     std::uint32_t backend_kv_page_entitlement = 0;
     std::shared_ptr<const qwen3_6::VisionControlPlan> vision_control_plan;
@@ -252,6 +254,7 @@ struct AdmissionCandidateImpl<NINFER_QWEN36_VARIANT> : ResourceCandidateState {
     std::vector<NINFER_QWEN36_RUNTIME_NS::CaptureGroup> shared_candidates;
     ops::SamplingConfig sampling;
     std::shared_ptr<const runtime::CompiledOutputConstraint> output_constraint;
+    TokenLogprobOptions logprobs;
     std::uint32_t text_kv_page_entitlement    = 0;
     std::uint32_t backend_kv_page_entitlement = 0;
     runtime::LaneId destination{};
@@ -476,6 +479,9 @@ struct RequestControl {
     ops::SamplingConfig sampling_host;
     std::vector<std::int32_t> prompt_presence_host;
     std::unique_ptr<runtime::OutputConstraintState> output_constraint;
+    TokenLogprobOptions logprobs;
+    // Readout of the round this request is pending on; empty unless logprobs are enabled.
+    std::vector<TokenLogprobs> round_logprobs;
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
     detail::PhysicalResources active_resources;
@@ -537,6 +543,7 @@ public:
 
     [[nodiscard]] RequestBasePlan plan_request(const PreparedPromptData& prompt,
                                                const runtime::ResolvedExecutionOptions& options);
+    [[nodiscard]] std::span<const TokenLogprobs> round_token_logprobs(std::uint32_t lane) const;
     [[nodiscard]] std::vector<float> causal_score(PreparedPromptData&& prompt,
                                                   std::uint32_t first_target);
     [[nodiscard]] std::optional<AdmissionCandidate> inspect_admission(
@@ -692,6 +699,8 @@ public:
 
     PinnedHostBuffer round_host;
     std::optional<PinnedHostBuffer> score_logprobs_host;
+    // One BF16 vocabulary column, allocated on the first request that enables token logprobs.
+    std::optional<PinnedHostBuffer> token_logits_host;
     TokenId* host_tokens = nullptr;
     PinnedHostBuffer ordinary_host;
     qwen3_6::OrdinaryDecodeIngress* ordinary_host_ingress = nullptr;
@@ -1206,6 +1215,11 @@ private:
     void release_sequence_state_strict(SequenceState& sequence) noexcept;
     void release_sequence_state(SequenceState& sequence) noexcept;
     void prepare_graphs();
+    [[nodiscard]] std::uint16_t* token_logits_capture(const RequestControl& request);
+    // Reads one sampled position's target logits into round_logprobs. `column` is the device
+    // column to copy after the round's synchronisation, or null when the prefill path already
+    // queued the copy into token_logits_host.
+    void record_round_logprobs(RequestControl& request, const Tensor* column, TokenId token);
     void install_sampling(SequenceState& sequence, RequestControl& request,
                           const ops::SamplingConfig& config, std::span<const TokenId> prompt);
     void set_device_i32(Tensor& tensor, std::int32_t value);

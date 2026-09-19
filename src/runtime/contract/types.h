@@ -188,6 +188,7 @@ struct ResolvedExecutionOptions {
     bool allow_prefix_reuse               = true;
     ThinkingControlOptions thinking;
     std::shared_ptr<const CompiledOutputConstraint> output_constraint;
+    TokenLogprobOptions logprobs;
 };
 
 struct ResolvedRequestOptions {

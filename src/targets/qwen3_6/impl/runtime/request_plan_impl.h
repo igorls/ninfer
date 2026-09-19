@@ -265,6 +265,12 @@ RequestBasePlan ProgramImplCore::plan_request(const PreparedPromptData& prompt,
                                                : FinishReason::ContextCapacity;
     base->sampling                       = translate_sampling(options.sampling);
     base->output_constraint              = options.output_constraint;
+    for (const TokenId id : options.logprobs.candidates) {
+        if (id < 0 || id >= TextConfig::token_domain) {
+            throw std::invalid_argument("logprob candidate is outside the 248077-token domain");
+        }
+    }
+    base->logprobs                       = options.logprobs;
     base->allow_prefix_reuse             = options.allow_prefix_reuse;
     base->summary.publish_continuation =
         options.allow_prefix_reuse && prompt.identity.reusable && context_cache.enabled;
@@ -465,6 +471,7 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
     plan->summary                     = base.summary;
     plan->sampling                    = base.sampling;
     plan->output_constraint           = base.output_constraint;
+    plan->logprobs                    = base.logprobs;
     plan->text_kv_page_entitlement    = base.text_kv_page_entitlement;
     plan->backend_kv_page_entitlement = base.backend_kv_page_entitlement;
     plan->root_rebuild_work           = base.root_rebuild_work;

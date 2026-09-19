@@ -825,6 +825,7 @@ private:
         GenerationResult result;
         result.prompt                  = request->prompt_summary;
         result.generated_token_ids     = std::move(request->generated);
+        result.token_logprobs          = std::move(request->token_logprobs);
         result.content                 = std::move(request->content);
         result.reasoning               = std::move(request->reasoning);
         result.tool_calls              = request->output.take_tool_calls();
@@ -1141,6 +1142,7 @@ private:
         std::array<FinishReason, kMaximumConcurrency> finish_reasons{};
         std::array<ContinuationAction, kMaximumConcurrency> continuations{};
         std::array<std::size_t, kMaximumConcurrency> generated_sizes{};
+        std::array<std::size_t, kMaximumConcurrency> logprob_sizes{};
         std::array<bool, kMaximumConcurrency> cancelled{};
         bool generated_staged = false;
         std::array<std::shared_ptr<Request>, kMaximumConcurrency> terminal_requests{};
@@ -1156,6 +1158,9 @@ private:
                 const auto& request = slots_[lane_indices[row]];
                 if (request != nullptr && request->generated.size() >= generated_sizes[row]) {
                     request->generated.resize(generated_sizes[row]);
+                }
+                if (request != nullptr && request->token_logprobs.size() >= logprob_sizes[row]) {
+                    request->token_logprobs.resize(logprob_sizes[row]);
                 }
             }
             generated_staged = false;
@@ -1179,6 +1184,7 @@ private:
                 const auto row_tokens     = pending.tokens().subspan(row * pending.row_stride(),
                                                                      static_cast<std::size_t>(count));
                 generated_sizes[row]      = request->generated.size();
+                logprob_sizes[row]        = request->token_logprobs.size();
                 if (cancelled[row]) {
                     (void)request->output.preview_terminal(FinishReason::Cancelled);
                     decisions[row] = CommitDecision{
@@ -1217,6 +1223,19 @@ private:
                                    static_cast<std::ptrdiff_t>(row * pending.row_stride());
                 request->generated.insert(request->generated.end(), first,
                                           first + static_cast<std::ptrdiff_t>(accepted));
+                if constexpr (requires {
+                                  instance_.program->round_token_logprobs(lanes[row]);
+                              }) {
+                    if (request->options.execution.logprobs.enabled) {
+                        const auto readout = instance_.program->round_token_logprobs(lanes[row]);
+                        if (readout.size() < accepted) {
+                            throw std::logic_error("Program round has no token logprob readout");
+                        }
+                        request->token_logprobs.insert(
+                            request->token_logprobs.end(), readout.begin(),
+                            readout.begin() + static_cast<std::ptrdiff_t>(accepted));
+                    }
+                }
             }
         } catch (...) {
             const std::exception_ptr error = std::current_exception();
@@ -1884,6 +1903,7 @@ private:
         }
 
         std::array<std::size_t, kMaximumConcurrency> generated_sizes{};
+        std::array<std::size_t, kMaximumConcurrency> logprob_sizes{};
         bool generated_staged         = false;
         const auto rollback_generated = [&]() noexcept {
             if (!generated_staged) { return; }
@@ -1891,6 +1911,9 @@ private:
                 const auto& request = slots_[membership.lanes[row]];
                 if (request != nullptr && request->generated.size() >= generated_sizes[row]) {
                     request->generated.resize(generated_sizes[row]);
+                }
+                if (request != nullptr && request->token_logprobs.size() >= logprob_sizes[row]) {
+                    request->token_logprobs.resize(logprob_sizes[row]);
                 }
             }
             generated_staged = false;
@@ -1902,6 +1925,7 @@ private:
                 throw std::logic_error("thinking control membership lost its request");
             }
             generated_sizes[row] = request->generated.size();
+            logprob_sizes[row]   = request->token_logprobs.size();
         }
         generated_staged = true;
         try {
@@ -1928,6 +1952,14 @@ private:
                         "admission did not reserve thinking-control token capacity");
                 }
                 request->generated.insert(request->generated.end(), tokens.begin(), tokens.end());
+                if (request->options.execution.logprobs.enabled) {
+                    for (const TokenId token : tokens) {
+                        request->token_logprobs.push_back(TokenLogprobs{
+                            .forced  = true,
+                            .sampled = TokenLogprob{.token = token},
+                        });
+                    }
+                }
             }
             phase.pause_range();
             ProgramCallScope program_call(*this);

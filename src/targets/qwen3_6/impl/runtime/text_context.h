@@ -172,6 +172,12 @@ public:
 
     void set_sampling(const ops::SamplingConfig* config) noexcept { sampling_config_ = config; }
 
+    // Pinned host destination for the final prompt position's target logits, or null. The copy
+    // is queued right after sampling because MTP drafting reuses the same logits buffer.
+    void set_first_token_logit_capture(std::uint16_t* host) noexcept {
+        first_token_logits_host_ = host;
+    }
+
     void set_prefill_split_frontier(std::int64_t position) noexcept {
         prefill_split_frontier_ = position;
     }
@@ -346,6 +352,7 @@ private:
     const std::int32_t* proposal_head_ids_      = nullptr;
     int proposal_head_n_                        = 0;
     const ops::SamplingConfig* sampling_config_ = nullptr;
+    std::uint16_t* first_token_logits_host_     = nullptr;
     MtpW mtp_;
     std::array<FullLayerW, TextConfig::full_attention_layers()> full_{};
     std::array<GdnLayerW, TextConfig::gdn_layers()> gdn_{};

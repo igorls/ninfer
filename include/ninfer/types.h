@@ -303,6 +303,9 @@ struct TokenLogprob {
 };
 
 struct TokenLogprobs {
+    // True for a token the engine inserted itself (thinking-budget control tokens). It was not
+    // drawn from the model, so it carries logprob 0 and no alternatives.
+    bool forced = false;
     TokenLogprob sampled;
     std::vector<TokenLogprob> top;
     std::vector<TokenLogprob> candidates;

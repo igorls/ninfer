@@ -42,8 +42,24 @@ struct GenerationMetrics {
     ninfer::MaterializationDiagnostics materialization;
 };
 
+struct TokenLogprobEntry {
+    ninfer::TokenId token_id = 0;
+    std::string bytes;
+    float logprob     = 0.0F;
+    float raw_logprob = 0.0F;
+};
+
+struct TokenLogprobPosition {
+    bool forced = false;
+    TokenLogprobEntry sampled;
+    std::vector<TokenLogprobEntry> top;
+    std::vector<TokenLogprobEntry> candidates;
+};
+
 struct GenerationOutcome {
     std::string text;
+    // One entry per generated token when the request enabled logprobs, otherwise empty.
+    std::vector<TokenLogprobPosition> token_logprobs;
     std::string reasoning;
     std::vector<ninfer::GeneratedToolCall> tool_calls;
     int prompt_tokens     = 0;

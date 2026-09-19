@@ -190,8 +190,18 @@ requested_reasoning_effort_name(RequestedReasoningEffort effort) noexcept {
     return {};
 }
 
+// One closed-set option for the candidate readout: either text that must encode to exactly one
+// token, or a token id.
+struct LogprobCandidate {
+    std::string text;
+    std::optional<std::int64_t> token_id;
+};
+
 struct GenerationRequest {
     StructuredOutputOptions structured_output;
+    bool logprobs    = false;
+    int top_logprobs = 0;
+    std::vector<LogprobCandidate> logprob_candidates;
     std::vector<ChatTurn> messages;
     std::vector<ToolDefinition> tools;
     std::size_t tool_name_max_length = 64;

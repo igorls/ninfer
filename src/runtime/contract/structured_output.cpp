@@ -232,6 +232,7 @@ std::span<const std::int32_t> OutputConstraintState::next_mask() {
     }
     return impl_->mask;
 }
+std::span<const std::int32_t> OutputConstraintState::current_mask() const noexcept { return impl_->mask; }
 bool OutputConstraintState::try_accept(TokenId token) {
     if (impl_->reasoning) {
         if (static_cast<int>(token) == impl_->compiled->impl->end_thinking) { impl_->reasoning = false; }

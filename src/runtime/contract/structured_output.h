@@ -39,6 +39,8 @@ public:
     OutputConstraintState(OutputConstraintState&&) noexcept;
     OutputConstraintState& operator=(OutputConstraintState&&) noexcept;
     [[nodiscard]] std::span<const std::int32_t> next_mask();
+    // The mask next_mask() last produced; it stays valid until the next next_mask() call.
+    [[nodiscard]] std::span<const std::int32_t> current_mask() const noexcept;
     void accept(std::span<const TokenId> tokens);
     [[nodiscard]] OutputConstraintState fork() const;
     [[nodiscard]] bool try_accept(TokenId token);

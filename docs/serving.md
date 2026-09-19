@@ -143,6 +143,38 @@ text-only `audio` configuration, and `prediction` are accepted without changing 
 Metadata, user/safety identifiers, service-tier and prompt-cache hints are likewise advisory.
 Unknown top-level fields are ignored.
 
+### Token log probabilities
+
+`logprobs: true` on a non-streaming Chat Completions request returns
+`choices[0].logprobs.content`, one entry per generated token (reasoning tokens and the final stop
+token included), in the OpenAI shape: `token`, `logprob`, `bytes`, and `top_logprobs` with up to
+`top_logprobs` (0 to 20) alternatives. Every entry also carries `token_id` and `raw_logprob`.
+
+All values are read from the target model's logits **before any sampling adjustment**: no
+repetition/presence/frequency penalty, no temperature, no `top_k`/`top_p`/`min_p` truncation. They
+are the model's own distribution at that position however the token was drawn, so a client can
+apply its own temperature scaling for calibration.
+
+- `raw_logprob` is the log softmax over the whole vocabulary.
+- `logprob` is the log softmax over the tokens the structured-output grammar allows at that
+  position, which is the distribution the sampler could actually draw from. Without
+  `response_format` constraints the two are equal. Under a mask `top_logprobs` lists allowed tokens
+  only and their probabilities sum to one over the allowed set.
+- `logprob_candidates` (NInfer extension): an array of up to 1024 closed-set options, each a string
+  that encodes to exactly one token or an integer token id. Every position then also reports
+  `candidate_logprobs`, the distribution renormalised over exactly that list, in request order and
+  not limited to 20. A candidate the grammar forbids reports the `-9999` floor. Check that each
+  option is one token in the context where it appears: a leading space changes the token.
+- A thinking-budget control token inserted by the engine is reported with `"forced": true`,
+  `logprob` 0 and no alternatives.
+- `-inf` is not valid JSON; vanishing or forbidden probabilities report `-9999`.
+
+A request with `logprobs: true` decodes one token per round: speculative drafts are not offered
+for it, so long generations are slower than without it. Each position copies one vocabulary column
+to the host (about 0.5 MB). `logprobs` with `stream: true` is rejected with
+`logprobs_stream_not_supported`; the Responses API does not report log probabilities. Models
+without a readout reject the request.
+
 A string `name` on a `tool` message is accepted as an ignored, output-neutral compatibility
 extension for clients that mirror the function name onto tool results. It does not participate in
 tool identity, prompt rendering, or output. Non-string values are malformed; non-empty names on

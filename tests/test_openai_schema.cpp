@@ -143,8 +143,42 @@ int test_standard_field_policy() {
 
     rejected("n", 2, "n_not_supported");
     rejected("logit_bias", Json{{"12", 1}}, "logit_bias_not_supported");
-    rejected("logprobs", true, "logprobs_not_supported");
-    rejected("top_logprobs", 2, "logprobs_not_supported");
+    {
+        Json body            = base_request();
+        body["logprobs"]     = true;
+        body["top_logprobs"] = 5;
+        body["logprob_candidates"] = Json::array({"yes", 17});
+        const OpenAIChatRequest parsed = parse(body);
+        failures += check(parsed.generation.logprobs && parsed.generation.top_logprobs == 5 &&
+                              parsed.generation.logprob_candidates.size() == 2 &&
+                              parsed.generation.logprob_candidates[0].text == "yes" &&
+                              parsed.generation.logprob_candidates[1].token_id == 17,
+                          "logprobs, top_logprobs and candidates reach the generation request");
+        failures += check(!parse(base_request()).generation.logprobs,
+                          "logprobs default to off");
+
+        auto invalid = [&](Json request, const char* param, const std::string& what) {
+            const ApiError error = api_error([&] { (void)parse(request); });
+            failures += check(error.param == param, what);
+        };
+        Json without_flag            = base_request();
+        without_flag["top_logprobs"] = 2;
+        invalid(without_flag, "top_logprobs", "top_logprobs without logprobs rejected");
+        Json too_many            = body;
+        too_many["top_logprobs"] = 21;
+        invalid(too_many, "top_logprobs", "top_logprobs above 20 rejected");
+        Json bad_candidate                  = body;
+        bad_candidate["logprob_candidates"] = Json::array({""});
+        invalid(bad_candidate, "logprob_candidates", "empty candidate rejected");
+        Json orphan_candidates = base_request();
+        orphan_candidates["logprob_candidates"] = Json::array({"yes"});
+        invalid(orphan_candidates, "logprob_candidates", "candidates without logprobs rejected");
+        Json streamed      = body;
+        streamed["stream"] = true;
+        const ApiError stream_error = api_error([&] { (void)parse(streamed); });
+        failures += check(stream_error.code == "logprobs_stream_not_supported",
+                          "streaming logprobs rejected with a specific code");
+    }
     rejected("response_format", Json{{"type", "json_schema"}}, "invalid_response_format");
     rejected("modalities", Json::array({"text", "audio"}), "modality_not_supported");
     rejected("web_search_options", Json::object(), "web_search_not_supported");

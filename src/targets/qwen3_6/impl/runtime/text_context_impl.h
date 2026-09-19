@@ -1249,6 +1249,12 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 } else {
                     ops::argmax(logits, io_.token, kCfg.token_domain, s);
                 }
+                if (first_token_logits_host_ != nullptr) {
+                    CUDA_CHECK(cudaMemcpyAsync(
+                        first_token_logits_host_, logits.data,
+                        static_cast<std::size_t>(kCfg.token_domain) * sizeof(std::uint16_t),
+                        cudaMemcpyDeviceToHost, s));
+                }
             }
 
             if (prepare_mtp_prompt) {

@@ -132,6 +132,17 @@ runtime::ResolvedRequestOptions resolve_request_options(const ModelSamplingDefau
     resolved.execution.requested_output_tokens = options.execution.requested_output_tokens;
     resolved.execution.allow_prefix_reuse      = options.execution.allow_prefix_reuse;
     resolved.execution.thinking                = options.execution.thinking;
+    TokenLogprobOptions& logprobs              = options.execution.logprobs;
+    if (!logprobs.enabled && (logprobs.top != 0 || !logprobs.candidates.empty())) {
+        throw std::invalid_argument("token logprob alternatives require logprobs to be enabled");
+    }
+    if (logprobs.top > kMaximumTopLogprobs) {
+        throw std::invalid_argument("top logprobs exceeds the supported maximum of 20");
+    }
+    if (logprobs.candidates.size() > kMaximumLogprobCandidates) {
+        throw std::invalid_argument("too many logprob candidate tokens");
+    }
+    resolved.execution.logprobs = std::move(logprobs);
     resolved.stop                              = std::move(options.stop);
     resolved.output                            = options.output;
     return resolved;
@@ -366,6 +377,16 @@ std::vector<TokenId> Engine::tokenize_text(std::string_view text) const {
         impl_->active);
 }
 
+std::string Engine::token_bytes(TokenId token) const {
+    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+    return std::visit(
+        [&](const auto& target_ptr) {
+            if (target_ptr == nullptr) { throw std::logic_error("Engine target is not active"); }
+            return target_ptr->loaded->frontend.token_bytes(token);
+        },
+        impl_->active);
+}
+
 std::vector<float> Engine::score_tokens(std::vector<TokenId> tokens, std::uint32_t first_target) {
     nvtx::ScopedRange score_range(nvtx::Name::Score, nvtx::Category::Scoring,
                                   static_cast<std::uint64_t>(tokens.size()));
@@ -442,6 +463,16 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
         (!options.stop.strings.empty() || !options.stop.token_ids.empty() || options.output.raw ||
          options.output.preserve_special_tokens)) {
         throw std::invalid_argument("structured output cannot be combined with custom stops or raw/special-token output");
+    }
+    if (options.execution.logprobs.enabled) {
+        const bool supported = std::visit(
+            [](const auto& target) {
+                return requires { target->program->round_token_logprobs(runtime::LaneId{}); };
+            },
+            impl_->active);
+        if (!supported) {
+            throw std::invalid_argument("token logprobs are not supported by the loaded model");
+        }
     }
     runtime::ResolvedRequestOptions resolved_options = resolve_request_options(
         impl_->sampling_defaults, prompt.impl_->sampling_mode, std::move(options));
