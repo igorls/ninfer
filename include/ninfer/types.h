@@ -276,8 +276,41 @@ struct StructuredOutputOptions {
     std::string schema;
 };
 
+// Opt-in per-token log probabilities. They are read from the target model's logits before any
+// sampling adjustment (no penalty, temperature or truncation), so they are the model's own
+// distribution at every position regardless of how the token was drawn. A request that enables
+// them decodes one token per round: speculative drafts are not offered for it.
+struct TokenLogprobOptions {
+    bool enabled = false;
+    // Number of most likely alternatives reported per position, at most kMaximumTopLogprobs.
+    std::uint32_t top = 0;
+    // If nonempty, every position also reports the distribution renormalised over exactly these
+    // tokens, in this order. Not bounded by `top`.
+    std::vector<TokenId> candidates;
+};
+
+inline constexpr std::uint32_t kMaximumTopLogprobs       = 20;
+inline constexpr std::size_t kMaximumLogprobCandidates   = 1024;
+
+struct TokenLogprob {
+    TokenId token = 0;
+    // Log probability over the tokens the structured-output mask allows at this position; equal
+    // to raw_logprob when the position is unconstrained, -inf for a forbidden token. Within
+    // TokenLogprobs::candidates it is renormalised over the candidate list instead.
+    float logprob = 0.0F;
+    // Log probability over the whole vocabulary, ignoring any mask.
+    float raw_logprob = 0.0F;
+};
+
+struct TokenLogprobs {
+    TokenLogprob sampled;
+    std::vector<TokenLogprob> top;
+    std::vector<TokenLogprob> candidates;
+};
+
 struct ExecutionOptions {
     SamplingOverrides sampling;
+    TokenLogprobOptions logprobs;
     std::uint32_t requested_output_tokens = 0;
     bool allow_prefix_reuse               = true;
     ThinkingControlOptions thinking;
@@ -748,6 +781,9 @@ struct MaterializationDiagnostics {
 struct GenerationResult {
     PromptSummary prompt;
     std::vector<TokenId> generated_token_ids;
+    // One entry per generated_token_ids element when ExecutionOptions::logprobs was enabled,
+    // otherwise empty.
+    std::vector<TokenLogprobs> token_logprobs;
     std::string content;
     std::string reasoning;
     std::vector<GeneratedToolCall> tool_calls;
