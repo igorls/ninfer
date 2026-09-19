@@ -406,6 +406,7 @@ if(NINFER_BUILD_SERVE)
     serve/request_validation.cpp
     serve/openai_chat_request.cpp
     serve/openai_chat_response.cpp
+    serve/ninfer_score_http.cpp
     serve/openai_chat_http.cpp
     serve/openai_common.cpp
     serve/openai_responses_request.cpp

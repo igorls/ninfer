@@ -186,6 +186,7 @@ struct ResolvedExecutionOptions {
     ResolvedSamplingParameters sampling;
     std::uint32_t requested_output_tokens = 0;
     bool allow_prefix_reuse               = true;
+    bool allow_prefix_publication         = true;
     ThinkingControlOptions thinking;
     std::shared_ptr<const CompiledOutputConstraint> output_constraint;
     TokenLogprobOptions logprobs;

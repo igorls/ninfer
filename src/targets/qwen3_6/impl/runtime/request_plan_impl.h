@@ -272,8 +272,12 @@ RequestBasePlan ProgramImplCore::plan_request(const PreparedPromptData& prompt,
     }
     base->logprobs                       = options.logprobs;
     base->allow_prefix_reuse             = options.allow_prefix_reuse;
-    base->summary.publish_continuation =
+    const bool reads_prefix_cache =
         options.allow_prefix_reuse && prompt.identity.reusable && context_cache.enabled;
+    base->summary.publish_continuation = reads_prefix_cache && options.allow_prefix_publication;
+    // A read-only plan advertises no write opportunity: the Engine projects every advertised
+    // shared candidate as a publication and expects its prepared rebuild work.
+    if (!base->summary.publish_continuation) { base->context_cache.opportunities.clear(); }
     const std::uint32_t reserved_context_tokens =
         base->summary.prompt_tokens + (base->summary.effective_output_tokens == 0
                                            ? 0U
@@ -336,12 +340,13 @@ RequestBasePlan ProgramImplCore::plan_request(const PreparedPromptData& prompt,
         }
         previous_rewrite_frontier = frontier;
     }
-    if (base->summary.publish_continuation) {
+    // A read-only request still needs its digests: they are the lookup keys of published prefixes.
+    if (reads_prefix_cache) {
         base->prefix_digests.assign(prompt);
         base->prefix_identity_tag =
             capture_identity_tag(speculative_backend, proposal_head, kv_storage);
     }
-    if (options.allow_prefix_reuse && prompt.identity.reusable && context_cache.enabled) {
+    if (base->summary.publish_continuation) {
         const auto add_capture = [&](std::uint32_t frontier, std::uint32_t input_order,
                                      std::optional<RewriteCheckpointKind> rewrite, bool shared,
                                      bool long_anchor, SharedCandidateEvidence evidence) {

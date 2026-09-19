@@ -156,6 +156,11 @@ int test_standard_field_policy() {
                           "logprobs, top_logprobs and candidates reach the generation request");
         failures += check(!parse(base_request()).generation.logprobs,
                           "logprobs default to off");
+        Json read_only                      = base_request();
+        read_only["prompt_cache_read_only"] = true;
+        failures += check(parse(read_only).generation.prompt_cache_read_only &&
+                              !parse(base_request()).generation.prompt_cache_read_only,
+                          "prompt_cache_read_only reaches the generation request, default off");
 
         auto invalid = [&](Json request, const char* param, const std::string& what) {
             const ApiError error = api_error([&] { (void)parse(request); });

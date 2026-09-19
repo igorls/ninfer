@@ -316,6 +316,10 @@ struct ExecutionOptions {
     TokenLogprobOptions logprobs;
     std::uint32_t requested_output_tokens = 0;
     bool allow_prefix_reuse               = true;
+    // With allow_prefix_reuse, false makes the request read-only in the context cache: it may
+    // start from a published prefix but captures no checkpoint and publishes no continuation,
+    // so it cannot displace another conversation's cached state. For one-shot requests.
+    bool allow_prefix_publication = true;
     ThinkingControlOptions thinking;
     StructuredOutputOptions structured_output;
     // If nonempty, constrain the answer to one complete call to a listed function.

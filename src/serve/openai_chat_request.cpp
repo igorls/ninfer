@@ -918,6 +918,7 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
     parse_stop(body, output.generation);
     parse_sampling(body, output.generation);
     parse_stream_options(body, output);
+    output.generation.prompt_cache_read_only = get_bool(body, "prompt_cache_read_only", false);
     output.generation.logprobs = get_bool(body, "logprobs", false);
     if (output.generation.logprobs) {
         output.generation.top_logprobs = optional_int(body, "top_logprobs").value_or(0);

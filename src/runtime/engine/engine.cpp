@@ -131,6 +131,7 @@ runtime::ResolvedRequestOptions resolve_request_options(const ModelSamplingDefau
         runtime::resolve_sampling(defaults, mode, options.execution.sampling);
     resolved.execution.requested_output_tokens = options.execution.requested_output_tokens;
     resolved.execution.allow_prefix_reuse      = options.execution.allow_prefix_reuse;
+    resolved.execution.allow_prefix_publication = options.execution.allow_prefix_publication;
     resolved.execution.thinking                = options.execution.thinking;
     TokenLogprobOptions& logprobs              = options.execution.logprobs;
     if (!logprobs.enabled && (logprobs.top != 0 || !logprobs.candidates.empty())) {

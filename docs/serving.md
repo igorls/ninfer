@@ -175,6 +175,69 @@ to the host (about 0.5 MB). `logprobs` with `stream: true` is rejected with
 `logprobs_stream_not_supported`; the Responses API does not report log probabilities. Models
 without a readout reject the request.
 
+### Read-only cache participation
+
+`prompt_cache_read_only: true` (NInfer extension, Chat Completions) lets a request start from an
+already published prefix while capturing no checkpoint and publishing no continuation of its own.
+Use it for one-shot requests, such as single-token classification over a shared document, whose
+continuation will never be reused: a burst of them otherwise turns the bounded continuation
+catalog over and evicts other conversations' cached state. A read-only request never creates the
+shared prefix it reads; some earlier request has to publish it.
+
+### Closed-set scoring: `POST /v1/score`
+
+Scores many isolated questions against one shared prefix in a single call, for closed-set
+classification with calibrated probabilities.
+
+```json
+{
+  "model": "qwen3.8-27b",
+  "messages": [{"role": "system", "content": "<instructions and document>"}],
+  "questions": [
+    {"id": "q1", "content": "Is the invoice overdue? Answer A for yes, B for no.", "candidates": ["A", "B"]},
+    {"id": "q2", "content": "...", "candidates": ["A", "B", "C", "D"]}
+  ],
+  "candidates": ["A", "B"],
+  "top_logprobs": 0,
+  "chat_template_kwargs": {"enable_thinking": false}
+}
+```
+
+`messages` is the shared prefix in Chat Completions format. Each of the 1 to 256 `questions`
+becomes one user message appended after it and is answered by its own one-token greedy request, so
+questions never see each other. `candidates` follow the `logprob_candidates` rules (single-token
+strings or integer token ids); a question without its own list uses the top-level default. A
+string that is not exactly one token fails the whole call with `invalid_logprob_candidate`, naming
+the question and the candidate. A question may carry its own `response_format`; the scored
+position is always the first generated token, so a format whose first token is punctuation (a JSON
+string quote) is not useful here.
+
+The response lists results in question order:
+
+```json
+{
+  "object": "score", "model": "qwen3.8-27b",
+  "results": [
+    {"id": "q1", "index": 0, "token": "A", "token_id": 32,
+     "candidate_logprobs": [{"token": "A", "token_id": 32, "logprob": -0.02, "raw_logprob": -0.03, "bytes": [65]}],
+     "top_logprobs": [], "outside_mass": 0.004, "cached_tokens": 0}
+  ],
+  "usage": {"prompt_tokens": 12400, "cached_tokens": 6100, "completion_tokens": 2}
+}
+```
+
+`candidate_logprobs[].logprob` is renormalised over the candidate list, `raw_logprob` is
+vocabulary-wide, and `outside_mass` is the vocabulary-wide probability the model put outside the
+list. A question that fails reports `{"id", "index", "error"}` in its slot and does not fail the
+call.
+
+The endpoint is orchestration over the ordinary Engine route, not a fused batch: the first question
+carries an explicit shared-prefix boundary at the end of `messages` and runs alone, which prefills
+and publishes the prefix once; the remaining questions then run concurrently, up to
+`--max-concurrency` at a time, against that prefix and read-only in the context cache. The
+published prefix stays in the cache under normal retention, so a later call over the same
+`messages` starts warm.
+
 A string `name` on a `tool` message is accepted as an ignored, output-neutral compatibility
 extension for clients that mirror the function name onto tool results. It does not participate in
 tool identity, prompt rendering, or output. Non-string values are malformed; non-empty names on

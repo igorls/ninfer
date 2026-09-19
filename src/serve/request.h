@@ -199,8 +199,11 @@ struct LogprobCandidate {
 
 struct GenerationRequest {
     StructuredOutputOptions structured_output;
-    bool logprobs    = false;
-    int top_logprobs = 0;
+    // Read published prefixes but publish nothing: for one-shot requests that must not displace
+    // other conversations' cached state.
+    bool prompt_cache_read_only = false;
+    bool logprobs               = false;
+    int top_logprobs            = 0;
     std::vector<LogprobCandidate> logprob_candidates;
     std::vector<ChatTurn> messages;
     std::vector<ToolDefinition> tools;

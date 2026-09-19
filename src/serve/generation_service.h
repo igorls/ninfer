@@ -112,6 +112,10 @@ public:
     // Engine owns the once-normalized startup configuration. Serving diagnostics must use this
     // value instead of reinterpreting optional defaults from ServeOptions.
     [[nodiscard]] const ninfer::EngineOptions& engine_options() const { return engine_->options(); }
+    // Raw artifact-tokenizer encoding, for validating single-token closed-set options.
+    [[nodiscard]] std::vector<ninfer::TokenId> tokenize_text(std::string_view text) const {
+        return engine_->tokenize_text(text);
+    }
 
     [[nodiscard]] ninfer::LoadSummary load_summary() const { return engine_->load_summary(); }
 
