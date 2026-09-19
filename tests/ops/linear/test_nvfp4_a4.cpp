@@ -1,4 +1,5 @@
 #include "ops/linear/linear_test_common.h"
+#include "ops/linear/nvfp4/nvfp4_tma_policy.h"
 
 #include <array>
 #include <exception>
@@ -8,6 +9,13 @@ namespace {
 
 using namespace ninfer;
 using namespace ninfer::test::linear;
+
+// Both cards are SM120; capability alone must not enable the regressing PRO path.
+static_assert(ops::detail::nvfp4_tma_use_token_fast("NVIDIA GeForce RTX 5090", 12, 0));
+static_assert(!ops::detail::nvfp4_tma_use_token_fast(
+    "NVIDIA RTX PRO 6000 Blackwell Workstation Edition", 12, 0));
+static_assert(!ops::detail::nvfp4_tma_use_token_fast("NVIDIA GeForce RTX 5090 Laptop GPU", 12, 0));
+static_assert(!ops::detail::nvfp4_tma_use_token_fast("NVIDIA GeForce RTX 4090", 8, 9));
 
 int run_nvfp4_a4() {
     constexpr std::array attn_invocations{

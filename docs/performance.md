@@ -37,6 +37,40 @@ over the loopback OpenAI-compatible HTTP endpoint. Each reported corpus fixture 
 seeds. Values are arithmetic mean ± sample standard deviation, and server warm-up completes before
 the measured requests. The concurrent campaign has its own sustained-wave method below.
 
+## RTX 5090 NVFP4 W4A4 prefill schedule
+
+The desktop NVIDIA GeForce RTX 5090 selects token-fast CTA rasterization and one
+activation-scale TMA fetch per K-tile pair for NVFP4 Linear and LinearSwiGLU.
+Selection uses the device name and SM120 capability, not capability alone: the
+RTX PRO 6000 retains weight-fast rasterization and per-tile scale fetches because
+the combined change regressed its measured 7,680-token prefill from 741.4 to 749.9 ms.
+Other devices retain that schedule as well. The existing full-tile TMA eligibility
+is unchanged; decode and non-TMA prefill routes are unchanged.
+
+[Issue #22](https://github.com/igorls/ninfer/issues/22#issuecomment-5741594802) and
+its [raw reports and reproduction scripts](https://gist.github.com/patrickscd/a1f67f1b693962d6cd6a826748cc24a3)
+record the September 19, 2026 RTX 5090 A/B: baseline `5e4a66d0` versus that baseline
+plus the two-file patch from `1acfff7d`. Five alternating fresh-process pairs per
+mode, one discarded warmup per prompt, and 256 timed decode tokens used
+Qwen3.8-27B NVFP4, 32,768 context/KV capacity, FP8 KV, 1,024-token prefill chunks,
+CUDA Graphs, disabled prefix reuse, and a 2 GiB desktop reserve. Windows Ninja
+Release used nvcc 13.3.33, MSVC 14.50.35503, driver 616.92 and a 480 W power limit.
+Desktop applications remained open.
+
+| Prompt tokens | Prefill gain, MTP0 | Prefill gain, MTP3 |
+|---:|---:|---:|
+| 512 | 4.13% | 4.35% |
+| 4,096 | 5.83% | 5.21% |
+| 8,192 | 5.83% | 5.72% |
+| 16,384 | 5.12% | 5.24% |
+
+Mean decode differences ranged from -0.31% to +0.26%. The submitted Linear A4
+and LinearSwiGLU numerical checks passed for both arms; a fixed greedy 512-token
+prompt produced identical text and token IDs across arms in each speculation mode.
+These gains apply to the measured workload, not all chunk sizes or other GPUs.
+The optional 35B MoE cache-hint measurement was waived because the contributor
+does not run that artifact.
+
 ## Qwen3.8-27B DFlash2 on RTX PRO 6000
 
 Native Windows qualification on September 7–8, 2026 uses the RTX PRO 6000 Blackwell 96 GB,

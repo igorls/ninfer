@@ -3,6 +3,7 @@
 #include "core/device.h"
 #include "ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_output.cuh"
 #include "ops/linear/nvfp4/nvfp4_config.h"
+#include "ops/linear/nvfp4/nvfp4_tma_policy.h"
 #include "ops/linear/nvfp4/nvfp4_w4a4_mma.cuh"
 #include "ops/linear/nvfp4/nvfp4_w4a4_tma.cuh"
 #include "ops/linear_add/nvfp4/nvfp4_linear_add_epilogue.cuh"
@@ -53,8 +54,8 @@ static_assert((kQueryRows % TmaM256N128::kBlockN) == 0);
 static_assert((kKeyRows % TmaM256N128::kBlockN) == 0);
 static_assert((kGateRows % TmaM256N128::kBlockN) == 0);
 
-template <class Geometry, class Schedule, class Epilogue, class Output>
-void launch_tma(const std::uint8_t* activation_codes, const std::uint8_t* activation_scales,
+template <bool TokenFast, class Geometry, class Schedule, class Epilogue, class Output>
+void launch_tma_variant(const std::uint8_t* activation_codes, const std::uint8_t* activation_scales,
                 const std::uint8_t* weight_codes, const std::uint8_t* weight_scales,
                 std::int32_t tokens, float alpha, Epilogue epilogue, Output output,
                 cudaStream_t stream) {
@@ -63,7 +64,7 @@ void launch_tma(const std::uint8_t* activation_codes, const std::uint8_t* activa
             activation_codes, activation_scales, weight_codes, weight_scales, tokens);
     constexpr std::size_t kSharedBytes = sizeof(Nvfp4W4a4TmaSharedStorage<Schedule>);
     static const bool kConfigured      = [] {
-        CUDA_CHECK(cudaFuncSetAttribute(nvfp4_w4a4_tma_kernel<Geometry, Schedule, Epilogue, Output>,
+        CUDA_CHECK(cudaFuncSetAttribute(nvfp4_w4a4_tma_kernel<TokenFast, Geometry, Schedule, Epilogue, Output>,
                                              cudaFuncAttributeMaxDynamicSharedMemorySize,
                                              static_cast<int>(kSharedBytes)));
         return true;
@@ -73,10 +74,24 @@ void launch_tma(const std::uint8_t* activation_codes, const std::uint8_t* activa
     const dim3 grid(Geometry::kOutputRows / Schedule::kBlockN, tokens / Schedule::kBlockM);
     static_assert(sizeof(Nvfp4W4a4TmaDescriptors) == 512);
     const std::uint64_t* descriptor_bytes = nvfp4_stage_tma_descriptor(descriptors, stream);
-    nvfp4_w4a4_tma_kernel<Geometry, Schedule>
+    nvfp4_w4a4_tma_kernel<TokenFast, Geometry, Schedule>
         <<<grid, Schedule::kThreads, kSharedBytes, stream>>>(descriptor_bytes, alpha, epilogue,
                                                              output);
     CUDA_CHECK(cudaGetLastError());
+}
+
+template <class Geometry, class Schedule, class Epilogue, class Output>
+void launch_tma(const std::uint8_t* activation_codes, const std::uint8_t* activation_scales,
+                const std::uint8_t* weight_codes, const std::uint8_t* weight_scales,
+                std::int32_t tokens, float alpha, Epilogue epilogue, Output output,
+                cudaStream_t stream) {
+    if (nvfp4_tma_use_token_fast()) {
+        launch_tma_variant<true, Geometry, Schedule>(activation_codes, activation_scales,
+            weight_codes, weight_scales, tokens, alpha, epilogue, output, stream);
+    } else {
+        launch_tma_variant<false, Geometry, Schedule>(activation_codes, activation_scales,
+            weight_codes, weight_scales, tokens, alpha, epilogue, output, stream);
+    }
 }
 
 template <class Geometry>

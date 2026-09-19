@@ -2,6 +2,7 @@
 
 #include "core/device.h"
 #include "ops/linear/nvfp4/nvfp4_config.h"
+#include "ops/linear/nvfp4/nvfp4_tma_policy.h"
 #include "ops/linear/nvfp4/nvfp4_w4a4_tma.cuh"
 #include "ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_w4a4_tma.cuh"
 
@@ -45,9 +46,8 @@ Nvfp4W4a4TmaDescriptors make_descriptors(const std::uint8_t* activation_codes,
     return descriptors;
 }
 
-} // namespace
-
-void launch_nvfp4_linear_swiglu_w4a4_tma(const std::uint8_t* activation_codes,
+template <bool TokenFast>
+void launch_tma_variant(const std::uint8_t* activation_codes,
                                          const std::uint8_t* activation_scales,
                                          const std::uint8_t* weight_codes,
                                          const std::uint8_t* weight_scales, __nv_bfloat16* output,
@@ -60,7 +60,7 @@ void launch_nvfp4_linear_swiglu_w4a4_tma(const std::uint8_t* activation_codes,
     using Geometry                     = Nvfp4MlpGateUpGeometry;
     constexpr std::size_t kSharedBytes = sizeof(Nvfp4LinearSwiGluTmaSharedStorage<M256N128S3>);
     static const bool kConfigured      = [] {
-        CUDA_CHECK(cudaFuncSetAttribute(nvfp4_linear_swiglu_w4a4_tma_kernel<Geometry, M256N128S3>,
+        CUDA_CHECK(cudaFuncSetAttribute(nvfp4_linear_swiglu_w4a4_tma_kernel<TokenFast, Geometry, M256N128S3>,
                                              cudaFuncAttributeMaxDynamicSharedMemorySize,
                                              static_cast<int>(kSharedBytes)));
         return true;
@@ -73,9 +73,25 @@ void launch_nvfp4_linear_swiglu_w4a4_tma(const std::uint8_t* activation_codes,
     const dim3 grid((Geometry::kOutputRows / 2) / kPairN, tokens / M256N128S3::kBlockM);
     static_assert(sizeof(Nvfp4W4a4TmaDescriptors) == 512);
     const std::uint64_t* descriptor_bytes = nvfp4_stage_tma_descriptor(descriptors, stream);
-    nvfp4_linear_swiglu_w4a4_tma_kernel<Geometry, M256N128S3>
+    nvfp4_linear_swiglu_w4a4_tma_kernel<TokenFast, Geometry, M256N128S3>
         <<<grid, M256N128S3::kThreads, kSharedBytes, stream>>>(descriptor_bytes, alpha, output);
     CUDA_CHECK(cudaGetLastError());
+}
+
+} // namespace
+
+void launch_nvfp4_linear_swiglu_w4a4_tma(const std::uint8_t* activation_codes,
+                                         const std::uint8_t* activation_scales,
+                                         const std::uint8_t* weight_codes,
+                                         const std::uint8_t* weight_scales, __nv_bfloat16* output,
+                                         std::int32_t tokens, float alpha, cudaStream_t stream) {
+    if (nvfp4_tma_use_token_fast()) {
+        launch_tma_variant<true>(activation_codes, activation_scales, weight_codes, weight_scales,
+                                 output, tokens, alpha, stream);
+    } else {
+        launch_tma_variant<false>(activation_codes, activation_scales, weight_codes, weight_scales,
+                                  output, tokens, alpha, stream);
+    }
 }
 
 } // namespace ninfer::ops::detail
