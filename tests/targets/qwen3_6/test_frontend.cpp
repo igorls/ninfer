@@ -826,10 +826,12 @@ int test_assistant_continuation() {
         render_chat({chat_message(ninfer::ChatRole::User, "question"),
                      chat_message(ninfer::ChatRole::Assistant, "answer prefix")},
                     options);
+    // The continued turn opens exactly as the generation prompt does with thinking off: the
+    // empty think block precedes the content so the prefix is conditioned like a real answer.
     const std::string expected = "<|im_start|>user\nquestion<|im_end|>\n"
-                                 "<|im_start|>assistant\nanswer prefix";
+                                 "<|im_start|>assistant\n<think>\n\n</think>\n\nanswer prefix";
     int failures               = check(rendered.text == expected,
-                                       "assistant continuation closed the turn or opened a second assistant");
+                                       "assistant continuation did not open like the generation prompt");
     failures +=
         check(rendered.rewrite_checkpoint &&
                   rendered.rewrite_checkpoint->kind ==
