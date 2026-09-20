@@ -121,6 +121,10 @@ ProgramImpl::ProgramImpl(const LoadedModelData* model_data, FlashNextRuntimePlan
       device_logprob_sampled_ids_(plan_.config.max_concurrency * kConstraintColumns *
                                   sizeof(std::int32_t)),
       device_logprob_readout_(plan_.config.max_concurrency * kLogprobReadoutFloats * sizeof(float)),
+      device_logprob_prompt_next_ids_(plan_.config.max_concurrency * kMaximumPromptReadouts *
+                                      sizeof(std::int32_t)),
+      device_logprob_prompt_readout_(plan_.config.max_concurrency * kLogprobPromptReadoutFloats *
+                                     sizeof(float)),
       device_token_counts_(plan_.config.max_concurrency * 248077 * sizeof(std::int32_t)),
       device_prompt_presence_(plan_.config.max_concurrency * kConstraintMaskWords * sizeof(std::int32_t)),
       device_history_tokens_(plan_.config.max_concurrency * kConstraintColumns * sizeof(std::int32_t)),
@@ -327,6 +331,71 @@ void ProgramImpl::collect_lane_logprobs(LaneState& st, std::uint32_t lane,
         }
     }
     st.logprob_readout_columns = 0;
+}
+
+FlashNextPromptReadout ProgramImpl::prompt_readout_for_chunk(const LaneState& st,
+                                                             std::uint32_t lane,
+                                                             std::uint32_t start,
+                                                             std::uint32_t end,
+                                                             std::vector<std::int32_t>& local) {
+    FlashNextPromptReadout out;
+    local.clear();
+    const auto& positions = st.logprobs.prompt_positions;
+    if (!st.logprobs_device_readout || positions.empty()) { return out; }
+    const auto lo = std::lower_bound(positions.begin(), positions.end(), start);
+    const auto hi = std::lower_bound(lo, positions.end(), end);
+    if (lo == hi) { return out; }
+    const auto first  = static_cast<std::size_t>(lo - positions.begin());
+    const std::size_t block = 2U + 2U * st.logprobs.candidates.size();
+    for (auto it = lo; it != hi; ++it) { local.push_back(static_cast<std::int32_t>(*it - start)); }
+    out.local_positions = local;
+    out.next_ids        = static_cast<const std::int32_t*>(device_logprob_prompt_next_ids_.p) +
+                   static_cast<std::size_t>(lane) * kMaximumPromptReadouts + first;
+    out.candidates    = static_cast<std::int32_t>(st.logprobs.candidates.size());
+    out.candidate_ids = out.candidates > 0
+                            ? static_cast<const std::int32_t*>(device_logprob_candidate_ids_.p) +
+                                  static_cast<std::size_t>(lane) * kMaximumLogprobCandidates
+                            : nullptr;
+    out.readout = static_cast<float*>(device_logprob_prompt_readout_.p) +
+                  static_cast<std::size_t>(lane) * kLogprobPromptReadoutFloats + first * block;
+    return out;
+}
+
+void ProgramImpl::enqueue_prompt_readout_copy(const LaneState& st, std::uint32_t lane,
+                                              std::uint32_t start, std::uint32_t end) {
+    const auto& positions = st.logprobs.prompt_positions;
+    if (!st.logprobs_device_readout || positions.empty()) { return; }
+    const auto lo = std::lower_bound(positions.begin(), positions.end(), start);
+    const auto hi = std::lower_bound(lo, positions.end(), end);
+    if (lo == hi) { return; }
+    if (!logprob_prompt_readout_host_) {
+        logprob_prompt_readout_host_.emplace(plan_.config.max_concurrency *
+                                             kLogprobPromptReadoutFloats * sizeof(float));
+    }
+    const auto first        = static_cast<std::size_t>(lo - positions.begin());
+    const auto count        = static_cast<std::size_t>(hi - lo);
+    const std::size_t block = 2U + 2U * st.logprobs.candidates.size();
+    const std::size_t base  = static_cast<std::size_t>(lane) * kLogprobPromptReadoutFloats + first * block;
+    CUDA_CHECK(cudaMemcpyAsync(static_cast<float*>(logprob_prompt_readout_host_->data()) + base,
+                               static_cast<const float*>(device_logprob_prompt_readout_.p) + base,
+                               count * block * sizeof(float), cudaMemcpyDeviceToHost,
+                               device_.stream));
+}
+
+void ProgramImpl::collect_prompt_readout(LaneState& st, std::uint32_t lane) {
+    st.prompt_logprobs.clear();
+    const auto& positions = st.logprobs.prompt_positions;
+    if (!st.logprobs_device_readout || positions.empty()) { return; }
+    const runtime::TokenLogprobReadoutLayout layout{.columns    = 1,
+                                                    .candidates = st.logprobs.candidates.size()};
+    const auto* host = static_cast<const float*>(logprob_prompt_readout_host_->data()) +
+                       static_cast<std::size_t>(lane) * kLogprobPromptReadoutFloats;
+    for (std::size_t i = 0; i < positions.size(); ++i) {
+        st.prompt_logprobs.push_back(runtime::assemble_token_logprobs(
+            st.prompt_readout_next_ids[i],
+            std::span<const float>(host + i * layout.floats(), layout.floats()), layout, 0,
+            st.logprobs.candidates));
+    }
 }
 
 void ProgramImpl::sample_tokens(const Tensor& logits,
@@ -1808,6 +1877,11 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestB
                         prompt_data.token_ids.begin())) {
             return std::nullopt;
         }
+        // A prompt position readout needs this request to compute that position.
+        if (!base.impl_->logprobs.prompt_positions.empty() &&
+            checkpoint->frontier > base.impl_->logprobs.prompt_positions.front()) {
+            return std::nullopt;
+        }
         reusable_tokens = checkpoint->frontier;
         cont_slot = &selected;
     }
@@ -2062,6 +2136,8 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
     st.logprobs_device_readout = false;
     st.logprob_readout_columns = 0;
     st.round_logprobs.clear();
+    st.prompt_logprobs.clear();
+    st.prompt_readout_next_ids.clear();
     st.requested_output_tokens = summary.requested_output_tokens;
     st.effective_output_tokens = summary.effective_output_tokens;
     st.publish_continuation    = summary.publish_continuation;
@@ -2100,6 +2176,25 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
         }
         st.logprobs        = adm.impl_->base_plan->logprobs;
         st.logprobs_device_readout = st.logprobs.enabled && st.logprobs.top == 0;
+        st.prompt_logprobs.clear();
+        st.prompt_readout_next_ids.clear();
+        if (!st.logprobs.prompt_positions.empty()) {
+            if (!st.logprobs_device_readout ||
+                st.logprobs.prompt_positions.size() > kMaximumPromptReadouts ||
+                static_cast<std::size_t>(st.logprobs.prompt_positions.back()) + 1U >=
+                    st.prompt_tokens.size()) {
+                throw std::logic_error("prompt position logprobs were not validated at submission");
+            }
+            for (const std::uint32_t position : st.logprobs.prompt_positions) {
+                st.prompt_readout_next_ids.push_back(st.prompt_tokens[position + 1U]);
+            }
+            CUDA_CHECK(cudaMemcpyAsync(
+                static_cast<std::int32_t*>(impl_->device_logprob_prompt_next_ids_.p) +
+                    static_cast<std::size_t>(lane_idx) * kMaximumPromptReadouts,
+                st.prompt_readout_next_ids.data(),
+                st.prompt_readout_next_ids.size() * sizeof(std::int32_t),
+                cudaMemcpyHostToDevice, impl_->device_.stream));
+        }
         if (st.logprobs_device_readout && !st.logprobs.candidates.empty()) {
             CUDA_CHECK(cudaMemcpyAsync(static_cast<std::int32_t*>(impl_->device_logprob_candidate_ids_.p) +
                                            static_cast<std::size_t>(lane_idx) * kMaximumLogprobCandidates,
@@ -2290,6 +2385,7 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
             impl_->record_round_logprobs(st, impl_->pending_round_.logits().slice(1, 0, 1),
                                          impl_->pending_batch_tokens_[0]);
         }
+        impl_->collect_prompt_readout(st, lane_idx);
 
         st.prefill_completed  = true;
         st.committed_frontier = static_cast<std::int32_t>(N);
@@ -2414,10 +2510,16 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
         impl_->ensure_physical_groups_available(needed);
     }
 
+    std::vector<std::int32_t> readout_local;
+    const detail::FlashNextPromptReadout prompt_readout =
+        impl_->prompt_readout_for_chunk(st, lane_idx, start_i, end_i, readout_local);
+    const detail::FlashNextPromptReadout* readout_ptr =
+        prompt_readout.local_positions.empty() ? nullptr : &prompt_readout;
     if (end_i < N) {
         auto round = impl_->executor_.execute_prefill_chunk(
             st.lane_handle, chunk_token_ids, chunk_positions, static_cast<std::int32_t>(start_i),
-            nullptr, visual_embeddings, local_scatter_indices);
+            nullptr, visual_embeddings, local_scatter_indices, readout_ptr);
+        impl_->enqueue_prompt_readout_copy(st, lane_idx, start_i, end_i);
         std::array<detail::LaneCommitDecision, 1> decision = {{{.accept = true}}};
         round.commit(decision);
         st.last_token_id    = chunk_token_ids.back();
@@ -2456,7 +2558,8 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
         // F == N: offer capture at N before sampling
         impl_->pending_round_ = impl_->executor_.execute_prefill_chunk(
             st.lane_handle, chunk_token_ids, chunk_positions, static_cast<std::int32_t>(start_i),
-            nullptr, visual_embeddings, local_scatter_indices);
+            nullptr, visual_embeddings, local_scatter_indices, readout_ptr);
+        impl_->enqueue_prompt_readout_copy(st, lane_idx, start_i, end_i);
         st.last_token_id    = chunk_token_ids.back();
         st.last_token_pos   = chunk_positions.back()[0];
         st.last_token_index = static_cast<std::int32_t>(end_i - 1);
@@ -2489,7 +2592,8 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
     // Normal completion at N without capture offer at N
     impl_->pending_round_ = impl_->executor_.execute_prefill_chunk(
         st.lane_handle, chunk_token_ids, chunk_positions, static_cast<std::int32_t>(start_i),
-        nullptr, visual_embeddings, local_scatter_indices);
+        nullptr, visual_embeddings, local_scatter_indices, readout_ptr);
+    impl_->enqueue_prompt_readout_copy(st, lane_idx, start_i, end_i);
     st.last_token_id    = chunk_token_ids.back();
     st.last_token_pos   = chunk_positions.back()[0];
     st.last_token_index = static_cast<std::int32_t>(end_i - 1);
@@ -2509,6 +2613,7 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
         impl_->record_round_logprobs(st, impl_->pending_round_.logits().slice(1, 0, 1),
                                      impl_->pending_batch_tokens_[0]);
     }
+    impl_->collect_prompt_readout(st, lane_idx);
 
     st.prefill_completed  = true;
     st.committed_frontier = static_cast<std::int32_t>(N);
@@ -3499,6 +3604,13 @@ std::span<const TokenLogprobs> Program::round_token_logprobs(runtime::LaneId lan
         throw std::out_of_range("token logprobs lane is out of range");
     }
     return impl_->lane_states_[lane.value].round_logprobs;
+}
+
+std::span<const TokenLogprobs> Program::prompt_token_logprobs(runtime::LaneId lane) const {
+    if (impl_ == nullptr || lane.value >= impl_->lane_states_.size()) {
+        throw std::out_of_range("prompt logprobs lane is out of range");
+    }
+    return impl_->lane_states_[lane.value].prompt_logprobs;
 }
 
 MemorySummary Program::memory_summary() const noexcept {

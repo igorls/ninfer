@@ -306,6 +306,8 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
         ninfer::TokenLogprobOptions& logprobs = request_options.execution.logprobs;
         logprobs.enabled                      = true;
         logprobs.top                          = static_cast<std::uint32_t>(request.top_logprobs);
+        logprobs.prompt_positions             = request.logprob_prompt_positions;
+        prepared.logprob_prompt_positions     = request.logprob_prompt_positions;
         logprobs.candidates.reserve(request.logprob_candidates.size());
         for (const LogprobCandidate& candidate : request.logprob_candidates) {
             if (candidate.token_id) {
@@ -445,7 +447,7 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     outcome.thinking            = result.thinking;
     outcome.finish_reason       = result.finish_reason;
     outcome.matched_stop_string = std::move(result.matched_stop_string);
-    if (!result.token_logprobs.empty()) {
+    if (!result.token_logprobs.empty() || !result.prompt_logprobs.empty()) {
         const auto describe = [&](const ninfer::TokenLogprob& value) {
             TokenLogprobEntry entry{.token_id    = value.token,
                                     .logprob     = value.logprob,
@@ -456,14 +458,23 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
             } catch (const std::out_of_range&) {}
             return entry;
         };
-        outcome.token_logprobs.reserve(result.token_logprobs.size());
-        for (const ninfer::TokenLogprobs& position : result.token_logprobs) {
+        const auto convert = [&](const ninfer::TokenLogprobs& position) {
             TokenLogprobPosition out{.forced = position.forced, .sampled = describe(position.sampled)};
             for (const auto& value : position.top) { out.top.push_back(describe(value)); }
             for (const auto& value : position.candidates) {
                 out.candidates.push_back(describe(value));
             }
-            outcome.token_logprobs.push_back(std::move(out));
+            return out;
+        };
+        outcome.token_logprobs.reserve(result.token_logprobs.size());
+        for (const ninfer::TokenLogprobs& position : result.token_logprobs) {
+            outcome.token_logprobs.push_back(convert(position));
+        }
+        outcome.prompt_logprobs.reserve(result.prompt_logprobs.size());
+        for (std::size_t i = 0; i < result.prompt_logprobs.size(); ++i) {
+            outcome.prompt_logprobs.push_back(PromptLogprobPosition{
+                .position = prepared.logprob_prompt_positions[i],
+                .value    = convert(result.prompt_logprobs[i])});
         }
     }
 

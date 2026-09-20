@@ -58,6 +58,7 @@ struct PrefillContext {
     // Pinned host destination for the first generated token's target logits, or null.
     std::uint16_t* first_token_logits_host                  = nullptr;
     const FirstTokenReadout* first_token_readout            = nullptr;
+    const PromptReadout* prompt_readout                     = nullptr;
 };
 
 // Enqueues the device readout of one logit column for the token in `sampled` (I32 [1]).

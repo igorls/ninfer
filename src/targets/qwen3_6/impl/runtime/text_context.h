@@ -132,6 +132,21 @@ struct FirstTokenReadout {
     std::size_t bytes = 0;
 };
 
+// Device readout of the next-token distribution at chosen prompt positions, run on each prefill
+// sub-block that contains some of them: the final-normed hidden rows are gathered, projected
+// through the output head a tile at a time, and each column resolved by ops::candidate_logprobs
+// into its own block of (2 + 2 * candidates) floats at `readout` / `host`.
+struct PromptReadout {
+    std::span<const std::uint32_t> positions; // ascending absolute prompt positions
+    const std::int32_t* next_ids = nullptr;   // device I32 [positions.size()]: token p+1 of each
+    std::optional<Tensor> candidate_ids;      // I32 [candidates]
+    std::size_t candidates = 0;
+    float* readout = nullptr;                 // device, positions.size() blocks
+    float* host    = nullptr;                 // pinned mirror of the same blocks
+
+    [[nodiscard]] std::size_t block_floats() const noexcept { return 2U + 2U * candidates; }
+};
+
 struct PrefillChunkResult {
     std::uint32_t processed_tokens = 0;
     bool finalized                 = false;
@@ -193,6 +208,8 @@ public:
     void set_first_token_readout(const FirstTokenReadout* readout) noexcept {
         first_token_readout_ = readout;
     }
+
+    void set_prompt_readout(const PromptReadout* readout) noexcept { prompt_readout_ = readout; }
 
     void set_prefill_split_frontier(std::int64_t position) noexcept {
         prefill_split_frontier_ = position;
@@ -370,6 +387,10 @@ private:
     const ops::SamplingConfig* sampling_config_ = nullptr;
     std::uint16_t* first_token_logits_host_     = nullptr;
     const FirstTokenReadout* first_token_readout_ = nullptr;
+    const PromptReadout* prompt_readout_          = nullptr;
+
+    void run_prompt_readout(const Tensor& normed, std::int64_t begin, std::int32_t length,
+                            cudaStream_t s);
     MtpW mtp_;
     std::array<FullLayerW, TextConfig::full_attention_layers()> full_{};
     std::array<GdnLayerW, TextConfig::gdn_layers()> gdn_{};

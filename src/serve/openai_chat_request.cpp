@@ -142,6 +142,30 @@ void validate_standard_output_controls(const Json& body) {
             }
         }
     }
+    if (body.contains("logprob_prompt_positions") && !body.at("logprob_prompt_positions").is_null()) {
+        const Json& positions = body.at("logprob_prompt_positions");
+        if (!logprobs) {
+            bad_request("logprob_prompt_positions requires logprobs=true", "logprob_prompt_positions");
+        }
+        if (optional_int(body, "top_logprobs").value_or(0) != 0) {
+            bad_request("logprob_prompt_positions cannot be combined with top_logprobs",
+                        "logprob_prompt_positions");
+        }
+        if (!positions.is_array() || positions.empty() ||
+            positions.size() > ninfer::kMaximumPromptReadouts) {
+            bad_request("logprob_prompt_positions must be a nonempty array of at most 256 entries",
+                        "logprob_prompt_positions");
+        }
+        std::int64_t previous = -1;
+        for (const Json& position : positions) {
+            if (!position.is_number_integer() || position.get<std::int64_t>() < 0 ||
+                position.get<std::int64_t>() <= previous) {
+                bad_request("logprob_prompt_positions must be ascending non-negative integers",
+                            "logprob_prompt_positions");
+            }
+            previous = position.get<std::int64_t>();
+        }
+    }
     if (logprobs && get_bool(body, "stream", false)) {
         bad_request("logprobs are reported on non-streaming responses only", "logprobs",
                     "logprobs_stream_not_supported");
@@ -931,6 +955,13 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
                     entry.token_id = candidate.get<std::int64_t>();
                 }
                 output.generation.logprob_candidates.push_back(std::move(entry));
+            }
+        }
+        if (body.contains("logprob_prompt_positions") &&
+            !body.at("logprob_prompt_positions").is_null()) {
+            for (const Json& position : body.at("logprob_prompt_positions")) {
+                output.generation.logprob_prompt_positions.push_back(
+                    static_cast<std::uint32_t>(position.get<std::int64_t>()));
             }
         }
     }

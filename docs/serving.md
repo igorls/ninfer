@@ -169,9 +169,24 @@ apply its own temperature scaling for calibration.
   `logprob` 0 and no alternatives.
 - `-inf` is not valid JSON; vanishing or forbidden probabilities report `-9999`.
 
-A request with `logprobs: true` decodes one token per round: speculative drafts are not offered
-for it, so long generations are slower than without it. Each position copies one vocabulary column
-to the host (about 0.5 MB). `logprobs` with `stream: true` is rejected with
+- `logprob_prompt_positions` (NInfer extension): ascending 0-based indices into the rendered
+  prompt's tokens, at most 256, needing `top_logprobs` 0. The response adds
+  `choices[0].logprobs.prompt`, one entry per position: the distribution over the token after that
+  position, whose `token` is the prompt's own next token with its `logprob` (so summed entries
+  score a continuation), plus `candidate_logprobs` when candidates are given. A position beyond the
+  prompt is rejected. Every listed position is computed by the request: prefix reuse is limited to
+  frontiers at or below the first position. Note that with thinking off a history assistant turn
+  renders without the empty `<think>` block the generation prompt has, so at the position before
+  its content the model expects `<think>`; write the block into the content
+  (`"<think>
+
+</think>
+
+" + answer`) to read an answer distribution there.
+
+A request with `logprobs: true` and `top_logprobs` above 0 decodes one token per round:
+speculative drafts are not offered for it. Without `top_logprobs` the readout runs on the device,
+costs a few floats per position, and speculative decoding stays on. `logprobs` with `stream: true` is rejected with
 `logprobs_stream_not_supported`; the Responses API does not report log probabilities. Every
 registered target supports the readout.
 

@@ -826,6 +826,7 @@ private:
         result.prompt                  = request->prompt_summary;
         result.generated_token_ids     = std::move(request->generated);
         result.token_logprobs          = std::move(request->token_logprobs);
+        result.prompt_logprobs         = std::move(request->prompt_logprobs);
         result.content                 = std::move(request->content);
         result.reasoning               = std::move(request->reasoning);
         result.tool_calls              = request->output.take_tool_calls();
@@ -1449,6 +1450,15 @@ private:
             request_admission_check();
         }
         request->begin = progress.summary;
+        if constexpr (requires { instance_.program->prompt_token_logprobs(LaneId{lane}); }) {
+            if (!request->options.execution.logprobs.prompt_positions.empty()) {
+                const auto readout = instance_.program->prompt_token_logprobs(LaneId{lane});
+                if (readout.size() != request->options.execution.logprobs.prompt_positions.size()) {
+                    throw std::logic_error("Program prefill has no prompt logprob readout");
+                }
+                request->prompt_logprobs.assign(readout.begin(), readout.end());
+            }
+        }
         const std::array<std::uint32_t, 1> lanes{lane};
         phase.finish();
         commit_pending(std::move(*progress.pending), lanes, false, cancelled_at_unit_start);

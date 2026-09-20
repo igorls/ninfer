@@ -496,6 +496,11 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
             throw std::logic_error("catalog shared-prefix summary disagrees with Program state");
         }
         if (!base.allow_prefix_reuse || !prompt.identity.reusable) { return std::nullopt; }
+        // A prompt position readout needs this request to compute that position.
+        if (!base.logprobs.prompt_positions.empty() &&
+            selected.frontier > base.logprobs.prompt_positions.front()) {
+            return std::nullopt;
+        }
         const auto* shared_identity = shared_source->identity->prefix_identity();
         if (shared_identity == nullptr ||
             !qwen3_6::detail::prefix_matches(prompt, shared_source->identity->ledger(),
@@ -512,6 +517,10 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
                                                     ? runtime::PrivateSourceMode::Retain
                                                     : runtime::PrivateSourceMode::ConsumeToActive;
         if (!base.allow_prefix_reuse || !prompt.identity.reusable) { return std::nullopt; }
+        if (!base.logprobs.prompt_positions.empty() &&
+            selected.frontier > base.logprobs.prompt_positions.front()) {
+            return std::nullopt;
+        }
         if (selected.kind == runtime::CheckpointKind::SessionEndpoint) {
             if (selected.ordinal != 0) {
                 throw std::logic_error("private endpoint checkpoint ordinal is invalid");

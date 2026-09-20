@@ -167,6 +167,8 @@ struct RequestRecord {
     std::vector<TokenId> generated;
     // Parallel to `generated` when the request enabled token logprobs, otherwise empty.
     std::vector<TokenLogprobs> token_logprobs;
+    // One per requested prompt position, collected when prefill completes.
+    std::vector<TokenLogprobs> prompt_logprobs;
     std::string content;
     std::string reasoning;
     std::optional<LaneId> lane;

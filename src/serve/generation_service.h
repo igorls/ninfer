@@ -56,10 +56,17 @@ struct TokenLogprobPosition {
     std::vector<TokenLogprobEntry> candidates;
 };
 
+struct PromptLogprobPosition {
+    std::uint32_t position = 0;
+    TokenLogprobPosition value; // `sampled` is the prompt's own next token
+};
+
 struct GenerationOutcome {
     std::string text;
     // One entry per generated token when the request enabled logprobs, otherwise empty.
     std::vector<TokenLogprobPosition> token_logprobs;
+    // One entry per requested prompt position, in request order.
+    std::vector<PromptLogprobPosition> prompt_logprobs;
     std::string reasoning;
     std::vector<ninfer::GeneratedToolCall> tool_calls;
     int prompt_tokens     = 0;
@@ -100,6 +107,8 @@ struct PreparedRequest {
     std::optional<std::uint32_t> thinking_budget;
     std::optional<ninfer::ReasoningEffort> effective_reasoning_effort;
     bool preserve_thinking = false;
+    // Prompt positions the request asked logprobs for, to label the readout in the outcome.
+    std::vector<std::uint32_t> logprob_prompt_positions;
     std::shared_ptr<RequestLifetime> lifetime;
 };
 

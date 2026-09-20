@@ -62,6 +62,7 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
     card.set_first_token_logit_capture(state.first_token_logits_host);
     card.set_first_token_readout(state.first_token_readout);
+    card.set_prompt_readout(state.prompt_readout);
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
     const std::span<const int> prompt(ids.data(), ids.size());
@@ -87,6 +88,7 @@ PrefillChunkResult prefill_multimodal_chunk(PrefillContext& state, const Prepare
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
     card.set_first_token_logit_capture(state.first_token_logits_host);
     card.set_first_token_readout(state.first_token_readout);
+    card.set_prompt_readout(state.prompt_readout);
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
     if (state.dflash != nullptr) {

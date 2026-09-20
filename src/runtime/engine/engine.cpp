@@ -143,6 +143,19 @@ runtime::ResolvedRequestOptions resolve_request_options(const ModelSamplingDefau
     if (logprobs.candidates.size() > kMaximumLogprobCandidates) {
         throw std::invalid_argument("too many logprob candidate tokens");
     }
+    if (!logprobs.prompt_positions.empty()) {
+        if (logprobs.top != 0) {
+            throw std::invalid_argument("prompt position logprobs do not report top alternatives");
+        }
+        if (logprobs.prompt_positions.size() > kMaximumPromptReadouts) {
+            throw std::invalid_argument("too many prompt positions for logprobs");
+        }
+        for (std::size_t i = 1; i < logprobs.prompt_positions.size(); ++i) {
+            if (logprobs.prompt_positions[i] <= logprobs.prompt_positions[i - 1]) {
+                throw std::invalid_argument("prompt positions for logprobs must be ascending");
+            }
+        }
+    }
     resolved.execution.logprobs = std::move(logprobs);
     resolved.stop                              = std::move(options.stop);
     resolved.output                            = options.output;
@@ -483,6 +496,13 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
         impl_->active);
 
     const PromptSummary prompt_summary = prompt.impl_->summary;
+    // Validated here, before the request reaches a Program: inside admission an invalid
+    // argument is an executor failure.
+    if (!resolved_options.execution.logprobs.prompt_positions.empty() &&
+        static_cast<std::uint64_t>(resolved_options.execution.logprobs.prompt_positions.back()) + 1U >=
+            prompt_summary.prompt_tokens) {
+        throw std::invalid_argument("prompt position logprobs exceed the prompt");
+    }
     if (prompt_summary.prompt_tokens > impl_->options.max_context) {
         throw RequestError(
             RequestErrorKind::ContextLengthExceeded,

@@ -287,10 +287,17 @@ struct TokenLogprobOptions {
     // If nonempty, every position also reports the distribution renormalised over exactly these
     // tokens, in this order. Not bounded by `top`.
     std::vector<TokenId> candidates;
+    // Prompt positions whose next-token distribution is read during prefill, as ascending
+    // 0-based indices into the prepared prompt's tokens; the readout at position p is the
+    // distribution over token p+1, and its `sampled` entry is the prompt's own token p+1. Needs
+    // `top` 0. Every listed position is computed by this request: prefix reuse is limited to
+    // frontiers at or below the first position.
+    std::vector<std::uint32_t> prompt_positions;
 };
 
 inline constexpr std::uint32_t kMaximumTopLogprobs       = 20;
 inline constexpr std::size_t kMaximumLogprobCandidates   = 1024;
+inline constexpr std::size_t kMaximumPromptReadouts      = 256;
 
 struct TokenLogprob {
     TokenId token = 0;
@@ -791,6 +798,8 @@ struct GenerationResult {
     // One entry per generated_token_ids element when ExecutionOptions::logprobs was enabled,
     // otherwise empty.
     std::vector<TokenLogprobs> token_logprobs;
+    // One entry per TokenLogprobOptions::prompt_positions element, in that order.
+    std::vector<TokenLogprobs> prompt_logprobs;
     std::string content;
     std::string reasoning;
     std::vector<GeneratedToolCall> tool_calls;

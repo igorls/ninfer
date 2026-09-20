@@ -487,6 +487,11 @@ struct RequestControl {
     std::uint32_t logprob_readout_columns = 0;
     // Readout of the round this request is pending on; empty unless logprobs are enabled.
     std::vector<TokenLogprobs> round_logprobs;
+    // Prompt-position readout, one per TokenLogprobOptions::prompt_positions, complete once
+    // prefill has finished.
+    std::vector<TokenLogprobs> prompt_logprobs;
+    std::vector<TokenId> prompt_readout_next_ids;
+    schedule::PromptReadout prompt_readout;
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
     detail::PhysicalResources active_resources;
@@ -549,6 +554,7 @@ public:
     [[nodiscard]] RequestBasePlan plan_request(const PreparedPromptData& prompt,
                                                const runtime::ResolvedExecutionOptions& options);
     [[nodiscard]] std::span<const TokenLogprobs> round_token_logprobs(std::uint32_t lane) const;
+    [[nodiscard]] std::span<const TokenLogprobs> prompt_token_logprobs(std::uint32_t lane) const;
     [[nodiscard]] std::vector<float> causal_score(PreparedPromptData&& prompt,
                                                   std::uint32_t first_target);
     [[nodiscard]] std::optional<AdmissionCandidate> inspect_admission(
@@ -690,6 +696,9 @@ public:
     Tensor logprob_candidate_ids;
     Tensor logprob_readout;
     std::optional<PinnedHostBuffer> logprob_readout_host;
+    Tensor logprob_prompt_next_ids;
+    Tensor logprob_prompt_readout;
+    std::optional<PinnedHostBuffer> logprob_prompt_readout_host;
     Tensor token_counts;
     Tensor prompt_presence;
 
@@ -1234,6 +1243,9 @@ private:
                                 std::span<const TokenId> tokens);
     [[nodiscard]] schedule::FirstTokenReadout first_token_readout(const SequenceState& sequence,
                                                                   RequestControl& request);
+    void install_prompt_readout(const SequenceState& sequence, RequestControl& request,
+                                std::span<const TokenId> prompt);
+    void collect_prompt_readout(const SequenceState& sequence, RequestControl& request);
     // Reads one sampled position's target logits into round_logprobs. `column` is the device
     // column to copy after the round's synchronisation, or null when the prefill path already
     // queued the copy into token_logits_host.

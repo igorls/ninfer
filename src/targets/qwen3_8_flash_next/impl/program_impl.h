@@ -12,6 +12,7 @@
 #include "targets/qwen3_8_flash_next/impl/load/materialized.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_state.h"
+#include "targets/qwen3_8_flash_next/impl/text_decode.h"
 #include "targets/qwen3_8_flash_next/impl/text_executor.h"
 
 #include <array>
@@ -244,6 +245,10 @@ struct LaneState {
     std::uint32_t logprob_readout_columns = 0;
     // Readout of the round this lane is pending on; empty unless logprobs are enabled.
     std::vector<TokenLogprobs> round_logprobs;
+    // Prompt-position readout, one per TokenLogprobOptions::prompt_positions, complete once
+    // prefill has finished; the next token of each position, as uploaded to the device.
+    std::vector<TokenLogprobs> prompt_logprobs;
+    std::vector<std::int32_t> prompt_readout_next_ids;
     bool publish_continuation = false;
     bool prefill_completed = false;
     bool finished          = false;
@@ -293,6 +298,17 @@ public:
                                const std::int32_t* sampled, std::span<const std::int32_t> host_sampled,
                                std::span<const std::int32_t* const> masks, std::uint32_t columns);
     void collect_lane_logprobs(LaneState& st, std::uint32_t lane, std::span<const TokenId> tokens);
+    // Prompt-position readout for the chunk [start, end) of one lane: the descriptor the
+    // executor runs (empty positions when none fall in the chunk), and the copy of that chunk's
+    // result blocks to pinned memory to enqueue after the chunk.
+    [[nodiscard]] FlashNextPromptReadout prompt_readout_for_chunk(const LaneState& st,
+                                                                  std::uint32_t lane,
+                                                                  std::uint32_t start,
+                                                                  std::uint32_t end,
+                                                                  std::vector<std::int32_t>& local);
+    void enqueue_prompt_readout_copy(const LaneState& st, std::uint32_t lane, std::uint32_t start,
+                                     std::uint32_t end);
+    void collect_prompt_readout(LaneState& st, std::uint32_t lane);
     [[nodiscard]] const std::int32_t* constraint_mask_device(std::uint32_t lane,
                                                               std::uint32_t column) const noexcept {
         return static_cast<const std::int32_t*>(device_constraint_masks_.p) +
@@ -377,6 +393,11 @@ public:
     DeviceBuffer device_logprob_sampled_ids_;
     DeviceBuffer device_logprob_readout_;
     std::optional<PinnedHostBuffer> logprob_readout_host_;
+    static constexpr std::size_t kLogprobPromptReadoutFloats =
+        (2U + 2U * kMaximumLogprobCandidates) * kMaximumPromptReadouts;
+    DeviceBuffer device_logprob_prompt_next_ids_;
+    DeviceBuffer device_logprob_prompt_readout_;
+    std::optional<PinnedHostBuffer> logprob_prompt_readout_host_;
     DeviceBuffer device_token_counts_;
     DeviceBuffer device_prompt_presence_;
     DeviceBuffer device_history_tokens_;

@@ -205,6 +205,8 @@ struct GenerationRequest {
     bool logprobs               = false;
     int top_logprobs            = 0;
     std::vector<LogprobCandidate> logprob_candidates;
+    // Ascending prompt token positions whose next-token distribution is read during prefill.
+    std::vector<std::uint32_t> logprob_prompt_positions;
     std::vector<ChatTurn> messages;
     std::vector<ToolDefinition> tools;
     std::size_t tool_name_max_length = 64;

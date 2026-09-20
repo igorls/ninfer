@@ -39,6 +39,8 @@ inline constexpr std::size_t kLogprobReadoutColumns =
     std::max<std::size_t>(qwen3_6::kMtpDecodeMaximumWidth, qwen3_6::kDFlashDecodeMaximumWidth);
 inline constexpr std::size_t kLogprobReadoutFloats =
     (2U + 2U * kMaximumLogprobCandidates) * kLogprobReadoutColumns;
+inline constexpr std::size_t kLogprobPromptReadoutFloats =
+    (2U + 2U * kMaximumLogprobCandidates) * kMaximumPromptReadouts;
 
 struct PersistentLayout {
     qwen3_6::DecoderStateLayout decoder;
@@ -56,6 +58,9 @@ struct PersistentLayout {
     // positions per lane (ops::candidate_logprobs layouts, widest speculative round).
     TensorLayout logprob_candidate_ids;
     TensorLayout logprob_readout;
+    // Prompt-position readout: the next token of each position, and its result blocks.
+    TensorLayout logprob_prompt_next_ids;
+    TensorLayout logprob_prompt_readout;
     std::size_t bytes            = 0;
     std::size_t kv_payload_bytes = 0;
 };

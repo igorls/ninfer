@@ -1,3 +1,4 @@
+#include "ninfer/ops/candidate_logprobs.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
 #include "targets/qwen3_8_flash_next/impl/mtp_forward.h"
 
@@ -384,6 +385,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                                    WorkspaceArena& workspace, Tensor& final_hidden, Tensor& logits,
                                    cudaStream_t stream, const FlashNextDecodeStateSink* sink,
                                    bool use_qsa_prefill_mma, Tensor* out_hyper_hidden,
+                                   const FlashNextPromptReadout* prompt_readout,
                                    const Tensor* mtp_token_ids) {
     const std::int32_t tokens      = embedding.ne[1];
     const std::int32_t state_slots = state.ple_convolution_states.ne[2];
@@ -512,6 +514,59 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
             token_indices, mrope_positions, Tensor{}, Tensor{}, Tensor{}, table_row,
             source_slot, destination_slot, first_token_index, true, true,
             state, workspace, stream);
+    }
+
+    // 2b. Prompt-position readout, before the final logits column is written.
+    if (prompt_readout != nullptr && !prompt_readout->local_positions.empty()) {
+        const auto& positions = prompt_readout->local_positions;
+        const std::int32_t width = prompt_readout->logits.ne[1];
+        const std::size_t block  = 2U + 2U * static_cast<std::size_t>(prompt_readout->candidates);
+        std::optional<Tensor> candidate_ids;
+        if (prompt_readout->candidates > 0) {
+            candidate_ids.emplace(const_cast<std::int32_t*>(prompt_readout->candidate_ids),
+                                  DType::I32,
+                                  std::initializer_list<std::int32_t>{prompt_readout->candidates});
+        }
+        for (std::size_t tile = 0; tile < positions.size(); tile += static_cast<std::size_t>(width)) {
+            const auto m = static_cast<std::int32_t>(
+                std::min<std::size_t>(static_cast<std::size_t>(width), positions.size() - tile));
+            Tensor gathered = workspace.alloc(DType::BF16, {10'240, m});
+            for (std::int32_t j = 0; j < m; ++j) {
+                const std::int32_t local = positions[tile + static_cast<std::size_t>(j)];
+                if (local < 0 || local >= tokens) {
+                    throw std::invalid_argument("prompt readout position is outside the chunk");
+                }
+                CUDA_CHECK(cudaMemcpyAsync(gathered.slice(1, j, 1).data,
+                                           round_ws.hyper_hidden.slice(1, local, 1).data,
+                                           10'240ULL * sizeof(std::uint16_t),
+                                           cudaMemcpyDeviceToDevice, stream));
+            }
+            Tensor mixed = workspace.alloc(DType::BF16, {2'560, m});
+            // The mixer checks its scratch against the exact column count: size one for the tile.
+            FlashNextHyperWorkspace tile_scratch = allocate_flash_next_hyper_workspace(workspace, m);
+            flash_next_hyper_mix(gathered, model.final_mixer, tile_scratch, mixed, stream);
+            Tensor tile_logits = prompt_readout->logits.slice(1, 0, m);
+            ops::linear(mixed, model.output_head, tile_logits, ops::LinearPolicy::A16Only, workspace,
+                        stream);
+            for (std::int32_t j = 0; j < m; ++j) {
+                const std::size_t index = tile + static_cast<std::size_t>(j);
+                float* out              = prompt_readout->readout + index * block;
+                const Tensor column     = tile_logits.slice(1, j, 1);
+                const Tensor sampled(const_cast<std::int32_t*>(prompt_readout->next_ids) + index,
+                                     DType::I32, {1});
+                Tensor sampled_out(out, DType::FP32, {1, 2});
+                std::optional<Tensor> candidates_out;
+                if (prompt_readout->candidates > 0) {
+                    candidates_out.emplace(out + 2, DType::FP32,
+                                           std::initializer_list<std::int32_t>{
+                                               1, prompt_readout->candidates, 2});
+                }
+                ops::candidate_logprobs(column, 248'077, sampled,
+                                        candidate_ids ? &*candidate_ids : nullptr, nullptr,
+                                        sampled_out, candidates_out ? &*candidates_out : nullptr,
+                                        stream);
+            }
+        }
     }
 
     // 3. Final hyper mixer on last token only -> final_hidden [2560, 1]

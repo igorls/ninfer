@@ -892,6 +892,8 @@ public:
     // empty unless the request enabled ResolvedExecutionOptions::logprobs. Valid until the lane's
     // next round.
     [[nodiscard]] std::span<const TokenLogprobs> round_token_logprobs(runtime::LaneId lane) const;
+    // Readout at the request's prompt positions, complete once its prefill has finished.
+    [[nodiscard]] std::span<const TokenLogprobs> prompt_token_logprobs(runtime::LaneId lane) const;
     [[nodiscard]] std::optional<AdmissionCandidate<Variant>>
     inspect_admission(const PreparedPrompt& prompt, const RequestBasePlan<Variant>& base,
                       runtime::LaneId destination, const ContinuationHandle<Variant>* source,

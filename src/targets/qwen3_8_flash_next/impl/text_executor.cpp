@@ -587,7 +587,8 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
     LaneHandle handle, std::span<const std::int32_t> token_ids,
     std::span<const std::array<std::int32_t, 3>> positions, std::int32_t first_token_index,
     const FlashNextDecodeStateSink* sink, const Tensor* visual_embeddings,
-    std::span<const std::int32_t> chunk_local_scatter_indices) {
+    std::span<const std::int32_t> chunk_local_scatter_indices,
+    const FlashNextPromptReadout* prompt_readout) {
     if (handle.owner() != this) {
         throw std::invalid_argument(
             "FlashNextTextExecutor: cross-executor or invalid owner handle");
@@ -708,13 +709,22 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
         // into the round tensor the speculative draft head reads; otherwise the first draft of
         // every request runs on the previous round's leftovers.
         Tensor hyper_hidden(alloc_.round_tensors().hyper_hidden.data, DType::BF16, {10'240, 1});
+        // The prompt readout projects its tiles into the round logits buffer at full width; the
+        // chunk's own single logits column is written afterwards.
+        std::optional<FlashNextPromptReadout> readout;
+        if (prompt_readout != nullptr) {
+            readout.emplace(*prompt_readout);
+            const Tensor& round_logits = alloc_.round_tensors().logits;
+            readout->logits = Tensor(round_logits.data, DType::BF16, {248'320, round_logits.ne[1]});
+        }
         flash_next_text_prefill_chunk(
             model_, embedding, dev_token_indices, dev_mrope_positions,
             static_cast<std::int32_t>(lane), initial_active_slot, initial_standby_slot,
             gathered_ple, static_cast<std::int32_t>(alloc_.plan().maximum_blocks),
             first_token_index, alloc_.state_view(), alloc_.workspace(), final_hidden, logits,
             device_.stream, effective_sink, alloc_.plan().config.use_qsa_prefill_mma,
-            &hyper_hidden, visual_embeddings != nullptr ? &dev_token_ids : nullptr);
+            &hyper_hidden, readout ? &*readout : nullptr,
+            visual_embeddings != nullptr ? &dev_token_ids : nullptr);
 
         round_in_flight_ = true;
         return PendingRound(this, prepared.transaction_id, 1, logits, final_hidden, hyper_hidden);

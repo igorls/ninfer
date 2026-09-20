@@ -86,7 +86,7 @@ Json logprob_entry_json(const TokenLogprobEntry& entry) {
 }
 
 Json logprobs_json(const GenerationOutcome& outcome) {
-    if (outcome.token_logprobs.empty()) { return nullptr; }
+    if (outcome.token_logprobs.empty() && outcome.prompt_logprobs.empty()) { return nullptr; }
     Json content = Json::array();
     for (const TokenLogprobPosition& position : outcome.token_logprobs) {
         Json entry            = logprob_entry_json(position.sampled);
@@ -103,7 +103,26 @@ Json logprobs_json(const GenerationOutcome& outcome) {
         }
         content.push_back(std::move(entry));
     }
-    return Json{{"content", std::move(content)}, {"refusal", nullptr}};
+    Json out{{"content", std::move(content)}, {"refusal", nullptr}};
+    if (!outcome.prompt_logprobs.empty()) {
+        // NInfer extension: the distribution over the token after each requested prompt
+        // position; `token` is the prompt's own next token with its log-probability.
+        Json prompt = Json::array();
+        for (const PromptLogprobPosition& position : outcome.prompt_logprobs) {
+            Json entry          = logprob_entry_json(position.value.sampled);
+            entry["position"]   = position.position;
+            if (!position.value.candidates.empty()) {
+                Json candidates = Json::array();
+                for (const auto& value : position.value.candidates) {
+                    candidates.push_back(logprob_entry_json(value));
+                }
+                entry["candidate_logprobs"] = std::move(candidates);
+            }
+            prompt.push_back(std::move(entry));
+        }
+        out["prompt"] = std::move(prompt);
+    }
+    return out;
 }
 
 Json usage_json(const CompletionUsage& usage) {

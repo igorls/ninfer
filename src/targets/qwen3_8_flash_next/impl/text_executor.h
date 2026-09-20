@@ -22,6 +22,7 @@
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
 struct FlashNextDecodeStateSink;
+struct FlashNextPromptReadout;
 class FlashNextTextExecutor;
 
 struct DecodeGraphProfile {
@@ -192,7 +193,8 @@ public:
                           std::int32_t first_token_index,
                           const FlashNextDecodeStateSink* sink                     = nullptr,
                           const Tensor* visual_embeddings                          = nullptr,
-                          std::span<const std::int32_t> chunk_local_scatter_indices = {});
+                          std::span<const std::int32_t> chunk_local_scatter_indices = {},
+                          const FlashNextPromptReadout* prompt_readout             = nullptr);
 
     [[nodiscard]] const FlashNextLaneLedger& ledger() const noexcept { return ledger_; }
 

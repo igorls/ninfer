@@ -777,6 +777,8 @@ public:
     // empty unless the request enabled ResolvedExecutionOptions::logprobs. Valid until the
     // lane's next round.
     [[nodiscard]] std::span<const TokenLogprobs> round_token_logprobs(runtime::LaneId lane) const;
+    // Readout at the request's prompt positions, complete once its prefill has finished.
+    [[nodiscard]] std::span<const TokenLogprobs> prompt_token_logprobs(runtime::LaneId lane) const;
 
 public:
     explicit Program(std::unique_ptr<detail::ProgramImpl> impl) noexcept;

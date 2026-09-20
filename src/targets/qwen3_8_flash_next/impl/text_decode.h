@@ -1,5 +1,6 @@
 #pragma once
 
+#include <span>
 #include "core/arena.h"
 #include "targets/qwen3_8_flash_next/impl/model_view.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode_state.h"
@@ -12,6 +13,20 @@
 #include <string_view>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
+
+// Device readout of the next-token distribution at chosen positions of one prefill chunk: the
+// 4-stream hidden rows are gathered, passed through the final mixer and the output head a tile
+// at a time, and each column resolved by ops::candidate_logprobs into its own block of
+// (2 + 2 * candidates) floats. Positions are chunk-local, ascending; `logits` is a full-width
+// column buffer the tiles may use before the chunk's own final logits are written.
+struct FlashNextPromptReadout {
+    std::span<const std::int32_t> local_positions;
+    const std::int32_t* next_ids = nullptr;   // device I32, one per listed position
+    const std::int32_t* candidate_ids = nullptr; // device I32 [candidates], may be null
+    std::int32_t candidates = 0;
+    float* readout = nullptr;                 // device blocks, one per listed position
+    Tensor logits;                            // BF16 [248320, width]
+};
 
 struct FlashNextDecodeStateSink {
     std::function<void(std::string_view name, const Tensor& device_tensor)> on_state;
@@ -56,6 +71,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                                    const FlashNextDecodeStateSink* sink = nullptr,
                                    bool use_qsa_prefill_mma            = false,
                                    Tensor* out_hyper_hidden            = nullptr,
+                                   const FlashNextPromptReadout* prompt_readout = nullptr,
                                    const Tensor* mtp_token_ids         = nullptr);
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

@@ -934,6 +934,8 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
     constraint_masks = plan.persistent.constraint_masks.bind(backing);
     logprob_candidate_ids = plan.persistent.logprob_candidate_ids.bind(backing);
     logprob_readout       = plan.persistent.logprob_readout.bind(backing);
+    logprob_prompt_next_ids = plan.persistent.logprob_prompt_next_ids.bind(backing);
+    logprob_prompt_readout  = plan.persistent.logprob_prompt_readout.bind(backing);
     active_continuations.fill(continuation_capacity);
     for (std::uint32_t lane = 0; lane < max_concurrency; ++lane) { lane_epochs[lane] = 1; }
     for (std::uint32_t index = 0; index < continuation_capacity; ++index) {
@@ -9903,6 +9905,7 @@ void ProgramImplCore::start_sequence(std::uint32_t lane, SequenceState& sequence
         request.logprobs = request_plan.logprobs;
         request.round_logprobs.clear();
         install_sampling(sequence, request, request_plan.sampling, staged.prompt.token_ids);
+        install_prompt_readout(sequence, request, staged.prompt.token_ids);
         sequence.rope_delta = staged.prompt.rope_delta;
         set_device_i32(io.rope_delta, sequence.rope_delta);
 
@@ -11386,6 +11389,62 @@ schedule::FirstTokenReadout ProgramImplCore::first_token_readout(const SequenceS
     return out;
 }
 
+void ProgramImplCore::install_prompt_readout(const SequenceState& sequence,
+                                             RequestControl& request,
+                                             std::span<const TokenId> prompt) {
+    request.prompt_logprobs.clear();
+    request.prompt_readout = schedule::PromptReadout{};
+    const auto& positions  = request.logprobs.prompt_positions;
+    if (positions.empty()) { return; }
+    if (!request.logprobs_device_readout || positions.size() > kMaximumPromptReadouts ||
+        static_cast<std::size_t>(positions.back()) + 1U >= prompt.size()) {
+        throw std::logic_error("prompt position logprobs were not validated at submission");
+    }
+    if (!logprob_prompt_readout_host) {
+        logprob_prompt_readout_host.emplace(kLogprobPromptReadoutFloats * max_concurrency *
+                                            sizeof(float));
+    }
+    const auto lane = static_cast<std::int32_t>(sequence.lane);
+    std::vector<TokenId>& next = request.prompt_readout_next_ids;
+    next.resize(positions.size());
+    for (std::size_t i = 0; i < positions.size(); ++i) { next[i] = prompt[positions[i] + 1U]; }
+    Tensor ids = logprob_prompt_next_ids.slice(1, lane, 1);
+    CUDA_CHECK(cudaMemcpyAsync(ids.data, next.data(), next.size() * sizeof(TokenId),
+                               cudaMemcpyHostToDevice, device.stream));
+    schedule::PromptReadout& readout = request.prompt_readout;
+    readout.positions  = positions;
+    readout.next_ids   = static_cast<const std::int32_t*>(ids.data);
+    readout.candidates = request.logprobs.candidates.size();
+    if (readout.candidates != 0) {
+        readout.candidate_ids.emplace(
+            logprob_candidate_ids.slice(1, lane, 1).data, DType::I32,
+            std::initializer_list<std::int32_t>{static_cast<std::int32_t>(readout.candidates)});
+    }
+    readout.readout = static_cast<float*>(logprob_prompt_readout.slice(1, lane, 1).data);
+    readout.host    = static_cast<float*>(logprob_prompt_readout_host->data()) +
+                   static_cast<std::size_t>(lane) * kLogprobPromptReadoutFloats;
+}
+
+void ProgramImplCore::collect_prompt_readout(const SequenceState& sequence,
+                                             RequestControl& request) {
+    (void)sequence;
+    request.prompt_logprobs.clear();
+    const schedule::PromptReadout& readout = request.prompt_readout;
+    if (readout.positions.empty()) { return; }
+    const runtime::TokenLogprobReadoutLayout layout{.columns = 1, .candidates = readout.candidates};
+    for (std::size_t i = 0; i < readout.positions.size(); ++i) {
+        request.prompt_logprobs.push_back(runtime::assemble_token_logprobs(
+            request.prompt_readout_next_ids[i],
+            std::span<const float>(readout.host + i * layout.floats(), layout.floats()), layout, 0,
+            request.logprobs.candidates));
+    }
+}
+
+std::span<const TokenLogprobs> ProgramImplCore::prompt_token_logprobs(std::uint32_t lane) const {
+    if (lane >= max_concurrency) { throw std::out_of_range("prompt logprobs lane is out of range"); }
+    return requests[lane].prompt_logprobs;
+}
+
 void ProgramImplCore::install_sampling(SequenceState& sequence, RequestControl& request,
                                        const ops::SamplingConfig& config, std::span<const TokenId> prompt) {
     Tensor counts = token_counts.slice(1, static_cast<std::int32_t>(sequence.lane), 1)
@@ -11602,6 +11661,9 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
             token_logits_capture(request)};
         const schedule::FirstTokenReadout readout = first_token_readout(sequence, request);
         if (request.logprobs_device_readout) { schedule_state.first_token_readout = &readout; }
+        if (!request.prompt_readout.positions.empty()) {
+            schedule_state.prompt_readout = &request.prompt_readout;
+        }
 
         if (staged.mtp_bridge == MtpBridgeMode::BeforeSuffix) {
             if (staged.cursor != staged.base || staged.base == 0 ||
@@ -11791,6 +11853,7 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
         } else {
             record_round_logprobs(request, nullptr, host_tokens[0]);
         }
+        collect_prompt_readout(sequence, request);
         if (sequence.ledger.size() != prompt_tokens) {
             throw std::logic_error("candidate token ledger does not match prompt length");
         }
