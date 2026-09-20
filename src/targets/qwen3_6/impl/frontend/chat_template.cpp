@@ -593,6 +593,15 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
                                 .kind = RewriteCheckpointKind::ResponseReplay, .offset = generation_begin};
             rendered.append_template("<|im_start|>assistant\n");
             add_rewrite_execution_boundary();
+            // A continued turn opens exactly like the generation prompt would have: with
+            // thinking off the model's answers always follow an empty think block, and a
+            // continuation that lacks it is conditioned unlike any answer it produces.
+            if (!options.enable_thinking) {
+                rendered.append_template("<think>\n");
+                add_rewrite_execution_boundary();
+                rendered.append_template("\n</think>\n\n");
+                add_rewrite_execution_boundary();
+            }
             rendered.append(content);
             message_boundaries[i + 1U] = rendered.size();
             continue;

@@ -190,6 +190,10 @@ costs a few floats per position, and speculative decoding stays on. `logprobs` w
 `logprobs_stream_not_supported`; the Responses API does not report log probabilities. Every
 registered target supports the readout.
 
+With thinking off, a continued final assistant message (assistant prefill) is rendered with the
+same empty think block the generation prompt carries before its content, so the continuation is
+conditioned exactly like an answer the model produces.
+
 ### Read-only cache participation
 
 `prompt_cache_read_only: true` (NInfer extension, Chat Completions) lets a request start from an
@@ -219,13 +223,26 @@ classification with calibrated probabilities.
 ```
 
 `messages` is the shared prefix in Chat Completions format. Each of the 1 to 256 `questions`
-becomes one user message appended after it and is answered by its own one-token greedy request, so
-questions never see each other. `candidates` follow the `logprob_candidates` rules (single-token
-strings or integer token ids); a question without its own list uses the top-level default. A
-string that is not exactly one token fails the whole call with `invalid_logprob_candidate`, naming
-the question and the candidate. A question may carry its own `response_format`; the scored
-position is always the first generated token, so a format whose first token is punctuation (a JSON
-string quote) is not useful here.
+becomes one user message appended after it, so questions never see each other. `candidates` are
+strings or integer token ids; a question without its own list uses the top-level default. Each
+question takes one of two forms, reported as `form`:
+
+- `token`: every candidate is one token. One greedy request reads the distribution over the
+  candidates at the first generated position (`candidate_logprobs`, `top_logprobs`,
+  `outside_mass`). A question may carry its own `response_format`; the scored position is always
+  the first generated token, so a format whose first token is punctuation (a JSON string quote) is
+  not useful here.
+- `text`: some candidate spans several tokens. One request per candidate renders it as the
+  continued final assistant turn, opened exactly as generation opens an answer, and reads the
+  log-probability of each of its tokens at its prompt position. `candidate_logprobs[].raw_logprob`
+  is their sum, the candidate's conditional log-probability; `logprob` renormalises the sums over
+  the list; `tokens` lists the per-token entries with their positions, so a client can apply its
+  own length normalisation. Token ids cannot be mixed into such a list, `response_format` does not
+  apply, and the form needs thinking off. Cost is one prefill of the question and candidate per
+  candidate, all reading the shared prefix.
+
+Every result also carries `entropy` (nats) and `margin` (top-two probability ratio) of its
+distribution.
 
 The response lists results in question order:
 
