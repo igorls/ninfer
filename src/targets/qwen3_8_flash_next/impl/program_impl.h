@@ -7,6 +7,7 @@
 #include "core/device.h"
 #include "ninfer/ops/sampling.h"
 #include "runtime/contract/structured_output.h"
+#include "runtime/contract/token_logprobs.h"
 #include "targets/qwen3_8_flash_next/impl/load/materialized.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_state.h"
@@ -29,6 +30,7 @@ public:
     qwen3_6::PreparedContextCache context_cache;
     ops::SamplingConfig sampling_config;
     std::shared_ptr<const runtime::CompiledOutputConstraint> output_constraint;
+    TokenLogprobOptions logprobs;
     std::uint32_t requested_output_tokens = 0;
     std::uint32_t effective_output_tokens = 0;
     bool allow_prefix_reuse               = false;
@@ -234,6 +236,9 @@ struct LaneState {
     std::uint32_t effective_output_tokens = 0;
     ops::SamplingConfig sampling_config{};
     std::unique_ptr<runtime::OutputConstraintState> output_constraint;
+    TokenLogprobOptions logprobs;
+    // Readout of the round this lane is pending on; empty unless logprobs are enabled.
+    std::vector<TokenLogprobs> round_logprobs;
     bool publish_continuation = false;
     bool prefill_completed = false;
     bool finished          = false;
@@ -271,6 +276,10 @@ public:
     ProgramImpl(ProgramImpl&&)                 = delete;
     ProgramImpl& operator=(ProgramImpl&&)      = delete;
 
+    // Reads one sampled position's target logits into st.round_logprobs after the round has
+    // synchronised. The structured-output mask for that position is the one next_mask() last
+    // produced, which every sampling site uploads right before it samples.
+    void record_round_logprobs(LaneState& st, const Tensor& column, TokenId token);
     void sample_tokens(const Tensor& logits,
                        std::span<const std::uint32_t> lane_indices,
                        std::span<std::int32_t> out_tokens);
@@ -334,6 +343,8 @@ public:
     DeviceBuffer device_sampling_positions_;
     DeviceBuffer device_sampled_tokens_;
     std::vector<std::int32_t> host_sampled_tokens_;
+    // One BF16 vocabulary column, allocated on the first request that enables token logprobs.
+    std::optional<PinnedHostBuffer> token_logits_host_;
     std::vector<ops::SamplingConfig> host_sampling_configs_;
     std::vector<std::int32_t> host_sampling_positions_;
     static constexpr std::size_t kConstraintMaskWords = (248077 + 31) / 32;

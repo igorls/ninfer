@@ -175,6 +175,26 @@ void ProgramImpl::commit_sampling_history(std::uint32_t lane, std::span<const To
     }
 }
 
+void ProgramImpl::record_round_logprobs(LaneState& st, const Tensor& column, TokenId token) {
+    st.round_logprobs.clear();
+    if (!st.logprobs.enabled) { return; }
+    constexpr std::size_t kRows = 248'077;
+    if (column.dtype != DType::BF16 || column.ne[0] < static_cast<std::int32_t>(kRows) ||
+        column.data == nullptr) {
+        throw std::logic_error("token logprobs: target logit column has an invalid shape");
+    }
+    if (!token_logits_host_) { token_logits_host_.emplace(kRows * sizeof(std::uint16_t)); }
+    auto* host = static_cast<std::uint16_t*>(token_logits_host_->data());
+    CUDA_CHECK(cudaMemcpyAsync(host, column.data, kRows * sizeof(std::uint16_t),
+                               cudaMemcpyDeviceToHost, device_.stream));
+    CUDA_CHECK(cudaStreamSynchronize(device_.stream));
+    const std::span<const std::int32_t> allowed =
+        st.output_constraint ? st.output_constraint->current_mask()
+                             : std::span<const std::int32_t>{};
+    st.round_logprobs.push_back(runtime::compute_token_logprobs(
+        std::span<const std::uint16_t>(host, kRows), allowed, token, st.logprobs));
+}
+
 void ProgramImpl::sample_tokens(const Tensor& logits,
                                 std::span<const std::uint32_t> lane_indices,
                                 std::span<std::int32_t> out_tokens) {
@@ -1534,14 +1554,19 @@ Program::plan_request(const qwen3_6::PreparedPrompt& prompt,
             : FinishReason::ContextCapacity;
     base->summary.prefix_reuse_path    = PrefixReusePath::Root;
     base->summary.publish_continuation =
-        options.allow_prefix_reuse && prompt_data.identity.reusable &&
-        (impl_->plan_.config.continuation_capacity > 0);
+        options.allow_prefix_reuse && options.allow_prefix_publication &&
+        prompt_data.identity.reusable && (impl_->plan_.config.continuation_capacity > 0);
     if (base->summary.publish_continuation) {
         base->checkpoint_slots_required = 1;
         if (impl_->continuation_slots_.size() > 1 && derive_turn_closure_frontier(prompt_data)) {
             ++base->checkpoint_slots_required;
         }
     }
+    // A read-only plan keeps its cache opportunities: Flash-Next has no shared-prefix catalog,
+    // so a published prefix is a private turn-closure checkpoint that the Engine finds through
+    // the request's declared boundaries. Publication itself is declined at capture assessment
+    // through st.publish_continuation, and shared_candidate_rebuild_work answers for any
+    // frontier, so the projected shared candidate costs nothing.
 
     const runtime::PrefillWork prefill_work =
         runtime::make_prefill_work(0, base->summary.prompt_tokens, 0, 0,
@@ -1566,6 +1591,12 @@ Program::plan_request(const qwen3_6::PreparedPrompt& prompt,
     base->sampling_config.seed              = options.sampling.seed;
     base->sampling_config.token_counts      = nullptr;
     base->output_constraint = options.output_constraint;
+    for (const TokenId id : options.logprobs.candidates) {
+        if (id < 0 || id >= 248077) {
+            throw std::invalid_argument("logprob candidate is outside the 248077-token domain");
+        }
+    }
+    base->logprobs = options.logprobs;
 
     if (prompt_data.has_media()) {
         auto control_plan         = qwen3_6::plan_vision_control(prompt_data);
@@ -1776,22 +1807,35 @@ Program::shared_capture_split_prefill_work(const AdmissionCandidate& /*candidate
     return runtime::PrefillWork{};
 }
 
+// Flash-Next keeps one checkpoint per request besides its endpoint, so this chooses the
+// frontier that checkpoint captures. The rewrite frontier serves the conversation's own next
+// turn once reasoning is stripped, and wins by default. A request whose declared boundaries
+// are all explicit, with no implicit write candidate (prompt_cache_options mode "explicit"),
+// has named the prefix it wants published for other requests; its last explicit boundary
+// wins then. Any other declared boundary is the fallback.
 static std::optional<std::uint32_t>
 derive_turn_closure_frontier(const qwen3_6::PreparedPromptData& prompt_data) {
-    if (prompt_data.identity.rewrite_checkpoint &&
-        prompt_data.identity.rewrite_checkpoint->frontier > 0 &&
-        prompt_data.identity.rewrite_checkpoint->frontier < prompt_data.token_ids.size()) {
-        return prompt_data.identity.rewrite_checkpoint->frontier;
-    }
-    std::optional<std::uint32_t> last_opp;
+    const std::size_t tokens = prompt_data.token_ids.size();
+    std::optional<std::uint32_t> last_explicit;
+    std::optional<std::uint32_t> last_any;
+    bool implicit_candidate = false;
     for (const auto& opp : prompt_data.context_cache.opportunities) {
-        if (opp.frontier > 0 && opp.frontier < prompt_data.token_ids.size()) {
-            if (!last_opp || opp.frontier > *last_opp) {
-                last_opp = opp.frontier;
-            }
+        if (opp.frontier == 0 || opp.frontier >= tokens) { continue; }
+        if (!last_any || opp.frontier > *last_any) { last_any = opp.frontier; }
+        if (has_shared_candidate_evidence(opp.evidence,
+                                          SharedCandidateEvidence::ExplicitBoundary)) {
+            if (!last_explicit || opp.frontier > *last_explicit) { last_explicit = opp.frontier; }
+        } else {
+            implicit_candidate = true;
         }
     }
-    return last_opp;
+    if (last_explicit && !implicit_candidate) { return last_explicit; }
+    if (prompt_data.identity.rewrite_checkpoint &&
+        prompt_data.identity.rewrite_checkpoint->frontier > 0 &&
+        prompt_data.identity.rewrite_checkpoint->frontier < tokens) {
+        return prompt_data.identity.rewrite_checkpoint->frontier;
+    }
+    return last_any;
 }
 
 runtime::ContextTransactionReserveStatus
@@ -1872,6 +1916,8 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
     st.last_token_index        = 0;
     st.total_generated_tokens  = 0;
     st.output_constraint.reset();
+    st.logprobs = TokenLogprobOptions{};
+    st.round_logprobs.clear();
     st.requested_output_tokens = summary.requested_output_tokens;
     st.effective_output_tokens = summary.effective_output_tokens;
     st.publish_continuation    = summary.publish_continuation;
@@ -1908,6 +1954,7 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
             st.output_constraint = std::make_unique<runtime::OutputConstraintState>(
                 adm.impl_->base_plan->output_constraint, prompt_data.starts_in_reasoning);
         }
+        st.logprobs        = adm.impl_->base_plan->logprobs;
         st.vision_control  = std::move(adm.impl_->base_plan->vision_control);
     }
 
@@ -2084,6 +2131,8 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
         impl_->pending_batch_row_counts_.resize(1);
         impl_->pending_batch_tokens_[0]     = static_cast<TokenId>(impl_->host_sampled_tokens_[0]);
         impl_->pending_batch_row_counts_[0] = 1;
+        impl_->record_round_logprobs(st, impl_->pending_round_.logits().slice(1, 0, 1),
+                                     impl_->pending_batch_tokens_[0]);
 
         st.prefill_completed  = true;
         st.committed_frontier = static_cast<std::int32_t>(N);
@@ -2296,6 +2345,8 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
     impl_->pending_batch_row_counts_.resize(1);
     impl_->pending_batch_tokens_[0]     = static_cast<TokenId>(impl_->host_sampled_tokens_[0]);
     impl_->pending_batch_row_counts_[0] = 1;
+    impl_->record_round_logprobs(st, impl_->pending_round_.logits().slice(1, 0, 1),
+                                 impl_->pending_batch_tokens_[0]);
 
     st.prefill_completed  = true;
     st.committed_frontier = static_cast<std::int32_t>(N);
@@ -2520,9 +2571,14 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
         throw std::logic_error("cannot decode while a pending round is uncommitted");
     }
 
-    // Speculative path: single sequence (B == 1) with speculative decoding enabled
+    // Speculative path: single sequence (B == 1) with speculative decoding enabled. A request
+    // that reads token logprobs takes the standard path instead: its readout is one target
+    // column per round, and the verify round reports no per-position distribution.
+    const bool logprobs_request =
+        B == 1 && sequences[0].lane().value < impl_->lane_states_.size() &&
+        impl_->lane_states_[sequences[0].lane().value].logprobs.enabled;
     if (B == 1 && impl_->plan_.config.speculative_draft_tokens > 0 &&
-        impl_->has_mtp()) {
+        impl_->has_mtp() && !logprobs_request) {
         const auto& seq = sequences[0];
         if (seq.owner() != this) {
             throw std::logic_error("SequenceHandle does not belong to this Program");
@@ -2699,6 +2755,12 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
     for (std::size_t b = 0; b < B; ++b) {
         impl_->pending_batch_tokens_[b]     = static_cast<TokenId>(sampled[b]);
         impl_->pending_batch_row_counts_[b] = 1;
+        auto& st = impl_->lane_states_[lane_indices[b]];
+        if (st.logprobs.enabled) {
+            impl_->record_round_logprobs(
+                st, impl_->pending_round_.logits().slice(1, static_cast<std::int32_t>(b), 1),
+                impl_->pending_batch_tokens_[b]);
+        }
     }
 
     // Attribute the round's blocking device stall to the wait bucket rather than
@@ -3234,6 +3296,13 @@ PhysicalUsageSnapshot Program::physical_usage() const noexcept {
         .checkpoint_slots_capacity = static_cast<std::uint32_t>(impl_->continuation_slots_.size()),
         .checkpoint_slots_reserved = reserved_slots,
     };
+}
+
+std::span<const TokenLogprobs> Program::round_token_logprobs(runtime::LaneId lane) const {
+    if (impl_ == nullptr || lane.value >= impl_->lane_states_.size()) {
+        throw std::out_of_range("token logprobs lane is out of range");
+    }
+    return impl_->lane_states_[lane.value].round_logprobs;
 }
 
 MemorySummary Program::memory_summary() const noexcept {
