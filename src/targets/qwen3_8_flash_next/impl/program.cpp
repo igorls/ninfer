@@ -116,6 +116,11 @@ ProgramImpl::ProgramImpl(const LoadedModelData* model_data, FlashNextRuntimePlan
       host_sampling_positions_(plan_.config.max_concurrency, 0),
       device_constraint_masks_(plan_.config.max_concurrency * kConstraintColumns * kConstraintMaskWords * sizeof(std::int32_t)),
       host_constraint_masks_(plan_.config.max_concurrency * kConstraintColumns * kConstraintMaskWords),
+      device_logprob_candidate_ids_(plan_.config.max_concurrency * kMaximumLogprobCandidates *
+                                    sizeof(std::int32_t)),
+      device_logprob_sampled_ids_(plan_.config.max_concurrency * kConstraintColumns *
+                                  sizeof(std::int32_t)),
+      device_logprob_readout_(plan_.config.max_concurrency * kLogprobReadoutFloats * sizeof(float)),
       device_token_counts_(plan_.config.max_concurrency * 248077 * sizeof(std::int32_t)),
       device_prompt_presence_(plan_.config.max_concurrency * kConstraintMaskWords * sizeof(std::int32_t)),
       device_history_tokens_(plan_.config.max_concurrency * kConstraintColumns * sizeof(std::int32_t)),
@@ -195,6 +200,135 @@ void ProgramImpl::record_round_logprobs(LaneState& st, const Tensor& column, Tok
         std::span<const std::uint16_t>(host, kRows), allowed, token, st.logprobs));
 }
 
+void ProgramImpl::enqueue_lane_logprobs(LaneState& st, std::uint32_t lane, const Tensor& logits,
+                                        const std::int32_t* sampled,
+                                        std::span<const std::int32_t> host_sampled,
+                                        std::span<const std::int32_t* const> masks,
+                                        std::uint32_t columns) {
+    st.logprob_readout_columns = 0;
+    if (!st.logprobs_device_readout || columns == 0) { return; }
+    if (columns > kConstraintColumns || masks.size() != columns) {
+        throw std::logic_error("token logprobs: round exceeds the readout capacity");
+    }
+    if (!logprob_readout_host_) {
+        logprob_readout_host_.emplace(plan_.config.max_concurrency * kLogprobReadoutFloats *
+                                      sizeof(float));
+    }
+    auto* sampled_device = static_cast<std::int32_t*>(device_logprob_sampled_ids_.p) +
+                           static_cast<std::size_t>(lane) * kConstraintColumns;
+    if (sampled == nullptr) {
+        if (host_sampled.size() != columns) {
+            throw std::logic_error("token logprobs: sampled ids do not match the columns");
+        }
+        CUDA_CHECK(cudaMemcpyAsync(sampled_device, host_sampled.data(),
+                                   columns * sizeof(std::int32_t), cudaMemcpyHostToDevice,
+                                   device_.stream));
+        sampled = sampled_device;
+    }
+    const auto count  = static_cast<std::int32_t>(st.logprobs.candidates.size());
+    auto* readout     = static_cast<float*>(device_logprob_readout_.p) +
+                    static_cast<std::size_t>(lane) * kLogprobReadoutFloats;
+    const runtime::TokenLogprobReadoutLayout layout{.columns    = columns,
+                                                    .candidates = st.logprobs.candidates.size()};
+    std::optional<Tensor> candidate_ids;
+    if (count > 0) {
+        candidate_ids.emplace(static_cast<std::int32_t*>(device_logprob_candidate_ids_.p) +
+                                  static_cast<std::size_t>(lane) * kMaximumLogprobCandidates,
+                              DType::I32, std::initializer_list<std::int32_t>{count});
+    }
+    // One launch when every column shares a mask (or none), else one launch per column so the
+    // op's single mask is each column's own. Outputs land in the shared per-lane layout.
+    const bool uniform = std::all_of(masks.begin(), masks.end(),
+                                     [&](const std::int32_t* mask) { return mask == masks[0]; });
+    const auto launch = [&](std::int32_t first, std::int32_t width, const std::int32_t* mask) {
+        const Tensor column_logits = logits.slice(1, first, width);
+        const Tensor column_sampled(const_cast<std::int32_t*>(sampled) + first, DType::I32,
+                                    {width});
+        Tensor sampled_out(readout + layout.sampled(0, static_cast<std::size_t>(first)),
+                           DType::FP32, {width, 2});
+        std::optional<Tensor> candidates_out;
+        if (count > 0) {
+            candidates_out.emplace(readout + layout.candidate(0, 0, static_cast<std::size_t>(first)),
+                                   DType::FP32, std::initializer_list<std::int32_t>{width, count, 2});
+        }
+        std::optional<Tensor> allowed;
+        if (mask != nullptr) {
+            allowed.emplace(const_cast<std::int32_t*>(mask), DType::I32,
+                            std::initializer_list<std::int32_t>{
+                                static_cast<std::int32_t>(kConstraintMaskWords)});
+        }
+        ops::candidate_logprobs(column_logits, 248'077, column_sampled,
+                                candidate_ids ? &*candidate_ids : nullptr,
+                                allowed ? &*allowed : nullptr, sampled_out,
+                                candidates_out ? &*candidates_out : nullptr, device_.stream);
+    };
+    if (uniform) {
+        launch(0, static_cast<std::int32_t>(columns), masks[0]);
+    } else {
+        // Per-column launches write strided slices of the [2, C] / [2, N, C] planes, which the
+        // op cannot address; use a width-1 layout per column instead.
+        for (std::uint32_t c = 0; c < columns; ++c) {
+            const runtime::TokenLogprobReadoutLayout one{.columns = 1,
+                                                         .candidates = layout.candidates};
+            float* base = readout + c * one.floats();
+            const Tensor column_logits = logits.slice(1, static_cast<std::int32_t>(c), 1);
+            const Tensor column_sampled(const_cast<std::int32_t*>(sampled) + c, DType::I32, {1});
+            Tensor sampled_out(base, DType::FP32, {1, 2});
+            std::optional<Tensor> candidates_out;
+            if (count > 0) {
+                candidates_out.emplace(base + 2, DType::FP32,
+                                       std::initializer_list<std::int32_t>{1, count, 2});
+            }
+            std::optional<Tensor> allowed;
+            if (masks[c] != nullptr) {
+                allowed.emplace(const_cast<std::int32_t*>(masks[c]), DType::I32,
+                                std::initializer_list<std::int32_t>{
+                                    static_cast<std::int32_t>(kConstraintMaskWords)});
+            }
+            ops::candidate_logprobs(column_logits, 248'077, column_sampled,
+                                    candidate_ids ? &*candidate_ids : nullptr,
+                                    allowed ? &*allowed : nullptr, sampled_out,
+                                    candidates_out ? &*candidates_out : nullptr, device_.stream);
+        }
+    }
+    auto* host = static_cast<float*>(logprob_readout_host_->data()) +
+                 static_cast<std::size_t>(lane) * kLogprobReadoutFloats;
+    CUDA_CHECK(cudaMemcpyAsync(host, readout, kLogprobReadoutFloats * sizeof(float),
+                               cudaMemcpyDeviceToHost, device_.stream));
+    st.logprob_readout_columns = columns | (uniform ? 0U : 0x80000000U);
+}
+
+void ProgramImpl::collect_lane_logprobs(LaneState& st, std::uint32_t lane,
+                                        std::span<const TokenId> tokens) {
+    st.round_logprobs.clear();
+    if (!st.logprobs_device_readout) { return; }
+    const bool per_column        = (st.logprob_readout_columns & 0x80000000U) != 0U;
+    const std::uint32_t columns  = st.logprob_readout_columns & 0x7fffffffU;
+    if (tokens.size() > columns) {
+        throw std::logic_error("token logprobs: round licensed more tokens than were read out");
+    }
+    const auto* host = static_cast<const float*>(logprob_readout_host_->data()) +
+                       static_cast<std::size_t>(lane) * kLogprobReadoutFloats;
+    if (per_column) {
+        const runtime::TokenLogprobReadoutLayout one{.columns = 1,
+                                                     .candidates = st.logprobs.candidates.size()};
+        for (std::size_t c = 0; c < tokens.size(); ++c) {
+            st.round_logprobs.push_back(runtime::assemble_token_logprobs(
+                tokens[c], std::span<const float>(host + c * one.floats(), one.floats()), one, 0,
+                st.logprobs.candidates));
+        }
+    } else {
+        const runtime::TokenLogprobReadoutLayout layout{.columns = columns,
+                                                        .candidates = st.logprobs.candidates.size()};
+        const std::span<const float> readout(host, layout.floats());
+        for (std::size_t c = 0; c < tokens.size(); ++c) {
+            st.round_logprobs.push_back(runtime::assemble_token_logprobs(
+                tokens[c], readout, layout, c, st.logprobs.candidates));
+        }
+    }
+    st.logprob_readout_columns = 0;
+}
+
 void ProgramImpl::sample_tokens(const Tensor& logits,
                                 std::span<const std::uint32_t> lane_indices,
                                 std::span<std::int32_t> out_tokens) {
@@ -231,6 +365,14 @@ void ProgramImpl::sample_tokens(const Tensor& logits,
     CUDA_CHECK(cudaMemcpyAsync(out_tokens.data(), device_sampled_tokens_.p,
                                B * sizeof(std::int32_t), cudaMemcpyDeviceToHost,
                                device_.stream));
+    for (std::size_t b = 0; b < B; ++b) {
+        auto& st = lane_states_[lane_indices[b]];
+        if (!st.logprobs_device_readout) { continue; }
+        const std::int32_t* mask = st.sampling_config.allowed_tokens;
+        enqueue_lane_logprobs(st, lane_indices[b], logits.slice(1, static_cast<std::int32_t>(b), 1),
+                              static_cast<const std::int32_t*>(device_sampled_tokens_.p) + b, {},
+                              std::span<const std::int32_t* const>(&mask, 1), 1);
+    }
     CUDA_CHECK(cudaStreamSynchronize(device_.stream));
 }
 
@@ -1917,6 +2059,8 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
     st.total_generated_tokens  = 0;
     st.output_constraint.reset();
     st.logprobs = TokenLogprobOptions{};
+    st.logprobs_device_readout = false;
+    st.logprob_readout_columns = 0;
     st.round_logprobs.clear();
     st.requested_output_tokens = summary.requested_output_tokens;
     st.effective_output_tokens = summary.effective_output_tokens;
@@ -1955,6 +2099,14 @@ Program::start_resource_transaction(ResourcePlan&& plan, qwen3_6::PreparedPrompt
                 adm.impl_->base_plan->output_constraint, prompt_data.starts_in_reasoning);
         }
         st.logprobs        = adm.impl_->base_plan->logprobs;
+        st.logprobs_device_readout = st.logprobs.enabled && st.logprobs.top == 0;
+        if (st.logprobs_device_readout && !st.logprobs.candidates.empty()) {
+            CUDA_CHECK(cudaMemcpyAsync(static_cast<std::int32_t*>(impl_->device_logprob_candidate_ids_.p) +
+                                           static_cast<std::size_t>(lane_idx) * kMaximumLogprobCandidates,
+                                       st.logprobs.candidates.data(),
+                                       st.logprobs.candidates.size() * sizeof(TokenId),
+                                       cudaMemcpyHostToDevice, impl_->device_.stream));
+        }
         st.vision_control  = std::move(adm.impl_->base_plan->vision_control);
     }
 
@@ -2131,8 +2283,13 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
         impl_->pending_batch_row_counts_.resize(1);
         impl_->pending_batch_tokens_[0]     = static_cast<TokenId>(impl_->host_sampled_tokens_[0]);
         impl_->pending_batch_row_counts_[0] = 1;
-        impl_->record_round_logprobs(st, impl_->pending_round_.logits().slice(1, 0, 1),
-                                     impl_->pending_batch_tokens_[0]);
+        if (st.logprobs_device_readout) {
+            impl_->collect_lane_logprobs(st, lane_idx,
+                                         std::span<const TokenId>(impl_->pending_batch_tokens_.data(), 1));
+        } else {
+            impl_->record_round_logprobs(st, impl_->pending_round_.logits().slice(1, 0, 1),
+                                         impl_->pending_batch_tokens_[0]);
+        }
 
         st.prefill_completed  = true;
         st.committed_frontier = static_cast<std::int32_t>(N);
@@ -2345,8 +2502,13 @@ Program::advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* fail
     impl_->pending_batch_row_counts_.resize(1);
     impl_->pending_batch_tokens_[0]     = static_cast<TokenId>(impl_->host_sampled_tokens_[0]);
     impl_->pending_batch_row_counts_[0] = 1;
-    impl_->record_round_logprobs(st, impl_->pending_round_.logits().slice(1, 0, 1),
-                                 impl_->pending_batch_tokens_[0]);
+    if (st.logprobs_device_readout) {
+        impl_->collect_lane_logprobs(st, lane_idx,
+                                     std::span<const TokenId>(impl_->pending_batch_tokens_.data(), 1));
+    } else {
+        impl_->record_round_logprobs(st, impl_->pending_round_.logits().slice(1, 0, 1),
+                                     impl_->pending_batch_tokens_[0]);
+    }
 
     st.prefill_completed  = true;
     st.committed_frontier = static_cast<std::int32_t>(N);
@@ -2576,7 +2738,8 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
     // column per round, and the verify round reports no per-position distribution.
     const bool logprobs_request =
         B == 1 && sequences[0].lane().value < impl_->lane_states_.size() &&
-        impl_->lane_states_[sequences[0].lane().value].logprobs.enabled;
+        impl_->lane_states_[sequences[0].lane().value].logprobs.enabled &&
+        !impl_->lane_states_[sequences[0].lane().value].logprobs_device_readout;
     if (B == 1 && impl_->plan_.config.speculative_draft_tokens > 0 &&
         impl_->has_mtp() && !logprobs_request) {
         const auto& seq = sequences[0];
@@ -2668,6 +2831,21 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
         }
 
         st.pending_accepted_tokens = accepted;
+        if (st.logprobs_device_readout) {
+            const auto columns = static_cast<std::uint32_t>(accepted.size());
+            std::vector<const std::int32_t*> masks(columns, nullptr);
+            if (st.output_constraint) {
+                for (std::uint32_t c = 0; c < columns; ++c) {
+                    masks[c] = impl_->constraint_mask_device(lane_idx, c);
+                }
+            }
+            impl_->enqueue_lane_logprobs(st, lane_idx, impl_->pending_round_.logits(), nullptr,
+                                         std::span<const std::int32_t>(accepted.data(), columns),
+                                         masks, columns);
+            CUDA_CHECK(cudaStreamSynchronize(impl_->device_.stream));
+            impl_->collect_lane_logprobs(st, lane_idx,
+                                         std::span<const TokenId>(accepted.data(), columns));
+        }
         if (st.speculative_stats.enabled) {
             st.speculative_stats.rounds += 1;
             st.speculative_stats.drafted_tokens += st.draft_tokens.size();
@@ -2756,10 +2934,28 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
         impl_->pending_batch_tokens_[b]     = static_cast<TokenId>(sampled[b]);
         impl_->pending_batch_row_counts_[b] = 1;
         auto& st = impl_->lane_states_[lane_indices[b]];
-        if (st.logprobs.enabled) {
+        if (st.logprobs_device_readout) {
+            const std::int32_t* mask =
+                st.output_constraint ? impl_->constraint_mask_device(lane_indices[b], 0) : nullptr;
+            impl_->enqueue_lane_logprobs(
+                st, lane_indices[b],
+                impl_->pending_round_.logits().slice(1, static_cast<std::int32_t>(b), 1), nullptr,
+                std::span<const std::int32_t>(&impl_->pending_batch_tokens_[b], 1),
+                std::span<const std::int32_t* const>(&mask, 1), 1);
+        } else if (st.logprobs.enabled) {
             impl_->record_round_logprobs(
                 st, impl_->pending_round_.logits().slice(1, static_cast<std::int32_t>(b), 1),
                 impl_->pending_batch_tokens_[b]);
+        }
+    }
+    if (std::any_of(lane_indices.begin(), lane_indices.begin() + static_cast<std::ptrdiff_t>(B),
+                    [&](std::uint32_t lane) { return impl_->lane_states_[lane].logprobs_device_readout; })) {
+        CUDA_CHECK(cudaStreamSynchronize(impl_->device_.stream));
+        for (std::size_t b = 0; b < B; ++b) {
+            auto& st = impl_->lane_states_[lane_indices[b]];
+            if (!st.logprobs_device_readout) { continue; }
+            impl_->collect_lane_logprobs(st, lane_indices[b],
+                                         std::span<const TokenId>(&impl_->pending_batch_tokens_[b], 1));
         }
     }
 

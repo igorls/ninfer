@@ -932,6 +932,8 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
     prompt_presence = plan.persistent.prompt_presence.bind(backing);
     sampling_config = plan.persistent.sampling_config.bind(backing);
     constraint_masks = plan.persistent.constraint_masks.bind(backing);
+    logprob_candidate_ids = plan.persistent.logprob_candidate_ids.bind(backing);
+    logprob_readout       = plan.persistent.logprob_readout.bind(backing);
     active_continuations.fill(continuation_capacity);
     for (std::uint32_t lane = 0; lane < max_concurrency; ++lane) { lane_epochs[lane] = 1; }
     for (std::uint32_t index = 0; index < continuation_capacity; ++index) {
@@ -11259,7 +11261,7 @@ void ProgramImplCore::prepare_graphs() {
 }
 
 std::uint16_t* ProgramImplCore::token_logits_capture(const RequestControl& request) {
-    if (!request.logprobs.enabled) { return nullptr; }
+    if (!request.logprobs.enabled || request.logprobs_device_readout) { return nullptr; }
     if (!token_logits_host) {
         token_logits_host.emplace(static_cast<std::size_t>(TextConfig::token_domain) *
                                   sizeof(std::uint16_t));
@@ -11294,6 +11296,96 @@ std::span<const TokenLogprobs> ProgramImplCore::round_token_logprobs(std::uint32
     return requests[lane].round_logprobs;
 }
 
+void ProgramImplCore::enqueue_round_logprobs(const SequenceState& sequence,
+                                             RequestControl& request, const Tensor& logits,
+                                             const Tensor& sampled, std::uint32_t columns) {
+    request.logprob_readout_columns = 0;
+    if (!request.logprobs_device_readout || columns == 0) { return; }
+    if (columns > kLogprobReadoutColumns) {
+        throw std::logic_error("token logprobs: round exceeds the readout capacity");
+    }
+    const auto lane        = static_cast<std::int32_t>(sequence.lane);
+    const auto count       = static_cast<std::int32_t>(request.logprobs.candidates.size());
+    const auto cols        = static_cast<std::int32_t>(columns);
+    const runtime::TokenLogprobReadoutLayout layout{.columns = columns,
+                                                    .candidates = request.logprobs.candidates.size()};
+    Tensor lane_readout = logprob_readout.slice(1, lane, 1);
+    Tensor sampled_out  = Tensor(lane_readout.data, DType::FP32, {cols, 2});
+    std::optional<Tensor> candidate_ids;
+    std::optional<Tensor> candidates_out;
+    if (count > 0) {
+        candidate_ids.emplace(logprob_candidate_ids.slice(1, lane, 1).data, DType::I32,
+                              std::initializer_list<std::int32_t>{count});
+        candidates_out.emplace(static_cast<float*>(lane_readout.data) + 2 * cols, DType::FP32,
+                               std::initializer_list<std::int32_t>{cols, count, 2});
+    }
+    std::optional<Tensor> allowed;
+    if (request.sampling_host.allowed_tokens != nullptr) {
+        allowed.emplace(const_cast<std::int32_t*>(request.sampling_host.allowed_tokens),
+                        DType::I32,
+                        std::initializer_list<std::int32_t>{(TextConfig::token_domain + 31) / 32});
+    }
+    ops::candidate_logprobs(logits, TextConfig::token_domain, sampled,
+                            candidate_ids ? &*candidate_ids : nullptr,
+                            allowed ? &*allowed : nullptr, sampled_out,
+                            candidates_out ? &*candidates_out : nullptr, device.stream);
+    auto* host = static_cast<float*>(logprob_readout_host->data()) +
+                 static_cast<std::size_t>(lane) * kLogprobReadoutFloats;
+    CUDA_CHECK(cudaMemcpyAsync(host, lane_readout.data, layout.floats() * sizeof(float),
+                               cudaMemcpyDeviceToHost, device.stream));
+    request.logprob_readout_columns = columns;
+}
+
+void ProgramImplCore::collect_round_logprobs(const SequenceState& sequence,
+                                             RequestControl& request,
+                                             std::span<const TokenId> tokens) {
+    request.round_logprobs.clear();
+    if (!request.logprobs_device_readout) { return; }
+    if (tokens.size() > request.logprob_readout_columns) {
+        throw std::logic_error("token logprobs: round licensed more tokens than were read out");
+    }
+    const runtime::TokenLogprobReadoutLayout layout{
+        .columns = request.logprob_readout_columns,
+        .candidates = request.logprobs.candidates.size()};
+    const auto* host = static_cast<const float*>(logprob_readout_host->data()) +
+                       static_cast<std::size_t>(sequence.lane) * kLogprobReadoutFloats;
+    const std::span<const float> readout(host, layout.floats());
+    for (std::size_t column = 0; column < tokens.size(); ++column) {
+        request.round_logprobs.push_back(runtime::assemble_token_logprobs(
+            tokens[column], readout, layout, column, request.logprobs.candidates));
+    }
+    request.logprob_readout_columns = 0;
+}
+
+schedule::FirstTokenReadout ProgramImplCore::first_token_readout(const SequenceState& sequence,
+                                                                 RequestControl& request) {
+    schedule::FirstTokenReadout out;
+    request.logprob_readout_columns = 0;
+    if (!request.logprobs_device_readout) { return out; }
+    const auto lane  = static_cast<std::int32_t>(sequence.lane);
+    const auto count = static_cast<std::int32_t>(request.logprobs.candidates.size());
+    Tensor lane_readout = logprob_readout.slice(1, lane, 1);
+    out.sampled_out     = Tensor(lane_readout.data, DType::FP32, {1, 2});
+    if (count > 0) {
+        out.candidate_ids.emplace(logprob_candidate_ids.slice(1, lane, 1).data, DType::I32,
+                                  std::initializer_list<std::int32_t>{count});
+        out.candidates_out.emplace(static_cast<float*>(lane_readout.data) + 2, DType::FP32,
+                                   std::initializer_list<std::int32_t>{1, count, 2});
+    }
+    if (request.sampling_host.allowed_tokens != nullptr) {
+        out.allowed.emplace(const_cast<std::int32_t*>(request.sampling_host.allowed_tokens),
+                            DType::I32,
+                            std::initializer_list<std::int32_t>{(TextConfig::token_domain + 31) / 32});
+    }
+    const runtime::TokenLogprobReadoutLayout layout{.columns = 1,
+                                                    .candidates = request.logprobs.candidates.size()};
+    out.host  = static_cast<float*>(logprob_readout_host->data()) +
+               static_cast<std::size_t>(lane) * kLogprobReadoutFloats;
+    out.bytes = layout.floats() * sizeof(float);
+    request.logprob_readout_columns = 1;
+    return out;
+}
+
 void ProgramImplCore::install_sampling(SequenceState& sequence, RequestControl& request,
                                        const ops::SamplingConfig& config, std::span<const TokenId> prompt) {
     Tensor counts = token_counts.slice(1, static_cast<std::int32_t>(sequence.lane), 1)
@@ -11305,6 +11397,19 @@ void ProgramImplCore::install_sampling(SequenceState& sequence, RequestControl& 
         if (mask.size_bytes() != row.bytes()) { throw std::logic_error("structured output mask shape mismatch"); }
         CUDA_CHECK(cudaMemcpyAsync(row.data, mask.data(), mask.size_bytes(), cudaMemcpyHostToDevice, device.stream));
         request.sampling_host.allowed_tokens = static_cast<const std::int32_t*>(row.data);
+    }
+    request.logprobs_device_readout  = request.logprobs.enabled && request.logprobs.top == 0;
+    request.logprob_readout_columns  = 0;
+    if (request.logprobs_device_readout) {
+        if (!logprob_readout_host) {
+            logprob_readout_host.emplace(kLogprobReadoutFloats * max_concurrency * sizeof(float));
+        }
+        if (!request.logprobs.candidates.empty()) {
+            Tensor ids = logprob_candidate_ids.slice(1, static_cast<std::int32_t>(sequence.lane), 1);
+            CUDA_CHECK(cudaMemcpyAsync(ids.data, request.logprobs.candidates.data(),
+                                       request.logprobs.candidates.size() * sizeof(TokenId),
+                                       cudaMemcpyHostToDevice, device.stream));
+        }
     }
     request.speculative_stats = SpeculativeStats{
         .backend               = speculative_backend,
@@ -11495,6 +11600,8 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
             staged.initial_mtp_extent,
             dflash_host_ingress,
             token_logits_capture(request)};
+        const schedule::FirstTokenReadout readout = first_token_readout(sequence, request);
+        if (request.logprobs_device_readout) { schedule_state.first_token_readout = &readout; }
 
         if (staged.mtp_bridge == MtpBridgeMode::BeforeSuffix) {
             if (staged.cursor != staged.base || staged.base == 0 ||
@@ -11679,7 +11786,11 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
         const std::uint32_t prompt_tokens = staged.prompt_tokens;
 
         validate_licensed_tokens(std::span<const TokenId>(host_tokens, 1));
-        record_round_logprobs(request, nullptr, host_tokens[0]);
+        if (request.logprobs_device_readout) {
+            collect_round_logprobs(sequence, request, std::span<const TokenId>(host_tokens, 1));
+        } else {
+            record_round_logprobs(request, nullptr, host_tokens[0]);
+        }
         if (sequence.ledger.size() != prompt_tokens) {
             throw std::logic_error("candidate token ledger does not match prompt length");
         }
@@ -11855,6 +11966,14 @@ ProgramImplCore::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
         mark_workspace_usage(workspace_plan.ordinary_round);
         schedule::ordinary_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
                                         envelope, executable);
+        for (std::size_t row = 0; row < lanes.size(); ++row) {
+            RequestControl& request = requests[lanes[row]];
+            if (!request.logprobs_device_readout) { continue; }
+            const auto column = static_cast<std::int32_t>(row);
+            enqueue_round_logprobs(active_sequence(lanes[row]), request,
+                                   io.ordinary.logits.slice(1, column, 1),
+                                   io.ordinary.sampled_tokens.slice(0, column, 1), 1);
+        }
         submit_range.reset();
         timing.begin_wait();
         {
@@ -11872,7 +11991,9 @@ ProgramImplCore::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             const std::uint32_t base_S = sequence.ledger_frontier;
             const TokenId token        = ordinary_host_egress->sampled_tokens[row];
             validate_licensed_tokens(std::span<const TokenId>(&token, 1));
-            if (request.logprobs.enabled) {
+            if (request.logprobs_device_readout) {
+                collect_round_logprobs(sequence, request, std::span<const TokenId>(&token, 1));
+            } else if (request.logprobs.enabled) {
                 const Tensor column = io.ordinary.logits.slice(1, static_cast<std::int32_t>(row), 1);
                 record_round_logprobs(request, &column, token);
             }
@@ -11984,8 +12105,11 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             const std::uint32_t max_by_budget = budgets[row].generated_tokens_remaining > 1
                                                     ? budgets[row].generated_tokens_remaining - 1
                                                     : 0;
-            const std::uint32_t extent = request.output_constraint || request.logprobs.enabled ? 0U :
-                std::min({sequence.mtp_draft_count, draft_window, max_by_budget,
+            const std::uint32_t extent =
+                request.output_constraint ||
+                        (request.logprobs.enabled && !request.logprobs_device_readout)
+                    ? 0U
+                    : std::min({sequence.mtp_draft_count, draft_window, max_by_budget,
                           capacity - sequence.execution_frontier - 1});
             mtp_host_ingress->anchors[row]        = sequence.ledger.back();
             mtp_host_ingress->base_frontiers[row] = checked_i32(frontier, "MTP batch frontier");
@@ -12033,6 +12157,17 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         mark_workspace_usage(workspace_plan.mtp_round);
         schedule::mtp_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
                                    draft_window, envelopes, executable);
+        for (std::size_t row = 0; row < lanes.size(); ++row) {
+            RequestControl& request = requests[lanes[row]];
+            if (!request.logprobs_device_readout) { continue; }
+            const auto column  = static_cast<std::int32_t>(row);
+            const auto columns = mtp_host_ingress->target_valid_columns[row];
+            enqueue_round_logprobs(
+                active_sequence(lanes[row]), request,
+                io.mtp_decode->target_logits.slice(2, column, 1).slice(1, 0, columns),
+                io.mtp_decode->licensed_tokens.slice(1, column, 1).slice(0, 0, columns),
+                static_cast<std::uint32_t>(columns));
+        }
         submit_range.reset();
         timing.begin_wait();
         {
@@ -12063,7 +12198,9 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                                                           row * width,
                                                       static_cast<std::size_t>(count_i));
             validate_licensed_tokens(row_tokens);
-            if (request.logprobs.enabled) {
+            if (request.logprobs_device_readout) {
+                collect_round_logprobs(sequence, request, row_tokens);
+            } else if (request.logprobs.enabled) {
                 if (count_i != 1) { throw std::logic_error("token logprobs round licensed a draft"); }
                 const Tensor column = io.mtp_decode->target_logits
                                           .slice(2, static_cast<std::int32_t>(row), 1)
@@ -12193,8 +12330,11 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             const std::uint32_t max_by_budget = budgets[row].generated_tokens_remaining > 1
                                                     ? budgets[row].generated_tokens_remaining - 1U
                                                     : 0U;
-            const std::uint32_t extent = request.output_constraint || request.logprobs.enabled ? 0U :
-                std::min({draft_window, max_by_budget, capacity - frontier - 1U});
+            const std::uint32_t extent =
+                request.output_constraint ||
+                        (request.logprobs.enabled && !request.logprobs_device_readout)
+                    ? 0U
+                    : std::min({draft_window, max_by_budget, capacity - frontier - 1U});
             dflash_host_ingress->anchors[row] = sequence.ledger.back();
             dflash_host_ingress->execution_frontiers[row] =
                 checked_i32(frontier, "DFlash batch frontier");
@@ -12240,6 +12380,17 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         mark_workspace_usage(workspace_plan.dflash_round);
         schedule::dflash_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
                                       draft_window, envelopes, target_envelope, executable);
+        for (std::size_t row = 0; row < lanes.size(); ++row) {
+            RequestControl& request = requests[lanes[row]];
+            if (!request.logprobs_device_readout) { continue; }
+            const auto column  = static_cast<std::int32_t>(row);
+            const auto columns = dflash_host_ingress->target_valid_columns[row];
+            enqueue_round_logprobs(
+                active_sequence(lanes[row]), request,
+                io.dflash_decode->target_logits.slice(2, column, 1).slice(1, 0, columns),
+                io.dflash_decode->licensed_tokens.slice(1, column, 1).slice(0, 0, columns),
+                static_cast<std::uint32_t>(columns));
+        }
         submit_range.reset();
         timing.begin_wait();
         {
@@ -12270,7 +12421,9 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                                                           row * width,
                                                       static_cast<std::size_t>(count_i));
             validate_licensed_tokens(row_tokens);
-            if (request.logprobs.enabled) {
+            if (request.logprobs_device_readout) {
+                collect_round_logprobs(sequence, request, row_tokens);
+            } else if (request.logprobs.enabled) {
                 if (count_i != 1) { throw std::logic_error("token logprobs round licensed a draft"); }
                 const Tensor column = io.dflash_decode->target_logits
                                           .slice(2, static_cast<std::int32_t>(row), 1)

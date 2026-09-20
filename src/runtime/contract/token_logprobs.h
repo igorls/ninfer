@@ -137,4 +137,63 @@ namespace ninfer::runtime {
     return out;
 }
 
+// Host-side floats of the device readout of one lane's round (ops::candidate_logprobs layouts):
+// sampled_out [2, columns] then candidates_out [2, N, columns], N = the lane's candidate count.
+struct TokenLogprobReadoutLayout {
+    std::size_t columns    = 0;
+    std::size_t candidates = 0;
+
+    [[nodiscard]] std::size_t floats() const noexcept {
+        return 2U * columns + 2U * candidates * columns;
+    }
+    [[nodiscard]] std::size_t sampled(std::size_t plane, std::size_t column) const noexcept {
+        return plane * columns + column;
+    }
+    [[nodiscard]] std::size_t candidate(std::size_t plane, std::size_t n,
+                                        std::size_t column) const noexcept {
+        return 2U * columns + (plane * candidates + n) * columns + column;
+    }
+};
+
+// Assembles one position from the device readout, with the same values compute_token_logprobs
+// produces from the full column, minus the top alternatives that only the full column gives.
+[[nodiscard]] inline TokenLogprobs
+assemble_token_logprobs(TokenId sampled, std::span<const float> readout,
+                        const TokenLogprobReadoutLayout& layout, std::size_t column,
+                        std::span<const TokenId> candidates) {
+    constexpr float kNegativeInfinity = -std::numeric_limits<float>::infinity();
+    TokenLogprobs out;
+    out.sampled = TokenLogprob{
+        .token       = sampled,
+        .logprob     = readout[layout.sampled(1, column)],
+        .raw_logprob = readout[layout.sampled(0, column)],
+    };
+    if (candidates.empty()) { return out; }
+    // Candidates renormalise over the allowed members of the list: subtracting their common
+    // masked normaliser and re-normalising over the list is the full column's formula exactly.
+    float maximum = kNegativeInfinity;
+    for (std::size_t n = 0; n < candidates.size(); ++n) {
+        maximum = std::max(maximum, readout[layout.candidate(1, n, column)]);
+    }
+    double sum = 0.0;
+    if (std::isfinite(maximum)) {
+        for (std::size_t n = 0; n < candidates.size(); ++n) {
+            const float value = readout[layout.candidate(1, n, column)];
+            if (std::isfinite(value)) { sum += std::exp(static_cast<double>(value) - maximum); }
+        }
+    }
+    const double normaliser = static_cast<double>(maximum) + std::log(sum);
+    out.candidates.reserve(candidates.size());
+    for (std::size_t n = 0; n < candidates.size(); ++n) {
+        const float masked = readout[layout.candidate(1, n, column)];
+        out.candidates.push_back(TokenLogprob{
+            .token       = candidates[n],
+            .logprob     = std::isfinite(masked) ? static_cast<float>(masked - normaliser)
+                                                 : kNegativeInfinity,
+            .raw_logprob = readout[layout.candidate(0, n, column)],
+        });
+    }
+    return out;
+}
+
 } // namespace ninfer::runtime

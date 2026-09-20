@@ -1,4 +1,5 @@
 #pragma once
+#include "ninfer/ops/candidate_logprobs.h"
 #include "targets/qwen3_6/impl/runtime/instance.h"
 // Qwen3.6 family runtime implementation; instantiated only by exact variants.
 
@@ -56,7 +57,21 @@ struct PrefillContext {
     const qwen3_6::DFlashDecodeIngress* dflash_host_ingress = nullptr;
     // Pinned host destination for the first generated token's target logits, or null.
     std::uint16_t* first_token_logits_host                  = nullptr;
+    const FirstTokenReadout* first_token_readout            = nullptr;
 };
+
+// Enqueues the device readout of one logit column for the token in `sampled` (I32 [1]).
+inline void enqueue_first_token_readout(const FirstTokenReadout& readout, const Tensor& logits,
+                                        const Tensor& sampled, cudaStream_t stream) {
+    Tensor sampled_out = readout.sampled_out;
+    std::optional<Tensor> candidates_out = readout.candidates_out;
+    ops::candidate_logprobs(logits, TextConfig::token_domain, sampled,
+                            readout.candidate_ids ? &*readout.candidate_ids : nullptr,
+                            readout.allowed ? &*readout.allowed : nullptr, sampled_out,
+                            candidates_out ? &*candidates_out : nullptr, stream);
+    CUDA_CHECK(cudaMemcpyAsync(readout.host, readout.sampled_out.data, readout.bytes,
+                               cudaMemcpyDeviceToHost, stream));
+}
 
 struct OrdinaryBatchContext {
     ExecutionCore execution;

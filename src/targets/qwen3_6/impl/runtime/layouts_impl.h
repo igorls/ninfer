@@ -243,6 +243,16 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
     out.constraint_masks = add_tensor(builder, DType::I32,
         {(TextConfig::token_domain + 31) / 32, static_cast<std::int32_t>(plan.max_concurrency)},
         "structured output token masks");
+    out.logprob_candidate_ids = add_tensor(
+        builder, DType::I32,
+        {static_cast<std::int32_t>(kMaximumLogprobCandidates),
+         static_cast<std::int32_t>(plan.max_concurrency)},
+        "token logprob candidate ids");
+    out.logprob_readout = add_tensor(
+        builder, DType::FP32,
+        {static_cast<std::int32_t>(kLogprobReadoutFloats),
+         static_cast<std::int32_t>(plan.max_concurrency)},
+        "token logprob readout");
     out.bytes = builder.finish(kArenaAlign, "persistent layout");
     out.kv_payload_bytes =
         out.decoder.kv_payload_bytes() + (out.dflash ? out.dflash->kv_payload_bytes() : 0);

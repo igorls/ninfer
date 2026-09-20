@@ -34,6 +34,12 @@ struct DFlashPersistentLayout {
     }
 };
 
+// Floats one lane's device readout needs for the widest speculative round.
+inline constexpr std::size_t kLogprobReadoutColumns =
+    std::max<std::size_t>(qwen3_6::kMtpDecodeMaximumWidth, qwen3_6::kDFlashDecodeMaximumWidth);
+inline constexpr std::size_t kLogprobReadoutFloats =
+    (2U + 2U * kMaximumLogprobCandidates) * kLogprobReadoutColumns;
+
 struct PersistentLayout {
     qwen3_6::DecoderStateLayout decoder;
     qwen3_6::StateImageDeviceLayout state_images;
@@ -46,6 +52,10 @@ struct PersistentLayout {
     TensorLayout prompt_presence;
     TensorLayout sampling_config;
     TensorLayout constraint_masks;
+    // Token logprob readout: candidate ids per lane, and the device results of one round's
+    // positions per lane (ops::candidate_logprobs layouts, widest speculative round).
+    TensorLayout logprob_candidate_ids;
+    TensorLayout logprob_readout;
     std::size_t bytes            = 0;
     std::size_t kv_payload_bytes = 0;
 };

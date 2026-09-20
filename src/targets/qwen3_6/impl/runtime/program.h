@@ -480,6 +480,11 @@ struct RequestControl {
     std::vector<std::int32_t> prompt_presence_host;
     std::unique_ptr<runtime::OutputConstraintState> output_constraint;
     TokenLogprobOptions logprobs;
+    // The device readout serves a request without top alternatives: K+2 floats per position
+    // instead of a vocabulary column, and speculative rounds stay enabled for it.
+    bool logprobs_device_readout = false;
+    // Positions the device readout was enqueued for in the round now pending, 0 when none.
+    std::uint32_t logprob_readout_columns = 0;
     // Readout of the round this request is pending on; empty unless logprobs are enabled.
     std::vector<TokenLogprobs> round_logprobs;
     GenerationTimings timings;
@@ -682,6 +687,9 @@ public:
     std::optional<Tensor> score_hidden;
     Tensor sampling_config;
     Tensor constraint_masks;
+    Tensor logprob_candidate_ids;
+    Tensor logprob_readout;
+    std::optional<PinnedHostBuffer> logprob_readout_host;
     Tensor token_counts;
     Tensor prompt_presence;
 
@@ -1216,6 +1224,16 @@ private:
     void release_sequence_state(SequenceState& sequence) noexcept;
     void prepare_graphs();
     [[nodiscard]] std::uint16_t* token_logits_capture(const RequestControl& request);
+    // Device readout of `columns` positions of the pending round for one lane: candidate
+    // logprobs computed on the stream from `logits` (BF16 [rows, columns]) and `sampled` (I32
+    // [columns]) and copied to pinned memory, to be collected after the round's synchronisation.
+    void enqueue_round_logprobs(const SequenceState& sequence, RequestControl& request,
+                                const Tensor& logits, const Tensor& sampled,
+                                std::uint32_t columns);
+    void collect_round_logprobs(const SequenceState& sequence, RequestControl& request,
+                                std::span<const TokenId> tokens);
+    [[nodiscard]] schedule::FirstTokenReadout first_token_readout(const SequenceState& sequence,
+                                                                  RequestControl& request);
     // Reads one sampled position's target logits into round_logprobs. `column` is the device
     // column to copy after the round's synchronisation, or null when the prefill path already
     // queued the copy into token_logits_host.

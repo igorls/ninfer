@@ -123,6 +123,56 @@ void test_candidate_list_is_a_full_distribution() {
             "candidates were not renormalised over the allowed candidates");
 }
 
+// The device readout (ops::candidate_logprobs layouts) assembled on the host must give the same
+// sampled and candidate values as the full-column path, mask included, with one difference: no
+// top alternatives.
+void test_device_readout_assembly_matches_the_full_column() {
+    const std::vector<float> values{1.0F, 9.0F, 2.0F, 0.0F, 3.0F, 8.0F, -4.0F};
+    const auto logits = column(values);
+    const std::vector<std::int32_t> mask{(1 << 0) | (1 << 2) | (1 << 4) | (1 << 5)};
+    const TokenLogprobOptions options{.enabled = true, .top = 0, .candidates = {5, 1, 0}};
+    const TokenLogprobs full = compute_token_logprobs(logits, mask, 4, options);
+
+    // What the op writes for two columns (the second is a copy), read for column 1.
+    const ninfer::runtime::TokenLogprobReadoutLayout layout{.columns = 2, .candidates = 3};
+    std::vector<float> readout(layout.floats(), 0.0F);
+    const auto op_values = [&](TokenId token, float& raw, float& masked) {
+        const std::vector<int> all{0, 1, 2, 3, 4, 5, 6};
+        raw = static_cast<float>(log_softmax(values, all, token));
+        std::vector<int> allowed;
+        for (const int t : all) {
+            if (ninfer::runtime::token_allowed(mask, static_cast<std::size_t>(t))) {
+                allowed.push_back(t);
+            }
+        }
+        masked = ninfer::runtime::token_allowed(mask, static_cast<std::size_t>(token))
+                     ? static_cast<float>(log_softmax(values, allowed, token))
+                     : -std::numeric_limits<float>::infinity();
+    };
+    for (std::size_t c = 0; c < 2; ++c) {
+        op_values(4, readout[layout.sampled(0, c)], readout[layout.sampled(1, c)]);
+        for (std::size_t n = 0; n < 3; ++n) {
+            op_values(options.candidates[n], readout[layout.candidate(0, n, c)],
+                      readout[layout.candidate(1, n, c)]);
+        }
+    }
+    const TokenLogprobs assembled =
+        ninfer::runtime::assemble_token_logprobs(4, readout, layout, 1, options.candidates);
+    require(assembled.sampled.token == 4 && close(assembled.sampled.logprob, full.sampled.logprob) &&
+                close(assembled.sampled.raw_logprob, full.sampled.raw_logprob),
+            "assembled sampled values differ from the full column");
+    require(assembled.candidates.size() == 3, "assembled candidate count differs");
+    for (std::size_t n = 0; n < 3; ++n) {
+        const bool forbidden = std::isinf(full.candidates[n].logprob);
+        require(assembled.candidates[n].token == full.candidates[n].token &&
+                    (forbidden ? std::isinf(assembled.candidates[n].logprob)
+                               : close(assembled.candidates[n].logprob, full.candidates[n].logprob)) &&
+                    close(assembled.candidates[n].raw_logprob, full.candidates[n].raw_logprob),
+                "assembled candidate " + std::to_string(n) + " differs from the full column");
+    }
+    require(assembled.top.empty(), "the device readout reports top alternatives");
+}
+
 void test_invalid_inputs_are_rejected() {
     const auto logits = column({0.0F, 1.0F});
     bool threw        = false;
@@ -154,6 +204,7 @@ int main() {
     run_test("unconstrained distribution", test_unconstrained_distribution);
     run_test("masked distribution", test_masked_distribution_renormalises_over_allowed_tokens);
     run_test("candidate list", test_candidate_list_is_a_full_distribution);
+    run_test("device readout assembly", test_device_readout_assembly_matches_the_full_column);
     run_test("invalid inputs", test_invalid_inputs_are_rejected);
     std::cout << "ok\n";
     return 0;

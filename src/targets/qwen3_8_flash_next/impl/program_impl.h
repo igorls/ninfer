@@ -8,6 +8,7 @@
 #include "ninfer/ops/sampling.h"
 #include "runtime/contract/structured_output.h"
 #include "runtime/contract/token_logprobs.h"
+#include "ninfer/ops/candidate_logprobs.h"
 #include "targets/qwen3_8_flash_next/impl/load/materialized.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_state.h"
@@ -237,6 +238,10 @@ struct LaneState {
     ops::SamplingConfig sampling_config{};
     std::unique_ptr<runtime::OutputConstraintState> output_constraint;
     TokenLogprobOptions logprobs;
+    // The device readout serves a request without top alternatives: K+2 floats per position
+    // instead of a vocabulary column, and speculative rounds stay enabled for it.
+    bool logprobs_device_readout          = false;
+    std::uint32_t logprob_readout_columns = 0;
     // Readout of the round this lane is pending on; empty unless logprobs are enabled.
     std::vector<TokenLogprobs> round_logprobs;
     bool publish_continuation = false;
@@ -280,6 +285,19 @@ public:
     // synchronised. The structured-output mask for that position is the one next_mask() last
     // produced, which every sampling site uploads right before it samples.
     void record_round_logprobs(LaneState& st, const Tensor& column, TokenId token);
+    // Device readout of `columns` positions for one lane: `logits` is BF16 [rows, columns],
+    // `sampled` holds the column tokens (device I32 [columns] when non-null, else uploaded from
+    // `host_sampled`), and `masks[c]` is column c's structured-output mask or null. Enqueued
+    // on the stream; collect_lane_logprobs reads the pinned results after synchronisation.
+    void enqueue_lane_logprobs(LaneState& st, std::uint32_t lane, const Tensor& logits,
+                               const std::int32_t* sampled, std::span<const std::int32_t> host_sampled,
+                               std::span<const std::int32_t* const> masks, std::uint32_t columns);
+    void collect_lane_logprobs(LaneState& st, std::uint32_t lane, std::span<const TokenId> tokens);
+    [[nodiscard]] const std::int32_t* constraint_mask_device(std::uint32_t lane,
+                                                              std::uint32_t column) const noexcept {
+        return static_cast<const std::int32_t*>(device_constraint_masks_.p) +
+               (lane * kConstraintColumns + column) * kConstraintMaskWords;
+    }
     void sample_tokens(const Tensor& logits,
                        std::span<const std::uint32_t> lane_indices,
                        std::span<std::int32_t> out_tokens);
@@ -351,6 +369,14 @@ public:
     static constexpr std::size_t kConstraintColumns = 5;
     DeviceBuffer device_constraint_masks_;
     std::vector<std::int32_t> host_constraint_masks_;
+    // Device readout: candidate ids per lane, sampled ids of one round per lane, results per lane
+    // (ops::candidate_logprobs layouts over kConstraintColumns positions), and their pinned copy.
+    static constexpr std::size_t kLogprobReadoutFloats =
+        (2U + 2U * kMaximumLogprobCandidates) * kConstraintColumns;
+    DeviceBuffer device_logprob_candidate_ids_;
+    DeviceBuffer device_logprob_sampled_ids_;
+    DeviceBuffer device_logprob_readout_;
+    std::optional<PinnedHostBuffer> logprob_readout_host_;
     DeviceBuffer device_token_counts_;
     DeviceBuffer device_prompt_presence_;
     DeviceBuffer device_history_tokens_;

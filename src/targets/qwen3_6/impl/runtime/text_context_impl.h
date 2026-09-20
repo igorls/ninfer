@@ -1255,6 +1255,10 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                         static_cast<std::size_t>(kCfg.token_domain) * sizeof(std::uint16_t),
                         cudaMemcpyDeviceToHost, s));
                 }
+                if (first_token_readout_ != nullptr) {
+                    schedule::enqueue_first_token_readout(*first_token_readout_, logits, io_.token,
+                                                          s);
+                }
             }
 
             if (prepare_mtp_prompt) {

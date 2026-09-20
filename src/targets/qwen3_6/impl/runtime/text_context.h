@@ -18,6 +18,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <functional>
 #include <span>
 #include <vector>
@@ -120,6 +121,17 @@ struct NullTap {
     static constexpr bool enabled = false;
 };
 
+// Device readout of the first generated token's logits (ops::candidate_logprobs), enqueued at
+// the prefill sampling site because MTP drafting reuses the logits buffer right after it.
+struct FirstTokenReadout {
+    std::optional<Tensor> candidate_ids; // I32 [N]
+    std::optional<Tensor> allowed;       // I32 [mask words], the position's structured-output mask
+    Tensor sampled_out;                  // FP32 [2, 1]
+    std::optional<Tensor> candidates_out; // FP32 [2, N, 1]
+    void* host        = nullptr;         // pinned destination, sampled_out then candidates_out
+    std::size_t bytes = 0;
+};
+
 struct PrefillChunkResult {
     std::uint32_t processed_tokens = 0;
     bool finalized                 = false;
@@ -176,6 +188,10 @@ public:
     // is queued right after sampling because MTP drafting reuses the same logits buffer.
     void set_first_token_logit_capture(std::uint16_t* host) noexcept {
         first_token_logits_host_ = host;
+    }
+
+    void set_first_token_readout(const FirstTokenReadout* readout) noexcept {
+        first_token_readout_ = readout;
     }
 
     void set_prefill_split_frontier(std::int64_t position) noexcept {
@@ -353,6 +369,7 @@ private:
     int proposal_head_n_                        = 0;
     const ops::SamplingConfig* sampling_config_ = nullptr;
     std::uint16_t* first_token_logits_host_     = nullptr;
+    const FirstTokenReadout* first_token_readout_ = nullptr;
     MtpW mtp_;
     std::array<FullLayerW, TextConfig::full_attention_layers()> full_{};
     std::array<GdnLayerW, TextConfig::gdn_layers()> gdn_{};
