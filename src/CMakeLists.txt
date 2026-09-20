@@ -97,6 +97,7 @@ add_library(ninfer_ops STATIC
   ops/launcher/sigmoid_gate_mul.cu
   ops/launcher/silu_and_mul.cu
   ops/launcher/target_logprobs.cu
+  ops/launcher/candidate_logprobs.cu
   ops/launcher/vision_pos_embed.cu
   ops/rmsnorm_rope/rmsnorm_rope.cpp
   ops/rmsnorm_rope/launch.cu
@@ -314,6 +315,7 @@ add_library(ninfer_ops STATIC
   ops/wrapper/silu_mul.cpp
   ops/wrapper/sparse_moe.cpp
   ops/wrapper/target_logprobs.cpp
+  ops/wrapper/candidate_logprobs.cpp
   ops/wrapper/vision_pos_embed.cpp)
 ninfer_internal_includes(ninfer_ops)
 ninfer_cuda_archive(ninfer_ops)
