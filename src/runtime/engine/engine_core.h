@@ -30,6 +30,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -1800,6 +1801,7 @@ private:
                 }
                 AdmissionGrant grant = scheduler_.grant_head(
                     head->id, head_inspection.choice->summary().service_work_quanta);
+                idle_flush_attempted_.erase(head->id);
                 return admit_planned_request(head, std::move(*head_inspection.choice),
                                              std::move(grant));
             }
@@ -1807,6 +1809,17 @@ private:
             const ActiveAdmissionSet active =
                 scheduler_.active_admission_set(slots_, max_concurrency_);
             if (active.size == 0) {
+                // Nothing is active, so every catalogued owner is unreferenced and the request,
+                // feasible in isolation, must be plannable from an empty cache. The planner
+                // failing here is a defect; emptying the cache and planning once more turns it
+                // into a lost cache instead of a lost process. The stat records each occurrence.
+                if (!idle_flush_attempted_.count(head->id) &&
+                    resources_.evict_all_idle(*instance_.program) != 0) {
+                    idle_flush_attempted_.insert(head->id);
+                    publish_runtime_stats();
+                    control_progress = true;
+                    continue;
+                }
                 throw std::logic_error("isolated-feasible request is blocked in an idle Engine");
             }
             if (!scheduler_.protect_blocked_head(head->id, active.span(),
@@ -2216,6 +2229,8 @@ private:
     std::array<std::shared_ptr<Request>, kMaximumConcurrency> slots_{};
     std::optional<MaterializingRequest> materializing_;
     Scheduling scheduler_;
+    // Requests for which an idle cache flush was already tried; a second failure is fatal.
+    std::unordered_set<std::uint64_t> idle_flush_attempted_;
     std::atomic<bool> admission_check_pending_{false};
     std::uint64_t worker_accounted_elapsed_ns_ = 0;
     HostWorkClass current_host_work_class_     = HostWorkClass::Control;

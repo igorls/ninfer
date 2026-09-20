@@ -970,6 +970,9 @@ struct RuntimeStats {
     std::uint64_t pressure_searches                    = 0;
     std::uint64_t pressure_search_budget_exhaustions   = 0;
     std::uint64_t pressure_maximal_fallback_selections = 0;
+    // Times an idle Engine emptied its context cache because the planner found no plan for a
+    // request that is feasible in isolation. Each one is a planner defect worth reporting.
+    std::uint64_t pressure_idle_flushes                = 0;
     std::uint32_t shared_active_references             = 0;
     std::uint64_t historical_fork_hits                 = 0;
     double actual_context_transfer_seconds             = 0.0;

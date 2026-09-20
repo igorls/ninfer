@@ -778,6 +778,8 @@ std::string format_throughput_json(const std::string& server_instance_id, std::u
              {"maximal_fallback_selections",
               monotonic_delta(previous.pressure_maximal_fallback_selections,
                               current.pressure_maximal_fallback_selections)},
+             {"idle_flushes", monotonic_delta(previous.pressure_idle_flushes,
+                                              current.pressure_idle_flushes)},
              {"historical_fork_hits",
               monotonic_delta(previous.historical_fork_hits, current.historical_fork_hits)}}},
         {"occupancy", Json{{"device_state_slots", current.device_state_occupied_slots},

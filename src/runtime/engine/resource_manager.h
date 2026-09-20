@@ -1112,6 +1112,7 @@ public:
         out.pressure_checkpoints_dropped       = context_stats_.pressure_checkpoints_dropped;
         out.pressure_searches                  = context_stats_.pressure_searches;
         out.pressure_search_budget_exhaustions = context_stats_.pressure_search_budget_exhaustions;
+        out.pressure_idle_flushes              = context_stats_.pressure_idle_flushes;
         out.pressure_maximal_fallback_selections =
             context_stats_.pressure_maximal_fallback_selections;
         out.historical_fork_hits            = context_stats_.historical_fork_hits;
@@ -1143,6 +1144,44 @@ public:
 
     [[nodiscard]] LogicalLaneState lane_state(LaneId lane) const noexcept {
         return lane.value < lane_count_ ? lanes_[lane.value] : LogicalLaneState::Free;
+    }
+
+    // Recovery for a planner that found no plan for an isolated-feasible request while nothing
+    // is active: every catalogued owner is unreferenced then, so the cache can be returned to
+    // empty and the request planned again from there. Returns the number of owners released,
+    // 0 when the Engine is not idle or a transaction is open.
+    template <class Program>
+    std::uint32_t evict_all_idle(Program& program) noexcept {
+        if (!std::holds_alternative<std::monostate>(transaction_) ||
+            program.has_context_transaction()) {
+            return 0;
+        }
+        for (std::uint32_t lane = 0; lane < lane_count_; ++lane) {
+            if (lanes_[lane] != LogicalLaneState::Free || active_[lane].occupied) { return 0; }
+        }
+        std::uint32_t released = 0;
+        for (CatalogEntry& entry : catalog_) {
+            if (entry.state == CatalogState::Vacant) { continue; }
+            if (entry.handle) {
+                (void)program.release_continuation(std::move(*entry.handle));
+                entry.handle.reset();
+            }
+            erase_session_if_owner(entry.id);
+            clear_catalog_entry(entry);
+            ++released;
+        }
+        for (SharedCatalogEntry& entry : shared_catalog_) {
+            if (entry.state == SharedCatalogState::Vacant) { continue; }
+            if (entry.handle) {
+                (void)program.release_shared_prefix(std::move(*entry.handle));
+                entry.handle.reset();
+            }
+            clear_shared_entry(entry);
+            ++released;
+        }
+        rebuild_prefix_index();
+        saturating_increment(context_stats_.pressure_idle_flushes);
+        return released;
     }
 
     void clear_after_program_cleanup() noexcept {

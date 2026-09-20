@@ -1125,6 +1125,12 @@ public:
         return FakeReleaseResult{.status = ConsumeStatus::Consumed};
     }
 
+    [[nodiscard]] FakeReleaseResult release_shared_prefix(FakeSharedPrefixHandle&& shared) noexcept {
+        released_shared_prefixes.push_back(shared.id);
+        advance_revision();
+        return FakeReleaseResult{.status = ConsumeStatus::Consumed};
+    }
+
     [[nodiscard]] ProgramResourceRevision resource_revision() const noexcept { return revision_; }
 
     [[nodiscard]] FakePhysicalUsage physical_usage() const noexcept { return usage; }
@@ -1183,6 +1189,7 @@ public:
     std::vector<std::uint64_t> started_action_ids;
     std::vector<std::uint32_t> selected_shared_capture_frontiers;
     std::vector<std::uint32_t> released_continuations;
+    std::vector<std::uint32_t> released_shared_prefixes;
 
 private:
     void advance_revision() noexcept {
@@ -2738,6 +2745,43 @@ void test_read_only_request_leaves_the_catalog_unchanged() {
             "the source was not reusable after a read-only request finished");
 }
 
+// The idle flush is the Engine's recovery when the planner finds no plan for an isolated-
+// feasible request with nothing active: every catalogued owner is released back to the Program
+// and the catalog is empty afterwards; with a lane active it does nothing.
+void test_idle_flush_empties_the_catalog_only_when_idle() {
+    FakeManager manager = make_manager(1, 3);
+    FakeProgram program;
+    const ActiveRequest first = start_active(manager, program, 61, make_base(61), 1);
+    (void)finish_active(manager, program, first, 16);
+    const ActiveRequest second = start_active(manager, program, 62, make_base(62), 2);
+    (void)finish_active(manager, program, second, 16);
+    const ActiveRequest busy = start_active(manager, program, 63, make_base(63), 3);
+    require(manager.evict_all_idle(program) == 0 && program.released_continuations.empty(),
+            "an idle flush ran while a lane was active");
+    (void)finish_active(manager, program, busy, 16);
+
+    const std::uint32_t released = manager.evict_all_idle(program);
+    require(released == 3 && program.released_continuations.size() == 3,
+            "the idle flush did not release every catalogued owner");
+    for (std::uint32_t slot = 0; slot < 3; ++slot) {
+        require(manager.catalog_state(slot) == FakeManager::CatalogState::Vacant,
+                "a catalog slot survived the idle flush");
+    }
+    RuntimeStats stats;
+    manager.populate_runtime_stats(program, stats);
+    require(stats.pressure_idle_flushes == 1, "the idle flush was not counted");
+    // The catalog works again afterwards: the next request is admitted at root and catalogued.
+    const ActiveRequest after = start_active(manager, program, 61, make_base(61), 4);
+    require(program.started_source_mode == PrivateSourceMode::ConsumeToActive &&
+                manager.catalog_state(0) != FakeManager::CatalogState::Catalogued,
+            "the flushed catalog still offered a source");
+    (void)finish_active(manager, program, after, 16);
+    require(manager.catalog_state(0) == FakeManager::CatalogState::Catalogued ||
+                manager.catalog_state(1) == FakeManager::CatalogState::Catalogued ||
+                manager.catalog_state(2) == FakeManager::CatalogState::Catalogued,
+            "the catalog did not accept a publication after the flush");
+}
+
 void test_admission_waits_for_program_boundary() {
     FakeManager manager = make_manager(2, 3);
     FakeProgram program;
@@ -3779,6 +3823,8 @@ int main() {
              test_read_only_and_declared_boundary_reuse_retain_the_source);
     run_test("read-only request leaves the catalog unchanged",
              test_read_only_request_leaves_the_catalog_unchanged);
+    run_test("idle flush empties the catalog only when idle",
+             test_idle_flush_empties_the_catalog_only_when_idle);
     run_test("aborted shared capture logical rollback",
              test_aborted_shared_capture_start_rolls_back_logical_claims);
     run_test("validate complete capture result before adoption",
