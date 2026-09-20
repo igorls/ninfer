@@ -2700,6 +2700,44 @@ void test_read_only_and_declared_boundary_reuse_retain_the_source() {
     (void)finish_active(manager, program, plain, 16);
 }
 
+// Isolation contract of a read-only request (a /v1/score branch): it reads a published
+// source by retaining it, and when the Program releases it at finish, the catalog is exactly
+// what it was: the source still catalogued and reusable at its frontier, no entry of its own.
+void test_read_only_request_leaves_the_catalog_unchanged() {
+    FakeManager manager = make_manager(1, 3);
+    FakeProgram program;
+    const ActiveRequest owner = start_active(manager, program, 61, make_base(61), 1);
+    (void)finish_active(manager, program, owner, 16);
+    const auto catalogued = [&] {
+        std::uint32_t count = 0;
+        for (std::uint32_t slot = 0; slot < 3; ++slot) {
+            count += manager.catalog_state(slot) == FakeManager::CatalogState::Catalogued ? 1U : 0U;
+        }
+        return count;
+    };
+    require(catalogued() == 1, "the publishing owner was not catalogued");
+
+    FakeRequestBasePlan read_only        = make_base(61);
+    read_only.value.publish_continuation = false;
+    const ActiveRequest reader = start_active(manager, program, 61, read_only, 2);
+    require(program.started_source_mode == PrivateSourceMode::Retain,
+            "a read-only request consumed the checkpoint it reused");
+    program.finish_release            = true;
+    const FakeFinishResult released   = finish_active(manager, program, reader, 16);
+    program.finish_release            = false;
+    require(released.disposition == FinishDisposition::Released,
+            "the fake did not release the read-only request");
+    require(catalogued() == 1 && manager.catalog_state(0) == FakeManager::CatalogState::Catalogued,
+            "a read-only request changed the catalog");
+    require(manager.lane_state(reader.lane) == ninfer::runtime::LogicalLaneState::Free,
+            "the read-only lane did not return to Free");
+
+    auto again = manager.inspect(program, FakePreparedPrompt{61}, make_base(61), 3);
+    require(again.readiness == Readiness::Ready && again.choice &&
+                again.choice->summary().reusable_prompt_tokens == 16,
+            "the source was not reusable after a read-only request finished");
+}
+
 void test_admission_waits_for_program_boundary() {
     FakeManager manager = make_manager(2, 3);
     FakeProgram program;
@@ -3739,6 +3777,8 @@ int main() {
              test_shared_capture_pressure_skips_owners_in_publication_grace);
     run_test("read-only and declared-boundary reuse retain the source",
              test_read_only_and_declared_boundary_reuse_retain_the_source);
+    run_test("read-only request leaves the catalog unchanged",
+             test_read_only_request_leaves_the_catalog_unchanged);
     run_test("aborted shared capture logical rollback",
              test_aborted_shared_capture_start_rolls_back_logical_claims);
     run_test("validate complete capture result before adoption",
