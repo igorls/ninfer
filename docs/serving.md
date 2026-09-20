@@ -172,8 +172,8 @@ apply its own temperature scaling for calibration.
 A request with `logprobs: true` decodes one token per round: speculative drafts are not offered
 for it, so long generations are slower than without it. Each position copies one vocabulary column
 to the host (about 0.5 MB). `logprobs` with `stream: true` is rejected with
-`logprobs_stream_not_supported`; the Responses API does not report log probabilities. Models
-without a readout reject the request.
+`logprobs_stream_not_supported`; the Responses API does not report log probabilities. Every
+registered target supports the readout.
 
 ### Read-only cache participation
 
@@ -232,11 +232,10 @@ list. A question that fails reports `{"id", "index", "error"}` in its slot and d
 call.
 
 The endpoint is orchestration over the ordinary Engine route, not a fused batch: the first question
-carries an explicit shared-prefix boundary at the end of `messages` and runs alone, which prefills
-and publishes the prefix once; the remaining questions then run concurrently, up to
-`--max-concurrency` at a time, against that prefix and read-only in the context cache. The
-published prefix stays in the cache under normal retention, so a later call over the same
-`messages` starts warm.
+carries an explicit shared-prefix boundary at the end of `messages` (and no implicit write
+candidate), which prefills and publishes the prefix once; the remaining questions then run one at
+a time against that prefix, read-only in the context cache. The published prefix stays in the
+cache under normal retention, so a later call over the same `messages` starts warm.
 
 A string `name` on a `tool` message is accepted as an ignored, output-neutral compatibility
 extension for clients that mirror the function name onto tool results. It does not participate in

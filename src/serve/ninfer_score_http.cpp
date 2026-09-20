@@ -5,16 +5,13 @@
 #include "serve/openai_common.h"
 
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -22,9 +19,9 @@
 //
 // Every question is an ordinary one-token chat request made of the shared messages plus one user
 // message, so questions never see each other. The first question carries an explicit shared-prefix
-// boundary at the end of the shared messages and runs alone; the remaining questions then run
-// concurrently against the published prefix, read-only in the context cache so that a large call
-// does not displace other conversations' cached state.
+// boundary at the end of the shared messages and publishes it; the remaining questions read it,
+// read-only in the context cache so that a large call does not displace other conversations'
+// cached state.
 
 namespace ninfer::serve {
 namespace {
@@ -165,7 +162,13 @@ void HttpServer::handle_score(const httplib::Request& req, httplib::Response& re
                               {"top_logprobs", body.value("top_logprobs", 0)},
                               {"logprob_candidates", candidates},
                               // Only the first question writes: it publishes the shared prefix.
-                              {"prompt_cache_read_only", index != 0}};
+                              {"prompt_cache_read_only", index != 0},
+                              // The explicit boundary is the only write candidate. Without this
+                              // the request also carries the default implicit candidate at the
+                              // end of its own question, and a target that keeps one checkpoint
+                              // per request (Flash-Next) would publish that instead of the
+                              // shared prefix.
+                              {"prompt_cache_options", Json{{"mode", "explicit"}}}};
             if (body.contains("chat_template_kwargs")) {
                 entry.body["chat_template_kwargs"] = body.at("chat_template_kwargs");
             }
@@ -189,7 +192,6 @@ void HttpServer::handle_score(const httplib::Request& req, httplib::Response& re
 
     std::vector<ScoreResult> results(questions.size());
     std::shared_ptr<RequestLifetime> lifetime;
-    std::mutex lifetime_mutex;
     const auto run_question = [&](std::size_t index) {
         const OpenAIChatRequest& request = requests[index];
         const std::uint64_t req_id       = ++request_seq_;
@@ -231,28 +233,14 @@ void HttpServer::handle_score(const httplib::Request& req, httplib::Response& re
             error.message        = exception.what();
             results[index].error = std::move(error);
         }
-        std::lock_guard lock(lifetime_mutex);
         if (!lifetime) { lifetime = prepared.lifetime; }
     };
 
-    // The first question publishes the prefix; the others must not race it to a cold prefill.
-    run_question(0);
-    if (questions.size() > 1) {
-        std::atomic<std::size_t> next{1};
-        const std::size_t workers = std::min<std::size_t>(
-            questions.size() - 1, std::max<std::uint32_t>(1U, options_.max_concurrency));
-        std::vector<std::thread> pool;
-        pool.reserve(workers);
-        for (std::size_t worker = 0; worker < workers; ++worker) {
-            pool.emplace_back([&] {
-                for (std::size_t index = next.fetch_add(1); index < questions.size();
-                     index             = next.fetch_add(1)) {
-                    run_question(index);
-                }
-            });
-        }
-        for (std::thread& thread : pool) { thread.join(); }
-    }
+    // One question at a time. The first publishes the prefix; each later one reads it. Prefill
+    // is one sequence at a time on every target, so concurrent branches gain little when they
+    // hit, and a target that keeps a published prefix as a private continuation (Flash-Next)
+    // admits one reader at a time: concurrent branches there miss and prefill cold.
+    for (std::size_t index = 0; index < questions.size(); ++index) { run_question(index); }
 
     try {
         Json rendered         = Json::array();
