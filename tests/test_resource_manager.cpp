@@ -2665,6 +2665,41 @@ void test_new_owner_survives_cold_admission_under_full_pool() {
             "planner did not evict one of the two least recently published owners");
 }
 
+// Reuse of a private checkpoint consumes it by default: the conversation moves on and the
+// endpoint is superseded. Two requests must retain instead. A read-only request (no
+// publication) would otherwise move the only copy into a lane that gives nothing back, and a
+// request that declares an explicit boundary at the reused frontier means that prefix to stay
+// published for others; the Program captures nothing at the frontier its prefill starts from.
+void test_read_only_and_declared_boundary_reuse_retain_the_source() {
+    FakeManager manager = make_manager(1, 3);
+    FakeProgram program;
+    const ActiveRequest owner = start_active(manager, program, 61, make_base(61), 1);
+    (void)finish_active(manager, program, owner, 16);
+
+    FakeRequestBasePlan read_only          = make_base(61);
+    read_only.value.publish_continuation   = false;
+    const ActiveRequest reader = start_active(manager, program, 61, read_only, 2);
+    require(program.started_source_mode == PrivateSourceMode::Retain,
+            "a read-only request consumed the checkpoint it reused");
+    (void)finish_active(manager, program, reader, 16);
+
+    FakeRequestBasePlan declared = make_base(61);
+    declared.cache.opportunities.push_back(FakeContextCache::Opportunity{
+        .kind     = ninfer::PromptCacheMarkerKind::SharedStablePrefix,
+        .evidence = ninfer::SharedCandidateEvidence::ExplicitBoundary,
+        .frontier = 16,
+    });
+    const ActiveRequest publisher = start_active(manager, program, 61, declared, 3);
+    require(program.started_source_mode == PrivateSourceMode::Retain,
+            "a request declaring an explicit boundary at the reused frontier consumed it");
+    (void)finish_active(manager, program, publisher, 16);
+
+    const ActiveRequest plain = start_active(manager, program, 61, make_base(61), 4);
+    require(program.started_source_mode == PrivateSourceMode::ConsumeToActive,
+            "an ordinary same-content request no longer consumes its own endpoint");
+    (void)finish_active(manager, program, plain, 16);
+}
+
 void test_admission_waits_for_program_boundary() {
     FakeManager manager = make_manager(2, 3);
     FakeProgram program;
@@ -3702,6 +3737,8 @@ int main() {
              test_shared_capture_combines_two_pressure_owners);
     run_test("shared capture pressure under publication grace",
              test_shared_capture_pressure_skips_owners_in_publication_grace);
+    run_test("read-only and declared-boundary reuse retain the source",
+             test_read_only_and_declared_boundary_reuse_retain_the_source);
     run_test("aborted shared capture logical rollback",
              test_aborted_shared_capture_start_rolls_back_logical_claims);
     run_test("validate complete capture result before adoption",

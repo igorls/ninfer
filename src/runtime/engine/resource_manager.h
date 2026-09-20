@@ -335,10 +335,25 @@ public:
                         private_has_active_edge(index.slot)) {
                         continue;
                     }
+                    // Two requests must not consume their source. One that publishes
+                    // nothing would move the only copy into a lane that never gives one
+                    // back. One that declares an explicit boundary at this very frontier
+                    // means that prefix to stay published for other requests; a Program
+                    // captures nothing at the frontier its prefill starts from, so consuming
+                    // it would end the prefix with this request.
+                    const bool declares_boundary_here = std::any_of(
+                        base.context_cache().opportunities.begin(),
+                        base.context_cache().opportunities.end(), [&](const auto& opportunity) {
+                            return opportunity.frontier == index.key.frontier &&
+                                   has_shared_candidate_evidence(
+                                       opportunity.evidence,
+                                       SharedCandidateEvidence::ExplicitBoundary);
+                        });
                     const bool retain =
-                        entry.session && (!base.context_cache().session_key ||
-                                          *entry.session != *base.context_cache().session_key ||
-                                          !base.context_cache().update_session_index);
+                        !base.summary().publish_continuation || declares_boundary_here ||
+                        (entry.session && (!base.context_cache().session_key ||
+                                           *entry.session != *base.context_cache().session_key ||
+                                           !base.context_cache().update_session_index));
                     std::optional<AdmissionCandidate> plan =
                         program.inspect_admission(prompt, base, *destination, &*entry.handle,
                                                   nullptr, index.checkpoint, retain);
