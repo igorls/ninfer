@@ -201,7 +201,10 @@ already published prefix while capturing no checkpoint and publishing no continu
 Use it for one-shot requests, such as single-token classification over a shared document, whose
 continuation will never be reused: a burst of them otherwise turns the bounded continuation
 catalog over and evicts other conversations' cached state. A read-only request never creates the
-shared prefix it reads; some earlier request has to publish it.
+shared prefix it reads; some earlier request has to publish it. Because nothing can later resume
+from it, a read-only request also skips the prefill split that publishing requests make before
+the assistant opener, so a short one-shot prompt prefills in one pass over the weights instead of
+two.
 
 ### Closed-set scoring: `POST /v1/score`
 

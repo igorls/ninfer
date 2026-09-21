@@ -11724,12 +11724,17 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                               staged.capture_groups[staged.next_capture].frontier)
                         : std::nullopt;
                 std::optional<std::uint32_t> split_frontier = capture_frontier;
-                const auto rewrite_split                    = std::upper_bound(
-                    staged.prompt.identity.rewrite_execution_frontiers.begin(),
-                    staged.prompt.identity.rewrite_execution_frontiers.end(), staged.cursor);
-                if (rewrite_split != staged.prompt.identity.rewrite_execution_frontiers.end() &&
-                    (!split_frontier || *rewrite_split < *split_frontier)) {
-                    split_frontier = *rewrite_split;
+                // A publishing request splits at its rewrite execution frontiers so a later turn
+                // resumed from its typed rewrite checkpoint shares its GDN decomposition. A
+                // read-only request is never a resume source and runs its suffix unsplit.
+                if (request.publish_continuation) {
+                    const auto rewrite_split = std::upper_bound(
+                        staged.prompt.identity.rewrite_execution_frontiers.begin(),
+                        staged.prompt.identity.rewrite_execution_frontiers.end(), staged.cursor);
+                    if (rewrite_split != staged.prompt.identity.rewrite_execution_frontiers.end() &&
+                        (!split_frontier || *rewrite_split < *split_frontier)) {
+                        split_frontier = *rewrite_split;
+                    }
                 }
                 schedule::PrefillChunkResult result;
                 timing.pause();
