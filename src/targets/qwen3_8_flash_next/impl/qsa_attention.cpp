@@ -8,6 +8,7 @@
 #include "targets/qwen3_8_flash_next/impl/qsa_attention_workspace.h"
 #include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
