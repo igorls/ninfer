@@ -34,6 +34,21 @@ preserve model semantics and improve the workload they claim to improve.
 - **Application integration and diagnostics.** Streaming, tool-call parsing, reasoning controls,
   API-key authentication, request JSONL logs, client attribution and speculative/reuse telemetry.
   NInfer returns tool calls to clients; it does not execute them.
+- **Native decision readout.** Chat Completions returns token log probabilities read from the
+  model's logits before any sampling adjustment, with `top_logprobs` alternatives, the
+  distribution over a caller-supplied closed set of candidates (`logprob_candidates`, up to
+  1,024 options, renormalised over the set and reported beside the vocabulary-wide value), and
+  log probabilities at chosen prompt positions for scoring a given continuation. `POST /v1/score`
+  scores up to 256 isolated questions against one shared prefix in a single call, with
+  single-token and multi-token candidate forms, entropy and top-two margin per result. Without
+  `top_logprobs` alternatives the readout runs on the device and speculative decoding stays on;
+  every registered target supports it. This is the substrate for classification, routing,
+  calibrated yes/no decisions and answer judging without generating text.
+- **Read-only cache participation.** `prompt_cache_read_only` lets a one-shot request start from
+  a published prefix while capturing no checkpoint and publishing nothing, so bursts of
+  classification requests cannot evict other conversations' cached state. Such a request also
+  prefills its prompt in a single pass, where a publishing request splits at turn boundaries to
+  keep cold and resumed execution numerically identical.
 
 These capabilities are implemented in this branch. Application-specific quality qualification is
 separate: valid JSON and fast inference do not establish correct legal analysis or reliable behavior
@@ -243,6 +258,17 @@ end-to-end request latency answer different questions.
 Synthetic and short-source tests protect specific regressions. Production qualification must also
 exercise representative complete application workflows and manually review their delivered
 answers against the sources. Structured-output conformance is one part of that qualification.
+
+[JevBench](https://github.com/fstandhartinger/jevbench) measures decision models: state and rubric
+in, a probability per option out, scored on accuracy, calibration, latency and cost.
+[`tools/bench/jevbench/`](tools/bench/jevbench/) holds an adapter in that repository's contract, a
+TypeSafe-wire-format shim so its stock adapter runs unchanged, and a driver that runs the 231
+public decisions and scores them with the board's own formula. On the public items, the Linux
+build of this fork on an RTX PRO 6000 answered 100 / 97.2 / 66.7 % of the easy / standard / hard
+tiers with Qwen3.8-27B NVFP4 at a 0.033 s median decision, and 100 / 98.6 / 79.3 % with
+Qwen3.8-Flash-Next at 0.094 s; Jev 1.13.0 scores 100 / 98.6 / 73.0 % on the same items. Half the
+benchmark is held out, so the official rows come only from the maintainer's own run; the submission
+is [issue #12](https://github.com/fstandhartinger/jevbench/issues/12).
 
 ## Documentation
 
