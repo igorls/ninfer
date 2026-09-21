@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NInfer · Decision analyzer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500&family=Kode+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --putty: #c8c3b4;
+      --putty-deep: #b3ad9d;
+      --putty-shadow: #8f8979;
+      --silk: #2b2822;
+      --silk-soft: #3e3a2e;
+      --frame: #3a352c;
+      --frame-edge: #201c15;
+      --glass: #170f06;
+      --glass-lit: #24170a;
+      --phosphor: #ffb000;
+      --phosphor-dim: #ad7a1c;
+      --phosphor-faint: #4f3a12;
+      --phosphor-halo: rgba(255, 176, 0, 0.35);
+      --key: #d7d2c3;
+      --key-lit: #ffcf5c;
+      --alarm: #ff6a3d;
+      --mono: "Kode Mono", ui-monospace, Menlo, monospace;
+      --silkface: "Barlow Condensed", "Barlow", sans-serif;
+      --body: "Barlow", system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    html { background: #5b574c; }
+    body {
+      font-family: var(--body);
+      color: var(--silk);
+      display: grid;
+      place-items: center;
+      min-height: 100%;
+      overflow: hidden;
+      caret-color: var(--phosphor);
+    }
+    ::selection { background: var(--phosphor); color: var(--glass); }
+    :focus-visible { outline: 3px solid var(--phosphor); outline-offset: 3px; }
+
+    /* ── Front panel ─────────────────────────────────────────────────────────── */
+    .panel {
+      width: 1280px;
+      height: 720px;
+      background:
+        radial-gradient(120% 90% at 50% 0%, #d4cfc1 0%, var(--putty) 55%, var(--putty-deep) 100%);
+      border-radius: 10px;
+      box-shadow: 0 30px 60px -20px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+      display: grid;
+      grid-template-columns: 300px 1fr;
+      padding: 32px 36px 32px 36px;
+      column-gap: 28px;
+      position: relative;
+    }
+    .panel::before, .panel::after {
+      content: "";
+      position: absolute;
+      width: 14px; height: 14px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 35%, #efeadb, #8f8979 70%, #6c665a);
+      box-shadow: inset 0 1px 2px rgba(0,0,0,0.4);
+    }
+    .panel::before { left: 14px; top: 14px; }
+    .panel::after { right: 14px; bottom: 14px; }
+    .screw {
+      position: absolute;
+      width: 14px; height: 14px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 35%, #efeadb, #8f8979 70%, #6c665a);
+      box-shadow: inset 0 1px 2px rgba(0,0,0,0.4);
+    }
+    .screw.tr { right: 14px; top: 14px; }
+    .screw.bl { left: 14px; bottom: 14px; }
+
+    /* ── Left column: silkscreen ─────────────────────────────────────────────── */
+    .side {
+      display: flex;
+      flex-direction: column;
+      gap: 26px;
+      min-width: 0;
+    }
+    .plate {
+      font-family: var(--silkface);
+      line-height: 0.95;
+      letter-spacing: -0.01em;
+    }
+    .plate .brand {
+      font-size: 44px;
+      font-weight: 700;
+      color: var(--silk);
+    }
+    .plate .model {
+      font-size: 22px;
+      font-weight: 600;
+      color: var(--silk-soft);
+      letter-spacing: 0.08em;
+      margin-top: 6px;
+    }
+    .plate .power {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      margin-top: 12px;
+      font-family: var(--silkface);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.14em;
+      color: var(--silk-soft);
+    }
+    .plate .led {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: #5a3a2a;
+      box-shadow: inset 0 1px 2px rgba(0,0,0,0.5);
+      transition: background 0.4s;
+    }
+    .plate .led.on { background: #ff8a2a; }
+    .plate .series {
+      margin-top: 10px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--silk-soft);
+      letter-spacing: 0.04em;
+    }
+
+    .block {
+      border-top: 1px solid var(--putty-shadow);
+      padding-top: 12px;
+    }
+    .block h2 {
+      margin: 0 0 8px;
+      font-family: var(--silkface);
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.16em;
+      color: var(--silk);
+    }
+    .block dl {
+      margin: 0;
+      display: grid;
+      grid-template-columns: auto 1fr;
+      column-gap: 12px;
+      row-gap: 5px;
+      font-size: 13.5px;
+      line-height: 1.35;
+    }
+    .block dt {
+      font-family: var(--silkface);
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      color: var(--silk-soft);
+      font-size: 12.5px;
+      padding-top: 1px;
+    }
+    .block dd {
+      margin: 0;
+      font-family: var(--mono);
+      font-size: 12.5px;
+      color: var(--silk);
+      overflow-wrap: anywhere;
+    }
+    .legend {
+      display: grid;
+      row-gap: 7px;
+      font-size: 13.5px;
+      line-height: 1.35;
+      color: var(--silk);
+    }
+    .legend .row {
+      display: grid;
+      grid-template-columns: 34px 1fr;
+      column-gap: 8px;
+      align-items: start;
+    }
+    .swatch {
+      height: 12px;
+      margin-top: 4px;
+      border: 1px solid var(--silk-soft);
+      background: var(--glass);
+      position: relative;
+      overflow: hidden;
+    }
+    .swatch i {
+      position: absolute; inset: 0;
+      background: var(--phosphor);
+    }
+    .swatch.high i { transform: scaleY(1); transform-origin: bottom; }
+    .swatch.low i { transform: scaleY(0.28); transform-origin: bottom; background: var(--phosphor-dim); }
+    .swatch.cursor { border-color: var(--silk-soft); }
+    .swatch.cursor i { width: 2px; left: 50%; background: var(--phosphor); }
+
+    .repo {
+      margin-top: auto;
+      font-size: 13px;
+      line-height: 1.4;
+      color: var(--silk-soft);
+    }
+    .repo a {
+      color: var(--silk);
+      text-decoration: underline;
+      text-underline-offset: 3px;
+      text-decoration-thickness: 1px;
+      font-family: var(--mono);
+      font-size: 12.5px;
+    }
+
+    /* ── CRT ─────────────────────────────────────────────────────────────────── */
+    .frame {
+      background: linear-gradient(180deg, var(--frame) 0%, var(--frame-edge) 100%);
+      border-radius: 8px;
+      padding: 14px 14px 10px;
+      box-shadow: inset 0 2px 6px rgba(0,0,0,0.55), 0 1px 0 rgba(255,255,255,0.25);
+      display: grid;
+      grid-template-rows: 1fr auto;
+      row-gap: 10px;
+      min-width: 0;
+    }
+    .crt {
+      position: relative;
+      background: radial-gradient(130% 110% at 50% 40%, var(--glass-lit) 0%, var(--glass) 70%);
+      border-radius: 14px / 18px;
+      overflow: hidden;
+      color: var(--phosphor);
+      font-family: var(--mono);
+      font-size: 15px;
+      line-height: 1.4;
+      padding: 16px 22px 12px;
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      row-gap: 10px;
+      box-shadow: inset 0 0 60px rgba(0,0,0,0.65);
+      opacity: 0;
+      transition: opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .crt.on { opacity: 1; }
+    .crt::after {
+      content: "";
+      position: absolute; inset: 0;
+      pointer-events: none;
+      background: repeating-linear-gradient(180deg, rgba(0,0,0,0) 0 2px, rgba(0,0,0,0.18) 2px 3px);
+      mix-blend-mode: multiply;
+    }
+    .crt .glow { font-weight: 700; }
+
+    .status {
+      display: flex;
+      justify-content: space-between;
+      font-size: 13.5px;
+      letter-spacing: 0.04em;
+      color: var(--phosphor);
+      border-bottom: 1px solid var(--phosphor-faint);
+      padding-bottom: 6px;
+      white-space: nowrap;
+    }
+    .status span b { font-weight: 700; }
+    .status .dim { color: var(--phosphor-dim); }
+    .status .live { animation: blink 0.9s steps(2, end) infinite; }
+    @keyframes blink { 50% { opacity: 0.25; } }
+
+    .state {
+      position: relative;
+      border: 1px solid var(--phosphor-faint);
+      padding: 6px 10px 8px;
+      min-height: 112px;
+      font-size: 13.5px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      color: var(--phosphor);
+    }
+    .state .tag {
+      position: absolute;
+      top: -8px; left: 8px;
+      padding: 0 6px;
+      background: var(--glass);
+      font-size: 12px;
+      letter-spacing: 0.14em;
+      color: var(--phosphor-dim);
+    }
+    .state .caret {
+      display: inline-block;
+      width: 8px; height: 14px;
+      background: var(--phosphor);
+      vertical-align: -2px;
+      animation: blink 0.8s steps(2, end) infinite;
+    }
+
+    .channels {
+      display: grid;
+      grid-template-rows: repeat(4, 1fr);
+      row-gap: 6px;
+      min-height: 0;
+    }
+    .ch {
+      display: grid;
+      grid-template-columns: 46px 222px 1fr 110px;
+      column-gap: 12px;
+      align-items: stretch;
+      opacity: 0.18;
+      transition: opacity 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+      min-height: 0;
+    }
+    .ch.armed { opacity: 1; }
+    .ch .id {
+      font-size: 13px;
+      letter-spacing: 0.08em;
+      color: var(--phosphor-dim);
+      padding-top: 2px;
+    }
+    .ch.decided .id { color: var(--phosphor); }
+    .ch .q {
+      font-size: 13.5px;
+      line-height: 1.35;
+      color: var(--phosphor);
+      padding-top: 1px;
+    }
+    .ch .q small {
+      display: block;
+      font-size: 12px;
+      letter-spacing: 0.1em;
+      color: var(--phosphor-dim);
+      margin-top: 2px;
+    }
+    .bus {
+      position: relative;
+      display: grid;
+      grid-auto-flow: column;
+      grid-auto-columns: 1fr;
+      column-gap: 4px;
+      border-bottom: 1px solid var(--phosphor-faint);
+      min-height: 0;
+    }
+    .seg {
+      position: relative;
+      display: flex;
+      align-items: flex-end;
+      min-height: 0;
+    }
+    .seg .fill {
+      position: absolute;
+      left: 0; right: 0; bottom: 0;
+      height: 0%;
+      background: var(--phosphor-dim);
+      transition: height 0.9s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .seg .fill::before {
+      content: "";
+      position: absolute;
+      left: 0; right: 0; top: 0;
+      height: 2px;
+      background: var(--phosphor);
+      box-shadow: 0 0 5px var(--phosphor-halo);
+    }
+    .seg.top .fill { background: var(--phosphor); }
+    .seg .lbl {
+      position: relative;
+      z-index: 1;
+      font-size: 13px;
+      letter-spacing: 0.02em;
+      color: var(--phosphor-dim);
+      padding: 0 6px 3px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      width: 100%;
+    }
+    .seg.top .lbl { color: var(--glass); font-weight: 700; }
+    .seg.top.lowfill .lbl { color: var(--phosphor); }
+    .seg .p {
+      position: absolute;
+      left: 6px; bottom: 22px;
+      z-index: 1;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--phosphor-dim);
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .ch.decided .seg .p { opacity: 1; }
+    .seg.top .p { color: var(--glass); font-weight: 700; }
+    .seg.top.lowfill .p { color: var(--phosphor); }
+
+    .bus .cursor {
+      position: absolute;
+      top: -4px; bottom: -1px;
+      width: 2px;
+      background: var(--phosphor);
+      box-shadow: 0 0 8px var(--phosphor-halo);
+      left: 0;
+      opacity: 0;
+      transition: left 1.1s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s;
+    }
+    .bus .cursor::before {
+      content: "";
+      position: absolute;
+      top: -6px; left: -5px;
+      border: 6px solid transparent;
+      border-top: 7px solid var(--phosphor);
+    }
+    .ch.decided .cursor { opacity: 1; }
+
+    .readout {
+      font-size: 13px;
+      line-height: 1.3;
+      color: var(--phosphor-dim);
+      display: grid;
+      align-content: start;
+      row-gap: 2px;
+      padding-top: 1px;
+    }
+    .readout b {
+      display: block;
+      font-size: 17px;
+      font-weight: 700;
+      color: var(--phosphor);
+      letter-spacing: 0.02em;
+    }
+    .readout .val {
+      color: var(--phosphor);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .fault {
+      position: absolute;
+      left: 22px; right: 22px; bottom: 56px;
+      color: var(--alarm);
+      font-size: 13px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+      display: none;
+    }
+    .crt.faulted .fault { display: block; }
+
+    /* ── Soft keys ───────────────────────────────────────────────────────────── */
+    .softkeys {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      column-gap: 12px;
+      padding: 0 6px;
+    }
+    .softkey {
+      display: grid;
+      row-gap: 5px;
+      justify-items: center;
+    }
+    .softkey .lbl {
+      font-family: var(--mono);
+      font-size: 13px;
+      letter-spacing: 0.14em;
+      color: var(--phosphor-dim);
+    }
+    .softkey button {
+      width: 100%;
+      height: 26px;
+      border: 0;
+      border-radius: 3px;
+      background: linear-gradient(180deg, #e6e1d2, var(--key));
+      box-shadow: 0 2px 0 var(--putty-shadow), inset 0 1px 0 rgba(255,255,255,0.7);
+      font: inherit;
+      cursor: pointer;
+      transition: transform 0.08s, background 0.2s, box-shadow 0.2s;
+    }
+    .softkey button:hover { background: linear-gradient(180deg, #f1ecdd, #ddd8c9); }
+    .softkey button:active, .softkey.pressed button {
+      transform: translateY(2px);
+      box-shadow: 0 0 0 var(--putty-shadow), inset 0 1px 2px rgba(0,0,0,0.25);
+    }
+    .softkey.lit .lbl { color: var(--phosphor); }
+    .softkey.lit button { background: linear-gradient(180deg, #ffe39a, var(--key-lit)); }
+    .softkey button:disabled { cursor: default; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .crt, .ch, .seg .fill, .cursor, .softkey button { transition: none; }
+      .status .live, .state .caret { animation: none; }
+    }
+    @media (max-width: 1300px), (max-height: 740px) {
+      body { overflow: auto; align-items: start; padding: 16px; }
+      .panel { transform-origin: top left; }
+    }
+  </style>
+</head>
+<body>
+  <div class="panel" id="panel">
+    <span class="screw tr" aria-hidden="true"></span><span class="screw bl" aria-hidden="true"></span>
+    <aside class="side">
+      <div class="plate">
+        <div class="brand">NInfer</div>
+        <div class="model">DECISION ANALYZER</div>
+        <div class="series">CLOSED-SET READOUT · /v1/score</div>
+        <div class="power"><span class="led" id="led" aria-hidden="true"></span>POWER</div>
+      </div>
+      <div class="block">
+        <h2>INPUT</h2>
+        <dl>
+          <dt>SOURCE</dt><dd id="src">127.0.0.1:8010</dd>
+          <dt>MODEL</dt><dd id="mdl">qwen3.8-27b</dd>
+          <dt>MODE</dt><dd>one pass · state cached · four channels</dd>
+        </dl>
+      </div>
+      <div class="block">
+        <h2>READOUT</h2>
+        <div class="legend">
+          <div class="row"><span class="swatch high"><i></i></span><span>Decided option: the trace holds at the model's probability for it.</span></div>
+          <div class="row"><span class="swatch low"><i></i></span><span>Other options: their share of the same distribution.</span></div>
+          <div class="row"><span class="swatch cursor"><i></i></span><span>Cursor: P of the decided option and Δt for the whole pass.</span></div>
+        </div>
+      </div>
+      <div class="repo">
+        Probabilities are read from the model's logits, not generated as text.<br>
+        <a href="https://github.com/igorls/ninfer">github.com/igorls/ninfer</a>
+      </div>
+    </aside>
+
+    <div class="frame">
+      <div class="crt" id="crt" aria-live="polite">
+        <div class="status">
+          <span id="st-left"><b class="glow">ACQ</b> <span class="dim">·</span> <span id="st-mode">STANDBY</span></span>
+          <span id="st-right" class="dim">CH 4 · TOK — · Δt —</span>
+        </div>
+        <div class="state" id="state"><span class="tag">STATE · SAMPLE INPUT</span><span id="state-text"></span><span class="caret" id="caret"></span></div>
+        <div class="channels" id="channels"></div>
+        <div class="fault" id="fault"></div>
+      </div>
+      <div class="softkeys" id="softkeys">
+        <div class="softkey" data-key="run"><span class="lbl">RUN</span><button type="button" aria-label="Run acquisition"></button></div>
+        <div class="softkey" data-key="single"><span class="lbl">SINGLE</span><button type="button" aria-label="Single question" disabled></button></div>
+        <div class="softkey" data-key="state"><span class="lbl">STATE</span><button type="button" aria-label="Show state" disabled></button></div>
+        <div class="softkey" data-key="cursor"><span class="lbl">CURSOR</span><button type="button" aria-label="Cursor" disabled></button></div>
+        <div class="softkey" data-key="replay"><span class="lbl">REPLAY</span><button type="button" aria-label="Replay the sequence"></button></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ── Demonstration content (authored; the numbers on screen are never authored) ──────────
+    const STATE_TEXT =
+`From: dana.k@example.com · Subject: order #48213
+Hi, I ordered the standing desk on Sep 2; it arrived Sep 9 with a cracked leg. Two emails with photos, no reply. At this point I'd rather return it and get my money back. Really frustrating.
+Store policy: refunds within 30 days of delivery for damaged items; replacements ship within 5 business days.`;
+
+    const QUESTIONS = [
+      { id: "refund", type: "noul", label: "Does the customer ask for a refund?", short: "REFUND?" },
+      { id: "route", type: "choice", label: "Which team should handle this?", short: "ROUTE",
+        options: [
+          { key: "billing", label: "billing: charges, invoices, payment" },
+          { key: "shipping", label: "shipping: delivery, damage in transit" },
+          { key: "returns", label: "returns: refunds and replacements" },
+          { key: "sales", label: "sales: pre-purchase questions" },
+        ] },
+      { id: "policy", type: "noul", label: "Is a refund within the store policy?", short: "IN POLICY?" },
+      { id: "tone", type: "choice", label: "How does the customer sound?", short: "TONE",
+        options: [
+          { key: "calm", label: "calm" },
+          { key: "frustrated", label: "frustrated" },
+          { key: "angry", label: "angry" },
+        ] },
+    ];
+
+    // ── Request semantics (identical to the closed-questions demo) ──────────────────────────
+    const CODES = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
+    const params = new URLSearchParams(location.search);
+    const ENDPOINT = (params.get("endpoint") || "http://127.0.0.1:8010").replace(/\/$/, "");
+    const MODEL = params.get("model") || "qwen3.8-27b";
+    const LOOP = params.get("loop") === "1";
+    const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    function questionContent(q) {
+      if (q.type === "noul") {
+        return { content: `${q.label}\nAnswer with exactly one letter: Y (yes) or N (no).`, candidates: ["Y", "N"], keys: ["yes", "no"] };
+      }
+      const codes = q.options.map((_, i) => CODES[i]);
+      return {
+        content: `${q.label}\nOptions:\n${q.options.map((o, i) => `${codes[i]}) ${o.label}`).join("\n")}\nAnswer with the single code of the correct option and nothing else.`,
+        candidates: codes,
+        keys: q.options.map((o) => o.key),
+      };
+    }
+
+    function buildRequest() {
+      const built = QUESTIONS.map(questionContent);
+      return {
+        body: {
+          model: MODEL,
+          chat_template_kwargs: { enable_thinking: false },
+          messages: [{ role: "system", content: `You answer closed questions about the STATE below.\n\nSTATE:\n${STATE_TEXT}` }],
+          questions: QUESTIONS.map((q, i) => ({ id: q.id, content: built[i].content, candidates: built[i].candidates })),
+        },
+        keys: built.map((b) => b.keys),
+      };
+    }
+
+    async function score() {
+      const { body, keys } = buildRequest();
+      const t0 = performance.now();
+      const res = await fetch(`${ENDPOINT}/v1/score`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const ms = performance.now() - t0;
+      const text = await res.text();
+      if (!res.ok) throw new Error(`HTTP ${res.status} from ${ENDPOINT}/v1/score\n${text.slice(0, 400)}`);
+      const j = JSON.parse(text);
+      const answers = j.results.map((r, i) => {
+        if (r.error) throw new Error(`question ${QUESTIONS[i].id}: ${JSON.stringify(r.error).slice(0, 300)}`);
+        const p = r.candidate_logprobs.map((c) => Math.exp(c.logprob));
+        const best = p.indexOf(Math.max(...p));
+        return { probs: keys[i].map((k, n) => ({ key: k, p: p[n] })), best, cached: r.cached_tokens ?? 0 };
+      });
+      return { ms, answers, usage: j.usage ?? {}, model: j.model };
+    }
+
+    // ── Screen ──────────────────────────────────────────────────────────────────────────────
+    const $ = (s) => document.querySelector(s);
+    const crt = $("#crt");
+    const channels = $("#channels");
+    const sleep = (ms) => new Promise((r) => setTimeout(r, REDUCED ? 0 : ms));
+    const keyEl = (k) => document.querySelector(`.softkey[data-key="${k}"]`);
+    $("#src").textContent = ENDPOINT.replace(/^https?:\/\//, "");
+    $("#mdl").textContent = MODEL;
+
+    function buildChannels() {
+      channels.innerHTML = "";
+      QUESTIONS.forEach((q, i) => {
+        const { keys } = questionContent(q);
+        const el = document.createElement("div");
+        el.className = "ch";
+        el.id = `ch-${q.id}`;
+        el.innerHTML =
+          `<div class="id">CH${i + 1}</div>` +
+          `<div class="q">${escape(q.label)}<small>${q.type === "noul" ? "YES / NO" : `${keys.length} OPTIONS`} · ${escape(q.short)}</small></div>` +
+          `<div class="bus">${keys.map((k) => `<div class="seg" data-key="${escape(k)}"><div class="fill"></div><span class="lbl">${escape(k)}</span><span class="p"></span></div>`).join("")}<div class="cursor"></div></div>` +
+          `<div class="readout"><span>P</span><b>—</b><span class="val">—</span></div>`;
+        channels.appendChild(el);
+      });
+    }
+
+    const escape = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+    async function typeState() {
+      const out = $("#state-text");
+      out.textContent = "";
+      $("#caret").style.display = "";
+      if (REDUCED) { out.textContent = STATE_TEXT; $("#caret").style.display = "none"; return; }
+      const chunk = 3;
+      for (let i = 0; i < STATE_TEXT.length; i += chunk) {
+        out.textContent = STATE_TEXT.slice(0, i + chunk);
+        await sleep(9);
+      }
+      $("#caret").style.display = "none";
+    }
+
+    function setStatus(mode, right) {
+      $("#st-mode").textContent = mode;
+      $("#st-mode").className = mode === "ACQUIRING" ? "live" : "";
+      if (right != null) { $("#st-right").textContent = right; $("#st-right").className = ""; }
+    }
+
+    function showAnswers(result) {
+      result.answers.forEach((a, i) => {
+        const ch = document.getElementById(`ch-${QUESTIONS[i].id}`);
+        const segs = [...ch.querySelectorAll(".seg")];
+        a.probs.forEach((pr, n) => {
+          const seg = segs[n];
+          const pct = Math.max(2, Math.round(pr.p * 100));
+          seg.querySelector(".fill").style.height = `${pct}%`;
+          seg.querySelector(".p").textContent = pr.p.toFixed(3);
+          seg.classList.toggle("top", n === a.best);
+          seg.classList.toggle("lowfill", n === a.best && pct < 40);
+        });
+        const best = a.probs[a.best];
+        const cursor = ch.querySelector(".cursor");
+        const width = 100 / a.probs.length;
+        cursor.style.left = `calc(${width * a.best + width / 2}% - 1px)`;
+        const ro = ch.querySelector(".readout");
+        ro.querySelector("b").textContent = best.p.toFixed(3);
+        ro.querySelector(".val").textContent = best.key.toUpperCase();
+        ch.classList.add("decided");
+      });
+      const u = result.usage;
+      const tok = u.prompt_tokens != null ? `${u.prompt_tokens} TOK` : "TOK —";
+      const cached = u.cached_tokens != null ? ` (${u.cached_tokens} CACHED)` : "";
+      setStatus("DECIDED", `CH ${result.answers.length} · ${tok}${cached} · Δt ${result.ms.toFixed(0)} ms`);
+    }
+
+    function fault(err) {
+      crt.classList.add("faulted");
+      $("#fault").textContent = `FAULT  ${String(err.message || err)}`;
+      setStatus("FAULT", null);
+      $("#st-mode").style.color = "var(--alarm)";
+    }
+
+    let running = false;
+    async function sequence() {
+      if (running) return;
+      running = true;
+      crt.classList.remove("faulted");
+      $("#fault").textContent = "";
+      $("#st-mode").style.color = "";
+      document.querySelectorAll(".softkey").forEach((k) => k.classList.remove("lit", "pressed"));
+      buildChannels();
+      crt.classList.remove("on");
+      document.getElementById("led").classList.remove("on");
+      setStatus("STANDBY", "CH 4 · TOK — · Δt —");
+      $("#st-right").className = "dim";
+      $("#state-text").textContent = "";
+      await sleep(350);
+      crt.classList.add("on");
+      document.getElementById("led").classList.add("on");
+      await sleep(500);
+      setStatus("CAPTURE", null);
+      await typeState();
+      await sleep(300);
+      setStatus("ARM", null);
+      for (const ch of channels.children) { ch.classList.add("armed"); await sleep(220); }
+      await sleep(400);
+      keyEl("run").classList.add("lit", "pressed");
+      setStatus("ACQUIRING", null);
+      let result;
+      try {
+        result = await score();
+      } catch (err) {
+        keyEl("run").classList.remove("pressed");
+        fault(err);
+        running = false;
+        return;
+      }
+      keyEl("run").classList.remove("pressed");
+      await sleep(150);
+      showAnswers(result);
+      keyEl("cursor").classList.add("lit");
+      running = false;
+      if (LOOP) { await sleep(5000); sequence(); }
+    }
+
+    keyEl("run").querySelector("button").addEventListener("click", sequence);
+    keyEl("replay").querySelector("button").addEventListener("click", sequence);
+    document.addEventListener("keydown", (e) => { if (e.key === "r" || e.key === "R" || e.key === " ") { e.preventDefault(); sequence(); } });
+
+    function fit() {
+      const panel = $("#panel");
+      const scale = Math.min(1, (innerWidth - 32) / 1280, (innerHeight - 32) / 720);
+      panel.style.transform = scale < 1 ? `scale(${scale})` : "";
+    }
+    addEventListener("resize", fit);
+    fit();
+    document.fonts.ready.then(sequence);
+  </script>
+</body>
+</html>
