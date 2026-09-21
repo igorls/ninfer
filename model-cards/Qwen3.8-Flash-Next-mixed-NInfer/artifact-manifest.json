@@ -1,0 +1,166 @@
+{
+  "schema": "ninfer.artifact-manifest",
+  "schema_version": 1,
+  "release": {
+    "status": "early-access-engineering-preview",
+    "tag": "preview-2026-09-07",
+    "prepared_date": "2026-09-07",
+    "repo_id": "igorls/Qwen3.8-Flash-Next-mixed-NInfer"
+  },
+  "artifact": {
+    "filename": "qwen3_8_flash_next_mixed.ninfer",
+    "bytes": 113298397952,
+    "sha256": "3d383e51963aafd4318dfd04c8dc63ee7df11768de19d9ab58dbba44460d1d02",
+    "container_version": 2,
+    "model_id": "qwen3.8-flash-next",
+    "weights_id": "mixed-nvfp4-fp8-ple-int4",
+    "target_key": "qwen3_8_flash_next",
+    "payload_offset_bytes": 262144
+  },
+  "source": {
+    "base": {
+      "repo_id": "Qwen/Qwen3.8-Flash-Next",
+      "original_weight_revision": null,
+      "license_frontend_reference_revision": "de4b8e4d43b917e7706784d8bb445c9af86a3540",
+      "license": "Qwen Community License 1.0",
+      "license_sha256": "a0dc422560841fd68e06d974907f8b4c709bca44a67daad2b528437bdf676c08"
+    },
+    "mixed": {
+      "repo_id": "primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8",
+      "revision": "a4e813ed3cfbbcc61e2929699eccb864a4dfa843",
+      "selection": "All compute and frontend sources; omit BF16 PLE table tensors",
+      "license_metadata": "qwen-community-1.0"
+    },
+    "ple": {
+      "repo_id": "primitive-ai/Qwen3.8-Flash-Next-PLE-quant",
+      "revision": "da8b39586016d8325ac619be28ad77d6296625ec",
+      "selection": "ples_int4/*",
+      "license_metadata": "apache-2.0",
+      "license_note": "Publisher metadata retained; underlying Qwen-derived weights remain subject to Qwen Community License 1.0."
+    }
+  },
+  "conversion": {
+    "recipe_id": "qwen3_8_flash_next_mixed-v1",
+    "converter_repository": "https://github.com/igorls/ninfer",
+    "converter_revision": null,
+    "converter_revision_note": "Not recorded in the historical conversion report. Do not infer it from the compatible engine revision.",
+    "source_index_tensors": 296630,
+    "consumed_non_ple_tensors": 296502,
+    "replaced_bf16_ple_tensors": 128,
+    "ple_shards": 128,
+    "ple_rows": 320001536,
+    "mtp_expert_storage": "BF16",
+    "optional_nvfp4_mtp_splice_applied": false,
+    "fine_tuning": false,
+    "expert_pruning": false,
+    "calibration_dataset_added": false
+  },
+  "runtime": {
+    "repository": "https://github.com/igorls/ninfer",
+    "compatible_revision": "c81c88f6d66652be4607fb775333a6c63132f3f5",
+    "cuda_architecture": "sm_120a",
+    "qualification_platform": "Windows, NVIDIA RTX PRO 6000 Blackwell Workstation Edition (96 GB)",
+    "mtp_expert_materialization": "BF16 host-mapped source quantized to NVFP4 device banks by the loader when MTP is enabled",
+    "mtp_expert_quantizer": "src/targets/qwen3_8_flash_next/impl/load/quantize_nvfp4_expert_bank.cu",
+    "mtp_nvfp4_device_payload_bytes": 1415581696,
+    "default_output_head_format": "BF16",
+    "default_token_embedding_format": "BF16"
+  },
+  "inventory": {
+    "objects": 1566,
+    "tensors": 1560,
+    "resources": 6,
+    "formats": {
+      "BF16": 1237,
+      "FP8_E4M3FN_ROW_F32S": 96,
+      "I64": 3,
+      "NVFP4": 96,
+      "U4Z8G16_F16S": 128
+    },
+    "layouts": {
+      "contiguous-le-v1": 1240,
+      "expert-blockscale-k16-m128x4-v1": 96,
+      "packed-u4-g16-v1": 128,
+      "row-scale-f32-v1": 96
+    },
+    "encodings": {
+      "raw-bytes-v1": 6
+    },
+    "bytes": {
+      "tensor": 113285265400,
+      "resource": 12837177,
+      "object": 113298102577,
+      "payload_span": 113298135808,
+      "alignment": 33231
+    },
+    "mtp_expert_tensors": [
+      {
+        "name": "mtp/layer/mlp/experts/gate_up",
+        "kind": "tensor",
+        "shape": [
+          512,
+          1280,
+          2560
+        ],
+        "format": "BF16",
+        "layout": "contiguous-le-v1",
+        "offset": 107264187648,
+        "bytes": 3355443200
+      },
+      {
+        "name": "mtp/layer/mlp/experts/down",
+        "kind": "tensor",
+        "shape": [
+          512,
+          2560,
+          640
+        ],
+        "format": "BF16",
+        "layout": "contiguous-le-v1",
+        "offset": 110619630848,
+        "bytes": 1677721600
+      }
+    ],
+    "host_mapped_ple_and_indexing_bytes": 32000162072,
+    "other_device_bound_tensor_payload_bytes_with_mtp_and_vision": 76251938528,
+    "payload_accounting_note": "Device-bound payload bytes exclude MTP materialization buffers, padding, graphs, runtime workspaces, state and KV allocations; they are not total VRAM usage."
+  },
+  "frontend": {
+    "frontend/tokenizer.json": {
+      "bytes": 12809320,
+      "sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3"
+    },
+    "frontend/tokenizer_config.json": {
+      "bytes": 17928,
+      "sha256": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27"
+    },
+    "frontend/chat_template.jinja": {
+      "bytes": 8952,
+      "sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
+    },
+    "frontend/generation_config.json": {
+      "bytes": 202,
+      "sha256": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e"
+    },
+    "frontend/preprocessor_config.json": {
+      "bytes": 390,
+      "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
+    },
+    "frontend/video_preprocessor_config.json": {
+      "bytes": 385,
+      "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
+    }
+  },
+  "validation": {
+    "checked_date": "2026-09-07",
+    "directory_reader": "tools.artifact.container.Artifact.open",
+    "directory_reader_python": "3.14.5",
+    "directory_contract": "Passed v2 prefix, object signature, encoded size, range and alignment checks",
+    "full_file_sha256": "computed",
+    "frontend_resource_hashes": "All six match original conversion report and official Qwen license/frontend reference revision",
+    "production_selection": "Exact artifact path selected from the running service command line, not inferred by filename search",
+    "new_gpu_tests_for_release": false,
+    "full_bf16_reference_numerical_equivalence": "not_established",
+    "application_quality_qualification": "in_progress"
+  }
+}

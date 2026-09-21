@@ -1,0 +1,87 @@
+{
+  "schema": "ninfer.artifact-manifest",
+  "schema_version": 1,
+  "artifact": {
+    "filename": "qwen3_8_27b_orcarouter_nvfp4.ninfer",
+    "bytes": 26268462848,
+    "sha256": "003f8c65175e262e66f83a803f7b1d286f7226ede0e672d3b3e5c4b6c75f3e7f",
+    "container_version": 2,
+    "model_id": "qwen3.8-27b-orcarouter",
+    "weights_id": "nvfp4",
+    "target_key": "qwen3_8_27b"
+  },
+  "source": {
+    "base": {
+      "repo_id": "orcarouter/Qwen3.8-27B-Uncensored-NVFP4",
+      "revision": "69d21348b2d6c11439fb69368f40414c2256e44e",
+      "license": "Apache-2.0"
+    },
+    "dflash2": {
+      "repo_id": "incoai/Qwen3.8-27B-DFlash2",
+      "revision": "dedf8df68adfb1afeaf7b7480c0a0243108177b4",
+      "license": "Apache-2.0"
+    }
+  },
+  "conversion": {
+    "recipe_id": "qwen3_8_27b_orcarouter_nvfp4-v1",
+    "converter_repository": "https://github.com/igorls/ninfer",
+    "implementation_revision": "91ce2f2c73c27ffbff3bd7c43a319f295e9597cc",
+    "recorded_checkout_base": "6d9bb5365a637d3d9aabf6f6a4c147f3aa3a6590",
+    "note": "Converted with then-uncommitted implementation now included in implementation_revision. Checkpoint bytes unchanged for release.",
+    "environment": {
+      "python": "3.14.5",
+      "platform": "Windows-11-10.0.29576-SP0",
+      "torch": "2.13.0+cpu",
+      "torch_cuda": null,
+      "resolved_device": "cpu",
+      "gpu": null
+    },
+    "bf16_endpoints_preserved": [
+      "text/output_head",
+      "text/token_embedding"
+    ],
+    "report": "qwen3_8_27b_orcarouter_nvfp4.ninfer.conversion.json",
+    "report_local_paths_redacted": true
+  },
+  "runtime": {
+    "repository": "https://github.com/igorls/ninfer",
+    "minimum_revision": "91ce2f2c73c27ffbff3bd7c43a319f295e9597cc",
+    "cuda_architecture": "sm_120a",
+    "qualified_platform": "Windows",
+    "qualified_gpu": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition 96 GB",
+    "ordinary_decode": true,
+    "vision": true,
+    "mtp": true,
+    "dflash2": true
+  },
+  "inventory": {
+    "count": 1190,
+    "tensors": 1184,
+    "resources": 6,
+    "formats": {
+      "BF16": 581,
+      "FP32": 208,
+      "FP8_E4M3FN_ROW_BF16S": 144,
+      "I32": 1,
+      "NVFP4": 112,
+      "Q4G64_F16S": 55,
+      "Q5G64_F16S": 54,
+      "Q6G64_F16S": 1,
+      "W8G32_F16S": 28
+    },
+    "layouts": {
+      "blockscale-k16-m128x4-v1": 112,
+      "contiguous-le-v1": 790,
+      "row-scale-v1": 144,
+      "row-split-k128-v1": 138
+    },
+    "encodings": {
+      "raw-bytes-v1": 6
+    },
+    "tensor_bytes": 26248203552,
+    "resource_bytes": 20000488,
+    "object_bytes": 26268204040,
+    "payload_span_bytes": 26268274432,
+    "alignment_bytes": 70392
+  }
+}
