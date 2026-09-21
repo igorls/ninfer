@@ -155,6 +155,12 @@ def make_handler(shim):
     return Handler
 
 
+class _Server(ThreadingHTTPServer):
+    # Python's default SO_REUSEADDR lets a second shim bind the same Windows port and silently
+    # share it; a stale shim pointing at a dead engine then answers some requests. Refuse instead.
+    allow_reuse_address = False
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ninfer", default="http://127.0.0.1:8010/v1")
@@ -163,7 +169,7 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     args = ap.parse_args()
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(Shim(args.ninfer, args.ninfer_model,
+    server = _Server((args.host, args.port), make_handler(Shim(args.ninfer, args.ninfer_model,
                                                                             args.ninfer_api_key)))
     print(f"typesafe shim on http://{args.host}:{args.port}/v1/systemone -> {args.ninfer} ({args.ninfer_model})",
           flush=True)
