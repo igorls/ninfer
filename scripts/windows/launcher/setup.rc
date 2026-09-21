@@ -1,0 +1,18 @@
+#include <windows.h>
+
+200 DIALOGEX 0, 0, 370, 238
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "NInfer - choose your model"
+FONT 10, "Segoe UI"
+BEGIN
+    LTEXT "Set up local inference", -1, 16, 14, 336, 16
+    LTEXT "Checking NVIDIA GPU...", 201, 16, 36, 336, 28
+    LTEXT "Choose a downloaded .ninfer model. Model weights are separate from this installer.", -1, 16, 72, 336, 26
+    EDITTEXT 202, 16, 103, 273, 16, ES_AUTOHSCROLL | ES_READONLY
+    PUSHBUTTON "Browse...", 203, 297, 102, 57, 18
+    PUSHBUTTON "Get Qwen3.8-27B", 204, 16, 130, 110, 20
+    PUSHBUTTON "Get Flash-Next (96 GB)", 205, 135, 130, 138, 20
+    LTEXT "Starts with a 16K context, two request lanes, and a 32K shared KV pool. Settings can be changed in the dashboard.", -1, 16, 160, 336, 28
+    DEFPUSHBUTTON "Save and start", IDOK, 230, 206, 74, 20
+    PUSHBUTTON "Later", IDCANCEL, 310, 206, 44, 20
+END

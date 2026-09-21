@@ -1,0 +1,39 @@
+NInfer Windows preview
+
+This is an unsigned test installer for Windows 11 x64 and NVIDIA Blackwell
+sm_120 GPUs. The primary test targets are RTX 5090 (32 GB) and RTX PRO 6000
+Blackwell (96 GB). RTX 3090 and RTX 4090 are not supported by this build.
+Use a current NVIDIA driver with CUDA 13.3 support or newer. No CUDA Toolkit,
+Visual Studio, CMake, Python, or Hugging Face CLI is needed to run the app.
+
+Install, open NInfer from Start, and select a downloaded .ninfer model file.
+Use Qwen3.8-27B NVFP4 for the 5090 test. Model download links are available
+in the setup window. Model weights are not included in the installer.
+Flash-Next requires a 96 GB GPU configuration and substantial system RAM;
+read its Hugging Face model card before downloading.
+
+The initial profile uses a 16K context per request, a 32K shared KV pool,
+two request lanes, FP8 KV, and MTP with three draft tokens. Vision libraries
+are bundled; Vision is opt-in through the Supervisor settings. The HTTP
+API listens only on 127.0.0.1:8010 and the dashboard on 127.0.0.1:8099.
+The full model is validated by the engine when it loads.
+
+Models stay where you downloaded them. Settings and logs are stored in
+%LOCALAPPDATA%\NInfer. Uninstall keeps these files. Quit NInfer from its
+tray menu before updating or uninstalling. Login startup can be enabled
+from the tray after configuration.
+
+This build is unsigned. Windows may show an unknown-publisher warning.
+The matching SHA256SUMS file identifies the installer provided for testing.
+
+Project: https://github.com/igorls/ninfer
+Issues: https://github.com/igorls/ninfer/issues
+27B model: https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer
+Flash-Next: https://huggingface.co/igorls/Qwen3.8-Flash-Next-mixed-NInfer
+
+NInfer source is Apache-2.0. Bundled components retain their respective
+licenses under the licenses folder. Model licenses apply separately.
+This internal test package includes the existing FFmpeg GPL build from
+the workstation. Public release requires distributing its corresponding
+source and build materials, or preparing an LGPL runtime package with its
+corresponding source. This installer has not been published as a public release.
