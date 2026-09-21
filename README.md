@@ -215,8 +215,10 @@ them in the selected preset. Engine startup still validates companion weights.
 
 ## Linux build
 
-The upstream build path remains available with a C++20 compiler, CUDA 13.1+, CMake 3.28+, Ninja,
-`pkg-config`, and the media development libraries listed above:
+The upstream build path remains available with a C++20 compiler, CUDA 13.3 (the Flash-Next package
+needs `cub/device/device_topk.cuh`, absent from CUDA 13.1), CMake 3.28+, Ninja, `pkg-config`, and
+the media development libraries listed above. The repository `Dockerfile` builds the same two
+applications on the `nvidia/cuda:13.3.1` Ubuntu 24.04 images:
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
