@@ -48,14 +48,6 @@ double finite_logprob(float value) {
     return std::isfinite(value) ? static_cast<double>(value) : kLogprobFloor;
 }
 
-std::string format_response_model(std::string_view requested) {
-    if (requested == "jev-latest") { return "jev-1.13.0"; }
-    if (requested.rfind("jev-latest-t", 0) == 0) {
-        return "jev-1.13.0-t" + std::string(requested.substr(12));
-    }
-    return std::string(requested);
-}
-
 } // namespace
 
 [[noreturn]] void systemone_bad_request(std::string message, std::string param, std::string code) {
@@ -83,19 +75,20 @@ void write_typesafe_error(httplib::Response& response, const ApiError& error) {
 std::string choice_token_for_index(std::size_t index) {
     if (index < 26) { return std::string(1, static_cast<char>('A' + index)); }
     if (index < 52) { return std::string(1, static_cast<char>('a' + (index - 26))); }
-    if (index < 62) { return std::string(1, static_cast<char>('0' + (index - 52))); }
-    // Unicode codepoints starting from U+00A1 (Latin-1 Supplement/Extended), strictly unique UTF-8 across 255 options
-    const char32_t cp = 0x00A1 + static_cast<char32_t>(index - 62);
-    std::string out;
-    if (cp <= 0x7FF) {
-        out.push_back(static_cast<char>(0xC0 | ((cp >> 6) & 0x1F)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else {
-        out.push_back(static_cast<char>(0xE0 | ((cp >> 12) & 0x0F)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    if (index < kMaximumSystemOneChoices) {
+        return std::string(1, static_cast<char>('0' + (index - 52)));
     }
-    return out;
+    return {};
+}
+
+std::int64_t systemone_billed_input_tokens(int prompt_tokens, std::uint32_t cached_tokens,
+                                           bool first) {
+    if (prompt_tokens <= 0) { return 0; }
+    if (first) { return prompt_tokens; }
+    const auto cached = static_cast<int>(std::min<std::uint32_t>(
+        cached_tokens, static_cast<std::uint32_t>(std::numeric_limits<int>::max())));
+    const int fresh   = prompt_tokens - cached;
+    return fresh > 0 ? fresh : 0;
 }
 
 std::vector<double> softmax_probabilities(const std::vector<double>& logprobs) {
@@ -173,7 +166,7 @@ std::string build_question_prompt(const SystemOneQuestion& question) {
         if (question.choice_options.size() <= 26) {
             prompt += "\nSelect the best option. Answer with only the option letter:\n";
         } else {
-            prompt += "\nSelect the best option. Answer with only the option letter/symbol:\n";
+            prompt += "\nSelect the best option. Answer with only the option letter or digit:\n";
         }
         break;
     }
@@ -307,8 +300,9 @@ SystemOneRequest parse_systemone_request(const nlohmann::ordered_json& body) {
             }
             const auto& crit = q_obj.at("criteria");
             if (crit.size() > kMaximumSystemOneChoices) {
-                systemone_bad_request("criteria for choice cannot exceed 255 options",
-                                      q_param + ".criteria");
+                systemone_bad_request(
+                    "criteria for choice cannot exceed 62 options",
+                    q_param + ".criteria");
             }
             bool all_single_char = true;
             for (auto opt_it = crit.begin(); opt_it != crit.end(); ++opt_it) {
@@ -430,6 +424,15 @@ void HttpServer::handle_systemone(const httplib::Request& req, httplib::Response
             systemone_bad_request("systemone responses are not streamed", "stream");
         }
         sys_request = parse_systemone_request(body);
+        for (const SystemOneQuestion& question : sys_request.questions) {
+            for (const std::string& candidate : question.candidates) {
+                if (service_->tokenize_text(candidate).size() != 1) {
+                    systemone_bad_request(
+                        "candidate \"" + candidate + "\" must be exactly one token",
+                        "questions." + question.id + ".criteria");
+                }
+            }
+        }
     } catch (const ApiException& exception) {
         write_typesafe_error(res, exception.error());
         return;
@@ -544,7 +547,7 @@ void HttpServer::handle_systemone(const httplib::Request& req, httplib::Response
     }
 
     SystemOneResponse response;
-    response.model = format_response_model(sys_request.requested_model);
+    response.model = sys_request.requested_model;
     response.answers.reserve(sys_request.questions.size());
 
     for (std::size_t i = 0; i < sys_request.questions.size(); ++i) {
@@ -569,8 +572,8 @@ void HttpServer::handle_systemone(const httplib::Request& req, httplib::Response
             write_typesafe_error(res, error);
             return;
         }
-        response.input_tokens += outcome.prompt_tokens;
-        response.output_tokens += outcome.completion_tokens;
+        response.input_tokens += systemone_billed_input_tokens(
+            outcome.prompt_tokens, outcome.metrics.prefix_cache_hit_tokens, i == 0);
 
         std::vector<double> candidate_lps;
         candidate_lps.reserve(pos.candidates.size());

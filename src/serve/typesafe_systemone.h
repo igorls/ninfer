@@ -15,7 +15,8 @@
 namespace ninfer::serve {
 
 constexpr std::size_t kMaximumSystemOneQuestions = 256;
-constexpr std::size_t kMaximumSystemOneChoices   = 255;
+// A–Z, a–z, and 0–9. Each mapped choice is one native token the model can actually emit.
+constexpr std::size_t kMaximumSystemOneChoices   = 62;
 constexpr std::size_t kMinimumScoreLevels        = 2;
 constexpr std::size_t kMaximumScoreLevels        = 10;
 
@@ -80,6 +81,10 @@ struct SystemOneResponse {
                                         std::string code = {});
 
 std::string choice_token_for_index(std::size_t index);
+// The first question bills its whole prompt, which holds the shared state. A later question
+// bills only the tokens past a prefix-cache hit, so the state is not charged once per question.
+std::int64_t systemone_billed_input_tokens(int prompt_tokens, std::uint32_t cached_tokens,
+                                           bool first);
 std::vector<double> softmax_probabilities(const std::vector<double>& logprobs);
 double calculate_choice_confidence(const std::vector<double>& probabilities);
 double calculate_expected_score(const std::vector<double>& probabilities);

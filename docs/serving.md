@@ -857,10 +857,9 @@ Both endpoint paths are identical:
 
 #### Request fields
 
-- `model` (string, required): the public model identifier (e.g. `qwen3.8-27b`, `jev-latest`,
-  `jev-1.13.0`, or `jev-preview`). A `-t<temp>` suffix (e.g. `jev-latest-t1.5`) is supported for
-  temperature scaling. When `jev-latest` is requested, the server formats the returned model as `jev-1.13.0`
-  (preserving any `-t<temp>` suffix).
+- `model` (string, required): echoed back in the response. Execution always uses the loaded
+  artifact; this field does not select a different model. A `-t<temp>` suffix (e.g. `qwen3.8-27b-t1.5`)
+  sets the candidate-logit temperature when `temperature` is omitted. `jev-latest` is echoed as sent.
 - `temperature` (number, optional): logit temperature scaling factor (default 1.0; must be > 0.0).
   Can also be specified via `-t<temp>` model suffix.
 - `state` (string, object, or array; required): the shared context, conversation transcript,
@@ -894,7 +893,7 @@ Validation constraints enforced by the endpoint:
 - `questions.<id>.instructions`: non-empty string, object, or array.
 - `questions.<id>.criteria`:
   - `noul`: optional object containing `true` and/or `false` guidance (string, object, or array).
-  - `choice`: required non-empty object with 1 to 255 options. Option descriptions can be string, object, array, or `null`.
+  - `choice`: required non-empty object with 1 to 62 options. Option descriptions can be string, object, array, or `null`.
   - `score`: required array with 2 to 10 rating levels. Level descriptions can be string, object, array, or `null`.
 - `stream`: streaming is unsupported; `stream: true` returns HTTP 422 with `param: "stream"`.
 
@@ -917,14 +916,14 @@ The engine evaluates candidate tokens `["Yes", "No"]`. The answer returns:
 
 #### 2. Categorical choice: `choice`
 
-Selects the best matching category from a closed set of 1 to 255 options.
+Selects the best matching category from a closed set of 1 to 62 options.
 - `type`: `"choice"`
 - `instructions` (string, object, or array; required): the classification question.
-- `criteria` (object, required): a non-empty mapping from category key to description. Up to 255 options. Each description value can be a string, structured object, array, or `null` (to omit description text).
+- `criteria` (object, required): a non-empty mapping from category key to description. Up to 62 options. Each description value can be a string, structured object, array, or `null` (to omit description text).
 
 Option keys and token assignment:
-- When all option keys are single printable characters (e.g. `A`, `B`, `C`), keys are used directly as candidate tokens (`- A: description`).
-- Otherwise, candidate option tokens are assigned sequentially: `A`..`Z` (indices 0..25), `a`..`z` (26..51), `0`..`9` (52..61), followed by distinct Unicode codepoints starting from U+00A1 (Latin-1 Supplement/Extended), guaranteeing 100% collision-free token mapping across all 255 options. Prompt options format with bracketed keys (`- A: [billing] description`).
+- When every option key is one printable ASCII character, that character is the candidate token (`- A: description`).
+- Otherwise the candidates are `A`..`Z`, then `a`..`z`, then `0`..`9`, in criteria order, and the prompt shows the caller's key in brackets (`- A: [billing] description`). A choice larger than this alphabet is rejected. Each candidate must encode to exactly one token.
 
 The answer returns:
 - `type`: `"choice"`
@@ -1030,16 +1029,17 @@ This enables complex multi-attribute evaluations without manual prompt-string co
   },
   "usage": {
     "input_tokens": 348,
-    "output_tokens": 3
+    "output_tokens": 0
   }
 }
 ```
 
-- `model`: effective response model name.
+- `model`: the `model` string from the request, unchanged.
 - `answers`: dictionary of question results matching the request question IDs.
 - `usage`:
-  - `input_tokens`: total prompt tokens processed across all evaluated questions.
-  - `output_tokens`: 1 token per question branch.
+  - `input_tokens`: the shared state once, plus each question's own suffix. A later question that
+    hits the state prefix contributes only the tokens past that hit.
+  - `output_tokens`: 0. The decision is a logit readout; the greedy token is not returned text.
 
 ### Mathematical specifications
 

@@ -128,18 +128,31 @@ int main() {
         failures += check(choice_token_for_index(52) == "0", "token index 52 is 0");
         failures += check(choice_token_for_index(61) == "9", "token index 61 is 9");
 
-        // Crucial test: across all 255 supported choice indices, there must be NO collisions
+        failures += check(choice_token_for_index(62).empty(), "token index 62 is past the alphabet");
+
+        // Across the 62 letter and digit indices there must be no collisions.
         std::vector<std::string> all_tokens;
-        all_tokens.reserve(255);
-        for (std::size_t idx = 0; idx < 255; ++idx) {
+        all_tokens.reserve(kMaximumSystemOneChoices);
+        for (std::size_t idx = 0; idx < kMaximumSystemOneChoices; ++idx) {
             all_tokens.push_back(choice_token_for_index(idx));
         }
         std::vector<std::string> unique_tokens = all_tokens;
         std::sort(unique_tokens.begin(), unique_tokens.end());
         unique_tokens.erase(std::unique(unique_tokens.begin(), unique_tokens.end()),
                             unique_tokens.end());
-        failures += check(unique_tokens.size() == 255,
-                          "all 255 choice candidate tokens are strictly unique and collision-free");
+        failures += check(unique_tokens.size() == kMaximumSystemOneChoices,
+                          "all 62 choice candidate tokens are strictly unique");
+    }
+
+    {
+        failures += check(systemone_billed_input_tokens(400, 0, true) == 400,
+                          "first question bills its whole prompt");
+        failures += check(systemone_billed_input_tokens(420, 380, false) == 40,
+                          "later question bills only tokens past the shared state");
+        failures += check(systemone_billed_input_tokens(100, 100, false) == 0,
+                          "a fully cached later question adds no input tokens");
+        failures += check(systemone_billed_input_tokens(50, 80, false) == 0,
+                          "a cache hit larger than the prompt does not bill a negative");
     }
 
     // 5. Valid Request Parsing: Noul
@@ -446,6 +459,21 @@ int main() {
             },
             "choice empty criteria 422");
 
+        failures += check_422_rejection(
+            [] {
+                Json criteria = Json::object();
+                for (int i = 0; i < 63; ++i) { criteria["opt" + std::to_string(i)] = "d"; }
+                parse_systemone_request(Json{
+                    {"model", "jev-latest"},
+                    {"state", "test"},
+                    {"questions",
+                     {{"q1",
+                       {{"type", "choice"},
+                        {"instructions", "abc"},
+                        {"criteria", std::move(criteria)}}}}}});
+            },
+            "choice 63 options 422");
+
         // Score criteria not array
         failures += check_422_rejection(
             [] {
@@ -567,7 +595,7 @@ int main() {
         httplib::Response res;
         ApiError err;
         err.status  = 422;
-        err.message = "criteria for choice cannot exceed 255 options";
+        err.message = "criteria for choice cannot exceed 62 options";
         err.param   = "questions.department.criteria";
         err.type    = "invalid_request_error";
         write_typesafe_error(res, err);
@@ -575,7 +603,7 @@ int main() {
         failures += check(res.status == 422, "write_typesafe_error status 422");
         const Json err_json = Json::parse(res.body);
         failures += check(err_json.at("error").at("message") ==
-                              "criteria for choice cannot exceed 255 options",
+                              "criteria for choice cannot exceed 62 options",
                           "error message preserved");
         failures += check(err_json.at("error").at("param") == "questions.department.criteria",
                           "error param preserved");
