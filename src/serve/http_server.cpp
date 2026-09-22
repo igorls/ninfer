@@ -135,6 +135,7 @@ const char* endpoint_name(std::string_view path) noexcept {
     if (path == "/v1/responses/input_tokens") { return "openai_responses_input_tokens"; }
     if (path == "/v1/messages") { return "anthropic_messages"; }
     if (path == "/v1/messages/count_tokens") { return "anthropic_count_tokens"; }
+    if (path == "/v1/systemone" || path == "/systemone") { return "typesafe_systemone"; }
     return "http_route";
 }
 
@@ -182,6 +183,8 @@ httplib::Server::HandlerResponse handle_unrendered_http_error(const ServeOptions
     }
     if (request.path.rfind("/v1/messages", 0) == 0) {
         write_anthropic_error(response, error, new_anthropic_request_id());
+    } else if (request.path == "/v1/systemone" || request.path == "/systemone") {
+        write_typesafe_error(response, error);
     } else {
         write_openai_error(response, error);
     }
@@ -367,6 +370,8 @@ void HttpServer::register_routes() {
             // Render the 401 in the shape the target endpoint speaks.
             if (req.path.rfind("/v1/messages", 0) == 0) {
                 write_anthropic_error(res, error, new_anthropic_request_id());
+            } else if (req.path == "/v1/systemone" || req.path == "/systemone") {
+                write_typesafe_error(res, error);
             } else {
                 write_openai_error(res, error);
             }
@@ -389,6 +394,8 @@ void HttpServer::register_routes() {
                 }
                 if (req.path.rfind("/v1/messages", 0) == 0) {
                     write_anthropic_error(res, e.error(), new_anthropic_request_id());
+                } else if (req.path == "/v1/systemone" || req.path == "/systemone") {
+                    write_typesafe_error(res, e.error());
                 } else {
                     write_openai_error(res, e.error());
                 }
@@ -402,6 +409,12 @@ void HttpServer::register_routes() {
                     error.status  = 500;
                     error.message = e.what();
                     write_anthropic_error(res, error, new_anthropic_request_id());
+                } else if (req.path == "/v1/systemone" || req.path == "/systemone") {
+                    ApiError error;
+                    error.status  = 500;
+                    error.type    = "internal_error";
+                    error.message = e.what();
+                    write_typesafe_error(res, error);
                 } else {
                     write_exception(res, e);
                 }
@@ -416,6 +429,8 @@ void HttpServer::register_routes() {
                 error.message = "unknown error";
                 if (req.path.rfind("/v1/messages", 0) == 0) {
                     write_anthropic_error(res, error, new_anthropic_request_id());
+                } else if (req.path == "/v1/systemone" || req.path == "/systemone") {
+                    write_typesafe_error(res, error);
                 } else {
                     write_openai_error(res, error);
                 }
@@ -437,6 +452,12 @@ void HttpServer::register_routes() {
                  });
     server_.Post("/v1/score", [this](const httplib::Request& req, httplib::Response& res) {
         handle_score(req, res);
+    });
+    server_.Post("/v1/systemone", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_systemone(req, res);
+    });
+    server_.Post("/systemone", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_systemone(req, res);
     });
     server_.Post("/v1/responses", [this](const httplib::Request& req, httplib::Response& res) {
         handle_responses(req, res);
@@ -484,11 +505,16 @@ namespace {
 
 const char* kv_cache_storage_name(KvCacheStorage storage) noexcept {
     switch (storage) {
-        case KvCacheStorage::BFloat16: return "bf16";
-        case KvCacheStorage::Int8Group64: return "int8";
-        case KvCacheStorage::Fp8E4M3Row256: return "fp8";
-        case KvCacheStorage::Nvfp4Group16: return "nvfp4";
-        case KvCacheStorage::Fp8KeyNvfp4Value: return "k8v4";
+    case KvCacheStorage::BFloat16:
+        return "bf16";
+    case KvCacheStorage::Int8Group64:
+        return "int8";
+    case KvCacheStorage::Fp8E4M3Row256:
+        return "fp8";
+    case KvCacheStorage::Nvfp4Group16:
+        return "nvfp4";
+    case KvCacheStorage::Fp8KeyNvfp4Value:
+        return "k8v4";
     }
     return "unknown";
 }
@@ -565,18 +591,18 @@ void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& r
                             std::chrono::steady_clock::now() - memory_taken)
                             .count();
     }
-    const EngineOptions& engine  = service_->engine_options();
-    const auto reading = device_snapshot(engine.device);
+    const EngineOptions& engine = service_->engine_options();
+    const auto reading          = device_snapshot(engine.device);
     if (!reading) {
         ApiError error;
-        error.status = 503;
-        error.type = "service_unavailable";
+        error.status  = 503;
+        error.type    = "service_unavailable";
         error.message = "device memory snapshot is not available yet";
         write_openai_error(res, error);
         return;
     }
     const DeviceMemorySnapshot& device = reading->snapshot;
-    const std::int64_t device_age_ms = reading->age_ms;
+    const std::int64_t device_age_ms   = reading->age_ms;
 
     nlohmann::json processes = nlohmann::json::array();
     for (const ProcessMemoryInfo& process : device.compute_processes) {
@@ -587,11 +613,10 @@ void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& r
     // (Sequence D23); `configured_bytes` is what was asked for. They differ when the floor has
     // not been armed, which is worth seeing rather than assuming.
     const std::size_t floor = runtime_desktop_reserve_floor();
-    nlohmann::json reserve  = {
-        {"configured_bytes", engine.desktop_reserve_bytes},
-        {"runtime_floor_bytes", floor},
-        {"free_bytes", device.free_bytes},
-        {"holding", floor == 0 || device.free_bytes >= floor}};
+    nlohmann::json reserve  = {{"configured_bytes", engine.desktop_reserve_bytes},
+                               {"runtime_floor_bytes", floor},
+                               {"free_bytes", device.free_bytes},
+                               {"holding", floor == 0 || device.free_bytes >= floor}};
 
     nlohmann::json plan = {
         {"runtime_reservation_bytes", memory.runtime_reservation_bytes},
@@ -710,26 +735,22 @@ void HttpServer::handle_admin_quiesce(const httplib::Request& req, httplib::Resp
     }
 
     try {
-        const ninfer::Engine::QuiescenceReport report =
-            service_->run_at_quiescence([hold_ms] {
-                if (hold_ms > 0) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
-                }
-            });
-        const auto ms = [](std::chrono::nanoseconds value) {
+        const ninfer::Engine::QuiescenceReport report = service_->run_at_quiescence([hold_ms] {
+            if (hold_ms > 0) { std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms)); }
+        });
+        const auto ms                                 = [](std::chrono::nanoseconds value) {
             return std::chrono::duration<double, std::milli>(value).count();
         };
-        nlohmann::json body = {
-            {"schema_version", 1},
-            // How long the in-flight work took to finish once admission stopped.
-            // This is the part a residency change cannot avoid paying.
-            {"drain_ms", ms(report.drain)},
-            {"work_ms", ms(report.work)},
-            // Requests that waited through the hold and were carried across with
-            // their admission deadlines extended. None of them were dropped;
-            // that is the property this endpoint exists to demonstrate.
-            {"requests_held", report.requests_held},
-            {"capacity_change", nullptr}};
+        nlohmann::json body = {{"schema_version", 1},
+                               // How long the in-flight work took to finish once admission stopped.
+                               // This is the part a residency change cannot avoid paying.
+                               {"drain_ms", ms(report.drain)},
+                               {"work_ms", ms(report.work)},
+                               // Requests that waited through the hold and were carried across with
+                               // their admission deadlines extended. None of them were dropped;
+                               // that is the property this endpoint exists to demonstrate.
+                               {"requests_held", report.requests_held},
+                               {"capacity_change", nullptr}};
         res.set_content(body.dump(), "application/json");
     } catch (const std::exception& ex) {
         // A fence that cannot run is a refusal, not a broken engine. The engine

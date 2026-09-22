@@ -99,6 +99,19 @@ int main() {
                               "1234 bytes") != std::string::npos,
                       "empty OpenAI 413 did not become a payload-limit error");
 
+    httplib::Request systemone_request;
+    systemone_request.path = "/v1/systemone";
+    httplib::Response systemone_response;
+    systemone_response.status = 413;
+    const auto systemone_result =
+        ninfer::serve::handle_unrendered_http_error(options, systemone_request, systemone_response);
+    const Json systemone_body = Json::parse(systemone_response.body);
+    failures += check(systemone_result == httplib::Server::HandlerResponse::Handled &&
+                          systemone_body.at("error").at("code") == "request_too_large" &&
+                          systemone_body.at("error").at("message").get<std::string>().find(
+                              "1234 bytes") != std::string::npos,
+                      "empty SystemOne 413 did not become a payload-limit error");
+
     httplib::Request missing_messages_request;
     missing_messages_request.path = "/v1/messages/missing";
     httplib::Response missing_messages_response;

@@ -63,6 +63,8 @@ cannot be combined with `--vision`. A later request cannot enable a capability o
 | `GET /v1/responses/{id}/input_items` | list that Response's normalized input Items |
 | `POST /v1/messages` | Anthropic-style message generation |
 | `POST /v1/messages/count_tokens` | checkpoint-native expanded input-token count |
+| `POST /v1/systemone` | TypeSafe System One structured decision, classification, and scoring |
+| `POST /systemone` | alias for `POST /v1/systemone` |
 
 Every OpenAI-compatible response carries a unique `x-request-id` header, including streaming and
 error responses. Anthropic endpoints use their separate `request-id` contract.
@@ -800,9 +802,477 @@ curl http://127.0.0.1:8080/v1/messages/count_tokens \
   }'
 ```
 
+## TypeSafe System One
+
+`POST /v1/systemone` and `POST /systemone` expose TypeSafe-compatible rapid decision, classification,
+and rating evaluations over one resident model instance.
+
+While autoregressive chat generation ("System 2") spends many sequential decoding cycles generating
+explanatory prose or thinking traces, System One computes structured categorical, binary, and ordinal
+decisions directly from next-token log-probability distributions in a single forward step per question.
+Multiple independent questions evaluate against a shared observation or document context (`state`)
+without re-evaluating the shared state and without seeing each other's outputs.
+
+### Endpoints and request structure
+
+Both endpoint paths are identical:
+- `POST /v1/systemone`
+- `POST /systemone`
+
+```json
+{
+  "model": "qwen3.8-27b",
+  "state": "Customer: 'I was charged twice for order #9482. Please refund immediately!'",
+  "questions": {
+    "is_urgent": {
+      "type": "noul",
+      "instructions": "Is this customer inquiry urgent?",
+      "criteria": {
+        "true": "Customer demands immediate resolution or financial correction",
+        "false": "Routine informational inquiry"
+      }
+    },
+    "department": {
+      "type": "choice",
+      "instructions": "Which department should handle this ticket?",
+      "criteria": {
+        "billing": "Charges, invoices, duplicate payments, refunds",
+        "shipping": "Tracking, delivery delays, lost packages",
+        "general": "General questions or feedback"
+      }
+    },
+    "customer_frustration": {
+      "type": "score",
+      "instructions": "Rate customer frustration on a 0-3 scale.",
+      "criteria": [
+        "Calm and polite",
+        "Mildly annoyed",
+        "Very upset / demanding",
+        "Hostile / severe escalation"
+      ]
+    }
+  }
+}
+```
+
+#### Request fields
+
+- `model` (string, required): the public model identifier (e.g. `qwen3.8-27b`, `jev-latest`,
+  `jev-1.13.0`, or `jev-preview`). A `-t<temp>` suffix (e.g. `jev-latest-t1.5`) is supported for
+  temperature scaling. When `jev-latest` is requested, the server formats the returned model as `jev-1.13.0`
+  (preserving any `-t<temp>` suffix).
+- `temperature` (number, optional): logit temperature scaling factor (default 1.0; must be > 0.0).
+  Can also be specified via `-t<temp>` model suffix.
+- `state` (string, object, or array; required): the shared context, conversation transcript,
+  ticket body, or document being evaluated. Objects and arrays are formatted as 2-space indented
+  JSON strings.
+- `questions` (object, required): a map of 1 to 256 questions keyed by question ID.
+- `stream` (boolean, optional): System One does not support streaming; `stream: true` returns HTTP 422.
+
+Requests with invalid schemas, missing required fields, or out-of-range counts return HTTP 422
+(`Unprocessable Entity`) with TypeSafe's error structure:
+
+```json
+{
+  "error": {
+    "message": "criteria for score must be an array of 2 to 10 levels",
+    "type": "invalid_request_error",
+    "param": "questions.customer_frustration.criteria"
+  },
+  "message": "criteria for score must be an array of 2 to 10 levels",
+  "param": "questions.customer_frustration.criteria"
+}
+```
+
+Validation constraints enforced by the endpoint:
+- `model`: non-empty string. Supports optional `-t<temp>` suffix.
+- `temperature`: positive number (> 0.0).
+- `state`: non-empty string, object, or array (objects and arrays are serialized as 2-space indented JSON).
+- `questions`: non-empty object containing 1 to 256 question definitions.
+- `questions.<id>`: question key cannot be empty; value must be an object.
+- `questions.<id>.type`: must be `"noul"`, `"choice"`, or `"score"`.
+- `questions.<id>.instructions`: non-empty string, object, or array.
+- `questions.<id>.criteria`:
+  - `noul`: optional object containing `true` and/or `false` guidance (string, object, or array).
+  - `choice`: required non-empty object with 1 to 255 options. Option descriptions can be string, object, array, or `null`.
+  - `score`: required array with 2 to 10 rating levels. Level descriptions can be string, object, array, or `null`.
+- `stream`: streaming is unsupported; `stream: true` returns HTTP 422 with `param: "stream"`.
+
+### Question primitives
+
+Each entry in `questions` defines a typed decision question. Three primitives are supported:
+
+#### 1. Binary truth: `noul`
+
+Evaluates whether a condition holds true for the state.
+- `type`: `"noul"`
+- `instructions` (string, object, or array; required): the binary question or statement to evaluate.
+- `criteria` (object, optional):
+  - `true` (string, object, or array): guidance for when the condition is satisfied.
+  - `false` (string, object, or array): guidance for when the condition is not satisfied.
+
+The engine evaluates candidate tokens `["Yes", "No"]`. The answer returns:
+- `type`: `"noul"`
+- `noul`: normalized probability $P(\text{Yes}) \in [0.0, 1.0]$. (No separate `confidence` field is emitted because `noul` directly represents the probability).
+
+#### 2. Categorical choice: `choice`
+
+Selects the best matching category from a closed set of 1 to 255 options.
+- `type`: `"choice"`
+- `instructions` (string, object, or array; required): the classification question.
+- `criteria` (object, required): a non-empty mapping from category key to description. Up to 255 options. Each description value can be a string, structured object, array, or `null` (to omit description text).
+
+Option keys and token assignment:
+- When all option keys are single printable characters (e.g. `A`, `B`, `C`), keys are used directly as candidate tokens (`- A: description`).
+- Otherwise, candidate option tokens are assigned sequentially: `A`..`Z` (indices 0..25), `a`..`z` (26..51), `0`..`9` (52..61), followed by distinct Unicode codepoints starting from U+00A1 (Latin-1 Supplement/Extended), guaranteeing 100% collision-free token mapping across all 255 options. Prompt options format with bracketed keys (`- A: [billing] description`).
+
+The answer returns:
+- `type`: `"choice"`
+- `choice`: key of the option with highest probability (argmax).
+- `probabilities`: map of each option key to its normalized probability $P_k$.
+- `confidence`: normalized confidence metric $C \in [0.0, 1.0]$.
+
+#### 3. Ordinal rating: `score`
+
+Evaluates a continuous rating score across an ordered scale of 2 to 10 discrete levels.
+- `type`: `"score"`
+- `instructions` (string, object, or array; required): the evaluation or rating instruction.
+- `criteria` (array, required): a list of 2 to 10 rating level descriptions corresponding to indices `0`, `1`, ..., `N-1`. Each description element can be a string, structured object, array, or `null`.
+
+Candidate tokens are `"0"`, `"1"`, ..., `std::to_string(N-1)`.
+The answer returns:
+- `type`: `"score"`
+- `score`: continuous expected value $\sum_{i=0}^{N-1} i \cdot P_i \in [0.0, N-1]$.
+- `legend`: map of level indices `"0"`, `"1"`, ... to their criteria descriptions.
+- `probabilities`: map of level indices to normalized probabilities $P_i$.
+- `confidence`: normalized confidence metric $C \in [0.0, 1.0]$.
+
+#### 4. Structured instructions and criteria
+
+In addition to plain strings, `instructions` and `criteria` values accept nested JSON objects or arrays. The server serializes structured values into 2-space indented JSON strings when constructing the underlying evaluation prompt:
+
+```json
+{
+  "model": "qwen3.8-27b",
+  "state": "Candidate profile: Jane Doe, Staff Infrastructure Engineer. Experience: Kubernetes clusters, distributed consensus, production incident commander.",
+  "questions": {
+    "role_fit": {
+      "type": "noul",
+      "instructions": {
+        "target_role": "Principal SRE",
+        "minimum_experience_years": 8,
+        "must_have": ["Kubernetes", "Incident Commander", "Distributed Systems"],
+        "question": "Does the candidate profile satisfy all core requirements?"
+      },
+      "criteria": {
+        "true": {
+          "verdict": "Qualified",
+          "recommendation": "Advance to technical interview"
+        },
+        "false": {
+          "verdict": "Underqualified",
+          "recommendation": "Route to Senior Engineer role or decline"
+        }
+      }
+    },
+    "primary_track": {
+      "type": "choice",
+      "instructions": "Determine the strongest specialization track.",
+      "criteria": {
+        "infra": {"domain": "Infrastructure & Cloud", "focus": ["k8s", "networking"]},
+        "product": {"domain": "Application Backend", "focus": ["APIs", "business logic"]},
+        "data": {"domain": "Data Platform", "focus": ["streaming", "storage"]}
+      }
+    }
+  }
+}
+```
+
+This enables complex multi-attribute evaluations without manual prompt-string concatenation.
+
+### Response structure
+
+```json
+{
+  "model": "qwen3.8-27b",
+  "answers": {
+    "is_urgent": {
+      "type": "noul",
+      "noul": 0.942
+    },
+    "department": {
+      "type": "choice",
+      "choice": "billing",
+      "probabilities": {
+        "billing": 0.885,
+        "shipping": 0.082,
+        "general": 0.033
+      },
+      "confidence": 0.828
+    },
+    "customer_frustration": {
+      "type": "score",
+      "score": 2.15,
+      "legend": {
+        "0": "Calm and polite",
+        "1": "Mildly annoyed",
+        "2": "Very upset / demanding",
+        "3": "Hostile / severe escalation"
+      },
+      "probabilities": {
+        "0": 0.01,
+        "1": 0.12,
+        "2": 0.58,
+        "3": 0.29
+      },
+      "confidence": 0.44
+    }
+  },
+  "usage": {
+    "input_tokens": 348,
+    "output_tokens": 3
+  }
+}
+```
+
+- `model`: effective response model name.
+- `answers`: dictionary of question results matching the request question IDs.
+- `usage`:
+  - `input_tokens`: total prompt tokens processed across all evaluated questions.
+  - `output_tokens`: 1 token per question branch.
+
+### Mathematical specifications
+
+#### 1. Softmax normalized probabilities
+
+Let $\ell_0, \ell_1, \dots, \ell_{N-1}$ be the candidate log-probabilities retrieved from the model's
+first generated token position. If temperature scaling $T > 0$ is specified ($T \neq 1.0$), logits are
+scaled as $\ell_i \leftarrow \ell_i / T$. For numerical stability:
+
+$$\ell_{\max} = \max_{0 \le j < N} \ell_j$$
+
+The unnormalized weights are:
+
+$$w_i = \begin{cases} \exp(\ell_i - \ell_{\max}) & \text{if } \ell_i > -9900.0 \\ 0.0 & \text{otherwise} \end{cases}$$
+
+When $\sum_{j=0}^{N-1} w_j > 0$:
+
+$$P_i = \frac{w_i}{\sum_{j=0}^{N-1} w_j}$$
+
+If the sum of weights is zero (all candidates masked or below threshold), $P$ defaults to the uniform
+distribution $P_i = \frac{1}{N}$. For $N = 1$, $P_0 = 1.0$.
+
+#### 2. Confidence formula
+
+The confidence metric $C$ measures how decisively the probability distribution peaks above a uniform
+distribution (where maximum probability is $1/N$, yielding $C = 0.0$) toward complete certainty
+(maximum probability is $1.0$, yielding $C = 1.0$):
+
+$$\text{confidence} = \max\left(0.0, \min\left(1.0, \frac{N \cdot \max_i P_i - 1.0}{N - 1.0}\right)\right)$$
+
+For $N = 1$, $\text{confidence} = 1.0$; for $N = 0$, $\text{confidence} = 0.0$.
+
+Properties:
+- **Uniform distribution** ($P_i = 1/N$ for all $i$): $\frac{N(1/N) - 1}{N - 1} = 0.0$.
+- **Certain outcome** ($\max P = 1.0$): $\frac{N(1.0) - 1}{N - 1} = 1.0$.
+- Linearly scales intermediate certainty independent of option count $N$.
+
+#### 3. Expected score formula
+
+For `score` questions with $N$ levels ($i \in \{0, 1, \dots, N-1\}$), the scalar score is the
+probability-weighted expectation:
+
+$$\text{score} = \sum_{i=0}^{N-1} i \cdot P_i$$
+
+Rather than snapping to an integer level, this produces a continuous rating that captures nuance
+and uncertainty across adjacent evaluation thresholds.
+
+### Prefix KV-cache reuse
+
+System One workloads often evaluate dozens of distinct questions over a large shared document,
+customer transcript, or codebase snapshot. Evaluating each question independently from scratch
+would incur $O(K \times L_{\text{state}})$ prefill compute, where $K$ is the question count and
+$L_{\text{state}}$ is the context length.
+
+NInfer eliminates this redundant compute through explicit context cache reuse:
+
+1. **Shared prefix formatting**: The server wraps `state` into a base system prompt:
+   `"You are an evaluation assistant. State to evaluate:\n" + state_text`.
+2. **Explicit cache boundary**: The first question branch ($i = 0$) appends an explicit
+   `prompt_cache_breakpoint: {"mode": "explicit"}` after the system prompt. The engine prefills
+   the entire state context once and commits its pages to the resident Paged KV-cache.
+3. **Zero-recomputation read branches**: All subsequent question branches ($i \ge 1$) execute with
+   `prompt_cache_read_only: true`. They read the prefilled state KV pages directly from GPU memory,
+   prefilling only the few dozen tokens of their own question instructions and candidate criteria.
+4. **Inter-request retention**: The cached state remains resident in the KV pool according to
+   the server's context-cache retention policy. Subsequent calls with identical `state` evaluate
+   all questions warm with zero state prefill overhead.
+5. **Strict isolation**: Because each question forms its own branch after the shared prefix,
+   questions never see each other's text or outputs, guaranteeing absence of ordering effects or
+   cross-question bias.
+
+### Client usage examples
+
+#### cURL
+
+```bash
+curl http://127.0.0.1:8080/v1/systemone \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "qwen3.8-27b",
+    "state": "Customer: '\''I was charged twice for order #9482. Please refund immediately!'\''",
+    "questions": {
+      "is_urgent": {
+        "type": "noul",
+        "instructions": "Is this customer inquiry urgent?",
+        "criteria": {
+          "true": "Customer demands immediate resolution or financial correction",
+          "false": "Routine informational inquiry"
+        }
+      },
+      "department": {
+        "type": "choice",
+        "instructions": "Which department should handle this ticket?",
+        "criteria": {
+          "billing": "Charges, invoices, duplicate payments, refunds",
+          "shipping": "Tracking, delivery delays, lost packages",
+          "general": "General questions or feedback"
+        }
+      },
+      "customer_frustration": {
+        "type": "score",
+        "instructions": "Rate customer frustration on a 0-3 scale.",
+        "criteria": [
+          "Calm and polite",
+          "Mildly annoyed",
+          "Very upset / demanding",
+          "Hostile / severe escalation"
+        ]
+      }
+    }
+  }'
+```
+
+#### Python (`typesafe-sdk`)
+
+```bash
+pip install typesafe-sdk
+```
+
+```python
+from typesafe_sdk import TypeSafeClient
+
+client = TypeSafeClient(
+    base_url="http://127.0.0.1:8080/v1",
+    api_key="optional-key",  # required only if --api-key was set on ninfer-serve
+)
+
+response = client.system_one(
+    model="qwen3.8-27b",
+    state="Customer: 'I was charged twice for order #9482. Please refund immediately!'",
+    questions={
+        "is_urgent": {
+            "type": "noul",
+            "instructions": "Is this customer inquiry urgent?",
+            "criteria": {
+                "true": "Customer demands immediate resolution or financial correction",
+                "false": "Routine informational inquiry",
+            },
+        },
+        "department": {
+            "type": "choice",
+            "instructions": "Which department should handle this ticket?",
+            "criteria": {
+                "billing": "Charges, invoices, duplicate payments, refunds",
+                "shipping": "Tracking, delivery delays, lost packages",
+                "general": "General questions or feedback",
+            },
+        },
+        "customer_frustration": {
+            "type": "score",
+            "instructions": "Rate customer frustration on a 0-3 scale.",
+            "criteria": [
+                "Calm and polite",
+                "Mildly annoyed",
+                "Very upset / demanding",
+                "Hostile / severe escalation",
+            ],
+        },
+    },
+)
+
+# 1. Noul: Probability of Yes (0.0 to 1.0)
+noul_ans = response.answers["is_urgent"]
+print(f"Urgent probability: {noul_ans.noul:.3f}")
+
+# 2. Choice: Winning category, probabilities, and confidence
+choice_ans = response.answers["department"]
+print(f"Department: {choice_ans.choice} (confidence: {choice_ans.confidence:.2f})")
+for key, prob in choice_ans.probabilities.items():
+    print(f"  {key}: {prob:.3f}")
+
+# 3. Score: Expected value (continuous 0.0 to N-1) and confidence
+score_ans = response.answers["customer_frustration"]
+print(f"Frustration score: {score_ans.score:.2f} / 3.0 (confidence: {score_ans.confidence:.2f})")
+```
+
+#### JavaScript / TypeScript (`@typesafe-ai/sdk`)
+
+```bash
+npm install @typesafe-ai/sdk
+# or: bun add @typesafe-ai/sdk
+```
+
+```typescript
+import { TypeSafeClient } from "@typesafe-ai/sdk";
+
+const client = new TypeSafeClient({
+  baseURL: "http://127.0.0.1:8080/v1",
+  apiKey: "optional-key", // required only if --api-key was set on ninfer-serve
+});
+
+const response = await client.systemOne({
+  model: "qwen3.8-27b",
+  state: "Customer: 'I was charged twice for order #9482. Please refund immediately!'",
+  questions: {
+    is_urgent: {
+      type: "noul",
+      instructions: "Is this customer inquiry urgent?",
+      criteria: {
+        true: "Customer demands immediate resolution or financial correction",
+        false: "Routine informational inquiry",
+      },
+    },
+    department: {
+      type: "choice",
+      instructions: "Which department should handle this ticket?",
+      criteria: {
+        billing: "Charges, invoices, duplicate payments, refunds",
+        shipping: "Tracking, delivery delays, lost packages",
+        general: "General questions or feedback",
+      },
+    },
+    customer_frustration: {
+      type: "score",
+      instructions: "Rate customer frustration on a 0-3 scale.",
+      criteria: [
+        "Calm and polite",
+        "Mildly annoyed",
+        "Very upset / demanding",
+        "Hostile / severe escalation",
+      ],
+    },
+  },
+});
+
+console.log(`Urgent probability: ${response.answers.is_urgent.noul}`);
+console.log(`Department: ${response.answers.department.choice} (confidence: ${response.answers.department.confidence})`);
+console.log(`Frustration score: ${response.answers.customer_frustration.score} (confidence: ${response.answers.customer_frustration.confidence})`);
+```
+
 ## Authentication and CORS
 
-Pass `--api-key VALUE` to require the same value as an OpenAI bearer token or Anthropic
+Pass `--api-key VALUE` to require the same value as an OpenAI/TypeSafe bearer token or Anthropic
 `x-api-key` header. `GET /health` and CORS preflight requests remain unauthenticated.
 
 ```bash

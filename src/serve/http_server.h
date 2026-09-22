@@ -24,6 +24,7 @@ namespace ninfer::serve {
 void write_openai_error(httplib::Response& response, const ApiError& error);
 void write_anthropic_error(httplib::Response& response, const ApiError& error,
                            const std::string& request_id);
+void write_typesafe_error(httplib::Response& response, const ApiError& error);
 
 // cpp-httplib invokes the error handler for every application response with status >= 400. Only
 // an empty 413 is its own pre-routing payload-limit rejection; application-authored errors must be
@@ -78,6 +79,7 @@ private:
     void register_routes();
     void handle_chat_completions(const httplib::Request& req, httplib::Response& res);
     void handle_score(const httplib::Request& req, httplib::Response& res);
+    void handle_systemone(const httplib::Request& req, httplib::Response& res);
     void handle_messages(const httplib::Request& req, httplib::Response& res);
     void handle_count_tokens(const httplib::Request& req, httplib::Response& res);
     void handle_responses(const httplib::Request& req, httplib::Response& res);

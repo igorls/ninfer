@@ -468,6 +468,11 @@ ninfer_add_test(ninfer_openai_responses_store_test
 ninfer_add_test(ninfer_anthropic_schema_test
   SOURCES test_anthropic_schema.cpp
   LIBRARIES ninfer_serve)
+ninfer_add_test(ninfer_typesafe_schema_test
+  SOURCES test_typesafe_schema.cpp
+  LIBRARIES ninfer_serve)
+target_include_directories(ninfer_typesafe_schema_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib)
 ninfer_add_test(ninfer_tool_call_parser_test
   SOURCES test_tool_call_parser.cpp
   LIBRARIES ninfer_engine)
