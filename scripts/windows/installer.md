@@ -10,7 +10,7 @@ cmake --build build-launcher --config Release -j
 ```
 
 Run `scripts/windows/build-installer.ps1` with explicit engine build, launcher
-build, Inno Setup compiler, FFmpeg license, and curl license paths. The script
+build, Inno Setup compiler, FFmpeg license, FFmpeg source note, and curl license paths. The script
 stages runtime DLLs, checks all four executables without development tools on
 PATH, builds the unsigned Setup executable, and writes its SHA-256 checksum.
 Use a new version for each candidate; a staging directory is never overwritten.
@@ -28,9 +28,10 @@ on a development machine; do not launch the installed app against production
 configuration during these checks. Model and settings preservation, bundled
 runtime startup and actual inference on the receiving GPU are acceptance checks.
 
-The current candidate is for internal unsigned testing. Before a public release,
-provide corresponding source/build materials for the bundled multimedia libraries
-and review all runtime redistribution notices. The workstation's existing FFmpeg
-DLLs are a GPL build, not an LGPL build. The notes shipped in this candidate state
-that limitation explicitly. Do not describe local installation checks as 5090
-inference qualification until the receiving machine has run the model.
+Build Vision against an LGPL shared FFmpeg (for example BtbN's `win64-lgpl-shared`
+builds), never a GPL build: NInfer only decodes media, and the LGPL decoders cover it.
+The `-FFmpegSourceNote` file names the exact FFmpeg version and where its corresponding
+source is published; ship that source with every public release (attach the source
+archive for the same commit to the GitHub release). The DLLs stay dynamically linked so
+users can replace them. Do not describe local installation checks as 5090 inference
+qualification until the receiving machine has run the model.

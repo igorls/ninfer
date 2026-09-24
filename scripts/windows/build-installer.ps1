@@ -4,6 +4,7 @@ param(
     [Parameter(Mandatory)][string]$LauncherBuildDir,
     [Parameter(Mandatory)][string]$Iscc,
     [Parameter(Mandatory)][string]$FFmpegLicense,
+    [Parameter(Mandatory)][string]$FFmpegSourceNote,
     [Parameter(Mandatory)][string]$CurlLicense,
     [string]$Version = '2026.09.11-preview.1',
     [string]$OutputDir = (Join-Path $PSScriptRoot '../../dist')
@@ -22,6 +23,7 @@ Copy-Item -LiteralPath (Join-Path $LauncherBuildDir 'Release/ninfer-launcher.exe
 Copy-Item -LiteralPath (Join-Path $repo 'LICENSE') -Destination $payload
 $licenses = @{
     'FFmpeg.txt' = $FFmpegLicense
+    'FFmpeg-SOURCE.txt' = $FFmpegSourceNote
     'curl.txt' = $CurlLicense
     'nlohmann-json.txt' = (Join-Path $repo 'third_party/nlohmann/LICENSE.MIT')
     'cpp-httplib.txt' = (Join-Path $repo 'third_party/cpp-httplib/LICENSE')

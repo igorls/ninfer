@@ -83,7 +83,7 @@ if(NINFER_BUILD_MEDIA)
   endif()
 
   if(NOT TARGET PkgConfig::FFMPEG)
-    set(FFMPEG_ROOT "P:/third_party/ffmpeg/ffmpeg-master-latest-win64-gpl-shared" CACHE PATH "FFmpeg root directory")
+    set(FFMPEG_ROOT "P:/third_party/ffmpeg-lgpl/ffmpeg-n9.0.2-3-ga5923073bf-win64-lgpl-shared-9.0" CACHE PATH "FFmpeg root directory")
     find_path(FFMPEG_INCLUDE_DIR NAMES libavformat/avformat.h
       HINTS ${FFMPEG_ROOT}/include ENV FFMPEG_INCLUDE_DIR)
     find_library(AVFORMAT_LIBRARY NAMES avformat libavformat

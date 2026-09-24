@@ -340,7 +340,7 @@ foreach(_oracle_test
   set_tests_properties(${_oracle_test} PROPERTIES SKIP_RETURN_CODE 77)
   if(WIN32)
     set_property(TEST ${_oracle_test} PROPERTY
-      ENVIRONMENT "PATH=P:/third_party/ffmpeg/ffmpeg-master-latest-win64-gpl-shared/bin\\;P:/third_party/curl-inst/bin\\;C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.3/bin\\;$ENV{PATH}")
+      ENVIRONMENT "PATH=${FFMPEG_ROOT}/bin\\;P:/third_party/curl-inst/bin\\;C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.3/bin\\;$ENV{PATH}")
   endif()
 endforeach()
 

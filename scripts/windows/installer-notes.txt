@@ -33,7 +33,6 @@ Flash-Next: https://huggingface.co/igorls/Qwen3.8-Flash-Next-mixed-NInfer
 
 NInfer source is Apache-2.0. Bundled components retain their respective
 licenses under the licenses folder. Model licenses apply separately.
-This internal test package includes the existing FFmpeg GPL build from
-the workstation. Public release requires distributing its corresponding
-source and build materials, or preparing an LGPL runtime package with its
-corresponding source. This installer has not been published as a public release.
+The bundled FFmpeg libraries are an LGPL build, dynamically linked; you
+may replace them with a compatible build. licenses/FFmpeg-SOURCE.txt names
+the exact FFmpeg version and where its corresponding source is available.
