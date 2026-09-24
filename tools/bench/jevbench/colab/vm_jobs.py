@@ -33,6 +33,8 @@ jobs = json.loads((R / "inputs/jobs.json").read_text())
 status = {job["name"]: {"state": "waiting", "rows": 0, "attempts": 0} for job in jobs}
 started = time.time()
 lock = threading.Lock()
+# Terminal state: once set, every later publish repeats it and the exporter thread exits.
+terminal = {"done": False, "error": None}
 
 
 def complete_bytes(path):
@@ -65,20 +67,26 @@ def export(job):
     return len(lines)
 
 
-def publish(final=False):
+def publish(final=False, error=None):
     with lock:
+        if final:
+            terminal["done"] = True
+        if error:
+            terminal["error"] = error
         for job in jobs:
             status[job["name"]]["rows"] = export(job)
         report = {"heartbeat": time.time(), "elapsed_s": round(time.time() - started, 1),
-                  "done": final, "jobs": status}
+                  "done": terminal["done"], "error": terminal["error"], "jobs": status}
         tmp = EXPORT / "progress.json.tmp"
         tmp.write_text(json.dumps(report, indent=1))
         tmp.replace(EXPORT / "progress.json")
 
 
 def exporter():
-    while True:
+    while not terminal["done"]:
         time.sleep(EXPORT_SECONDS)
+        if terminal["done"]:
+            return
         try:
             publish()
         except Exception as error:  # noqa: BLE001 - keep exporting
@@ -133,9 +141,13 @@ def run(job):
 
 threading.Thread(target=exporter, daemon=True).start()
 publish()
-wait_ready()
-for job in jobs:
-    run(job)
-    publish()
+try:
+    wait_ready()
+    for job in jobs:
+        run(job)
+        publish()
+except BaseException as failure:  # SystemExit included: IPython keeps the kernel alive
+    publish(final=True, error=f"{type(failure).__name__}: {failure}"[-4000:])
+    raise
 publish(final=True)
 print(json.dumps(status, indent=1))

@@ -66,11 +66,29 @@ json.dump({{"path": path, "repo": {REPO!r}, "revision": {REVISION!r}, "size": si
           open({str(R / 'artifact.json')!r}, "w"), indent=2)
 print("VERIFIED", digest, flush=True)
 """)
-if not (R / "build.log").exists():
+def running(pattern):
+    return subprocess.run(["pgrep", "-f", pattern], capture_output=True).returncode == 0
+
+
+def marker(name):
+    path = R / name
+    return path.read_text(errors="replace") if path.exists() else ""
+
+
+if "BUILD_COMPLETE" in marker("build.log"):
+    print("build: already complete")
+elif running(str(R / "build.sh")):
+    print("build: already running")
+else:
     subprocess.Popen(["bash", str(R / "build.sh")], stdout=open(R / "build.log", "w"),
                      stderr=subprocess.STDOUT, start_new_session=True)
-if not (R / "download.log").exists():
+    print("build: started")
+if "VERIFIED" in marker("download.log"):
+    print("download: already verified")
+elif running(str(R / "download.py")):
+    print("download: already running")
+else:
     subprocess.Popen([sys.executable, str(R / "download.py")], stdout=open(R / "download.log", "w"),
                      stderr=subprocess.STDOUT, start_new_session=True,
                      env={**os.environ, "HF_HUB_ENABLE_HF_TRANSFER": "0"})
-print("build and download started")
+    print("download: started")

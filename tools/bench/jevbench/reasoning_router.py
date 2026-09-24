@@ -97,10 +97,16 @@ def labels(row):
     return correct, costs
 
 
+def jsonl_lines(path):
+    # JSONL records end at "\n" only; str.splitlines would also split on U+2028, U+2029 and
+    # U+0085, which the collector writes raw inside model text.
+    return [line.rstrip("\r") for line in path.read_text(encoding="utf-8").split("\n")]
+
+
 def load_rows(paths, holdout_family):
     rows, seen, groups, prompts, artifacts, profiles = [], set(), {}, {}, set(), set()
     for path in paths:
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line in jsonl_lines(path):
             if not line.strip():
                 continue
             row = json.loads(line)
@@ -258,7 +264,7 @@ def train(args):
 
 def read_outcomes(path):
     rows = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in jsonl_lines(path):
         if line.strip():
             row = json.loads(line)
             if row["input"]["id"] in rows:
@@ -289,7 +295,8 @@ def analyze(args):
         for line in args.blueprints.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 blueprint = json.loads(line)
-                strata[blueprint["id"]] = f"{blueprint['kind']}-{blueprint['depth']}"
+                if "id" in blueprint:  # failed teacher slots carry no accepted blueprint
+                    strata[blueprint["id"]] = f"{blueprint['kind']}-{blueprint['depth']}"
 
     def stratum(row):
         blueprint = row["input"].get("provenance", {}).get("blueprint")
@@ -322,7 +329,9 @@ def analyze(args):
                                              ("content", "reasoning", "output_tokens", "finish_reason")))
         for action in actions[1:]:
             if "derived_from_budget" not in action and action.get("seconds"):
-                rate_points.append((action["output_tokens"], action["seconds"]))
+                # Forced cap-close tokens are committed in one step, not decoded one by one.
+                decoded = action["output_tokens"] - action.get("thinking", {}).get("injected_tokens", 0)
+                rate_points.append((decoded, action["seconds"]))
     for entry in table.values():
         n = entry["n"]
         entry["accuracy"] = [round(c / n, 3) for c in entry["correct"]]
@@ -335,7 +344,7 @@ def analyze(args):
                  max(1e-9, sum((t - mean_t) ** 2 for t, _ in rate_points)))
         rate = {"decode_tokens_per_second": round(1 / slope, 2) if slope > 0 else None,
                 "intercept_seconds": round(mean_s - slope * mean_t, 4), "actions": len(rate_points),
-                "note": "OLS of action seconds on output tokens; meaningful only for concurrency 1"}
+                "note": "OLS of action seconds on decoded tokens (output minus injected cap-close); concurrency 1 only"}
     report = {"rows": len(rows), "profiles": sorted({str(r.get("profile")) for r in rows.values()}),
               "artifacts": sorted({str(r.get("artifact_sha256")) for r in rows.values()}),
               "strata": dict(sorted(table.items())), "budget_identity_when_1024_uncapped": identity,

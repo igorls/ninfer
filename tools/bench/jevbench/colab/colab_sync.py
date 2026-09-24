@@ -27,18 +27,36 @@ def fetch(session, remote, local):
     return True
 
 
+def verified(path, sha256):
+    return path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() == sha256
+
+
+def sync_job(session, job_dir, name, run_dir):
+    """Fetch the remote state into staging, then every part it lists. The local state.json
+    (the restore input) is replaced only once all listed parts are present and verified."""
+    staged = job_dir / "state.json.staged"
+    if not fetch(session, f"/content/rr/export/{name}/state.json", staged):
+        return None
+    state = json.loads(staged.read_text())
+    for part in state["parts"]:
+        path = job_dir / part["name"]
+        if not verified(path, part["sha256"]):
+            if not fetch(session, f"/content/rr/export/{name}/{part['name']}", path) or \
+                    not verified(path, part["sha256"]):
+                path.unlink(missing_ok=True)
+                return None
+    staged.replace(job_dir / "state.json")
+    return assemble(job_dir, name, run_dir)
+
+
 def assemble(job_dir, name, run_dir):
     state = json.loads((job_dir / "state.json").read_text())
     data, first = b"", 0
     for part in state["parts"]:
         path = job_dir / part["name"]
-        if not path.exists() or part["first"] != first:
+        if part["first"] != first or not verified(path, part["sha256"]):
             return None
-        blob = path.read_bytes()
-        if hashlib.sha256(blob).hexdigest() != part["sha256"]:
-            path.unlink()
-            return None
-        data += gzip.decompress(blob)
+        data += gzip.decompress(path.read_bytes())
         first = part["end"]
     if hashlib.sha256(data).hexdigest() != state["complete_sha256"]:
         return None
@@ -68,24 +86,22 @@ def main():
             continue
         failures = 0
         progress = json.loads(progress_path.read_text())
-        summary = []
+        summary, complete = [], True
         for name, job in progress["jobs"].items():
-            job_dir = args.run_dir / "parts" / name
-            if fetch(args.session, f"/content/rr/export/{name}/state.json", job_dir / "state.json"):
-                state = json.loads((job_dir / "state.json").read_text())
-                for part in state["parts"]:
-                    if not (job_dir / part["name"]).exists():
-                        fetch(args.session, f"/content/rr/export/{name}/{part['name']}", job_dir / part["name"])
-                local = assemble(job_dir, name, args.run_dir)
-            else:
-                local = None
+            local = sync_job(args.session, args.run_dir / "parts" / name, name, args.run_dir)
+            complete &= local is not None and local == job["rows"] and job["state"] == "complete"
             summary.append(f"{name}:{job['state']} {job['rows']}/{job.get('total', '?')} local={local}")
         age = time.time() - progress["heartbeat"]
         print(f"{time.strftime('%H:%M:%S')} elapsed={progress['elapsed_s']:.0f}s heartbeat_age={age:.0f}s "
               + " | ".join(summary), flush=True)
+        if progress.get("error"):
+            print("VM_ERROR", progress["error"], flush=True)
         if progress.get("done"):
-            print("VM_DONE", flush=True)
-            sys.exit(0)
+            if complete and not progress.get("error"):
+                print("VM_DONE", flush=True)
+                sys.exit(0)
+            print("VM_DONE_INCOMPLETE: a job failed or its local copy is incomplete", flush=True)
+            sys.exit(4)
         time.sleep(args.interval)
 
 

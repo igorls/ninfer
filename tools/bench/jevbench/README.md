@@ -153,8 +153,26 @@ cmake --build build-win --config Release --target ninfer-reasoning-collect -j
 ```
 
 `collect` hashes the artifact, verifies it did not change, and resumes matching completed IDs.
-An interrupted partial final JSONL line must be removed before resuming; complete rows remain
-usable. Use a new outcome file for a different artifact or numerical profile. `prepare --tasks`
+The collector drops an interrupted partial final line itself and recollects that example.
+Use a new outcome file for a different artifact or numerical profile.
+
+Two options change the collection profile, and a training set always holds exactly one profile:
+
+- `--derive-2048` runs the 2,048-token action only when the 1,024-token action's thinking cap
+  fired. An uncapped 1,024 action stopped before either limit, so under the same schedule the
+  2,048 action would repeat it token for token; it is recorded with `derived_from_budget: 1024`
+  (profile suffix `:derive2048`). Each action also records `thinking.model_tokens`,
+  `injected_tokens` and `cap_applied`.
+- `--concurrency N` (2-8) decodes N rows at once. Prefill features are unchanged (prefill is a
+  single-lane unit), but decode labels then depend on batch composition and are not repeatable
+  (profile suffix `:cN`). The `seconds` field then includes shared rounds; use it descriptively only.
+
+The profile does not record the engine commit, compiler or GPU. Before combining collections from
+different builds or machines, collect a few identical requests on both and compare them with
+`analyze --data new.jsonl --against old.jsonl`: features must be bitwise equal.
+`analyze --data outcomes.jsonl [--blueprints blueprints.jsonl]` reports outcome types per stratum
+(reasoning helps/harms, 2,048 beats 1,024, all fail), cap use, the 1,024/2,048 identity rate on
+uncapped rows, and the concurrency-1 decode rate. `prepare --tasks`
 accepts existing task JSONL with independent gold; related variants must share `group` or
 `source_group`. Never use the teacher's unsupported self-assessment as the correctness label.
 The included generated cohort is a small diagnostic, not a general training corpus.
@@ -231,6 +249,26 @@ Resume with the same model, verified artifact, generator, seed and variant count
 blueprint count may only increase; failed slots retry. Preserve the manifest with the raw rows.
 An interrupted partial final JSONL line must be removed before resuming. Download results before
 stopping the named Colab session, and stop it after use to release the GPU.
+
+### 27B outcome collection on Colab G4
+
+`colab/` holds the collection pipeline for a Colab RTX PRO 6000 (G4) VM. The engine only runs on
+`sm_120`, so other Colab GPUs cannot collect. Upload a `git archive --prefix=ninfer/` tarball of the
+collection commit as `/content/source.tar.gz`, the request files and a `jobs.json`, e.g.
+`[{"name": "pilot-c1", "requests": "pilot64.jsonl", "concurrency": 1, "derive_2048": false}]`.
+
+1. `colab exec -f vm_setup.py` extracts the source, records the environment, and starts the
+   collector build and the download of the pinned 27B artifact (`neroued/Qwen3.8-27B-nvfp4-NInfer`
+   at revision `11dbbbbb`, SHA-256 `552c374c...`, byte-identical to the earlier local collection;
+   HF `main` is a container-v3 file this branch cannot load) in the background.
+2. `colab exec -f vm_jobs.py --timeout 60` runs the jobs in the foreground. The CLI returns at its
+   timeout, but the cell keeps the kernel busy, and every 120 s it exports complete outcome lines
+   as SHA-256-checked gzip parts under `/content/rr/export/`.
+3. `python colab/colab_sync.py --session NAME --run-dir DIR` mirrors those parts with
+   `colab download` (the Contents API, independent of the busy kernel) and assembles verified
+   local files. It exits 0 on completion, 3 when the session is lost, and 4 when a job failed.
+4. After a lost session, upload `DIR/parts/<job>/` to `/content/rr/import/<job>/` on a new VM,
+   run `vm_setup.py`, then `vm_restore.py`, then `vm_jobs.py` again; the collector resumes by id.
 
 Prepare these tasks with `reasoning_router.py prepare --tasks /path/to/tasks.jsonl --out requests.jsonl`,
 then collect direct/1,024/2,048-token outcomes using **Qwen3.8-27B NVFP4**. Flash is the scenario

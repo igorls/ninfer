@@ -118,6 +118,15 @@ class RouterDataTests(unittest.TestCase):
         self.assertEqual((against["shared_ids"], against["features_bitwise_equal"]), (1, 1))
         self.assertEqual(against["label_agreement"], [1, 0, 1])
 
+    def test_unicode_line_separators_inside_model_text_stay_in_one_row(self):
+        row = observation()
+        row["actions"][1]["reasoning"] = "step one step two \u0085end"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "data.jsonl"
+            path.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+            loaded = router.load_rows([path], "temporal_lookup")
+        self.assertEqual(loaded[0]["actions"][1]["reasoning"], row["actions"][1]["reasoning"])
+
     def test_same_path_different_weights_cannot_mix(self):
         a, b = observation("a"), observation("b")
         b["artifact_sha256"] = "b" * 64
