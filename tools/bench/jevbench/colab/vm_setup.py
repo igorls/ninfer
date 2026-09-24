@@ -87,6 +87,20 @@ def marker(name):
     return path.read_text(errors="replace") if path.exists() else ""
 
 
+prebuilt = Path("/content/collector.tar.gz")
+if prebuilt.exists() and "BUILD_COMPLETE" not in marker("build.log"):
+    # A collector built by an earlier session of the same source commit: skips the toolkit
+    # install and the build after a reclaimed VM. It needs only the driver at run time.
+    with tarfile.open(prebuilt) as archive:
+        archive.extractall(R / "build" / "apps", filter="data")
+    collector = R / "build" / "apps" / "ninfer-reasoning-collect"
+    collector.chmod(0o755)
+    check = subprocess.run(["ldd", str(collector)], capture_output=True, text=True)
+    missing = [line for line in check.stdout.splitlines() if "not found" in line]
+    if missing:
+        raise SystemExit("prebuilt collector is missing libraries:\n" + "\n".join(missing))
+    (R / "build.log").write_text("prebuilt collector from /content/collector.tar.gz\nBUILD_COMPLETE\n")
+    print("build: prebuilt collector installed")
 if "BUILD_COMPLETE" in marker("build.log"):
     print("build: already complete")
 elif running(str(R / "build.sh")):
