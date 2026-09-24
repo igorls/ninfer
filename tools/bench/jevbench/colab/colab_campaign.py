@@ -148,6 +148,8 @@ def main():
     parser.add_argument("--max-sessions", type=int, default=8)
     parser.add_argument("--interval", type=int, default=120, help="colab_sync poll seconds")
     args = parser.parse_args()
+    # The colab CLI prints box-drawing characters; a redirected Windows stdout defaults to cp1252.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     workdir = args.run_dir / "campaign"
     workdir.mkdir(parents=True, exist_ok=True)
     idle, unavailable = 0, 0
