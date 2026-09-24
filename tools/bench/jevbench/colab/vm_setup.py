@@ -47,9 +47,21 @@ if not (R / "ninfer").exists():
         archive.extractall(R, filter="data")
 print("source:", (R / "ninfer" / "CMakeLists.txt").exists())
 
+# NInfer needs CUDA 13.1+. Colab images differ: some ship 13.3, others only 12.8 with a CUDA 13.0
+# driver (580.x), which runs 13.x-built binaries through minor-version compatibility.
 (R / "build.sh").write_text(f"""set -e
 trap 'echo BUILD_FAILED' ERR
-cmake -S {R}/ninfer -B {R}/build -DCMAKE_BUILD_TYPE=Release -DNINFER_BUILD_MEDIA=OFF -DBUILD_TESTING=OFF
+NVCC=$(ls -d /usr/local/cuda-13.[1-9]*/bin/nvcc 2>/dev/null | sort -V | tail -1 || true)
+if [ -z "$NVCC" ]; then
+  echo "installing cuda-toolkit-13-3"
+  apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq cuda-toolkit-13-3
+  NVCC=/usr/local/cuda-13.3/bin/nvcc
+fi
+echo "nvcc: $NVCC"; "$NVCC" --version | tail -2
+rm -rf {R}/build
+cmake -S {R}/ninfer -B {R}/build -DCMAKE_BUILD_TYPE=Release -DNINFER_BUILD_MEDIA=OFF -DBUILD_TESTING=OFF \\
+  -DCMAKE_CUDA_COMPILER="$NVCC" -DCUDAToolkit_ROOT="$(dirname "$(dirname "$NVCC")")"
 cmake --build {R}/build --target ninfer-reasoning-collect -j
 echo BUILD_COMPLETE
 """)
