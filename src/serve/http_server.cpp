@@ -496,6 +496,9 @@ void HttpServer::register_routes() {
     server_.Get("/admin/vram", [this](const httplib::Request& req, httplib::Response& res) {
         handle_admin_vram(req, res);
     });
+    server_.Get("/admin/stats", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_admin_stats(req, res);
+    });
     server_.Post("/admin/quiesce", [this](const httplib::Request& req, httplib::Response& res) {
         handle_admin_quiesce(req, res);
     });
@@ -694,6 +697,68 @@ void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& r
           {"reason", "this build allocates device memory once at startup and holds it; no "
                      "residency path exists to release and rebuild it"}}}};
 
+    res.set_content(body.dump(), "application/json");
+}
+
+void HttpServer::handle_admin_stats(const httplib::Request&, httplib::Response& res) const {
+    if (service_ == nullptr) {
+        ApiError error;
+        error.status  = 503;
+        error.type    = "service_unavailable";
+        error.message = "engine is not attached";
+        write_openai_error(res, error);
+        return;
+    }
+    const ninfer::RuntimeStats s = service_->runtime_stats();
+    const auto ns                = [](std::uint64_t value) { return value; };
+    nlohmann::json body          = {
+        {"schema_version", 1},
+        {"host_work",
+         {{"engine_boundary_ns", ns(s.host_work.engine_boundary_ns)},
+          {"program_submit_ns", ns(s.host_work.program_submit_ns)},
+          {"program_post_ns", ns(s.host_work.program_post_ns)},
+          {"engine_commit_output_ns", ns(s.host_work.engine_commit_output_ns)},
+          {"engine_maintenance_ns", ns(s.host_work.engine_maintenance_ns)},
+          {"device_wait_ns", ns(s.host_work.device_wait_ns)},
+          {"prefill_host_ns", ns(s.host_work.prefill_host_ns)},
+          {"prefill_device_wait_ns", ns(s.host_work.prefill_device_wait_ns)},
+          {"control_host_ns", ns(s.host_work.control_host_ns)},
+          {"control_device_wait_ns", ns(s.host_work.control_device_wait_ns)},
+          {"decode_host_ns", ns(s.host_work.decode_host_ns)},
+          {"decode_device_wait_ns", ns(s.host_work.decode_device_wait_ns)},
+          {"admission_policy_ns", ns(s.host_work.admission_policy_ns)},
+          {"context_progress_ns", ns(s.host_work.context_progress_ns)},
+          {"stats_publication_ns", ns(s.host_work.stats_publication_ns)},
+          {"prefill_units", s.host_work.prefill_units},
+          {"control_units", s.host_work.control_units},
+          {"admission_policy_invocations", s.host_work.admission_policy_invocations},
+          {"context_progress_invocations", s.host_work.context_progress_invocations}}},
+        {"computed_prefill_tokens", s.computed_prefill_tokens},
+        {"committed_decode_tokens", s.committed_decode_tokens},
+        {"active_captures_completed", s.active_captures_completed},
+        {"active_captures_aborted", s.active_captures_aborted},
+        {"root_selections", s.root_selections},
+        {"private_endpoint_selections", s.private_endpoint_selections},
+        {"shared_stable_prefix_selections", s.shared_stable_prefix_selections},
+        {"reused_prompt_tokens", s.reused_prompt_tokens},
+        {"state_d2h_count", s.state_d2h_count},
+        {"state_h2d_count", s.state_h2d_count},
+        {"state_d2d_count", s.state_d2d_count},
+        {"state_d2h_seconds", s.state_d2h_seconds},
+        {"state_h2d_seconds", s.state_h2d_seconds},
+        {"state_d2d_seconds", s.state_d2d_seconds},
+        {"main_kv_d2h_pages", s.main_kv_d2h_pages},
+        {"main_kv_h2d_pages", s.main_kv_h2d_pages},
+        {"main_kv_d2d_pages", s.main_kv_d2d_pages},
+        {"main_kv_d2h_seconds", s.main_kv_d2h_seconds},
+        {"main_kv_h2d_seconds", s.main_kv_h2d_seconds},
+        {"main_kv_d2d_seconds", s.main_kv_d2d_seconds},
+        {"actual_context_transfer_seconds", s.actual_context_transfer_seconds},
+        {"pressure_private_owners_evicted", s.pressure_private_owners_evicted},
+        {"pressure_shared_owners_evicted", s.pressure_shared_owners_evicted},
+        {"pressure_idle_flushes", s.pressure_idle_flushes},
+    };
+    res.status = 200;
     res.set_content(body.dump(), "application/json");
 }
 

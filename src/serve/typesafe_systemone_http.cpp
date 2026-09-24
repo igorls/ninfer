@@ -15,6 +15,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -22,8 +23,6 @@ namespace ninfer::serve {
 namespace {
 
 using Json = nlohmann::ordered_json;
-
-constexpr double kLogprobFloor = -9999.0;
 
 struct SystemOneBranch {
     std::size_t question_index = 0;
@@ -42,10 +41,6 @@ Json with_prefix_boundary(Json messages) {
         last["content"].back()["prompt_cache_breakpoint"] = Json{{"mode", "explicit"}};
     }
     return messages;
-}
-
-double finite_logprob(float value) {
-    return std::isfinite(value) ? static_cast<double>(value) : kLogprobFloor;
 }
 
 } // namespace
@@ -91,15 +86,21 @@ std::int64_t systemone_billed_input_tokens(int prompt_tokens, std::uint32_t cach
     return fresh > 0 ? fresh : 0;
 }
 
-std::vector<double> softmax_probabilities(const std::vector<double>& logprobs) {
+std::vector<double> softmax_probabilities(const std::vector<double>& logprobs,
+                                          double temperature) {
     if (logprobs.empty()) { return {}; }
     if (logprobs.size() == 1) { return {1.0}; }
-    const double max_lp = *std::max_element(logprobs.begin(), logprobs.end());
+    double max_lp = -std::numeric_limits<double>::infinity();
+    for (const double lp : logprobs) {
+        if (std::isfinite(lp)) { max_lp = std::max(max_lp, lp); }
+    }
     std::vector<double> probabilities(logprobs.size(), 0.0);
     double sum = 0.0;
     for (std::size_t i = 0; i < logprobs.size(); ++i) {
-        if (logprobs[i] > -9900.0) {
-            probabilities[i] = std::exp(logprobs[i] - max_lp);
+        if (std::isfinite(logprobs[i])) {
+            // Center before temperature scaling: finite scores must never be mistaken for a
+            // masked-value sentinel at low temperatures, or overflow before subtraction.
+            probabilities[i] = std::exp((logprobs[i] - max_lp) / temperature);
             sum += probabilities[i];
         }
     }
@@ -213,6 +214,17 @@ SystemOneRequest parse_systemone_request(const nlohmann::ordered_json& body) {
     SystemOneRequest req;
     req.requested_model = std::move(requested_model);
     req.state_text      = std::move(state_text);
+    if (body.contains("images")) {
+        if (!body.at("images").is_array()) {
+            systemone_bad_request("images must be an array of image URLs or data URIs", "images");
+        }
+        for (const auto& image : body.at("images")) {
+            if (!image.is_string() || image.get_ref<const std::string&>().empty()) {
+                systemone_bad_request("each image must be a nonempty URL or data URI", "images");
+            }
+            req.images.push_back(image.get<std::string>());
+        }
+    }
 
     double temperature = 1.0;
     if (body.contains("temperature") && !body.at("temperature").is_null()) {
@@ -220,9 +232,6 @@ SystemOneRequest parse_systemone_request(const nlohmann::ordered_json& body) {
             systemone_bad_request("temperature must be a number", "temperature");
         }
         temperature = body.at("temperature").get<double>();
-        if (temperature <= 0.0) {
-            systemone_bad_request("temperature must be positive", "temperature");
-        }
     } else {
         const auto t_pos = req.requested_model.rfind("-t");
         if (t_pos != std::string::npos && t_pos + 2 < req.requested_model.size()) {
@@ -231,6 +240,9 @@ SystemOneRequest parse_systemone_request(const nlohmann::ordered_json& body) {
                 if (parsed_t > 0.0) { temperature = parsed_t; }
             } catch (...) {}
         }
+    }
+    if (!std::isfinite(temperature) || temperature <= 0.0) {
+        systemone_bad_request("temperature must be finite and positive", "temperature");
     }
     req.temperature = temperature;
 
@@ -375,6 +387,19 @@ SystemOneRequest parse_systemone_request(const nlohmann::ordered_json& body) {
     return req;
 }
 
+nlohmann::ordered_json build_systemone_messages(const SystemOneRequest& request) {
+    Json messages = Json::array({Json{{"role", "system"},
+        {"content", "You are an evaluation assistant. State to evaluate:\n" + request.state_text}}});
+    if (!request.images.empty()) {
+        Json content = Json::array();
+        for (const auto& image : request.images) {
+            content.push_back(Json{{"type", "image_url"}, {"image_url", Json{{"url", image}}}});
+        }
+        messages.push_back(Json{{"role", "user"}, {"content", std::move(content)}});
+    }
+    return messages;
+}
+
 nlohmann::ordered_json make_systemone_response_json(const SystemOneResponse& response) {
     nlohmann::ordered_json answers = nlohmann::ordered_json::object();
     for (const auto& answer : response.answers) {
@@ -408,15 +433,20 @@ nlohmann::ordered_json make_systemone_response_json(const SystemOneResponse& res
         }
         answers[answer.id] = std::move(item);
     }
-    return nlohmann::ordered_json{
+    nlohmann::ordered_json result{
         {"model", response.model},
         {"answers", std::move(answers)},
         {"usage", nlohmann::ordered_json{{"input_tokens", response.input_tokens},
                                          {"output_tokens", response.output_tokens}}}};
+    if (response.vision_tokens != 0) {
+        result["usage"]["vision_tokens"] = response.vision_tokens;
+    }
+    return result;
 }
 
 void HttpServer::handle_systemone(const httplib::Request& req, httplib::Response& res) {
     SystemOneRequest sys_request;
+    std::vector<Json> candidate_ids;
     try {
         const Json body = parse_json_body(req);
         if (body.contains("stream") && body.at("stream").is_boolean() &&
@@ -424,14 +454,26 @@ void HttpServer::handle_systemone(const httplib::Request& req, httplib::Response
             systemone_bad_request("systemone responses are not streamed", "stream");
         }
         sys_request = parse_systemone_request(body);
+        candidate_ids.reserve(sys_request.questions.size());
+        // Resolve each distinct native candidate once per request. Reuse its validated token
+        // ID across questions and pass IDs to prepare(), which otherwise tokenizes it again.
+        std::unordered_map<std::string, ninfer::TokenId> resolved_candidates;
         for (const SystemOneQuestion& question : sys_request.questions) {
+            Json ids = Json::array();
             for (const std::string& candidate : question.candidates) {
-                if (service_->tokenize_text(candidate).size() != 1) {
-                    systemone_bad_request(
-                        "candidate \"" + candidate + "\" must be exactly one token",
-                        "questions." + question.id + ".criteria");
+                auto found = resolved_candidates.find(candidate);
+                if (found == resolved_candidates.end()) {
+                    const auto tokens = service_->tokenize_text(candidate);
+                    if (tokens.size() != 1) {
+                        systemone_bad_request(
+                            "candidate \"" + candidate + "\" must be exactly one token",
+                            "questions." + question.id + ".criteria");
+                    }
+                    found = resolved_candidates.emplace(candidate, tokens.front()).first;
                 }
+                ids.push_back(found->second);
             }
+            candidate_ids.push_back(std::move(ids));
         }
     } catch (const ApiException& exception) {
         write_typesafe_error(res, exception.error());
@@ -451,15 +493,18 @@ void HttpServer::handle_systemone(const httplib::Request& req, httplib::Response
     RequestLimits limits;
     limits.default_max_tokens = options_.default_max_tokens;
 
-    const Json base_messages =
-        Json::array({Json{{"role", "system"},
-                          {"content", "You are an evaluation assistant. State to evaluate:\n" +
-                                          sys_request.state_text}}});
+    const Json base_messages = build_systemone_messages(sys_request);
+
+    // Multiple questions about one state need the first prefill to publish that state. A
+    // single-question call never reuses its own prefix, so publishing only pays for two
+    // captures and a growing commit. Tetris-shaped decisions are always one question.
+    const bool publish_shared_state = sys_request.questions.size() > 1;
 
     for (std::size_t i = 0; i < sys_request.questions.size(); ++i) {
         const auto& question = sys_request.questions[i];
         const bool first     = (i == 0);
-        Json messages        = first ? with_prefix_boundary(base_messages) : base_messages;
+        const bool publish   = publish_shared_state && first;
+        Json messages        = publish ? with_prefix_boundary(base_messages) : base_messages;
         messages.push_back(Json{{"role", "user"}, {"content", build_question_prompt(question)}});
 
         Json chat_body{{"model", public_model_id_},
@@ -467,9 +512,10 @@ void HttpServer::handle_systemone(const httplib::Request& req, httplib::Response
                        {"max_tokens", 1},
                        {"temperature", 0},
                        {"logprobs", true},
-                       {"logprob_candidates", question.candidates},
-                       {"prompt_cache_read_only", !first},
-                       {"prompt_cache_options", Json{{"mode", "explicit"}}},
+                       {"logprob_candidates", std::move(candidate_ids[i])},
+                       {"prompt_cache_read_only", !publish},
+                       {"prompt_cache_options",
+                        Json{{"mode", publish ? "explicit" : "implicit"}}},
                        {"chat_template_kwargs", Json{{"enable_thinking", false}}}};
 
         SystemOneBranch branch;
@@ -494,6 +540,7 @@ void HttpServer::handle_systemone(const httplib::Request& req, httplib::Response
     }
 
     std::shared_ptr<RequestLifetime> lifetime;
+    std::uint64_t vision_tokens = 0;
     for (SystemOneBranch& branch : branches) {
         const OpenAIChatRequest& request = branch.request;
         const std::uint64_t req_id       = ++request_seq_;
@@ -543,11 +590,16 @@ void HttpServer::handle_systemone(const httplib::Request& req, httplib::Response
             return;
         }
 
-        if (!lifetime) { lifetime = prepared.lifetime; }
+        if (!lifetime) {
+            lifetime = prepared.lifetime;
+            // Shared observation count, once per request rather than once per question.
+            vision_tokens = prepared.preparation.vision_tokens;
+        }
     }
 
     SystemOneResponse response;
     response.model = sys_request.requested_model;
+    response.vision_tokens = vision_tokens;
     response.answers.reserve(sys_request.questions.size());
 
     for (std::size_t i = 0; i < sys_request.questions.size(); ++i) {
@@ -579,14 +631,10 @@ void HttpServer::handle_systemone(const httplib::Request& req, httplib::Response
         candidate_lps.reserve(pos.candidates.size());
         for (const auto& cand : pos.candidates) {
             const float lp = std::isfinite(cand.raw_logprob) ? cand.raw_logprob : cand.logprob;
-            double val     = finite_logprob(lp);
-            if (sys_request.temperature > 0.0 && sys_request.temperature != 1.0 &&
-                val > -9900.0) {
-                val /= sys_request.temperature;
-            }
-            candidate_lps.push_back(val);
+            candidate_lps.push_back(static_cast<double>(lp));
         }
-        const std::vector<double> probs = softmax_probabilities(candidate_lps);
+        const std::vector<double> probs =
+            softmax_probabilities(candidate_lps, sys_request.temperature);
 
         SystemOneAnswer answer;
         answer.id   = question.id;

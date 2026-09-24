@@ -50,6 +50,8 @@ struct SystemOneQuestion {
 struct SystemOneRequest {
     std::string requested_model;
     std::string state_text;
+    // NInfer extension: observations acquired through the shared product media route.
+    std::vector<std::string> images;
     double temperature = 1.0;
     std::vector<SystemOneQuestion> questions;
 };
@@ -75,6 +77,7 @@ struct SystemOneResponse {
     std::vector<SystemOneAnswer> answers;
     std::int64_t input_tokens  = 0;
     std::int64_t output_tokens = 0;
+    std::uint64_t vision_tokens = 0;
 };
 
 [[noreturn]] void systemone_bad_request(std::string message, std::string param = {},
@@ -85,11 +88,13 @@ std::string choice_token_for_index(std::size_t index);
 // bills only the tokens past a prefix-cache hit, so the state is not charged once per question.
 std::int64_t systemone_billed_input_tokens(int prompt_tokens, std::uint32_t cached_tokens,
                                            bool first);
-std::vector<double> softmax_probabilities(const std::vector<double>& logprobs);
+std::vector<double> softmax_probabilities(const std::vector<double>& logprobs,
+                                          double temperature = 1.0);
 double calculate_choice_confidence(const std::vector<double>& probabilities);
 double calculate_expected_score(const std::vector<double>& probabilities);
 
 SystemOneRequest parse_systemone_request(const nlohmann::ordered_json& body);
+nlohmann::ordered_json build_systemone_messages(const SystemOneRequest& request);
 std::string build_question_prompt(const SystemOneQuestion& question);
 nlohmann::ordered_json make_systemone_response_json(const SystemOneResponse& response);
 

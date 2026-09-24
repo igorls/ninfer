@@ -1,5 +1,6 @@
 #include "serve/typesafe_systemone.h"
 #include "serve/http_server.h"
+#include "serve/openai_chat.h"
 
 #include <nlohmann/json.hpp>
 
@@ -71,6 +72,43 @@ int main() {
         double sum         = 0.0;
         for (double p : multi_p) { sum += p; }
         failures += check(close_to(sum, 1.0), "softmax probabilities sum to 1.0");
+
+        // Independent formula on moderate represented inputs, evaluated in long double.
+        const std::vector<double> oracle_lps{-2.0, -3.5, -6.0};
+        for (const double temperature : {0.25, 1.0, 4.0}) {
+            long double denominator = 0.0L;
+            for (const double lp : oracle_lps) {
+                denominator += std::exp(static_cast<long double>(lp) / temperature);
+            }
+            const auto actual = softmax_probabilities(oracle_lps, temperature);
+            for (std::size_t i = 0; i < actual.size(); ++i) {
+                const long double expected =
+                    std::exp(static_cast<long double>(oracle_lps[i]) / temperature) / denominator;
+                failures += check(close_to(actual[i], static_cast<double>(expected), 1e-12),
+                                  "temperature softmax agrees with independent formula");
+            }
+        }
+        // Reproduced by a real Qwen3.8 decision: scaling negative scores before applying the
+        // old -9900 floor incorrectly turned a confident B into a uniform/A result.
+        const auto cold = softmax_probabilities({-8.0, -0.2}, 1e-6);
+        failures += check(cold[0] == 0.0 && cold[1] == 1.0,
+                          "low temperature preserves the actual winner");
+        const auto tiny = softmax_probabilities({-8.0, -0.2},
+                                                std::numeric_limits<double>::denorm_min());
+        failures += check(tiny[0] == 0.0 && tiny[1] == 1.0,
+                          "smallest positive temperature remains well-defined");
+        const auto shifted = softmax_probabilities({-10008.0, -10000.2}, 0.25);
+        const auto unshifted = softmax_probabilities({-8.0, -0.2}, 0.25);
+        failures += check(close_to(shifted[0], unshifted[0], 1e-12) &&
+                              close_to(shifted[1], unshifted[1], 1e-12),
+                          "finite scores remain valid below the old sentinel threshold");
+        const double masked = -std::numeric_limits<double>::infinity();
+        const auto mixed = softmax_probabilities({masked, -4.0, -2.0}, 10000.0);
+        failures += check(mixed[0] == 0.0 && mixed[2] > mixed[1],
+                          "unavailable candidates stay zero at high temperature");
+        const auto unavailable = softmax_probabilities({masked, masked}, 0.1);
+        failures += check(unavailable[0] == 0.5 && unavailable[1] == 0.5,
+                          "all unavailable candidates retain uniform fallback");
     }
 
     // 2. Mathematics: Choice & Score confidence formula
@@ -346,6 +384,19 @@ int main() {
 
     // 11. Validation Rejections (HTTP 422 Unprocessable Entity)
     {
+        for (const double invalid : {std::numeric_limits<double>::infinity(),
+                                     std::numeric_limits<double>::quiet_NaN()}) {
+            failures += check_422_rejection(
+                [&] { parse_systemone_request(Json{
+                    {"model", "qwen3.8-27b"}, {"temperature", invalid}, {"state", "test"},
+                    {"questions", {{"q", {{"type", "noul"}, {"instructions", "Yes?"}}}}}}); },
+                "non-finite temperature rejected");
+        }
+        failures += check_422_rejection(
+            [] { parse_systemone_request(Json{
+                {"model", "qwen3.8-27b-tinf"}, {"state", "test"},
+                {"questions", {{"q", {{"type", "noul"}, {"instructions", "Yes?"}}}}}}); },
+            "infinite temperature suffix rejected");
         // Empty question ID
         failures += check_422_rejection(
             [] {
@@ -607,6 +658,35 @@ int main() {
                           "error message preserved");
         failures += check(err_json.at("error").at("param") == "questions.department.criteria",
                           "error param preserved");
+    }
+
+    // Image observations traverse the same multimodal adapter as native chat.
+    {
+        Json body{{"model", "qwen3.8-27b"}, {"state", Json{{"task", "observe"}}},
+                  {"images", Json::array({"https://example.test/a.png", "data:image/png;base64,AA=="})},
+                  {"questions", {{"move", {{"type", "choice"}, {"instructions", "Choose a direction"},
+                    {"criteria", {{"A", "left"}, {"B", "right"}}}}}}}};
+        const auto request = parse_systemone_request(body);
+        auto messages = build_systemone_messages(request);
+        messages.push_back(Json{{"role", "user"}, {"content", build_question_prompt(request.questions[0])}});
+        const auto chat = parse_chat_completion_request(Json{{"model", "qwen3.8-27b"}, {"messages", messages}}, RequestLimits{});
+        failures += check(chat.generation.media_item_count() == 2 &&
+            chat.generation.messages[1].content[0].kind == ContentKind::Image &&
+            chat.generation.messages[1].content[1].kind == ContentKind::Image,
+            "System One images become Engine image inputs");
+        failures += check(request.state_text == body["state"].dump(2), "JSON state remains text");
+        for (const auto& invalid : std::vector<Json>{nullptr, "image.png", Json::array({42}), Json::array({""})}) {
+            body["images"] = invalid;
+            failures += check_422_rejection([&] { (void)parse_systemone_request(body); }, "invalid images rejected");
+        }
+        body["images"] = Json::array();
+        failures += check(build_systemone_messages(parse_systemone_request(body)).size() == 1, "empty images preserves text route");
+        body.erase("images");
+        failures += check(build_systemone_messages(parse_systemone_request(body)).size() == 1, "omitted images preserves text route");
+        SystemOneResponse response;
+        failures += check(!make_systemone_response_json(response)["usage"].contains("vision_tokens"), "text usage unchanged");
+        response.vision_tokens = 80;
+        failures += check(make_systemone_response_json(response)["usage"]["vision_tokens"] == 80, "vision usage evidence emitted");
     }
 
     if (failures == 0) {

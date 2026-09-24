@@ -860,11 +860,19 @@ Both endpoint paths are identical:
 - `model` (string, required): echoed back in the response. Execution always uses the loaded
   artifact; this field does not select a different model. A `-t<temp>` suffix (e.g. `qwen3.8-27b-t1.5`)
   sets the candidate-logit temperature when `temperature` is omitted. `jev-latest` is echoed as sent.
-- `temperature` (number, optional): logit temperature scaling factor (default 1.0; must be > 0.0).
+- `temperature` (number, optional): logit temperature scaling factor (default 1.0; must be finite and > 0.0).
   Can also be specified via `-t<temp>` model suffix.
 - `state` (string, object, or array; required): the shared context, conversation transcript,
   ticket body, or document being evaluated. Objects and arrays are formatted as 2-space indented
-  JSON strings.
+  JSON strings. Putting `image_url` content parts inside `state` still serializes them as text;
+  use the separate `images` extension for native vision input.
+- `images` (array of nonempty strings, optional; **NInfer extension**): image URLs or base64 image
+  data URIs shared by all questions. Images enter the same acquisition, preprocessing and Engine
+  vision route as Chat Completions; the resident server must have `--vision` enabled. Omitting
+  this field or sending `[]` preserves text-only behavior. Invalid field types return HTTP 422;
+  media acquisition/decoding failures use the common media error contract. This field is not a
+  claim of TypeSafe/Jev image compatibility. Older NInfer builds ignored it, so vision clients
+  should require nonzero `usage.vision_tokens` before treating a response as image-grounded.
 - `questions` (object, required): a map of 1 to 256 questions keyed by question ID.
 - `stream` (boolean, optional): System One does not support streaming; `stream: true` returns HTTP 422.
 
@@ -885,7 +893,7 @@ Requests with invalid schemas, missing required fields, or out-of-range counts r
 
 Validation constraints enforced by the endpoint:
 - `model`: non-empty string. Supports optional `-t<temp>` suffix.
-- `temperature`: positive number (> 0.0).
+- `temperature`: finite positive number (> 0.0).
 - `state`: non-empty string, object, or array (objects and arrays are serialized as 2-space indented JSON).
 - `questions`: non-empty object containing 1 to 256 question definitions.
 - `questions.<id>`: question key cannot be empty; value must be an object.
@@ -1040,27 +1048,36 @@ This enables complex multi-attribute evaluations without manual prompt-string co
   - `input_tokens`: the shared state once, plus each question's own suffix. A later question that
     hits the state prefix contributes only the tokens past that hit.
   - `output_tokens`: 0. The decision is a logit readout; the greedy token is not returned text.
+  - `vision_tokens` (**NInfer extension**, present only for image observations): the actual expanded
+    vision-token count from Engine prompt preparation for the shared observation, counted once,
+    not once per question. It is already included in prompt usage, not an additional token charge.
+
+For example, add `"images": ["data:image/png;base64,..."]` next to `state` and `questions`.
+The state and question instructions can remain fixed while each image supplies a new observation.
+Multi-question calls keep the image observation inside the shared prefix boundary.
 
 ### Mathematical specifications
 
 #### 1. Softmax normalized probabilities
 
 Let $\ell_0, \ell_1, \dots, \ell_{N-1}$ be the candidate log-probabilities retrieved from the model's
-first generated token position. If temperature scaling $T > 0$ is specified ($T \neq 1.0$), logits are
-scaled as $\ell_i \leftarrow \ell_i / T$. For numerical stability:
+first generated token position. With finite temperature $T > 0$, subtract the largest finite
+candidate score **before** dividing by temperature:
 
-$$\ell_{\max} = \max_{0 \le j < N} \ell_j$$
+$$\ell_{\max} = \max_{j:\,\ell_j\text{ finite}} \ell_j$$
 
 The unnormalized weights are:
 
-$$w_i = \begin{cases} \exp(\ell_i - \ell_{\max}) & \text{if } \ell_i > -9900.0 \\ 0.0 & \text{otherwise} \end{cases}$$
+$$w_i = \begin{cases} \exp((\ell_i - \ell_{\max}) / T) & \text{if } \ell_i\text{ is finite} \\ 0.0 & \text{otherwise} \end{cases}$$
 
 When $\sum_{j=0}^{N-1} w_j > 0$:
 
 $$P_i = \frac{w_i}{\sum_{j=0}^{N-1} w_j}$$
 
-If the sum of weights is zero (all candidates masked or below threshold), $P$ defaults to the uniform
-distribution $P_i = \frac{1}{N}$. For $N = 1$, $P_0 = 1.0$.
+If no candidate has a finite score, $P$ defaults to the uniform distribution
+$P_i = \frac{1}{N}$. For $N = 1$, $P_0 = 1.0$. Finite scores have no arbitrary lower cutoff.
+This preserves the winning option at very small positive temperatures and keeps unavailable
+candidates at probability zero at large temperatures.
 
 #### 2. Confidence formula
 
@@ -1094,24 +1111,33 @@ customer transcript, or codebase snapshot. Evaluating each question independentl
 would incur $O(K \times L_{\text{state}})$ prefill compute, where $K$ is the question count and
 $L_{\text{state}}$ is the context length.
 
-NInfer eliminates this redundant compute through explicit context cache reuse:
+NInfer eliminates redundant state recompute across questions in one request through explicit
+context-cache reuse:
 
 1. **Shared prefix formatting**: The server wraps `state` into a base system prompt:
    `"You are an evaluation assistant. State to evaluate:\n" + state_text`.
-2. **Explicit cache boundary**: The first question branch ($i = 0$) appends an explicit
-   `prompt_cache_breakpoint: {"mode": "explicit"}` after the system prompt. The engine prefills
-   the entire state context once and commits its pages to the resident Paged KV-cache.
-3. **Zero-recomputation read branches**: All subsequent question branches ($i \ge 1$) execute with
-   `prompt_cache_read_only: true`. They read the prefilled state KV pages directly from GPU memory,
-   prefilling only the few dozen tokens of their own question instructions and candidate criteria.
-4. **Inter-request retention**: The cached state remains resident in the KV pool according to
-   the server's context-cache retention policy. Subsequent calls with identical `state` evaluate
-   all questions warm with zero state prefill overhead.
-5. **Strict isolation**: Because each question forms its own branch after the shared prefix,
-   questions never see each other's text or outputs, guaranteeing absence of ordering effects or
-   cross-question bias.
+2. **Single-question calls**: A request with one question runs `prompt_cache_read_only: true` and
+   does not publish a continuation. The decision is a one-shot logit readout; paying for a
+   throwaway publish only adds capture work.
+3. **Multi-question publish**: When `questions` has two or more entries, the first branch appends
+   an explicit `prompt_cache_breakpoint: {"mode": "explicit"}` after the system prompt, prefills
+   the state once, and publishes it. Later branches set `prompt_cache_read_only: true` and prefill
+   only their own question tokens against that resident prefix.
+4. **Strict isolation**: Because each question forms its own branch after the shared prefix,
+   questions never see each other's text or outputs.
 
 ### Client usage examples
+
+The [decision arcade](decision-arcade.md) provides interactive [Tetris](tetris-demo.html),
+[Chess](chess-demo.html) and [Kitchen Rush](kitchen-demo.html) clients. They expose the full choice
+distribution, measured client latency, exact requests/responses and a separately labeled local
+reference policy. Kitchen Rush compares paired kitchens with identical seeded orders and either
+real-time or paused decision clocks. Its cooperative mode assigns independent model actors to
+two chefs in one shared kitchen, exposing handoffs and resource conflicts; stale responses never
+substitute a different job.
+Chess retains every legal move; positions above the 62-choice limit use piece selection followed
+by move selection, with both conditional distributions shown. The guide covers controls,
+measurement boundaries and reproducible evaluation commands.
 
 #### cURL
 

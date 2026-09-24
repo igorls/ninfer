@@ -103,6 +103,8 @@ private:
     // the change will sit inside, exposed so the drain and the request-holding
     // behaviour can be exercised against a real engine rather than a fake.
     void handle_admin_quiesce(const httplib::Request& req, httplib::Response& res) const;
+    // Cumulative RuntimeStats snapshot for one-request host-work attribution. Not a product
+    // surface; used to subtract before/after a single System One decision.
     void handle_admin_stats(const httplib::Request& req, httplib::Response& res) const;
 
     void record_request_start(const RequestLogContext& context);
