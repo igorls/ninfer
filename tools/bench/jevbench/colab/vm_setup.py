@@ -95,6 +95,12 @@ if prebuilt.exists() and "BUILD_COMPLETE" not in marker("build.log"):
         archive.extractall(R / "build" / "apps", filter="data")
     collector = R / "build" / "apps" / "ninfer-reasoning-collect"
     collector.chmod(0o755)
+    # The package carries the CUDA 13 runtime it was linked against; images with only a
+    # 12.x toolkit lack libcudart.so.13.
+    bundled = R / "build" / "apps" / "lib" / "libcudart.so.13"
+    if bundled.exists():
+        shutil.copy2(bundled, "/usr/local/lib/libcudart.so.13")
+        subprocess.run(["ldconfig"], check=True)
     check = subprocess.run(["ldd", str(collector)], capture_output=True, text=True)
     missing = [line for line in check.stdout.splitlines() if "not found" in line]
     if missing:
