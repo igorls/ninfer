@@ -7,10 +7,15 @@ equal the state's complete_sha256. Existing outcome files are never overwritten.
 import gzip
 import hashlib
 import json
+import tarfile
 from pathlib import Path
 
 R = Path("/content/rr")
 (R / "out").mkdir(parents=True, exist_ok=True)
+bundle = Path("/content/import.tar.gz")  # <job>/state.json + parts, packed by colab_campaign.py
+if bundle.exists():
+    with tarfile.open(bundle) as archive:
+        archive.extractall(R / "import", filter="data")
 for folder in sorted((R / "import").iterdir()):
     state = json.loads((folder / "state.json").read_text())
     data, expected_first = b"", 0

@@ -269,6 +269,12 @@ collection commit as `/content/source.tar.gz`, the request files and a `jobs.jso
    local files. It exits 0 on completion, 3 when the session is lost, and 4 when a job failed.
 4. After a lost session, upload `DIR/parts/<job>/` to `/content/rr/import/<job>/` on a new VM,
    run `vm_setup.py`, then `vm_restore.py`, then `vm_jobs.py` again; the collector resumes by id.
+5. `colab/colab_campaign.py` automates steps 1-4 across reclaimed sessions: each round creates a G4
+   session, uploads the source, a prebuilt collector (`collector.tar.gz` holding
+   `ninfer-reasoning-collect` and `lib/libcudart.so.13`, sent in 30 MB chunks) and the mirrored parts
+   of the jobs in `jobs.json` as one `import.tar.gz`, resumes, and mirrors until done or lost. It
+   stops every session it creates and ends on completion, a failed job, `--max-sessions`, or two
+   sessions without new rows.
 
 Prepare these tasks with `reasoning_router.py prepare --tasks /path/to/tasks.jsonl --out requests.jsonl`,
 then collect direct/1,024/2,048-token outcomes using **Qwen3.8-27B NVFP4**. Flash is the scenario

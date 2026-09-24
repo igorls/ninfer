@@ -5,6 +5,7 @@ records the environment, then starts two background jobs and returns immediately
 the Linux build of ninfer-reasoning-collect and the pinned artifact download + SHA-256 check.
 Poll build.log for BUILD_COMPLETE and download.log for VERIFIED.
 """
+import hashlib
 import json
 import os
 import shutil
@@ -88,6 +89,14 @@ def marker(name):
 
 
 prebuilt = Path("/content/collector.tar.gz")
+chunks = sorted(Path("/content").glob("collector.tar.gz.part-*"))
+if chunks and not prebuilt.exists():
+    # Large files travel as ~30 MB uploads; the expected digest arrives beside them.
+    blob = b"".join(chunk.read_bytes() for chunk in chunks)
+    expected = Path("/content/collector.tar.gz.sha256").read_text().split()[0]
+    if hashlib.sha256(blob).hexdigest() != expected:
+        raise SystemExit("prebuilt collector chunks do not match their SHA-256")
+    prebuilt.write_bytes(blob)
 if prebuilt.exists() and "BUILD_COMPLETE" not in marker("build.log"):
     # A collector built by an earlier session of the same source commit: skips the toolkit
     # install and the build after a reclaimed VM. It needs only the driver at run time.
