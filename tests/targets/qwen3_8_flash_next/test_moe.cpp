@@ -19,6 +19,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <random>
 #include <set>
 #include <string>
@@ -184,8 +185,8 @@ down_kernel_name(ninfer::targets::qwen3_8_flash_next::detail::FlashNextMoeDownKe
 // ids, alphas and shared scales, for tokens in {1, 2, 3, 4, 5, 6, 7, 8} (grid.y of the decode arm).
 // Non-vacuous: the other tests use constant codes, unit scales and a zero shared expert, so they
 // cannot see a wrong scale tile, a wrong path order, or a wrong shared-path combine. The kernels
-// are chosen through flash_next_moe_down_launch rather than the environment because the launcher
-// reads NINFER_FLASH_NEXT_MOE_DOWN_LEGACY once per process.
+// are chosen explicitly through flash_next_moe_down_launch; "launcher default" is the kernel
+// flash_next_moe_down_kernel_for picks at that T.
 int test_decode_down_bitwise_gate(ninfer::DeviceContext& device) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
     // The kernels only ever form expert * stride: 64 physical expert spans exercise that index
@@ -239,8 +240,6 @@ int test_decode_down_bitwise_gate(ninfer::DeviceContext& device) {
                         .scale_bytes_per_expert = down_scale_bytes_per_expert},
     };
 
-    const FlashNextMoeDownKernel selected = flash_next_moe_down_kernel_selection();
-    std::cout << "  launcher default down kernel: " << down_kernel_name(selected) << "\n";
     for (const FlashNextMoeDownKernel kernel :
          {FlashNextMoeDownKernel::Legacy, FlashNextMoeDownKernel::PathWarp}) {
         const FlashNextMoeDownKernelAttributes attributes =
@@ -270,6 +269,7 @@ int test_decode_down_bitwise_gate(ninfer::DeviceContext& device) {
     for (const int tokens : {1, 2, 3, 4, 5, 6, 7, 8}) {
         const auto scope              = workspace.scope();
         FlashNextMoeWorkspace scratch = allocate_flash_next_moe_workspace(workspace, tokens);
+        const FlashNextMoeDownKernel selected = flash_next_moe_down_kernel_for(tokens);
 
         std::vector<std::int32_t> h_ids(static_cast<std::size_t>(10) * tokens);
         for (auto& v : h_ids) { v = id_dist(rng); }
@@ -357,10 +357,108 @@ int test_decode_down_bitwise_gate(ninfer::DeviceContext& device) {
             return 1;
         }
         std::cout << "  tokens=" << tokens << ": legacy == path-per-warp == launcher default ("
-                  << values << " BF16 values, " << non_finite << " non-finite, " << zeros
+                  << down_kernel_name(selected) << ", " << values << " BF16 values, " << non_finite << " non-finite, " << zeros
                   << " zero)\n";
     }
     std::cout << "PASS: test_decode_down_bitwise_gate\n";
+    return 0;
+}
+
+// Report-only decode down timing: both kernels at T = 1..8 over a full 512-expert down bank
+// with kSets independent routing sets per replay (~65 MB of expert rows each at T=8), so the
+// routed rows come from DRAM as they do across decoder layers. Values are data-independent
+// for timing; the bitwise gate above covers correctness. Times are per launch.
+int test_decode_down_timing(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    constexpr int kExperts                              = 512;
+    constexpr int kSets                                 = 8;
+    constexpr std::uint64_t down_code_bytes_per_expert  = 2'560ULL * 640 / 2;
+    constexpr std::uint64_t down_scale_bytes_per_expert = 2'560ULL * 640 / 16;
+
+    ninfer::DeviceBuffer d_codes(kExperts * down_code_bytes_per_expert);
+    ninfer::DeviceBuffer d_scales(kExperts * down_scale_bytes_per_expert);
+    ninfer::DeviceBuffer d_divisors(kExperts * sizeof(float));
+    ninfer::DeviceBuffer d_shared_down(2'560ULL * 640 * sizeof(std::uint16_t));
+    d_codes.fill(0x11);
+    d_scales.fill(0x38);
+    d_shared_down.fill(0);
+    const std::vector<float> h_divisors(kExperts, 1.0F);
+    d_divisors.copy_from_host(h_divisors.data(), h_divisors.size() * sizeof(float));
+
+    MoeWeights weights{
+        .shared_down = bf16_weight(d_shared_down.p, 2'560, 640),
+        .expert_down = {.codes                  = static_cast<const std::byte*>(d_codes.p),
+                        .scales                 = static_cast<const std::byte*>(d_scales.p),
+                        .weight_scale_divisors  = static_cast<const float*>(d_divisors.p),
+                        .experts                = kExperts,
+                        .rows                   = 2'560,
+                        .columns                = 640,
+                        .code_bytes_per_expert  = down_code_bytes_per_expert,
+                        .scale_bytes_per_expert = down_scale_bytes_per_expert},
+    };
+
+    std::mt19937 rng(0xD0D0'2026U);
+    std::uniform_int_distribution<int> id_dist(0, kExperts - 1);
+    std::cout << "\n--- Flash-Next MoE decode down timing (report-only, us per launch) ---\n";
+    std::cout << "  T   legacy  path-per-warp\n";
+    for (int tokens = 1; tokens <= 8; ++tokens) {
+        std::vector<std::unique_ptr<ninfer::WorkspaceArena>> arenas;
+        std::vector<FlashNextMoeWorkspace> sets;
+        for (int s = 0; s < kSets; ++s) {
+            arenas.push_back(std::make_unique<ninfer::WorkspaceArena>(
+                flash_next_moe_workspace_capacity_bytes(1, tokens)));
+            sets.push_back(allocate_flash_next_moe_workspace(*arenas.back(), tokens));
+            std::vector<std::int32_t> h_ids(static_cast<std::size_t>(10) * tokens);
+            for (auto& v : h_ids) { v = id_dist(rng); }
+            const std::vector<float> h_alpha(h_ids.size(), 0.1F);
+            const std::vector<float> h_shared_scale(static_cast<std::size_t>(tokens), 1.0F);
+            CUDA_CHECK(cudaMemcpy(sets.back().ids.data, h_ids.data(),
+                                  h_ids.size() * sizeof(std::int32_t), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(sets.back().alpha.data, h_alpha.data(),
+                                  h_alpha.size() * sizeof(float), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(sets.back().shared_scale.data, h_shared_scale.data(),
+                                  h_shared_scale.size() * sizeof(float), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemset(sets.back().activations.data, 0,
+                                  640ULL * 11 * tokens * sizeof(std::uint16_t)));
+        }
+        ninfer::DeviceBuffer d_out(2'560ULL * tokens * sizeof(std::uint16_t));
+        ninfer::Tensor out_view(d_out.p, ninfer::DType::BF16, {2'560, tokens});
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        float us[2] = {};
+        const FlashNextMoeDownKernel kernels[2] = {FlashNextMoeDownKernel::Legacy,
+                                                   FlashNextMoeDownKernel::PathWarp};
+        for (int k = 0; k < 2; ++k) {
+            constexpr int kIters       = 100;
+            cudaGraph_t graph          = nullptr;
+            cudaGraphExec_t graph_exec = nullptr;
+            CUDA_CHECK(cudaStreamBeginCapture(device.stream, cudaStreamCaptureModeGlobal));
+            for (int s = 0; s < kSets; ++s) {
+                flash_next_moe_down_launch(kernels[k], weights, sets[s], tokens, out_view,
+                                           device.stream);
+            }
+            CUDA_CHECK(cudaStreamEndCapture(device.stream, &graph));
+            CUDA_CHECK(cudaGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0));
+            // Long warmup: an idle card needs ~100 ms at load to reach its clocks.
+            for (int i = 0; i < 300; ++i) { CUDA_CHECK(cudaGraphLaunch(graph_exec, device.stream)); }
+            cudaEvent_t start_event, stop_event;
+            CUDA_CHECK(cudaEventCreate(&start_event));
+            CUDA_CHECK(cudaEventCreate(&stop_event));
+            CUDA_CHECK(cudaEventRecord(start_event, device.stream));
+            for (int i = 0; i < kIters; ++i) { CUDA_CHECK(cudaGraphLaunch(graph_exec, device.stream)); }
+            CUDA_CHECK(cudaEventRecord(stop_event, device.stream));
+            CUDA_CHECK(cudaEventSynchronize(stop_event));
+            float ms = 0.0F;
+            CUDA_CHECK(cudaEventElapsedTime(&ms, start_event, stop_event));
+            CUDA_CHECK(cudaEventDestroy(start_event));
+            CUDA_CHECK(cudaEventDestroy(stop_event));
+            CUDA_CHECK(cudaGraphExecDestroy(graph_exec));
+            CUDA_CHECK(cudaGraphDestroy(graph));
+            us[k] = (ms / kIters) * 1000.0F / kSets;
+        }
+        std::cout << "  " << tokens << std::fixed << std::setprecision(2) << std::setw(9) << us[0]
+                  << std::setw(15) << us[1] << "\n";
+    }
     return 0;
 }
 
@@ -703,6 +801,7 @@ int main() {
         std::cerr << "FAILED: test_decode_down_bitwise_gate\n";
         return 1;
     }
+    if (test_decode_down_timing(device) != 0) { return 1; }
 
     if (test_prefill_workspace_envelope_covers_simt_tail() != 0) {
         std::cerr << "FAILED: test_prefill_workspace_envelope_covers_simt_tail\n";

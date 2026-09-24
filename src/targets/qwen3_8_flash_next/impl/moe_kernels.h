@@ -19,15 +19,15 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
 //   PathWarp - (2560, T) CTAs x 11 warps, one warp per path, thread 0 combines.
 enum class FlashNextMoeDownKernel : int { Legacy = 0, PathWarp = 1 };
 
-// The kernel flash_next_moe_kernels_launch uses on the decode arm. Read once per process:
-// NINFER_FLASH_NEXT_MOE_DOWN_LEGACY set to a non-empty value other than "0" pins Legacy,
-// otherwise PathWarp. Later changes to the environment are not observed.
-FlashNextMoeDownKernel flash_next_moe_down_kernel_selection();
+// The kernel flash_next_moe_kernels_launch uses on the decode arm for `tokens` (1..8): PathWarp
+// at T=1, where Legacy's 320 CTAs are 0.28 waves; Legacy from T=2, where its T x 320 CTAs fill
+// the machine and PathWarp's 2,560 x T 11-warp CTAs cost 8-20% more from T=5 up.
+FlashNextMoeDownKernel flash_next_moe_down_kernel_for(int tokens);
 
 // Runs the decode-arm down projection with an explicit kernel choice on an already routed
 // workspace (ids, alpha, shared_scale, activations[640, 11, T]) into output [2560, T]. This is
 // the hook the bitwise gate in test_moe.cpp uses to run both kernels on identical inputs; the
-// production launcher calls it with flash_next_moe_down_kernel_selection(). Throws
+// production launcher calls it with flash_next_moe_down_kernel_for(tokens). Throws
 // std::invalid_argument unless 1 <= tokens <= 8.
 void flash_next_moe_down_launch(FlashNextMoeDownKernel kernel, const MoeWeights& weights,
                                 const FlashNextMoeWorkspace& workspace, int tokens,

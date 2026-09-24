@@ -282,9 +282,9 @@ __device__ __forceinline__ float down_shared_path_value(
     return ops::warp_reduce_sum(shared_sum);
 }
 
-// Legacy decode down kernel (reference): one warp per output row walks the ten routed paths
-// serially, then the shared expert. Kept selectable (NINFER_FLASH_NEXT_MOE_DOWN_LEGACY=1) as the
-// A/B and bitwise reference for the path-per-warp kernel below.
+// Legacy decode down kernel: one warp per output row walks the ten routed paths serially, then
+// the shared expert. The decode arm uses it from T=2 (flash_next_moe_down_kernel_for) and it is
+// the bitwise reference for the path-per-warp kernel below.
 __global__ void flash_next_moe_down_kernel(
     const std::int32_t* __restrict__ ids, const float* __restrict__ alpha,
     const float* __restrict__ shared_scale, const __nv_bfloat16* __restrict__ activations,
@@ -1860,17 +1860,10 @@ FlashNextMoeDownKernelAttributes down_kernel_attributes(Kernel* kernel, int thre
 
 } // namespace
 
-FlashNextMoeDownKernel flash_next_moe_down_kernel_selection() {
-    // Read once: this sits on the per-layer decode path (48 launches per token), and a getenv
-    // per launch is host overhead the decode graph would otherwise replay. The bitwise gate
-    // therefore selects kernels through flash_next_moe_down_launch, not by flipping the
-    // environment mid-process.
-    static const FlashNextMoeDownKernel selection = []() {
-        const char* env = std::getenv("NINFER_FLASH_NEXT_MOE_DOWN_LEGACY");
-        const bool legacy = env != nullptr && env[0] != '\0' && std::strcmp(env, "0") != 0;
-        return legacy ? FlashNextMoeDownKernel::Legacy : FlashNextMoeDownKernel::PathWarp;
-    }();
-    return selection;
+FlashNextMoeDownKernel flash_next_moe_down_kernel_for(int tokens) {
+    // test_moe decode down timing, full 512-expert bank, 8 routing sets per replay (us/launch):
+    // T=1 legacy 10.0 / path-per-warp 7.8; T=2 15.3 / 16.0; T=5 36.4 / 39.5; T=8 51.9 / 62.3.
+    return tokens == 1 ? FlashNextMoeDownKernel::PathWarp : FlashNextMoeDownKernel::Legacy;
 }
 
 void flash_next_moe_down_launch(FlashNextMoeDownKernel kernel, const MoeWeights& weights,
@@ -1913,8 +1906,7 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
             static_cast<__nv_bfloat16*>(workspace.activations.data));
         CUDA_CHECK(cudaGetLastError());
 
-        // Path-per-warp by default; NINFER_FLASH_NEXT_MOE_DOWN_LEGACY=1 pins the legacy kernel.
-        launch_down_decode(flash_next_moe_down_kernel_selection(), weights, workspace, tokens,
+        launch_down_decode(flash_next_moe_down_kernel_for(tokens), weights, workspace, tokens,
                            output, stream);
     } else {
         // Prefill path (tokens > 8): Group tokens by expert, load weights once per chunk
