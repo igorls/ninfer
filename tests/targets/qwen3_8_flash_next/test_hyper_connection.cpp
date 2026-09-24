@@ -529,26 +529,13 @@ int test_synthetic_stage_equivalence(ninfer::DeviceContext& device) {
 }
 
 // ---------------------------------------------------------------------------
-// Decode-route bit-exact gate.
+// Decode-route graph-replay gate.
 //
-// The fused hyper_norm_low_rank_fused_kernel replaces group_norm_vectorized_kernel +
-// low_rank_and_injection_kernel at T <= 8 and must be indistinguishable from them: every
-// buffer the stage writes (normalized, low_rank, injection, block_input, and hidden after
-// the inject) is compared with memcmp, for both the prepare and the mixer forms, then
-// again through CUDA-graph replay where the fused capture must hold one kernel node less.
+// Decode runs from captured CUDA graphs. Replaying the captured prepare + inject must
+// leave exactly the bits of eager execution in every buffer the stage writes
+// (normalized, low_rank, injection, block_input, and hidden accumulated across passes),
+// for both the prepare and the mixer forms, with one graph node per kernel.
 // ---------------------------------------------------------------------------
-
-// Stage-1 kernel selection under test. Production goes through the validated public
-// wrapper and therefore through whatever flash_next_hyper_decode_route() resolved to.
-enum class RouteUnderTest { Legacy, Fused, Production };
-
-const char* route_name(RouteUnderTest route) {
-    switch (route) {
-        case RouteUnderTest::Legacy: return "legacy";
-        case RouteUnderTest::Fused: return "fused";
-        default: return "production";
-    }
-}
 
 struct DecodeRouteBits {
     // After prepare + inject.
@@ -587,10 +574,10 @@ void download_bits(std::vector<T>& out, const void* device_ptr, std::size_t coun
 
 // Runs prepare + inject `repeats` times (eagerly, or as one captured graph replayed
 // `repeats` times), then the mixer form once on the resulting hidden state. Every output
-// buffer starts from an all-ones sentinel so a region one route writes and the other
+// buffer starts from an all-ones sentinel so a region one run writes and the other
 // skips shows up as a mismatch rather than as matching stale memory.
 DecodeRouteBits run_decode_route(
-    ninfer::DeviceContext& device, RouteUnderTest route,
+    ninfer::DeviceContext& device,
     const ninfer::targets::qwen3_8_flash_next::detail::HyperConnectionWeights& weights,
     const std::vector<std::uint16_t>& h_hidden_bf, const std::vector<std::uint16_t>& h_output_bf,
     int tokens, int repeats, bool via_graph, int* kernel_nodes) {
@@ -630,39 +617,13 @@ DecodeRouteBits run_decode_route(
     };
 
     auto prepare = [&] {
-        switch (route) {
-            case RouteUnderTest::Legacy:
-                flash_next_hyper_prepare_route_launch(hidden_view, weights, scratch, input_view,
-                                                      device.stream,
-                                                      FlashNextHyperDecodeRoute::Legacy);
-                break;
-            case RouteUnderTest::Fused:
-                flash_next_hyper_prepare_route_launch(hidden_view, weights, scratch, input_view,
-                                                      device.stream,
-                                                      FlashNextHyperDecodeRoute::Fused);
-                break;
-            default:
-                flash_next_hyper_prepare(hidden_view, weights, scratch, input_view, device.stream);
-                break;
-        }
+        flash_next_hyper_prepare(hidden_view, weights, scratch, input_view, device.stream);
     };
     auto inject = [&] {
         flash_next_hyper_inject(output_view, scratch.injection, hidden_view, device.stream);
     };
     auto mix = [&] {
-        switch (route) {
-            case RouteUnderTest::Legacy:
-                flash_next_hyper_mix_route_launch(hidden_view, mixer, scratch, input_view,
-                                                  device.stream, FlashNextHyperDecodeRoute::Legacy);
-                break;
-            case RouteUnderTest::Fused:
-                flash_next_hyper_mix_route_launch(hidden_view, mixer, scratch, input_view,
-                                                  device.stream, FlashNextHyperDecodeRoute::Fused);
-                break;
-            default:
-                flash_next_hyper_mix(hidden_view, mixer, scratch, input_view, device.stream);
-                break;
-        }
+        flash_next_hyper_mix(hidden_view, mixer, scratch, input_view, device.stream);
     };
 
     reset_sentinels();
@@ -772,18 +733,10 @@ bool bits_were_written(int tokens, const char* route, const DecodeRouteBits& bit
     return ok;
 }
 
-int test_decode_route_bit_exact(ninfer::DeviceContext& device) {
+int test_decode_graph_replay(ninfer::DeviceContext& device) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
-    const FlashNextHyperDecodeRoute production = flash_next_hyper_decode_route();
-    const RouteUnderTest production_twin = production == FlashNextHyperDecodeRoute::Fused
-                                               ? RouteUnderTest::Fused
-                                               : RouteUnderTest::Legacy;
 
-    std::cout << "\n--- Flash-Next Hyper-Connection decode-route bit-exact gate ---\n";
-    std::cout << "  production route: " << route_name(production_twin)
-              << (production == FlashNextHyperDecodeRoute::Legacy
-                      ? " (NINFER_FLASH_NEXT_HYPER_LEGACY=1)\n"
-                      : " (default)\n");
+    std::cout << "\n--- Flash-Next Hyper-Connection decode-route graph-replay gate ---\n";
 
     // Two regimes: the narrow one keeps the row dot products in the linear part of
     // silu/sigmoid; the wide one saturates them and moves the sum of squares through a
@@ -832,83 +785,41 @@ int test_decode_route_bit_exact(ninfer::DeviceContext& device) {
             .input_mix_up   = bf16_weight(d_up.p, 10'240, 320),
         };
 
-        // Decode shapes: T = batch at one token per sequence, 1..8 covers B in {1,2,4,8}.
+        // Decode shapes: T = batch at one token per sequence (1..8) or one MTP verify
+        // window. Three passes, because hidden accumulates across them.
         for (int tokens = 1; tokens <= 8; ++tokens) {
             std::vector<std::uint16_t> h_hidden(static_cast<std::size_t>(tokens) * 10'240);
             std::vector<std::uint16_t> h_output(static_cast<std::size_t>(tokens) * 2'560);
             fill_bf16(h_hidden, regime.act_span);
             fill_bf16(h_output, regime.act_span);
 
-            const DecodeRouteBits legacy = run_decode_route(
-                device, RouteUnderTest::Legacy, weights, h_hidden, h_output, tokens, 1, false, nullptr);
-            const DecodeRouteBits fused = run_decode_route(
-                device, RouteUnderTest::Fused, weights, h_hidden, h_output, tokens, 1, false, nullptr);
-            const DecodeRouteBits prod = run_decode_route(
-                device, RouteUnderTest::Production, weights, h_hidden, h_output, tokens, 1, false,
-                nullptr);
-
-            bool ok = bits_were_written(tokens, "legacy", legacy);
-            ok      = bits_were_written(tokens, "fused", fused) && ok;
-            ok      = compare_route_bits(tokens, "legacy", legacy, "fused", fused) && ok;
-            ok      = compare_route_bits(tokens, "production", prod,
-                                         route_name(production_twin),
-                                         production_twin == RouteUnderTest::Fused ? fused : legacy) &&
-                 ok;
-            if (!ok) {
-                std::cerr << "FAILED: decode-route bit-exact gate (" << regime.name << ", T="
-                          << tokens << ")\n";
-                return 1;
-            }
-            std::cout << "  [" << regime.name << "] T=" << tokens
-                      << " legacy == fused == production: identical bits in normalized, "
-                         "low_rank, injection, block_input, hidden, mixer outputs\n";
-        }
-
-        // Graph replay: three replays of the captured fused chain against three eager
-        // legacy passes (hidden accumulates across passes, so the iteration count must
-        // match), plus the kernel-node count that is the whole point of the fusion.
-        for (int tokens : {1, 8}) {
-            std::vector<std::uint16_t> h_hidden(static_cast<std::size_t>(tokens) * 10'240);
-            std::vector<std::uint16_t> h_output(static_cast<std::size_t>(tokens) * 2'560);
-            fill_bf16(h_hidden, regime.act_span);
-            fill_bf16(h_output, regime.act_span);
-
             constexpr int kReplays = 3;
-            int fused_nodes        = 0;
-            int legacy_nodes       = 0;
-            const DecodeRouteBits legacy_eager = run_decode_route(
-                device, RouteUnderTest::Legacy, weights, h_hidden, h_output, tokens, kReplays,
-                false, nullptr);
-            const DecodeRouteBits fused_graph = run_decode_route(
-                device, RouteUnderTest::Fused, weights, h_hidden, h_output, tokens, kReplays, true,
-                &fused_nodes);
-            const DecodeRouteBits legacy_graph = run_decode_route(
-                device, RouteUnderTest::Legacy, weights, h_hidden, h_output, tokens, kReplays,
-                true, &legacy_nodes);
+            int graph_nodes        = 0;
+            const DecodeRouteBits eager = run_decode_route(device, weights, h_hidden, h_output,
+                                                           tokens, kReplays, false, nullptr);
+            const DecodeRouteBits graph = run_decode_route(device, weights, h_hidden, h_output,
+                                                           tokens, kReplays, true, &graph_nodes);
 
-            bool ok = compare_route_bits(tokens, "legacy-eager", legacy_eager, "fused-graph",
-                                         fused_graph);
-            ok = compare_route_bits(tokens, "legacy-eager", legacy_eager, "legacy-graph",
-                                    legacy_graph) &&
-                 ok;
-            // prepare + inject: fused = {fused, mix_up, inject}, legacy = {norm, low_rank, mix_up, inject}.
-            if (fused_nodes != 3 || legacy_nodes != 4) {
-                std::cerr << "FAILED: T=" << tokens << " kernel nodes fused=" << fused_nodes
-                          << " (expected 3) legacy=" << legacy_nodes << " (expected 4)\n";
+            bool ok = bits_were_written(tokens, "eager", eager);
+            ok      = compare_route_bits(tokens, "eager", eager, "graph", graph) && ok;
+            // prepare + inject = {group_norm, low_rank, mix_up, inject}.
+            if (graph_nodes != 4) {
+                std::cerr << "FAILED: T=" << tokens << " kernel nodes " << graph_nodes
+                          << " (expected 4)\n";
                 ok = false;
             }
             if (!ok) {
-                std::cerr << "FAILED: decode-route graph replay gate (" << regime.name
+                std::cerr << "FAILED: decode-route graph-replay gate (" << regime.name
                           << ", T=" << tokens << ")\n";
                 return 1;
             }
             std::cout << "  [" << regime.name << "] T=" << tokens << " graph replay x" << kReplays
-                      << ": fused graph == legacy eager == legacy graph; kernel nodes fused="
-                      << fused_nodes << " legacy=" << legacy_nodes << "\n";
+                      << " == eager x" << kReplays << " in every buffer; kernel nodes "
+                      << graph_nodes << "\n";
         }
     }
 
-    std::cout << "PASS: test_decode_route_bit_exact\n";
+    std::cout << "PASS: test_decode_graph_replay\n";
     return 0;
 }
 
@@ -1034,49 +945,6 @@ int test_kernel_timing_benchmark(ninfer::DeviceContext& device) {
         std::cout << "    Eager Chain Stream Total    : " << avg_eager_us << " us\n";
         std::cout << "    CUDA Graph Hardware Replay  : " << avg_graph_us << " us\n";
 
-        // Decode shapes only: the saving of the norm/low-rank fusion is the difference
-        // between the two routes' graph-replayed prepare, 97 launches per token.
-        if (tokens <= 8) {
-            float route_us[2] = {0.0F, 0.0F};
-            const FlashNextHyperDecodeRoute routes[2] = {FlashNextHyperDecodeRoute::Legacy,
-                                                         FlashNextHyperDecodeRoute::Fused};
-            for (int r = 0; r < 2; ++r) {
-                cudaEvent_t route_start, route_stop;
-                CUDA_CHECK(cudaEventCreate(&route_start));
-                CUDA_CHECK(cudaEventCreate(&route_stop));
-                cudaGraph_t route_graph          = nullptr;
-                cudaGraphExec_t route_graph_exec = nullptr;
-                CUDA_CHECK(cudaStreamBeginCapture(device.stream, cudaStreamCaptureModeGlobal));
-                flash_next_hyper_prepare_route_launch(hidden_view, weights, scratch, input_view,
-                                                      device.stream, routes[r]);
-                CUDA_CHECK(cudaStreamEndCapture(device.stream, &route_graph));
-                CUDA_CHECK(cudaGraphInstantiate(&route_graph_exec, route_graph, nullptr, nullptr, 0));
-                for (int i = 0; i < 20; ++i) {
-                    CUDA_CHECK(cudaGraphLaunch(route_graph_exec, device.stream));
-                }
-                CUDA_CHECK(cudaEventRecord(route_start, device.stream));
-                for (int i = 0; i < kIters; ++i) {
-                    CUDA_CHECK(cudaGraphLaunch(route_graph_exec, device.stream));
-                }
-                CUDA_CHECK(cudaEventRecord(route_stop, device.stream));
-                CUDA_CHECK(cudaEventSynchronize(route_stop));
-                float route_ms = 0.0F;
-                CUDA_CHECK(cudaEventElapsedTime(&route_ms, route_start, route_stop));
-                route_us[r] = (route_ms / kIters) * 1000.0F;
-                CUDA_CHECK(cudaGraphExecDestroy(route_graph_exec));
-                CUDA_CHECK(cudaGraphDestroy(route_graph));
-                CUDA_CHECK(cudaEventDestroy(route_start));
-                CUDA_CHECK(cudaEventDestroy(route_stop));
-            }
-            std::cout << "    Prepare graph, legacy route : " << route_us[0]
-                      << " us (group_norm + low_rank + mix_up)\n";
-            std::cout << "    Prepare graph, fused route  : " << route_us[1]
-                      << " us (fused norm/low_rank + mix_up)\n";
-            std::cout << "    Fusion saving per prepare   : " << (route_us[0] - route_us[1])
-                      << " us  (x97 launches/token = "
-                      << (route_us[0] - route_us[1]) * 97.0F / 1000.0F << " ms/token)\n";
-        }
-
         if (tokens == 1) {
             std::cout << "    T=1 25us gate             : " << avg_graph_us << " us vs 25.0 us"
                       << (perf_gates ? " (armed)\n" : " (report-only)\n");
@@ -1086,6 +954,83 @@ int test_kernel_timing_benchmark(ninfer::DeviceContext& device) {
                 return 1;
             }
         }
+    }
+    // Decode shapes: graph-replayed prepare and mixer forms at T = 1..8 over kLayers
+    // distinct weight sets (~210 MB, beyond L2), so every launch fetches its weights from
+    // DRAM as consecutive decoder layers do. Report-only; times are per layer.
+    constexpr int kLayers = 16;
+    std::vector<ninfer::DeviceBuffer> layer_buffers;
+    std::vector<HyperConnectionWeights> layer_weights;
+    std::vector<HyperMixerWeights> layer_mixers;
+    layer_buffers.reserve(kLayers * 4);
+    for (int l = 0; l < kLayers; ++l) {
+        auto& norm_l   = layer_buffers.emplace_back(10'240 * 2);
+        auto& down_l   = layer_buffers.emplace_back(320ULL * 10'240 * 2);
+        auto& up_l     = layer_buffers.emplace_back(10'240ULL * 320 * 2);
+        auto& inject_l = layer_buffers.emplace_back(4ULL * 10'240 * 2);
+        norm_l.fill(0);
+        down_l.fill(0);
+        up_l.fill(0);
+        inject_l.fill(0);
+        layer_weights.push_back(HyperConnectionWeights{
+            .block_inject   = bf16_weight(inject_l.p, 4, 10'240),
+            .norm           = ninfer::Tensor(norm_l.p, ninfer::DType::BF16, {10'240}),
+            .input_mix_down = bf16_weight(down_l.p, 320, 10'240),
+            .input_mix_up   = bf16_weight(up_l.p, 10'240, 320),
+        });
+        layer_mixers.push_back(HyperMixerWeights{
+            .norm           = layer_weights.back().norm,
+            .input_mix_down = layer_weights.back().input_mix_down,
+            .input_mix_up   = layer_weights.back().input_mix_up,
+        });
+    }
+    std::cout << "  Decode route, graph replay over " << kLayers
+              << " DRAM-resident weight sets (us per layer):\n";
+    for (int tokens = 1; tokens <= 8; ++tokens) {
+        ninfer::DeviceBuffer d_hidden(static_cast<std::size_t>(tokens) * 10'240 * 2);
+        ninfer::DeviceBuffer d_block_input(static_cast<std::size_t>(tokens) * 2'560 * 2);
+        d_hidden.fill(0);
+        d_block_input.fill(0);
+        ninfer::WorkspaceArena workspace(flash_next_hyper_workspace_capacity_bytes(1, tokens));
+        auto scope                      = workspace.scope();
+        FlashNextHyperWorkspace scratch = allocate_flash_next_hyper_workspace(workspace, tokens);
+        ninfer::Tensor hidden_view(d_hidden.p, ninfer::DType::BF16, {10'240, tokens});
+        ninfer::Tensor input_view(d_block_input.p, ninfer::DType::BF16, {2'560, tokens});
+
+        auto time_layers = [&](auto&& layer) {
+            constexpr int kIters       = 100;
+            cudaGraph_t graph          = nullptr;
+            cudaGraphExec_t graph_exec = nullptr;
+            CUDA_CHECK(cudaStreamBeginCapture(device.stream, cudaStreamCaptureModeGlobal));
+            for (int l = 0; l < kLayers; ++l) { layer(l); }
+            CUDA_CHECK(cudaStreamEndCapture(device.stream, &graph));
+            CUDA_CHECK(cudaGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0));
+            for (int i = 0; i < 10; ++i) { CUDA_CHECK(cudaGraphLaunch(graph_exec, device.stream)); }
+            cudaEvent_t start_event, stop_event;
+            CUDA_CHECK(cudaEventCreate(&start_event));
+            CUDA_CHECK(cudaEventCreate(&stop_event));
+            CUDA_CHECK(cudaEventRecord(start_event, device.stream));
+            for (int i = 0; i < kIters; ++i) { CUDA_CHECK(cudaGraphLaunch(graph_exec, device.stream)); }
+            CUDA_CHECK(cudaEventRecord(stop_event, device.stream));
+            CUDA_CHECK(cudaEventSynchronize(stop_event));
+            float ms = 0.0F;
+            CUDA_CHECK(cudaEventElapsedTime(&ms, start_event, stop_event));
+            CUDA_CHECK(cudaEventDestroy(start_event));
+            CUDA_CHECK(cudaEventDestroy(stop_event));
+            CUDA_CHECK(cudaGraphExecDestroy(graph_exec));
+            CUDA_CHECK(cudaGraphDestroy(graph));
+            return (ms / kIters) * 1000.0F / kLayers;
+        };
+
+        const float prepare_us = time_layers([&](int l) {
+            flash_next_hyper_prepare(hidden_view, layer_weights[l], scratch, input_view,
+                                     device.stream);
+        });
+        const float mixer_us = time_layers([&](int l) {
+            flash_next_hyper_mix(hidden_view, layer_mixers[l], scratch, input_view, device.stream);
+        });
+        std::cout << "    T=" << tokens << "  prepare " << prepare_us << " us  mixer " << mixer_us
+                  << " us\n";
     }
     std::cout << "===========================================================\n";
     return 0;
@@ -1106,7 +1051,7 @@ int main() {
 
     if (test_basic_unit_injection(device) != 0) { return 1; }
     if (test_synthetic_stage_equivalence(device) != 0) { return 1; }
-    if (test_decode_route_bit_exact(device) != 0) { return 1; }
+    if (test_decode_graph_replay(device) != 0) { return 1; }
     if (test_kernel_timing_benchmark(device) != 0) { return 1; }
 
     std::cout << "OK Flash-Next Hyper Connection\n";
