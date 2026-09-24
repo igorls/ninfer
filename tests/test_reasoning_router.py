@@ -1,3 +1,4 @@
+import argparse
 import json
 from pathlib import Path
 import sys
@@ -77,6 +78,45 @@ class RouterDataTests(unittest.TestCase):
             router.validate_replay(parent, contract, {"old": "first", "held-out": "changed"}, {"old"})
         with self.assertRaisesRegex(ValueError, "different feature/training contract"):
             router.validate_replay(parent, {"artifact_sha256": "b" * 64}, parent["observation_digests"], {"old"})
+
+    def test_collection_profile_variants_load_but_never_mix(self):
+        for suffix in (":c8", ":derive2048", ":c4:derive2048"):
+            self.assertEqual(len(self.load([observation(profile=router.PROFILE + suffix)])), 1)
+        with self.assertRaisesRegex(ValueError, "incompatible collection"):
+            self.load([observation(profile=router.PROFILE + ":c9")])
+        with self.assertRaisesRegex(ValueError, "one collection profile"):
+            self.load([observation("a"), observation("b", profile=router.PROFILE + ":c8")])
+
+    def test_analyze_counts_outcomes_identity_and_agreement(self):
+        capped = observation("capped")
+        capped["actions"][0]["content"] = "B"
+        for action, applied in zip(capped["actions"][1:], (True, False)):
+            action["thinking"] = {"cap_applied": applied}
+        capped["actions"][1]["content"] = "B"
+        uncapped = observation("uncapped")
+        for action in uncapped["actions"][1:]:
+            action.update({"thinking": {"cap_applied": False}, "reasoning": "r", "finish_reason": 3,
+                           "output_tokens": 200})
+        derived = observation("derived", profile=router.PROFILE + ":derive2048")
+        derived["actions"][2]["derived_from_budget"] = 1024
+        with tempfile.TemporaryDirectory() as directory:
+            data, other, out = (Path(directory) / name for name in ("a.jsonl", "b.jsonl", "r.json"))
+            data.write_text("\n".join(json.dumps(r) for r in (capped, uncapped, derived)))
+            flipped = json.loads(json.dumps(uncapped))
+            flipped["actions"][1]["content"] = "B"
+            other.write_text(json.dumps(flipped))
+            router.analyze(argparse.Namespace(data=[data], blueprints=None, against=other, out=out))
+            report = json.loads(out.read_text())
+        entry = report["strata"]["arithmetic"]
+        self.assertEqual(entry["n"], 3)
+        self.assertEqual(entry["2048_beats_1024"], 1)
+        self.assertEqual(entry["reasoning_helps"], 1)
+        self.assertEqual(entry["derived_2048"], 1)
+        self.assertEqual(entry["cap_applied"], [1, 0])
+        self.assertEqual(report["budget_identity_when_1024_uncapped"], {"compared": 1, "identical": 1})
+        against = report["against"]
+        self.assertEqual((against["shared_ids"], against["features_bitwise_equal"]), (1, 1))
+        self.assertEqual(against["label_agreement"], [1, 0, 1])
 
     def test_same_path_different_weights_cannot_mix(self):
         a, b = observation("a"), observation("b")

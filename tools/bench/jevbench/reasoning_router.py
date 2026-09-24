@@ -11,11 +11,16 @@ import hashlib
 import json
 import math
 import re
+import statistics
 import subprocess
 from pathlib import Path
 
 BUDGETS = [0, 1024, 2048]
 PROFILE = "qwen3.8-27b/nvfp4:fp8:chunk1024:cache-off:spec-none:medium:frontier-split"
+# The collector appends ":cN" when N rows decode concurrently (labels depend on batch
+# composition) and ":derive2048" when an uncapped 1024 action stands in for the 2048 one.
+# A training set always holds exactly one profile.
+PROFILE_PATTERN = re.compile(re.escape(PROFILE) + r"(?::c[2-8])?(?::derive2048)?")
 
 
 def digest(value):
@@ -67,8 +72,12 @@ def collect(args):
         artifact_digest = hashlib.file_digest(stream, "sha256").hexdigest()
     if version() != before:
         raise ValueError("artifact changed while hashing")
-    subprocess.run([str(args.collector.resolve()), str(args.artifact.resolve()),
-                    str(args.requests.resolve()), str(args.out.resolve()), artifact_digest], check=True)
+    command = [str(args.collector.resolve()), str(args.artifact.resolve()),
+               str(args.requests.resolve()), str(args.out.resolve()), artifact_digest,
+               "--concurrency", str(args.concurrency)]
+    if args.derive_2048:
+        command.append("--derive-2048")
+    subprocess.run(command, check=True)
     if version() != before:
         raise ValueError("artifact changed during collection; discard this collection output")
 
@@ -89,14 +98,15 @@ def labels(row):
 
 
 def load_rows(paths, holdout_family):
-    rows, seen, groups, prompts, artifacts = [], set(), {}, {}, set()
+    rows, seen, groups, prompts, artifacts, profiles = [], set(), {}, {}, set(), set()
     for path in paths:
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             row = json.loads(line)
-            if row["schema"] != 1 or row["profile"] != PROFILE:
+            if row["schema"] != 1 or not PROFILE_PATTERN.fullmatch(row["profile"]):
                 raise ValueError("incompatible collection schema/profile")
+            profiles.add(row["profile"])
             item = row["input"]
             if item["id"] in seen:
                 raise ValueError("duplicate observation: pass each accumulated file only once")
@@ -117,6 +127,8 @@ def load_rows(paths, holdout_family):
             rows.append(row)
     if len(artifacts) != 1:
         raise ValueError("one explicitly pinned backbone artifact is required")
+    if len(profiles) != 1:
+        raise ValueError("incompatible collection schema/profile: one collection profile per training set")
     return rows
 
 
@@ -152,7 +164,7 @@ def train(args):
     net = (torch.nn.Linear(5120, 6) if args.hidden == 0 else
            torch.nn.Sequential(torch.nn.Linear(5120, args.hidden), torch.nn.Tanh(),
                                torch.nn.Linear(args.hidden, 6))).to(device)
-    contract = {"schema": 1, "profile": PROFILE, "artifact_sha256": rows[0]["artifact_sha256"],
+    contract = {"schema": 1, "profile": rows[0]["profile"], "artifact_sha256": rows[0]["artifact_sha256"],
                 "budgets": BUDGETS, "feature": "pre-think-final-norm-bf16-as-f32",
                 "normalization": "per-row-rms", "hidden": args.hidden,
                 "holdout_family": args.holdout_family, "cost_weight": args.cost_weight,
@@ -244,6 +256,114 @@ def train(args):
     print(json.dumps(report, indent=2))
 
 
+def read_outcomes(path):
+    rows = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            row = json.loads(line)
+            if row["input"]["id"] in rows:
+                raise ValueError(f"duplicate observation in {path}")
+            rows[row["input"]["id"]] = row
+    return rows
+
+
+def quantiles(values):
+    if not values:
+        return None
+    ordered = sorted(values)
+    return {"median": statistics.median(ordered), "p90": ordered[int(0.9 * (len(ordered) - 1))],
+            "max": ordered[-1]}
+
+
+def analyze(args):
+    """Collection diagnostics: label yield by stratum, cap use, budget identity, decode rate,
+    and (with --against) feature and label agreement between two collections of the same ids."""
+    rows = {}
+    for path in args.data:
+        for key, row in read_outcomes(path).items():
+            if key in rows:
+                raise ValueError("duplicate observation across --data files")
+            rows[key] = row
+    strata = {}
+    if args.blueprints:
+        for line in args.blueprints.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                blueprint = json.loads(line)
+                strata[blueprint["id"]] = f"{blueprint['kind']}-{blueprint['depth']}"
+
+    def stratum(row):
+        blueprint = row["input"].get("provenance", {}).get("blueprint")
+        return strata.get(blueprint, row["input"]["family"])
+
+    table, identity, rate_points = {}, {"compared": 0, "identical": 0}, []
+    for row in rows.values():
+        correct, _ = labels(row)
+        actions = row["actions"]
+        entry = table.setdefault(stratum(row), {"n": 0, "correct": [0, 0, 0], "reasoning_helps": 0,
+                                                "reasoning_harms": 0, "2048_beats_1024": 0,
+                                                "1024_beats_2048": 0, "all_fail": 0, "cap_applied": [0, 0],
+                                                "derived_2048": 0, "reasoning_tokens": []})
+        entry["n"] += 1
+        entry["correct"] = [a + b for a, b in zip(entry["correct"], correct)]
+        entry["reasoning_helps"] += int(correct[0] == 0 and max(correct[1:]) == 1)
+        entry["reasoning_harms"] += int(correct[0] == 1 and min(correct[1:]) == 0)
+        entry["2048_beats_1024"] += int(correct[2] > correct[1])
+        entry["1024_beats_2048"] += int(correct[1] > correct[2])
+        entry["all_fail"] += int(max(correct) == 0)
+        for j in (1, 2):
+            entry["cap_applied"][j - 1] += int(actions[j].get("thinking", {}).get("cap_applied", False))
+            entry["reasoning_tokens"].append(actions[j].get("reasoning_tokens", 0))
+        derived = "derived_from_budget" in actions[2]
+        entry["derived_2048"] += int(derived)
+        uncapped = not actions[1].get("thinking", {}).get("cap_applied", False) and actions[1]["stopped"]
+        if uncapped and not derived and "thinking" in actions[1]:
+            identity["compared"] += 1
+            identity["identical"] += int(all(actions[1][k] == actions[2][k] for k in
+                                             ("content", "reasoning", "output_tokens", "finish_reason")))
+        for action in actions[1:]:
+            if "derived_from_budget" not in action and action.get("seconds"):
+                rate_points.append((action["output_tokens"], action["seconds"]))
+    for entry in table.values():
+        n = entry["n"]
+        entry["accuracy"] = [round(c / n, 3) for c in entry["correct"]]
+        entry["reasoning_tokens"] = quantiles(entry["reasoning_tokens"])
+    rate = None
+    if len(rate_points) >= 2:
+        mean_t = statistics.fmean(t for t, _ in rate_points)
+        mean_s = statistics.fmean(s for _, s in rate_points)
+        slope = (sum((t - mean_t) * (s - mean_s) for t, s in rate_points) /
+                 max(1e-9, sum((t - mean_t) ** 2 for t, _ in rate_points)))
+        rate = {"decode_tokens_per_second": round(1 / slope, 2) if slope > 0 else None,
+                "intercept_seconds": round(mean_s - slope * mean_t, 4), "actions": len(rate_points),
+                "note": "OLS of action seconds on output tokens; meaningful only for concurrency 1"}
+    report = {"rows": len(rows), "profiles": sorted({str(r.get("profile")) for r in rows.values()}),
+              "artifacts": sorted({str(r.get("artifact_sha256")) for r in rows.values()}),
+              "strata": dict(sorted(table.items())), "budget_identity_when_1024_uncapped": identity,
+              "decode_rate": rate}
+    if args.against:
+        other = read_outcomes(args.against)
+        shared = sorted(set(rows) & set(other))
+        agreement = {"shared_ids": len(shared), "features_bitwise_equal": 0, "max_abs_feature_diff": 0.0,
+                     "label_agreement": [0, 0, 0], "content_equal": [0, 0, 0], "disagreements": []}
+        for key in shared:
+            a, b = rows[key], other[key]
+            diff = max(abs(x - y) for x, y in zip(a["features"], b["features"]))
+            agreement["features_bitwise_equal"] += int(a["features"] == b["features"])
+            agreement["max_abs_feature_diff"] = max(agreement["max_abs_feature_diff"], diff)
+            ca, cb = labels(a)[0], labels(b)[0]
+            for j in range(3):
+                agreement["label_agreement"][j] += int(ca[j] == cb[j])
+                agreement["content_equal"][j] += int(a["actions"][j]["content"] == b["actions"][j]["content"] and
+                                                     a["actions"][j]["output_tokens"] == b["actions"][j]["output_tokens"])
+            if ca != cb:
+                agreement["disagreements"].append({"id": key, "stratum": stratum(a), "data": ca, "against": cb})
+        report["against"] = {"path": str(args.against), **agreement}
+    text = json.dumps(report, indent=2)
+    if args.out:
+        args.out.write_text(text + "\n", encoding="utf-8")
+    print(text)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -257,6 +377,15 @@ def main():
     c.add_argument("--collector", type=Path, required=True)
     c.add_argument("--requests", type=Path, required=True)
     c.add_argument("--out", type=Path, required=True)
+    c.add_argument("--concurrency", type=int, choices=range(1, 9), default=1,
+                   help="rows decoded concurrently; >1 marks labels as a non-repeatable :cN profile")
+    c.add_argument("--derive-2048", action="store_true",
+                   help="reuse an uncapped 1024 action as the 2048 action (profile :derive2048)")
+    a = commands.add_parser("analyze")
+    a.add_argument("--data", type=Path, nargs="+", required=True)
+    a.add_argument("--blueprints", type=Path, help="synthetic_corpus blueprints.jsonl for kind-depth strata")
+    a.add_argument("--against", type=Path, help="second collection of the same ids to compare")
+    a.add_argument("--out", type=Path)
     t = commands.add_parser("train")
     t.add_argument("--data", type=Path, nargs="+", required=True)
     t.add_argument("--previous", type=Path)
@@ -274,6 +403,8 @@ def main():
         prepare(args)
     elif args.command == "collect":
         collect(args)
+    elif args.command == "analyze":
+        analyze(args)
     else:
         if args.epochs < 1 or args.cost_weight < 0 or args.learning_rate <= 0:
             parser.error("invalid training hyperparameters")
