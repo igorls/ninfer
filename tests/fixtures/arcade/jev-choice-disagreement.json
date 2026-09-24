@@ -1,0 +1,17 @@
+{
+  "model": "jev-1.13.0",
+  "answers": {
+    "move": {
+      "type": "choice",
+      "choice": "D",
+      "confidence": 0.07,
+      "probabilities": {
+        "C": 0.12, "J": 0.02, "P": 0.05, "O": 0.13,
+        "N": 0.09, "I": 0.05, "G": 0.04, "E": 0.06,
+        "K": 0.02, "B": 0.06, "L": 0.02, "H": 0.02,
+        "M": 0.06, "A": 0.09, "D": 0.12, "F": 0.05
+      }
+    }
+  },
+  "usage": { "input_tokens": 1033, "output_tokens": 129 }
+}

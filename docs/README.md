@@ -9,6 +9,7 @@ run the CLI or HTTP server.
 |---|---|
 | [CLI](cli.md) | text, chat-history, image/video input, output streams, sampling, MTP, and common runtime options |
 | [HTTP serving](serving.md) | OpenAI Responses/Chat Completions, Anthropic Messages, TypeSafe System One, state, streaming, token counting, authentication, and tool calls |
+| [Decision arcade](decision-arcade.md) | Tetris, chess, cooperative Kitchen Rush and Beacon Runner vision control, with reproducible decision evaluation |
 | [Windows app](windows-app.md) | install the standalone Supervisor, launch at sign-in, update, and uninstall |
 | [Performance](performance.md) | RTX 5090 single-request and concurrent-decode results, MTP/DFlash measurements, and reproduction commands |
 | [Perplexity](perplexity.md) | fixed-corpus and custom-text causal perplexity, comparison rules, progress, and reports |
