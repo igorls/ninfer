@@ -271,6 +271,7 @@ RequestBasePlan ProgramImplCore::plan_request(const PreparedPromptData& prompt,
         }
     }
     base->logprobs                       = options.logprobs;
+    base->reasoning_feature_position = options.reasoning_feature_position;
     base->allow_prefix_reuse             = options.allow_prefix_reuse;
     const bool reads_prefix_cache =
         options.allow_prefix_reuse && prompt.identity.reusable && context_cache.enabled;
@@ -281,7 +282,10 @@ RequestBasePlan ProgramImplCore::plan_request(const PreparedPromptData& prompt,
     // Prefill splits at the prompt's rewrite execution frontiers so that a later turn resumed from
     // this request's typed rewrite checkpoint and a root run share one GDN decomposition. A
     // read-only request never becomes a resume source, so its suffix runs unsplit.
+    const std::array<std::uint32_t, 1> feature_frontier{
+        options.reasoning_feature_position.value_or(0) + 1U};
     const std::span<const std::uint32_t> execution_frontiers =
+        options.reasoning_feature_position ? std::span<const std::uint32_t>(feature_frontier) :
         base->summary.publish_continuation
             ? std::span<const std::uint32_t>(prompt.identity.rewrite_execution_frontiers)
             : std::span<const std::uint32_t>{};
@@ -484,6 +488,7 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
     plan->sampling                    = base.sampling;
     plan->output_constraint           = base.output_constraint;
     plan->logprobs                    = base.logprobs;
+    plan->reasoning_feature_position = base.reasoning_feature_position;
     plan->text_kv_page_entitlement    = base.text_kv_page_entitlement;
     plan->backend_kv_page_entitlement = base.backend_kv_page_entitlement;
     plan->root_rebuild_work           = base.root_rebuild_work;

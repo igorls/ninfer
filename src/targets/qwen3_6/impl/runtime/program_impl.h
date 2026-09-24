@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <exception>
 #include <iterator>
@@ -9903,6 +9904,7 @@ void ProgramImplCore::start_sequence(std::uint32_t lane, SequenceState& sequence
             ? std::make_unique<runtime::OutputConstraintState>(request_plan.output_constraint, staged.prompt.starts_in_reasoning)
             : nullptr;
         request.logprobs = request_plan.logprobs;
+        request.reasoning_feature_position = request_plan.reasoning_feature_position;
         request.round_logprobs.clear();
         install_sampling(sequence, request, request_plan.sampling, staged.prompt.token_ids);
         install_prompt_readout(sequence, request, staged.prompt.token_ids);
@@ -11394,6 +11396,13 @@ void ProgramImplCore::install_prompt_readout(const SequenceState& sequence,
                                              std::span<const TokenId> prompt) {
     request.prompt_logprobs.clear();
     request.prompt_readout = schedule::PromptReadout{};
+    request.reasoning_features.clear();
+    request.reasoning_features_bf16.clear();
+    if (request.reasoning_feature_position) {
+        request.reasoning_features_bf16.resize(TextConfig::hidden);
+        request.prompt_readout.feature_position = request.reasoning_feature_position;
+        request.prompt_readout.feature_host = request.reasoning_features_bf16.data();
+    }
     const auto& positions  = request.logprobs.prompt_positions;
     if (positions.empty()) { return; }
     if (!request.logprobs_device_readout || positions.size() > kMaximumPromptReadouts ||
@@ -11430,6 +11439,10 @@ void ProgramImplCore::collect_prompt_readout(const SequenceState& sequence,
     (void)sequence;
     request.prompt_logprobs.clear();
     const schedule::PromptReadout& readout = request.prompt_readout;
+    request.reasoning_features.clear();
+    for (const auto value : request.reasoning_features_bf16) {
+        request.reasoning_features.push_back(std::bit_cast<float>(static_cast<std::uint32_t>(value) << 16U));
+    }
     if (readout.positions.empty()) { return; }
     const runtime::TokenLogprobReadoutLayout layout{.columns = 1, .candidates = readout.candidates};
     for (std::size_t i = 0; i < readout.positions.size(); ++i) {
@@ -11443,6 +11456,11 @@ void ProgramImplCore::collect_prompt_readout(const SequenceState& sequence,
 std::span<const TokenLogprobs> ProgramImplCore::prompt_token_logprobs(std::uint32_t lane) const {
     if (lane >= max_concurrency) { throw std::out_of_range("prompt logprobs lane is out of range"); }
     return requests[lane].prompt_logprobs;
+}
+
+std::span<const float> ProgramImplCore::reasoning_features(std::uint32_t lane) const {
+    if (lane >= max_concurrency) { throw std::out_of_range("reasoning feature lane is out of range"); }
+    return requests[lane].reasoning_features;
 }
 
 void ProgramImplCore::install_sampling(SequenceState& sequence, RequestControl& request,
@@ -11661,7 +11679,7 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
             token_logits_capture(request)};
         const schedule::FirstTokenReadout readout = first_token_readout(sequence, request);
         if (request.logprobs_device_readout) { schedule_state.first_token_readout = &readout; }
-        if (!request.prompt_readout.positions.empty()) {
+        if (!request.prompt_readout.positions.empty() || request.prompt_readout.feature_position) {
             schedule_state.prompt_readout = &request.prompt_readout;
         }
 
@@ -11724,6 +11742,12 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                               staged.capture_groups[staged.next_capture].frontier)
                         : std::nullopt;
                 std::optional<std::uint32_t> split_frontier = capture_frontier;
+                if (request.reasoning_feature_position) {
+                    const auto frontier = *request.reasoning_feature_position + 1U;
+                    if (frontier > staged.cursor && (!split_frontier || frontier < *split_frontier)) {
+                        split_frontier = frontier;
+                    }
+                }
                 // A publishing request splits at its rewrite execution frontiers so a later turn
                 // resumed from its typed rewrite checkpoint shares its GDN decomposition. A
                 // read-only request is never a resume source and runs its suffix unsplit.

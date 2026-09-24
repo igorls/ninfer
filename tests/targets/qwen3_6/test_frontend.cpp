@@ -964,6 +964,11 @@ int test_rewrite_checkpoint_trace() {
     const fi::RenderedChat turn1 =
         render_chat({chat_message(ninfer::ChatRole::User, "question")});
     const std::size_t turn1_header = turn1.text.rfind(assistant_header);
+    if (!turn1.reasoning_boundary ||
+        *turn1.reasoning_boundary != turn1_header + assistant_header.size() ||
+        turn1.text.substr(*turn1.reasoning_boundary, 8) != "<think>\n") {
+        return check(false, "reasoning feature boundary must precede the thinking opener");
+    }
     int failures =
         check(turn1_header != std::string::npos && turn1.rewrite_checkpoint &&
                   turn1.rewrite_checkpoint->kind ==

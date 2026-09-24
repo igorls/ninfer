@@ -358,6 +358,11 @@ std::span<const TokenLogprobs> Program<Variant>::prompt_token_logprobs(runtime::
 }
 
 template <>
+std::span<const float> Program<Variant>::reasoning_features(runtime::LaneId lane) const {
+    return impl_->reasoning_features(lane.value);
+}
+
+template <>
 std::vector<float> Program<Variant>::causal_score(PreparedPrompt&& prompt,
                                                   std::uint32_t first_target) {
     return impl_->causal_score(PreparedPromptAccess::take(std::move(prompt)), first_target);

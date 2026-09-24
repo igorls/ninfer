@@ -186,6 +186,7 @@ struct RequestBasePlanImpl<NINFER_QWEN36_VARIANT> {
     ops::SamplingConfig sampling;
     std::shared_ptr<const runtime::CompiledOutputConstraint> output_constraint;
     TokenLogprobOptions logprobs;
+    std::optional<std::uint32_t> reasoning_feature_position;
     std::uint32_t text_kv_page_entitlement    = 0;
     std::uint32_t backend_kv_page_entitlement = 0;
     std::shared_ptr<const qwen3_6::VisionControlPlan> vision_control_plan;
@@ -255,6 +256,7 @@ struct AdmissionCandidateImpl<NINFER_QWEN36_VARIANT> : ResourceCandidateState {
     ops::SamplingConfig sampling;
     std::shared_ptr<const runtime::CompiledOutputConstraint> output_constraint;
     TokenLogprobOptions logprobs;
+    std::optional<std::uint32_t> reasoning_feature_position;
     std::uint32_t text_kv_page_entitlement    = 0;
     std::uint32_t backend_kv_page_entitlement = 0;
     runtime::LaneId destination{};
@@ -480,6 +482,7 @@ struct RequestControl {
     std::vector<std::int32_t> prompt_presence_host;
     std::unique_ptr<runtime::OutputConstraintState> output_constraint;
     TokenLogprobOptions logprobs;
+    std::optional<std::uint32_t> reasoning_feature_position;
     // The device readout serves a request without top alternatives: K+2 floats per position
     // instead of a vocabulary column, and speculative rounds stay enabled for it.
     bool logprobs_device_readout = false;
@@ -492,6 +495,8 @@ struct RequestControl {
     std::vector<TokenLogprobs> prompt_logprobs;
     std::vector<TokenId> prompt_readout_next_ids;
     schedule::PromptReadout prompt_readout;
+    std::vector<std::uint16_t> reasoning_features_bf16;
+    std::vector<float> reasoning_features;
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
     detail::PhysicalResources active_resources;
@@ -555,6 +560,7 @@ public:
                                                const runtime::ResolvedExecutionOptions& options);
     [[nodiscard]] std::span<const TokenLogprobs> round_token_logprobs(std::uint32_t lane) const;
     [[nodiscard]] std::span<const TokenLogprobs> prompt_token_logprobs(std::uint32_t lane) const;
+    [[nodiscard]] std::span<const float> reasoning_features(std::uint32_t lane) const;
     [[nodiscard]] std::vector<float> causal_score(PreparedPromptData&& prompt,
                                                   std::uint32_t first_target);
     [[nodiscard]] std::optional<AdmissionCandidate> inspect_admission(

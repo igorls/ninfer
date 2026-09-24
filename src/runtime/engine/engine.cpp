@@ -467,6 +467,19 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
     }
     if (prompt.impl_ == nullptr) { throw std::invalid_argument("PreparedPrompt is empty"); }
 
+    const bool capture_features = options.execution.capture_reasoning_features;
+    if (capture_features) {
+        const auto& summary = prompt.impl_->summary;
+        const bool supported = std::visit([](const auto& target) {
+            return requires { target->program->reasoning_features(runtime::LaneId{}); };
+        }, impl_->active);
+        if (!supported || summary.has_media || !summary.reasoning_frontier ||
+            *summary.reasoning_frontier == 0 || options.execution.requested_output_tokens == 0) {
+            throw std::invalid_argument("reasoning features require a supported text new-assistant prompt and positive output budget");
+        }
+        options.execution.allow_prefix_reuse = false;
+        options.execution.allow_prefix_publication = false;
+    }
     const StructuredOutputOptions structured_output = options.execution.structured_output;
     const auto required_tool_names = options.execution.required_tool_names;
     if (!required_tool_names.empty() &&
@@ -496,6 +509,9 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
         impl_->active);
 
     const PromptSummary prompt_summary = prompt.impl_->summary;
+    if (capture_features) {
+        resolved_options.execution.reasoning_feature_position = *prompt_summary.reasoning_frontier - 1U;
+    }
     // Validated here, before the request reaches a Program: inside admission an invalid
     // argument is an executor failure.
     if (!resolved_options.execution.logprobs.prompt_positions.empty() &&

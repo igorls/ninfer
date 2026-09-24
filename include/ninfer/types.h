@@ -321,6 +321,9 @@ struct TokenLogprobs {
 struct ExecutionOptions {
     SamplingOverrides sampling;
     TokenLogprobOptions logprobs;
+    // Training readout: final-normalized hidden state immediately before the new assistant
+    // thinking opener. Requires a text NewAssistantTurn and disables prefix reuse/publication.
+    bool capture_reasoning_features = false;
     std::uint32_t requested_output_tokens = 0;
     bool allow_prefix_reuse               = true;
     // With allow_prefix_reuse, false makes the request read-only in the context cache: it may
@@ -554,6 +557,7 @@ private:
 struct PromptSummary {
     std::uint32_t prompt_tokens = 0;
     bool has_media              = false;
+    std::optional<std::uint32_t> reasoning_frontier;
 };
 
 struct PromptPreparationStats {
@@ -800,6 +804,9 @@ struct GenerationResult {
     std::vector<TokenLogprobs> token_logprobs;
     // One entry per TokenLogprobOptions::prompt_positions element, in that order.
     std::vector<TokenLogprobs> prompt_logprobs;
+    // Owning FP32 representation of the model's BF16 final-normalized prompt feature row.
+    // Empty unless capture_reasoning_features was requested and prefill completed.
+    std::vector<float> reasoning_features;
     std::string content;
     std::string reasoning;
     std::vector<GeneratedToolCall> tool_calls;

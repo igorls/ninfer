@@ -828,6 +828,7 @@ private:
         result.generated_token_ids     = std::move(request->generated);
         result.token_logprobs          = std::move(request->token_logprobs);
         result.prompt_logprobs         = std::move(request->prompt_logprobs);
+        result.reasoning_features = std::move(request->reasoning_features);
         result.content                 = std::move(request->content);
         result.reasoning               = std::move(request->reasoning);
         result.tool_calls              = request->output.take_tool_calls();
@@ -1458,6 +1459,13 @@ private:
                     throw std::logic_error("Program prefill has no prompt logprob readout");
                 }
                 request->prompt_logprobs.assign(readout.begin(), readout.end());
+            }
+        }
+        if constexpr (requires { instance_.program->reasoning_features(LaneId{lane}); }) {
+            if (request->options.execution.reasoning_feature_position) {
+                const auto features = instance_.program->reasoning_features(LaneId{lane});
+                if (features.empty()) { throw std::logic_error("Program prefill has no reasoning features"); }
+                request->reasoning_features.assign(features.begin(), features.end());
             }
         }
         const std::array<std::uint32_t, 1> lanes{lane};

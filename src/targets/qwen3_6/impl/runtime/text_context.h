@@ -137,6 +137,8 @@ struct FirstTokenReadout {
 // through the output head a tile at a time, and each column resolved by ops::candidate_logprobs
 // into its own block of (2 + 2 * candidates) floats at `readout` / `host`.
 struct PromptReadout {
+    std::optional<std::uint32_t> feature_position;
+    std::uint16_t* feature_host = nullptr; // owning request buffer, synchronized before collection
     std::span<const std::uint32_t> positions; // ascending absolute prompt positions
     const std::int32_t* next_ids = nullptr;   // device I32 [positions.size()]: token p+1 of each
     std::optional<Tensor> candidate_ids;      // I32 [candidates]

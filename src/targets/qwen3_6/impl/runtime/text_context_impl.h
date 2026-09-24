@@ -246,6 +246,13 @@ TextContext::~TextContext() = default;
 void TextContext::run_prompt_readout(const Tensor& normed, std::int64_t begin,
                                               std::int32_t length, cudaStream_t s) {
     const PromptReadout& readout = *prompt_readout_;
+    if (readout.feature_position && *readout.feature_position >= begin &&
+        *readout.feature_position < begin + length) {
+        const auto local = static_cast<std::int32_t>(*readout.feature_position - begin);
+        CUDA_CHECK(cudaMemcpyAsync(readout.feature_host, normed.slice(1, local, 1).data,
+                                   static_cast<std::size_t>(kCfg.hidden) * sizeof(std::uint16_t),
+                                   cudaMemcpyDeviceToHost, s));
+    }
     const auto lo = std::lower_bound(readout.positions.begin(), readout.positions.end(),
                                      static_cast<std::uint32_t>(begin));
     const auto hi = std::lower_bound(lo, readout.positions.end(),

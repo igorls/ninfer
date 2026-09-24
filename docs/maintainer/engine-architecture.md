@@ -214,6 +214,24 @@ Free -> Materializing -> Active -> TerminalPending -> Free
 Streaming request 在 admission 选择提交后、任何输出 delta 前发布一次 `GenerationStart`；其中的
 prompt token 和 reused-prefix token 是已提交的资源选择事实，不等待 prefill 完成。
 
+#### Reasoning feature collection
+
+`ExecutionOptions::capture_reasoning_features` is an opt-in training readout on the Qwen3.6
+family route. It accepts a text new-assistant prompt with a positive output budget. The Frontend
+records `PromptSummary::reasoning_frontier` immediately after the assistant header, before the
+`<think>` opener. Raw-token prompts, assistant continuation and media requests are rejected for
+this readout. It is not an HTTP extension or an adaptive serving policy.
+
+Engine disables prefix reuse/publication for these requests. Request planning and Program prefill
+both split at that frontier, so features are computed before the action-dependent suffix changes
+the prefill decomposition. Program copies the final-normalized BF16 row into request-owned host
+storage, synchronizes through the normal prefill completion, and expands it exactly to FP32.
+Engine copies the owning vector into `GenerationResult::reasoning_features` before the lane can
+be reused. The result remains empty when collection was not requested or prefill did not complete.
+No new device allocation or numerical Op is introduced. Callers collecting paired modes must
+use identical leading instructions; the Qwen3.8 collector uses Medium reasoning effort, which
+adds no effort preamble, and verifies exact equality across all three actions.
+
 Control lane、StateImage slot、KV execution row 和 decode batch row 是不同身份：
 
 - lane 是 Engine 的长期 active request 位置；

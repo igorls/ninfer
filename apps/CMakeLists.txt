@@ -50,3 +50,7 @@ target_include_directories(ninfer-perplexity PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party
   ${CMAKE_CURRENT_SOURCE_DIR}/perplexity)
 target_link_libraries(ninfer-perplexity PRIVATE ninfer_engine ninfer_product_logging)
+
+add_executable(ninfer-reasoning-collect reasoning-collect/main.cpp)
+target_include_directories(ninfer-reasoning-collect PRIVATE ${PROJECT_SOURCE_DIR}/third_party)
+target_link_libraries(ninfer-reasoning-collect PRIVATE ninfer_engine)

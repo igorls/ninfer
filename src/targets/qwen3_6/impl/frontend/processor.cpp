@@ -582,6 +582,9 @@ RenderedChat expand_placeholders(RenderedChat rendered, const std::vector<Vision
         rendered.rewrite_checkpoint->offset =
             map_boundary(rendered.rewrite_checkpoint->offset, "rewrite checkpoint");
     }
+    if (rendered.reasoning_boundary) {
+        rendered.reasoning_boundary = map_boundary(*rendered.reasoning_boundary, "reasoning boundary");
+    }
     for (std::size_t& boundary : rendered.rewrite_execution_boundaries) {
         boundary = map_boundary(boundary, "rewrite execution boundary");
     }
@@ -748,12 +751,14 @@ EncodedChat encode_rendered_chat(const Tokenizer& tokenizer, const RenderedChat&
     EncodedChat encoded;
     std::vector<std::size_t> byte_boundaries;
     byte_boundaries.reserve((rendered.rewrite_checkpoint ? 1U : 0U) +
+                            (rendered.reasoning_boundary ? 1U : 0U) +
                             rendered.rewrite_execution_boundaries.size() +
                             rendered.message_boundaries.size() + rendered.cache_boundaries.size() +
                             rendered.media_token_runs.size() * 2U);
     if (rendered.rewrite_checkpoint) {
         byte_boundaries.push_back(rendered.rewrite_checkpoint->offset);
     }
+    if (rendered.reasoning_boundary) { byte_boundaries.push_back(*rendered.reasoning_boundary); }
     byte_boundaries.insert(byte_boundaries.end(), rendered.rewrite_execution_boundaries.begin(),
                            rendered.rewrite_execution_boundaries.end());
     for (const std::optional<std::size_t> boundary : rendered.message_boundaries) {
@@ -790,6 +795,13 @@ EncodedChat encode_rendered_chat(const Tokenizer& tokenizer, const RenderedChat&
         }
         encoded.rewrite_checkpoint =
             RewriteCheckpointSpec{.kind = rendered.rewrite_checkpoint->kind, .frontier = frontier};
+    }
+    if (rendered.reasoning_boundary) {
+        const auto& boundary = tokenized.boundaries.at(boundary_index++);
+        if (!boundary.exact_frontier || *boundary.exact_frontier == 0) {
+            throw std::logic_error("reasoning boundary is not an exact nonempty token frontier");
+        }
+        encoded.reasoning_frontier = to_frontier(*boundary.exact_frontier, "reasoning boundary");
     }
     encoded.rewrite_execution_frontiers.reserve(rendered.rewrite_execution_boundaries.size());
     for (std::size_t remaining = rendered.rewrite_execution_boundaries.size(); remaining != 0;
@@ -1072,6 +1084,7 @@ ProcessedInput Processor::process(std::vector<ChatMessage> messages,
     }
     output.input_ids                   = std::move(encoded.input_ids);
     output.rewrite_checkpoint          = encoded.rewrite_checkpoint;
+    output.reasoning_frontier          = encoded.reasoning_frontier;
     output.rewrite_execution_frontiers = std::move(encoded.rewrite_execution_frontiers);
     output.message_boundaries          = std::move(encoded.message_boundaries);
     output.cache_boundaries            = std::move(encoded.cache_boundaries);

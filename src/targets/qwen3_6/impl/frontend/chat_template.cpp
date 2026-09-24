@@ -516,6 +516,7 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
     const long last_query_index  = last_real_user_query(messages);
     const bool preserve_thinking = options.preserve_thinking.value_or(effort_template);
     std::optional<RewriteCheckpointByteSpec> rewrite_checkpoint;
+    std::optional<std::size_t> reasoning_boundary;
     std::vector<std::size_t> rewrite_execution_boundaries;
     const auto add_rewrite_execution_boundary = [&] {
         if (rewrite_execution_boundaries.empty() ||
@@ -667,6 +668,7 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
                 .kind = RewriteCheckpointKind::TurnClosure, .offset = generation_begin};
         }
         rendered.append_template("<|im_start|>assistant\n");
+        reasoning_boundary = rendered.size();
         add_rewrite_execution_boundary();
         if (options.enable_thinking) {
             rendered.append_template("<think>\n");
@@ -710,6 +712,7 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
                         .literal_spans                = std::move(final.literal_spans),
                         .media_placeholders           = std::move(final.media_placeholders),
                         .rewrite_checkpoint           = rewrite_checkpoint,
+                        .reasoning_boundary           = reasoning_boundary,
                         .rewrite_execution_boundaries = std::move(rewrite_execution_boundaries),
                         .message_boundaries           = std::move(message_boundaries),
                         .cache_boundaries             = std::move(cache_boundaries)};

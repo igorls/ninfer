@@ -169,6 +169,7 @@ struct RequestRecord {
     std::vector<TokenLogprobs> token_logprobs;
     // One per requested prompt position, collected when prefill completes.
     std::vector<TokenLogprobs> prompt_logprobs;
+    std::vector<float> reasoning_features;
     std::string content;
     std::string reasoning;
     std::optional<LaneId> lane;

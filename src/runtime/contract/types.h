@@ -190,6 +190,7 @@ struct ResolvedExecutionOptions {
     ThinkingControlOptions thinking;
     std::shared_ptr<const CompiledOutputConstraint> output_constraint;
     TokenLogprobOptions logprobs;
+    std::optional<std::uint32_t> reasoning_feature_position;
 };
 
 struct ResolvedRequestOptions {
