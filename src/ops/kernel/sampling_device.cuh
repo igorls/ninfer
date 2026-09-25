@@ -246,11 +246,12 @@ __device__ __forceinline__ int sampling_dist_offset(int col, int j) {
 // only runs when penalties are active, so it is free on the no-penalty path.
 __device__ __forceinline__ float sampling_adjusted_logit(float raw, int v, const SamplingConfig& c,
                                                          const std::int32_t* overlay = nullptr,
-                                                         int overlay_len             = 0) {
+                                                         int overlay_len             = 0,
+                                                         int column                  = 0) {
     float x = raw;
-    if (c.allowed_tokens != nullptr &&
-        !(static_cast<unsigned int>(c.allowed_tokens[v / 32]) & (1U << (v % 32)))) {
-        return -CUDART_INF_F;
+    if (c.allowed_tokens != nullptr) {
+        const std::int32_t* mask = c.allowed_tokens + column * c.allowed_tokens_column_stride;
+        if (!(static_cast<unsigned int>(mask[v / 32]) & (1U << (v % 32)))) { return -CUDART_INF_F; }
     }
     if (c.presence_penalty == 0.0f && c.frequency_penalty == 0.0f && c.repetition_penalty == 1.0f) { return x; }
     int cnt = c.token_counts != nullptr ? c.token_counts[v] : 0;
@@ -353,13 +354,14 @@ __device__ inline void
 sampling_build_truncated_small(const __nv_bfloat16* logits, std::int64_t base, std::int32_t vocab,
                                const SamplingConfig& cfg, float* tile_val, int* tile_idx,
                                float* cand_val, int* cand_idx, float* prob, int* n_support,
-                               const std::int32_t* overlay = nullptr, int overlay_len = 0) {
+                               const std::int32_t* overlay = nullptr, int overlay_len = 0,
+                               int column = 0) {
     const int tid = threadIdx.x;
     const int cap = sampling_candidate_cap(cfg, vocab);
     if (tid < kSamplerTileItems) {
         if (tid < vocab) {
             const float x = sampling_adjusted_logit(__bfloat162float(logits[base + tid]), tid, cfg,
-                                                    overlay, overlay_len);
+                                                    overlay, overlay_len, column);
             tile_val[tid] = x;
             tile_idx[tid] = tid;
         } else {
@@ -383,7 +385,7 @@ sampling_build_truncated_small(const __nv_bfloat16* logits, std::int64_t base, s
 __device__ inline void sampling_build_truncated_block_fast(
     const __nv_bfloat16* logits, std::int64_t base, std::int32_t vocab, const SamplingConfig& cfg,
     float* merge_val, int* merge_idx, float* cand_val, int* cand_idx, float* prob, int* n_support,
-    const std::int32_t* overlay = nullptr, int overlay_len = 0) {
+    const std::int32_t* overlay = nullptr, int overlay_len = 0, int column = 0) {
     const int tid = threadIdx.x;
     const int cap = sampling_candidate_cap(cfg, vocab); // always <= kSamplerFastCandidates
 
@@ -398,7 +400,7 @@ __device__ inline void sampling_build_truncated_block_fast(
     const int fast_cap = cap;
     for (int v = tid; v < vocab; v += blockDim.x) {
         const float x = sampling_adjusted_logit(__bfloat162float(logits[base + v]), v, cfg, overlay,
-                                                overlay_len);
+                                                overlay_len, column);
         sampling_insert_candidate(local_val, local_idx, fast_cap, x, v);
     }
 

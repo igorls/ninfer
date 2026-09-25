@@ -1046,6 +1046,55 @@ int constrained_zero_extent_case(int token_domain) {
     return failures;
 }
 
+// Structured output under speculation: column j carries the grammar state after drafts[0..j-1]
+// (allowed_tokens + j*allowed_tokens_column_stride). A shared column-0 mask would reject draft 1
+// and correct to 5; per-column masks accept drafts 5 and 9, then column 2 prefers 20 over 13.
+int per_column_mask_case(int token_domain) {
+    const std::vector<std::int32_t> drafts{5, 9, 13};
+    const int columns = static_cast<int>(drafts.size()) + 1;
+    const std::vector<std::int32_t> raw_targets(static_cast<std::size_t>(columns), 1);
+    std::vector<float> logits(static_cast<std::size_t>(token_domain) * columns, -20.0F);
+    for (int col = 0; col < columns; ++col) {
+        const std::size_t base = static_cast<std::size_t>(col) * token_domain;
+        logits[base + 1]  = 50.0F; // highest raw logit, never admissible
+        logits[base + 5]  = 5.0F;
+        logits[base + 9]  = 5.0F;
+        logits[base + 13] = 5.0F;
+        logits[base + 20] = 8.0F;
+        logits[base + 30] = 4.0F;
+    }
+    std::vector<std::uint16_t> bits(logits.size());
+    for (std::size_t index = 0; index < logits.size(); ++index) { bits[index] = f32_to_bf16(logits[index]); }
+    const int words = (token_domain + 31) / 32;
+    std::vector<std::int32_t> masks(static_cast<std::size_t>(words) * columns, 0);
+    const auto allow = [&](int col, int token) {
+        masks[static_cast<std::size_t>(col) * words + token / 32] |= static_cast<std::int32_t>(1U << (token % 32));
+    };
+    allow(0, 5);
+    allow(1, 9);
+    allow(2, 13);
+    allow(2, 20);
+    allow(3, 30);
+    DeviceBuffer device_masks = to_device(masks);
+    ops::SamplingConfig config{};
+    config.allowed_tokens              = static_cast<const std::int32_t*>(device_masks.p);
+    config.allowed_tokens_column_stride = words;
+    config.top_k                       = 1;
+    int failures = 0;
+    for (float temperature : {0.0F, 0.8F}) {
+        config.temperature = temperature;
+        failures += execute_accept_case(
+            "speculative per-column mask token-domain=" + std::to_string(token_domain) +
+                " temperature=" + std::to_string(temperature),
+            raw_targets, bits, token_domain, drafts, 100, token_domain, config,
+            std::vector<std::int32_t>(static_cast<std::size_t>(token_domain), 0),
+            accept_state_oracle(drafts, 2, 20, 100));
+    }
+    failures += verify_exact("speculative per-column masks read-only",
+                             from_device<std::int32_t>(device_masks, masks.size()), masks);
+    return failures;
+}
+
 int greedy_penalty_case(int token_domain) {
     constexpr int k = 2;
     const std::vector<std::int32_t> drafts{1, 1};
@@ -1298,6 +1347,9 @@ int main(int argc, char** argv) {
     failures += constrained_zero_extent_case(64);
     failures += constrained_zero_extent_case(257);
     failures += constrained_zero_extent_case(248077);
+    failures += per_column_mask_case(64);
+    failures += per_column_mask_case(257);
+    failures += per_column_mask_case(248077);
     failures += deterministic_sampling_case();
     failures += batched_sampling_workspace_stride_case();
     std::size_t sparse_peak = 0;

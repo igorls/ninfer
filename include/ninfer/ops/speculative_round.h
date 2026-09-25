@@ -63,7 +63,9 @@ void speculative_prepare_verify_ids(const Tensor& anchors, const Tensor& drafts,
  *   Independently for each row b, greedy mode accepts the longest available draft prefix matching
  *   the per-column penalty-adjusted argmax and commits that argmax at the first mismatch (or the
  *   bonus column). With both penalties disabled and no allowed_tokens mask, target_tokens is
- *   the exact raw-logit fast path. A mask constrains all valid columns before selection.
+ *   the exact raw-logit fast path. A mask constrains every valid column before selection; column j
+ *   reads allowed_tokens + j*allowed_tokens_column_stride (sampling.h), so a structured-output
+ *   caller can give each verification column the grammar state after drafts[0..j-1].
  *   Sampling mode applies configs[b] to each valid verification column, accepts draft i with
  *   target probability p_i(draft_i), samples from the residual distribution on first rejection,
  *   and samples a bonus from column Pcur[b] when every available draft is accepted. The draft
@@ -113,7 +115,8 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
  * Algorithm:
  *   This is the variable-K, 16-candidate form of speculative rejection sampling.
  *   For row b, let P=clamp(current_extents[b],0,K). Only target columns 0..P are live.
- *   Greedy rows accept the longest prefix matching the mask- and penalty-adjusted target argmax,
+ *   Greedy rows accept the longest prefix matching the mask- and penalty-adjusted target argmax
+ *   (column j's mask is allowed_tokens + j*allowed_tokens_column_stride),
  *   then emit that argmax as correction/bonus. Positive-temperature rows construct p
  *   using sampling.h masks, penalties, and filters. A live draft d is accepted with probability
  *   min(1,p(d)/q(d)); first rejection samples normalized max(p-q,0). After accepting all

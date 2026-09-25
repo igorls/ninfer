@@ -11463,17 +11463,28 @@ std::span<const float> ProgramImplCore::reasoning_features(std::uint32_t lane) c
     return requests[lane].reasoning_features;
 }
 
+const std::int32_t* ProgramImplCore::upload_constraint_mask(std::uint32_t lane, std::uint32_t column,
+                                                           std::span<const std::int32_t> mask) {
+    if (lane >= static_cast<std::uint32_t>(constraint_masks.ne[2]) ||
+        column >= static_cast<std::uint32_t>(constraint_masks.ne[1])) {
+        throw std::logic_error("structured output mask column is out of range");
+    }
+    Tensor row = constraint_masks.slice(2, static_cast<std::int32_t>(lane), 1)
+                     .slice(1, static_cast<std::int32_t>(column), 1);
+    if (mask.size_bytes() != row.bytes()) { throw std::logic_error("structured output mask shape mismatch"); }
+    CUDA_CHECK(cudaMemcpyAsync(row.data, mask.data(), mask.size_bytes(), cudaMemcpyHostToDevice, device.stream));
+    return static_cast<const std::int32_t*>(row.data);
+}
+
 void ProgramImplCore::install_sampling(SequenceState& sequence, RequestControl& request,
                                        const ops::SamplingConfig& config, std::span<const TokenId> prompt) {
     Tensor counts = token_counts.slice(1, static_cast<std::int32_t>(sequence.lane), 1)
                         .view({TextConfig::token_domain});
     request.sampling_host     = config;
     if (request.output_constraint) {
-        const auto mask = request.output_constraint->next_mask();
-        Tensor row = constraint_masks.slice(1, static_cast<std::int32_t>(sequence.lane), 1);
-        if (mask.size_bytes() != row.bytes()) { throw std::logic_error("structured output mask shape mismatch"); }
-        CUDA_CHECK(cudaMemcpyAsync(row.data, mask.data(), mask.size_bytes(), cudaMemcpyHostToDevice, device.stream));
-        request.sampling_host.allowed_tokens = static_cast<const std::int32_t*>(row.data);
+        request.sampling_host.allowed_tokens =
+            upload_constraint_mask(sequence.lane, 0, request.output_constraint->next_mask());
+        request.sampling_host.allowed_tokens_column_stride = constraint_masks.ne[0];
     }
     request.logprobs_device_readout  = request.logprobs.enabled && request.logprobs.top == 0;
     request.logprob_readout_columns  = 0;
@@ -12034,9 +12045,7 @@ ProgramImplCore::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             ordinary_host_ingress->state_source_slots[row]      = selectors.source;
             ordinary_host_ingress->state_destination_slots[row] = selectors.destination;
             if (request.output_constraint) {
-                const auto mask = request.output_constraint->next_mask();
-                Tensor target = constraint_masks.slice(1, static_cast<std::int32_t>(sequence.lane), 1);
-                CUDA_CHECK(cudaMemcpyAsync(target.data, mask.data(), mask.size_bytes(), cudaMemcpyHostToDevice, device.stream));
+                upload_constraint_mask(sequence.lane, 0, request.output_constraint->next_mask());
             }
             ordinary_host_ingress->sampling[row]                = request.sampling_host;
             ensure_sequence_kv_mapped(sequence, frontier + 1,
@@ -12197,12 +12206,27 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             const std::uint32_t max_by_budget = budgets[row].generated_tokens_remaining > 1
                                                     ? budgets[row].generated_tokens_remaining - 1
                                                     : 0;
-            const std::uint32_t extent =
-                request.output_constraint ||
-                        (request.logprobs.enabled && !request.logprobs_device_readout)
+            std::uint32_t extent =
+                request.logprobs.enabled && !request.logprobs_device_readout
                     ? 0U
                     : std::min({sequence.mtp_draft_count, draft_window, max_by_budget,
                           capacity - sequence.execution_frontier - 1});
+            if (request.output_constraint) {
+                // Column 0 is the committed grammar state. Walk a fork along the drafts: column j+1
+                // gets the state after drafts[0..j], and the draft stops at its first token the
+                // grammar rejects or that completes it, so every verified draft is admissible.
+                upload_constraint_mask(sequence.lane, 0, request.output_constraint->next_mask());
+                if (extent > 0) {
+                    runtime::OutputConstraintState preview = request.output_constraint->fork();
+                    std::uint32_t admissible = 0;
+                    while (admissible < extent && preview.try_accept(sequence.mtp_drafts[admissible]) &&
+                           !preview.terminated()) {
+                        ++admissible;
+                        upload_constraint_mask(sequence.lane, admissible, preview.next_mask());
+                    }
+                    extent = admissible;
+                }
+            }
             mtp_host_ingress->anchors[row]        = sequence.ledger.back();
             mtp_host_ingress->base_frontiers[row] = checked_i32(frontier, "MTP batch frontier");
             mtp_host_ingress->remaining_budgets[row] =
@@ -12226,11 +12250,6 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             mtp_host_ingress->state_source_slots[row]      = selectors.source;
             mtp_host_ingress->state_destination_slots[row] = selectors.destination;
             mtp_host_ingress->rope_deltas[row]             = sequence.rope_delta;
-            if (request.output_constraint) {
-                const auto mask = request.output_constraint->next_mask();
-                Tensor target = constraint_masks.slice(1, static_cast<std::int32_t>(sequence.lane), 1);
-                CUDA_CHECK(cudaMemcpyAsync(target.data, mask.data(), mask.size_bytes(), cudaMemcpyHostToDevice, device.stream));
-            }
             mtp_host_ingress->sampling[row]                = request.sampling_host;
             ensure_sequence_kv_mapped(sequence, frontier + extent + 1,
                                     std::min(capacity, frontier + extent + draft_window));
@@ -12449,9 +12468,7 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             dflash_host_ingress->state_source_slots[row] = selectors.source;
             dflash_host_ingress->state_destination_slots[row] = selectors.destination;
             if (request.output_constraint) {
-                const auto mask = request.output_constraint->next_mask();
-                Tensor target = constraint_masks.slice(1, static_cast<std::int32_t>(sequence.lane), 1);
-                CUDA_CHECK(cudaMemcpyAsync(target.data, mask.data(), mask.size_bytes(), cudaMemcpyHostToDevice, device.stream));
+                upload_constraint_mask(sequence.lane, 0, request.output_constraint->next_mask());
             }
             dflash_host_ingress->sampling[row]                = request.sampling_host;
             ensure_sequence_kv_mapped(sequence, frontier + extent + 1U,
@@ -12578,8 +12595,10 @@ ProgramImplCore::decode_raw(std::span<const std::uint32_t> lanes,
             throw std::invalid_argument("decode batch lane is invalid");
         }
         const SequenceState& sequence = active_sequence(lanes[row]);
+        // DFlash proposes on the device inside the round, so its drafts cannot be walked through
+        // the grammar ahead of verification; constrained DFlash lanes stay target-only.
         target_only = target_only &&
-            (requests[lanes[row]].output_constraint ||
+            ((requests[lanes[row]].output_constraint && speculative_backend != SpeculativeBackend::Mtp) ||
              budgets[row].generated_tokens_remaining <= 1 ||
              sequence.execution_frontier + 1 >= capacity);
     }

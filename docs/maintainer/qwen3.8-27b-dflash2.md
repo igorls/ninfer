@@ -71,9 +71,12 @@ accelerates subsequent generated-text decode, not media encoding or prefill.
 ## Constrained output
 
 Structured-output matcher state belongs to each request. Allowed-token masks occupy stable
-Program-owned addresses and refresh for every committed token. Constrained family-runtime lanes
-use zero speculative extent while constrained; unconstrained neighbors retain speculation.
-When every lane is constrained or has only one output/context position left, the Program executes
+Program-owned addresses and refresh for every committed token. MTP keeps drafting under a
+constraint: one mask per verification column holds the grammar state after drafts[0..j-1], and a
+draft stops at its first token the grammar rejects or that completes it. DFlash2 proposes on the
+device inside the round, so constrained DFlash2 lanes use zero speculative extent; unconstrained
+neighbors retain speculation. When every DFlash2 lane is constrained or has only one
+output/context position left, the Program executes
 a width-one target round instead of the drafter and padded verification. DFlash2 still captures
 and appends committed target features; MTP still aligns its state with the sampled target token.
 The startup allocation and graph envelope include this ordinary route for every backend.

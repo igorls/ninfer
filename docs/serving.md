@@ -1620,13 +1620,14 @@ or special-token preservation. Prompt instructions remain useful for choosing me
 format enforcement does not establish factual or legal correctness.
 
 Compiled grammars are cached per frontend. Each request owns fresh matcher state, including
-requests that reuse a prompt prefix. Flash-Next MTP verification uses a mask for each proposed
-prefix and commits only accepted target tokens. The Qwen3.6 family keeps its configured speculative
-backend state while using zero draft extent for constrained lanes; unconstrained lanes retain
-their normal speculation. If every lane is constrained or has only one output/context position
-left, it runs the width-one target schedule and maintains the selected backend's committed state,
-without generating proposals. Mixed batches keep the speculative schedule. Masks occupy stable
-Program-owned device storage for graph replay.
+requests that reuse a prompt prefix. MTP verification uses a mask for each proposed prefix and
+commits only accepted target tokens: the Program walks a fork of the request's matcher along the
+drafts, truncates each draft at its first token the grammar rejects or that completes it, and gives
+verification column j the grammar state after drafts 0..j-1. Constrained output therefore keeps
+MTP speculation in both Flash-Next and the Qwen3.6 family. DFlash2 proposes inside the round, so
+its constrained lanes use zero draft extent; if every DFlash2 lane is constrained or has only one
+output/context position left, it runs the width-one target schedule and maintains the backend's
+committed state. Masks occupy stable Program-owned device storage for graph replay.
 
 Qualification uses `ninfer_structured_output_test`, the three protocol schema tests, and the
 CUDA `ninfer_sampling_test`/`ninfer_speculative_round_test`. The live runner

@@ -33,6 +33,10 @@ struct SamplingConfig {
     unsigned long long seed    = 0;
     std::int32_t* token_counts = nullptr; // device [token_domain] i32, or null
     const std::int32_t* allowed_tokens = nullptr; // device bitset [ceil(token_domain/32)], or null
+    // I32 words between the masks of consecutive speculative verification columns. 0 applies
+    // allowed_tokens to every column; W>0 makes column j read allowed_tokens + j*W. Single-column
+    // sampling always reads column 0.
+    std::int32_t allowed_tokens_column_stride = 0;
     const std::int32_t* prompt_presence = nullptr; // immutable prompt-membership bitset
     const std::int32_t* history_overlay = nullptr; // read-only provisional prefix, or null
     std::int32_t history_overlay_size = 0;

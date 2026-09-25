@@ -1256,6 +1256,9 @@ private:
     // column to copy after the round's synchronisation, or null when the prefill path already
     // queued the copy into token_logits_host.
     void record_round_logprobs(RequestControl& request, const Tensor* column, TokenId token);
+    // Copies one host grammar mask into the lane's verification column; returns the device row.
+    const std::int32_t* upload_constraint_mask(std::uint32_t lane, std::uint32_t column,
+                                               std::span<const std::int32_t> mask);
     void install_sampling(SequenceState& sequence, RequestControl& request,
                           const ops::SamplingConfig& config, std::span<const TokenId> prompt);
     void set_device_i32(Tensor& tensor, std::int32_t value);

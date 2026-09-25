@@ -240,8 +240,11 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
     out.sampling_config = add_tensor(
         builder, DType::I32, {config_words, static_cast<std::int32_t>(plan.max_concurrency)},
         "sampling config");
+    // One grammar mask per speculative verification column per lane: column j is the grammar
+    // state after drafts[0..j-1], so MTP keeps drafting under structured output.
     out.constraint_masks = add_tensor(builder, DType::I32,
-        {(TextConfig::token_domain + 31) / 32, static_cast<std::int32_t>(plan.max_concurrency)},
+        {(TextConfig::token_domain + 31) / 32, static_cast<std::int32_t>(plan.draft_window + 1U),
+         static_cast<std::int32_t>(plan.max_concurrency)},
         "structured output token masks");
     out.logprob_candidate_ids = add_tensor(
         builder, DType::I32,
