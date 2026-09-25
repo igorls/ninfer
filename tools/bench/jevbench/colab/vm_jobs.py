@@ -10,6 +10,7 @@ local side fetches with `colab download` (the Contents API, which does not use t
 
 Jobs come from /content/rr/inputs/jobs.json:
   [{"name": "pilot-c8", "requests": "pilot64.jsonl", "concurrency": 8, "derive_2048": false}, ...]
+"direct_only": true collects only the direct action with its answer-letter logprobs.
 Outcome files are /content/rr/out/<name>.jsonl. A restored job resumes from its rows.
 """
 import gzip
@@ -123,6 +124,8 @@ def run(job):
                    "--concurrency", str(job.get("concurrency", 1))]
         if job.get("derive_2048"):
             command.append("--derive-2048")
+        if job.get("direct_only"):
+            command.append("--direct-only")
         status[name]["attempts"] += 1
         with open(R / "logs" / f"{name}.log", "a") as log:
             log.write(f"\n=== attempt {status[name]['attempts']} at {time.ctime()}\n")

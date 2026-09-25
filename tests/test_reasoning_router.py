@@ -127,6 +127,32 @@ class RouterDataTests(unittest.TestCase):
             loaded = router.load_rows([path], "temporal_lookup")
         self.assertEqual(loaded[0]["actions"][1]["reasoning"], row["actions"][1]["reasoning"])
 
+    def test_folds_test_every_group_exactly_once(self):
+        groups = [{"group": f"g{i}", "family": "arithmetic"} for i in range(200)]
+        tested = [[router.split_for(g, "none", fold) for fold in range(10)].count("test") for g in groups]
+        self.assertEqual(set(tested), {1})
+
+    def test_confidence_joins_only_the_identical_direct_observation(self):
+        row = observation()
+        direct = dict(row["actions"][0], answer_logprobs={"A": -0.1053605, "B": -2.3025851},
+                      answer_raw_logprobs={"A": -0.2, "B": -2.4})
+        other = dict(row, profile=router.PROFILE + ":c8:direct-only", actions=[direct])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "confidence.jsonl"
+            path.write_text(json.dumps(other))
+            top, margin, entropy, mass = router.load_confidence(path, [row])[0]
+            self.assertAlmostEqual(top, 0.9, places=5)
+            self.assertAlmostEqual(margin, 0.8, places=5)
+            self.assertLess(entropy, 0.5)
+            changed = observation()
+            changed["actions"][0]["content"] = "B"
+            with self.assertRaisesRegex(ValueError, "differs from the paired direct action"):
+                router.load_confidence(path, [changed])
+            changed = observation()
+            changed["features"] = [0.5] * 5120
+            with self.assertRaisesRegex(ValueError, "different prompt state"):
+                router.load_confidence(path, [changed])
+
     def test_same_path_different_weights_cannot_mix(self):
         a, b = observation("a"), observation("b")
         b["artifact_sha256"] = "b" * 64

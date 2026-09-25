@@ -33,6 +33,9 @@ struct Settings {
     // Otherwise both actions decode the same greedy tokens under the same schedule, and
     // the 2048 action is recorded as derived from the 1024 observation.
     bool derive_2048 = false;
+    // Only the direct action, re-observed for its answer-letter distribution; joined to a
+    // paired collection of the same rows by reasoning_router.py load_confidence.
+    bool direct_only = false;
 };
 
 std::string profile_for(const Settings& settings) {
@@ -41,6 +44,7 @@ std::string profile_for(const Settings& settings) {
     // collected at C > 1 are a different, non-repeatable numerical profile.
     if (settings.concurrency > 1) { profile += ":c" + std::to_string(settings.concurrency); }
     if (settings.derive_2048) { profile += ":derive2048"; }
+    if (settings.direct_only) { profile += ":direct-only"; }
     return profile;
 }
 
@@ -87,6 +91,19 @@ json run_action(ninfer::Engine& engine, const json& row, unsigned budget,
     request.execution.allow_prefix_reuse = false;
     request.execution.allow_prefix_publication = false;
     if (budget) { request.execution.thinking.budget = budget; }
+    // The direct action's first answer position reports its distribution over the option
+    // letters, the confidence a router can read after one decoded token.
+    std::vector<std::string> letters;
+    if (budget == 0) {
+        request.execution.logprobs.enabled = true;
+        request.execution.logprobs.top = 5;
+        for (const auto& [letter, value] : row.at("mapping").items()) {
+            const auto ids = engine.tokenize_text(letter);
+            if (ids.size() != 1) { throw std::invalid_argument("option letter is not one token: " + letter); }
+            letters.push_back(letter);
+            request.execution.logprobs.candidates.push_back(ids.front());
+        }
+    }
     const auto response = engine.generate(engine.prepare(std::move(prompt)), request);
     // Exhausting the declared action budget is a measured failure. Cancellation and
     // context exhaustion are incomplete observations and must be retried.
@@ -106,7 +123,7 @@ json run_action(ninfer::Engine& engine, const json& row, unsigned budget,
     }
     result["feature_frontier"] = *response.prompt.reasoning_frontier;
     const auto& thinking = response.thinking;
-    return {{"budget", budget}, {"content", response.content},
+    json action = {{"budget", budget}, {"content", response.content},
             {"reasoning", response.reasoning}, {"reasoning_tokens", response.reasoning_tokens},
             {"output_tokens", response.generated_token_ids.size()},
             {"finish_reason", static_cast<int>(response.finish_reason)},
@@ -116,6 +133,23 @@ json run_action(ninfer::Engine& engine, const json& row, unsigned budget,
                           {"injected_tokens", thinking.injected_tokens},
                           {"cap_applied", thinking.applied}}},
             {"seconds", response.timings.total_seconds}};
+    if (budget == 0) {
+        const auto first = std::find_if(response.token_logprobs.begin(), response.token_logprobs.end(),
+                                         [](const ninfer::TokenLogprobs& entry) { return !entry.forced; });
+        if (first == response.token_logprobs.end() || first->candidates.size() != letters.size()) {
+            throw std::runtime_error("direct action lacks answer-letter logprobs");
+        }
+        json answer = json::object(), raw = json::object(), top = json::array();
+        for (std::size_t i = 0; i < letters.size(); ++i) {
+            answer[letters[i]] = first->candidates[i].logprob;
+            raw[letters[i]] = first->candidates[i].raw_logprob;
+        }
+        for (const auto& entry : first->top) { top.push_back({engine.token_bytes(entry.token), entry.raw_logprob}); }
+        action["answer_logprobs"] = std::move(answer);
+        action["answer_raw_logprobs"] = std::move(raw);
+        action["first_top"] = std::move(top);
+    }
+    return action;
 }
 
 json collect_row(ninfer::Engine& engine, const json& row, const Settings& settings,
@@ -126,6 +160,10 @@ json collect_row(ninfer::Engine& engine, const json& row, const Settings& settin
                 {"actions", json::array()}};
     std::vector<float> features;
     result["actions"].push_back(run_action(engine, row, 0, features, result));
+    if (settings.direct_only) {
+        result["features"] = features;
+        return result;
+    }
     const json reasoned = run_action(engine, row, 1024, features, result);
     result["actions"].push_back(reasoned);
     // A 1024 run that stopped on its own without the cap firing never reached 1024 thinking
@@ -154,13 +192,16 @@ int main(int argc, char** argv) try {
             settings.concurrency = static_cast<unsigned>(std::stoul(argv[++i]));
         } else if (arg == "--derive-2048") {
             settings.derive_2048 = true;
+        } else if (arg == "--direct-only") {
+            settings.direct_only = true;
         } else {
             positional.push_back(arg);
         }
     }
-    if (positional.size() != 4 || settings.concurrency < 1 || settings.concurrency > 8) {
+    if (positional.size() != 4 || settings.concurrency < 1 || settings.concurrency > 8 ||
+        (settings.direct_only && settings.derive_2048)) {
         std::cerr << "usage: ninfer-reasoning-collect model.ninfer requests.jsonl outcomes.jsonl "
-                     "artifact-sha256 [--concurrency 1..8] [--derive-2048]\n"
+                     "artifact-sha256 [--concurrency 1..8] [--derive-2048 | --direct-only]\n"
                      "Use reasoning_router.py collect to compute and validate the artifact digest.\n"
                      "Appends complete paired examples; matching existing IDs are resumed.\n";
         return 2;
@@ -236,7 +277,7 @@ int main(int argc, char** argv) try {
             try {
                 const json result = collect_row(engine, pending[index], settings, profile,
                                                 artifact_path, artifact_digest);
-                const std::string serialized = result.dump();
+                const std::string serialized = result.dump(-1, ' ', false, json::error_handler_t::replace);
                 std::lock_guard lock(writer);
                 output << serialized << '\n';
                 output.flush();

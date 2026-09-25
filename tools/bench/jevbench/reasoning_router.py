@@ -21,6 +21,8 @@ PROFILE = "qwen3.8-27b/nvfp4:fp8:chunk1024:cache-off:spec-none:medium:frontier-s
 # composition) and ":derive2048" when an uncapped 1024 action stands in for the 2048 one.
 # A training set always holds exactly one profile.
 PROFILE_PATTERN = re.compile(re.escape(PROFILE) + r"(?::c[2-8])?(?::derive2048)?")
+# A --direct-only collection re-observes the direct action with its answer-letter distribution.
+CONFIDENCE_PROFILE_PATTERN = re.compile(re.escape(PROFILE) + r"(?::c[2-8])?:direct-only")
 
 
 def digest(value):
@@ -55,10 +57,11 @@ def prepare(args):
     print(json.dumps({"prepared": len(prepared), "deduplicated": len(rows) - len(prepared)}))
 
 
-def split_for(row, holdout_family):
+def split_for(row, holdout_family, fold=0):
     if row["family"] == holdout_family:
         return "family_test"
-    bucket = int(digest(row["group"])[:8], 16) % 10
+    # Fold k rotates the ten group buckets, so over folds 0-9 every group is tested once.
+    bucket = (int(digest(row["group"])[:8], 16) - fold) % 10
     return "test" if bucket == 0 else "validation" if bucket in (1, 2) else "train"
 
 
@@ -77,6 +80,8 @@ def collect(args):
                "--concurrency", str(args.concurrency)]
     if args.derive_2048:
         command.append("--derive-2048")
+    if args.direct_only:
+        command.append("--direct-only")
     subprocess.run(command, check=True)
     if version() != before:
         raise ValueError("artifact changed during collection; discard this collection output")
@@ -103,7 +108,7 @@ def jsonl_lines(path):
     return [line.rstrip("\r") for line in path.read_text(encoding="utf-8").split("\n")]
 
 
-def load_rows(paths, holdout_family):
+def load_rows(paths, holdout_family, fold=0):
     rows, seen, groups, prompts, artifacts, profiles = [], set(), {}, {}, set(), set()
     for path in paths:
         for line in jsonl_lines(path):
@@ -119,7 +124,7 @@ def load_rows(paths, holdout_family):
             seen.add(item["id"])
             if len(row["features"]) != 5120 or not all(math.isfinite(x) for x in row["features"]):
                 raise ValueError("invalid backbone feature vector")
-            split = split_for(item, holdout_family)
+            split = split_for(item, holdout_family, fold)
             for key, table in ((item["group"], groups), (digest(item["messages"]), prompts)):
                 if key in table and table[key] != split:
                     raise ValueError("related or identical prompts cross data splits")
@@ -136,6 +141,41 @@ def load_rows(paths, holdout_family):
     if len(profiles) != 1:
         raise ValueError("incompatible collection schema/profile: one collection profile per training set")
     return rows
+
+
+def load_confidence(path, rows):
+    """Answer-letter confidence of each row's direct action, from a --direct-only collection.
+
+    The row must observe the identical prompt state (input, artifact and exact features) and
+    produce the same direct answer as the paired collection. Returns per row: top letter
+    probability, margin to the second, entropy normalized by log(options), and the raw
+    probability mass the whole vocabulary places on the option letters."""
+    observed = {}
+    for line in jsonl_lines(path):
+        if line.strip():
+            row = json.loads(line)
+            if not CONFIDENCE_PROFILE_PATTERN.fullmatch(row["profile"]):
+                raise ValueError("confidence rows must come from a --direct-only collection")
+            observed[row["input"]["id"]] = row
+    values = []
+    for row in rows:
+        other = observed.get(row["input"]["id"])
+        if other is None:
+            raise ValueError("confidence collection lacks an observation")
+        if (other["input"] != row["input"] or other["artifact_sha256"] != row["artifact_sha256"]
+                or other["features"] != row["features"]):
+            raise ValueError("confidence row observes a different prompt state")
+        direct = other["actions"][0]
+        if direct["budget"] != 0 or direct["content"] != row["actions"][0]["content"]:
+            raise ValueError("confidence direct answer differs from the paired direct action")
+        letters = direct["answer_logprobs"]
+        if set(letters) != set(row["input"]["mapping"]) or len(letters) < 2:
+            raise ValueError("confidence must cover exactly the option letters")
+        p = sorted((math.exp(v) for v in letters.values()), reverse=True)
+        entropy = -sum(q * math.log(q) for q in p if q > 0) / math.log(len(p))
+        mass = sum(math.exp(v) for v in direct["answer_raw_logprobs"].values())
+        values.append([p[0], p[0] - p[1], entropy, mass])
+    return values
 
 
 def validate_replay(parent, contract, observations, training_ids):
@@ -155,26 +195,36 @@ def train(args):
     torch.manual_seed(args.seed)
     torch.set_num_threads(2)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    rows = load_rows(args.data, args.holdout_family)
+    rows = load_rows(args.data, args.holdout_family, args.fold)
     indices = {split: [i for i, row in enumerate(rows) if row["split"] == split]
                for split in ("train", "validation", "test", "family_test")}
     group_counts = {split: len({rows[i]["input"]["group"] for i in index})
                     for split, index in indices.items()}
     if group_counts["train"] < 8 or group_counts["validation"] < 3:
         raise ValueError("need at least eight training and three validation groups")
-    x = torch.tensor([r["features"] for r in rows], dtype=torch.float32, device=device)
-    # Per-example RMS scaling has no fitted corpus statistics and stays stable between rounds.
-    x = x / x.square().mean(-1, keepdim=True).sqrt().clamp_min(1e-6)
+    if args.inputs != "hidden" and not args.confidence:
+        raise ValueError("confidence inputs need --confidence")
+    confidence = (torch.tensor(load_confidence(args.confidence, rows), dtype=torch.float32, device=device)
+                  if args.confidence else None)
+    parts = []
+    if args.inputs != "confidence":
+        hidden = torch.tensor([r["features"] for r in rows], dtype=torch.float32, device=device)
+        # Per-example RMS scaling has no fitted corpus statistics and stays stable between rounds.
+        parts.append(hidden / hidden.square().mean(-1, keepdim=True).sqrt().clamp_min(1e-6))
+    if args.inputs != "hidden":
+        parts.append(confidence)
+    x = torch.cat(parts, -1)
     y = torch.tensor([labels(r)[0] for r in rows], dtype=torch.float32, device=device)
     costs = torch.tensor([labels(r)[1] for r in rows], dtype=torch.float32, device=device)
-    net = (torch.nn.Linear(5120, 6) if args.hidden == 0 else
-           torch.nn.Sequential(torch.nn.Linear(5120, args.hidden), torch.nn.Tanh(),
+    width = x.shape[1]
+    net = (torch.nn.Linear(width, 6) if args.hidden == 0 else
+           torch.nn.Sequential(torch.nn.Linear(width, args.hidden), torch.nn.Tanh(),
                                torch.nn.Linear(args.hidden, 6))).to(device)
     contract = {"schema": 1, "profile": rows[0]["profile"], "artifact_sha256": rows[0]["artifact_sha256"],
                 "budgets": BUDGETS, "feature": "pre-think-final-norm-bf16-as-f32",
-                "normalization": "per-row-rms", "hidden": args.hidden,
+                "normalization": "per-row-rms", "hidden": args.hidden, "inputs": args.inputs,
                 "holdout_family": args.holdout_family, "cost_weight": args.cost_weight,
-                "split_policy": "sha256-group-10:test0:validation1,2:train3-9"}
+                "split_policy": f"sha256-group-10-rotate{args.fold}:test0:validation1,2:train3-9"}
     parent = None
     observations = {r["input"]["id"]: digest({k: v for k, v in r.items() if k != "artifact"}) for r in rows}
     if args.previous:
@@ -229,12 +279,29 @@ def train(args):
                 "utility": float((correct - args.cost_weight * paid / 1024).mean()),
                 "action_counts": {str(b): int((picked == j).sum()) for j, b in enumerate(BUDGETS)}}
 
+    gate = None
+    if confidence is not None:
+        # Baseline with one fitted number: answer directly when the top option letter's
+        # probability reaches the threshold, otherwise reason with the 1,024 budget. The
+        # threshold maximizes train+validation utility; tests never influence it.
+        fit = torch.tensor(indices["train"] + indices["validation"], device=device)
+        top, iv = confidence[fit, 0], torch.arange(len(fit), device=device)
+        best_gate = None
+        for threshold in sorted(set(top.tolist())) + [float("inf")]:
+            actions = torch.where(top >= threshold, 0, 1)
+            utility = float((y[fit][iv, actions] - args.cost_weight * costs[fit][iv, actions] / 1024).mean())
+            if best_gate is None or utility > best_gate[0]:
+                best_gate = (utility, threshold)
+        gate = {"threshold": best_gate[1], "fit_utility": best_gate[0],
+                "actions": torch.where(confidence[:, 0] >= best_gate[1], 0, 1)}
     metrics = {}
     oracle = (y - args.cost_weight * costs / 1024).argmax(-1)
     for split, index in indices.items():
         metrics[split] = {"router": score(index, chosen), "oracle_upper_bound": score(index, oracle)}
         for j, budget in enumerate(BUDGETS):
             metrics[split][f"always_{budget}"] = score(index, torch.full_like(chosen, j))
+        if gate:
+            metrics[split]["confidence_gate"] = score(index, gate["actions"])
         if index:
             metrics[split]["brier"] = float((probabilities[index] - y[index]).square().mean())
             metrics[split]["reasoning_helps"] = int(((y[index, 0] == 0) & (y[index, 1:].max(-1).values == 1)).sum())
@@ -249,6 +316,7 @@ def train(args):
     report = {"device": str(device), "torch": torch.__version__, "examples": len(rows),
               "parameters": sum(p.numel() for p in net.parameters()), "best_epoch": best_epoch,
               "validation_utility": -best[0], "validation_loss": best[1],
+              "confidence_gate": {k: v for k, v in gate.items() if k != "actions"} if gate else None,
               "groups": group_counts, "seed": args.seed, "metrics": metrics,
               "qualified_for_serving": False,
               "limitation": "Small authored diagnostic templates; not a general capability or production qualification."}
@@ -257,6 +325,7 @@ def train(args):
         for i, row in enumerate(rows):
             out.write(json.dumps({"id": row["input"]["id"], "split": row["split"],
                                   "family": row["input"]["family"], "budget": BUDGETS[int(chosen[i])],
+                                  "gate_budget": BUDGETS[int(gate["actions"][i])] if gate else None,
                                   "probabilities": probabilities[i].cpu().tolist(),
                                   "predicted_cost": predicted_cost[i].cpu().tolist()}) + "\n")
     print(json.dumps(report, indent=2))
@@ -390,6 +459,8 @@ def main():
                    help="rows decoded concurrently; >1 marks labels as a non-repeatable :cN profile")
     c.add_argument("--derive-2048", action="store_true",
                    help="reuse an uncapped 1024 action as the 2048 action (profile :derive2048)")
+    c.add_argument("--direct-only", action="store_true",
+                   help="collect only the direct action with its answer-letter logprobs (profile :direct-only)")
     a = commands.add_parser("analyze")
     a.add_argument("--data", type=Path, nargs="+", required=True)
     a.add_argument("--blueprints", type=Path, help="synthetic_corpus blueprints.jsonl for kind-depth strata")
@@ -399,7 +470,10 @@ def main():
     t.add_argument("--data", type=Path, nargs="+", required=True)
     t.add_argument("--previous", type=Path)
     t.add_argument("--out", type=Path, required=True)
-    t.add_argument("--holdout-family", default="temporal_lookup")
+    t.add_argument("--holdout-family", default="temporal_lookup", help="a family absent from the data holds none out")
+    t.add_argument("--fold", type=int, choices=range(10), default=0, help="rotation of the group buckets")
+    t.add_argument("--confidence", type=Path, help="--direct-only collection of the same rows")
+    t.add_argument("--inputs", choices=("hidden", "confidence", "both"), default="hidden")
     t.add_argument("--hidden", type=int, choices=(0, 128), default=0)
     t.add_argument("--cost-weight", type=float, default=0.02, help="accuracy utility cost per 1024 output tokens")
     t.add_argument("--learning-rate", type=float, default=0.0003)
