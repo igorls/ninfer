@@ -232,9 +232,9 @@ The exported archive passed SHA-256/ZIP verification, all 2,048 tasks passed the
 and rendered-state gold check, and all 2,048 converted to Qwen collector inputs without further
 deduplication. For a separate new study holding out `synthetic_allocation`, the fixed split has
 32 train, nine validation, seven instance-test and 16 family-test groups. This illustrative split
-does not change the existing progressive study's holdouts. **No Qwen outcomes have been collected
-for this new corpus yet, and no router gain is claimed.** The Colab G4 session was terminated
-after downloading the results.
+does not change the existing progressive study's holdouts. Qwen outcomes for this corpus and the
+resulting router study follow below. The Colab G4 session was terminated after downloading the
+results.
 
 The ten focused tests include independent all-pairs and exhaustive-subset oracles, floor/clamp
 and rule-order cases, title exclusion, grouping/deduplication, manifestless resume rejection,
@@ -247,6 +247,65 @@ binds this run to the actual artifact, since a response model name cannot attest
 Run evidence is retained locally under `profiles/bench/colab-corpus-20260923/`, including the
 source snapshot, raw teacher attempts, executable-gold tasks and environment/launch records.
 See the [generation commands](../../tools/bench/jevbench/README.md#flash-next-synthetic-corpus-on-colab-g4).
+
+### Qwen3.8-27B outcomes and router study on the synthetic corpus — 2026-09-25
+
+**Collection.** All 2,048 scenarios ran through `ninfer-reasoning-collect` on Colab G4 VMs
+(RTX PRO 6000 Blackwell Server Edition) against the pinned `neroued/Qwen3.8-27B-nvfp4-NInfer`
+file at revision `11dbbbbb` (SHA-256 `552c374c...`), byte-identical to the artifact used locally.
+The profile adds `:c8:derive2048`: eight requests decode concurrently, and the 2,048-token action
+reuses the 1,024 outcome whenever the 1,024 run stopped without its cap. A pilot established the
+basis for both. Eight G4 rows reproduced the local collection bit for bit. Features and direct
+answers did not depend on concurrency. The derived 2,048 action matched a real rerun at
+concurrency 1. Concurrency 8 can still change reasoning labels through batch composition, so this
+profile never mixes with concurrency-1 data. Collection produced 3.49 M output tokens at about 16
+rows/min. Colab reclaimed each VM after 23-30 minutes, so the run spanned eight sessions resumed
+by `colab_campaign.py` from verified parts. All 2,048 rows passed the trainer's schema, feature,
+artifact and split checks.
+
+| Family | n | Direct correct | 1,024 correct | 2,048 correct | Mean tokens 1,024 / 2,048 | Helps / harms | 2,048 better / worse | All fail |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| ledger | 512 | 24.8 % | 98.0 % | 99.6 % | 472 / 468 | 384 / 4 | 9 / 1 | 1 |
+| policy | 512 | 46.9 % | 92.0 % | 92.2 % | 401 / 413 | 243 / 13 | 8 / 7 | 29 |
+| allocation | 512 | 24.4 % | 43.0 % | 43.0 % | 951 / 1,685 | 191 / 74 | 56 / 56 | 196 |
+| route | 512 | 37.5 % | 40.4 % | 40.6 % | 980 / 1,446 | 126 / 108 | 41 / 40 | 194 |
+
+The corpus supplies the outcomes the first study lacked: reasoning that breaks a correct direct
+answer, 2,048 beating 1,024 and the reverse, and every action failing. On allocation and route,
+reasoning helps and harms at similar rates, and the extra 1,024 tokens buy nothing on average.
+
+**Training.** A Colab CPU session (PyTorch 2.11.0+cpu) trained the linear and 128-unit MLP heads
+with seeds 20260923, 1 and 2. Utility was correctness minus 0.02 per 1,024 tokens, with
+`synthetic_allocation` held out as an entire family (32 train, 9 validation, 7 test and 16
+family-test groups; 1,024 / 288 / 224 / 512 rows). Linear head, seed 20260923:
+
+| Split | Always direct | Always 1,024 | Always 2,048 | Router | Oracle | Router actions (0 / 1,024 / 2,048) |
+|---|---:|---:|---:|---:|---:|---|
+| Validation (selection) | 0.309 | 0.617 | 0.584 | 0.641 | 0.728 | 83 / 115 / 90 |
+| Instance test | 0.397 | 0.975 | 0.979 | 0.979 | 0.996 | 0 / 110 / 114 |
+| Held-out family | 0.244 | 0.411 | 0.397 | 0.388 | 0.611 | 0 / 71 / 441 |
+
+All six heads reproduce the pattern. Instance-test utility is 0.970-0.979, a tie with always
+reasoning. Held-out family utility is 0.388-0.405, which is **below always-1,024 in every run**.
+The MLP never beat the linear head. Held-out family Brier score is 0.309, against 0.089 on the
+instance test. The instance test cannot show a gain: its seven groups are mostly ledger and
+policy, where always reasoning is nearly perfect, plus easy route groups where direct is already
+84 % correct. The validation gain of +0.024 over always-1,024 is the only positive signal. Its
+router answers directly on 83 of 288 rows, but the split also selected the early-stopping epoch,
+which makes it optimistic.
+
+**Conclusion.** Pre-think features from the frozen backbone do not transfer the reasoning
+decision to an unseen family. On allocation the router spends 1,644 tokens per item, falling back
+to always reasoning at the larger budget, and loses to the fixed 1,024 policy. The oracle shows
+large headroom on both held-out splits: 0.611 against 0.411 on the family, mostly from answering
+directly when reasoning would not have helped. Within the training families there is weak
+evidence of useful direct routing, not yet measured on an unbiased split. No head is qualified
+for serving. The next decisive measurement is grouped cross-validation within the three training
+families, to separate in-family signal from the absence of cross-family transfer. More families
+would be needed before any held-out-family claim.
+
+Evidence is retained under `profiles/bench/reasoning-router-g4-20260924/` (outcomes, verified
+parts, pilot analyses, campaign logs, and `campaign/train/out/*` reports and checkpoints).
 
 ## Research evidence
 
