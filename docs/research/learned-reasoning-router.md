@@ -258,7 +258,7 @@ reuses the 1,024 outcome whenever the 1,024 run stopped without its cap. A pilot
 basis for both. Eight G4 rows reproduced the local collection bit for bit. Features and direct
 answers did not depend on concurrency. The derived 2,048 action matched a real rerun at
 concurrency 1. Concurrency 8 can still change reasoning labels through batch composition, so this
-profile never mixes with concurrency-1 data. Collection produced 3.49 M output tokens at about 16
+profile never mixes with concurrency-1 data. The labels account for 3.49 M output tokens, derived actions included. Collection ran at about 16
 rows/min. Colab reclaimed each VM after 23-30 minutes, so the run spanned eight sessions resumed
 by `colab_campaign.py` from verified parts. All 2,048 rows passed the trainer's schema, feature,
 artifact and split checks.
