@@ -300,12 +300,78 @@ to always reasoning at the larger budget, and loses to the fixed 1,024 policy. T
 large headroom on both held-out splits: 0.611 against 0.411 on the family, mostly from answering
 directly when reasoning would not have helped. Within the training families there is weak
 evidence of useful direct routing, not yet measured on an unbiased split. No head is qualified
-for serving. The next decisive measurement is grouped cross-validation within the three training
-families, to separate in-family signal from the absence of cross-family transfer. More families
-would be needed before any held-out-family claim.
+for serving. The follow-up below separates in-family signal from cross-family transfer.
 
 Evidence is retained under `profiles/bench/reasoning-router-g4-20260924/` (outcomes, verified
 parts, pilot analyses, campaign logs, and `campaign/train/out/*` reports and checkpoints).
+
+### Rotating holdouts and direct-answer confidence — 2026-09-25
+
+Two questions follow from the study above. Does the hidden-state router learn anything on unseen
+groups inside the families it trained on? Does the model's confidence in its direct answer carry
+over to unseen families better than hidden features do?
+
+**Confidence data.** The collector now records the direct action's distribution over the option
+letters at its first answer position. A `--direct-only` pass re-observed all 2,048 rows on one
+Colab G4 session (build 7 minutes, collection 4 minutes, concurrency 8). Every row joined its
+paired observation with identical input, artifact, features and direct answer. Four confidence
+inputs were derived per row: top letter probability, margin, normalized entropy, and the letter
+mass under the full vocabulary. The top probability separates correct from wrong direct answers
+only weakly (AUROC 0.64). Direct answers at 0.9 or above were always correct, but only 71 rows
+reached that level, none of them in ledger or allocation.
+
+**Protocol.** One Colab CPU session ran 42 linear heads. In the ten-fold group rotation
+(`--fold 0..9`, no family held out), every one of the 64 groups is tested exactly once, and
+out-of-fold predictions are pooled over all 2,048 rows. Leave-one-family-out holds each family
+out entirely. Every configuration trains on hidden features, confidence, or both, and also scores
+the one-threshold confidence gate, fitted on train and validation only. Utility is unchanged:
+correctness minus 0.02 per 1,024 tokens.
+
+Pooled out-of-fold results (unseen groups of the trained families):
+
+| Scope | Always 1,024: utility / accuracy / tokens | Hidden router | Confidence gate | Oracle |
+|---|---|---|---|---|
+| All 2,048 | 0.670 / 68.4 % / 701 | **0.700 / 70.9 % / 416** | 0.668 / 68.1 % / 684 | 0.790 / 79.5 % / 268 |
+| route | 0.385 / 40.4 % / 980 | **0.459 / 46.7 % / 392** | 0.384 | 0.617 |
+| allocation | 0.411 / 43.0 % / 951 | **0.441 / 44.9 % / 405** | 0.407 | 0.611 |
+| ledger | 0.971 / 98.0 % / 472 | 0.989 / 99.8 % / 466 | 0.971 | 0.991 |
+| policy | 0.912 / 92.0 % / 401 | 0.912 / 92.0 % / 403 | 0.909 | 0.940 |
+
+Within its families, the hidden-state router is more accurate than always reasoning and spends
+41 % fewer tokens. It answers directly on 287 of 512 route and 266 of 512 allocation rows, where
+reasoning helps and harms at similar rates and often runs out of budget. It keeps reasoning on
+ledger and policy. Confidence as the head's only input matches always-1,024 (0.671). Adding it to
+the hidden features does not help (0.697).
+
+A prompt-length rule is the obvious simpler explanation, because the corpus deliberately varies
+instance size. It does not account for the result. A single length threshold fitted on the same
+folds scores 0.665. A separate threshold for each family, which is given the family label the
+router never sees, scores 0.677 overall. That rule nearly matches the router on route (0.453) and
+loses on allocation (0.394).
+
+Leave-one-family-out utility:
+
+| Held-out family | Always 1,024 | Hidden | Confidence | Both | Confidence gate | Oracle |
+|---|---:|---:|---:|---:|---:|---:|
+| ledger | 0.971 | 0.987 | 0.971 | 0.987 | 0.971 | 0.991 |
+| policy | 0.912 | 0.912 | 0.917 | 0.914 | 0.892 | 0.940 |
+| route | 0.385 | 0.378 | 0.385 | 0.404 | 0.387 | 0.617 |
+| allocation | 0.411 | 0.388 | 0.409 | 0.389 | 0.407 | 0.611 |
+
+On a family never seen in training, no input set recovers the direct-answer headroom. The heads
+reason on nearly every row. The ledger gain only reflects 2,048 over 1,024 on that family. The
+route "both" gain of +0.019 comes from one configuration without replication.
+
+**Conclusion.** Pre-think hidden features carry a real routing signal, but for the task
+distributions a head has trained on. Direct-answer confidence is a weak signal and does not
+transfer either. For NInfer this points to calibrating a router on the deployment's own recurring
+task families rather than shipping one general head. That requires paired outcomes collected on
+that workload; for sensitive workloads, both collection and training must stay on site. The
+2,048 budget earns little here. Over always-1,024 it gains +0.016 utility on ledger and +0.002
+on policy, and it loses on route and allocation. No head is qualified for serving.
+
+Evidence is under `profiles/bench/reasoning-router-confidence-20260925/` (`direct-c8.jsonl`,
+`train/out/*`, `aggregate.json`, and the scripts that produced them).
 
 ## Research evidence
 

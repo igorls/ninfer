@@ -167,6 +167,14 @@ Two options change the collection profile, and a training set always holds exact
   single-lane unit), but decode labels then depend on batch composition and are not repeatable
   (profile suffix `:cN`). The `seconds` field then includes shared rounds; use it descriptively only.
 
+Every direct action records `answer_logprobs` (its first answer position renormalized over the
+option letters), `answer_raw_logprobs` and the top five tokens. `--direct-only` re-observes only
+that action (profile suffix `:direct-only`). Train with `--confidence FILE` to join such a
+collection of the same rows. Rows join only when their input, artifact, features and direct answer
+are identical. `--inputs hidden|confidence|both` selects the head's inputs. Every report then also
+scores a one-threshold confidence gate: answer directly above the threshold, otherwise reason with
+1,024 tokens.
+
 The profile does not record the engine commit, compiler or GPU. Before combining collections from
 different builds or machines, collect a few identical requests on both and compare them with
 `analyze --data new.jsonl --against old.jsonl`: features must be bitwise equal.
@@ -198,6 +206,8 @@ Download before stopping; stop the session even when training fails. Training ou
 `router.json` (portable weights, profile, replay identities), `report.json` and `predictions.jsonl`.
 Default selection utility is correctness minus `0.02 * output_tokens / 1024`; set it before
 evaluating. The default head has 30,726 parameters; `--hidden 128` trains the larger MLP.
+`--fold K` (0-9) rotates the group buckets, so folds 0-9 test every group once.
+`--holdout-family none` keeps every family in the instance splits.
 
 For the next round, collect new groups into the accumulated outcomes, upload the updated file and
 the previous `router.json`, then add `--previous /content/previous-router.json` to the train command.
