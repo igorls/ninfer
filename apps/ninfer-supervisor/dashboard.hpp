@@ -1088,7 +1088,7 @@ R"HTML(  canvas.addEventListener('mouseleave', () => {
     document.getElementById('chart-empty').hidden = n >= 2;
     if (n < 2) return;
 
-    let yMax = (lastState && lastState.nvidia_smi && lastState.nvidia_smi.total_bytes) || 1;
+    let yMax = (lastState && lastState.device_memory && lastState.device_memory.total_bytes) || 1;
     for (let i = 0; i < n; i++) {
       if (u[i] > yMax) yMax = u[i];
     }
@@ -1162,7 +1162,7 @@ R"HTML(  canvas.addEventListener('mouseleave', () => {
     // optimistic again near saturation, so it could not be read as a signal.
     const reserveFloor = (lastState && lastState.admin_vram && lastState.admin_vram.desktop_reserve)
       ? lastState.admin_vram.desktop_reserve.runtime_floor_bytes : 0;
-    const totalForLine = (lastState && lastState.nvidia_smi) ? lastState.nvidia_smi.total_bytes : 0;
+    const totalForLine = (lastState && lastState.device_memory) ? lastState.device_memory.total_bytes : 0;
     if (reserveFloor > 0 && totalForLine > 0) {
       const limitY = getY(totalForLine - reserveFloor);
       ctx.beginPath();
@@ -1301,7 +1301,7 @@ R"HTML(    if (id === 'prefix.reuse_mix') return {title:'Reusing earlier convers
     const info = s.desktop_reserve || {};
     const saved = info.next_gib == null ? 8 : info.next_gib;
     const gib = reserveDraft == null ? saved : reserveDraft === 0 ? 8 : reserveDraft;
-    const nv = s.nvidia_smi || {};
+    const nv = s.device_memory || {};
     const total = nv.ok ? nv.total_bytes / 1073741824 : null;
     const budget = s.reserve_budget || {};
     const max = budget.ok ? budget.max_gib : 0;
@@ -1401,7 +1401,7 @@ R"HTML(    if (id === 'prefix.reuse_mix') return {title:'Reusing earlier convers
     renderLaunchPlan(eng, s);
 
     // VRAM Metrics
-    const nv = s.nvidia_smi || {};
+    const nv = s.device_memory || {};
     const dxgi = s.dxgi || {};
     const usedBytes = Number.isFinite(nv.used_bytes) && nv.total_bytes > 0 ? nv.used_bytes : null;
     const totalBytes = nv.total_bytes > 0 ? nv.total_bytes : null;

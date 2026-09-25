@@ -46,7 +46,7 @@ public:
 
     // Repaints the tray icon when the status changes. Called on a timer; cheap
     // because it reads EngineChild's in-memory status and never polls the
-    // engine or shells out to nvidia-smi.
+    // engine or the GPU.
     void refresh_icon();
 
     // Shell_NotifyIcon(NIM_ADD), reported rather than assumed. It fails when
@@ -135,18 +135,5 @@ private:
     bool listen_announced_       = false;
     bool login_install_pending_  = false;
 };
-
-// Device-wide memory via nvidia-smi, run hidden.
-//
-// Deliberately NOT cudaMemGetInfo and NOT the DXGI budget: both report an empty
-// card while another process holds 70 GiB -- verified this session, and the cause
-// of two incidents where the engine filled the card and the desktop stopped
-// responding. Anything the tray says about memory has to be device-wide truth.
-// Returns ok=false when the tool is missing, and the menu then omits the memory
-// line rather than showing a wrong one.
-//
-// Only a fallback now: the menu reads Collector::last_nvidia(), which is the
-// same measurement already taken at 1 Hz off the UI thread.
-NvidiaSmiMemory query_device_memory_smi(int device);
 
 } // namespace ninfer::supervisor

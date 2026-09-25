@@ -129,7 +129,11 @@ void Collector::poll_admin(Collected& out) {
     }
 }
 
-void Collector::poll_nvidia_smi(Collected& out) {
+// Device-wide memory: NVML in process (one session for the supervisor's lifetime), with
+// nvidia-smi only when NVML cannot load.
+void Collector::poll_device_memory(Collected& out) {
+    out.nvidia = nvml_.query(spec_.device);
+    if (out.nvidia.ok || nvml_.available()) { return; }
     std::string csv;
     int rc = 0;
     if (!run_hidden_capture("nvidia-smi --query-gpu=index,memory.used,memory.total "
@@ -387,7 +391,7 @@ std::int64_t Collector::poll_request_log_mtime() const {
     return ms > 0 ? ms : 0;
 }
 
-NvidiaSmiMemory Collector::last_nvidia() {
+NvidiaMemory Collector::last_nvidia() {
     std::lock_guard lock(mu_);
     return last_nvidia_;
 }
@@ -556,15 +560,11 @@ nlohmann::json Collector::throughput_series_json() {
 void Collector::series_loop() {
     // DXGI is an in-process API call, cheap enough to sample at the full rate --
     // and the budget oscillation IS the finding, so it must not be decimated.
-    // nvidia-smi is a PROCESS SPAWN measured at ~51 ms on this box; polling it
-    // every tick cost ~10 spawns/s and ~48% of one core, continuously. That does
-    // not just waste CPU, it perturbs the machine this series exists to observe --
-    // the game-test workload it is meant to measure would be competing with it.
-    // Device totals move slowly, so sample them at 1 Hz and carry the last
-    // reading forward into the fast series.
+    // Device-wide memory (NVML) and the per-process PDH counters move slowly, so they are
+    // sampled at 1 Hz and carried forward into the fast series.
     constexpr int kNvidiaEvery = 10;
     int nvidia_tick            = 0;
-    NvidiaSmiMemory nvidia_last;
+    NvidiaMemory nvidia_last;
     GpuProcessSource process_source;
     nlohmann::json process_last;
     while (series_run_.load()) {
@@ -575,7 +575,7 @@ void Collector::series_loop() {
             DxgiSnapshot dxgi = query_dxgi_local(spec_.device);
             if (nvidia_tick == 0 && dxgi.ok) {
                 Collected nv;
-                poll_nvidia_smi(nv);
+                poll_device_memory(nv);
                 nvidia_last = nv.nvidia;
                 process_last = process_source.sample(dxgi);
             }
@@ -759,7 +759,7 @@ Collected Collector::snapshot() {
     poll_health(out);
     poll_admin(out);
     out.dxgi = query_dxgi_local(spec_.device);
-    poll_nvidia_smi(out);
+    poll_device_memory(out);
     record_transitions(out);
     return out;
 }

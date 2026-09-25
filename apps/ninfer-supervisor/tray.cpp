@@ -109,8 +109,9 @@ HBITMAP make_status_dot(TrayStatus status) {
 }
 
 // Free memory leads, because that is the number a person can act on; the split is
-// secondary. Reads device-wide truth -- see query_device_memory_smi.
-std::wstring memory_line(const NvidiaSmiMemory& m) {
+// secondary. Device-wide truth (NVML), never cudaMemGetInfo or the DXGI budget: both
+// report an empty card while another process holds 70 GiB.
+std::wstring memory_line(const NvidiaMemory& m) {
     if (!m.ok || m.total_mib == 0) { return L"GPU memory unavailable"; }
     wchar_t buf[128];
     const double freeg = static_cast<double>(m.total_mib - m.used_mib) / 1024.0;
@@ -557,51 +558,6 @@ void TrayIcon::tick_idle_unload() {
            L"The engine was idle and its memory has been returned to the desktop. "
            L"Load it again from the tray menu.",
            NIIF_INFO | NIIF_RESPECT_QUIET_TIME);
-}
-
-// Device-wide memory. nvidia-smi rather than cudaMemGetInfo or DXGI, both of
-// which report an empty card while another process holds 70 GiB.
-//
-// The menu no longer calls this: a process spawn measured at ~51 ms on the UI
-// thread, with a read loop that had no timeout, could freeze the menu for as
-// long as nvidia-smi was wedged. Collector::last_nvidia() is the same reading
-// taken at 1 Hz on a background thread. Kept for callers with no Collector.
-NvidiaSmiMemory query_device_memory_smi(int device) {
-    NvidiaSmiMemory out;
-    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
-    HANDLE r = nullptr;
-    HANDLE w = nullptr;
-    if (!CreatePipe(&r, &w, &sa, 0)) { return out; }
-    SetHandleInformation(r, HANDLE_FLAG_INHERIT, 0);
-
-    STARTUPINFOW si{};
-    si.cb         = sizeof(si);
-    si.dwFlags    = STARTF_USESTDHANDLES;
-    si.hStdOutput = w;
-    si.hStdError  = w;
-
-    wchar_t cmd[] = L"nvidia-smi --query-gpu=index,memory.used,memory.total "
-                    L"--format=csv,noheader,nounits";
-    PROCESS_INFORMATION pi{};
-    if (!CreateProcessW(nullptr, cmd, nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr,
-                        &si, &pi)) {
-        CloseHandle(r);
-        CloseHandle(w);
-        return out;
-    }
-    CloseHandle(w);
-    CloseHandle(pi.hThread);
-
-    std::string buf;
-    char chunk[512];
-    DWORD got = 0;
-    while (ReadFile(r, chunk, sizeof(chunk), &got, nullptr) && got > 0) {
-        buf.append(chunk, got);
-    }
-    CloseHandle(r);
-    WaitForSingleObject(pi.hProcess, 2000);
-    CloseHandle(pi.hProcess);
-    return parse_nvidia_smi_memory_csv(buf, device);
 }
 
 void TrayIcon::open_dashboard() const {

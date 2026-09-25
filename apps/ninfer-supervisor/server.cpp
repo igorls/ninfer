@@ -567,7 +567,7 @@ nlohmann::json DashboardServer::state_json() {
     return {{"monitor_only", !manages_engine_process(cfg_)},
             {"engine", std::move(engine)},
             {"dxgi", std::move(dxgi)},
-            {"nvidia_smi", std::move(nvidia)},
+            {"device_memory", std::move(nvidia)},
             {"gpu_processes", snap.gpu_processes},
             {"reserve_budget", child_.reserve_budget()},
             {"desktop_reserve", {{"next_gib", desktop_reserve_launch_mib(child_.config().engine.args, st.desktop_reserve_gib) / 1024.0},

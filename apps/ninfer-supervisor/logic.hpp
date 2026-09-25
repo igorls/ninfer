@@ -109,7 +109,7 @@ inline bool supervisor_control_header_ok(std::string_view value) {
     return trim_sv(value) == kSupervisorControlHeaderValue;
 }
 
-struct NvidiaSmiMemory {
+struct NvidiaMemory {
     bool ok                 = false;
     int index               = -1;
     std::uint64_t used_mib  = 0;
@@ -119,8 +119,8 @@ struct NvidiaSmiMemory {
 
 // Parses `nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits`.
 // Values are mebibytes. Picks the row whose index equals `device`.
-inline NvidiaSmiMemory parse_nvidia_smi_memory_csv(std::string_view csv, int device) {
-    NvidiaSmiMemory out;
+inline NvidiaMemory parse_nvidia_smi_memory_csv(std::string_view csv, int device) {
+    NvidiaMemory out;
     std::string_view rest = csv;
     bool saw_row          = false;
     while (!rest.empty()) {

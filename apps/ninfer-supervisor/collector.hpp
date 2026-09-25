@@ -2,6 +2,7 @@
 
 #include "config.hpp"
 #include "dxgi_query.hpp"
+#include "nvml_memory.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -50,7 +51,7 @@ struct RequestMix {
 
 struct Collected {
     DxgiSnapshot dxgi;
-    NvidiaSmiMemory nvidia;
+    NvidiaMemory nvidia;
     nlohmann::json gpu_processes = {{"ok", false}, {"apps", nlohmann::json::array()}};
     nlohmann::json admin_vram = nullptr;
     std::string admin_vram_note;
@@ -88,10 +89,8 @@ public:
     void set_health_observer(HealthObserver obs) { health_observer_ = std::move(obs); }
     void set_engine_state_provider(EngineStateProvider p) { engine_state_provider_ = std::move(p); }
 
-    // The 1 Hz cached nvidia-smi reading. The tray menu uses this instead of
-    // spawning nvidia-smi on the UI thread: that spawn costs ~51 ms measured, and
-    // its read loop had no timeout, so a wedged nvidia-smi froze the menu.
-    [[nodiscard]] NvidiaSmiMemory last_nvidia();
+    // The cached device-wide memory reading, so the tray menu never queries on the UI thread.
+    [[nodiscard]] NvidiaMemory last_nvidia();
 
     // mtime of the engine's request log, or 0 when none is configured. A second,
     // coarser activity source than the stderr scan: it survives a supervisor
@@ -101,7 +100,7 @@ public:
 private:
     void poll_health(Collected& out);
     void poll_admin(Collected& out);
-    void poll_nvidia_smi(Collected& out);
+    void poll_device_memory(Collected& out);
     void poll_request_log(Collected& out);
     void series_loop();
     // Reads only what has been appended since the last call and folds any engine
@@ -144,7 +143,8 @@ private:
     nlohmann::json last_admin_vram_  = nullptr;
     std::string last_admin_note_;
     DxgiSnapshot last_dxgi_;
-    NvidiaSmiMemory last_nvidia_;
+    NvidiaMemory last_nvidia_;
+    NvmlMemory nvml_;
     nlohmann::json last_gpu_processes_ = {{"ok", false}, {"apps", nlohmann::json::array()}};
     HealthObserver health_observer_;
     EngineStateProvider engine_state_provider_;
