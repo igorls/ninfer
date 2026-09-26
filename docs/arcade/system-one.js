@@ -40,7 +40,12 @@ const SystemOne = (() => {
         let body;
         try {body=JSON.parse(text);} catch {}
         if (!response.ok) {
-          const message=body?.error?.message||body?.message||text.slice(0,200);
+          // TypeSafe's FastAPI `detail` is a message, an {error_type, message} object or a list of
+          // validation errors; OpenAI-shaped relays use error.message.
+          const detail=body?.detail;
+          const message=(typeof detail==='string'?detail:null)||detail?.message||detail?.error_type||
+            (Array.isArray(detail)&&detail[0]?.msg?detail.map(d=>(d.loc||[]).join('.')+': '+d.msg).join('; '):null)||
+            body?.error?.message||body?.message||text.slice(0,200);
           throw fail('HTTP '+response.status+': '+message,'http',body??text);
         }
         if(body===undefined)throw fail('The API response is not valid JSON.','response',text);

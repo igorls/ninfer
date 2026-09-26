@@ -51,7 +51,7 @@ async function probe(route,kind,image,index,warmup=false){
   const started=performance.now(),response=await fetch(endpoint+'/v1/'+(route==='systemone'?'systemone':'chat/completions'),{
     method:'POST',headers:{'Content-Type':'application/json','User-Agent':tag,...(process.env.NINFER_API_KEY?{Authorization:'Bearer '+process.env.NINFER_API_KEY}:{})},body:JSON.stringify(body),signal:AbortSignal.timeout(120000)});
   const wire=await response.json(),ms=performance.now()-started;
-  if(!response.ok)throw new Error(JSON.stringify({route,kind,status:response.status,error:wire.error}));
+  if(!response.ok)throw new Error(JSON.stringify({route,kind,status:response.status,error:wire.detail??wire.error}));
   const answer=wire.answers?.move,position=wire.choices?.[0]?.logprobs?.content?.[0];
   const candidates=position?.candidate_logprobs;
   let choice=answer?.choice,probabilities=answer?.probabilities;

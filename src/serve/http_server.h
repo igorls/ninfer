@@ -18,13 +18,16 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 
 namespace ninfer::serve {
 
 void write_openai_error(httplib::Response& response, const ApiError& error);
 void write_anthropic_error(httplib::Response& response, const ApiError& error,
                            const std::string& request_id);
+class SystemOneError;
 void write_typesafe_error(httplib::Response& response, const ApiError& error);
+void write_typesafe_failure(httplib::Response& response, const SystemOneError& error);
 
 // cpp-httplib invokes the error handler for every application response with status >= 400. Only
 // an empty 413 is its own pre-routing payload-limit rejection; application-authored errors must be
@@ -77,6 +80,10 @@ private:
     [[nodiscard]] std::shared_ptr<RequestLifecycle> begin_request(RequestLogContext context);
 
     void register_routes();
+    // Writes the endpoint-shaped rejection and returns true when a configured key is missing or
+    // wrong.
+    [[nodiscard]] bool reject_unauthenticated(const httplib::Request& req,
+                                              httplib::Response& res) const;
     void handle_chat_completions(const httplib::Request& req, httplib::Response& res);
     void handle_score(const httplib::Request& req, httplib::Response& res);
     void handle_systemone(const httplib::Request& req, httplib::Response& res);
@@ -120,6 +127,8 @@ private:
     ServeOptions options_;
     AnthropicThinkingSigner anthropic_thinking_signer_;
     std::string public_model_id_;
+    std::int64_t loaded_unix_seconds_ = 0;
+    std::unordered_set<std::string> handler_authenticated_posts_;
     OpenAIResponsesStore openai_responses_store_;
     OperationalLog operational_log_;
     JsonlRequestLog request_jsonl_;

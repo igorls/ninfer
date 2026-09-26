@@ -409,6 +409,7 @@ if(NINFER_BUILD_SERVE)
     serve/openai_chat_request.cpp
     serve/openai_chat_response.cpp
     serve/ninfer_score_http.cpp
+    serve/typesafe_systemone.cpp
     serve/typesafe_systemone_http.cpp
     serve/openai_chat_http.cpp
     serve/openai_common.cpp

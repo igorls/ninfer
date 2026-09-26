@@ -134,6 +134,10 @@ test('latency includes the complete response body and parsing/validation', async
 test('HTTP and malformed responses fail explicitly', async () => {
   const game=new T.Game(1),options=game.options();
   await assert.rejects(T.decide('http://localhost',{},options,{fetchImpl:async()=>({ok:false,status:401,text:async()=>'{"error":{"message":"bad token"}}'})}),/HTTP 401: bad token/);
+  const typesafe=detail=>({fetchImpl:async()=>({ok:false,status:400,text:async()=>JSON.stringify({detail})})});
+  await assert.rejects(T.decide('http://localhost',{},options,typesafe('Too many choices. Must have at most 255 choices.')),/HTTP 400: Too many choices/);
+  await assert.rejects(T.decide('http://localhost',{},options,typesafe({error_type:'authentication_error',message:'Cannot authenticate'})),/HTTP 400: Cannot authenticate/);
+  await assert.rejects(T.decide('http://localhost',{},options,typesafe([{type:'missing',loc:['body','state'],msg:'Field required'}])),/HTTP 400: body\.state: Field required/);
   await assert.rejects(T.decide('http://localhost',{},options,{fetchImpl:async()=>({ok:true,text:async()=>'<html>not JSON'})}),/not valid JSON/);
 });
 

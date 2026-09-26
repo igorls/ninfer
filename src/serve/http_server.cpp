@@ -5,6 +5,7 @@
 #include "serve/http_transport.h"
 #include "serve/openai_common.h"
 #include "serve/request_log.h"
+#include "serve/typesafe_systemone.h"
 
 #include "core/device_memory.h"
 
@@ -12,6 +13,7 @@
 
 #include <chrono>
 #include <exception>
+#include <functional>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -36,9 +38,18 @@ bool is_openai_path(std::string_view path) {
     return path.starts_with("/v1/") && !is_anthropic_path(path);
 }
 
+bool is_systemone_path(std::string_view path) {
+    return path == "/v1/systemone" || path == "/systemone";
+}
+
 void ensure_openai_request_id(const httplib::Request& request, httplib::Response& response) {
-    if (is_openai_path(request.path) && !response.has_header("x-request-id")) {
+    if ((is_openai_path(request.path) || is_systemone_path(request.path)) &&
+        !response.has_header("x-request-id")) {
         response.set_header("x-request-id", new_openai_request_id());
+    }
+    // TypeSafe clients read their request id from this header.
+    if (is_systemone_path(request.path) && !response.has_header("x-typesafe-request-id")) {
+        response.set_header("x-typesafe-request-id", response.get_header_value("x-request-id"));
     }
 }
 
@@ -339,7 +350,7 @@ void HttpServer::register_routes() {
     if (options_.enable_cors) {
         server_.set_default_headers(
             {{"Access-Control-Allow-Origin", "*"},
-             {"Access-Control-Expose-Headers", "x-request-id, request-id"},
+             {"Access-Control-Expose-Headers", "x-request-id, request-id, x-typesafe-request-id"},
              {"Access-Control-Allow-Headers",
               "Authorization, Content-Type, X-API-Key, anthropic-version, anthropic-beta, "
               "anthropic-user-profile-id"},
@@ -352,32 +363,11 @@ void HttpServer::register_routes() {
 
     server_.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
         ensure_openai_request_id(req, res);
-        if (options_.api_key.empty() || req.path == "/health" || req.method == "OPTIONS") {
+        if (req.method == "POST" && handler_authenticated_posts_.contains(req.path)) {
             return httplib::Server::HandlerResponse::Unhandled;
         }
-        // Accept both the OpenAI-style bearer token and the Anthropic-style
-        // x-api-key header so OpenAI clients and Claude Code (ANTHROPIC_API_KEY
-        // -> x-api-key, ANTHROPIC_AUTH_TOKEN -> Authorization: Bearer) both work.
-        const bool bearer_ok =
-            matches_bearer_credential(req.get_header_value("Authorization"), options_.api_key);
-        const bool x_api_key_ok = req.get_header_value("x-api-key") == options_.api_key;
-        if (!bearer_ok && !x_api_key_ok) {
-            ApiError error;
-            error.status  = 401;
-            error.type    = "invalid_request_error";
-            error.code    = "invalid_api_key";
-            error.message = "missing or invalid API key";
-            // Render the 401 in the shape the target endpoint speaks.
-            if (req.path.rfind("/v1/messages", 0) == 0) {
-                write_anthropic_error(res, error, new_anthropic_request_id());
-            } else if (req.path == "/v1/systemone" || req.path == "/systemone") {
-                write_typesafe_error(res, error);
-            } else {
-                write_openai_error(res, error);
-            }
-            return httplib::Server::HandlerResponse::Handled;
-        }
-        return httplib::Server::HandlerResponse::Unhandled;
+        return reject_unauthenticated(req, res) ? httplib::Server::HandlerResponse::Handled
+                                                : httplib::Server::HandlerResponse::Unhandled;
     });
 
     server_.set_exception_handler(
@@ -446,30 +436,31 @@ void HttpServer::register_routes() {
     server_.Get(R"(/v1/models/(.+))", [this](const httplib::Request& req, httplib::Response& res) {
         handle_model(req, res);
     });
-    server_.Post("/v1/chat/completions",
-                 [this](const httplib::Request& req, httplib::Response& res) {
-                     handle_chat_completions(req, res);
-                 });
-    server_.Post("/v1/score", [this](const httplib::Request& req, httplib::Response& res) {
-        handle_score(req, res);
-    });
-    server_.Post("/v1/systemone", [this](const httplib::Request& req, httplib::Response& res) {
-        handle_systemone(req, res);
-    });
-    server_.Post("/systemone", [this](const httplib::Request& req, httplib::Response& res) {
-        handle_systemone(req, res);
-    });
-    server_.Post("/v1/responses", [this](const httplib::Request& req, httplib::Response& res) {
-        handle_responses(req, res);
-    });
-    server_.Post("/v1/responses/input_tokens",
-                 [this](const httplib::Request& req, httplib::Response& res) {
-                     handle_response_input_tokens(req, res);
-                 });
-    server_.Post("/v1/responses/compact",
-                 [this](const httplib::Request& req, httplib::Response& res) {
-                     handle_response_compact(req, res);
-                 });
+    // A rejection must follow reading the body: closing a socket with unread request bytes resets
+    // the connection, and the reset can overtake the 401. Exact POST routes therefore authenticate
+    // in their handler; the pre-routing check covers every other request.
+    const auto post = [this](const std::string& path, auto handler) {
+        handler_authenticated_posts_.insert(path);
+        server_.Post(path, [this, handler](const httplib::Request& req, httplib::Response& res) {
+            if (!reject_unauthenticated(req, res)) { std::invoke(handler, this, req, res); }
+        });
+    };
+    post("/v1/chat/completions", &HttpServer::handle_chat_completions);
+    post("/v1/score", &HttpServer::handle_score);
+    post("/v1/systemone", &HttpServer::handle_systemone);
+    post("/systemone", &HttpServer::handle_systemone);
+    for (const char* path : {"/v1/systemone", "/systemone"}) {
+        const auto not_allowed = [](const httplib::Request&, httplib::Response& res) {
+            write_typesafe_failure(res, systemone_method_not_allowed());
+        };
+        server_.Get(path, not_allowed);
+        server_.Put(path, not_allowed);
+        server_.Patch(path, not_allowed);
+        server_.Delete(path, not_allowed);
+    }
+    post("/v1/responses", &HttpServer::handle_responses);
+    post("/v1/responses/input_tokens", &HttpServer::handle_response_input_tokens);
+    post("/v1/responses/compact", &HttpServer::handle_response_compact);
     server_.Post(R"(/v1/responses/([^/]+)/cancel)",
                  [this](const httplib::Request& req, httplib::Response& res) {
                      handle_response_cancel(req, res);
@@ -486,22 +477,48 @@ void HttpServer::register_routes() {
                    [this](const httplib::Request& req, httplib::Response& res) {
                        handle_response_delete(req, res);
                    });
-    server_.Post("/v1/messages/count_tokens",
-                 [this](const httplib::Request& req, httplib::Response& res) {
-                     handle_count_tokens(req, res);
-                 });
-    server_.Post("/v1/messages", [this](const httplib::Request& req, httplib::Response& res) {
-        handle_messages(req, res);
-    });
+    post("/v1/messages/count_tokens", &HttpServer::handle_count_tokens);
+    post("/v1/messages", &HttpServer::handle_messages);
     server_.Get("/admin/vram", [this](const httplib::Request& req, httplib::Response& res) {
         handle_admin_vram(req, res);
     });
     server_.Get("/admin/stats", [this](const httplib::Request& req, httplib::Response& res) {
         handle_admin_stats(req, res);
     });
-    server_.Post("/admin/quiesce", [this](const httplib::Request& req, httplib::Response& res) {
-        handle_admin_quiesce(req, res);
-    });
+    post("/admin/quiesce", &HttpServer::handle_admin_quiesce);
+}
+
+bool HttpServer::reject_unauthenticated(const httplib::Request& req,
+                                        httplib::Response& res) const {
+    if (options_.api_key.empty() || req.path == "/health" || req.method == "OPTIONS") {
+        return false;
+    }
+    // Accept both the OpenAI-style bearer token and the Anthropic-style
+    // x-api-key header so OpenAI clients and Claude Code (ANTHROPIC_API_KEY
+    // -> x-api-key, ANTHROPIC_AUTH_TOKEN -> Authorization: Bearer) both work.
+    const bool bearer_ok =
+        matches_bearer_credential(req.get_header_value("Authorization"), options_.api_key);
+    const bool x_api_key_ok = req.get_header_value("x-api-key") == options_.api_key;
+    if (bearer_ok || x_api_key_ok) { return false; }
+    if (is_systemone_path(req.path)) {
+        // TypeSafe answers a missing key with 403 and a wrong one with 401.
+        const bool supplied = req.has_header("Authorization") || req.has_header("x-api-key");
+        write_typesafe_failure(res,
+                               supplied ? systemone_invalid_api_key() : systemone_missing_api_key());
+        return true;
+    }
+    ApiError error;
+    error.status  = 401;
+    error.type    = "invalid_request_error";
+    error.code    = "invalid_api_key";
+    error.message = "missing or invalid API key";
+    // Render the 401 in the shape the target endpoint speaks.
+    if (req.path.rfind("/v1/messages", 0) == 0) {
+        write_anthropic_error(res, error, new_anthropic_request_id());
+    } else {
+        write_openai_error(res, error);
+    }
+    return true;
 }
 
 namespace {
@@ -829,8 +846,12 @@ void HttpServer::handle_admin_quiesce(const httplib::Request& req, httplib::Resp
 }
 
 void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) const {
-    res.set_content(make_models_list(public_model_id_, unix_time_now(), options_.max_context),
-                    "application/json");
+    // One body serves OpenAI clients (`data`) and TypeSafe SDKs (`models`), which both request
+    // this path and ignore the other's key.
+    nlohmann::ordered_json payload = nlohmann::ordered_json::parse(
+        make_models_list(public_model_id_, unix_time_now(), options_.max_context));
+    payload["models"] = systemone_model_entries(public_model_id_, loaded_unix_seconds_);
+    res.set_content(payload.dump(), "application/json");
 }
 
 void HttpServer::handle_model(const httplib::Request& req, httplib::Response& res) const {
@@ -856,6 +877,7 @@ void HttpServer::attach(GenerationService& service) {
     }
     const ninfer::LoadSummary load = service.load_summary();
     public_model_id_               = resolve_public_model_id(options_, load.model_id);
+    loaded_unix_seconds_           = unix_time_now();
     service_                       = &service;
     request_jsonl_.write_server_start(options_, service.engine_options(),
                                       service.sampling_defaults(), public_model_id_, load,

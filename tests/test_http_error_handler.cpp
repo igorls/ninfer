@@ -107,10 +107,12 @@ int main() {
         ninfer::serve::handle_unrendered_http_error(options, systemone_request, systemone_response);
     const Json systemone_body = Json::parse(systemone_response.body);
     failures += check(systemone_result == httplib::Server::HandlerResponse::Handled &&
-                          systemone_body.at("error").at("code") == "request_too_large" &&
-                          systemone_body.at("error").at("message").get<std::string>().find(
-                              "1234 bytes") != std::string::npos,
-                      "empty SystemOne 413 did not become a payload-limit error");
+                          systemone_response.status == 413 &&
+                          systemone_body.at("detail").at("error_type") == "api_usage_error" &&
+                          systemone_body.at("detail").at("message").get<std::string>().find(
+                              "1234 bytes") != std::string::npos &&
+                          systemone_response.has_header("x-typesafe-request-id"),
+                      "empty SystemOne 413 did not become a TypeSafe payload-limit error");
 
     httplib::Request missing_messages_request;
     missing_messages_request.path = "/v1/messages/missing";
