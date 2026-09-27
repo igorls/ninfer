@@ -74,7 +74,7 @@ messages) and `35a27329` (`chat_template_kwargs`) are in upstream's request pars
 (long-anchor slot identity) has identical checks in upstream's resource manager; `ddeeec19` is
 mostly the upstream DFlash2 closure.
 
-## Proposed drops (need Igor's approval)
+## Drops (approved by Igor, 2026-09-27)
 
 | Item | Reason |
 |---|---|
@@ -84,8 +84,14 @@ mostly the upstream DFlash2 closure.
 | `a7c24564` `362aa76c` `7de1c559` D19 KV-store lift | v3 owns logical/host KV stores under `models/qwen3_5/program/storage`; Flash-Next decides its own store placement in M3 |
 | `48c11931` Flash-Next MTP implementation brief | Completed plan |
 | `NINFER_BUILD_MEDIA=OFF` stubs (`decode_stub.cpp`, `acquire_stub.cpp`) | v3 makes FFmpeg and libcurl mandatory; every Windows build here has them |
-| Committed data: `supervisor-logs-demo/` (13 MB), `bench/d20_results*/` | Measurement output, not source |
-| `tools/freq_corpus/fixtures/*.i64` (35 MB) | Frequency data for the Flash-Next draft head; regenerate or keep with M3 |
+| Committed data: `supervisor-logs-demo/` (13 MB), `bench/d20_results*/` | Measurement output, not source; stays in the old branch history |
+
+Correction (Igor, 2026-09-27): `tools/freq_corpus/fixtures/ranking/*.i64` are not Flash-Next data.
+They are byte-identical to upstream's copies at `bace20dc`, and the v3 converter uses
+`ranking.train.counts.i64` as `DEFAULT_RANKING` for the 27B optimized proposal head
+(`tools/convert/proposal.py`). Nothing to drop. Only the fork's `shortlist_32k.i32` and
+`shortlist_65k.i32` beside them are Flash-Next inputs (draft head, `load/materialized.cpp`); they
+come with M3.
 
 ## Upstream `6cc95cc5..bace20dc` verdicts
 
@@ -102,15 +108,20 @@ All 20 commits are kept in the port base. Two need a production decision.
 | `dc58675f` | Q5 routed-down Rows2 window | Keep: 35B MoE only |
 | `f9c4a04b` | state-cache working-set bench scenarios | Keep |
 | `cb30e070` `a9a0d10a` `b39de4d5` `f76e19c0` `9e163eee` `594930e7` | Q4/Q5 A16 routes | Keep: groupwise-int only |
-| `4c0fe48a` then `bace20dc` | blocking sync, then spin default with `NINFER_CUDA_SYNC` | Keep. Spin equals production today: the fork never set device flags, and `cudaDeviceScheduleAuto` spins on a 32-thread host with one GPU. **Decision for Igor:** run production with `NINFER_CUDA_SYNC=blocking` to free the spinning core on the shared desktop, at some latency cost to be measured |
+| `4c0fe48a` then `bace20dc` | blocking sync, then spin default with `NINFER_CUDA_SYNC` | Keep upstream's spin default for parity (Igor, 2026-09-27). Spin equals production today: the fork never set device flags, and `cudaDeviceScheduleAuto` spins on a 32-thread host with one GPU. The close-out A/B also measures `NINFER_CUDA_SYNC=blocking` on the port build (TTFT, decode tok/s, CPU core freed) as data for a later production decision |
 
 Earlier upstream `ee9d5192` (in the base, reviewed before `6cc95cc5`) made token-fast W4A4
 rasterisation unconditional. The fork rejected it on the RTX PRO 6000 (7,680-token prefill
-741.4 -> 749.9 ms, 2026-09-10) and kept it only for the RTX 5090 (`db1a3694`). **Revert
-candidate:** if the M2 A/B shows the same regression on v3 (which also carries `1d8587bc` and
-`5f5fccab`), reintroduce a device-selected weight-fast schedule for the RTX PRO 6000.
+741.4 -> 749.9 ms, 2026-09-10) and kept it only for the RTX 5090 (`db1a3694`). It stays in the
+base for now (Igor, 2026-09-27): the M2 NVFP4 A/B (group P1) measures it on this RTX PRO 6000
+against the fork's 741.4 ms 7,680-token reference, with the 2026-09-10 probe, and decides whether
+a device-selected weight-fast schedule comes back.
 
-## Decisions and risks for Igor
+## Decisions and risks
+
+Recorded decisions (Igor, 2026-09-27): proceed with M2 in the proposed order; drops approved as
+listed above; keep the spin CUDA sync default; re-convert OrcaRouter; keep `ee9d5192` pending the
+P1 A/B.
 
 1. System One scores change across builds (see the Tribuno rollout rule). Any v3 production build
    needs a bentokit recalibration before it enters the judge list.
@@ -120,10 +131,11 @@ candidate:** if the M2 A/B shows the same regression on v3 (which also carries `
    reuse probes and the score/System One tests.
 3. `tools/upgrade_ninfer_v2_to_v3.py` knows only the seven official identities. The NVFP4+DFlash2
    artifact should upgrade (DFlash2 components are handled); the OrcaRouter artifact
-   (`qwen3.8-27b-orcarouter/nvfp4`, BF16 embedding and full head) is not a known input. Options:
-   re-convert from the local source with a v3 recipe (preferred: no fork-only upgrade path), or
-   extend the upgrade tool locally.
-4. CUDA synchronization default and the W4A4 raster (above).
+   (`qwen3.8-27b-orcarouter/nvfp4`, BF16 embedding and full head) is not a known input. Decision
+   (Igor, 2026-09-27): re-convert OrcaRouter from its local source with a v3 recipe, outputs under
+   `E:\models\v3\`, never overwriting an existing artifact; the upgrade tool is not extended for
+   it. The upgrade tool still gets its Windows patch for the NVFP4+DFlash2 production copies.
+4. CUDA synchronization default and the W4A4 raster: decided above.
 
 ## M1 — pristine Windows baseline
 
@@ -194,7 +206,7 @@ tools, DOC docs, OBS obsolete.
 |---|---|---|---|---|---|
 | `3ca81ca8` | 2026-08-27 | feat(platform): native Windows MSVC+CUDA build and toolcall/admin fixes | b | W1 | platform half re-done in M1 on v3 (file_io, platform.h, wide multiply); its tool-call JSON form and admin routes were lost in merge 7478c8d0 (admin re-done by f704502a) |
 | `7fc96721` | 2026-08-27 | feat(serve): tolerant tool calling, supervisor app, prefix observability, fatal executor handler | b | S2 | supervisor app -> SUP (d); fatal executor handler + test survive at 87812bc8 (port); tolerant tool-call parser lost in merge 7478c8d0 |
-| `84f0347f` | 2026-08-27 | fix(serve): partial tool-call recovery, tag whitespace resilience, and POST /admin/vram endpoints | e | OBS | tool-call recovery and POST /admin/vram lost in merge 7478c8d0; superseded by upstream 3b50962b/0c5d570c/719d56ef and fork f704502a |
+| `84f0347f` | 2026-08-27 | fix(serve): partial tool-call recovery, tag whitespace resilience, and POST /admin/vram endpoints | e | OBS | tool-call recovery and POST /admin/vram lost in merge 7478c8d0; superseded by upstream 3b50962b/0c5d570c/719d56ef and fork f704502a Dropped (Igor, 2026-09-27). |
 | `5a94cd1c` | 2026-08-27 | feat(media): enable native Windows Vision support via direct FFmpeg and libcurl discovery | b | W1 | FFmpeg/libcurl discovery without pkg-config: re-done in M1 (cmake/Dependencies.cmake) |
 | `a5e9b7be` | 2026-08-27 | fix(serve): accept structured multi-part content (including images) in tool messages | a | S1 | upstream parse_tool_message accepts content parts (openai_chat_request.cpp) |
 | `2b75ed5f` | 2026-08-27 | fix(frontend): publish rewrite checkpoint at current generation opener during tool loops (issue #13) | b | R1 | issue #13: checkpoint at the current generation opener in tool loops; upstream still retains the first tail assistant; re-derive against the Jinja probe design |
@@ -257,7 +269,7 @@ tools, DOC docs, OBS obsolete.
 | `7e1acac5` | 2026-08-30 | fix(qwen3_8_flash_next): state-slot invariant and 64-round continuation check (sequence 6f) | c | FN |  |
 | `0a495f93` | 2026-08-30 | fix(qwen3_8_flash_next): evict catalogued checkpoints under page-group pressure (sequence 6g, partial) | c | FN |  |
 | `1e7eb28b` | 2026-08-30 | feat(qwen3_8_flash_next): Engine pressure-planning protocol for private continuations (sequence 6h) | c | FN |  |
-| `3c6e41ec` | 2026-08-30 | fix(merge): make the upstream merge actually serve both targets (integration fixes) | e | OBS | integration fix for the 2026-08-30 merge; nothing to carry |
+| `3c6e41ec` | 2026-08-30 | fix(merge): make the upstream merge actually serve both targets (integration fixes) | e | OBS | integration fix for the 2026-08-30 merge; nothing to carry Dropped (Igor, 2026-09-27). |
 | `ca7305e2` | 2026-08-30 | perf(qwen3_8_flash_next): high-occupancy fused hyper-connection chain (sequence 9a) | c | FN |  |
 | `6243bcf3` | 2026-08-31 | fix(qwen3_8_flash_next): catalog-debt cleanup from 6h (sequence 6i) | c | FN |  |
 | `dbc1e663` | 2026-08-31 | perf(qwen3_8_flash_next): warp-cooperative QSA prefill attention (sequence 9d) | c | FN |  |
@@ -310,7 +322,7 @@ tools, DOC docs, OBS obsolete.
 | `11e0bb4e` | 2026-09-03 | perf(qwen3_8_flash_next): tensor-core PV and four-warp QK for the QSA prefill attention, behind a switch (sequence G24) | c | FN |  |
 | `97d5ec2b` | 2026-09-03 | fix(qwen3_8_flash_next): order the speculative verifier's recurrent rows without serialising ordinary decode (sequence M2b) | c | FN |  |
 | `cedd255c` | 2026-09-03 | perf(qwen3_8_flash_next): stage the routed MoE gate-up weights with cp.async and double-buffer the activations, behind a switch (sequence 21c) | c | FN |  |
-| `98fa9c14` | 2026-09-03 | fix(qwen3_6): emit the pimpl move-assignment operators so every Engine link resolves | e | OBS | explicit pimpl move operators for the removed qwen3_6 template API; v3 has no such instantiations (M1 build shows no need) |
+| `98fa9c14` | 2026-09-03 | fix(qwen3_6): emit the pimpl move-assignment operators so every Engine link resolves | e | OBS | explicit pimpl move operators for the removed qwen3_6 template API; v3 has no such instantiations (M1 build shows no need) Dropped (Igor, 2026-09-27). |
 | `11dcf0e6` | 2026-09-03 | build(third_party): compile spdlog with /utf-8 under MSVC | b | W1 | spdlog /utf-8: re-done in M1 |
 | `b0c40582` | 2026-09-03 | fix(qwen3_6): name the tool-call parse fallbacks and allow trailing text behind a switch | b | T1 | named parse fallbacks + NINFER_TOOL_CALLS_ALLOW_TRAILING_TEXT |
 | `fe724073` | 2026-09-03 | fix(qwen3_8_flash_next): add LRU eviction to continuation slots and inspect_capture feasibility (M6b) | c | FN |  |
@@ -335,10 +347,10 @@ tools, DOC docs, OBS obsolete.
 | `415572b0` | 2026-09-04 | feat(gdn): implement BF16 recurrent SSM state storage for Flash-Next (D18) | c | FN |  |
 | `9bf5e8b8` | 2026-09-04 | feat(sizing): Sequence D21 - NVML device-wide memory sizing & desktop reserve floor | b | S3 | NVML device-wide memory query, desktop reserve floor (--desktop-reserve-gib/-mib), actionable admission memory errors |
 | `a7950919` | 2026-09-04 | feat(spec): Sequence D20 - speculative telemetry wiring & acceptance fixtures | c | FN | Flash-Next MTP telemetry + acceptance fixtures |
-| `a7c24564` | 2026-09-04 | feat(residency): Sequence D19 - lift logical KV and host extent stores to src/runtime/ | e | OBS | D19 lift of qwen3_6 KV stores into src/runtime; v3 owns these under models/qwen3_5/program/storage |
+| `a7c24564` | 2026-09-04 | feat(residency): Sequence D19 - lift logical KV and host extent stores to src/runtime/ | e | OBS | D19 lift of qwen3_6 KV stores into src/runtime; v3 owns these under models/qwen3_5/program/storage Dropped (Igor, 2026-09-27). |
 | `b2c12970` | 2026-09-04 | feat(head): Sequence D17 - wire FP8 output head options & divergence harness | c | FN | FP8 output head flags; only Flash-Next honors them |
-| `362aa76c` | 2026-09-04 | revert: back out the D19 residency lift until its own test passes | e | OBS | revert of a7c24564 |
-| `7de1c559` | 2026-09-04 | feat(runtime): lift logical and host KV stores into namespace ninfer::runtime (D19 re-delivery) | e | OBS | D19 re-delivery; structure superseded by v3. Its DeviceArena-backing fix is checked against v3 storage in M2 |
+| `362aa76c` | 2026-09-04 | revert: back out the D19 residency lift until its own test passes | e | OBS | revert of a7c24564 Dropped (Igor, 2026-09-27). |
+| `7de1c559` | 2026-09-04 | feat(runtime): lift logical and host KV stores into namespace ninfer::runtime (D19 re-delivery) | e | OBS | D19 re-delivery; structure superseded by v3. Its DeviceArena-backing fix is checked against v3 storage in M2 Dropped (Igor, 2026-09-27). |
 | `eab7f1b8` | 2026-09-04 | feat(embed): wire FP8 token embedding quantizer & extend divergence harness | c | FN | FP8 token embedding flag; only Flash-Next honors it |
 | `2a606c22` | 2026-09-05 | feat(supervisor): Docker-style tray menu with desktop reserve, idle unload and device-wide memory | d | SUP |  |
 | `c1fb8c88` | 2026-09-05 | perf(flash-next): path-per-warp MoE down projection at decode, bitwise-identical | c | FN |  |
@@ -373,7 +385,7 @@ tools, DOC docs, OBS obsolete.
 | `d45b1871` | 2026-09-06 | fix(qwen3_6): a badly written tool argument no longer discards the whole call | b | T1 | typed tool argument that does not parse is passed through as text |
 | `3400f9c9` | 2026-09-06 | feat(serve): fingerprint the tool block on every request | b | S2 | request_start.tools_digest |
 | `fd6880bf` | 2026-09-06 | feat(supervisor): show which apps are using the engine, and how well each reuses | d | SUP |  |
-| `48c11931` | 2026-09-06 | docs: implementation brief for finishing MTP speculation on Flash-Next | e | OBS | completed Flash-Next MTP implementation brief (plan doc) |
+| `48c11931` | 2026-09-06 | docs: implementation brief for finishing MTP speculation on Flash-Next | e | OBS | completed Flash-Next MTP implementation brief (plan doc) Dropped (Igor, 2026-09-27). |
 | `1941ff01` | 2026-09-06 | fix(flash-next): complete MTP state and improve decode and prefill | c | FN | MTP state completion; small host_memory/frontend-test helpers travel with it |
 | `039bef66` | 2026-09-06 | fix(serve): avoid deadlock during cold telemetry refresh | b | S2 | device snapshot cache: telemetry never deadlocks HTTP workers |
 | `bb7b7305` | 2026-09-07 | feat(flash-next): prefix-reuse stability, split-attention decode, native structured output | b | G1 | three concerns: XGrammar structured output (G1), checkpoint capacity as admission resource + observation carry-over + publication grace (R1), selected-block split attention (FN) |
