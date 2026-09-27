@@ -24,6 +24,7 @@ struct Options {
     KvCapacityPolicy kv_capacity = KvCapacityPolicy::explicit_capacity(2048);
     std::uint32_t prefill_chunk  = 1024;
     int device                   = 0;
+    std::size_t desktop_reserve_bytes = kDefaultDesktopReserveBytes;
 
     KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;

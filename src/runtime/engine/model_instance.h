@@ -34,6 +34,8 @@ struct ConstructedModel {
     ContextMachineCostModel context_cost;
 };
 
-[[nodiscard]] ConstructedModel construct_model(const EngineOptions& options, DeviceContext& device);
+// Loads and plans the model. options.max_concurrency may be lowered to what the KV pool backs
+// (clamp_concurrency_to_pool); the caller keeps the effective options.
+[[nodiscard]] ConstructedModel construct_model(EngineOptions& options, DeviceContext& device);
 
 } // namespace ninfer::runtime

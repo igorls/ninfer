@@ -67,6 +67,19 @@ int main() {
     failures += check(resolve_public_model_id(defaults, "artifact-model") == "artifact-model",
                       "artifact model id was not selected by default");
 
+    failures += check(defaults.desktop_reserve_bytes == ninfer::kDefaultDesktopReserveBytes &&
+                          !defaults.clamp_concurrency_to_pool,
+                      "desktop reserve or concurrency clamp default changed");
+    const ServeOptions reserve =
+        parse({"ninfer-serve", "model.ninfer", "--desktop-reserve-gib", "6", "--kv-capacity",
+               "auto", "--kv-slack-floor-mib", "2048", "--clamp-concurrency-to-pool"});
+    failures += check(reserve.desktop_reserve_bytes == 6ULL << 30U &&
+                          reserve.kv_capacity.slack_floor_bytes == 2048ULL << 20U &&
+                          reserve.clamp_concurrency_to_pool,
+                      "desktop reserve, slack floor or concurrency clamp was not parsed");
+    failures += check(parse({"ninfer-serve", "model.ninfer", "--desktop-reserve-mib", "512"})
+                              .desktop_reserve_bytes == 512ULL << 20U,
+                      "desktop reserve in MiB was not parsed");
     const ServeOptions fp8 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "fp8"});
     failures += check(fp8.kv_cache == ninfer::KvCacheStorage::Fp8E4M3Row256,
                       "--kv-dtype fp8 did not select row-scaled E4M3 KV");

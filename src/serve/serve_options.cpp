@@ -68,6 +68,8 @@ std::string serve_usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
            " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
            "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
+           "[--clamp-concurrency-to-pool] [--kv-slack-floor-mib N] "
+           "[--desktop-reserve-gib N] [--desktop-reserve-mib N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
            "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
            "[--context-cost-presets FILE] "
@@ -103,6 +105,16 @@ std::string serve_usage_text(const char* argv0) {
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom\n"
+           "       --desktop-reserve-gib/--desktop-reserve-mib keeps device memory free for the "
+           "desktop and other applications (default " +
+           std::to_string(kDefaultDesktopReserveBytes >> 30U) +
+           " GiB); sizing uses device-wide free memory\n"
+           "       --kv-slack-floor-mib is the minimum unreserved memory kept by --kv-capacity "
+           "auto (default " +
+           std::to_string(kDefaultKvCapacitySlackFloorBytes >> 20U) +
+           " MiB)\n"
+           "       --clamp-concurrency-to-pool lowers concurrency to what the KV pool backs at "
+           "full context\n"
            "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
            "       context cache defaults: device-state=max-concurrency, private=2x concurrency, "
            "shared=max(max-concurrency,4), anchors=2; Host state=8 slots, Host KV=8192 MiB\n"
@@ -164,6 +176,17 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--max-concurrency") {
             options.max_concurrency = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--max-concurrency"), "max-concurrency"));
+        } else if (arg == "--clamp-concurrency-to-pool") {
+            options.clamp_concurrency_to_pool = true;
+        } else if (arg == "--kv-slack-floor-mib") {
+            options.min_slack_floor_bytes =
+                parse_u64(require_value("--kv-slack-floor-mib"), "kv-slack-floor-mib") << 20U;
+        } else if (arg == "--desktop-reserve-gib") {
+            options.desktop_reserve_bytes =
+                parse_u64(require_value("--desktop-reserve-gib"), "desktop-reserve-gib") << 30U;
+        } else if (arg == "--desktop-reserve-mib") {
+            options.desktop_reserve_bytes =
+                parse_u64(require_value("--desktop-reserve-mib"), "desktop-reserve-mib") << 20U;
         } else if (arg == "--max-pending-requests") {
             options.max_pending_requests = static_cast<std::uint32_t>(parse_nonnegative_int(
                 require_value("--max-pending-requests"), "max-pending-requests"));
@@ -326,6 +349,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     }
     if (!kv_capacity_explicit) {
         options.kv_capacity = KvCapacityPolicy::explicit_capacity(options.max_context);
+    } else if (options.kv_capacity.mode == KvCapacityMode::Automatic) {
+        options.kv_capacity.slack_floor_bytes =
+            std::max(options.kv_capacity.automatic_headroom_bytes, options.min_slack_floor_bytes);
     }
     if (!options.allow_prefix_reuse) {
         if (context_capacity_explicit) {

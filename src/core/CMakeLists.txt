@@ -1,6 +1,7 @@
 add_library(ninfer_core STATIC
   arena.cu
   device.cu
+  device_memory.cpp
   dtype.cpp
   host_worker_pool.cpp
   gdn_replay_records.cpp
@@ -16,3 +17,5 @@ add_library(ninfer_core STATIC
 ninfer_internal_includes(ninfer_core)
 ninfer_cuda_archive(ninfer_core)
 target_link_libraries(ninfer_core PUBLIC CUDA::cudart CUDA::nvtx3 Threads::Threads)
+# NVML is loaded at run time (device_memory.cpp), so a machine without it falls back to CUDA.
+target_link_libraries(ninfer_core PRIVATE ${CMAKE_DL_LIBS})

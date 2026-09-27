@@ -28,6 +28,9 @@ add_test(NAME ninfer_device_sync_empty_test
 ninfer_add_test(ninfer_decode_graph_test SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_decode_graph.cpp"
   LIBRARIES ninfer_core)
 
+ninfer_add_test(ninfer_device_memory_test SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_device_memory.cpp"
+  LIBRARIES ninfer_core)
+
 ninfer_add_test(ninfer_wide_multiply_test SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_wide_multiply.cpp")
 
 ninfer_add_test(ninfer_tensor_test       SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_tensor.cpp"
