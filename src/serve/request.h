@@ -93,6 +93,7 @@ struct ToolCall {
 enum class ToolChoiceMode {
     Auto,
     None,
+    Required,
 };
 
 struct ToolChoice {
@@ -122,6 +123,7 @@ struct SamplingParams {
     std::optional<int> top_k;
     std::optional<double> presence_penalty;
     std::optional<double> frequency_penalty;
+    std::optional<double> repetition_penalty;
     std::optional<std::uint64_t> seed;
 };
 
@@ -171,6 +173,7 @@ requested_reasoning_effort_name(RequestedReasoningEffort effort) noexcept {
 }
 
 struct GenerationRequest {
+    StructuredOutputOptions structured_output;
     std::vector<ChatTurn> messages;
     std::vector<ToolDefinition> tools;
     std::size_t tool_name_max_length = 64;

@@ -104,6 +104,22 @@ int main() {
                               dense, ninfer::SamplingMode::Thinking, overrides);
                       }),
                       "non-finite sampling override was accepted");
+    overrides.temperature = 0.0F;
+
+    failures +=
+        check(thinking.repetition_penalty == 1.0F && non_thinking.repetition_penalty == 1.0F,
+              "omitted repetition penalty is not neutral");
+    overrides.repetition_penalty = 1.1F;
+    failures +=
+        check(ninfer::runtime::resolve_sampling(dense, ninfer::SamplingMode::Thinking, overrides)
+                      .repetition_penalty == 1.1F,
+              "repetition penalty override was not applied");
+    overrides.repetition_penalty = 0.0F;
+    failures += check(throws_invalid([&] {
+                          (void)ninfer::runtime::resolve_sampling(
+                              dense, ninfer::SamplingMode::Thinking, overrides);
+                      }),
+                      "a non-positive repetition penalty was accepted");
 
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;

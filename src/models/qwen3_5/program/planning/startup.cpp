@@ -266,6 +266,11 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                         static_cast<std::int32_t>(plan.draft_window + 1U),
                         static_cast<std::int32_t>(plan.max_concurrency)},
                        "structured output token masks");
+        out.prompt_presence =
+            add_tensor(builder, DType::I32,
+                       {(dimension(parameters.model.resources().public_token_count) + 31) / 32,
+                        static_cast<std::int32_t>(plan.max_concurrency)},
+                       "sampling prompt presence");
     }
     out.bytes = builder.finish(kArenaAlign, "persistent layout");
     out.kv_payload_bytes =

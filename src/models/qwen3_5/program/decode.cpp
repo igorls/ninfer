@@ -132,7 +132,8 @@ DecodeGraphExecutable& install_graph_profile(DecodeGraphFamily& family, DecodeGr
 } // namespace
 
 void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& request,
-                                   const ops::SamplingConfig& config) {
+                                   const ops::SamplingConfig& config,
+                                   std::span<const TokenId> prompt) {
     Tensor counts = token_counts.slice(1, static_cast<std::int32_t>(sequence.lane), 1)
                         .view({dimension(parameters.model.resources().public_token_count)});
     request.sampling_host = config;
@@ -148,10 +149,28 @@ void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& requ
         .accepted_per_position = std::vector<std::uint64_t>(draft_window, 0),
     };
     const bool penalties = request.sampling_host.presence_penalty != 0.0F ||
-                           request.sampling_host.frequency_penalty != 0.0F;
+                           request.sampling_host.frequency_penalty != 0.0F ||
+                           request.sampling_host.repetition_penalty != 1.0F;
     if (penalties) { CUDA_CHECK(cudaMemsetAsync(counts.data, 0, counts.bytes(), device.stream)); }
     request.sampling_host.token_counts =
         penalties ? static_cast<std::int32_t*>(counts.data) : nullptr;
+    request.sampling_host.prompt_presence = nullptr;
+    if (config.repetition_penalty != 1.0F) {
+        // Membership over the complete prepared prompt, including reused tokens; media
+        // placeholders outside the sampled domain never match.
+        Tensor bits       = prompt_presence.slice(1, static_cast<std::int32_t>(sequence.lane), 1);
+        const auto domain = static_cast<TokenId>(counts.ne[0]);
+        request.prompt_presence_host.assign(static_cast<std::size_t>(bits.ne[0]), 0);
+        for (const TokenId token : prompt) {
+            if (token < 0 || token >= domain) { continue; }
+            auto& word = request.prompt_presence_host[static_cast<std::size_t>(token) / 32U];
+            word       = static_cast<std::int32_t>(static_cast<std::uint32_t>(word) |
+                                                   (1U << (static_cast<std::uint32_t>(token) % 32U)));
+        }
+        CUDA_CHECK(cudaMemcpyAsync(bits.data, request.prompt_presence_host.data(), bits.bytes(),
+                                   cudaMemcpyHostToDevice, device.stream));
+        request.sampling_host.prompt_presence = static_cast<const std::int32_t*>(bits.data);
+    }
     Tensor config_lane = sampling_config.slice(1, static_cast<std::int32_t>(sequence.lane), 1);
     CUDA_CHECK(cudaMemcpyAsync(config_lane.data, &request.sampling_host,
                                sizeof(request.sampling_host), cudaMemcpyHostToDevice,

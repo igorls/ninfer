@@ -115,6 +115,7 @@ int test_basic_request_and_resolution() {
                        {"instructions", "be concise"},
                        {"max_output_tokens", 64},
                        {"temperature", 0.3},
+                       {"repetition_penalty", 1.1},
                        {"top_p", 0.8},
                        {"reasoning", Json{{"effort", "medium"}}},
                        {"metadata", Json{{"trace", "abc"}}}};
@@ -123,6 +124,14 @@ int test_basic_request_and_resolution() {
 
     int failures = 0;
     failures += check(request.prompt.model == "qwen3.6-27b", "model parsed");
+    failures += check(request.prompt.generation.sampling.repetition_penalty == 1.1,
+                      "Responses repetition penalty retained");
+    auto invalid_penalty                  = body;
+    invalid_penalty["repetition_penalty"] = 0;
+    failures += check(api_error([&] {
+                          (void)parse_openai_responses_create_request(invalid_penalty, limits());
+                      }).param == "repetition_penalty",
+                      "Responses rejects zero repetition penalty");
     failures += check(request.prompt.input_turns.size() == 1 &&
                           request.prompt.input_turns[0].role == ninfer::ChatRole::User &&
                           request.prompt.input_turns[0].content[0].text == "hello",
@@ -548,6 +557,23 @@ int test_tools_and_effective_subset() {
             ordered_prompt.options.tool_jsons.front() ==
                 R"({"type":"function","function":{"name":"probe","parameters":{"type":"object","properties":{"zeta":{"type":"string"},"alpha":{"type":"integer"}}},"strict":false}})",
         "OpenAI Responses changed tool-schema member order before PromptInput");
+    Json forced                   = body;
+    forced["tool_choice"]["mode"] = "required";
+    forced["parallel_tool_calls"] = false;
+    const auto required           = parse_openai_responses_create_request(forced, limits());
+    failures += check(required.prompt.generation.tool_choice.mode == ToolChoiceMode::Required &&
+                          required.prompt.generation.tools.size() == 1 &&
+                          required.prompt.generation.tools[0].name == "clock",
+                      "required allowed tools retain their constrained selection");
+    forced["tool_choice"] = "required";
+    failures += check(parse_openai_responses_create_request(forced, limits())
+                              .prompt.generation.tool_choice.mode == ToolChoiceMode::Required,
+                      "required Responses choice is executable");
+    forced["tool_choice"] = Json{{"type", "function"}, {"name", "weather"}};
+    failures += check(
+        parse_openai_responses_create_request(forced, limits()).prompt.generation.tools[0].name ==
+            "weather",
+        "named Responses choice narrows the callable set");
     return failures;
 }
 
@@ -726,8 +752,33 @@ int test_explicit_rejections() {
     value["text"] = Json{{"format", Json{{"type", "json_schema"}}}};
     failures += check(api_code([&] {
                           (void)parse_openai_responses_create_request(value, limits());
-                      }) == "structured_outputs_not_supported",
-                      "structured output is rejected explicitly");
+                      }) == "invalid_response_format",
+                      "structured output without schema is rejected explicitly");
+    value["text"]["format"] = Json{{"type", "json_schema"},
+                                   {"name", "result"},
+                                   {"strict", true},
+                                   {"schema", Json{{"type", "object"}}}};
+    failures += check(parse_openai_responses_create_request(value, limits())
+                              .prompt.generation.structured_output.kind ==
+                          ninfer::StructuredOutputKind::JsonSchema,
+                      "Responses schema reaches generation request");
+    const auto formatted_request = parse_openai_responses_create_request(value, limits());
+    failures +=
+        check(make_openai_response_object("resp_schema", 1, formatted_request, {}, sample_outcome())
+                      .body["text"]["format"] == value["text"]["format"],
+              "Responses aggregate and terminal format preserves schema descriptor");
+
+    const auto ordered_body = nlohmann::ordered_json::parse(
+        R"({"model":"qwen","input":"hello","text":{"format":{"type":"json_schema","name":"result","strict":true,"schema":{"type":"object","properties":{"zebra":{"type":"string"},"alpha":{"type":"string"}},"required":["zebra","alpha"],"additionalProperties":false}}}})");
+    const auto ordered_responses_schema =
+        parse_openai_responses_create_request(ordered_body, limits())
+            .prompt.generation.structured_output.schema;
+    const auto resp_zebra_pos = ordered_responses_schema.find("\"zebra\"");
+    const auto resp_alpha_pos = ordered_responses_schema.find("\"alpha\"");
+    failures +=
+        check(resp_zebra_pos != std::string::npos && resp_alpha_pos != std::string::npos &&
+                  resp_zebra_pos < resp_alpha_pos,
+              "Responses schema properties retain declaration order instead of alphabetical sort");
 
     value               = base;
     value["background"] = true;

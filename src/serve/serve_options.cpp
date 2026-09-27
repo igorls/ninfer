@@ -109,7 +109,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--chat-template FILE] [--lm-head-draft] [--no-thinking] [--preserve-thinking] "
            "[--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
-           "[--frequency-penalty F] [--seed N] [--greedy]\n"
+           "[--frequency-penalty F] [--repetition-penalty F] [--seed N] [--greedy]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
            "       serves OpenAI Responses/Chat Completions and Anthropic Messages endpoints\n"
            "       --default-max-tokens defaults to " +
@@ -363,6 +363,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--frequency-penalty") {
             options.sampling_overrides.frequency_penalty = parse_float_in(
                 require_value("--frequency-penalty"), "frequency-penalty", -2.0f, 2.0f);
+        } else if (arg == "--repetition-penalty") {
+            options.sampling_overrides.repetition_penalty =
+                parse_float_in(require_value("--repetition-penalty"), "repetition-penalty",
+                               std::numeric_limits<float>::min(), 100.0f);
         } else if (arg == "--seed") {
             options.sampling_overrides.seed = parse_u64(require_value("--seed"), "seed");
         } else if (arg == "--greedy") {

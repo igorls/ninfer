@@ -45,6 +45,8 @@ struct PersistentLayout {
     // Structured-output token masks [words, draft_window + 1, lanes]: verification column j holds
     // the grammar state after drafts[0..j-1].
     std::optional<TensorLayout> constraint_masks;
+    // Prompt-membership bitsets [words, lanes] for the repetition penalty.
+    std::optional<TensorLayout> prompt_presence;
     std::size_t bytes            = 0;
     std::size_t kv_payload_bytes = 0;
 };

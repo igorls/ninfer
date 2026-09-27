@@ -246,6 +246,9 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     if (plan.persistent.constraint_masks) {
         constraint_masks = plan.persistent.constraint_masks->bind(backing);
     }
+    if (plan.persistent.prompt_presence) {
+        prompt_presence = plan.persistent.prompt_presence->bind(backing);
+    }
     active_continuations.fill(continuation_capacity);
     for (std::uint32_t lane = 0; lane < max_concurrency; ++lane) { lane_epochs[lane] = 1; }
     for (std::uint32_t index = 0; index < continuation_capacity; ++index) {

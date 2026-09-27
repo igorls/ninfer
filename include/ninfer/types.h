@@ -203,6 +203,9 @@ struct SamplingPreset {
     float min_p             = 0.0F;
     float presence_penalty  = 0.0F;
     float frequency_penalty = 0.0F;
+    // HF-style: prompt or generated tokens have positive logits divided and negative logits
+    // multiplied by this value. 1 is neutral.
+    float repetition_penalty = 1.0F;
 };
 
 struct ModelSamplingDefaults {
@@ -223,6 +226,7 @@ struct SamplingOverrides {
     std::optional<float> min_p;
     std::optional<float> presence_penalty;
     std::optional<float> frequency_penalty;
+    std::optional<float> repetition_penalty;
     std::optional<std::uint64_t> seed;
 };
 
@@ -233,8 +237,9 @@ struct ResolvedSamplingParameters {
     float top_p             = 1.0F;
     float min_p             = 0.0F;
     float presence_penalty  = 0.0F;
-    float frequency_penalty = 0.0F;
-    std::uint64_t seed      = 0;
+    float frequency_penalty  = 0.0F;
+    float repetition_penalty = 1.0F;
+    std::uint64_t seed       = 0;
 };
 
 enum class OutputChannel : std::uint8_t {

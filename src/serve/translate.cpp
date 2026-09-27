@@ -1,5 +1,6 @@
 #include "serve/translate.h"
 #include "serve/request_json.h"
+#include "serve/request_validation.h"
 
 #include <nlohmann/json.hpp>
 
@@ -48,6 +49,9 @@ ninfer::SamplingOverrides resolve_sampling_overrides(const SamplingParams& reque
     if (request.frequency_penalty) {
         sampling.frequency_penalty = static_cast<float>(*request.frequency_penalty);
     }
+    if (request.repetition_penalty) {
+        sampling.repetition_penalty = static_cast<float>(*request.repetition_penalty);
+    }
     if (request.seed) {
         sampling.seed = *request.seed;
     } else if (server.sampling_overrides.seed) {
@@ -60,7 +64,8 @@ ninfer::SamplingOverrides resolve_sampling_overrides(const SamplingParams& reque
         return !value || std::isfinite(*value);
     };
     if (!finite(sampling.temperature) || !finite(sampling.top_p) || !finite(sampling.min_p) ||
-        !finite(sampling.presence_penalty) || !finite(sampling.frequency_penalty)) {
+        !finite(sampling.presence_penalty) || !finite(sampling.frequency_penalty) ||
+        !finite(sampling.repetition_penalty)) {
         invalid_sampling("sampling parameters must be finite", "sampling");
     }
     if (sampling.temperature && (*sampling.temperature < 0.0F || *sampling.temperature > 2.0F)) {
@@ -97,6 +102,9 @@ ninfer::SamplingOverrides resolve_sampling_overrides(const SamplingParams& reque
     if (sampling.frequency_penalty &&
         (*sampling.frequency_penalty < -2.0F || *sampling.frequency_penalty > 2.0F)) {
         invalid_sampling("frequency_penalty must be in [-2,2]", "frequency_penalty");
+    }
+    if (sampling.repetition_penalty && *sampling.repetition_penalty <= 0.0F) {
+        invalid_sampling("repetition_penalty must be positive", "repetition_penalty");
     }
     if (server.greedy) { sampling.temperature = 0.0F; }
     return sampling;
@@ -328,6 +336,24 @@ ninfer::RequestOptions to_request_options(const GenerationRequest& request,
                                           const ResolvedPromptSemantics& semantics,
                                           bool allow_prefix_reuse) {
     ninfer::RequestOptions options;
+    options.execution.structured_output = request.structured_output;
+    if (request.tool_choice.mode == ToolChoiceMode::Required) {
+        if (request.tools.empty()) {
+            bad_request("required tool choice needs at least one tool", "tool_choice");
+        }
+        if (!request.stop_strings.empty()) {
+            bad_request("required tool choice conflicts with custom stop strings", "stop",
+                        "tool_choice_conflict");
+        }
+        for (const auto& tool : request.tools) {
+            options.execution.required_tool_names.push_back(tool.name);
+        }
+    }
+    if (request.structured_output.kind != StructuredOutputKind::Text &&
+        (request.uses_tools() || !request.stop_strings.empty())) {
+        bad_request("structured output cannot be combined with active tools or custom stop strings",
+                    "response_format", "structured_output_conflict");
+    }
     options.execution.requested_output_tokens = static_cast<std::uint32_t>(request.max_tokens);
     options.execution.allow_prefix_reuse      = allow_prefix_reuse;
     if (semantics.enable_thinking != false) {
@@ -336,7 +362,9 @@ ninfer::RequestOptions to_request_options(const GenerationRequest& request,
     }
     options.execution.sampling             = resolve_sampling_overrides(request.sampling, server);
     options.output.raw                     = false;
-    options.output.preserve_special_tokens = request.uses_tools() || request.has_tool_history();
+    options.output.preserve_special_tokens =
+        request.structured_output.kind == StructuredOutputKind::Text &&
+        (request.uses_tools() || request.has_tool_history());
     options.output.tool_name_max_length = static_cast<std::uint32_t>(request.tool_name_max_length);
     options.stop.strings.reserve(request.stop_strings.size() *
                                  (request.stop_strings_apply_to_reasoning ? 2U : 1U));

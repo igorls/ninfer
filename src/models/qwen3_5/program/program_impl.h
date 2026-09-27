@@ -406,6 +406,8 @@ struct RequestControl {
     ops::SamplingConfig sampling_host;
     // Per-request grammar matcher; advanced by every committed or forced token.
     std::unique_ptr<runtime::OutputConstraintState> output_constraint;
+    // Host copy of the prompt-membership bitset while its upload may be in flight.
+    std::vector<std::int32_t> prompt_presence_host;
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
     detail::PhysicalResources active_resources;
@@ -607,6 +609,7 @@ public:
     Tensor sampling_config;
     Tensor token_counts;
     Tensor constraint_masks;
+    Tensor prompt_presence;
 
     std::vector<SequenceState> continuation_states;
     std::vector<ContinuationSlot> continuation_slots;
@@ -1138,7 +1141,7 @@ private:
     void release_sequence_state(SequenceState& sequence) noexcept;
     void prepare_graphs();
     void install_sampling(SequenceState& sequence, RequestControl& request,
-                          const ops::SamplingConfig& config);
+                          const ops::SamplingConfig& config, std::span<const TokenId> prompt);
     // Uploads one verification column's grammar mask for a lane; returns its device address.
     const std::int32_t* upload_constraint_mask(std::uint32_t lane, std::uint32_t column,
                                                std::span<const std::int32_t> mask);

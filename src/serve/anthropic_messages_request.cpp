@@ -788,19 +788,19 @@ void lower_tools(const Json& body, GenerationRequest& request) {
         if (std::none_of(definitions.begin(), definitions.end(), named)) {
             bad_request("tool_choice references unknown tool: " + selection.name, "tool_choice");
         }
-        bad_request("tool_choice.type='tool' requires that exact tool to be called, which NInfer "
-                    "cannot guarantee",
-                    "tool_choice", "tool_choice_not_supported");
+        std::erase_if(definitions, [&](const ParsedTool& tool) {
+            return tool.definition.name != selection.name;
+        });
     }
     if (selection.kind == ToolSelectionKind::Any) {
         if (definitions.empty()) { bad_request("tool_choice requires tools", "tool_choice"); }
-        bad_request("tool_choice.type='any' requires at least one tool call, which NInfer cannot "
-                    "guarantee",
-                    "tool_choice", "tool_choice_not_supported");
     }
 
     request.tool_choice.mode =
-        selection.kind == ToolSelectionKind::None ? ToolChoiceMode::None : ToolChoiceMode::Auto;
+        selection.kind == ToolSelectionKind::None
+            ? ToolChoiceMode::None
+            : (selection.kind == ToolSelectionKind::Auto ? ToolChoiceMode::Auto
+                                                         : ToolChoiceMode::Required);
     if (selection.kind == ToolSelectionKind::None) {
         for (ParsedTool& tool : definitions) {
             if (tool.source == ToolSource::UserDefined) {
@@ -899,9 +899,8 @@ void parse_effort(const Json& body, GenerationRequest& request, ParsePurpose pur
     if (!config.is_object()) { bad_request("output_config must be an object", "output_config"); }
     if (purpose == ParsePurpose::Messages && config.contains("format") &&
         !config.at("format").is_null()) {
-        bad_request("output_config.format requires constrained decoding, which NInfer does not "
-                    "provide",
-                    "output_config.format", "output_config_format_not_supported");
+        request.structured_output =
+            parse_structured_output_format(config.at("format"), "output_config.format", false);
     }
     if (!config.contains("effort") || config.at("effort").is_null()) { return; }
     if (!config.at("effort").is_string()) {

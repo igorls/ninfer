@@ -643,7 +643,7 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
                 ? std::make_unique<runtime::OutputConstraintState>(
                       request_plan.output_constraint, staged.prompt.starts_in_reasoning)
                 : nullptr;
-        install_sampling(sequence, request, request_plan.sampling);
+        install_sampling(sequence, request, request_plan.sampling, staged.prompt.token_ids);
         sequence.rope_delta = staged.prompt.rope_delta;
         set_device_i32(io.rope_delta, sequence.rope_delta);
 

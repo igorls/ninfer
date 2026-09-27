@@ -88,7 +88,8 @@ std::string usage_text(const char* argv0) {
            "N]\n"
            "       [--lm-head-draft]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
-           "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"
+           "       [--presence-penalty F] [--frequency-penalty F] [--repetition-penalty F]\n"
+           "       [--seed N] [--greedy]\n"
            "       [--stop-token-id N]... [--stop <text>]... [--reasoning-stop <text>]...\n"
            "       [--chat-template FILE]\n"
            "       [--raw-output] [--print-token-ids] [--no-thinking] [--thinking-budget N]\n"
@@ -200,6 +201,9 @@ Options parse_options(int argc, char** argv) {
         } else if (arg == "--frequency-penalty") {
             options.sampling.frequency_penalty =
                 parse_float(value(arg), "frequency-penalty", -2.0F, 2.0F);
+        } else if (arg == "--repetition-penalty") {
+            options.sampling.repetition_penalty = parse_float(
+                value(arg), "repetition-penalty", std::numeric_limits<float>::min(), 100.0F);
         } else if (arg == "--seed") {
             options.sampling.seed = parse_u64(value(arg), "seed");
         } else if (arg == "--greedy") {

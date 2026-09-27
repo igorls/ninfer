@@ -124,22 +124,23 @@ The endpoint supports:
 - `temperature`, `top_p`, presence/frequency penalties, and signed integer `seed`;
 - the compatible `top_k` (`0..20`) and `min_p` (`0..1`) sampler extensions;
 - up to four non-empty stop strings, applied to both reasoning and answer output;
-- `n:1`, text-only `modalities`, and `response_format: {"type":"text"}`;
+- `n:1`, text-only `modalities`, and `response_format` `text`, `json_object` or `json_schema`
+  (see [Structured output](#structured-output));
 - non-streaming responses and server-sent event streams;
 - `stream_options.include_usage`;
 - llama.cpp-compatible terminal `timings`, plus opt-in `timings_per_token` and
   streaming `return_progress` observations;
-- non-strict function tools with `tool_choice` `auto`, `none`, or `allowed_tools` in `auto` mode,
-  parallel calls enabled, assistant tool-call history, tool-result messages, and legacy
-  function-call history;
+- non-strict function tools with `tool_choice` `auto`, `none`, `required`, a named function, or
+  `allowed_tools` in `auto` or `required` mode, parallel calls enabled, assistant tool-call
+  history, tool-result messages, and legacy function-call history;
 - the top-level `reasoning_effort` field;
 - `enable_thinking` and `preserve_thinking`, either at top level or in
   `chat_template_kwargs`;
 - Assistant `reasoning_content` and `reasoning` history aliases.
 
 Options whose observable behavior the Engine cannot provide are rejected when they request that
-behavior. This includes JSON constrained output, nonzero `logit_bias`, requested log probabilities,
-audio/file input or audio output, `strict:true`, required or named tool choice,
+behavior. This includes nonzero `logit_bias`, requested log probabilities,
+audio/file input or audio output, `strict:true`,
 `parallel_tool_calls:false` with enabled tools, explicit low/high image detail, web search,
 moderation, low/high verbosity, stored Chat Completions, and non-empty legacy `functions`.
 Each capability rejection identifies the affected field and the guarantee NInfer cannot provide.
@@ -160,7 +161,8 @@ other message roles remain unsupported because they carry participant identity t
 template cannot represent.
 
 For commonly generated OpenAI-compatible payloads, `repetition_penalty` is accepted only at its
-neutral value `1`, and `mm_processor_kwargs` when empty or containing only null values. String-form
+neutral value `1` on Chat Completions (Responses and the `--repetition-penalty` server flag apply
+it), and `mm_processor_kwargs` when empty or containing only null values. String-form
 image/video URLs are also accepted.
 
 Malformed protocol values return field-specific HTTP 400 errors. Invalid media sources, bytes, or
@@ -427,9 +429,9 @@ wire response contains typed `output` Items.
 | `reasoning.effort` | `none` requests disabled thinking; other standard effort values pass to the selected template |
 | `chat_template_kwargs` | template parameters as a JSON object; standard options merge with typed fields |
 | `preserve_thinking` | alias for `chat_template_kwargs.preserve_thinking`; conflicting values are rejected |
-| `text.format` | omitted or `{"type":"text"}` only |
+| `text.format` | `text`, `json_object`, or flat `json_schema` (`name`, `schema`, optional `strict`, `description`); echoed on the Response object |
 | `tools` | direct function definitions or namespace groups containing function definitions; see below |
-| `tool_choice` | `auto`, `none`, or function-only `allowed_tools` with mode `auto`; a namespaced selection carries both `namespace` and `name` |
+| `tool_choice` | `auto`, `none`, `required`, a named function, or function-only `allowed_tools` with mode `auto` or `required`; a namespaced selection carries both `namespace` and `name` |
 | `parallel_tool_calls` | `true` by default; `false` is accepted only when no effective tool is callable |
 | `max_tool_calls` | non-negative integer accepted as a hosted-tool no-op; NInfer does not execute hosted tools |
 | `truncation` | omitted or `disabled`; overlong input fails instead of silently dropping Items |
@@ -700,8 +702,9 @@ closed-turn reasoning history. `output_config.effort` passes its protocol-valida
 selected template.
 
 User-defined, non-strict tools support `name`, `description`, object `input_schema`, and
-`input_examples`. `tool_choice:auto` and `none` are executable. Forced or named choice,
-`strict:true`, active single-call enforcement, deferred tools, tools that exclude direct model
+`input_examples`. `tool_choice` `auto`, `none`, `any` and `tool` (one named tool) are
+executable; `output_config.format` accepts `json_schema`
+([Structured output](#structured-output)). `strict:true`, active single-call enforcement, deferred tools, tools that exclude direct model
 calls, Anthropic-provided/server tools, toolsets, MCP, and containers are rejected because their
 required constraint or executor is absent. `tool_result` preserves text/image order and marks
 `is_error:true` explicitly in the model prompt. For a visible Assistant tool-use turn, the next
@@ -946,6 +949,47 @@ token execution; only fully idle intervals are omitted. Downstream measurement s
 raw counters and seconds over rounded stderr rates.
 
 ## Execution behavior
+
+### Structured output
+
+The Engine constrains answer tokens before greedy selection or stochastic top-k/top-p sampling.
+Chat Completions accepts `response_format: {"type":"json_object"}` for a JSON object, or:
+
+```json
+{"response_format":{"type":"json_schema","json_schema":{"name":"result","strict":true,"schema":{"type":"object","properties":{"status":{"type":"string","enum":["confirmed","unknown"]}},"required":["status"],"additionalProperties":false}}}}
+```
+
+Responses uses the flat equivalent under `text.format`:
+`{"type":"json_schema","name":"result","schema":{...}}`. Anthropic Messages accepts
+`output_config.format: {"type":"json_schema","schema":{...}}`. The C++ interface is
+`ExecutionOptions::structured_output`, with `JsonObject` or `JsonSchema` and a serialized schema.
+Schema constraints apply regardless of the optional `strict` flag.
+
+Supported assertions are explicit types (including nullable type arrays), `properties`,
+`required`, `additionalProperties`, `items`, `prefixItems`, `minItems`, `maxItems`, numeric bounds,
+`enum`, `const`, `anyOf`, and unescaped document-local `$ref` paths into `$defs`/`definitions`.
+Typed assertions require an explicit `type`, and required names must be declared in `properties`.
+`$ref` and `anyOf` cannot have sibling assertions; `enum` and `const` may additionally specify a
+matching type. Ordinary schema annotations are accepted. Unsupported assertions return HTTP 400
+`unsupported_json_schema`; this includes `pattern`, string length bounds, `format`, `oneOf`,
+`allOf`, and `uniqueItems`. Unspecified `additionalProperties` retains its JSON Schema meaning.
+
+Reasoning remains separate and unconstrained; the answer grammar activates after `</think>`. An
+end token is allowed only after a complete matching value. Output/context limits and cancellation
+can still produce an incomplete JSON prefix: inspect the finish reason before parsing. Streaming
+chunks are prefixes. Structured output cannot be combined with active function tools, custom stops,
+raw output, or special-token preservation.
+
+A required tool choice (`tool_choice:"required"`, a named function, `allowed_tools` in `required`
+mode, or Anthropic `any`/`tool`) constrains the answer to exactly one complete native call to an
+eligible function; argument text stays non-strict. It cannot be combined with custom stops.
+
+Compiled grammars are cached per model frontend. Each request owns fresh matcher state, including
+requests that reuse a prompt prefix. MTP keeps speculating: the Program walks a fork of the
+matcher along the drafts, truncates each draft at its first token the grammar rejects or that
+completes it, and gives verification column j the grammar state after drafts 0..j-1. DFlash
+proposes inside the round, so its constrained lanes verify no drafts. Masks occupy stable
+Program-owned device storage for graph replay.
 
 The server owns one resident Engine with a startup-fixed capacity of `1..8` active generation
 requests. At each decode boundary, every decode-ready request is compacted into one batch and

@@ -136,12 +136,7 @@ void validate_standard_output_controls(const Json& body) {
         if (!format.is_object() || !format.contains("type") || !format.at("type").is_string()) {
             bad_request("response_format must contain a string type", "response_format");
         }
-        if (format.at("type").get<std::string>() != "text") {
-            bad_request(
-                "this response_format requires constrained output, which NInfer cannot guarantee; "
-                "only {\"type\":\"text\"} is available",
-                "response_format", "response_format_not_supported");
-        }
+        (void)parse_structured_output_format(format, "response_format", true);
     }
 
     if (body.contains("modalities") && !body.at("modalities").is_null()) {
@@ -676,18 +671,15 @@ void apply_allowed_tools(const Json& config, GenerationRequest& output) {
         }
     }
 
-    if (mode == "required") {
-        bad_request(
-            "tool_choice.allowed_tools mode='required' requires at least one tool call, which "
-            "NInfer cannot guarantee",
-            "tool_choice", "tool_choice_not_supported");
-    }
-
     std::erase_if(output.tools, [&](const ToolDefinition& tool) {
         return std::find(allowed_names.begin(), allowed_names.end(), tool.name) ==
                allowed_names.end();
     });
-    output.tool_choice.mode = ToolChoiceMode::Auto;
+    output.tool_choice.mode =
+        (mode == "required" ? ToolChoiceMode::Required : ToolChoiceMode::Auto);
+    if (mode == "required" && output.tools.empty()) {
+        bad_request("required tool choice needs at least one tool", "tool_choice");
+    }
 }
 
 void parse_tool_choice(const Json& body, GenerationRequest& output) {
@@ -700,10 +692,10 @@ void parse_tool_choice(const Json& body, GenerationRequest& output) {
         } else if (value == "none") {
             output.tool_choice.mode = ToolChoiceMode::None;
         } else if (value == "required") {
-            bad_request(
-                "tool_choice='required' requires at least one tool call, which NInfer cannot "
-                "guarantee",
-                "tool_choice", "tool_choice_not_supported");
+            if (output.tools.empty()) {
+                bad_request("required tool choice needs at least one tool", "tool_choice");
+            }
+            output.tool_choice.mode = ToolChoiceMode::Required;
         } else {
             bad_request("tool_choice must be 'auto', 'none', 'required', or a function choice",
                         "tool_choice");
@@ -721,10 +713,16 @@ void parse_tool_choice(const Json& body, GenerationRequest& output) {
                 bad_request("function tool_choice must contain a function object", "tool_choice");
             }
             const std::string name = require_function_name(choice.at("function"), "tool_choice");
-            bad_request(
-                "tool_choice for function '" + name +
-                    "' requires that exact function to be called, which NInfer cannot guarantee",
-                "tool_choice", "tool_choice_not_supported");
+            const bool declared =
+                std::any_of(output.tools.begin(), output.tools.end(),
+                            [&](const ToolDefinition& tool) { return tool.name == name; });
+            if (!declared) {
+                bad_request("named tool choice references undeclared function '" + name + "'",
+                            "tool_choice");
+            }
+            std::erase_if(output.tools,
+                          [&](const ToolDefinition& tool) { return tool.name != name; });
+            output.tool_choice.mode = ToolChoiceMode::Required;
         } else if (type == "custom") {
             bad_request(
                 "custom tool_choice requires custom tool output, which NInfer does not provide",
@@ -886,6 +884,10 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
     validate_compatibility_hints(body);
 
     OpenAIChatRequest output;
+    if (body.contains("response_format") && !body["response_format"].is_null()) {
+        output.generation.structured_output =
+            parse_structured_output_format(body["response_format"], "response_format", true);
+    }
     if (!body.contains("model") || !body.at("model").is_string() ||
         body.at("model").get<std::string>().empty()) {
         bad_request("missing required field: model", "model");
