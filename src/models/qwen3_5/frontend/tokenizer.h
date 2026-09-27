@@ -159,6 +159,8 @@ private:
     std::unordered_map<std::string, int> vocab_token_to_id_;
     BpeMergeTable bpe_merge_rules_;
     std::array<int, 256> byte_token_ids_{};
+    // False for the letters-only word split some Qwen exports store in tokenizer.json.
+    bool marks_as_letters_ = true;
     std::vector<AddedToken> added_tokens_;
     std::array<std::vector<std::size_t>, 256> added_token_candidates_;
     std::vector<int> default_stop_token_ids_;

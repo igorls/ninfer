@@ -15,6 +15,15 @@ ninfer_add_test(ninfer_qwen3_5_frontend_test
   NEEDS_SOURCE_DIR
   LIBRARIES ninfer_engine ninfer_core ninfer::json)
 
+ninfer_add_test(ninfer_qwen3_5_orcarouter_tokenizer_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_orcarouter_tokenizer.cpp"
+  NEEDS_SOURCE_DIR
+  LIBRARIES ninfer_engine ninfer_core ninfer::json)
+
+set_tests_properties(
+  ninfer_qwen3_5_orcarouter_tokenizer_test
+  PROPERTIES SKIP_RETURN_CODE 77)
+
 ninfer_add_test(ninfer_qwen3_5_runtime_mechanisms_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_runtime_mechanisms.cpp"
   LIBRARIES ninfer_engine ninfer_core)
