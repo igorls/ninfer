@@ -737,6 +737,7 @@ void HttpServer::handle_admin_stats(const httplib::Request&, httplib::Response& 
         {"actual_context_transfer_seconds", s.actual_context_transfer_seconds},
         {"pressure_private_owners_evicted", s.pressure_private_owners_evicted},
         {"pressure_shared_owners_evicted", s.pressure_shared_owners_evicted},
+        {"pressure_idle_flushes", s.pressure_idle_flushes},
     };
     res.status = 200;
     res.set_content(body.dump(), "application/json");

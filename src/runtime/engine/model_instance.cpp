@@ -196,6 +196,14 @@ EngineOptions normalize_engine_options(EngineOptions options) {
         throw std::invalid_argument(
             "context cache max_private_continuations must cover every active request");
     }
+    // A catalogued continuation needs a StateImage to hold it, and the active lanes consume
+    // their own; extra device plus Host state slots are what can back checkpoints. Advertising a
+    // larger catalog reports capacity that cannot exist (the 27B once claimed 64 against 32).
+    const std::uint64_t backing =
+        static_cast<std::uint64_t>(*cache.device_state_slots) + cache.host_state_slots;
+    if (backing >= concurrency && *cache.max_private_continuations > backing) {
+        cache.max_private_continuations = static_cast<std::uint32_t>(backing);
+    }
     const std::uint64_t total_device_state_slots =
         static_cast<std::uint64_t>(concurrency) + *cache.device_state_slots;
     if (total_device_state_slots > std::numeric_limits<std::uint32_t>::max()) {
