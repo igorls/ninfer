@@ -226,6 +226,9 @@ ninfer::PromptInput chinese_chat(bool enable_thinking) {
     ninfer::PromptInput input;
     input.messages.push_back(std::move(message));
     input.options.enable_thinking = enable_thinking;
+    // Medium adds no effort preamble on either maintained template (Qwen3.8 defaults to xhigh,
+    // Qwen3.6 has no effort control), so the goldens hold for both artifact families.
+    if (enable_thinking) { input.options.reasoning_effort = ninfer::ReasoningEffort::Medium; }
     return input;
 }
 
@@ -1539,7 +1542,10 @@ int exercise_vision(ninfer::Engine& engine) {
         return 1;
     }
 
-    ninfer::RequestOptions mtp_options            = options(false);
+    // The baseline publishes like the stopped request: a request that publishes nothing prefills
+    // without the rewrite-frontier splits, and that decomposition may differ at noise level,
+    // enough to move a near-tied greedy token.
+    ninfer::RequestOptions mtp_options            = options(true);
     mtp_options.execution.requested_output_tokens = 5;
     const ninfer::GenerationResult mtp_baseline =
         engine.generate(engine.prepare(first_input(image_bytes)), mtp_options);
@@ -1548,8 +1554,7 @@ int exercise_vision(ninfer::Engine& engine) {
         std::cerr << "multimodal stop fixture did not produce distinct leading tokens\n";
         return 1;
     }
-    ninfer::RequestOptions stop_options       = mtp_options;
-    stop_options.execution.allow_prefix_reuse = true;
+    ninfer::RequestOptions stop_options = mtp_options;
     stop_options.stop.token_ids.push_back(mtp_baseline.generated_token_ids[1]);
     const ninfer::GenerationResult stopped =
         engine.generate(engine.prepare(first_input(image_bytes)), stop_options);
