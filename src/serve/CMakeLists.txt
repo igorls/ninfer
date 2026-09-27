@@ -19,6 +19,8 @@ add_library(ninfer_serve STATIC
   request_log.cpp
   http_server.cpp
   ninfer_score_http.cpp
+  typesafe_systemone.cpp
+  typesafe_systemone_http.cpp
   openai_responses_http.cpp
   serve_options.cpp
 )
