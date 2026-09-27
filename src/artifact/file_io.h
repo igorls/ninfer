@@ -23,10 +23,11 @@ public:
                                           std::span<std::byte> destination) const;
 
 private:
+    // POSIX file descriptors or Windows HANDLEs; -1 is invalid on both.
     std::filesystem::path path_;
-    int fd_                = -1;
-    mutable int direct_fd_ = -1;
-    std::uint64_t bytes_   = 0;
+    std::intptr_t file_                 = -1;
+    mutable std::intptr_t direct_file_ = -1;
+    std::uint64_t bytes_                = 0;
 };
 
 } // namespace ninfer::artifact

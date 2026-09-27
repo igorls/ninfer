@@ -1,5 +1,8 @@
 #include "runtime/engine/context_cache/context_cost.h"
 
+#include "core/platform.h"
+#include "core/wide_multiply.h"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -12,8 +15,6 @@
 #include <system_error>
 #include <utility>
 
-#include <unistd.h>
-
 namespace ninfer::runtime {
 
 const std::array<ContextTransferCost, 3>& generic_context_transfer_cost();
@@ -23,31 +24,21 @@ const std::vector<ContextCostMachinePreset>& compiled_context_cost_defaults();
 namespace {
 
 using Json = nlohmann::json;
-using U128 = unsigned __int128;
 
 constexpr std::size_t direction_index(ContextTransferDirection direction) noexcept {
     return static_cast<std::size_t>(direction);
 }
 
-std::uint64_t saturating_add(std::uint64_t left, std::uint64_t right) noexcept {
-    return right > std::numeric_limits<std::uint64_t>::max() - left
-               ? std::numeric_limits<std::uint64_t>::max()
-               : left + right;
-}
-
-std::uint64_t saturating_product(std::uint64_t left, std::uint64_t right) noexcept {
-    const U128 product = static_cast<U128>(left) * right;
-    return product > std::numeric_limits<std::uint64_t>::max()
-               ? std::numeric_limits<std::uint64_t>::max()
-               : static_cast<std::uint64_t>(product);
-}
-
+// ceil(coefficient * units / 2^32), saturating once the quotient reaches the u64 maximum.
 std::uint64_t q32_product_ns(std::uint64_t coefficient, std::uint64_t units) noexcept {
     if (coefficient == 0 || units == 0) { return 0; }
-    const U128 product        = static_cast<U128>(coefficient) * units;
-    const U128 maximum_scaled = static_cast<U128>(std::numeric_limits<std::uint64_t>::max()) << 32U;
+    static_assert(kContextCostQ32One == 1ULL << 32U);
+    const WideProduct product = multiply_wide(coefficient, units);
+    // maximum << 32 == (2^32 - 1) * 2^64 + (2^64 - 2^32).
+    constexpr WideProduct maximum_scaled{0xFFFFFFFFULL, ~0ULL << 32U};
     if (product >= maximum_scaled) { return std::numeric_limits<std::uint64_t>::max(); }
-    return static_cast<std::uint64_t>((product + kContextCostQ32One - 1U) >> 32U);
+    return (product.high << 32U) + (product.low >> 32U) +
+           ((product.low & 0xFFFFFFFFULL) != 0 ? 1U : 0U);
 }
 
 void require_object(const Json& value, std::string_view context) {
@@ -294,7 +285,7 @@ void write_document_atomic(const std::filesystem::path& path, const Json& docume
     if (!path.parent_path().empty()) { std::filesystem::create_directories(path.parent_path()); }
 
     std::filesystem::path temporary = path;
-    temporary += ".tmp." + std::to_string(static_cast<long long>(::getpid())) + "." +
+    temporary += ".tmp." + std::to_string(current_process_id()) + "." +
                  std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
     try {
         {
@@ -326,7 +317,7 @@ std::uint64_t ContextMachineCostModel::transfer_ns(ContextTransferDirection dire
     if (index >= transfer.size()) { return std::numeric_limits<std::uint64_t>::max(); }
     const ContextTransferCost& cost = transfer[index];
     const std::uint64_t operation_limited =
-        saturating_add(cost.batch_ns, saturating_product(cost.operation_ns, work.copy_operations));
+        saturating_add(cost.batch_ns, saturating_multiply(cost.operation_ns, work.copy_operations));
     const std::uint64_t bandwidth_limited =
         q32_product_ns(cost.ns_per_byte_q32, work.payload_bytes);
     return std::max(operation_limited, bandwidth_limited);
@@ -362,11 +353,11 @@ std::uint64_t ContextMachineCostModel::transfer_batches_ns(
 }
 
 std::uint64_t ContextMachineCostModel::prefill_ns(PrefillWork work) const noexcept {
-    std::uint64_t result = saturating_product(prefill.chunk_ns, work.chunks);
+    std::uint64_t result = saturating_multiply(prefill.chunk_ns, work.chunks);
     result = saturating_add(result, q32_product_ns(prefill.token_ns_q32, work.tokens));
     result =
         saturating_add(result, q32_product_ns(prefill.attention_pair_ns_q32, work.attention_pairs));
-    result = saturating_add(result, saturating_product(prefill.vision_item_ns, work.vision_items));
+    result = saturating_add(result, saturating_multiply(prefill.vision_item_ns, work.vision_items));
     result =
         saturating_add(result, q32_product_ns(prefill.vision_patch_ns_q32, work.vision_patches));
     return result;

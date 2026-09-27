@@ -3,7 +3,12 @@
 
 #include <spdlog/logger.h>
 
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -17,36 +22,54 @@
 
 namespace {
 
+#if defined(_WIN32)
+constexpr int kStderr = 2;
+int open_pipe(int (&ends)[2]) { return ::_pipe(ends, 1U << 20U, _O_BINARY); }
+int duplicate(int file) { return ::_dup(file); }
+int duplicate_to(int file, int target) { return ::_dup2(file, target); }
+int close_file(int file) { return ::_close(file); }
+long long read_file(int file, char* data, std::size_t bytes) {
+    return ::_read(file, data, static_cast<unsigned>(bytes));
+}
+#else
+constexpr int kStderr = STDERR_FILENO;
+int open_pipe(int (&ends)[2]) { return ::pipe(ends); }
+int duplicate(int file) { return ::dup(file); }
+int duplicate_to(int file, int target) { return ::dup2(file, target); }
+int close_file(int file) { return ::close(file); }
+long long read_file(int file, char* data, std::size_t bytes) { return ::read(file, data, bytes); }
+#endif
+
 class StderrCapture {
 public:
     StderrCapture() {
-        if (::pipe(pipe_) != 0) { throw std::runtime_error(std::strerror(errno)); }
-        saved_ = ::dup(STDERR_FILENO);
-        if (saved_ < 0 || ::dup2(pipe_[1], STDERR_FILENO) < 0) {
+        if (open_pipe(pipe_) != 0) { throw std::runtime_error(std::strerror(errno)); }
+        saved_ = duplicate(kStderr);
+        if (saved_ < 0 || duplicate_to(pipe_[1], kStderr) < 0) {
             throw std::runtime_error(std::strerror(errno));
         }
-        ::close(pipe_[1]);
+        close_file(pipe_[1]);
         pipe_[1] = -1;
     }
 
     ~StderrCapture() {
         if (saved_ >= 0) {
-            (void)::dup2(saved_, STDERR_FILENO);
-            ::close(saved_);
+            (void)duplicate_to(saved_, kStderr);
+            close_file(saved_);
         }
-        if (pipe_[0] >= 0) { ::close(pipe_[0]); }
+        if (pipe_[0] >= 0) { close_file(pipe_[0]); }
     }
 
     std::string finish() {
         std::fflush(stderr);
-        if (::dup2(saved_, STDERR_FILENO) < 0) { throw std::runtime_error(std::strerror(errno)); }
-        ::close(saved_);
+        if (duplicate_to(saved_, kStderr) < 0) { throw std::runtime_error(std::strerror(errno)); }
+        close_file(saved_);
         saved_ = -1;
 
         std::string output;
         std::array<char, 4096> buffer{};
         for (;;) {
-            const ssize_t count = ::read(pipe_[0], buffer.data(), buffer.size());
+            const long long count = read_file(pipe_[0], buffer.data(), buffer.size());
             if (count == 0) { break; }
             if (count < 0) {
                 if (errno == EINTR) { continue; }
@@ -54,7 +77,7 @@ public:
             }
             output.append(buffer.data(), static_cast<std::size_t>(count));
         }
-        ::close(pipe_[0]);
+        close_file(pipe_[0]);
         pipe_[0] = -1;
         return output;
     }

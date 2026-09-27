@@ -16,16 +16,19 @@ foreach(mode flags IN ZIP_LISTS sync_modes sync_flags)
   set_tests_properties(ninfer_device_sync_${mode}_test PROPERTIES
     ENVIRONMENT "NINFER_CUDA_SYNC=${mode}" SKIP_RETURN_CODE 77)
 endforeach()
-foreach(mode IN ITEMS invalid empty)
-  add_test(NAME ninfer_device_sync_${mode}_test COMMAND ninfer_device_test --invalid-sync)
-endforeach()
+add_test(NAME ninfer_device_sync_invalid_test COMMAND ninfer_device_test --invalid-sync)
 set_tests_properties(ninfer_device_sync_invalid_test PROPERTIES
   ENVIRONMENT "NINFER_CUDA_SYNC=invalid")
-set_tests_properties(ninfer_device_sync_empty_test PROPERTIES
-  ENVIRONMENT "NINFER_CUDA_SYNC=")
+# The empty value is set by `cmake -E env` for the child only: CTest applies ENVIRONMENT to its
+# own process, and on Windows it fails to remove an empty variable afterwards, so every later test
+# would inherit NINFER_CUDA_SYNC="".
+add_test(NAME ninfer_device_sync_empty_test
+  COMMAND ${CMAKE_COMMAND} -E env NINFER_CUDA_SYNC= $<TARGET_FILE:ninfer_device_test> --invalid-sync)
 
 ninfer_add_test(ninfer_decode_graph_test SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_decode_graph.cpp"
   LIBRARIES ninfer_core)
+
+ninfer_add_test(ninfer_wide_multiply_test SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_wide_multiply.cpp")
 
 ninfer_add_test(ninfer_tensor_test       SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_tensor.cpp"
   LIBRARIES ninfer_core)

@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -32,6 +33,17 @@ void rejects(Fn&& fn, const char* message) {
     throw std::runtime_error(message);
 }
 
+// Creates a fresh directory under the system temporary directory (portable mkdtemp).
+inline std::filesystem::path make_temporary_directory(const std::string& prefix) {
+    std::random_device entropy;
+    for (int attempt = 0; attempt < 64; ++attempt) {
+        const auto candidate =
+            std::filesystem::temp_directory_path() / (prefix + std::to_string(entropy()));
+        if (std::filesystem::create_directory(candidate)) { return candidate; }
+    }
+    throw std::runtime_error("cannot create fixture directory");
+}
+
 inline void put_word(std::span<std::byte> bytes, std::size_t offset, std::uint64_t value,
                      unsigned size) {
     for (unsigned i = 0; i < size; ++i) { bytes[offset + i] = std::byte((value >> (8 * i)) & 255); }
@@ -46,12 +58,7 @@ struct Fixture {
     std::vector<std::byte> payload;
 
     Fixture() : payload(1344) {
-        auto pattern = (std::filesystem::temp_directory_path() / "ninfer-artifact-XXXXXX").string();
-        std::vector<char> buffer(pattern.begin(), pattern.end());
-        buffer.push_back('\0');
-        const char* path = ::mkdtemp(buffer.data());
-        if (!path) { throw std::runtime_error("cannot create fixture directory"); }
-        directory = path;
+        directory = make_temporary_directory("ninfer-artifact-");
         entry     = directory / "model.ninfer";
         root      = {
             {"components",

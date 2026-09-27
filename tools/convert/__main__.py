@@ -62,7 +62,8 @@ def _function(value: str):
     if value in RECIPES:
         return RECIPES[value]
     filename, separator, function = value.rpartition(":")
-    if not separator:
+    # A Windows drive letter is a colon too; only an identifier after it names the function.
+    if not separator or not function.isidentifier():
         filename, function = value, "configure"
     path = Path(filename).resolve()
     spec = importlib.util.spec_from_file_location("ninfer_user_recipe", path)

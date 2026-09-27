@@ -8,3 +8,13 @@ include(cmake/ProductTests.cmake)
 include(cmake/BenchSupportTests.cmake)
 include(models/qwen3_5/tests.cmake)
 include(ops/tests.cmake)
+
+if(WIN32)
+  # Windows has no rpath: every test finds CUDA, FFmpeg and libcurl DLLs through PATH.
+  get_property(ninfer_tests DIRECTORY PROPERTY TESTS)
+  set(ninfer_test_path "")
+  foreach(dir IN LISTS NINFER_RUNTIME_DLL_DIRS)
+    list(APPEND ninfer_test_path "PATH=path_list_prepend:${dir}")
+  endforeach()
+  set_property(TEST ${ninfer_tests} APPEND PROPERTY ENVIRONMENT_MODIFICATION ${ninfer_test_path})
+endif()

@@ -255,6 +255,7 @@ class ChatTemplates(unittest.TestCase):
         result = subprocess.run(
             [str(RENDERER), "--render"],
             text=True,
+            encoding="utf-8",
             capture_output=True,
             check=True,
             input="".join(

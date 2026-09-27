@@ -64,12 +64,43 @@ Configure that environment with `cmake --preset local`. Compiler paths may also 
 changing compilers requires a fresh build directory. There is no tools option, installed SDK,
 package export or configure-time dependency download.
 
+## Windows (MSVC)
+
+Windows 11 with Visual Studio 2026 (MSVC 19.51) and CUDA 13.3 is a native build and runtime
+platform of this fork. Use the Visual Studio generator and a build directory per configuration:
+
+```powershell
+cmake -S . -B build-win -G "Visual Studio 18 2026" -DCMAKE_CUDA_ARCHITECTURES=120a `
+  -DFFMPEG_ROOT=<ffmpeg shared distribution> -DCURL_ROOT=<libcurl install> `
+  -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=ON
+cmake --build build-win --config Release -j
+ctest --test-dir build-win -C Release
+```
+
+- FFmpeg and libcurl are located from `FFMPEG_ROOT` and `CURL_ROOT` (their `include/`, `lib/`
+  and `bin/`) instead of pkg-config, whose `.pc` files in those distributions describe MinGW
+  link lines. `FFMPEG_ROOT` defaults to the LGPL distribution because release builds bundle it;
+  never ship a GPL FFmpeg.
+- MSVC compiles every source as UTF-8 (`/utf-8`), gives CUDA's host pass the conforming
+  preprocessor (`/Zc:preprocessor`, required by CCCL), defines `NOMINMAX`, and disables C++20
+  module scanning.
+- Windows has no rpath. CTest prepends the CUDA, FFmpeg and libcurl `bin/` directories to each
+  test's `PATH`; a product install ships those DLLs beside the executables.
+- Host code that differs by platform keeps both branches in one place: `core/platform.h`
+  (process id, terminal detection, calendar time), `core/wide_multiply.h` (exact 64x64-bit
+  products; MSVC has no `unsigned __int128`) and `artifact/file_io.cpp` (positional and
+  unbuffered reads through `ReadFile`).
+- The Artifact materialization test's CUDA fault injection relies on GNU ld `--wrap`; on MSVC
+  only its recovery check runs.
+- The Visual Studio generator can report success after skipping a stale target. Confirm that an
+  edited translation unit's object or library timestamp moved before measuring a binary.
+
 ## Targets and dependencies
 
-`cmake/Dependencies.cmake` discovers system CUDA, Threads, FFmpeg and conditional curl, and
-exposes the repository-pinned JSON/HTTP headers and conditional spdlog library. External include
-requirements follow their consuming targets. `cmake/NinferTargets.cmake` provides private
-project includes and the two CUDA archive policies.
+`cmake/Dependencies.cmake` discovers system CUDA, Threads, FFmpeg and conditional curl (as
+`ninfer::ffmpeg` and `ninfer::libcurl`), and exposes the repository-pinned JSON/HTTP headers and
+conditional spdlog library. External include requirements follow their consuming targets.
+`cmake/NinferTargets.cmake` provides private project includes and the two CUDA archive policies.
 
 `src/CMakeLists.txt` explicitly enters the component directories. Each component's
 `CMakeLists.txt` owns its targets, dependency visibility and compile properties:

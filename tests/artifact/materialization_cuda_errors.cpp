@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <iostream>
 #include <utility>
 
 namespace {
@@ -31,6 +32,9 @@ bool active() { return trace.failure != Failure::None; }
 } // namespace
 
 // Link-time wrappers affect only this test executable. The production path has no fault hooks.
+// They need GNU ld's --wrap; the MSVC linker has no equivalent, so Windows runs only the
+// recovery check below.
+#if !defined(_WIN32)
 extern "C" {
 cudaError_t CUDARTAPI __real_cudaMalloc(void**, std::size_t);
 cudaError_t CUDARTAPI __real_cudaMallocHost(void**, std::size_t);
@@ -102,6 +106,7 @@ cudaError_t CUDARTAPI __wrap_cudaStreamSynchronize(cudaStream_t stream) {
     return status;
 }
 }
+#endif
 
 namespace ninfer::test {
 
@@ -110,6 +115,9 @@ void materialization_cuda_errors(DeviceContext& device) {
     using namespace artifact_fixture;
     Fixture fixture;
     fixture.write();
+#if defined(_WIN32)
+    std::cerr << "CUDA fault injection skipped: it needs GNU ld --wrap\n";
+#else
     for (const auto failure : {Failure::EventCreation, Failure::EventRecord}) {
         Reader reader(fixture.entry);
         Binder binder(reader);
@@ -131,6 +139,7 @@ void materialization_cuda_errors(DeviceContext& device) {
             require(result.uploads > 0, "event failure did not exercise an in-flight upload");
         }
     }
+#endif
     Reader reader(fixture.entry);
     Binder binder(reader);
     (void)binder.parameter("matrix", {2, 130});

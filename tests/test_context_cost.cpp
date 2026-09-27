@@ -1,4 +1,5 @@
 #include "runtime/engine/context_cache/context_cost.h"
+#include "core/platform.h"
 
 #include "core/host_kv_arena.h"
 
@@ -12,8 +13,6 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
-
-#include <unistd.h>
 
 namespace {
 
@@ -275,7 +274,7 @@ void test_schema_validation() {
 void test_resolution_and_atomic_upserts() {
     const std::filesystem::path directory =
         std::filesystem::temp_directory_path() /
-        ("ninfer-context-cost-test-" + std::to_string(static_cast<long long>(::getpid())));
+        ("ninfer-context-cost-test-" + std::to_string(ninfer::current_process_id()));
     std::filesystem::create_directories(directory);
     const std::filesystem::path path = directory / "presets.json";
     try {

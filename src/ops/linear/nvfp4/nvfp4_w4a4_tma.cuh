@@ -16,12 +16,16 @@
 
 namespace ninfer::ops::detail {
 
-struct alignas(128) Nvfp4W4a4TmaDescriptors {
+// Passed by value as a __grid_constant__ kernel parameter. TMA requires 64-byte descriptor
+// alignment. It is stated here because cuda.h keys CUtensorMap's alignas on __cplusplus, which
+// MSVC reports as 199711L, and MSVC cannot pass a parameter aligned beyond 64 bytes by value.
+struct alignas(64) Nvfp4W4a4TmaDescriptors {
     CUtensorMap a_codes;
     CUtensorMap b_codes;
     CUtensorMap a_scales;
     CUtensorMap b_scales;
 };
+static_assert(alignof(Nvfp4W4a4TmaDescriptors) == 64);
 
 inline void nvfp4_check_driver(CUresult status, const char* operation) {
     if (status == CUDA_SUCCESS) { return; }
