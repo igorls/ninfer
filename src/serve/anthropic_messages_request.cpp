@@ -940,8 +940,15 @@ void parse_generation_fields(const Json& body, GenerationRequest& request) {
         (*request.sampling.top_p < 0.0 || *request.sampling.top_p > 1.0)) {
         bad_request("top_p must be in [0,1]", "top_p");
     }
-    if (request.sampling.top_k && (*request.sampling.top_k < 0 || *request.sampling.top_k > 20)) {
-        bad_request("top_k must be in [0,20]", "top_k");
+    if (request.sampling.top_k && *request.sampling.top_k < 0) {
+        bad_request("top_k must not be negative", "top_k");
+    }
+    // Clamped, not refused, for the same reason as the OpenAI path in
+    // translate.cpp: the sampler's candidate domain is 20, common clients
+    // default to 40, and refusing costs a whole request to save a difference
+    // that almost never changes the selected token.
+    if (request.sampling.top_k && *request.sampling.top_k > 20) {
+        request.sampling.top_k = 20;
     }
 }
 
@@ -977,7 +984,8 @@ void apply_anthropic_prompt_cache_policy(const Json& body, GenerationRequest& re
 
     const std::optional<CacheBoundary::Ttl> automatic_ttl = cache_boundary(body, "cache_control");
     if (!automatic_ttl) { return; }
-    request.allow_engine_automatic_shared_prefixes = false;
+    // Engine discovery of repeated prefixes stays enabled beside the automatic cache_control
+    // boundary.
 
     std::optional<CacheBoundary>* automatic_target = nullptr;
     for (auto turn = request.messages.rbegin(); turn != request.messages.rend(); ++turn) {

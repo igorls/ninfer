@@ -128,10 +128,28 @@ int test_envelope_and_field_policy() {
     body["temperature"] = 1.01;
     failures += check(api_param([&] { (void)parse(body); }) == "temperature",
                       "Anthropic temperature range was not enforced");
+    // top_k above the sampler's 20-candidate domain is clamped, not refused:
+    // llama.cpp and Ollama both default it to 40, and refusing cost those clients
+    // their first request against an otherwise compatible server. Negative values
+    // are still an error, because there is no sensible reading of them.
     body          = base_request();
-    body["top_k"] = 21;
+    body["top_k"] = 40;
+    {
+        const auto request = parse(body);
+        failures += check(request.generation.sampling.top_k == 20,
+                          "top_k above the candidate domain must clamp to 20");
+    }
+    body          = base_request();
+    body["top_k"] = 20;
+    {
+        const auto request = parse(body);
+        failures += check(request.generation.sampling.top_k == 20,
+                          "top_k at the candidate domain is unchanged");
+    }
+    body          = base_request();
+    body["top_k"] = -1;
     failures += check(api_param([&] { (void)parse(body); }) == "top_k",
-                      "Engine top_k range was not enforced");
+                      "negative top_k is still rejected");
     body                  = base_request();
     body["output_config"] = Json{{"format", Json{{"type", "json_schema"}}}};
     failures += check(api_code([&] { (void)parse(body); }) == "output_config_format_not_supported",
@@ -570,6 +588,8 @@ int test_content_and_cache_hints() {
                           translated.context_cache.markers[1].location ==
                               ninfer::PromptCacheMarkerLocation::MessagePartBoundary,
                       "message-part cache boundary was not represented in PromptInput");
+    failures += check(request.allow_engine_automatic_shared_prefixes,
+                      "automatic cache_control disabled Engine prefix discovery (fork issue #23)");
 
     body                           = base_request();
     body["messages"][0]["content"] = Json::array(
