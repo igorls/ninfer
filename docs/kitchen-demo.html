@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>NInfer · Kitchen Rush</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500&family=Kode+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="arcade/instrument.css"><link rel="stylesheet" href="arcade/kitchen.css">
+</head>
+<body>
+<main class="panel kitchen-console">
+  <span class="screw tr" aria-hidden="true"></span><span class="screw bl" aria-hidden="true"></span>
+  <aside class="side" aria-label="Kitchen Rush controls">
+    <header class="plate"><nav class="game-switch" aria-label="Choose game"><a href="tetris-demo.html">TETRIS</a><a href="chess-demo.html">CHESS</a><a href="kitchen-demo.html" aria-current="page">KITCHEN</a><a href="beacon-demo.html">BEACON</a></nav><div class="brand">NInfer</div><h1 class="model">KITCHEN RUSH</h1><div class="series">THE DECISION ARCADE</div><div class="power"><span class="led" id="led" aria-hidden="true"></span><span id="power-label">READY</span></div></header>
+    <p class="intro">Two chefs. One stove.<br>Every second is a choice.</p>
+    <fieldset class="block settings" id="session-settings"><legend>THE MATCH</legend>
+      <label for="layout">Play together or compare?</label><select id="layout"><option value="comparison">Compare · two kitchens</option><option value="cooperative">Cooperate · one kitchen</option></select>
+      <label for="left-player" id="left-label">Left kitchen</label><select id="left-player"><option value="reference">Local reference</option><option value="qwen">Qwen · NInfer</option><option value="jev">Jev · TypeSafe</option><option value="human">You</option></select>
+      <label for="right-player" id="right-label">Right kitchen</label><select id="right-player"><option value="qwen">Qwen · NInfer</option><option value="jev">Jev · TypeSafe</option><option value="reference">Local reference</option><option value="human">You</option></select>
+      <div class="setup-actions"><button id="local-demo" type="button">Local demo</button><button id="jev-match" type="button">Jev vs Qwen</button></div>
+      <label for="clock-mode">Simulation clock</label><select id="clock-mode"><option value="realtime">Real time · latency matters</option><option value="paused">Paused decisions · equal time</option></select>
+      <p class="field-note" id="clock-help">Orders and food keep aging while a model decides. Expired actions are rejected.</p>
+      <div class="field-pair"><div><label for="duration">Shift length</label><select id="duration"><option value="60000">60 seconds</option><option value="90000" selected>90 seconds</option><option value="120000">120 seconds</option></select></div><div><label for="seed">Seed</label><input id="seed" type="number" min="0" max="4294967295" value="1" step="1"></div></div>
+    </fieldset>
+    <fieldset class="block settings"><legend>SHARED INSTRUCTIONS</legend><label for="goal">What matters most?</label><select id="goal"><option value="revenue">Maximize revenue</option><option value="waste">Reduce waste</option><option value="vip">Prioritize VIP orders</option></select><p class="field-note">Change the goal during a shift. Both players get the new instructions on their next decision.</p></fieldset>
+    <details class="block connection" id="qwen-connection"><summary>QWEN CONNECTION</summary><label for="qwen-endpoint">NInfer API base URL</label><input id="qwen-endpoint" type="url" value="http://127.0.0.1:8010" spellcheck="false"><label for="qwen-model">Resident model label</label><input id="qwen-model" value="qwen3.8-27b" spellcheck="false"><label for="qwen-key">Bearer token, if required</label><input id="qwen-key" type="password" autocomplete="off"><p class="field-note">This label does not switch the resident model. Use the server's --cors option.</p></details>
+    <details class="block connection" id="jev-connection"><summary>JEV CONNECTION</summary><label for="jev-key">TypeSafe API key</label><input id="jev-key" type="password" autocomplete="off" spellcheck="false"><label for="jev-endpoint">Local relay URL</label><input id="jev-endpoint" type="url" value="http://127.0.0.1:8012" spellcheck="false"><label for="jev-model">Model</label><input id="jev-model" value="jev-latest" spellcheck="false"><p class="field-note">Start the relay from the repository:</p><code class="relay-command">node tools/arcade/jev-relay.mjs</code><p class="field-note">Keys stay in this page and are excluded from exports. Jev requests go through the relay to api.typesafe.ai.</p></details>
+    <details class="block rules"><summary>HOW TO PLAY</summary><p>Collect → chop → cook → plate → serve. Salad skips cooking. Each chef handles one job at a time; a reserved order or station cannot be assigned twice.</p><p>Cooking continues without a chef. Plate cooked food within five seconds or it burns. Clear a burned pan to reopen the stove. Each ticket has its own service deadline.</p><p>Cooperate gives each player one chef in a shared kitchen. Both see their partner's work and can continue the same dish. Simultaneous claims may conflict: real time accepts the first valid answer, while paused rounds rotate chef priority. Rejected jobs are shown; the chef chooses again.</p><p>Select You to choose jobs below your player's readout. Walking and task execution are automatic. P pauses. Paused decision mode and Step make manual play easier.</p><p>Compare gives each player a separate kitchen with identical seeded arrivals, recipes and deadlines. The local reference is a greedy scheduling baseline, not an optimal strategy. Probabilities express action preferences.</p></details>
+    <footer class="repo"><code>POST /v1/systemone</code><br>Same interface. Different decisions.<br><a href="decision-arcade.md">Arcade guide &amp; measurements</a></footer>
+  </aside>
+  <section class="frame" aria-label="Kitchen Rush decision instrument"><div class="crt">
+    <header class="status"><span><b>KITCHEN RUSH</b> <span class="dim">/</span> <span id="mode" role="status">READY</span></span><span id="clock">00:00 / 01:30</span></header>
+    <div class="shift-head"><p id="match-note">Same tickets. Same deadlines. Two independent kitchens.</p><span id="goal-label">MAXIMIZE REVENUE</span></div>
+    <progress id="shift-progress" value="0" max="90000" aria-label="Shift elapsed"></progress>
+    <section id="shared-kitchen" class="shared-kitchen" aria-label="Shared kitchen" hidden><div class="kitchen-heading"><h2>ONE KITCHEN · SHARED SCORE</h2><small id="team-owners"></small></div><div id="shared-world"></div><p id="team-metrics" class="team-metrics"></p></section>
+    <div class="kitchen-pair" id="kitchens"></div>
+    <section id="team-activity" class="team-activity" aria-label="Shared activity" hidden><h2>ON THE LINE</h2><p class="screen-note">Actual work, handoffs and conflicts. Both chefs see the latest activity.</p><ol id="activity-log"></ol></section>
+    <div id="fault" class="fault" role="alert"></div>
+    <details class="inspector" id="inspector"><summary>INSPECT A DECISION <span id="inspector-count"></span></summary>
+      <div class="inspection-controls"><label for="inspect-lane">Player</label><select id="inspect-lane"><option value="0">Left kitchen</option><option value="1">Right kitchen</option></select><label for="inspect-record">Decision</label><select id="inspect-record"><option value="latest">Latest</option></select></div>
+      <p id="decision-note" class="screen-note">Run or Step to record the first decision.</p>
+      <div class="table-scroll"><table><caption class="sr-only">All actions supplied in this decision</caption><thead><tr><th>Option</th><th>Chef / job</th><th>Facts</th><th>Probability</th></tr></thead><tbody id="candidate-table"></tbody></table></div>
+      <details><summary>REQUEST / RESPONSE</summary><div class="wire"><pre id="request-wire">No request yet.</pre><pre id="response-wire">No response yet.</pre></div></details>
+    </details>
+  </div><nav class="softkeys" aria-label="Match actions"><div class="softkey lit"><button id="run" type="button">RUN</button></div><div class="softkey"><button id="step" type="button">STEP</button></div><div class="softkey"><button id="reset" type="button">RESET</button></div><div class="softkey"><button id="export" type="button" disabled>EXPORT</button></div></nav><div class="bezel-note"><span>OBSERVE · CHOOSE · ACT</span><span>API TIME INCLUDES NETWORK TRAVEL</span></div></section>
+</main>
+<script src="arcade/system-one.js"></script><script src="arcade/kitchen-game.js"></script><script src="arcade/kitchen-match.js"></script><script src="arcade/kitchen-ui.js"></script>
+</body>
+</html>

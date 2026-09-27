@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>NInfer · Beacon Runner</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500&family=Kode+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="arcade/instrument.css"><link rel="stylesheet" href="arcade/beacon.css">
+</head>
+<body>
+<main class="panel beacon-console">
+  <span class="screw tr" aria-hidden="true"></span><span class="screw bl" aria-hidden="true"></span>
+  <aside class="side" aria-label="Beacon Runner controls">
+    <header class="plate"><nav class="game-switch" aria-label="Choose game"><a href="tetris-demo.html">TETRIS</a><a href="chess-demo.html">CHESS</a><a href="kitchen-demo.html">KITCHEN</a><a href="beacon-demo.html" aria-current="page">BEACON</a></nav><div class="brand">NInfer</div><h1 class="model">BEACON RUNNER</h1><div class="power"><span class="led" id="led" aria-hidden="true"></span><span id="power-label">READY</span></div></header>
+    <p class="intro">Give it eyes.<br>Then move the world.</p>
+    <fieldset class="block settings"><legend>THE CAMERA</legend>
+      <label for="camera-mode">What reaches the model?</label><select id="camera-mode"><option value="live">Live camera</option><option value="blackout">Blackout · no scene</option><option value="freeze">Freeze · one held frame</option><option value="delay">Delay · one second behind</option></select>
+      <p class="field-note" id="camera-help">Only the image changes between decisions. No coordinates, object lists or route hints are sent.</p>
+      <label for="resolution">Image size</label><select id="resolution"><option value="320">320 × 240 · fast</option><option value="640">640 × 480 · detailed</option><option value="960">960 × 720 · large</option></select>
+      <label for="deadline">Discard answers slower than</label><select id="deadline"><option value="250">250 ms</option><option value="500" selected>500 ms</option><option value="1000">1,000 ms</option><option value="2000">2,000 ms</option></select>
+      <p class="field-note">One request at a time. Each accepted action powers a 220 ms movement pulse. The world keeps moving while Qwen decides.</p>
+    </fieldset>
+    <fieldset class="block settings" id="setup"><legend>THE RUN</legend><label for="pilot">Pilot</label><select id="pilot"><option value="qwen">Qwen · vision only</option><option value="human">You · arrow keys / touch</option></select><div class="field-pair"><div><label for="duration">Duration</label><select id="duration"><option value="60000">60 seconds</option><option value="90000">90 seconds</option></select></div><div><label for="seed">Seed</label><input id="seed" type="number" min="0" max="4294967295" step="1" value="1"></div></div></fieldset>
+    <details class="block connection" open><summary>QWEN CONNECTION</summary><label for="endpoint">NInfer API base URL</label><input id="endpoint" type="url" value="http://127.0.0.1:8014" spellcheck="false"><label for="model">Resident model label</label><input id="model" value="qwen3.8-27b" spellcheck="false"><label for="key">Bearer token, if required</label><input id="key" type="password" autocomplete="off"><p class="field-note">Requires the image-enabled System One build, --vision and --cors. Port 8014 is the local candidate; change it to your server. Keys stay in this page.</p></details>
+    <details class="block rules"><summary>HOW TO PLAY</summary><p>Guide the cyan triangle into yellow rings. Avoid gray walls and red moving hazards. Rings collected and separate contacts are counted for the human observer.</p><p>Drag a wall or beacon during a run to change the scene. Or select an object below the arena and use the nudge buttons. Qwen learns about edits only through its next image.</p><p>Run first verifies image processing without moving. Camera changes pause and brake the drone; Resume starts a new observation. Hidden tabs pause automatically. A blackout should produce Brake; frozen and delayed images may mislead the pilot.</p><p>This is a visual control experiment, not a navigation benchmark. The model has no map or action history. Arrow keys work with the arena focused in human mode; P pauses.</p></details>
+    <footer class="repo"><code>POST /v1/systemone</code><br>Image in. One action out.<br><a href="decision-arcade.md">Arcade guide &amp; measurements</a></footer>
+  </aside>
+  <section class="frame" aria-label="Beacon Runner decision instrument"><div class="crt">
+    <header class="status"><span><b>BEACON RUNNER</b> <span class="dim">/</span> <span id="mode" role="status">READY</span></span><span id="clock">00:00 / 01:00</span></header>
+    <div class="arena-layout">
+      <section class="arena-section" aria-label="Live world"><div class="readout-heading"><h2>THE WORLD</h2><span id="score">0 BEACONS · 0 CONTACTS</span></div>
+        <canvas id="arena" width="640" height="480" tabindex="0" aria-label="Live arena. Cyan drone, yellow beacon, gray walls and red moving hazard. Drag walls or beacon to change the scene."></canvas>
+        <p class="screen-note">Drag a wall or beacon. The model sees your edit on its next live frame.</p>
+        <div class="object-controls"><label for="object">Move</label><select id="object"><option value="beacon">Yellow beacon</option><option value="wall-0">Lower wall</option><option value="wall-1">Upper wall</option></select><button data-nudge="-20,0" aria-label="Move selected object left">Left</button><button data-nudge="0,-20" aria-label="Move selected object up">Up</button><button data-nudge="0,20" aria-label="Move selected object down">Down</button><button data-nudge="20,0" aria-label="Move selected object right">Right</button></div>
+        <p id="edit-status" class="screen-note" role="status"></p>
+        <div id="manual" hidden><p class="screen-note">Arrow keys or choose a movement pulse.</p><div id="manual-actions" class="manual-actions"></div></div>
+        <progress id="run-progress" value="0" max="60000" aria-label="Run elapsed"></progress>
+      </section>
+      <section class="camera-readout" aria-label="Model observation"><div class="readout-heading"><h2>WHAT QWEN SAW</h2><span id="camera-label">LIVE</span></div>
+        <img id="observation" width="320" height="240" alt="The exact camera image sent in the last decision request" hidden>
+        <div id="empty-camera">Run to send the first frame.<br>No image has been sent yet.</div>
+        <p id="frame-note" class="screen-note">No observation yet.</p>
+        <div class="action-readout"><span>NEXT ACTION</span><strong id="action">—</strong><span id="action-detail">Waiting for a decision</span></div>
+        <dl class="telemetry"><div><dt>Request time</dt><dd id="latency">—</dd></div><div><dt>Frame age at answer</dt><dd id="frame-age">—</dd></div><div><dt>Native vision tokens</dt><dd id="vision-tokens">—</dd></div><div><dt>P50 / P95 request</dt><dd id="percentiles">—</dd></div><div><dt>Decisions / late drops</dt><dd id="samples">0 / 0</dd></div></dl>
+        <p class="screen-note">Timings exclude warm-up. Frame age includes intentional camera delay; late drops use request time only. Probabilities are action preferences.</p>
+      </section>
+    </div>
+    <div id="fault" class="fault" role="alert"></div>
+    <details class="inspector"><summary>INSPECT LAST DECISION</summary><p id="receipt-note" class="screen-note">No decision recorded.</p><div class="probabilities" id="probabilities"></div><div class="wire"><pre id="request-wire">No request yet.</pre><pre id="response-wire">No response yet.</pre></div><p class="screen-note">The image bytes are abbreviated here. Export includes exact sent images, full responses and camera settings, without the API key.</p></details>
+  </div><nav class="softkeys" aria-label="Run actions"><div class="softkey lit"><button id="run">RUN</button></div><div class="softkey"><button id="reset">RESET</button></div><div class="softkey"><button id="export" disabled>EXPORT</button></div></nav><div class="bezel-note"><span>OBSERVE · CHOOSE · ACT</span><span>PIXELS ARE THE ONLY OBSERVATION</span></div></section>
+</main>
+<script src="arcade/system-one.js"></script><script src="arcade/beacon-game.js"></script><script src="arcade/beacon-session.js"></script><script src="arcade/beacon-ui.js"></script>
+</body>
+</html>

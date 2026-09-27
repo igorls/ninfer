@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NInfer · Tetris</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500&family=Kode+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="arcade/instrument.css">
+</head>
+<body>
+  <main class="panel tetris-console">
+    <span class="screw tr" aria-hidden="true"></span><span class="screw bl" aria-hidden="true"></span>
+    <aside class="side" aria-label="Session controls">
+      <header class="plate">
+        <nav class="game-switch" aria-label="Choose game"><a href="tetris-demo.html" aria-current="page">TETRIS</a><a href="chess-demo.html">CHESS</a><a href="kitchen-demo.html">KITCHEN</a><a href="beacon-demo.html">BEACON</a></nav>
+        <div class="brand">NInfer</div>
+        <h1 class="model">TETRIS</h1>
+        <div class="series">THE DECISION ARCADE</div>
+        <div class="power"><span class="led" id="led" aria-hidden="true"></span><span id="power-label">READY TO PLAY</span></div>
+      </header>
+      <p class="intro">One falling piece.<br>One decision from the logits.</p>
+      <fieldset class="block settings" id="session-settings">
+        <legend>SESSION</legend>
+        <label for="controller">Player</label>
+        <select id="controller"><option value="live">System One · live model</option><option value="human">You · manual placement</option><option value="reference">Reference · local policy</option></select>
+        <div class="field-pair">
+          <div><label for="scenario">Starting board</label><select id="scenario"><option value="empty">Empty well</option><option value="trench">Four-line well</option><option value="stairs">Staircase</option></select></div>
+          <div><label for="seed">Seed</label><input id="seed" type="number" min="0" max="4294967295" step="1" value="1"></div>
+        </div>
+        <label for="row">Gravity <output id="row-value">12 ms / row</output></label>
+        <input id="row" type="range" min="4" max="40" step="1" value="12">
+        <label class="check"><input id="strict" type="checkbox"> Stop on a missed deadline</label>
+        <p class="field-note" id="deadline-help">Watch mode measures misses and still places the answer. Enable the deadline challenge to race gravity.</p>
+      </fieldset>
+      <div class="block motion-settings">
+        <label for="motion-speed">Piece speed <output id="motion-value">1×</output></label>
+        <input id="motion-speed" type="range" min="0.5" max="3" step="0.25" value="1">
+        <p class="field-note">Controls the move after a choice. Adjust it while the game runs; request timings stay separate.</p>
+      </div>
+      <details class="block connection">
+        <summary>CONNECTION &amp; PACE</summary>
+        <label for="endpoint">API base URL</label><input id="endpoint" type="url" spellcheck="false" value="http://127.0.0.1:8010">
+        <label for="model">Model label</label><input id="model" type="text" spellcheck="false" value="qwen3.8-27b">
+        <p class="field-note">The server uses its resident model. This label does not load or switch a model.</p>
+        <label for="api-key">Bearer token <span class="optional">(if required)</span></label><input id="api-key" type="password" autocomplete="off" spellcheck="false">
+        <label for="pace">Pause between pieces <output id="pace-value">180 ms</output></label><input id="pace" type="range" min="0" max="800" step="20" value="180">
+        <p class="field-note">Presentation time is excluded from request latency. The token stays in this page and is excluded from exports.</p>
+      </details>
+      <details class="block rules">
+        <summary>HOW IT WORKS</summary>
+        <p>The browser enumerates straight-drop landings and measures each resulting board. System One chooses a letter; its response supplies the full probability distribution.</p>
+        <p>Policy: most lines, then fewest holes, lowest stack, least roughness. Agreement compares that policy exactly, including ties. It does not measure optimal Tetris play.</p>
+        <p>This is a placement challenge: no wall kicks, tucks, hold, or movement-path search. The falling piece shows the time budget. A valid answer selects a top-drop destination.</p>
+        <p>Manual: ← → choose column, ↑ rotate, Space place. Buttons also work on touchscreens. P pauses; R resets.</p>
+      </details>
+      <footer class="repo"><code>POST /v1/systemone</code><br>TypeSafe-compatible choice API<br><a href="decide-demo.html">Open the decision analyzer</a></footer>
+    </aside>
+    <section class="frame" aria-label="Tetris decision instrument">
+      <div class="crt on" id="crt">
+        <header class="status">
+          <span><b id="source">LIVE MODEL</b> <span class="dim">/</span> <span id="mode" role="status">STANDBY</span></span>
+          <span id="scoreboard">0 LINES · 0 PIECES</span>
+        </header>
+        <div class="signal-path" aria-label="Decision pipeline">
+          <span id="stage-enumerate">LEGAL LANDINGS <b id="option-count">—</b></span>
+          <span id="stage-decide">CHOICE LOGITS</span>
+          <span id="stage-place">PLACE</span>
+        </div>
+        <div class="play">
+          <section class="arena-section" aria-label="Game board">
+            <div class="arena">
+              <div class="well" id="well" role="img" aria-label="Empty Tetris board">
+                <div class="banner" id="banner"><b id="banner-title">READY</b><span id="banner-detail">Run the model or take a turn.</span></div>
+                <div class="piece-motion" id="piece-motion" aria-hidden="true" hidden></div>
+              </div>
+              <div class="queue-rail"><span class="screen-label">NEXT</span><div id="queue"></div><span class="screen-label">STACK</span><b id="height">0 / 20</b><span class="screen-label">HOLES</span><b id="holes">0</b></div>
+            </div>
+            <div class="board-caption"><span id="piece-label">7-BAG · SEED 1</span><span id="score">SCORE 0</span></div>
+            <div class="manual-controls" id="manual-controls" hidden>
+              <button type="button" id="left" aria-label="Choose landing to the left">←</button>
+              <button type="button" id="rotate">Rotate</button>
+              <button type="button" id="right" aria-label="Choose landing to the right">→</button>
+              <button type="button" id="drop">Place</button>
+              <p class="manual-feedback" id="manual-status" role="status" aria-live="polite"></p>
+            </div>
+            <div class="deadline-head"><span id="budget-label">SPAWN-TO-LOCK BUDGET</span><b id="budget">—</b></div>
+            <progress id="deadline" max="1" value="1" aria-label="Time remaining before lock"></progress>
+            <p class="screen-note" id="budget-note">Warm-up runs before the first timed decision.</p>
+          </section>
+          <section class="meters" aria-label="Decision measurements">
+            <div class="readout">
+              <div class="dt" id="dt-wrap"><span id="latency-label">REQUEST → VALID ANSWER</span><div><b id="dt">—</b><small>ms</small></div></div>
+              <dl class="percentiles"><div><dt>P50</dt><dd id="p50">—</dd></div><div><dt>P95</dt><dd id="p95">—</dd></div><div><dt>N</dt><dd id="samples">0</dd></div></dl>
+            </div>
+            <svg id="latency-chart" viewBox="0 0 320 60" role="img" aria-label="No request timings yet"><path id="latency-line" fill="none" stroke="currentColor" stroke-width="1.5"></path></svg>
+            <div class="decision-heading"><h2 id="decision-title">WAITING FOR A DECISION</h2><span id="selection-prob">—</span></div>
+            <p class="screen-note" id="decision-note">Run continuously, or use Step to inspect one piece.</p>
+            <div id="probabilities" aria-label="Leading landing probabilities"></div>
+            <dl class="quality">
+              <div><dt>POLICY AGREEMENT</dt><dd id="agreement">—</dd></div>
+              <div><dt>DEADLINES MET</dt><dd id="on-time">—</dd></div>
+              <div><dt>INPUT / OUTPUT TOKENS</dt><dd id="tokens">—</dd></div>
+              <div><dt>WARM-UP</dt><dd id="warmup">—</dd></div>
+            </dl>
+            <div class="fault" id="fault" role="alert"></div>
+          </section>
+        </div>
+        <details class="inspector" id="inspector">
+          <summary><span id="inspector-label">INSPECT LAST DECISION</span> <span id="inspector-count"></span></summary>
+          <p class="screen-note">The selected row is the actual choice. Probabilities are shown as returned and express model preference, not a calibrated chance of winning.</p>
+          <div class="table-scroll"><table><caption class="sr-only">All legal landings and their outcomes</caption><thead><tr><th>Move</th><th>Column</th><th>Turn</th><th>Lines</th><th>Holes</th><th>Height</th><th>Rough</th><th>P</th></tr></thead><tbody id="landing-table"></tbody></table></div>
+          <details id="wire-details"><summary>REQUEST / RESPONSE</summary><div class="wire"><pre id="request-wire">No request yet.</pre><pre id="response-wire">No response yet.</pre></div></details>
+        </details>
+      </div>
+      <nav class="softkeys" aria-label="Game actions">
+        <div class="softkey lit"><button id="run" type="button">RUN</button></div>
+        <div class="softkey"><button id="step" type="button">STEP</button></div>
+        <div class="softkey"><button id="reset" type="button">RESET</button></div>
+        <div class="softkey"><button id="export" type="button" disabled>EXPORT RUN</button></div>
+      </nav>
+      <div class="bezel-note"><span id="session-note">LIVE API · NO HEURISTIC OVERRIDE</span><span id="run-id">SEED 1</span></div>
+    </section>
+  </main>
+  <script src="arcade/system-one.js"></script>
+  <script src="arcade/tetris-game.js"></script>
+  <script src="arcade/tetris-ui.js"></script>
+</body>
+</html>

@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NInfer · Dual-purpose decode</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Overpass+Condensed:wght@600;700&family=Overpass:wght@400;600&family=Source+Sans+3:ital,wght@0,400;0,600;0,700;1,400&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --paper: #e4e6df;
+      --paper-deep: #d7dacf;
+      --ink: #1c1e1a;
+      --ink-soft: #3a4038;
+      --grid: #c2c7bb;
+      --teal: #1a6b64;
+      --teal-deep: #0e433e;
+      --brick: #9c3d32;
+      --hole: #6d736c;
+      --focus: #1a6b64;
+      --measure: 68ch;
+      --bench: #6d736c;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    html {
+      background: var(--bench);
+      scrollbar-color: var(--ink) var(--paper-deep);
+    }
+    body {
+      color: var(--ink);
+      font-family: "Source Sans 3", sans-serif;
+      font-size: 1.0625rem;
+      line-height: 1.55;
+      background: var(--bench);
+      caret-color: var(--teal);
+    }
+
+    ::selection { background: var(--teal); color: var(--paper); }
+    :focus-visible {
+      outline: 3px solid var(--focus);
+      outline-offset: 3px;
+    }
+
+    .sheet {
+      --sprocket: 28px;
+      position: relative;
+      max-width: 920px;
+      margin: 36px auto 72px;
+      padding: 28px var(--sprocket) 64px;
+      background-color: var(--paper);
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.89  0 0 0 0 0.90  0 0 0 0 0.87  0 0 0 0.09 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      box-shadow:
+        0 1px 0 rgb(28 30 26 / 0.18),
+        0 8px 18px rgb(20 24 18 / 0.22);
+    }
+
+    .sheet::before,
+    .sheet::after {
+      content: "";
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: var(--sprocket);
+      background-image: radial-gradient(circle at 50% 10px, var(--bench) 4px, transparent 4.4px);
+      background-size: 100% 28px;
+      background-repeat: repeat-y;
+      pointer-events: none;
+    }
+    .sheet::before { left: 0; box-shadow: inset -1px 0 0 rgb(28 30 26 / 0.28); }
+    .sheet::after { right: 0; box-shadow: inset 1px 0 0 rgb(28 30 26 / 0.28); }
+
+    .inner { padding: 8px 36px 0; }
+
+    .stamp {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 0.8125rem;
+      letter-spacing: 0.04em;
+      line-height: 1.7;
+      color: var(--ink-soft);
+      border-bottom: 1px solid var(--ink);
+      padding-bottom: 10px;
+      overflow-wrap: anywhere;
+    }
+    .stamp strong {
+      color: var(--ink);
+      font-weight: 500;
+    }
+    .stamp-right { text-align: right; }
+
+    h1 {
+      font-family: "Overpass Condensed", Overpass, "Source Sans 3", sans-serif;
+      font-size: 2.55rem;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 0.95;
+      margin: 18px 0 8px;
+      max-width: 22ch;
+    }
+
+    .lede {
+      max-width: var(--measure);
+      font-size: 1.12rem;
+      line-height: 1.4;
+      margin: 0 0 16px;
+    }
+
+    .plate {
+      margin: 0 -8px 10px;
+      padding: 12px;
+      background:
+        linear-gradient(var(--grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--grid) 1px, transparent 1px),
+        var(--paper-deep);
+      background-size: 28px 28px;
+      border: 1px solid var(--ink);
+    }
+    .plate svg {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    .peak-label {
+      font-family: "Overpass Condensed", Overpass, sans-serif;
+      font-weight: 700;
+      font-size: 22px;
+      fill: var(--teal-deep);
+    }
+    .axis-label {
+      font-family: "Overpass Condensed", Overpass, sans-serif;
+      font-weight: 600;
+      font-size: 16px;
+      fill: var(--ink-soft);
+    }
+    .trace-label {
+      font-family: "Overpass Condensed", Overpass, sans-serif;
+      font-weight: 700;
+      font-size: 16px;
+      letter-spacing: 0.04em;
+    }
+
+    figcaption {
+      font-size: 1.05rem;
+      line-height: 1.45;
+      max-width: var(--measure);
+      margin: 12px 0 22px;
+    }
+    figcaption strong { font-weight: 700; }
+
+    .synthetic {
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 0.75rem;
+      letter-spacing: 0.04em;
+      color: var(--brick);
+    }
+
+    .control {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px 18px;
+      align-items: end;
+      max-width: 540px;
+      margin: 0 0 28px;
+    }
+    .control label {
+      font-family: "Overpass", sans-serif;
+      font-weight: 700;
+      font-size: 0.92rem;
+      letter-spacing: 0.02em;
+    }
+    .control output {
+      font-family: "Source Sans 3", sans-serif;
+      font-size: 0.95rem;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      color: var(--teal-deep);
+    }
+    input[type="range"] {
+      grid-column: 1 / -1;
+      width: 100%;
+      height: 28px;
+      appearance: none;
+      background: transparent;
+      cursor: pointer;
+      accent-color: var(--brick);
+    }
+    input[type="range"]::-webkit-slider-runnable-track {
+      height: 3px;
+      background: var(--ink);
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      appearance: none;
+      width: 14px;
+      height: 22px;
+      margin-top: -10px;
+      background: var(--brick);
+      border: 1px solid var(--ink);
+    }
+    input[type="range"]::-moz-range-track {
+      height: 3px;
+      background: var(--ink);
+      border: none;
+    }
+    input[type="range"]::-moz-range-thumb {
+      width: 14px;
+      height: 22px;
+      background: var(--brick);
+      border: 1px solid var(--ink);
+      border-radius: 0;
+    }
+
+    .gate-readout {
+      font-size: 0.95rem;
+      font-variant-numeric: tabular-nums;
+      margin: -12px 0 8px;
+      min-height: 1.4em;
+    }
+    .gate-note {
+      max-width: var(--measure);
+      font-size: 0.95rem;
+      color: var(--ink-soft);
+      margin: 0 0 36px;
+    }
+    .gate-readout[data-state="typed"] { color: var(--teal-deep); }
+    .gate-readout[data-state="think"] { color: var(--brick); }
+
+    h2 {
+      font-family: "Overpass Condensed", Overpass, sans-serif;
+      font-size: 1.35rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin: 2.2em 0 0.45em;
+      max-width: var(--measure);
+    }
+    h2:first-of-type { margin-top: 0.4em; }
+
+    p, li, figcaption, dd {
+      max-width: var(--measure);
+      overflow-wrap: break-word;
+    }
+    p { margin: 0 0 0.85em; }
+    code {
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 0.86em;
+    }
+
+    dl {
+      display: grid;
+      grid-template-columns: 11.5rem 1fr;
+      gap: 0.55em 1.1em;
+      margin: 0 0 1.2em;
+      max-width: 78ch;
+    }
+    dt {
+      font-family: "Overpass Condensed", Overpass, sans-serif;
+      font-size: 1rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      color: var(--teal-deep);
+    }
+    dd { margin: 0; }
+
+    ol.method {
+      padding-left: 1.2em;
+      margin: 0 0 1.2em;
+    }
+    ol.method li { margin: 0 0 0.55em; }
+
+    .refuse {
+      border-top: 1px solid var(--ink);
+      border-bottom: 1px solid var(--ink);
+      padding: 14px 0;
+      margin: 1.4em 0 1.6em;
+      max-width: var(--measure);
+    }
+    .refuse p { margin: 0; }
+
+    footer.colophon {
+      margin-top: 48px;
+      padding-top: 12px;
+      border-top: 1px solid var(--ink);
+      font-size: 0.9rem;
+      color: var(--ink-soft);
+    }
+    footer.colophon a {
+      color: var(--teal-deep);
+      text-underline-offset: 3px;
+    }
+
+    @media (max-width: 720px) {
+      .sheet {
+        margin: 0;
+        box-shadow: none;
+        --sprocket: 20px;
+        padding: 18px 0 48px;
+        overflow-x: hidden;
+      }
+      .inner {
+        display: flex;
+        flex-direction: column;
+        padding: 8px 28px 0;
+      }
+      .stamp { order: 0; flex-direction: column; gap: 8px; }
+      figure { order: 1; }
+      h1 { order: 2; font-size: 2.15rem; max-width: 16ch; }
+      .lede { order: 3; font-size: 1.05rem; }
+      .control { order: 4; }
+      .gate-readout { order: 5; }
+      .gate-note { order: 6; }
+      .notes { order: 7; }
+      footer.colophon { order: 8; }
+      .stamp-right { text-align: left; }
+      .plate { margin: 0; }
+      .lede, p, li, figcaption, dl, .refuse { max-width: 100%; }
+      dl { grid-template-columns: 1fr; gap: 0.15em 0; }
+      dt { margin-top: 0.7em; }
+    }
+
+    @media print {
+      html, body { background: white; }
+      .sheet { margin: 0; box-shadow: none; max-width: none; background-image: none; }
+      .control, .gate-readout { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <article class="sheet">
+    <div class="inner">
+      <header class="stamp">
+        <div>
+          <strong>NInfer</strong><br>
+          Qwen3.8 · POST /v1/score
+        </div>
+        <div class="stamp-right">
+          <span class="synthetic">Synthetic illustration, not a recorded run</span>
+        </div>
+      </header>
+
+      <h1>Closed-set readout, leftover mass</h1>
+      <p class="lede">The same Qwen weights that write chat also answer a closed list of option tokens. <code>logprob</code> is that list, renormalised. <code>outside_mass</code> is everything they put elsewhere. If the remainder is high, those weights can still think — they are not a second model.</p>
+
+      <figure>
+        <div class="plate">
+          <svg id="spectrum" viewBox="0 0 840 520" role="img" aria-labelledby="cap">
+            <defs>
+              <pattern id="hatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(38)">
+                <line x1="0" y1="0" x2="0" y2="7" stroke="#9c3d32" stroke-width="1.4"/>
+              </pattern>
+            </defs>
+            <path id="noise" fill="none" stroke="#1c1e1a" stroke-width="0.6" opacity="0.35"/>
+            <line x1="72" y1="48" x2="72" y2="310" stroke="#1c1e1a" stroke-width="1.2"/>
+            <line x1="72" y1="310" x2="808" y2="310" stroke="#1c1e1a" stroke-width="1.2"/>
+            <rect x="72" y="304" width="56" height="8" fill="#1a6b64"/>
+            <text class="axis-label" x="100" y="354" text-anchor="middle" fill="#0e433e">prefix</text>
+            <text class="axis-label" x="64" y="54" text-anchor="end">1.0</text>
+            <text class="axis-label" x="64" y="182" text-anchor="end">0.5</text>
+            <text class="axis-label" x="64" y="314" text-anchor="end">0</text>
+            <text class="trace-label" x="80" y="40" fill="#0e433e">candidate logprobs</text>
+            <g id="peaks"></g>
+            <g id="remainder"></g>
+            <rect x="1" y="338" width="838" height="24" fill="#e4e6df"/>
+            <line x1="72" y1="400" x2="808" y2="400" stroke="#1c1e1a" stroke-width="1"/>
+            <text class="trace-label" x="80" y="380" fill="#1c1e1a">think / generate</text>
+            <path id="think" fill="none" stroke="#1c1e1a" stroke-width="2.2"/>
+            <text class="axis-label" x="64" y="404" text-anchor="end">off</text>
+            <text class="axis-label" x="64" y="456" text-anchor="end">on</text>
+          </svg>
+        </div>
+        <figcaption id="cap">
+          <strong>Typed read first. Think only when mass sits outside the labeled peaks.</strong>
+          Peaks are option tokens. The hatched lobe is <code>outside_mass</code> — vocabulary the model wanted that you did not offer.
+        </figcaption>
+      </figure>
+
+      <div class="control">
+        <label for="threshold">Think when outside_mass ≥</label>
+        <output id="threshold-out" for="threshold">0.08</output>
+        <input id="threshold" type="range" min="0" max="0.25" step="0.01" value="0.08">
+      </div>
+      <p class="gate-readout" id="gate" data-state="think">remainder 0.11 ≥ 0.08 — think</p>
+      <p class="gate-note">The cursor is the proposed seam, not a shipped automatic. The engine already returns <code>outside_mass</code>. <code>enable_thinking</code> is still a per-request flag.</p>
+
+      <div class="notes">
+        <h2>On the engine today</h2>
+        <p>This is a readout of the model you already serve for chat and chain-of-thought.</p>
+        <dl>
+          <dt>candidate_logprobs</dt>
+          <dd>Up to 1024 closed-set options, each exactly one token. The reported <code>logprob</code> is the softmax over that list only.</dd>
+          <dt>raw_logprob</dt>
+          <dd>Log softmax over the whole vocabulary, before temperature, penalties, or truncation. A client can fit its own calibration map.</dd>
+          <dt>outside_mass</dt>
+          <dd>Vocabulary-wide probability the model put outside the candidate list. Jev cannot emit this; a dual-purpose model can.</dd>
+          <dt>POST /v1/score</dt>
+          <dd>One shared prefix, 1–256 isolated questions. Questions never see each other’s answers. The first question publishes the prefix; the rest read it.</dd>
+          <dt>enable_thinking</dt>
+          <dd>A per-request template flag. Turn it on from the reject slice. Do not train the model to skip thinking.</dd>
+        </dl>
+
+        <h2>The gate</h2>
+        <p>Pass 1 is always a typed read at T=1. If <code>outside_mass</code> is high, or the candidate distribution is flat, pass 2 uses the same weights with thinking on — then either re-reads the candidates or generates.</p>
+        <p>High remainder means the model wanted to write something you did not list. A dedicated decision model has no such leftover; it can only be wrong inside the schema.</p>
+
+        <h2>Isolation</h2>
+        <p>Each question is its own one-token request against the published prefix. Later questions do not attend to earlier answers. Packing many questions into one generated prompt is a different product: quality drops, and later generation on that prefix picks up exam-mode contamination.</p>
+        <p>Fusing the forward — one prefill, N decode branches sharing KV — is engine work. Concatenating questions is not.</p>
+
+        <div class="refuse">
+          <p><strong>We will not</strong> RLCD the served weights, distill Jev’s probabilities into Qwen, or merge a decision LoRA into the chat path. Those are how you get a model that cannot write.</p>
+        </div>
+
+        <h2>Letter bias before any fine-tune</h2>
+        <p>A dual-purpose Qwen has exam priors on A/B/C. The score API already accepts integer token ids and arbitrary one-token strings. Shuffle option order. Prefer scoring the criterion string over the letter. Hierarchical choice when the set is large — seventy-seven intents is where a letter readout fails and option text might not.</p>
+
+        <h2>Order of work</h2>
+        <ol class="method">
+          <li>Measure the gate on our own labels: <code>outside_mass</code> × candidate entropy × optional thinking pass. Coverage versus error, not a vendor multiplier.</li>
+          <li>Letter-shuffle and criterion-string readout on the same set. Prompt convention, not a new head.</li>
+          <li>Per-domain temperature or isotonic maps on the pre-sampling logits we already return. Off the generation path.</li>
+          <li>Candidate-only logit gather, and a fused shared-prefix <code>/v1/score</code>. MTP stays off on the scored token; chat graphs stay untouched.</li>
+          <li>Request-scoped answer-token LoRA only if that ceiling is still short of the slice we care about. LoRA off must remain bit-identical to today’s checkpoint on generation and thinking evals.</li>
+        </ol>
+
+        <p>Jev’s remaining moat is calibrated isolation in one forward, not intelligence. NInfer already has isolation and the logits. The dual-purpose product is the reject-into-CoT seam. Calibration is a map we fit. Generation stays the default path.</p>
+      </div>
+
+      <footer class="colophon">
+        POST /v1/score · <a href="serving.md">docs/serving.md</a>
+      </footer>
+    </div>
+  </article>
+
+  <script>
+    const TRACE = {
+      labels: ["billing", "outage", "feature"],
+      p: [0.82, 0.14, 0.04],
+      outside: 0.11
+    };
+
+    const peaks = document.getElementById("peaks");
+    const remainder = document.getElementById("remainder");
+    const think = document.getElementById("think");
+    const noise = document.getElementById("noise");
+    const slider = document.getElementById("threshold");
+    const out = document.getElementById("threshold-out");
+    const gate = document.getElementById("gate");
+    const plot = { y0: 310, h: 250, rx: 700 };
+
+    function jitter(n) {
+      return (Math.sin(n * 12.9898) * 43758.5453) % 1;
+    }
+
+    (function drawNoise() {
+      let d = `M72 ${plot.y0}`;
+      for (let x = 72; x <= 808; x += 6) {
+        d += ` L${x} ${(plot.y0 - 1.4 - jitter(x) * 2.8).toFixed(1)}`;
+      }
+      noise.setAttribute("d", d);
+    })();
+
+    function peak(cx, p, label, k) {
+      const h = p * plot.h;
+      const y = plot.y0 - h;
+      const w = 16 + p * 34;
+      const lean = (k - 1) * 4;
+      const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute(
+        "d",
+        `M${cx - w * 1.7} ${plot.y0} L${cx - w * 0.95} ${plot.y0 - 3} C${cx - w * 0.28 + lean} ${plot.y0 - 8}, ${cx - 7} ${y + 6}, ${cx + lean} ${y} C${cx + 9} ${y + 4}, ${cx + w * 0.4} ${plot.y0 - 6}, ${cx + w} ${plot.y0} L${cx + w * 1.55} ${plot.y0} Z`
+      );
+      path.setAttribute("fill", "#1a6b64");
+      const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      t.setAttribute("class", "peak-label");
+      t.setAttribute("x", cx);
+      t.setAttribute("y", plot.y0 + 20);
+      t.setAttribute("text-anchor", "middle");
+      t.textContent = label;
+      const v = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      v.setAttribute("class", "axis-label");
+      v.setAttribute("x", cx);
+      v.setAttribute("y", y - 8);
+      v.setAttribute("text-anchor", "middle");
+      v.textContent = p.toFixed(2);
+      g.append(path, t, v);
+      return g;
+    }
+
+    TRACE.labels.forEach((label, i) => {
+      peaks.appendChild(peak(150 + i * 170, TRACE.p[i], label, i));
+    });
+
+    function drawRemainder() {
+      remainder.replaceChildren();
+      const h = Math.max(28, TRACE.outside * plot.h * 3.4);
+      const y = plot.y0 - h;
+      const x = plot.rx;
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute(
+        "d",
+        `M${x - 40} ${plot.y0} C${x - 18} ${plot.y0 - 4}, ${x + 4} ${y + 10}, ${x + 22} ${y} C${x + 44} ${y + 14}, ${x + 62} ${plot.y0 - 18}, ${x + 88} ${plot.y0} C${x + 70} ${plot.y0 - 2}, ${x + 20} ${plot.y0}, ${x - 40} ${plot.y0} Z`
+      );
+      path.setAttribute("fill", "url(#hatch)");
+      path.setAttribute("stroke", "#9c3d32");
+      path.setAttribute("stroke-width", "1.2");
+      const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      t.setAttribute("class", "peak-label");
+      t.setAttribute("fill", "#9c3d32");
+      t.setAttribute("x", x + 24);
+      t.setAttribute("y", plot.y0 + 20);
+      t.setAttribute("text-anchor", "middle");
+      t.textContent = "outside";
+      const v = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      v.setAttribute("class", "axis-label");
+      v.setAttribute("fill", "#9c3d32");
+      v.setAttribute("x", x + 24);
+      v.setAttribute("y", y);
+      v.setAttribute("text-anchor", "middle");
+      v.textContent = TRACE.outside.toFixed(2);
+      remainder.append(path, t, v);
+    }
+
+    function thinkPath(on) {
+      const yOff = 400;
+      const yOn = 452;
+      if (!on) {
+        think.setAttribute("d", `M72 ${yOff} H808`);
+        think.setAttribute("stroke-width", "1.2");
+        return;
+      }
+      think.setAttribute("stroke-width", "2.2");
+      think.setAttribute(
+        "d",
+        `M72 ${yOff} H196 C238 ${yOff + 1}, 262 ${yOn - 6}, 304 ${yOn} H598 C648 ${yOn + 2}, 682 ${yOff + 4}, 736 ${yOff} H808`
+      );
+    }
+
+    function render() {
+      const t = Number(slider.value);
+      out.textContent = t.toFixed(2);
+      const thinkOn = TRACE.outside >= t;
+      thinkPath(thinkOn);
+      gate.dataset.state = thinkOn ? "think" : "typed";
+      gate.textContent = thinkOn
+        ? `remainder ${TRACE.outside.toFixed(2)} ≥ ${t.toFixed(2)} — think`
+        : `remainder ${TRACE.outside.toFixed(2)} < ${t.toFixed(2)} — typed`;
+    }
+
+    drawRemainder();
+    slider.addEventListener("input", render);
+    render();
+  </script>
+</body>
+</html>

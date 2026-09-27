@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>NInfer · Chess decision arcade</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500&family=Kode+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="arcade/instrument.css">
+  <link rel="stylesheet" href="arcade/chess.css">
+</head>
+<body>
+  <main class="panel chess-console">
+    <span class="screw tr" aria-hidden="true"></span><span class="screw bl" aria-hidden="true"></span>
+    <aside class="side" aria-label="Chess controls">
+      <header class="plate">
+        <nav class="game-switch" aria-label="Choose game"><a href="tetris-demo.html">TETRIS</a><a href="chess-demo.html" aria-current="page">CHESS</a><a href="kitchen-demo.html">KITCHEN</a><a href="beacon-demo.html">BEACON</a></nav>
+        <div class="brand">NInfer</div><h1 class="model">CHESS</h1><div class="series">THE DECISION ARCADE</div>
+        <div class="power"><span class="led" id="led" aria-hidden="true"></span><span id="power-label">READY TO PLAY</span></div>
+      </header>
+      <p class="intro">Read the position.<br>Choose the next move.</p>
+      <fieldset class="block settings">
+        <legend>PLAYERS</legend>
+        <div class="field-pair players">
+          <div><label for="white">White</label><select id="white"><option value="human">You</option><option value="qwen">Qwen · NInfer</option><option value="jev">Jev · TypeSafe</option><option value="reference">Local reference</option></select></div>
+          <div><label for="black">Black</label><select id="black"><option value="qwen">Qwen · NInfer</option><option value="jev">Jev · TypeSafe</option><option value="human">You</option><option value="reference">Local reference</option></select></div>
+        </div>
+        <div class="match-actions"><button type="button" id="jev-v-qwen" class="panel-button">Jev vs Qwen</button><button type="button" id="swap-sides" class="panel-button">Swap sides</button></div>
+        <p class="field-note" id="match-setup">Each model uses its own connection. Swap sides to play the return game.</p>
+        <label for="scenario">Starting position</label><select id="scenario"><option value="opening">Opening</option><option value="mate">Find checkmate</option><option value="fork">Win material</option><option value="promotion">Promotion</option><option value="custom">Custom FEN</option></select>
+        <div id="fen-input" hidden><label for="start-fen">Position in FEN</label><textarea id="start-fen" rows="3" spellcheck="false"></textarea><button id="load-fen" class="panel-button" type="button">Load position</button></div>
+        <label for="budget-ms">Decision budget <output id="budget-value">500 ms</output></label><input id="budget-ms" type="range" min="100" max="3000" step="100" value="500">
+        <label class="check"><input type="checkbox" id="strict"> Pause on a missed deadline</label>
+        <p class="field-note">The budget covers all requests for one move. Human turns are untimed.</p>
+      </fieldset>
+      <details class="block connection" id="qwen-connection">
+        <summary>QWEN CONNECTION</summary>
+        <label for="qwen-endpoint">NInfer API base URL</label><input id="qwen-endpoint" value="http://127.0.0.1:8010" type="url" spellcheck="false">
+        <label for="qwen-model">Model label</label><input id="qwen-model" value="qwen3.8-27b" spellcheck="false">
+        <p class="field-note">NInfer uses its resident model. This label does not switch models.</p>
+        <label for="qwen-key">NInfer bearer token (if required)</label><input type="password" id="qwen-key" autocomplete="off">
+      </details>
+      <details class="block connection" id="jev-connection">
+        <summary>JEV CONNECTION</summary>
+        <label for="jev-key">TypeSafe API key</label><input type="password" id="jev-key" autocomplete="off" spellcheck="false">
+        <p class="field-note">Kept in this page and sent only through the Jev connection. Never saved in an export.</p>
+        <label for="jev-model">Jev model</label><input id="jev-model" value="jev-latest" spellcheck="false">
+        <label for="jev-endpoint">Jev relay base URL</label><input id="jev-endpoint" value="http://127.0.0.1:8012" type="url" spellcheck="false">
+        <p class="field-note">The local relay forwards to api.typesafe.ai. Start it from the repository:</p>
+        <code class="relay-command">node tools/arcade/jev-relay.mjs</code>
+        <p class="field-note">The relay requires this key on every request and holds no account credentials of its own.</p>
+      </details>
+      <details class="block connection">
+        <summary>PRESENTATION PACE</summary>
+        <label for="pace">Pause between moves <output id="pace-value">500 ms</output></label><input id="pace" type="range" min="0" max="2000" step="100" value="500">
+      </details>
+      <details class="block rules">
+        <summary>HOW TO PLAY</summary>
+        <p>Click a piece, then a highlighted square. Choose a piece explicitly when promoting. Castling, en passant and draw detection use chess.js.</p>
+        <p>Choose Jev vs Qwen for a model matchup. Each side has its own connection, warm-up and measurements. Swap sides resets the starting position and preserves the connections. Choose the local reference to try the board without a server.</p>
+        <p>System One sees the position and every legal move, with captures, checkmate and attacked-piece facts. The browser never replaces its choice with the reference's move.</p>
+        <p>Up to 62 moves use one request. Larger move sets use piece selection followed by move selection; both requests and conditional probabilities appear in the inspector.</p>
+        <p>Arrow keys navigate the board; Enter selects. P pauses. Move history supports replay. The model's probabilities are preferences, not win probabilities.</p>
+      </details>
+      <footer class="repo"><code>POST /v1/systemone</code><br>TypeSafe-compatible choice API<br><a href="decision-arcade.md">Arcade guide &amp; measurement notes</a></footer>
+    </aside>
+    <section class="frame" aria-label="Chess decision instrument">
+      <div class="crt">
+        <header class="status"><span><b id="source">WHITE · YOU</b> <span class="dim">/</span> <span id="mode" role="status">STANDBY</span></span><span id="turn-state">White to move</span></header>
+        <div class="signal-path"><span id="stage-enumerate">LEGAL MOVES <b id="option-count">20</b></span><span id="stage-decide">CHOICE LOGITS</span><span id="stage-place">MOVE</span></div>
+        <section class="match-score" aria-label="Player comparison"><div class="match-heading"><h2 id="match-result">YOU vs QWEN</h2><p id="match-note" class="screen-note">The same legal-action policy applies to both models. Latency includes network travel.</p></div><div class="table-scroll" tabindex="0" role="region" aria-label="Player comparison table"><table><caption class="sr-only">Per-player completed move timings and token usage</caption><thead><tr><th>Player</th><th>Moves</th><th>P50 ms</th><th>P95 ms</th><th>Tokens in/out</th></tr></thead><tbody id="player-stats"></tbody></table></div></section>
+        <div class="play chess-play">
+          <section class="chess-arena" aria-label="Position">
+            <div class="board-wrap"><div id="board" class="chess-board" role="group" aria-label="Chessboard, White at the bottom"></div><div class="chess-banner" id="board-banner" hidden></div></div>
+            <fieldset id="promotion" class="promotion" hidden><legend>Promote to</legend><button type="button" data-promotion="q">Queen</button><button type="button" data-promotion="r">Rook</button><button type="button" data-promotion="b">Bishop</button><button type="button" data-promotion="n">Knight</button></fieldset>
+            <div class="board-caption"><span id="board-note">YOU ARE WHITE · SELECT A PIECE</span><span id="ply-count">PLY 0</span></div>
+            <div class="deadline-head"><span>DECISION BUDGET</span><b id="budget">500 ms</b></div><progress id="deadline" max="1" value="1" aria-label="Decision budget remaining"></progress>
+            <div class="history-head"><h2>MOVES</h2><button type="button" id="save-pgn">Save PGN</button></div>
+            <div id="history" class="move-history" aria-label="Move history"></div>
+            <div class="replay-controls"><button id="previous" type="button" aria-label="Replay previous position">Previous</button><button id="return-live" type="button">Live position</button><button id="next-position" type="button" aria-label="Replay next position">Next</button></div>
+          </section>
+          <section class="meters" aria-label="Decision measurements">
+            <div class="readout"><div class="dt" id="dt-wrap"><span>API REQUEST TIME · SUM</span><div><b id="dt">—</b><small>ms</small></div></div><dl class="percentiles"><div><dt>P50</dt><dd id="p50">—</dd></div><div><dt>P95</dt><dd id="p95">—</dd></div><div><dt>N</dt><dd id="samples">0</dd></div></dl></div>
+            <div class="decision-heading"><h2 id="decision-title">YOUR MOVE</h2><span id="selection-prob">—</span></div>
+            <p class="screen-note" id="decision-note">Play White against the live model, or change the players.</p>
+            <div id="probabilities" aria-label="Leading move probabilities"></div>
+            <dl class="quality"><div><dt>REQUESTS THIS MOVE</dt><dd id="calls">—</dd></div><div><dt>FULL DECISION TIME</dt><dd id="decision-ms">—</dd></div><div><dt>REFERENCE AGREEMENT</dt><dd id="agreement">—</dd></div><div><dt>DEADLINES MET</dt><dd id="on-time">—</dd></div><div><dt>INPUT / OUTPUT TOKENS</dt><dd id="tokens">—</dd></div><div><dt>WARM-UP</dt><dd id="warmup">—</dd></div></dl>
+            <p class="screen-note">Reference agreement compares a simple material heuristic. It is not chess accuracy or an engine evaluation.</p>
+            <div id="fault" class="fault" role="alert"></div>
+          </section>
+        </div>
+        <details class="inspector" id="inspector"><summary>INSPECT LAST DECISION <span id="inspector-count"></span></summary>
+          <div id="stage-tabs" class="stage-tabs" aria-label="Decision stage"></div>
+          <p class="screen-note" id="distribution-note">All probabilities belong to the displayed request.</p>
+          <div class="table-scroll"><table><caption class="sr-only">Candidate moves and model probabilities</caption><thead><tr><th>Option</th><th>Move / piece</th><th>Detail</th><th>P</th></tr></thead><tbody id="candidate-table"></tbody></table></div>
+          <details><summary>REQUEST / RESPONSE</summary><div class="wire"><pre id="request-wire">No request yet.</pre><pre id="response-wire">No response yet.</pre></div></details>
+          <details><summary>CURRENT FEN</summary><pre id="current-fen"></pre></details>
+        </details>
+      </div>
+      <nav class="softkeys chess-keys" aria-label="Game actions"><div class="softkey lit"><button type="button" id="run">RUN</button></div><div class="softkey"><button type="button" id="step">STEP</button></div><div class="softkey"><button type="button" id="reset">RESET</button></div><div class="softkey"><button type="button" id="flip">FLIP</button></div><div class="softkey"><button type="button" id="export" disabled>EXPORT</button></div></nav>
+      <div class="bezel-note"><span id="session-note">HUMAN WHITE / LIVE MODEL BLACK</span><span>LEGAL MOVES · MODEL CHOICE</span></div>
+    </section>
+  </main>
+  <script src="arcade/vendor/chess.js"></script>
+  <script src="arcade/system-one.js"></script>
+  <script src="arcade/chess-game.js"></script>
+  <script src="arcade/chess-ui.js"></script>
+</body>
+</html>

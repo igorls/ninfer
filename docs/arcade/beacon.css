@@ -1,0 +1,37 @@
+.beacon-console .crt { padding:22px; }
+.beacon-console .frame { padding:14px; }
+.beacon-console .status { font-size:12px; gap:12px; flex-wrap:wrap; }
+.arena-layout { display:grid; grid-template-columns:minmax(0,1.8fr) minmax(230px,1fr); gap:26px; margin-top:22px; }
+.arena-section,.camera-readout { min-width:0; }
+.readout-heading { display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
+.readout-heading h2 { font:600 20px var(--silkface); margin:0; }
+.readout-heading span { font:11px var(--mono); color:var(--phosphor-dim); }
+#arena,#observation { display:block; width:100%; height:auto; aspect-ratio:4/3; background:#111920; border:1px solid #63747c; }
+#arena { touch-action:none; cursor:crosshair; }
+#arena:focus-visible { outline:3px solid var(--phosphor); outline-offset:4px; }
+#observation[hidden] { display:none; }
+#empty-camera { display:grid; place-content:center; aspect-ratio:4/3; border:1px solid var(--phosphor-faint); color:var(--phosphor-dim); font-size:12px; line-height:1.7; text-align:center; padding:12px; }
+#empty-camera[hidden] { display:none; }
+.beacon-console .screen-note { font:12px/1.6 var(--mono); color:var(--phosphor-dim); margin:12px 0; overflow-wrap:anywhere; }
+.object-controls { display:flex; align-items:center; flex-wrap:wrap; gap:8px; font-size:12px; }
+.object-controls select { width:auto; flex:1 1 130px; }
+.beacon-console .crt button { min-height:40px; padding:6px 10px; background:#2d200b; color:var(--phosphor); border:1px solid var(--phosphor-faint); border-radius:3px; cursor:pointer; }
+.beacon-console .crt button:hover { background:#493412; }
+.manual-actions { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
+.beacon-console progress { display:block; width:100%; height:6px; margin:22px 0 0; accent-color:var(--phosphor); }
+.action-readout { display:grid; gap:6px; margin:22px 0; font-size:11px; color:var(--phosphor-dim); }
+.action-readout strong { font:600 36px/1.1 var(--silkface); color:var(--phosphor); }
+.telemetry { margin:0; font-size:11px; font-variant-numeric:tabular-nums; }
+.telemetry div { display:flex; justify-content:space-between; gap:12px; border-top:1px solid var(--phosphor-faint); padding:10px 0; }
+.telemetry dt { color:var(--phosphor-dim); }.telemetry dd { margin:0; text-align:right; overflow-wrap:anywhere; }
+.beacon-console .fault { font-size:13px; line-height:1.5; margin-top:18px; overflow-wrap:anywhere; }
+.beacon-console .fault:empty { display:none; }
+.probabilities { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin:16px 0; font-size:11px; }
+.probabilities div { display:grid; gap:6px; }.probabilities progress { margin:0; height:5px; }
+.beacon-console .softkeys { grid-template-columns:repeat(3,minmax(70px,110px)); gap:18px; margin:20px 0 12px; }
+.beacon-console .softkey button { min-height:42px; font-weight:600; }
+.beacon-console .bezel-note { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; color:var(--putty); font:10px var(--mono); padding:0 8px 6px; }
+.beacon-console .wire { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:14px; }
+.beacon-console .wire pre { max-height:330px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px; padding:12px; background:#100a04; }
+@media(max-width:1150px) { .arena-layout { grid-template-columns:minmax(0,1fr); }.camera-readout { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:0 22px; }.camera-readout .readout-heading { grid-column:1/-1; }.camera-readout .action-readout { margin-top:0; }.camera-readout .telemetry { grid-column:2;grid-row:2/5; }.camera-readout>.screen-note:last-child { grid-column:1/-1; } }
+@media(max-width:720px) { .beacon-console.panel { grid-template-columns:minmax(0,1fr); padding:18px; gap:22px; }.beacon-console .crt { padding:16px; }.beacon-console .frame { padding:10px; }.beacon-console .wire { grid-template-columns:1fr; }.camera-readout { display:block; }.camera-readout .action-readout { margin-top:22px; }.beacon-console .softkeys { gap:12px; }.probabilities { grid-template-columns:repeat(2,minmax(0,1fr)); } }

@@ -1070,6 +1070,17 @@ Errors use FastAPI's `{"detail": ...}` body with the statuses Jev returns:
 
 ### Client usage examples
 
+The [decision arcade](decision-arcade.md) provides interactive [Tetris](tetris-demo.html),
+[Chess](chess-demo.html) and [Kitchen Rush](kitchen-demo.html) clients. They expose the full choice
+distribution, measured client latency, exact requests/responses and a separately labeled local
+reference policy. Kitchen Rush compares paired kitchens with identical seeded orders and either
+real-time or paused decision clocks. Its cooperative mode assigns independent model actors to
+two chefs in one shared kitchen, exposing handoffs and resource conflicts; stale responses never
+substitute a different job.
+Chess retains every legal move; positions above its 62-code alphabet use piece selection followed
+by move selection, with both conditional distributions shown. The guide covers controls,
+measurement boundaries and reproducible evaluation commands.
+
 #### Existing Jev clients
 
 Both TypeSafe SDKs append `/v1/systemone` and `/v1/models` to their base URL, so the base URL is the
