@@ -258,7 +258,9 @@ int run_bf16_linear() {
     int failures = 0;
     DeviceWeight attention_weight(make_patterned(14336, 5120, 401U));
     DeviceWeight output_weight(make_patterned(5120, 6144, 409U));
-    for (DeviceWeight* weight : {&attention_weight, &output_weight}) {
+    // A checkpoint that keeps its full vocabulary head in BF16.
+    DeviceWeight head_weight(make_patterned(248320, 5120, 431U));
+    for (DeviceWeight* weight : {&attention_weight, &output_weight, &head_weight}) {
         for (int tokens = 1; tokens <= 33; ++tokens) {
             failures += run_bf16_linear_case(*weight, tokens);
         }

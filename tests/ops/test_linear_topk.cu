@@ -107,6 +107,25 @@ FixtureWeight make_fp8() {
     return result;
 }
 
+// A contiguous BF16 full head, as kept by a checkpoint that does not quantize its output head.
+FixtureWeight make_bf16() {
+    FixtureWeight result{DeviceBuffer(static_cast<std::size_t>(kFullRows) * kHidden * 2), {}, 0};
+    result.payload.fill(0);
+    result.weight.payload         = result.payload.p;
+    result.weight.payload_bytes   = result.payload.bytes;
+    result.weight.qdata           = result.payload.p;
+    result.weight.qtype           = QType::BF16;
+    result.weight.layout          = QuantLayout::Contiguous;
+    result.weight.n               = kFullRows;
+    result.weight.k               = kHidden;
+    result.weight.shape[0]        = kFullRows;
+    result.weight.shape[1]        = kHidden;
+    result.weight.padded_shape[0] = kFullRows;
+    result.weight.padded_shape[1] = kHidden;
+    result.weight.ndim            = 2;
+    return result;
+}
+
 const std::array<std::int32_t, 17> kFullWinnerRows{
     3,     127,   511,   512,   1023,   4095,   8191,   15872,  16383,
     16384, 16895, 32767, 65535, 131071, 196607, 247808, 248076,
@@ -162,6 +181,21 @@ void patch_rowsplit_row(FixtureWeight& fixture, QType qtype, std::int32_t row, f
                                            sizeof(std::uint16_t));
 }
 
+// The stored BF16 row is the rounded product of the factor and the FP8 fixture code values.
+std::uint16_t bf16_weight(std::int32_t k, float factor) {
+    return f32_to_bf16(factor *
+                       static_cast<float>(quantized_weight::detail::decode_e4m3fn(fp8_code(k))));
+}
+
+void patch_bf16_row(FixtureWeight& fixture, std::int32_t row, float factor) {
+    std::vector<std::uint16_t> words(kHidden);
+    for (std::int32_t k = 0; k < kHidden; ++k) {
+        words[static_cast<std::size_t>(k)] = bf16_weight(k, factor);
+    }
+    fixture.payload.copy_from_host(words.data(), words.size() * sizeof(std::uint16_t),
+                                   static_cast<std::size_t>(row) * kHidden * sizeof(std::uint16_t));
+}
+
 void patch_fp8_row(FixtureWeight& fixture, std::int32_t row, float factor) {
     std::vector<std::uint8_t> codes(kHidden);
     for (std::int32_t k = 0; k < kHidden; ++k) { codes[static_cast<std::size_t>(k)] = fp8_code(k); }
@@ -194,7 +228,9 @@ std::vector<double> base_scores(QType qtype, const std::vector<std::uint16_t>& h
             double sum = 0;
             for (int k = 0; k < kHidden; ++k) {
                 double weight;
-                if (qtype == QType::FP8_E4M3FN_ROW_BF16) {
+                if (qtype == QType::BF16) {
+                    weight = bf16_to_f32(bf16_weight(k, static_cast<float>(factor)));
+                } else if (qtype == QType::FP8_E4M3FN_ROW_BF16) {
                     weight =
                         quantized_weight::detail::decode_e4m3fn(fp8_code(k)) *
                         static_cast<double>(bf16_to_f32(f32_to_bf16(static_cast<float>(factor))));
@@ -314,17 +350,22 @@ int verify_zero_ties(const FixtureWeight& fixture, const Tensor* id_map,
 
 int run_full(QType qtype, const char* profile, const DeviceBuffer& hidden,
              const std::vector<double>& base_score) {
-    FixtureWeight fixture =
-        qtype == QType::Q8_G32_FP16 ? make_rowsplit(qtype, kFullRows) : make_fp8();
+    FixtureWeight fixture = qtype == QType::Q8_G32_FP16 ? make_rowsplit(qtype, kFullRows)
+                            : qtype == QType::BF16      ? make_bf16()
+                                                        : make_fp8();
     for (std::size_t index = 0; index < kFullWinnerRows.size(); ++index) {
         if (qtype == QType::Q8_G32_FP16) {
             patch_rowsplit_row(fixture, qtype, kFullWinnerRows[index], factor_for(index));
+        } else if (qtype == QType::BF16) {
+            patch_bf16_row(fixture, kFullWinnerRows[index], factor_for(index));
         } else {
             patch_fp8_row(fixture, kFullWinnerRows[index], factor_for(index));
         }
     }
     if (qtype == QType::Q8_G32_FP16) {
         patch_rowsplit_row(fixture, qtype, kFullRows - 1, 64.0F);
+    } else if (qtype == QType::BF16) {
+        patch_bf16_row(fixture, kFullRows - 1, 64.0F);
     } else {
         patch_fp8_row(fixture, kFullRows - 1, 64.0F);
     }
@@ -491,6 +532,8 @@ int main() {
                              base_scores(QType::Q8_G32_FP16, host_hidden));
         failures += run_full(QType::FP8_E4M3FN_ROW_BF16, "fp8-full", hidden,
                              base_scores(QType::FP8_E4M3FN_ROW_BF16, host_hidden));
+        failures += run_full(QType::BF16, "bf16-full", hidden,
+                             base_scores(QType::BF16, host_hidden));
         failures += run_q4(hidden, base_scores(QType::Q4_G64_FP16, host_hidden));
         std::cout << (failures == 0 ? "OK" : "FAIL") << " linear_topk\n";
         return failures == 0 ? 0 : 1;
