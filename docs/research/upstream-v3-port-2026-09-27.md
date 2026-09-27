@@ -52,11 +52,11 @@ confirm in M2), `dropped` (after approval).
 | 6 | R1 Prefix reuse, catalog stability | b | `bb7b7305` (resource manager part) `2b75ed5f` `aec32ee0` `f26ab57d` `529f85b8` `a29f97e2` `d2982875` | `src/runtime/engine/context_cache/*`, `src/models/qwen3_5/program/planning`, `src/models/qwen3_5/frontend/chat_template.cpp` | done `352958d5` (resource manager, idle flush, catalog clamp); `2b75ed5f` (issue #13 tool-loop checkpoint) verify with the tool-loop reuse probe in the M2 smoke; `d2982875` with L1 |
 | 7 | G1 Structured output (XGrammar) | b | `bb7b7305` (XGrammar part) `2cbdb2b6` `bb88a776` (required tool choice) `ddeeec19` (all-constrained width-one) | `third_party/xgrammar`, `src/runtime/contract/structured_output.*`, sampler/speculative mask plumbing in `src/ops`, `src/models/qwen3_5/program`, three protocol adapters | done `ff78ceae` (engine), `f9800e26` (protocols); the fork-only DFlash all-constrained width-one path is not carried (v3 allocates no ordinary buffers under speculation), constrained DFlash rows verify no drafts |
 | 8 | L1 Logprobs, `/v1/score`, read-only participation | b | `f596a68e` `2c307887` `da87a3f5` `c4288317` `a0b43ad4` `05797621` `3181627f` `e17813cf` `d49a8e0c` `282f013c` | `src/ops/candidate_logprobs`, `src/runtime/contract/token_logprobs.h`, `src/models/qwen3_5/program` sampling and prefill sites, `src/serve/ninfer_score_http.cpp` | done `3bbb06fa` (candidate_logprobs Op), `737b570a` (host and device readout, prompt positions, read-only participation, /v1/score). Divergence from upstream: the maintained templates render a continued final assistant turn (thinking off) behind the empty think block, as the fork did; real-model check of /v1/score pending the v3 artifact copies |
-| 9 | Y1 TypeSafe System One | b | `e20e7e23` `147370d7` `ff20cd06` `87812bc8` | `src/serve/typesafe_systemone*`, `tests/test_typesafe_schema.cpp` | todo |
-| 10 | Q1 Reasoning feature readout | b | `15f0c5aa` | `ExecutionOptions`, `src/models/qwen3_5` frontend frontier and program readout, `apps/reasoning-collect` | todo |
-| 11 | O1 OrcaRouter NVFP4 | b | `91ce2f2c` | `tools/convert` recipe (BF16 embedding + full head), tokenizer resource handling, BF16 Linear/LinearTopK qualification, supervisor preset | todo |
-| 12 | D2 DFlash2 residue | b/a | `ddeeec19` | StateImage-fork admission block in the Program; 27B DFlash2 real test | verify |
-| 13 | Tooling and apps | d | SUP, W2, RTR, JEV, ARC, BEN, DOC rows below | `apps/ninfer-supervisor`, `apps/windows`, `scripts/windows`, `tools/bench`, `docs`, `model-cards` | todo |
+| 9 | Y1 TypeSafe System One | b | `e20e7e23` `147370d7` `ff20cd06` `87812bc8` | `src/serve/typesafe_systemone*`, `tests/test_typesafe_schema.cpp` | done `1833011e`. Sources carried verbatim onto the v3 generation service; the decision-arcade client paragraph of `docs/serving.md` returns with the ARC pages. Real-model /v1/systemone check in the M2 smoke |
+| 10 | Q1 Reasoning feature readout | b | `15f0c5aa` | `ExecutionOptions`, `src/models/qwen3_5` frontend frontier and program readout, `apps/reasoning-collect` | done `f290c8e7`. The frontier comes from the rendered layout's final open assistant block and is absent (capture refused at submit) when not an exact token frontier, instead of the fork's throw during every prepare. The collector is the 87812bc8 version (concurrency, derive-2048, direct-only); it checks `model_name` qwen3.8-27b plus an `nvfp4` weight format. Real test passes on both v3 artifacts. `reasoning_router.py` and the Colab tools move with RTR |
+| 11 | O1 OrcaRouter NVFP4 | b | `91ce2f2c` | `tools/convert` recipe (BF16 embedding + full head), tokenizer resource handling, BF16 Linear/LinearTopK qualification, supervisor preset | done `e35b663d` (BF16 [248320,5120] Linear and LinearTopK, oracle tests), `9a9a1823` (letters-only split, optional added_tokens_decoder/add_bos_token, 17-case tokenizers fixture), `74c5343f` (recipe `qwen3_8_27b_orcarouter_nvfp4`). v3 artifact `E:\models\v3\OrcaRouter-Qwen3.8-27B-NVFP4\qwen3_8_27b_orcarouter_nvfp4.ninfer` (26,268,683,012 bytes, CPU conversion 127 s) loads with MTP and DFlash2. The v3 proposal already force-includes special tokens. Supervisor preset moves with SUP |
+| 12 | D2 DFlash2 residue | b/a | `ddeeec19` | StateImage-fork admission block in the Program; 27B DFlash2 real test | verify. v3 rejects an unsettled Fork at seal revalidation (`StalePolicyState`, seal returns no plan) instead of the fork's early `inspect_admission` gate; not carried unless a test shows a stall. DFlash2 serving smoke passes; `ninfer_qwen3_5_dflash2_real_test` needs about 3.7 GB (4 rows) to 6.3 GB (8 rows) beyond weights under the fixed 8 GiB default desktop reserve and cannot run beside production |
+| 13 | Tooling and apps | d | SUP, W2, RTR, JEV, ARC, BEN, DOC rows below | `apps/ninfer-supervisor`, `apps/windows`, `scripts/windows`, `tools/bench`, `docs`, `model-cards` | wip: `168bdf12` supervisor (unit test passes; monitor-only twin on 8098 observed a v3 engine), `a1f8b2d9` arcade (12 Node tests pass), `fc9a1ebe` installer scripts, `6dfd01b8` JevBench and router (13 pytest pass), `7c8555cb` probes and CUDA 13.3 container. Remaining: README fork direction, `docs/performance.md` fork results, OrcaRouter model card (describes the published v2 artifact), `docs/tribuno-production-evaluation-plan.md` (completed 2026-09-07 handoff plan). The fork's edits to `run_serve_*`/`run_ninfer_bench_matrix.py` are superseded by v3 (report schema v15, DFlash2 modes); Flash-Next tools, `shortlist_*.i32` and the Flash-Next card wait for M3 |
 | 14 | P1 NVFP4 W4A4 schedule by device | b | `db1a3694` | `src/ops/linear/nvfp4` TMA raster selection | measure first |
 | 15 | Flash-Next package + converter + v3 artifact | c | 140 rows (FN, FA) | second architecture package beside `src/models/qwen3_5`, v3 converter recipe | M3 |
 
@@ -136,6 +136,59 @@ P1 A/B.
    `E:\models\v3\`, never overwriting an existing artifact; the upgrade tool is not extended for
    it. The upgrade tool still gets its Windows patch for the NVFP4+DFlash2 production copies.
 4. CUDA synchronization default and the W4A4 raster: decided above.
+
+## Coordination notes (2026-09-27)
+
+- Igor's main tree `P:\NInfer` holds an uncommitted `docs/maintainer/upstream-ports.md` and a matching
+  AGENTS.md rule (another session, 2026-09-26; screened upstream through `bace20dc` against fork
+  `bbe3e16e`). It is meant to become the fork's upstream-port authority. It is not copied into this
+  branch; at M2 close-out this ledger's upstream verdicts and port record fold into it, and this
+  ledger is removed as a completed plan.
+- A Codex session holds 19 uncommitted NVFP4 kernel edits on the old branch
+  (`C:\Users\igorl\.codex\worktrees\nvfp4-prefill`), adapting upstream `1d8587bc`/`5f5fccab`
+  (tiled activation scales, partial final TMA tiles). The v3 base already contains both; P1 measures
+  them in upstream form. That worktree is not touched by the port.
+- `tools/upgrade_ninfer_v2_to_v3.py` now runs on Windows (`03b36e5c`). The production copy is
+  `E:\models\v3\Qwen3.8-27B\qwen3_8_27b_nvfp4_dflash2.ninfer` (`C:\models` is a junction to
+  `E:\models`).
+
+## M2 verification so far (2026-09-27)
+
+Full CTest at Q1 (`f290c8e7`): 135 tests, 127 passed, 8 real-model skips, 0 failed (632 s, GPU
+shared with production). Later groups ran their focused tests: BF16 Linear and LinearTopK oracles,
+OrcaRouter tokenizer (17 cases), supervisor, frontend, serve schema tests.
+
+Real-model tests (`NINFER_TEST_ARTIFACT`, one at a time beside production):
+
+| Test | Production copy | OrcaRouter v3 |
+|---|---|---|
+| `loading_real` MTP and DFlash2, vision, optimized proposal | pass (21.5 / 23.3 GB device) | pass (24.0 / 25.8 GB) |
+| `score_real` | pass | pass |
+| `reasoning_features_real` | pass | pass (5,120 values at frontier 1,313) |
+| `vision_workspace` | pass | pass |
+| `prefix_real` | see below | not run |
+| `dflash2_real` | blocked: memory under the 8 GiB default reserve | not run |
+| `moe_real`, `dflash_real` | 35B-A3B only; no local 35B artifact | |
+
+`prefix_real` on the production copy, per scenario, port against the pristine base `173948fb`
+(`E:\NInfer.v3base`, golden fix only): vision, concurrent, anthropic-prefix-regression,
+shared-rewrite-materialization, shared-replacement, private-long-anchor, rewrite-checkpoint,
+rewrite-checkpoint-shared and stream-observations pass on both. Host restore (inside `all`) fails
+identically on both (upstream behaviour here). pressure-resume, private-checkpoint-pressure and
+source-pressure-protection fail only on the port; all three pass with the private-catalog clamp
+(fork `aec32ee0`, carried in `352958d5`) disabled. The clamp is a no-op at v3 defaults (P=2C=16,
+H+R=16) and at the production flags; it binds when P > H+R, as in these tests (P=4, H=2, R=0),
+where upstream backs catalog entries with idle lanes' state slots. Decision pending (Igor).
+
+Spare-port serving smoke (8021, production copy, production flags with 4 lanes and 32K KV, 6 GiB
+reserve): MTP and DFlash2 each 10/11 — text thinking and non-thinking, image, reuse across turns
+(1,247 of 1,271 prompt tokens cached), logprobs, `/v1/score` token and text form,
+`/v1/systemone` noul/choice/score and 422 shape, required tool call, Anthropic Messages. The miss is
+a json_schema request whose prompt asks for prose: the constrained answer stays whitespace until
+the limit (the grammar admits leading whitespace, same code as the fork); with a prompt that asks
+for JSON both json_schema and json_object return valid JSON in 25 tokens. Parity with the
+production binary is checked in the A/B. MTP and DFlash2 give identical greedy outputs, logprobs and
+System One values.
 
 ## M1 — pristine Windows baseline
 
