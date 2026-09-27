@@ -183,6 +183,10 @@ struct EngineOptions {
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
     StartupObserver startup_observer;
+    // Called once from the worker after an Engine-wide failure has failed every request. A
+    // supervised server exits here so its supervisor restarts it; unset, the Engine stays
+    // unavailable (Engine::is_available() is false).
+    std::function<void(std::exception_ptr, const std::string&)> on_fatal_error;
 };
 
 enum class SamplingMode : std::uint8_t {

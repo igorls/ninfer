@@ -67,6 +67,9 @@ selected for this process.
 | `GET /v1/responses/{id}/input_items` | list that Response's normalized input Items |
 | `POST /v1/messages` | Anthropic-style message generation |
 | `POST /v1/messages/count_tokens` | checkpoint-native expanded input-token count |
+| `GET /admin/vram` | Engine memory plan beside cached device-wide memory diagnostics |
+| `GET /admin/stats` | cumulative runtime and Host-work statistics |
+| `POST /admin/quiesce` | hold the Engine still at an execution boundary (diagnostic) |
 
 `GET /health` returns HTTP 200 with `{"status":"ok"}` while the Engine can accept work. After an
 Engine-wide failure it returns HTTP 503 with `{"status":"unavailable"}`. Temporary queue
@@ -74,6 +77,16 @@ saturation does not make the Engine unavailable. The endpoint remains unauthenti
 
 Every OpenAI-compatible response carries a unique `x-request-id` header, including streaming and
 error responses. Anthropic endpoints use their separate `request-id` contract.
+
+`/admin/vram` reports the Engine's planned reservation, arenas and KV beside device-wide free
+memory from NVML (`device.source` is `cudaMemGetInfo` when NVML is unavailable), the desktop
+reserve, and the compute processes on the device. Driver queries refresh at most once every two
+seconds; while one is in progress, concurrent requests receive the previous snapshot with its
+`device.age_ms`, or HTTP 503 before the first snapshot. The Engine memory plan is read without
+waiting for an execution unit, so `/admin/vram` stays responsive under load. `/admin/quiesce`
+refuses admission until active requests drain, holds the Engine at an idle boundary for the
+requested `hold_ms` (default 0, at most 10000), then resumes; requests that arrive meanwhile wait
+and their admission deadlines are extended by the hold. It changes no capacity.
 
 All three generation SSE endpoints emit the standard `: keep-alive` comment after five seconds
 without a protocol event. The comment is transport-only: SSE clients ignore it, and it does not
@@ -738,7 +751,9 @@ curl http://127.0.0.1:8080/v1/messages/count_tokens \
 ## Authentication and CORS
 
 Pass `--api-key VALUE` to require the same value as an OpenAI bearer token or Anthropic
-`x-api-key` header. `GET /health` and CORS preflight requests remain unauthenticated.
+`x-api-key` header. `--api-key-file PATH` reads the key from a file instead, so it does not appear
+in the process command line that other local processes can read; startup fails if the file is
+unreadable or empty. `GET /health` and CORS preflight requests remain unauthenticated.
 
 ```bash
 curl http://127.0.0.1:8080/v1/models \
@@ -756,10 +771,14 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--host H` | listen address | `127.0.0.1` |
 | `--port N` | listen port | `8080` |
 | `--api-key KEY` | required bearer or `x-api-key` value | unset |
+| `--api-key-file PATH` | read the required key from a file | unset |
 | `--model-id ID` | override the public OpenAI model alias | artifact `identity.model_id` |
 | `--max-context N` | logical context ceiling of each sequence | `8192` |
 | `--kv-capacity N\|auto` | explicit shared Main Text KV capacity, or maximize it from remaining GPU memory; omitted means `--max-context` | `8192` |
 | `--max-concurrency N` | maximum admitted requests; valid range `1..8` | `1` |
+| `--clamp-concurrency-to-pool` | lower concurrency to the number of full-context sequences the KV pool backs | off |
+| `--desktop-reserve-gib N`, `--desktop-reserve-mib N` | device memory kept free for the desktop and other applications; sizing uses device-wide (NVML) free memory, and no Engine allocation may take the device below the reserve after startup | `8` GiB |
+| `--kv-slack-floor-mib N` | device memory `--kv-capacity auto` leaves unreserved | `1024` |
 | `--max-pending-requests N` | additional requests allowed to wait for admission | `16` |
 | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `30000` |
 | `--prefill-chunk N` | text-prefill chunk | `1024` |
@@ -851,7 +870,7 @@ they do not infer request behavior from process-global counter deltas.
 | Event | Contents |
 |---|---|
 | `server_start` | artifact path, architecture, public name, actual formats and prefill signature; resolved Engine and context-cache capacities, thinking/non-thinking sampler defaults plus process overrides, thinking-history and thinking-budget defaults, Device arenas, the optional non-additive Vision layout inside the unified workspace, Host State/KV capacity and occupancy, KV sizing ledger, CUDA Graph allowance, CUDA/GPU environment, and redacted argv |
-| `request_start` | protocol, resolved sampler and seed, requested reasoning effort, actual initial thinking mode and optional budget, Responses semantic-change flag, output budget, stream/message/tool shape |
+| `request_start` | protocol, resolved sampler and seed, requested reasoning effort, actual initial thinking mode and optional budget, Responses semantic-change flag, output budget, stream/message/tool shape, `client` (the `User-Agent` header), and `tools_digest` (an FNV-1a fingerprint of the ordered tool definitions; a change between two turns of one conversation invalidates its whole cached prefix) |
 | `request_rejected` | parsed request shape, requested reasoning effort, media-item count, `phase: "prepare"`, and the exact HTTP status/type/code/parameter/message for a synchronous preparation rejection |
 | `request_done` | finish reason, prompt/completion/cache/computed-prefill tokens, prefix reuse path, tool-call parse diagnostics, request-owned materialization cost/search diagnostics, thinking-budget application counters, unrounded request-stage seconds, per-request Engine Host exposure, and complete speculative-decoding counters |
 | `request_error` | the resolved request configuration and the generation, cancellation, or pre-outcome transport terminal message |

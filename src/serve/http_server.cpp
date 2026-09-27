@@ -1,9 +1,12 @@
 #include "serve/http_server.h"
 
 #include "serve/anthropic_messages.h"
+#include "serve/device_snapshot_cache.h"
 #include "serve/http_transport.h"
 #include "serve/openai_common.h"
 #include "serve/request_log.h"
+
+#include "core/device_memory.h"
 
 #include <nlohmann/json.hpp>
 
@@ -13,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 
 namespace ninfer::serve {
@@ -475,6 +479,333 @@ void HttpServer::register_routes() {
     server_.Post("/v1/messages", [this](const httplib::Request& req, httplib::Response& res) {
         handle_messages(req, res);
     });
+    server_.Get("/admin/vram", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_admin_vram(req, res);
+    });
+    server_.Get("/admin/stats", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_admin_stats(req, res);
+    });
+    server_.Post("/admin/quiesce", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_admin_quiesce(req, res);
+    });
+}
+
+namespace {
+
+const char* kv_cache_storage_name(KvCacheStorage storage) noexcept {
+    switch (storage) {
+    case KvCacheStorage::BFloat16:
+        return "bf16";
+    case KvCacheStorage::Int8Group64:
+        return "int8";
+    case KvCacheStorage::Fp8E4M3Row256:
+        return "fp8";
+    case KvCacheStorage::Nvfp4Group16:
+        return "nvfp4";
+    case KvCacheStorage::Fp8KeyNvfp4Value:
+        return "k8v4";
+    }
+    return "unknown";
+}
+
+nlohmann::json arena_json(const ArenaMemorySummary& arena) {
+    return {{"capacity_bytes", arena.capacity_bytes},
+            {"used_bytes", arena.used_bytes},
+            {"peak_used_bytes", arena.peak_used_bytes}};
+}
+
+// NVML process enumeration can take seconds on Windows. Only the refreshing
+// request waits for the driver; concurrent readers receive the previous snapshot
+// with its age, or unavailable until the first snapshot has been published.
+std::optional<DeviceSnapshotReading> device_snapshot(int device) {
+    static DeviceSnapshotCache cache;
+    return cache.read([device] { return query_device_memory(device); });
+}
+
+} // namespace
+
+// The memory report an operator or supervisor needs, from the process that actually owns the
+// memory. Two rules it exists to enforce:
+//
+//   1. Device-wide free comes from NVML, never cudaMemGetInfo and never the DXGI budget. Both
+//      of those report an empty card while another process holds 70 GiB under WDDM, which is
+//      how this workstation's desktop got starved twice; `device.source` says which one
+//      answered so a reader can distrust the number when NVML is missing.
+//   2. The plan and the live device numbers are reported side by side. The gap between
+//      `plan.runtime_reservation_bytes` and what is actually resident is the engine's own
+//      overshoot; free memory falling without that gap moving is somebody else's doing, and
+//      the two must never be conflated when deciding whether to shed load.
+void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& res) const {
+    if (service_ == nullptr) {
+        ApiError error;
+        error.status  = 503;
+        error.type    = "service_unavailable";
+        error.message = "engine is not attached";
+        write_openai_error(res, error);
+        return;
+    }
+
+    // Never the blocking memory_summary() here. It takes the engine's execution
+    // mutex, which the worker holds for a whole execution unit, so a once-a-second
+    // poller would take one HTTP worker per poll and block it; under sustained
+    // load every worker is consumed and the server accepts connections only to
+    // close them. Serve the last good reading with its age instead -- a couple of
+    // seconds of staleness in a diagnostics payload costs nothing, and taking the
+    // engine offline to avoid it costs everything.
+    static std::mutex memory_cache_mu;
+    static MemorySummary memory_cached;
+    static std::chrono::steady_clock::time_point memory_taken{};
+    static bool memory_primed = false;
+
+    MemorySummary memory;
+    std::int64_t memory_age_ms = 0;
+    if (std::optional<MemorySummary> fresh = service_->try_memory_summary()) {
+        std::lock_guard lock(memory_cache_mu);
+        memory_cached = *fresh;
+        memory_taken  = std::chrono::steady_clock::now();
+        memory_primed = true;
+        memory        = *fresh;
+    } else {
+        std::lock_guard lock(memory_cache_mu);
+        if (!memory_primed) {
+            ApiError error;
+            error.status  = 503;
+            error.type    = "service_unavailable";
+            error.message = "engine memory summary is not available yet";
+            write_openai_error(res, error);
+            return;
+        }
+        memory        = memory_cached;
+        memory_age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - memory_taken)
+                            .count();
+    }
+    const EngineOptions& engine = service_->engine_options();
+    const auto reading          = device_snapshot(engine.device);
+    if (!reading) {
+        ApiError error;
+        error.status  = 503;
+        error.type    = "service_unavailable";
+        error.message = "device memory snapshot is not available yet";
+        write_openai_error(res, error);
+        return;
+    }
+    const DeviceMemorySnapshot& device = reading->snapshot;
+    const std::int64_t device_age_ms   = reading->age_ms;
+
+    nlohmann::json processes = nlohmann::json::array();
+    for (const ProcessMemoryInfo& process : device.compute_processes) {
+        processes.push_back({{"pid", process.pid}, {"used_bytes", process.used_bytes}});
+    }
+
+    // `runtime_floor_bytes` is the value an allocation is actually checked against at run time
+    // (Sequence D23); `configured_bytes` is what was asked for. They differ when the floor has
+    // not been armed, which is worth seeing rather than assuming.
+    const std::size_t floor = runtime_desktop_reserve_floor();
+    nlohmann::json reserve  = {{"configured_bytes", engine.desktop_reserve_bytes},
+                               {"runtime_floor_bytes", floor},
+                               {"free_bytes", device.free_bytes},
+                               {"holding", floor == 0 || device.free_bytes >= floor}};
+
+    nlohmann::json plan = {
+        {"runtime_reservation_bytes", memory.runtime_reservation_bytes},
+        {"minimum_runtime_reservation_bytes", memory.minimum_runtime_reservation_bytes},
+        {"available_after_weights_bytes", memory.available_after_weights_bytes},
+        {"available_after_startup_bytes", memory.available_after_startup_bytes},
+        {"planned_slack_bytes", memory.planned_slack_bytes},
+        {"workspace_logical_peak_bytes", memory.workspace_logical_peak_bytes},
+        // Inside the reservation but never allocated: headroom for CUDA graphs captured later.
+        // A check of the form "reservation should equal resident bytes" is wrong by this much.
+        {"cuda_graph_allowance_bytes", memory.cuda_graph_allowance_bytes},
+        {"kv_capacity_headroom_bytes", memory.kv_capacity_headroom_bytes}};
+
+    nlohmann::json arenas = {{"weights", arena_json(memory.weights)},
+                             {"sequence", arena_json(memory.sequence)},
+                             {"workspace", arena_json(memory.workspace)}};
+    if (memory.vision_workspace.has_value()) {
+        // Logical regions inside the one physical workspace allocation; they describe layout,
+        // and must not be added to workspace.capacity_bytes.
+        arenas["vision_workspace"] = {
+            {"general_capacity_bytes", memory.vision_workspace->general_capacity_bytes},
+            {"encode_peak_bytes", memory.vision_workspace->encode_peak_bytes},
+            {"handoff_capacity_bytes", memory.vision_workspace->handoff_capacity_bytes},
+            {"aggregate_prompt_tokens", memory.vision_workspace->aggregate_prompt_tokens},
+            {"max_item_tokens", memory.vision_workspace->max_item_tokens}};
+    } else {
+        arenas["vision_workspace"] = nullptr;
+    }
+
+    nlohmann::json kv = {{"capacity_tokens", memory.kv_capacity},
+                         {"page_groups", memory.kv_capacity_page_groups},
+                         {"max_page_groups", memory.kv_capacity_max_page_groups},
+                         {"payload_bytes", memory.kv_payload_bytes},
+                         {"storage", kv_cache_storage_name(memory.kv_cache)},
+                         {"host_state_capacity_slots", memory.host_state_capacity_slots},
+                         {"host_state_occupied_slots", memory.host_state_occupied_slots},
+                         {"host_kv_capacity_bytes", memory.host_kv_capacity_bytes},
+                         {"host_kv_occupied_bytes", memory.host_kv_occupied_bytes}};
+
+    nlohmann::json body = {
+        {"schema_version", 1},
+        {"model_id", public_model_id_},
+        // Non-zero when the engine was busy and this payload reports the previous
+        // reading rather than blocking behind execution to take a fresh one.
+        {"memory_age_ms", memory_age_ms},
+        {"device",
+         {{"index", engine.device},
+          {"name", device.device_name},
+          {"pci_bus_id", device.pci_bus_id},
+          {"total_bytes", device.total_bytes},
+          {"free_bytes", device.free_bytes},
+          {"used_bytes", device.used_bytes},
+          {"source", device.is_nvml ? "nvml" : "cudaMemGetInfo"},
+          // How old this reading is. Non-zero means it was served from cache
+          // while a refresh was in flight or still fresh; a caller deciding
+          // anything on free memory should know it is not reading the driver.
+          {"age_ms", device_age_ms},
+          {"warning", device.warning},
+          {"compute_processes", processes}}},
+        {"desktop_reserve", reserve},
+        {"plan", plan},
+        {"arenas", arenas},
+        {"kv", kv},
+        {"options",
+         {{"max_concurrency", engine.max_concurrency}, {"vision", engine.enable_vision}}},
+        // Stated rather than implied: nothing here frees memory. A caller that wants device
+        // memory back has one option today, which is to stop the process.
+        {"release",
+         {{"supported", false},
+          {"reason", "this build allocates device memory once at startup and holds it; no "
+                     "residency path exists to release and rebuild it"}}}};
+
+    res.set_content(body.dump(), "application/json");
+}
+
+void HttpServer::handle_admin_stats(const httplib::Request&, httplib::Response& res) const {
+    if (service_ == nullptr) {
+        ApiError error;
+        error.status  = 503;
+        error.type    = "service_unavailable";
+        error.message = "engine is not attached";
+        write_openai_error(res, error);
+        return;
+    }
+    const ninfer::RuntimeStats s = service_->runtime_stats();
+    const auto ns                = [](std::uint64_t value) { return value; };
+    nlohmann::json body          = {
+        {"schema_version", 1},
+        {"host_work",
+                  {{"engine_boundary_ns", ns(s.host_work.engine_boundary_ns)},
+                   {"program_submit_ns", ns(s.host_work.program_submit_ns)},
+                   {"program_post_ns", ns(s.host_work.program_post_ns)},
+                   {"engine_commit_output_ns", ns(s.host_work.engine_commit_output_ns)},
+                   {"engine_maintenance_ns", ns(s.host_work.engine_maintenance_ns)},
+                   {"device_wait_ns", ns(s.host_work.device_wait_ns)},
+                   {"prefill_host_ns", ns(s.host_work.prefill_host_ns)},
+                   {"prefill_device_wait_ns", ns(s.host_work.prefill_device_wait_ns)},
+                   {"control_host_ns", ns(s.host_work.control_host_ns)},
+                   {"control_device_wait_ns", ns(s.host_work.control_device_wait_ns)},
+                   {"decode_host_ns", ns(s.host_work.decode_host_ns)},
+                   {"decode_device_wait_ns", ns(s.host_work.decode_device_wait_ns)},
+                   {"admission_policy_ns", ns(s.host_work.admission_policy_ns)},
+                   {"context_progress_ns", ns(s.host_work.context_progress_ns)},
+                   {"stats_publication_ns", ns(s.host_work.stats_publication_ns)},
+                   {"prefill_units", s.host_work.prefill_units},
+                   {"control_units", s.host_work.control_units},
+                   {"admission_policy_invocations", s.host_work.admission_policy_invocations},
+                   {"context_progress_invocations", s.host_work.context_progress_invocations}}},
+        {"computed_prefill_tokens", s.computed_prefill_tokens},
+        {"committed_decode_tokens", s.committed_decode_tokens},
+        {"active_captures_completed", s.active_captures_completed},
+        {"active_captures_aborted", s.active_captures_aborted},
+        {"root_selections", s.root_selections},
+        {"private_endpoint_selections", s.private_endpoint_selections},
+        {"shared_stable_prefix_selections", s.shared_stable_prefix_selections},
+        {"reused_prompt_tokens", s.reused_prompt_tokens},
+        {"state_d2h_count", s.state_d2h_count},
+        {"state_h2d_count", s.state_h2d_count},
+        {"state_d2d_count", s.state_d2d_count},
+        {"state_d2h_seconds", s.state_d2h_seconds},
+        {"state_h2d_seconds", s.state_h2d_seconds},
+        {"state_d2d_seconds", s.state_d2d_seconds},
+        {"main_kv_d2h_pages", s.main_kv_d2h_pages},
+        {"main_kv_h2d_pages", s.main_kv_h2d_pages},
+        {"main_kv_d2d_pages", s.main_kv_d2d_pages},
+        {"main_kv_d2h_seconds", s.main_kv_d2h_seconds},
+        {"main_kv_h2d_seconds", s.main_kv_h2d_seconds},
+        {"main_kv_d2d_seconds", s.main_kv_d2d_seconds},
+        {"actual_context_transfer_seconds", s.actual_context_transfer_seconds},
+        {"pressure_private_owners_evicted", s.pressure_private_owners_evicted},
+        {"pressure_shared_owners_evicted", s.pressure_shared_owners_evicted},
+    };
+    res.status = 200;
+    res.set_content(body.dump(), "application/json");
+}
+
+void HttpServer::handle_admin_quiesce(const httplib::Request& req, httplib::Response& res) const {
+    if (service_ == nullptr) {
+        ApiError error;
+        error.status  = 503;
+        error.type    = "service_unavailable";
+        error.message = "engine is not attached";
+        write_openai_error(res, error);
+        return;
+    }
+
+    // An optional hold, so the request-holding behaviour can be observed rather
+    // than inferred from a fence that returns instantly. Bounded because this
+    // stops the engine for everyone: a caller cannot use it to take the server
+    // down. Real residency work will replace it and is not expected to need it.
+    std::int64_t hold_ms = 0;
+    if (!req.body.empty()) {
+        try {
+            const auto parsed = nlohmann::json::parse(req.body);
+            hold_ms           = parsed.value("hold_ms", static_cast<std::int64_t>(0));
+        } catch (const std::exception&) {
+            ApiError error;
+            error.status  = 400;
+            error.type    = "invalid_request_error";
+            error.message = "body must be JSON with an optional integer hold_ms";
+            write_openai_error(res, error);
+            return;
+        }
+    }
+    if (hold_ms < 0 || hold_ms > 10'000) {
+        ApiError error;
+        error.status  = 400;
+        error.type    = "invalid_request_error";
+        error.message = "hold_ms must be between 0 and 10000";
+        write_openai_error(res, error);
+        return;
+    }
+
+    try {
+        const ninfer::Engine::QuiescenceReport report = service_->run_at_quiescence([hold_ms] {
+            if (hold_ms > 0) { std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms)); }
+        });
+        const auto ms                                 = [](std::chrono::nanoseconds value) {
+            return std::chrono::duration<double, std::milli>(value).count();
+        };
+        nlohmann::json body = {{"schema_version", 1},
+                               // How long the in-flight work took to finish once admission stopped.
+                               // This is the part a residency change cannot avoid paying.
+                               {"drain_ms", ms(report.drain)},
+                               {"work_ms", ms(report.work)},
+                               // Requests that waited through the hold and were carried across with
+                               // their admission deadlines extended. None of them were dropped;
+                               // that is the property this endpoint exists to demonstrate.
+                               {"requests_held", report.requests_held},
+                               {"capacity_change", nullptr}};
+        res.set_content(body.dump(), "application/json");
+    } catch (const std::exception& ex) {
+        // A fence that cannot run is a refusal, not a broken engine. The engine
+        // keeps serving either way.
+        ApiError error;
+        error.status  = 409;
+        error.type    = "conflict";
+        error.message = std::string("engine could not be quiesced: ") + ex.what();
+        write_openai_error(res, error);
+    }
 }
 
 void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) const {

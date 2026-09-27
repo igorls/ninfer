@@ -106,12 +106,25 @@ public:
 
     [[nodiscard]] ninfer::MemorySummary memory_summary() const { return engine_->memory_summary(); }
 
+    // Telemetry callers must use this. See Engine::try_memory_summary.
+    [[nodiscard]] std::optional<ninfer::MemorySummary> try_memory_summary() const {
+        return engine_->try_memory_summary();
+    }
+
     [[nodiscard]] ninfer::RuntimeStats runtime_stats() const { return engine_->runtime_stats(); }
 
     [[nodiscard]] bool is_available() const { return engine_->is_available(); }
 
     [[nodiscard]] ninfer::MediaCacheSummary media_cache_summary() const {
         return engine_->media_cache_summary();
+    }
+
+    // Holds the engine still and runs `work` there. Blocks until it has run.
+    // Requests arriving during the hold wait rather than fail; see
+    // Engine::run_at_quiescence.
+    [[nodiscard]] ninfer::Engine::QuiescenceReport
+    run_at_quiescence(std::function<void()> work) const {
+        return engine_->run_at_quiescence(std::move(work));
     }
 
     [[nodiscard]] ninfer::ModelSamplingDefaults sampling_defaults() const {

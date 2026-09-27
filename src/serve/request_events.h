@@ -13,6 +13,22 @@ namespace ninfer::serve {
 struct RequestLogContext {
     std::uint64_t id = 0;
     std::string protocol;
+    // Which app sent this, from User-Agent. A workstation engine serves several
+    // clients at once and they behave very differently: one that sends unstable
+    // tool definitions re-prefills its whole context every turn and fills the
+    // shared state pool, degrading every other client on the box. Without this
+    // the log shows the damage and cannot name the source -- a real diagnosis
+    // came down to guessing from tool_count, and guessed wrong.
+    std::string client;
+    // Fingerprint of the tool block exactly as it will be rendered, in order.
+    // Tool definitions are emitted at the very start of the prompt, so anything
+    // that changes them -- a tool added, removed, or reordered -- moves the first
+    // token and costs the ENTIRE prefix. Two consecutive turns of one
+    // conversation carrying different digests is the whole diagnosis; without it
+    // the log shows a conversation re-reading 22k tokens a turn and cannot say
+    // why. Names are listed separately so a membership change is readable rather
+    // than merely detectable.
+    std::string tools_digest;
     std::string model;
     bool stream                             = false;
     std::size_t message_count               = 0;
@@ -101,7 +117,8 @@ struct ThroughputReport {
 RequestLogContext make_request_log_context(std::uint64_t id, std::string protocol,
                                            const GenerationRequest& request,
                                            const RequestLogMetadata& metadata,
-                                           const PreparedRequest& prepared);
+                                           const PreparedRequest& prepared,
+                                           std::string client = {});
 RequestRejectionLogContext make_request_rejection_log_context(std::uint64_t id,
                                                               std::string protocol,
                                                               const GenerationRequest& request,

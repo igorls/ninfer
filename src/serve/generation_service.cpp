@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <cstdio>
 #include <cstddef>
 #include <iterator>
 #include <mutex>
@@ -255,6 +257,13 @@ GenerationService::GenerationService(ServeOptions options, StartupObserver start
     engine_options.media_live_bytes         = options_.media_live_bytes;
     engine_options.media_preprocess_threads = options_.media_preprocess_threads;
     engine_options.startup_observer         = std::move(startup_observer);
+    // A server whose Engine failed cannot serve again; exit so the supervisor restarts it instead
+    // of leaving a process that holds the port and the GPU while answering nothing.
+    engine_options.on_fatal_error = [](std::exception_ptr, const std::string& message) {
+        std::fprintf(stderr, "%s; exiting\n", message.c_str());
+        std::fflush(stderr);
+        std::_Exit(1);
+    };
     engine_           = std::make_unique<ninfer::Engine>(std::move(engine_options));
     request_capacity_ = std::make_shared<RequestCapacity>(
         static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests);
