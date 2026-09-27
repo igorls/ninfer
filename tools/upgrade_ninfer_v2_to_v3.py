@@ -34,6 +34,20 @@ LAYOUTS = {
     "blockscale-k16-m128x4-v1": "block_scale_k16_m128x4_v1",
     "row-scale-v1": "row_scale_v1",
 }
+if os.name == "nt":
+    # Windows has no per-range page-cache advice; its memory manager trims written file pages on
+    # its own, so writeback is bounded by syncing alone.
+    def discard_cached_pages(fd: int, offset: int = 0, count: int = 0) -> None:
+        del fd, offset, count
+
+    sync_data = os.fsync
+else:
+
+    def discard_cached_pages(fd: int, offset: int = 0, count: int = 0) -> None:
+        os.posix_fadvise(fd, offset, count, os.POSIX_FADV_DONTNEED)
+
+    sync_data = os.fdatasync
+
 KNOWN_COUNTS = {
     ("qwen3.6-27b", "groupwise-int"): (1124,),
     ("qwen3.6-27b", "nvfp4"): (1307,),
@@ -828,11 +842,8 @@ def upgrade(input_path, output_path):
                             )
                             if not chunk:
                                 raise ValueError("v2 payload ended prematurely")
-                            os.posix_fadvise(
-                                source.fileno(),
-                                source.tell() - len(chunk),
-                                len(chunk),
-                                os.POSIX_FADV_DONTNEED,
+                            discard_cached_pages(
+                                source.fileno(), source.tell() - len(chunk), len(chunk)
                             )
                         elif cursor < template_offset:
                             chunk = bytes(min(remaining, template_offset - cursor))
@@ -845,15 +856,13 @@ def upgrade(input_path, output_path):
                         pending += len(chunk)
                         if pending >= WRITEBACK:
                             output.flush()
-                            os.fdatasync(output.fileno())
-                            os.posix_fadvise(
-                                output.fileno(), 0, 0, os.POSIX_FADV_DONTNEED
-                            )
+                            sync_data(output.fileno())
+                            discard_cached_pages(output.fileno())
                             pending = 0
                     output.flush()
-                    os.fdatasync(output.fileno())
-                    os.posix_fadvise(output.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
-            os.posix_fadvise(source.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+                    sync_data(output.fileno())
+                    discard_cached_pages(output.fileno())
+            discard_cached_pages(source.fileno())
         for index in [*range(1, len(targets)), 0]:
             os.link(temporary[index], targets[index])
             published.append(targets[index])
