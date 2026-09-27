@@ -295,9 +295,24 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
         throw std::invalid_argument("live generation observations require a Streaming consumer");
     }
 
+    const StructuredOutputOptions structured_output    = options.execution.structured_output;
+    const std::vector<std::string> required_tool_names = options.execution.required_tool_names;
+    if (!required_tool_names.empty() &&
+        (!options.stop.strings.empty() || !options.stop.token_ids.empty() || options.output.raw)) {
+        throw std::invalid_argument(
+            "required tool calls cannot be combined with custom stops or raw output");
+    }
+    if (structured_output.kind != StructuredOutputKind::Text &&
+        (!options.stop.strings.empty() || !options.stop.token_ids.empty() || options.output.raw ||
+         options.output.preserve_special_tokens)) {
+        throw std::invalid_argument(
+            "structured output cannot be combined with custom stops or raw/special-token output");
+    }
     runtime::ResolvedRequestOptions resolved_options = resolve_request_options(
         impl_->sampling_defaults, prompt.impl_->sampling_mode, std::move(options));
     const ResolvedSamplingParameters resolved_sampling = resolved_options.execution.sampling;
+    resolved_options.execution.output_constraint =
+        impl_->active->frontend.compile_output_constraint(structured_output, required_tool_names);
 
     const PromptSummary prompt_summary = prompt.impl_->summary;
     if (prompt_summary.prompt_tokens > impl_->options.max_context) {

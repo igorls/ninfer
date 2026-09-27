@@ -297,6 +297,7 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
             RequestControl& request  = requests[lane];
             const std::span<const TokenId> forced =
                 row_major_tokens.subspan(row * row_stride, row_stride);
+            if (request.output_constraint) { request.output_constraint->accept(forced); }
             const std::uint32_t base_ledger_frontier = sequence.ledger_frontier;
             const std::uint32_t base                 = sequence.execution_frontier;
             const std::uint32_t end                  = base + row_stride;

@@ -262,11 +262,25 @@ struct ThinkingControlOptions {
     std::optional<std::uint32_t> budget;
 };
 
+enum class StructuredOutputKind : std::uint8_t { Text, JsonObject, JsonSchema };
+
+struct StructuredOutputOptions {
+    StructuredOutputKind kind = StructuredOutputKind::Text;
+    // Owning serialized JSON Schema; empty for Text/JsonObject.
+    std::string schema;
+};
+
 struct ExecutionOptions {
     SamplingOverrides sampling;
     std::uint32_t requested_output_tokens = 0;
     bool allow_prefix_reuse               = true;
     ThinkingControlOptions thinking;
+    // Constrains the answer (after any reasoning) with a token mask applied in sampling and in
+    // speculative verification.
+    StructuredOutputOptions structured_output;
+    // If nonempty, constrain the answer to one complete call to a listed function. Argument
+    // schemas remain non-strict. Output limits and cancellation can interrupt a call.
+    std::vector<std::string> required_tool_names;
 };
 
 struct OutputOptions {

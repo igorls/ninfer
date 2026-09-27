@@ -4,6 +4,7 @@
 #include "models/qwen3_5/frontend/output_session.h"
 #include "models/registry.h"
 #include "runtime/contract/request.h"
+#include "runtime/contract/structured_output.h"
 
 #include <array>
 #include <cstddef>
@@ -78,6 +79,11 @@ public:
                         const ThinkingControlOptions& thinking = {}) const;
     [[nodiscard]] const StopPolicy& default_stop_policy() const noexcept;
     [[nodiscard]] const ModelSamplingDefaults& sampling_defaults() const noexcept;
+    // Null for unconstrained output. Throws invalid_argument for a schema the compiler cannot
+    // enforce. Compilers over the vocabulary are built once and shared by later requests.
+    [[nodiscard]] std::shared_ptr<const runtime::CompiledOutputConstraint>
+    compile_output_constraint(const StructuredOutputOptions& options,
+                              const std::vector<std::string>& required_tool_names = {}) const;
 
 private:
     class Impl;

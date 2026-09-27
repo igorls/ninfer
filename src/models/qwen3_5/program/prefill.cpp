@@ -637,6 +637,12 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
             : speculative_backend == SpeculativeBackend::DFlash ? prompt_tokens
                                                                 : 0U;
         ensure_sequence_kv_mapped(sequence, prompt_tokens, backend_materialized);
+        // A prompt that ends inside reasoning leaves the grammar free until the reasoning closes.
+        request.output_constraint =
+            request_plan.output_constraint
+                ? std::make_unique<runtime::OutputConstraintState>(
+                      request_plan.output_constraint, staged.prompt.starts_in_reasoning)
+                : nullptr;
         install_sampling(sequence, request, request_plan.sampling);
         sequence.rope_delta = staged.prompt.rope_delta;
         set_device_i32(io.rope_delta, sequence.rope_delta);
@@ -906,6 +912,9 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                     ? mtp_host_egress->licensed_tokens.data() + row * width
                     : dflash_host_egress->licensed_tokens.data() + row * width;
             sequence.ledger.insert(sequence.ledger.end(), token_base, token_base + committed);
+            if (request.output_constraint) {
+                request.output_constraint->accept(std::span<const TokenId>(token_base, committed));
+            }
             commit_generated_prefix_identity(sequence, pending.base_S,
                                              std::span<const TokenId>(token_base, committed),
                                              prefix_execution_splits[row]);

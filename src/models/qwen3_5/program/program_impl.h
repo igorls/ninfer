@@ -19,6 +19,7 @@
 #include "models/qwen3_5/execution/text.h"
 #include "models/qwen3_5/execution/vision.h"
 #include "models/qwen3_5/program/vision_prefill.h"
+#include "runtime/contract/structured_output.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -180,6 +181,7 @@ struct RequestBasePlanImpl {
     std::uint32_t root_rebuild_tail_begin = 0;
     qwen3_5::PreparedContextCache context_cache;
     ops::SamplingConfig sampling;
+    std::shared_ptr<const runtime::CompiledOutputConstraint> output_constraint;
     std::uint32_t text_kv_page_entitlement    = 0;
     std::uint32_t backend_kv_page_entitlement = 0;
     std::shared_ptr<const qwen3_5::VisionControlPlan> vision_control_plan;
@@ -244,6 +246,7 @@ struct AdmissionCandidateImpl : ResourceCandidateState {
     std::vector<CaptureGroup> capture_groups;
     std::vector<CaptureGroup> shared_candidates;
     ops::SamplingConfig sampling;
+    std::shared_ptr<const runtime::CompiledOutputConstraint> output_constraint;
     std::uint32_t text_kv_page_entitlement    = 0;
     std::uint32_t backend_kv_page_entitlement = 0;
     runtime::LaneId destination{};
@@ -401,6 +404,8 @@ struct RequestControl {
     Lifecycle lifecycle = Lifecycle::Empty;
     PendingCandidate pending;
     ops::SamplingConfig sampling_host;
+    // Per-request grammar matcher; advanced by every committed or forced token.
+    std::unique_ptr<runtime::OutputConstraintState> output_constraint;
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
     detail::PhysicalResources active_resources;
@@ -601,6 +606,7 @@ public:
     std::optional<Tensor> score_hidden;
     Tensor sampling_config;
     Tensor token_counts;
+    Tensor constraint_masks;
 
     std::vector<SequenceState> continuation_states;
     std::vector<ContinuationSlot> continuation_slots;
@@ -1133,6 +1139,9 @@ private:
     void prepare_graphs();
     void install_sampling(SequenceState& sequence, RequestControl& request,
                           const ops::SamplingConfig& config);
+    // Uploads one verification column's grammar mask for a lane; returns its device address.
+    const std::int32_t* upload_constraint_mask(std::uint32_t lane, std::uint32_t column,
+                                               std::span<const std::int32_t> mask);
     void set_device_i32(Tensor& tensor, std::int32_t value);
     void copy_tail(SequenceState& sequence, const Tensor& source);
     void copy_round_token();

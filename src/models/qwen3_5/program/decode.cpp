@@ -135,7 +135,12 @@ void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& requ
                                    const ops::SamplingConfig& config) {
     Tensor counts = token_counts.slice(1, static_cast<std::int32_t>(sequence.lane), 1)
                         .view({dimension(parameters.model.resources().public_token_count)});
-    request.sampling_host     = config;
+    request.sampling_host = config;
+    if (request.output_constraint) {
+        request.sampling_host.allowed_tokens =
+            upload_constraint_mask(sequence.lane, 0, request.output_constraint->next_mask());
+        request.sampling_host.allowed_tokens_column_stride = constraint_masks.ne[0];
+    }
     request.speculative_stats = SpeculativeStats{
         .backend               = speculative_backend,
         .enabled               = speculative_backend != SpeculativeBackend::None,
@@ -151,6 +156,22 @@ void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& requ
     CUDA_CHECK(cudaMemcpyAsync(config_lane.data, &request.sampling_host,
                                sizeof(request.sampling_host), cudaMemcpyHostToDevice,
                                device.stream));
+}
+
+const std::int32_t* ProgramImpl::upload_constraint_mask(std::uint32_t lane, std::uint32_t column,
+                                                        std::span<const std::int32_t> mask) {
+    if (lane >= static_cast<std::uint32_t>(constraint_masks.ne[2]) ||
+        column >= static_cast<std::uint32_t>(constraint_masks.ne[1])) {
+        throw std::logic_error("structured output mask column is out of range");
+    }
+    Tensor row = constraint_masks.slice(2, static_cast<std::int32_t>(lane), 1)
+                     .slice(1, static_cast<std::int32_t>(column), 1);
+    if (mask.size_bytes() != row.bytes()) {
+        throw std::logic_error("structured output mask shape mismatch");
+    }
+    CUDA_CHECK(cudaMemcpyAsync(row.data, mask.data(), mask.size_bytes(), cudaMemcpyHostToDevice,
+                               device.stream));
+    return static_cast<const std::int32_t*>(row.data);
 }
 
 void ProgramImpl::copy_tail(SequenceState& sequence, const Tensor& source) {
@@ -327,6 +348,9 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             const StateImageSelectors selectors                 = state_selectors(sequence);
             ordinary_host_ingress->state_source_slots[row]      = selectors.source;
             ordinary_host_ingress->state_destination_slots[row] = selectors.destination;
+            if (request.output_constraint) {
+                upload_constraint_mask(sequence.lane, 0, request.output_constraint->next_mask());
+            }
             ordinary_host_ingress->sampling[row]                = request.sampling_host;
             ensure_sequence_kv_mapped(sequence, frontier + 1, 0);
         }
@@ -460,9 +484,25 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             const std::uint32_t max_by_budget = budgets[row].generated_tokens_remaining > 1
                                                     ? budgets[row].generated_tokens_remaining - 1
                                                     : 0;
-            const std::uint32_t extent =
-                std::min({sequence.mtp_draft_count, draft_window, max_by_budget,
-                          capacity - sequence.execution_frontier - 1});
+            std::uint32_t extent = std::min({sequence.mtp_draft_count, draft_window, max_by_budget,
+                                             capacity - sequence.execution_frontier - 1});
+            if (request.output_constraint) {
+                // Column 0 is the committed grammar state. Column j+1 gets the state after
+                // drafts[0..j]; a draft stops at its first token the grammar rejects or that
+                // completes it, so every verified draft is admissible.
+                upload_constraint_mask(sequence.lane, 0, request.output_constraint->next_mask());
+                if (extent > 0) {
+                    runtime::OutputConstraintState preview = request.output_constraint->fork();
+                    std::uint32_t admissible               = 0;
+                    while (admissible < extent &&
+                           preview.try_accept(sequence.mtp_drafts[admissible]) &&
+                           !preview.terminated()) {
+                        ++admissible;
+                        upload_constraint_mask(sequence.lane, admissible, preview.next_mask());
+                    }
+                    extent = admissible;
+                }
+            }
             mtp_host_ingress->anchors[row]        = sequence.ledger.back();
             mtp_host_ingress->base_frontiers[row] = checked_i32(frontier, "MTP batch frontier");
             mtp_host_ingress->remaining_budgets[row] =
@@ -622,8 +662,12 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         const std::uint32_t max_by_budget = budgets[row].generated_tokens_remaining > 1
                                                 ? budgets[row].generated_tokens_remaining - 1U
                                                 : 0U;
-        const std::uint32_t extent =
-            std::min({draft_window, max_by_budget, capacity - sequence.execution_frontier - 1U});
+        // DFlash proposes on the device inside the round, so its drafts cannot be walked
+        // through the grammar ahead of verification; constrained rows verify no drafts.
+        const std::uint32_t extent = requests[lanes[row]].output_constraint
+                                         ? 0U
+                                         : std::min({draft_window, max_by_budget,
+                                                     capacity - sequence.execution_frontier - 1U});
         maximum_frontier = std::max(maximum_frontier, sequence.execution_frontier);
         maximum_target_tokens =
             std::max(maximum_target_tokens, sequence.execution_frontier + extent + 1U);
@@ -658,7 +702,9 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                                                     ? budgets[row].generated_tokens_remaining - 1U
                                                     : 0U;
             const std::uint32_t extent =
-                std::min({draft_window, max_by_budget, capacity - frontier - 1U});
+                request.output_constraint
+                    ? 0U
+                    : std::min({draft_window, max_by_budget, capacity - frontier - 1U});
             dflash_host_ingress->anchors[row] = sequence.ledger.back();
             dflash_host_ingress->execution_frontiers[row] =
                 checked_i32(frontier, "DFlash batch frontier");
@@ -680,6 +726,9 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             const StateImageSelectors selectors          = state_selectors(sequence);
             dflash_host_ingress->state_source_slots[row] = selectors.source;
             dflash_host_ingress->state_destination_slots[row] = selectors.destination;
+            if (request.output_constraint) {
+                upload_constraint_mask(sequence.lane, 0, request.output_constraint->next_mask());
+            }
             dflash_host_ingress->sampling[row]                = request.sampling_host;
             ensure_sequence_kv_mapped(sequence, frontier + extent + 1U,
                                       backend_kv_cache() ? frontier : 0U);
@@ -845,6 +894,11 @@ runtime::ExecutionTiming ProgramImpl::resolve_non_speculative_pending(
     }
     trim_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
     if (terminal) { sequence.mtp_draft_count = 0; }
+    if (request.output_constraint) {
+        request.output_constraint->accept(
+            std::span<const TokenId>(sequence.ledger)
+                .subspan(sequence.ledger.size() - accepted_tokens, accepted_tokens));
+    }
     request.lifecycle = terminal ? Lifecycle::Finishable : Lifecycle::Active;
     request.pending   = {};
     return timing.finish();

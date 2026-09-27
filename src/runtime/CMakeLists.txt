@@ -1,4 +1,5 @@
 add_library(ninfer_runtime_support STATIC
+  contract/structured_output.cpp
   engine/admission_policy.cpp
   engine/context_cache/context_cost.cpp
   engine/context_cache/context_cost_defaults.cpp
@@ -6,7 +7,7 @@ add_library(ninfer_runtime_support STATIC
   engine/public_types.cpp
 )
 ninfer_internal_includes(ninfer_runtime_support)
-target_link_libraries(ninfer_runtime_support PUBLIC ninfer_core PRIVATE ninfer::json)
+target_link_libraries(ninfer_runtime_support PUBLIC ninfer_core PRIVATE ninfer::json ninfer_xgrammar)
 
 # Public Engine and common contracts; model execution remains in the model layer.
 add_library(ninfer_engine STATIC

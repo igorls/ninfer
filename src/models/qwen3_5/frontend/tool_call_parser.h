@@ -62,6 +62,10 @@ struct ParsedToolCallOutput {
 [[nodiscard]] std::shared_ptr<const ToolCallOutputContract>
 build_tool_call_output_contract(std::span<const std::string> tool_jsons, bool enabled);
 
+// Grammar of exactly one complete native Qwen call to one of `names`, with delimiter-safe raw
+// parameter text. Used to constrain required tool calls.
+[[nodiscard]] std::string required_tool_call_grammar(const std::vector<std::string>& names);
+
 [[nodiscard]] ParsedToolCallOutput
 parse_qwen_tool_call_output(const std::string& text, std::size_t max_tool_name_length,
                             const ToolCallOutputContract& contract);

@@ -22,6 +22,7 @@
 #include <limits>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -633,6 +634,11 @@ public:
     std::shared_ptr<const std::vector<TokenId>> thinking_control_tokens;
     bool vision_enabled       = true;
     std::uint32_t max_context = 0;
+    // Built on first use: one over the answer vocabulary, one that also admits the tool-call
+    // delimiters for required tool calls.
+    mutable std::mutex constraint_mutex;
+    mutable std::unique_ptr<runtime::OutputConstraintCompiler> constraint_compiler;
+    mutable std::unique_ptr<runtime::OutputConstraintCompiler> tool_constraint_compiler;
 };
 
 std::span<const std::int32_t> PreparedPromptData::position_axis(int axis) const {
@@ -913,5 +919,44 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
 }
 
 const StopPolicy& Frontend::default_stop_policy() const noexcept { return impl_->defaults; }
+
+std::shared_ptr<const runtime::CompiledOutputConstraint>
+Frontend::compile_output_constraint(const StructuredOutputOptions& options,
+                                    const std::vector<std::string>& required_tool_names) const {
+    runtime::validate_structured_output(options);
+    if (options.kind == StructuredOutputKind::Text && required_tool_names.empty()) {
+        return nullptr;
+    }
+    if (options.kind != StructuredOutputKind::Text && !required_tool_names.empty()) {
+        throw std::invalid_argument("required tool calls conflict with structured answer output");
+    }
+    std::lock_guard lock(impl_->constraint_mutex);
+    auto& compiler =
+        required_tool_names.empty() ? impl_->constraint_compiler : impl_->tool_constraint_compiler;
+    if (!compiler) {
+        const fi::Tokenizer& tokenizer = *impl_->tokenizer;
+        std::vector<std::string> vocabulary(tokenizer.vocab_size());
+        for (std::size_t i = 0; i < vocabulary.size(); ++i) {
+            const int id = static_cast<int>(i);
+            if (!tokenizer.is_valid_token(id)) { continue; }
+            const std::string_view bytes = tokenizer.decode_token_bytes(id);
+            if (!tokenizer.is_special_token(id) ||
+                (!required_tool_names.empty() &&
+                 (bytes == "<tool_call>" || bytes == "</tool_call>"))) {
+                vocabulary[i] = std::string(bytes);
+            }
+        }
+        const std::vector<int> end = tokenizer.encode(kThinkClose);
+        if (end.size() != 1) {
+            throw std::invalid_argument(
+                "structured output requires an atomic reasoning boundary token");
+        }
+        compiler = std::make_unique<runtime::OutputConstraintCompiler>(
+            std::move(vocabulary), tokenizer.default_stop_token_ids(), end.front());
+    }
+    return required_tool_names.empty()
+               ? compiler->compile(options)
+               : compiler->compile_grammar(fi::required_tool_call_grammar(required_tool_names));
+}
 
 } // namespace ninfer::models::qwen3_5

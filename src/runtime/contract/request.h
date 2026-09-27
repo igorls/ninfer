@@ -3,9 +3,12 @@
 #include "ninfer/types.h"
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <optional>
 
 namespace ninfer::runtime {
+
+class CompiledOutputConstraint;
 
 // Engine has already selected the model/mode preset, applied every explicit override,
 // and validated these values before constructing the runtime request.
@@ -14,6 +17,9 @@ struct ResolvedExecutionOptions {
     std::uint32_t requested_output_tokens = 0;
     bool allow_prefix_reuse               = true;
     ThinkingControlOptions thinking;
+    // Compiled by the model frontend from structured_output/required_tool_names; null when the
+    // request is unconstrained.
+    std::shared_ptr<const CompiledOutputConstraint> output_constraint;
 };
 
 struct ResolvedRequestOptions {
