@@ -20,6 +20,7 @@
 #include "models/qwen3_5/execution/vision.h"
 #include "models/qwen3_5/program/vision_prefill.h"
 #include "runtime/contract/structured_output.h"
+#include "runtime/contract/token_logprobs.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -182,6 +183,7 @@ struct RequestBasePlanImpl {
     qwen3_5::PreparedContextCache context_cache;
     ops::SamplingConfig sampling;
     std::shared_ptr<const runtime::CompiledOutputConstraint> output_constraint;
+    TokenLogprobOptions logprobs;
     std::uint32_t text_kv_page_entitlement    = 0;
     std::uint32_t backend_kv_page_entitlement = 0;
     std::shared_ptr<const qwen3_5::VisionControlPlan> vision_control_plan;
@@ -247,6 +249,7 @@ struct AdmissionCandidateImpl : ResourceCandidateState {
     std::vector<CaptureGroup> shared_candidates;
     ops::SamplingConfig sampling;
     std::shared_ptr<const runtime::CompiledOutputConstraint> output_constraint;
+    TokenLogprobOptions logprobs;
     std::uint32_t text_kv_page_entitlement    = 0;
     std::uint32_t backend_kv_page_entitlement = 0;
     runtime::LaneId destination{};
@@ -408,6 +411,16 @@ struct RequestControl {
     std::unique_ptr<runtime::OutputConstraintState> output_constraint;
     // Host copy of the prompt-membership bitset while its upload may be in flight.
     std::vector<std::int32_t> prompt_presence_host;
+    TokenLogprobOptions logprobs;
+    // Top-alternative requests read a full vocabulary column on the host; every other logprob
+    // request reads K+2 floats per position through ops::candidate_logprobs on the device.
+    bool logprobs_device_readout          = false;
+    std::uint32_t logprob_readout_columns = 0;
+    // Readout of the round this request is pending on; empty unless logprobs are enabled.
+    std::vector<TokenLogprobs> round_logprobs;
+    std::vector<TokenLogprobs> prompt_logprobs;
+    execution::PromptReadout prompt_readout;
+    std::vector<TokenId> prompt_readout_next_ids;
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
     detail::PhysicalResources active_resources;
@@ -610,6 +623,14 @@ public:
     Tensor token_counts;
     Tensor constraint_masks;
     Tensor prompt_presence;
+    Tensor logprob_candidate_ids;
+    Tensor logprob_readout;
+    Tensor logprob_prompt_next_ids;
+    Tensor logprob_prompt_readout;
+    // Pinned host mirrors allocated by the first request that needs them.
+    std::optional<PinnedHostBuffer> token_logits_host;
+    std::optional<PinnedHostBuffer> logprob_readout_host;
+    std::optional<PinnedHostBuffer> logprob_prompt_readout_host;
 
     std::vector<SequenceState> continuation_states;
     std::vector<ContinuationSlot> continuation_slots;
@@ -1145,6 +1166,26 @@ private:
     // Uploads one verification column's grammar mask for a lane; returns its device address.
     const std::int32_t* upload_constraint_mask(std::uint32_t lane, std::uint32_t column,
                                                std::span<const std::int32_t> mask);
+    // Token log-probability readout. A host-readout request copies one full logit column;
+    // a device-readout request enqueues ops::candidate_logprobs before the round's wait and
+    // collects its K+2 floats per licensed token after it.
+    [[nodiscard]] std::uint16_t* token_logits_capture(const RequestControl& request);
+    void record_round_logprobs(RequestControl& request, const Tensor* column, TokenId token);
+    void enqueue_round_logprobs(const SequenceState& sequence, RequestControl& request,
+                                const Tensor& logits, const Tensor& sampled, std::uint32_t columns);
+    void collect_round_logprobs(const SequenceState& sequence, RequestControl& request,
+                                std::span<const TokenId> tokens);
+    [[nodiscard]] execution::FirstTokenReadout first_token_readout(const SequenceState& sequence,
+                                                                   RequestControl& request);
+    void install_prompt_readout(const SequenceState& sequence, RequestControl& request,
+                                std::span<const TokenId> prompt);
+    void collect_prompt_readout(RequestControl& request);
+
+public:
+    [[nodiscard]] std::span<const TokenLogprobs> round_token_logprobs(std::uint32_t lane) const;
+    [[nodiscard]] std::span<const TokenLogprobs> prompt_token_logprobs(std::uint32_t lane) const;
+
+private:
     void set_device_i32(Tensor& tensor, std::int32_t value);
     void copy_tail(SequenceState& sequence, const Tensor& source);
     void copy_round_token();

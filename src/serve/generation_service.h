@@ -44,8 +44,31 @@ struct GenerationMetrics {
     ninfer::MaterializationDiagnostics materialization;
 };
 
+struct TokenLogprobEntry {
+    ninfer::TokenId token_id = 0;
+    std::string bytes;
+    float logprob     = 0.0F;
+    float raw_logprob = 0.0F;
+};
+
+struct TokenLogprobPosition {
+    bool forced = false;
+    TokenLogprobEntry sampled;
+    std::vector<TokenLogprobEntry> top;
+    std::vector<TokenLogprobEntry> candidates;
+};
+
+struct PromptLogprobPosition {
+    std::uint32_t position = 0;
+    TokenLogprobPosition value; // `sampled` is the prompt's own next token
+};
+
 struct GenerationOutcome {
     std::string text;
+    // One entry per generated token when the request enabled logprobs, otherwise empty.
+    std::vector<TokenLogprobPosition> token_logprobs;
+    // One entry per requested prompt position, in request order.
+    std::vector<PromptLogprobPosition> prompt_logprobs;
     std::string reasoning;
     std::vector<ninfer::GeneratedToolCall> tool_calls;
     ninfer::ToolCallParseDiagnostics tool_call_parse;
@@ -89,6 +112,8 @@ struct PreparedRequest {
     std::optional<std::uint32_t> thinking_budget;
     std::optional<ninfer::ReasoningEffort> reasoning_effort;
     std::optional<bool> preserve_thinking;
+    // Prompt positions the request asked logprobs for, to label the readout in the outcome.
+    std::vector<std::uint32_t> logprob_prompt_positions;
     std::shared_ptr<RequestLifetime> lifetime;
 };
 
@@ -101,6 +126,11 @@ public:
     // Engine owns the once-normalized startup configuration. Serving diagnostics must use this
     // value instead of reinterpreting optional defaults from ServeOptions.
     [[nodiscard]] const ninfer::EngineOptions& engine_options() const { return engine_->options(); }
+
+    // Raw artifact-tokenizer encoding, for validating single-token closed-set options.
+    [[nodiscard]] std::vector<ninfer::TokenId> tokenize_text(std::string_view text) const {
+        return engine_->tokenize_text(text);
+    }
 
     [[nodiscard]] ninfer::LoadSummary load_summary() const { return engine_->load_summary(); }
 

@@ -275,10 +275,57 @@ struct StructuredOutputOptions {
     std::string schema;
 };
 
+// Opt-in per-token log probabilities. They are read from the target model's logits before any
+// sampling adjustment (no penalty, temperature or truncation), so they are the model's own
+// distribution at every position regardless of how the token was drawn. A request that enables
+// them decodes one token per round: speculative drafts are not offered for it.
+struct TokenLogprobOptions {
+    bool enabled = false;
+    // Number of most likely alternatives reported per position, at most kMaximumTopLogprobs.
+    std::uint32_t top = 0;
+    // If nonempty, every position also reports the distribution renormalised over exactly these
+    // tokens, in this order. Not bounded by `top`.
+    std::vector<TokenId> candidates;
+    // Prompt positions whose next-token distribution is read during prefill, as ascending
+    // 0-based indices into the prepared prompt's tokens; the readout at position p is the
+    // distribution over token p+1, and its `sampled` entry is the prompt's own token p+1. Needs
+    // `top` 0. Every listed position is computed by this request: prefix reuse is limited to
+    // frontiers at or below the first position.
+    std::vector<std::uint32_t> prompt_positions;
+};
+
+inline constexpr std::uint32_t kMaximumTopLogprobs     = 20;
+inline constexpr std::size_t kMaximumLogprobCandidates = 1024;
+inline constexpr std::size_t kMaximumPromptReadouts    = 256;
+
+struct TokenLogprob {
+    TokenId token = 0;
+    // Log probability over the tokens the structured-output mask allows at this position; equal
+    // to raw_logprob when the position is unconstrained, -inf for a forbidden token. Within
+    // TokenLogprobs::candidates it is renormalised over the candidate list instead.
+    float logprob = 0.0F;
+    // Log probability over the whole vocabulary, ignoring any mask.
+    float raw_logprob = 0.0F;
+};
+
+struct TokenLogprobs {
+    // True for a token the engine inserted itself (thinking-budget control tokens). It was not
+    // drawn from the model, so it carries logprob 0 and no alternatives.
+    bool forced = false;
+    TokenLogprob sampled;
+    std::vector<TokenLogprob> top;
+    std::vector<TokenLogprob> candidates;
+};
+
 struct ExecutionOptions {
     SamplingOverrides sampling;
+    TokenLogprobOptions logprobs;
     std::uint32_t requested_output_tokens = 0;
     bool allow_prefix_reuse               = true;
+    // With allow_prefix_reuse, false makes the request read-only in the context cache: it may
+    // start from a published prefix but captures no checkpoint and publishes no continuation,
+    // so it cannot displace another conversation's cached state. For one-shot requests.
+    bool allow_prefix_publication = true;
     ThinkingControlOptions thinking;
     // Constrains the answer (after any reasoning) with a token mask applied in sampling and in
     // speculative verification.
@@ -829,6 +876,11 @@ struct MaterializationDiagnostics {
 struct GenerationResult {
     PromptSummary prompt;
     std::vector<TokenId> generated_token_ids;
+    // One entry per generated_token_ids element when ExecutionOptions::logprobs was enabled,
+    // otherwise empty.
+    std::vector<TokenLogprobs> token_logprobs;
+    // One entry per TokenLogprobOptions::prompt_positions element, in that order.
+    std::vector<TokenLogprobs> prompt_logprobs;
     std::string content;
     std::string reasoning;
     std::vector<GeneratedToolCall> tool_calls;

@@ -11,6 +11,7 @@
 #include "models/qwen3_5/state/state_image.h"
 #include "models/load_options.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -20,6 +21,15 @@ namespace ninfer::models::qwen3_5::detail {
 
 using TensorLayout                              = TensorRegion;
 inline constexpr std::uint32_t kCausalScoreTile = 1024;
+
+// Floats one lane's device logprob readout needs for the widest speculative round, and for the
+// largest prompt-position readout; each column is (sampled, raw) followed by candidate pairs.
+inline constexpr std::size_t kLogprobReadoutColumns =
+    std::max<std::size_t>(kMtpDecodeMaximumWidth, kDFlashDecodeMaximumWidth);
+inline constexpr std::size_t kLogprobReadoutFloats =
+    (2U + 2U * kMaximumLogprobCandidates) * kLogprobReadoutColumns;
+inline constexpr std::size_t kLogprobPromptReadoutFloats =
+    (2U + 2U * kMaximumLogprobCandidates) * kMaximumPromptReadouts;
 
 struct DFlashPersistentLayout {
     std::optional<qwen3_5::PagedKVCacheLayout> full;
@@ -47,6 +57,11 @@ struct PersistentLayout {
     std::optional<TensorLayout> constraint_masks;
     // Prompt-membership bitsets [words, lanes] for the repetition penalty.
     std::optional<TensorLayout> prompt_presence;
+    // Token logprob device readout: candidate ids, per-round columns, and prompt positions.
+    std::optional<TensorLayout> logprob_candidate_ids;
+    std::optional<TensorLayout> logprob_readout;
+    std::optional<TensorLayout> logprob_prompt_next_ids;
+    std::optional<TensorLayout> logprob_prompt_readout;
     std::size_t bytes            = 0;
     std::size_t kv_payload_bytes = 0;
 };

@@ -172,8 +172,23 @@ requested_reasoning_effort_name(RequestedReasoningEffort effort) noexcept {
     return {};
 }
 
+// One closed-set option for the candidate readout: either text that must encode to exactly one
+// token, or a token id.
+struct LogprobCandidate {
+    std::string text;
+    std::optional<std::int64_t> token_id;
+};
+
 struct GenerationRequest {
     StructuredOutputOptions structured_output;
+    // Read published prefixes but publish nothing: for one-shot requests that must not displace
+    // other conversations' cached state.
+    bool prompt_cache_read_only = false;
+    bool logprobs               = false;
+    int top_logprobs            = 0;
+    std::vector<LogprobCandidate> logprob_candidates;
+    // Ascending prompt token positions whose next-token distribution is read during prefill.
+    std::vector<std::uint32_t> logprob_prompt_positions;
     std::vector<ChatTurn> messages;
     std::vector<ToolDefinition> tools;
     std::size_t tool_name_max_length = 64;

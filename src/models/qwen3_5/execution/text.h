@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -34,6 +35,37 @@ enum class GdnStateAction : std::uint8_t {
 struct NullTap {
     static constexpr bool enabled = false;
 };
+
+// Device readout of the first generated token's logits (ops::candidate_logprobs), enqueued at
+// the prefill sampling site because MTP drafting reuses the logits buffer right after it.
+struct FirstTokenReadout {
+    std::optional<Tensor> candidate_ids;  // I32 [N]
+    std::optional<Tensor> allowed;        // I32 [mask words], the position's structured-output mask
+    Tensor sampled_out;                   // FP32 [2, 1]
+    std::optional<Tensor> candidates_out; // FP32 [2, N, 1]
+    void* host        = nullptr;          // pinned destination, sampled_out then candidates_out
+    std::size_t bytes = 0;
+};
+
+// Device readout of the next-token distribution at chosen prompt positions, run on each prefill
+// sub-block that contains some of them: the final-normed hidden rows are gathered, projected
+// through the output head a tile at a time, and each column resolved by ops::candidate_logprobs
+// into its own block of (2 + 2 * candidates) floats at `readout` / `host`.
+struct PromptReadout {
+    std::span<const std::uint32_t> positions; // ascending absolute prompt positions
+    const std::int32_t* next_ids = nullptr;   // device I32 [positions.size()]: token p+1 of each
+    std::optional<Tensor> candidate_ids;      // I32 [candidates]
+    std::size_t candidates = 0;
+    float* readout         = nullptr; // device, positions.size() blocks
+    float* host            = nullptr; // pinned mirror of the same blocks
+
+    [[nodiscard]] std::size_t block_floats() const noexcept { return 2U + 2U * candidates; }
+};
+
+// Enqueues the device readout of one logit column for the token in `sampled` (I32 [1]).
+void enqueue_first_token_readout(const FirstTokenReadout& readout, const Tensor& logits,
+                                 const Tensor& sampled, std::int32_t token_domain,
+                                 cudaStream_t stream);
 
 struct PrefillChunkResult {
     std::uint32_t processed_tokens = 0;
@@ -87,6 +119,18 @@ public:
     }
 
     void set_sampling(const ops::SamplingConfig* config) noexcept { sampling_config_ = config; }
+
+    // Pinned host destination for the final prompt position's full target logits, or null. The
+    // copy is queued right after sampling because MTP drafting reuses the same logits buffer.
+    void set_first_token_logit_capture(std::uint16_t* host) noexcept {
+        first_token_logits_host_ = host;
+    }
+
+    void set_first_token_readout(const FirstTokenReadout* readout) noexcept {
+        first_token_readout_ = readout;
+    }
+
+    void set_prompt_readout(const PromptReadout* readout) noexcept { prompt_readout_ = readout; }
 
     void set_prefill_split_frontier(std::int64_t position) noexcept {
         prefill_split_frontier_ = position;
@@ -248,6 +292,12 @@ private:
     int proposal_head_n_                        = 0;
     const ops::SamplingConfig* sampling_config_ = nullptr;
     const MtpParameters* mtp_                   = nullptr;
+    std::uint16_t* first_token_logits_host_       = nullptr;
+    const FirstTokenReadout* first_token_readout_ = nullptr;
+    const PromptReadout* prompt_readout_          = nullptr;
+
+    void run_prompt_readout(const Tensor& normed, std::int64_t begin, std::int32_t length,
+                            cudaStream_t s);
 };
 
 } // namespace ninfer::models::qwen3_5::execution

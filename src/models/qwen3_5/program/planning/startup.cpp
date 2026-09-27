@@ -271,6 +271,19 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                        {(dimension(parameters.model.resources().public_token_count) + 31) / 32,
                         static_cast<std::int32_t>(plan.max_concurrency)},
                        "sampling prompt presence");
+        const auto lanes          = static_cast<std::int32_t>(plan.max_concurrency);
+        out.logprob_candidate_ids = add_tensor(
+            builder, DType::I32, {static_cast<std::int32_t>(kMaximumLogprobCandidates), lanes},
+            "token logprob candidate ids");
+        out.logprob_readout         = add_tensor(builder, DType::FP32,
+                                                 {static_cast<std::int32_t>(kLogprobReadoutFloats), lanes},
+                                                 "token logprob readout");
+        out.logprob_prompt_next_ids = add_tensor(
+            builder, DType::I32, {static_cast<std::int32_t>(kMaximumPromptReadouts), lanes},
+            "prompt logprob next ids");
+        out.logprob_prompt_readout = add_tensor(
+            builder, DType::FP32, {static_cast<std::int32_t>(kLogprobPromptReadoutFloats), lanes},
+            "prompt logprob readout");
     }
     out.bytes = builder.finish(kArenaAlign, "persistent layout");
     out.kv_payload_bytes =

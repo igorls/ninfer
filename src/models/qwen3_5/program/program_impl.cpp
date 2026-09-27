@@ -249,6 +249,12 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     if (plan.persistent.prompt_presence) {
         prompt_presence = plan.persistent.prompt_presence->bind(backing);
     }
+    if (plan.persistent.logprob_readout) {
+        logprob_candidate_ids   = plan.persistent.logprob_candidate_ids->bind(backing);
+        logprob_readout         = plan.persistent.logprob_readout->bind(backing);
+        logprob_prompt_next_ids = plan.persistent.logprob_prompt_next_ids->bind(backing);
+        logprob_prompt_readout  = plan.persistent.logprob_prompt_readout->bind(backing);
+    }
     active_continuations.fill(continuation_capacity);
     for (std::uint32_t lane = 0; lane < max_concurrency; ++lane) { lane_epochs[lane] = 1; }
     for (std::uint32_t index = 0; index < continuation_capacity; ++index) {

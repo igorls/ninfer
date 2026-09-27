@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cmath>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -154,6 +155,71 @@ Json tool_calls_json(const std::vector<ToolCall>& calls, bool include_index) {
     return output;
 }
 
+// JSON has no -inf: a token the structured-output mask forbids reports this floor instead, the
+// same sentinel OpenAI uses for vanishing probabilities.
+constexpr double kLogprobFloor = -9999.0;
+
+double finite_logprob(float value) {
+    return std::isfinite(value) ? static_cast<double>(value) : kLogprobFloor;
+}
+
+Json logprob_entry_json(const TokenLogprobEntry& entry) {
+    Json bytes = Json::array();
+    for (const char byte : entry.bytes) {
+        bytes.push_back(static_cast<int>(static_cast<unsigned char>(byte)));
+    }
+    // A single token may hold a partial UTF-8 sequence; `token` replaces what cannot be decoded
+    // and `bytes` stays exact.
+    const std::string token =
+        Json::parse(Json(entry.bytes).dump(-1, ' ', false, Json::error_handler_t::replace))
+            .get<std::string>();
+    return Json{{"token", token},
+                {"token_id", entry.token_id},
+                {"logprob", finite_logprob(entry.logprob)},
+                {"raw_logprob", finite_logprob(entry.raw_logprob)},
+                {"bytes", std::move(bytes)}};
+}
+
+Json logprobs_json(const GenerationOutcome& outcome) {
+    if (outcome.token_logprobs.empty() && outcome.prompt_logprobs.empty()) { return nullptr; }
+    Json content = Json::array();
+    for (const TokenLogprobPosition& position : outcome.token_logprobs) {
+        Json entry = logprob_entry_json(position.sampled);
+        Json top   = Json::array();
+        for (const auto& value : position.top) { top.push_back(logprob_entry_json(value)); }
+        entry["top_logprobs"] = std::move(top);
+        if (position.forced) { entry["forced"] = true; }
+        if (!position.candidates.empty()) {
+            Json candidates = Json::array();
+            for (const auto& value : position.candidates) {
+                candidates.push_back(logprob_entry_json(value));
+            }
+            entry["candidate_logprobs"] = std::move(candidates);
+        }
+        content.push_back(std::move(entry));
+    }
+    Json out{{"content", std::move(content)}, {"refusal", nullptr}};
+    if (!outcome.prompt_logprobs.empty()) {
+        // NInfer extension: the distribution over the token after each requested prompt
+        // position; `token` is the prompt's own next token with its log-probability.
+        Json prompt = Json::array();
+        for (const PromptLogprobPosition& position : outcome.prompt_logprobs) {
+            Json entry        = logprob_entry_json(position.value.sampled);
+            entry["position"] = position.position;
+            if (!position.value.candidates.empty()) {
+                Json candidates = Json::array();
+                for (const auto& value : position.value.candidates) {
+                    candidates.push_back(logprob_entry_json(value));
+                }
+                entry["candidate_logprobs"] = std::move(candidates);
+            }
+            prompt.push_back(std::move(entry));
+        }
+        out["prompt"] = std::move(prompt);
+    }
+    return out;
+}
+
 Json usage_json(const CompletionUsage& usage) {
     const int cached_tokens = std::clamp(usage.cached_tokens, 0, usage.prompt_tokens);
     return Json{{"prompt_tokens", usage.prompt_tokens},
@@ -240,7 +306,7 @@ std::string make_chat_completion_response(const OpenAIChatResponseIdentity& iden
     payload["choices"] = Json::array(
         {Json{{"index", 0},
               {"message", std::move(message)},
-              {"logprobs", nullptr},
+              {"logprobs", logprobs_json(outcome)},
               {"finish_reason",
                has_tool_calls ? Json("tool_calls") : Json(finish_reason(outcome.finish_reason))}}});
     payload["usage"]   = usage_json(usage_from(outcome));

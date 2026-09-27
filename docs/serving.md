@@ -60,6 +60,7 @@ selected for this process.
 | `GET /v1/models` | configured OpenAI model alias and effective `max_model_len` |
 | `GET /v1/models/{id}` | lookup of the configured alias and effective `max_model_len` |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
+| `POST /v1/score` | closed-set scoring of isolated questions against one shared prefix |
 | `POST /v1/responses` | OpenAI Responses Core generation, state, typed Items, and SSE |
 | `POST /v1/responses/input_tokens` | Responses prompt-token count without generation |
 | `GET /v1/responses/{id}` | retrieve a locally stored terminal Response |
@@ -153,6 +154,130 @@ Semantically neutral fields do not make an otherwise executable request fail. Al
 text-only `audio` configuration, and `prediction` are accepted without changing Engine execution.
 Metadata, user/safety identifiers, service-tier and prompt-cache hints are likewise advisory.
 Unknown top-level fields are ignored.
+
+### Token log probabilities
+
+`logprobs: true` on a non-streaming Chat Completions request returns
+`choices[0].logprobs.content`, one entry per generated token (reasoning tokens and the final stop
+token included), in the OpenAI shape: `token`, `logprob`, `bytes`, and `top_logprobs` with up to
+`top_logprobs` (0 to 20) alternatives. Every entry also carries `token_id` and `raw_logprob`.
+
+All values are read from the target model's logits **before any sampling adjustment**: no
+repetition/presence/frequency penalty, no temperature, no `top_k`/`top_p`/`min_p` truncation. They
+are the model's own distribution at that position however the token was drawn, so a client can
+apply its own temperature scaling for calibration.
+
+- `raw_logprob` is the log softmax over the whole vocabulary.
+- `logprob` is the log softmax over the tokens the structured-output grammar allows at that
+  position, which is the distribution the sampler could actually draw from. Without
+  `response_format` constraints the two are equal. Under a mask `top_logprobs` lists allowed tokens
+  only and their probabilities sum to one over the allowed set.
+- `logprob_candidates` (NInfer extension): an array of up to 1024 closed-set options, each a string
+  that encodes to exactly one token or an integer token id. Every position then also reports
+  `candidate_logprobs`, the distribution renormalised over exactly that list, in request order and
+  not limited to 20. A candidate the grammar forbids reports the `-9999` floor. Check that each
+  option is one token in the context where it appears: a leading space changes the token.
+- A thinking-budget control token inserted by the engine is reported with `"forced": true`,
+  `logprob` 0 and no alternatives.
+- `-inf` is not valid JSON; vanishing or forbidden probabilities report `-9999`.
+- `logprob_prompt_positions` (NInfer extension): ascending 0-based indices into the rendered
+  prompt's tokens, at most 256, needing `top_logprobs` 0. The response adds
+  `choices[0].logprobs.prompt`, one entry per position: the distribution over the token after that
+  position, whose `token` is the prompt's own next token with its `logprob` (so summed entries
+  score a continuation), plus `candidate_logprobs` when candidates are given. A position beyond the
+  prompt is rejected. Every listed position is computed by the request: prefix reuse is limited to
+  frontiers at or below the first position. A history assistant turn renders as the selected
+  template writes it; where that omits the empty think block the generation prompt carries, the
+  model expects `<think>` at the position before its content, so write the block into the content
+  (`"<think>\n\n</think>\n\n" + answer`) to read an answer distribution there.
+
+A request with `logprobs: true` and `top_logprobs` above 0 reads a full vocabulary column on the
+host and decodes one token per round: speculative drafts are not offered for it. Without
+`top_logprobs` the readout runs on the device, costs a few floats per position, and speculative
+decoding stays on. `logprobs` with `stream: true` is rejected with `logprobs_stream_not_supported`;
+the Responses API does not report log probabilities.
+
+With thinking off, the maintained Qwen templates render a continued final assistant message
+(assistant prefill) with the same empty think block the generation prompt carries before its
+content, so the continuation is conditioned exactly like an answer the model produces.
+
+### Read-only cache participation
+
+`prompt_cache_read_only: true` (NInfer extension, Chat Completions) lets a request start from an
+already published prefix while capturing no checkpoint and publishing no continuation of its own.
+Use it for one-shot requests, such as single-token classification over a shared document, whose
+continuation will never be reused: a burst of them otherwise turns the bounded continuation
+catalog over and evicts other conversations' cached state. A read-only request never creates the
+shared prefix it reads; some earlier request has to publish it. Because nothing can later resume
+from it, a read-only request also skips the prefill split that publishing requests make at the
+prompt's rewrite execution frontiers, so a short one-shot prompt prefills in one pass over the
+weights instead of two.
+
+### Closed-set scoring: `POST /v1/score`
+
+Scores many isolated questions against one shared prefix in a single call, for closed-set
+classification with calibrated probabilities.
+
+```json
+{
+  "model": "qwen3.8-27b",
+  "messages": [{"role": "system", "content": "<instructions and document>"}],
+  "questions": [
+    {"id": "q1", "content": "Is the invoice overdue? Answer A for yes, B for no.", "candidates": ["A", "B"]},
+    {"id": "q2", "content": "...", "candidates": ["A", "B", "C", "D"]}
+  ],
+  "candidates": ["A", "B"],
+  "top_logprobs": 0,
+  "chat_template_kwargs": {"enable_thinking": false}
+}
+```
+
+`messages` is the shared prefix in Chat Completions format. Each of the 1 to 256 `questions`
+becomes one user message appended after it, so questions never see each other. `candidates` are
+strings or integer token ids; a question without its own list uses the top-level default. Each
+question takes one of two forms, reported as `form`:
+
+- `token`: every candidate is one token. One greedy request reads the distribution over the
+  candidates at the first generated position (`candidate_logprobs`, `top_logprobs`,
+  `outside_mass`). A question may carry its own `response_format`; the scored position is always
+  the first generated token, so a format whose first token is punctuation (a JSON string quote) is
+  not useful here.
+- `text`: some candidate spans several tokens. One request per candidate renders it as the
+  continued final assistant turn, opened exactly as generation opens an answer, and reads the
+  log-probability of each of its tokens at its prompt position. `candidate_logprobs[].raw_logprob`
+  is their sum, the candidate's conditional log-probability; `logprob` renormalises the sums over
+  the list; `tokens` lists the per-token entries with their positions, so a client can apply its
+  own length normalisation. Token ids cannot be mixed into such a list, `response_format` does not
+  apply, and the form needs thinking off. Cost is one prefill of the question and candidate per
+  candidate, all reading the shared prefix.
+
+Every result also carries `entropy` (nats) and `margin` (top-two probability ratio) of its
+distribution.
+
+The response lists results in question order:
+
+```json
+{
+  "object": "score", "model": "qwen3.8-27b",
+  "results": [
+    {"id": "q1", "index": 0, "token": "A", "token_id": 32,
+     "candidate_logprobs": [{"token": "A", "token_id": 32, "logprob": -0.02, "raw_logprob": -0.03, "bytes": [65]}],
+     "top_logprobs": [], "outside_mass": 0.004, "cached_tokens": 0}
+  ],
+  "usage": {"prompt_tokens": 12400, "cached_tokens": 6100, "completion_tokens": 2}
+}
+```
+
+`candidate_logprobs[].logprob` is renormalised over the candidate list, `raw_logprob` is
+vocabulary-wide, and `outside_mass` is the vocabulary-wide probability the model put outside the
+list. A question that fails reports `{"id", "index", "error"}` in its slot and does not fail the
+call.
+
+The endpoint is orchestration over the ordinary Engine route, not a fused batch: the first question
+carries an explicit shared-prefix boundary at the end of `messages` (and no implicit write
+candidate), which prefills and publishes the prefix once; the remaining questions then run one at
+a time against that prefix, read-only in the context cache. The published prefix stays in the
+cache under normal retention, so a later call over the same `messages` starts warm.
 
 A string `name` on a `tool` message is accepted as an ignored, output-neutral compatibility
 extension for clients that mirror the function name onto tool results. It does not participate in

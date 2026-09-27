@@ -11,6 +11,7 @@
 #include "models/qwen3_5/execution/vision.h"
 #include "models/qwen3_5/program/vision_control.h"
 #include "ninfer/ops/argmax.h"
+#include "ninfer/ops/candidate_logprobs.h"
 #include "ninfer/ops/attn_input_proj.h"
 #include "ninfer/ops/causal_conv1d_silu.h"
 #include "ninfer/ops/embedding.h"
@@ -265,6 +266,71 @@ TextContext::TextContext(DeviceContext& ctx, const execution::Parameters& weight
 }
 
 TextContext::~TextContext() = default;
+
+void enqueue_first_token_readout(const FirstTokenReadout& readout, const Tensor& logits,
+                                 const Tensor& sampled, std::int32_t token_domain,
+                                 cudaStream_t stream) {
+    Tensor sampled_out                   = readout.sampled_out;
+    std::optional<Tensor> candidates_out = readout.candidates_out;
+    ops::candidate_logprobs(logits, token_domain, sampled,
+                            readout.candidate_ids ? &*readout.candidate_ids : nullptr,
+                            readout.allowed ? &*readout.allowed : nullptr, sampled_out,
+                            candidates_out ? &*candidates_out : nullptr, stream);
+    CUDA_CHECK(cudaMemcpyAsync(readout.host, readout.sampled_out.data, readout.bytes,
+                               cudaMemcpyDeviceToHost, stream));
+}
+
+void TextContext::run_prompt_readout(const Tensor& normed, std::int64_t begin, std::int32_t length,
+                                     cudaStream_t s) {
+    const PromptReadout& readout = *prompt_readout_;
+    const auto lo = std::lower_bound(readout.positions.begin(), readout.positions.end(),
+                                     static_cast<std::uint32_t>(begin));
+    const auto hi =
+        std::lower_bound(lo, readout.positions.end(), static_cast<std::uint32_t>(begin + length));
+    if (lo == hi) { return; }
+    const std::int32_t hidden      = dimension(config_.hidden_size);
+    const std::int32_t domain      = dimension(parameters_.model.resources().public_token_count);
+    const std::size_t first        = static_cast<std::size_t>(lo - readout.positions.begin());
+    const std::size_t count        = static_cast<std::size_t>(hi - lo);
+    const std::int32_t width       = io_.logits.ne[1];
+    const std::size_t block_floats = readout.block_floats();
+    const auto cand_count          = static_cast<std::int32_t>(readout.candidates);
+    for (std::size_t tile = 0; tile < count; tile += static_cast<std::size_t>(width)) {
+        const auto m = static_cast<std::int32_t>(
+            std::min<std::size_t>(static_cast<std::size_t>(width), count - tile));
+        auto scope      = work_.scope();
+        Tensor gathered = work_.alloc(DType::BF16, {hidden, m});
+        for (std::int32_t j = 0; j < m; ++j) {
+            const std::uint32_t position = readout.positions[first + tile + j];
+            const auto local =
+                static_cast<std::int32_t>(static_cast<std::int64_t>(position) - begin);
+            CUDA_CHECK(cudaMemcpyAsync(gathered.slice(1, j, 1).data, normed.slice(1, local, 1).data,
+                                       static_cast<std::size_t>(hidden) * sizeof(std::uint16_t),
+                                       cudaMemcpyDeviceToDevice, s));
+        }
+        Tensor logits = matrix_window(io_.logits, m);
+        project(gathered, *lm_head_, logits, work_, s);
+        for (std::int32_t j = 0; j < m; ++j) {
+            const std::size_t index = first + tile + static_cast<std::size_t>(j);
+            float* block            = readout.readout + index * block_floats;
+            const Tensor column     = logits.slice(1, j, 1);
+            const Tensor sampled(const_cast<std::int32_t*>(readout.next_ids) + index, DType::I32,
+                                 {1});
+            Tensor sampled_out(block, DType::FP32, {1, 2});
+            std::optional<Tensor> candidates_out;
+            if (cand_count > 0) {
+                candidates_out.emplace(block + 2, DType::FP32,
+                                       std::initializer_list<std::int32_t>{1, cand_count, 2});
+            }
+            ops::candidate_logprobs(
+                column, domain, sampled, readout.candidate_ids ? &*readout.candidate_ids : nullptr,
+                nullptr, sampled_out, candidates_out ? &*candidates_out : nullptr, s);
+        }
+    }
+    CUDA_CHECK(cudaMemcpyAsync(readout.host + first * block_floats,
+                               readout.readout + first * block_floats,
+                               count * block_floats * sizeof(float), cudaMemcpyDeviceToHost, s));
+}
 
 void TextContext::set_linear_state_slots(std::int32_t source_slot, std::int32_t destination_slot) {
     if (source_slot < 0 || source_slot >= state_.slot_count() || destination_slot < 0 ||
@@ -1263,6 +1329,9 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                             ? matrix_window(prefill_hidden_, len)
                             : work_.alloc(DType::BF16, {dimension(config_.hidden_size), len});
             ops::rmsnorm(x, *final_norm_, config_.rms_norm_eps, true, xf, s);
+            if (prompt_readout_ != nullptr) {
+                run_prompt_readout(xf, static_cast<std::int64_t>(base_i) + t0, len, s);
+            }
 
             if (is_last) {
                 Tensor last_xf = xf.slice(1, len - 1, 1);
@@ -1280,6 +1349,18 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 } else {
                     ops::argmax(logits, io_.token,
                                 dimension(parameters_.model.resources().public_token_count), s);
+                }
+                const std::int32_t domain =
+                    dimension(parameters_.model.resources().public_token_count);
+                if (first_token_logits_host_ != nullptr) {
+                    CUDA_CHECK(
+                        cudaMemcpyAsync(first_token_logits_host_, logits.data,
+                                        static_cast<std::size_t>(domain) * sizeof(std::uint16_t),
+                                        cudaMemcpyDeviceToHost, s));
+                }
+                if (first_token_readout_ != nullptr) {
+                    enqueue_first_token_readout(*first_token_readout_, logits, io_.token, domain,
+                                                s);
                 }
             }
 

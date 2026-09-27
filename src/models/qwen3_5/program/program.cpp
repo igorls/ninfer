@@ -472,6 +472,14 @@ MemorySummary Program::memory_summary() const noexcept { return impl_->memory_su
 
 void Program::reset_memory_peaks() noexcept { impl_->reset_memory_peaks(); }
 
+std::span<const TokenLogprobs> Program::round_token_logprobs(runtime::LaneId lane) const {
+    return impl_->round_token_logprobs(lane.value);
+}
+
+std::span<const TokenLogprobs> Program::prompt_token_logprobs(runtime::LaneId lane) const {
+    return impl_->prompt_token_logprobs(lane.value);
+}
+
 SequencePlanner make_sequence_planner(const execution::Parameters& parameters,
                                       DeviceContext& device, const EngineOptions& options) {
     return SequencePlanner(detail::make_sequence_planner_impl(parameters, device, options));

@@ -78,6 +78,8 @@ public:
 
     // Artifact-tokenizer raw-text encoding. No chat template or implicit special token is added.
     [[nodiscard]] std::vector<TokenId> tokenize_text(std::string_view text) const;
+    // Exact bytes one token id decodes to, for reporting TokenLogprobs entries.
+    [[nodiscard]] std::string token_bytes(TokenId token) const;
 
     // Returns log p(tokens[i] | tokens[0..i)) for i in [first_target,tokens.size()).
     [[nodiscard]] std::vector<float> score_tokens(std::vector<TokenId> tokens,

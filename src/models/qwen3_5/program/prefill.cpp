@@ -71,6 +71,9 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
+    card.set_first_token_logit_capture(state.first_token_logits_host);
+    card.set_first_token_readout(state.first_token_readout);
+    card.set_prompt_readout(state.prompt_readout);
     const std::span<const int> prompt(ids.data(), ids.size());
     if (state.dflash != nullptr) {
         DFlashFeatureSink sink = make_dflash_prefill_sink(state);
@@ -94,6 +97,9 @@ PrefillChunkResult prefill_multimodal_chunk(PrefillContext& state, const Prepare
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
+    card.set_first_token_logit_capture(state.first_token_logits_host);
+    card.set_first_token_readout(state.first_token_readout);
+    card.set_prompt_readout(state.prompt_readout);
     if (state.dflash != nullptr) {
         DFlashFeatureSink sink = make_dflash_prefill_sink(state);
         return card.prefill_chunk(prompt, state.text_kv_base, nominal_length, vision,
@@ -153,10 +159,23 @@ void sample_from_hidden(PrefillContext& state, const Tensor& hidden, std::int32_
     CUDA_CHECK(cudaMemcpyAsync(state.execution.io.pos.data, &absolute_position,
                                sizeof(absolute_position), cudaMemcpyHostToDevice,
                                state.execution.device.stream));
-    ops::sample(logits, state.execution.io.token,
-                dimension(state.execution.parameters.model.resources().public_token_count),
-                state.sampling, state.execution.io.pos, purpose, state.execution.work,
-                state.execution.device.stream);
+    const std::int32_t domain =
+        dimension(state.execution.parameters.model.resources().public_token_count);
+    ops::sample(logits, state.execution.io.token, domain, state.sampling, state.execution.io.pos,
+                purpose, state.execution.work, state.execution.device.stream);
+    // A zero-suffix reuse samples its first token here instead of in a prefill chunk.
+    if (purpose == ops::kSamplePurposePrefill) {
+        if (state.first_token_logits_host != nullptr) {
+            CUDA_CHECK(cudaMemcpyAsync(state.first_token_logits_host, logits.data,
+                                       static_cast<std::size_t>(domain) * sizeof(std::uint16_t),
+                                       cudaMemcpyDeviceToHost, state.execution.device.stream));
+        }
+        if (state.first_token_readout != nullptr) {
+            enqueue_first_token_readout(*state.first_token_readout, logits,
+                                        state.execution.io.token, domain,
+                                        state.execution.device.stream);
+        }
+    }
     state.execution.work.reset();
 }
 
@@ -643,7 +662,10 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
                 ? std::make_unique<runtime::OutputConstraintState>(
                       request_plan.output_constraint, staged.prompt.starts_in_reasoning)
                 : nullptr;
+        request.logprobs = request_plan.logprobs;
+        request.round_logprobs.clear();
         install_sampling(sequence, request, request_plan.sampling, staged.prompt.token_ids);
+        install_prompt_readout(sequence, request, staged.prompt.token_ids);
         sequence.rope_delta = staged.prompt.rope_delta;
         set_device_i32(io.rope_delta, sequence.rope_delta);
 
@@ -1014,7 +1036,13 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             selectors.source,
             selectors.destination,
             staged.initial_mtp_extent,
-            dflash_host_ingress};
+            dflash_host_ingress,
+            token_logits_capture(request)};
+        const execution::FirstTokenReadout readout = first_token_readout(sequence, request);
+        if (request.logprobs_device_readout) { schedule_state.first_token_readout = &readout; }
+        if (!request.prompt_readout.positions.empty()) {
+            schedule_state.prompt_readout = &request.prompt_readout;
+        }
 
         if (staged.mtp_bridge == MtpBridgeMode::BeforeSuffix) {
             if (staged.cursor != staged.base || staged.base == 0 ||
@@ -1075,12 +1103,17 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                               staged.capture_groups[staged.next_capture].frontier)
                         : std::nullopt;
                 std::optional<std::uint32_t> split_frontier = capture_frontier;
-                const auto rewrite_split                    = std::upper_bound(
-                    staged.prompt.identity.rewrite_execution_frontiers.begin(),
-                    staged.prompt.identity.rewrite_execution_frontiers.end(), staged.cursor);
-                if (rewrite_split != staged.prompt.identity.rewrite_execution_frontiers.end() &&
-                    (!split_frontier || *rewrite_split < *split_frontier)) {
-                    split_frontier = *rewrite_split;
+                // A publishing request splits at its rewrite execution frontiers so a later turn
+                // resumed from its typed rewrite checkpoint shares its GDN decomposition. A
+                // read-only request is never a resume source and runs its suffix unsplit.
+                if (request.publish_continuation) {
+                    const auto rewrite_split = std::upper_bound(
+                        staged.prompt.identity.rewrite_execution_frontiers.begin(),
+                        staged.prompt.identity.rewrite_execution_frontiers.end(), staged.cursor);
+                    if (rewrite_split != staged.prompt.identity.rewrite_execution_frontiers.end() &&
+                        (!split_frontier || *rewrite_split < *split_frontier)) {
+                        split_frontier = *rewrite_split;
+                    }
                 }
                 execution::PrefillChunkResult result;
                 timing.pause();
@@ -1199,6 +1232,12 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
         const std::uint32_t prompt_tokens = staged.prompt_tokens;
 
         validate_licensed_tokens(std::span<const TokenId>(host_tokens, 1));
+        if (request.logprobs_device_readout) {
+            collect_round_logprobs(sequence, request, std::span<const TokenId>(host_tokens, 1));
+        } else {
+            record_round_logprobs(request, nullptr, host_tokens[0]);
+        }
+        collect_prompt_readout(request);
         if (sequence.ledger.size() != prompt_tokens) {
             throw std::logic_error("candidate token ledger does not match prompt length");
         }

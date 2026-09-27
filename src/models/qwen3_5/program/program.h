@@ -939,6 +939,13 @@ public:
     [[nodiscard]] MemorySummary memory_summary() const noexcept;
     void reset_memory_peaks() noexcept;
 
+    // Token logprob readout of the lane's last decode or first-token round, valid until the
+    // lane's next round; one entry per licensed token.
+    [[nodiscard]] std::span<const TokenLogprobs> round_token_logprobs(runtime::LaneId lane) const;
+    // Prompt-position readout, one entry per TokenLogprobOptions::prompt_positions, complete once
+    // the lane's prefill has finished.
+    [[nodiscard]] std::span<const TokenLogprobs> prompt_token_logprobs(runtime::LaneId lane) const;
+
 private:
     explicit Program(std::unique_ptr<detail::ProgramImpl> impl) noexcept;
     std::unique_ptr<detail::ProgramImpl> impl_;

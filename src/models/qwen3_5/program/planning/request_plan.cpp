@@ -254,9 +254,28 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
                                                : FinishReason::ContextCapacity;
     base->sampling                       = translate_sampling(options.sampling);
     base->output_constraint              = options.output_constraint;
-    base->allow_prefix_reuse             = options.allow_prefix_reuse;
-    base->summary.publish_continuation =
+    const std::int32_t token_domain =
+        execution::dimension(parameters.model.resources().public_token_count);
+    for (const TokenId id : options.logprobs.candidates) {
+        if (id < 0 || id >= token_domain) {
+            throw std::invalid_argument("logprob candidate is outside the token domain");
+        }
+    }
+    base->logprobs           = options.logprobs;
+    base->allow_prefix_reuse = options.allow_prefix_reuse;
+    const bool reads_prefix_cache =
         options.allow_prefix_reuse && prompt.identity.reusable && context_cache.enabled;
+    base->summary.publish_continuation = reads_prefix_cache && options.allow_prefix_publication;
+    // A read-only plan advertises no write opportunity: the Engine projects every advertised
+    // shared candidate as a publication and expects its prepared rebuild work.
+    if (!base->summary.publish_continuation) { base->context_cache.opportunities.clear(); }
+    // Prefill splits at the prompt's rewrite execution frontiers so that a later turn resumed from
+    // this request's typed rewrite checkpoint and a root run share one GDN decomposition. A
+    // read-only request never becomes a resume source, so its suffix runs unsplit.
+    const std::span<const std::uint32_t> execution_frontiers =
+        base->summary.publish_continuation
+            ? std::span<const std::uint32_t>(prompt.identity.rewrite_execution_frontiers)
+            : std::span<const std::uint32_t>{};
     const std::uint32_t reserved_context_tokens =
         base->summary.prompt_tokens + (base->summary.effective_output_tokens == 0
                                            ? 0U
@@ -320,12 +339,13 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
         }
         previous_rewrite_frontier = frontier;
     }
-    if (base->summary.publish_continuation) {
+    // A read-only request still needs its digests: they are the lookup keys of published prefixes.
+    if (reads_prefix_cache) {
         base->prefix_digests.assign(prompt);
         base->prefix_identity_tag =
             capture_identity_tag(speculative_backend, proposal_head, kv_storage);
     }
-    if (options.allow_prefix_reuse && prompt.identity.reusable && context_cache.enabled) {
+    if (base->summary.publish_continuation) {
         const auto add_capture = [&](std::uint32_t frontier, std::uint32_t input_order,
                                      std::optional<RewriteCheckpointKind> rewrite, bool shared,
                                      bool long_anchor, SharedCandidateEvidence evidence) {
@@ -424,15 +444,15 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
         base->vision_control_plan ? base->vision_control_plan->items.size() : 0ULL;
     base->summary.service_work_quanta =
         projected_service_work(base->summary, 0, prefill_chunk, cold_prefill_splits,
-                               base->capture_groups, prompt.identity.rewrite_execution_frontiers);
+                               base->capture_groups, execution_frontiers);
     base->root_rebuild_work =
         rebuild_work_at_frontier(prompt, base->summary.prompt_tokens, prefill_chunk,
-                                 base->capture_groups, prompt.identity.rewrite_execution_frontiers);
+                                 base->capture_groups, execution_frontiers);
     for (const CaptureGroup& group : base->capture_groups) {
         runtime_support::include_rebuild_boundary(base->root_rebuild_tail_begin, group.frontier,
                                                   base->summary.prompt_tokens);
     }
-    for (const std::uint32_t frontier : prompt.identity.rewrite_execution_frontiers) {
+    for (const std::uint32_t frontier : execution_frontiers) {
         runtime_support::include_rebuild_boundary(base->root_rebuild_tail_begin, frontier,
                                                   base->summary.prompt_tokens);
     }
@@ -455,6 +475,7 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
     plan->summary                     = base.summary;
     plan->sampling                    = base.sampling;
     plan->output_constraint           = base.output_constraint;
+    plan->logprobs                    = base.logprobs;
     plan->text_kv_page_entitlement    = base.text_kv_page_entitlement;
     plan->backend_kv_page_entitlement = base.backend_kv_page_entitlement;
     plan->root_rebuild_work           = base.root_rebuild_work;
@@ -474,6 +495,11 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
             throw std::logic_error("catalog shared-prefix summary disagrees with Program state");
         }
         if (!base.allow_prefix_reuse || !prompt.identity.reusable) { return std::nullopt; }
+        // A prompt position readout needs this request to compute that position.
+        if (!base.logprobs.prompt_positions.empty() &&
+            selected.frontier > base.logprobs.prompt_positions.front()) {
+            return std::nullopt;
+        }
         const auto* shared_identity = shared_source->identity->prefix_identity();
         if (shared_identity == nullptr ||
             !qwen3_5::detail::prefix_matches(prompt, shared_source->identity->ledger(),
@@ -490,6 +516,10 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
                                                     ? runtime::PrivateSourceMode::Retain
                                                     : runtime::PrivateSourceMode::ConsumeToActive;
         if (!base.allow_prefix_reuse || !prompt.identity.reusable) { return std::nullopt; }
+        if (!base.logprobs.prompt_positions.empty() &&
+            selected.frontier > base.logprobs.prompt_positions.front()) {
+            return std::nullopt;
+        }
         if (selected.kind == runtime::CheckpointKind::SessionEndpoint) {
             if (selected.ordinal != 0) {
                 throw std::logic_error("private endpoint checkpoint ordinal is invalid");
@@ -727,9 +757,13 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
     }
 
     const std::size_t prefill_splits = plan->vision ? plan->vision->uses.size() : 0ULL;
+    const std::span<const std::uint32_t> execution_frontiers =
+        plan->summary.publish_continuation
+            ? std::span<const std::uint32_t>(prompt.identity.rewrite_execution_frontiers)
+            : std::span<const std::uint32_t>{};
     plan->summary.service_work_quanta =
         projected_service_work(plan->summary, plan->reuse_base, prefill_chunk, prefill_splits,
-                               plan->capture_groups, prompt.identity.rewrite_execution_frontiers);
+                               plan->capture_groups, execution_frontiers);
     std::uint64_t remaining_vision_items   = 0;
     std::uint64_t remaining_vision_patches = 0;
     if (plan->vision) {
@@ -751,10 +785,9 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
             remaining_vision_patches += static_cast<std::uint64_t>(patches);
         }
     }
-    plan->remaining_prefill_work =
-        scheduled_prefill_work(plan->reuse_base, plan->summary.prompt_tokens,
-                               remaining_vision_items, remaining_vision_patches, prefill_chunk,
-                               plan->capture_groups, prompt.identity.rewrite_execution_frontiers);
+    plan->remaining_prefill_work = scheduled_prefill_work(
+        plan->reuse_base, plan->summary.prompt_tokens, remaining_vision_items,
+        remaining_vision_patches, prefill_chunk, plan->capture_groups, execution_frontiers);
     plan->transfer_requirements.reserve(4);
     const auto add_state_transfer = [&](runtime::ContextTransferDirection direction,
                                         bool dflash_local_only = false) {

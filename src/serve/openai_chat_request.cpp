@@ -116,19 +116,65 @@ void validate_standard_output_controls(const Json& body) {
         if (!body.at("logprobs").is_boolean()) {
             bad_request("logprobs must be a boolean", "logprobs");
         }
-        if (body.at("logprobs").get<bool>()) {
-            bad_request("logprobs=true requires per-token log probabilities in the response, which "
-                        "NInfer does not provide",
-                        "logprobs", "logprobs_not_supported");
+    }
+    const bool logprobs = get_bool(body, "logprobs", false);
+    if (const std::optional<int> top_logprobs = optional_int(body, "top_logprobs")) {
+        if (*top_logprobs < 0 || *top_logprobs > static_cast<int>(ninfer::kMaximumTopLogprobs)) {
+            bad_request("top_logprobs must be between 0 and 20", "top_logprobs");
+        }
+        if (*top_logprobs != 0 && !logprobs) {
+            bad_request("top_logprobs requires logprobs=true", "top_logprobs");
         }
     }
-    if (const std::optional<int> top_logprobs = optional_int(body, "top_logprobs")) {
-        if (*top_logprobs != 0) {
-            bad_request(
-                "nonzero top_logprobs requires alternative-token probabilities in the response, "
-                "which NInfer does not provide",
-                "top_logprobs", "logprobs_not_supported");
+    if (body.contains("logprob_candidates") && !body.at("logprob_candidates").is_null()) {
+        const Json& candidates = body.at("logprob_candidates");
+        if (!logprobs) {
+            bad_request("logprob_candidates requires logprobs=true", "logprob_candidates");
         }
+        if (!candidates.is_array() || candidates.empty() ||
+            candidates.size() > ninfer::kMaximumLogprobCandidates) {
+            bad_request("logprob_candidates must be a nonempty array of at most 1024 entries",
+                        "logprob_candidates");
+        }
+        for (const Json& candidate : candidates) {
+            const bool text =
+                candidate.is_string() && !candidate.get_ref<const std::string&>().empty();
+            if (!text && !candidate.is_number_integer()) {
+                bad_request(
+                    "each logprob candidate must be a nonempty string or an integer token id",
+                    "logprob_candidates");
+            }
+        }
+    }
+    if (body.contains("logprob_prompt_positions") &&
+        !body.at("logprob_prompt_positions").is_null()) {
+        const Json& positions = body.at("logprob_prompt_positions");
+        if (!logprobs) {
+            bad_request("logprob_prompt_positions requires logprobs=true",
+                        "logprob_prompt_positions");
+        }
+        if (optional_int(body, "top_logprobs").value_or(0) != 0) {
+            bad_request("logprob_prompt_positions cannot be combined with top_logprobs",
+                        "logprob_prompt_positions");
+        }
+        if (!positions.is_array() || positions.empty() ||
+            positions.size() > ninfer::kMaximumPromptReadouts) {
+            bad_request("logprob_prompt_positions must be a nonempty array of at most 256 entries",
+                        "logprob_prompt_positions");
+        }
+        std::int64_t previous = -1;
+        for (const Json& position : positions) {
+            if (!position.is_number_integer() || position.get<std::int64_t>() < 0 ||
+                position.get<std::int64_t>() <= previous) {
+                bad_request("logprob_prompt_positions must be ascending non-negative integers",
+                            "logprob_prompt_positions");
+            }
+            previous = position.get<std::int64_t>();
+        }
+    }
+    if (logprobs && get_bool(body, "stream", false)) {
+        bad_request("logprobs are reported on non-streaming responses only", "logprobs",
+                    "logprobs_stream_not_supported");
     }
 
     if (body.contains("response_format") && !body.at("response_format").is_null()) {
@@ -904,6 +950,29 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
     parse_sampling(body, output.generation);
     parse_stream_options(body, output);
     parse_response_observations(body, output);
+    output.generation.prompt_cache_read_only = get_bool(body, "prompt_cache_read_only", false);
+    output.generation.logprobs               = get_bool(body, "logprobs", false);
+    if (output.generation.logprobs) {
+        output.generation.top_logprobs = optional_int(body, "top_logprobs").value_or(0);
+        if (body.contains("logprob_candidates") && !body.at("logprob_candidates").is_null()) {
+            for (const Json& candidate : body.at("logprob_candidates")) {
+                LogprobCandidate entry;
+                if (candidate.is_string()) {
+                    entry.text = candidate.get<std::string>();
+                } else {
+                    entry.token_id = candidate.get<std::int64_t>();
+                }
+                output.generation.logprob_candidates.push_back(std::move(entry));
+            }
+        }
+        if (body.contains("logprob_prompt_positions") &&
+            !body.at("logprob_prompt_positions").is_null()) {
+            for (const Json& position : body.at("logprob_prompt_positions")) {
+                output.generation.logprob_prompt_positions.push_back(
+                    static_cast<std::uint32_t>(position.get<std::int64_t>()));
+            }
+        }
+    }
     parse_output_limit(body, limits, output);
     parse_reasoning_effort(body, output.generation);
     const TemplateOptions template_options      = parse_template_options(body);

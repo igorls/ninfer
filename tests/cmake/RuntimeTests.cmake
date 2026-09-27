@@ -7,6 +7,9 @@ ninfer_add_test(ninfer_context_cost_test SOURCES "${CMAKE_CURRENT_LIST_DIR}/../t
 ninfer_add_test(ninfer_resource_manager_test SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_resource_manager.cpp"
   LIBRARIES ninfer_runtime_support)
 
+ninfer_add_test(ninfer_token_logprobs_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_token_logprobs.cpp")
+
 ninfer_add_test(ninfer_structured_output_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_structured_output.cpp"
   LIBRARIES ninfer_runtime_support ninfer::json)

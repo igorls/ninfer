@@ -823,10 +823,12 @@ int test_assistant_continuation() {
         render_chat({chat_message(ninfer::ChatRole::User, "question"),
                      chat_message(ninfer::ChatRole::Assistant, "answer prefix")},
                     options);
+    // The continued turn opens exactly as the generation prompt does with thinking off: the
+    // empty think block precedes the content so the prefix is conditioned like a real answer.
     const std::string expected = "<|im_start|>user\nquestion<|im_end|>\n"
-                                 "<|im_start|>assistant\nanswer prefix";
+                                 "<|im_start|>assistant\n<think>\n\n</think>\n\nanswer prefix";
     int failures               = check(rendered.text == expected,
-                                       "assistant continuation closed the turn or opened a second assistant");
+                                       "assistant continuation did not open like the generation prompt");
     failures +=
         check(rendered.rewrite_checkpoint &&
                   rendered.rewrite_checkpoint->kind ==
@@ -850,8 +852,11 @@ int test_assistant_continuation() {
     failures +=
         check(!literal.starts_in_reasoning && literal.text.ends_with("<|image_pad|>") &&
                   std::count(encoded.input_ids.begin(), encoded.input_ids.end(), 248046) == 1 &&
+                  // Only the template's own empty think block encodes as reasoning controls.
+                  std::count(encoded.input_ids.begin(), encoded.input_ids.end(), 248068) == 1 &&
+                  std::count(encoded.input_ids.begin(), encoded.input_ids.end(), 248069) == 1 &&
                   std::none_of(encoded.input_ids.begin(), encoded.input_ids.end(),
-                               [](int id) { return id == 248068 || id == 248056; }),
+                               [](int id) { return id == 248056; }),
               "assistant continuation reinterpreted literal controls");
     return failures;
 }

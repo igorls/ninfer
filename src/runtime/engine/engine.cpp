@@ -39,7 +39,32 @@ runtime::ResolvedRequestOptions resolve_request_options(const ModelSamplingDefau
         runtime::resolve_sampling(defaults, mode, options.execution.sampling);
     resolved.execution.requested_output_tokens = options.execution.requested_output_tokens;
     resolved.execution.allow_prefix_reuse      = options.execution.allow_prefix_reuse;
+    resolved.execution.allow_prefix_publication = options.execution.allow_prefix_publication;
     resolved.execution.thinking                = options.execution.thinking;
+    TokenLogprobOptions& logprobs               = options.execution.logprobs;
+    if (!logprobs.enabled && (logprobs.top != 0 || !logprobs.candidates.empty())) {
+        throw std::invalid_argument("token logprob alternatives require logprobs to be enabled");
+    }
+    if (logprobs.top > kMaximumTopLogprobs) {
+        throw std::invalid_argument("top logprobs exceeds the supported maximum of 20");
+    }
+    if (logprobs.candidates.size() > kMaximumLogprobCandidates) {
+        throw std::invalid_argument("too many logprob candidate tokens");
+    }
+    if (!logprobs.prompt_positions.empty()) {
+        if (logprobs.top != 0) {
+            throw std::invalid_argument("prompt position logprobs do not report top alternatives");
+        }
+        if (logprobs.prompt_positions.size() > kMaximumPromptReadouts) {
+            throw std::invalid_argument("too many prompt positions for logprobs");
+        }
+        for (std::size_t i = 1; i < logprobs.prompt_positions.size(); ++i) {
+            if (logprobs.prompt_positions[i] <= logprobs.prompt_positions[i - 1]) {
+                throw std::invalid_argument("prompt positions for logprobs must be ascending");
+            }
+        }
+    }
+    resolved.execution.logprobs                = std::move(logprobs);
     resolved.stop                              = std::move(options.stop);
     resolved.output                            = options.output;
     return resolved;
@@ -239,6 +264,11 @@ std::vector<TokenId> Engine::tokenize_text(std::string_view text) const {
     return impl_->active->frontend.tokenize_text(text);
 }
 
+std::string Engine::token_bytes(TokenId token) const {
+    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+    return impl_->active->frontend.token_bytes(token);
+}
+
 std::vector<float> Engine::score_tokens(std::vector<TokenId> tokens, std::uint32_t first_target) {
     nvtx::ScopedRange score_range(nvtx::Name::Score, nvtx::Category::Scoring,
                                   static_cast<std::uint64_t>(tokens.size()));
@@ -315,6 +345,14 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
         impl_->active->frontend.compile_output_constraint(structured_output, required_tool_names);
 
     const PromptSummary prompt_summary = prompt.impl_->summary;
+    // Validated here, before the request reaches a Program: inside admission an invalid
+    // argument is an executor failure.
+    if (!resolved_options.execution.logprobs.prompt_positions.empty() &&
+        static_cast<std::uint64_t>(resolved_options.execution.logprobs.prompt_positions.back()) +
+                1U >=
+            prompt_summary.prompt_tokens) {
+        throw std::invalid_argument("prompt position logprobs exceed the prompt");
+    }
     if (prompt_summary.prompt_tokens > impl_->options.max_context) {
         throw RequestError(
             RequestErrorKind::ContextLengthExceeded,

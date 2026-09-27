@@ -172,9 +172,12 @@ class ChatTemplates(unittest.TestCase):
                 text = self.render(
                     version, history, continue_final_message=True, enable_thinking=False
                 )
+                # The continued turn opens exactly as the generation prompt does with thinking
+                # off: the empty think block precedes the content.
                 self.assertEqual(
                     text,
-                    "<|im_start|>user\nquestion<|im_end|>\n<|im_start|>assistant\nanswer prefix",
+                    "<|im_start|>user\nquestion<|im_end|>\n<|im_start|>assistant\n"
+                    "<think>\n\n</think>\n\nanswer prefix",
                 )
                 literal = [
                     message("user", "question"),
@@ -186,7 +189,9 @@ class ChatTemplates(unittest.TestCase):
                         literal,
                         continue_final_message=True,
                         enable_thinking=False,
-                    ).endswith("<|im_start|>assistant\nprefix </think> text")
+                    ).endswith(
+                        "<|im_start|>assistant\n<think>\n\n</think>\n\nprefix </think> text"
+                    )
                 )
 
     def test_cpp_matches_independent_renderer(self):
