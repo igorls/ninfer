@@ -904,6 +904,16 @@ int test_rewrite_checkpoint_trace() {
                           nonthinking.text.ends_with("<think>\n\n</think>\n\n"),
                       "non-thinking response replay did not checkpoint before its generation "
                       "prologue");
+    // The reasoning feature boundary sits after the generation header, before the think block,
+    // whatever the thinking mode renders behind it.
+    for (const fi::RenderedChat* rendered : {&preserved, &nonthinking}) {
+        const std::size_t header = rendered->text.rfind(assistant_header);
+        failures += check(header != std::string::npos && rendered->reasoning_boundary &&
+                              *rendered->reasoning_boundary == header + assistant_header.size() &&
+                              rendered->text.compare(*rendered->reasoning_boundary, 7,
+                                                     "<think>") == 0,
+                          "reasoning feature boundary must precede the thinking opener");
+    }
 
     std::vector<fi::ChatMessage> next_turn = tool_loop;
     next_turn.push_back(chat_message(ninfer::ChatRole::User, "next question"));
@@ -937,6 +947,8 @@ int test_rewrite_checkpoint_trace() {
         render_chat({chat_message(ninfer::ChatRole::User, "question")}, no_generation);
     failures += check(!no_assistant.rewrite_checkpoint,
                       "boundary-less prompt unexpectedly published a rewrite boundary");
+    failures += check(!no_assistant.reasoning_boundary,
+                      "a prompt without a generation opener has a reasoning boundary");
 
     no_generation.preserve_thinking                     = true;
     const fi::RenderedChat preserved_without_generation = render_chat(tool_loop, no_generation);

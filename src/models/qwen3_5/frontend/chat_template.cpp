@@ -275,6 +275,11 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
     }
     RenderedChat result;
     result.starts_in_reasoning          = layout.starts_in_reasoning;
+    // The generation prompt is the final, open assistant block.
+    if (!continuation && options.add_generation_prompt && !layout.messages.empty() &&
+        layout.messages.back().role == ChatRole::Assistant && !layout.messages.back().closed) {
+        result.reasoning_boundary = layout.messages.back().content_begin;
+    }
     result.media_placeholders           = layout.media_placeholders;
     result.rewrite_execution_boundaries = layout.execution_boundaries;
     result.message_boundaries.resize(messages.size() + 1);

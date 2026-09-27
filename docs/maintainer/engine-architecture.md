@@ -282,6 +282,25 @@ Free -> Materializing -> Active -> TerminalPending -> Free
 Streaming request 在 admission 选择提交后、任何输出 delta 前发布一次 `GenerationStart`；其中的
 prompt token 和 reused-prefix token 是已提交的资源选择事实，不等待 prefill 完成。
 
+#### Reasoning feature collection
+
+`ExecutionOptions::capture_reasoning_features` is an opt-in training readout. It accepts a text
+new-assistant prompt with a positive output budget. The Frontend records
+`PromptSummary::reasoning_frontier` right after the generation header, before the `<think>`
+opener, when that byte boundary is an exact token frontier. Raw-token prompts, assistant
+continuation and media requests have no frontier and are rejected at submission. It is not an HTTP
+extension or an adaptive serving policy.
+
+Engine disables prefix reuse and publication for these requests. Request planning and Program
+prefill both split at the frontier, so the feature row is computed as for a prompt that ends there,
+independent of the action-dependent suffix. Program copies the final-normalized BF16 row into a
+pinned per-lane host slot during prefill and expands it exactly to FP32 after the prefill
+completes; Engine moves it into `GenerationResult::reasoning_features` before the lane can be
+reused. The result stays empty when collection was not requested. No device allocation or
+numerical Op is added. Callers collecting paired modes must use identical leading instructions:
+`ninfer-reasoning-collect` uses Medium reasoning effort, which adds no effort preamble, and
+verifies exact feature equality across its actions.
+
 Control lane、StateImage slot、KV execution row 和 decode batch row 是不同身份：
 
 - lane 是 Engine 的长期 active request 位置；

@@ -945,6 +945,8 @@ public:
     // Prompt-position readout, one entry per TokenLogprobOptions::prompt_positions, complete once
     // the lane's prefill has finished.
     [[nodiscard]] std::span<const TokenLogprobs> prompt_token_logprobs(runtime::LaneId lane) const;
+    // Reasoning feature row of the lane's request, complete once its prefill has finished.
+    [[nodiscard]] std::span<const float> reasoning_features(runtime::LaneId lane) const;
 
 private:
     explicit Program(std::unique_ptr<detail::ProgramImpl> impl) noexcept;

@@ -338,8 +338,25 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
         throw std::invalid_argument(
             "structured output cannot be combined with custom stops or raw/special-token output");
     }
+    const bool capture_features = options.execution.capture_reasoning_features;
+    if (capture_features) {
+        const PromptSummary& summary = prompt.impl_->summary;
+        if (summary.has_media || !summary.reasoning_frontier || *summary.reasoning_frontier == 0 ||
+            options.execution.requested_output_tokens == 0) {
+            throw std::invalid_argument("reasoning features require a text new-assistant prompt "
+                                        "and a positive output budget");
+        }
+        // The feature row must be computed by this request, and a training readout leaves the
+        // context cache as it found it.
+        options.execution.allow_prefix_reuse       = false;
+        options.execution.allow_prefix_publication = false;
+    }
     runtime::ResolvedRequestOptions resolved_options = resolve_request_options(
         impl_->sampling_defaults, prompt.impl_->sampling_mode, std::move(options));
+    if (capture_features) {
+        resolved_options.execution.reasoning_feature_position =
+            *prompt.impl_->summary.reasoning_frontier - 1U;
+    }
     const ResolvedSamplingParameters resolved_sampling = resolved_options.execution.sampling;
     resolved_options.execution.output_constraint =
         impl_->active->frontend.compile_output_constraint(structured_output, required_tool_names);

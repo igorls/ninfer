@@ -22,6 +22,8 @@ struct ResolvedExecutionOptions {
     // request is unconstrained.
     std::shared_ptr<const CompiledOutputConstraint> output_constraint;
     TokenLogprobOptions logprobs;
+    // Prompt position whose final-normalized hidden row the Program copies out during prefill.
+    std::optional<std::uint32_t> reasoning_feature_position;
 };
 
 struct ResolvedRequestOptions {

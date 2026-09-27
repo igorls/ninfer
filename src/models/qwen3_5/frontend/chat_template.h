@@ -117,6 +117,9 @@ struct RenderedChat {
     std::vector<MediaPlaceholderByteSpec> media_placeholders;
     std::vector<MediaTokenRunByteSpec> media_token_runs;
     std::optional<RewriteCheckpointByteSpec> rewrite_checkpoint;
+    // A new assistant turn's content begin, right after its header and before its thinking
+    // opener; the reasoning feature readout reads the last position before it.
+    std::optional<std::size_t> reasoning_boundary;
     std::vector<std::size_t> rewrite_execution_boundaries;
     // Index n is the exact byte frontier after serializing the first n input messages. A missing
     // value means the template has no independent boundary there (for example, before a leading

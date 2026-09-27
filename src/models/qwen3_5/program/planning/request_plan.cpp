@@ -3,6 +3,7 @@
 #include "models/qwen3_5/program/planning/rebuild_work.h"
 #include "models/qwen3_5/program/context.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iterator>
 #include <limits>
@@ -261,8 +262,9 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
             throw std::invalid_argument("logprob candidate is outside the token domain");
         }
     }
-    base->logprobs           = options.logprobs;
-    base->allow_prefix_reuse = options.allow_prefix_reuse;
+    base->logprobs                   = options.logprobs;
+    base->reasoning_feature_position = options.reasoning_feature_position;
+    base->allow_prefix_reuse         = options.allow_prefix_reuse;
     const bool reads_prefix_cache =
         options.allow_prefix_reuse && prompt.identity.reusable && context_cache.enabled;
     base->summary.publish_continuation = reads_prefix_cache && options.allow_prefix_publication;
@@ -271,9 +273,13 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
     if (!base->summary.publish_continuation) { base->context_cache.opportunities.clear(); }
     // Prefill splits at the prompt's rewrite execution frontiers so that a later turn resumed from
     // this request's typed rewrite checkpoint and a root run share one GDN decomposition. A
-    // read-only request never becomes a resume source, so its suffix runs unsplit.
+    // read-only request never becomes a resume source, so its suffix runs unsplit. A reasoning
+    // feature readout (never a publisher) splits at its feature frontier instead.
+    const std::array<std::uint32_t, 1> feature_frontier{
+        options.reasoning_feature_position.value_or(0) + 1U};
     const std::span<const std::uint32_t> execution_frontiers =
-        base->summary.publish_continuation
+        options.reasoning_feature_position ? std::span<const std::uint32_t>(feature_frontier)
+        : base->summary.publish_continuation
             ? std::span<const std::uint32_t>(prompt.identity.rewrite_execution_frontiers)
             : std::span<const std::uint32_t>{};
     const std::uint32_t reserved_context_tokens =
@@ -476,6 +482,7 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
     plan->sampling                    = base.sampling;
     plan->output_constraint           = base.output_constraint;
     plan->logprobs                    = base.logprobs;
+    plan->reasoning_feature_position  = base.reasoning_feature_position;
     plan->text_kv_page_entitlement    = base.text_kv_page_entitlement;
     plan->backend_kv_page_entitlement = base.backend_kv_page_entitlement;
     plan->root_rebuild_work           = base.root_rebuild_work;
@@ -757,8 +764,11 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
     }
 
     const std::size_t prefill_splits = plan->vision ? plan->vision->uses.size() : 0ULL;
+    const std::array<std::uint32_t, 1> feature_frontier{
+        plan->reasoning_feature_position.value_or(0) + 1U};
     const std::span<const std::uint32_t> execution_frontiers =
-        plan->summary.publish_continuation
+        plan->reasoning_feature_position ? std::span<const std::uint32_t>(feature_frontier)
+        : plan->summary.publish_continuation
             ? std::span<const std::uint32_t>(prompt.identity.rewrite_execution_frontiers)
             : std::span<const std::uint32_t>{};
     plan->summary.service_work_quanta =

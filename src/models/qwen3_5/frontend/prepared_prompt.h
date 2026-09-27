@@ -151,6 +151,7 @@ struct PreparedPromptData {
     PreparedContextCache context_cache;
     std::shared_ptr<const frontend::ToolCallOutputContract> tool_call_output;
     bool starts_in_reasoning = false;
+    std::optional<std::uint32_t> reasoning_frontier;
     PrepareStats prepare;
 
     [[nodiscard]] std::span<const std::int32_t> position_axis(int axis) const;

@@ -10,6 +10,7 @@
 #include "ninfer/ops/scatter.h"
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -337,7 +338,22 @@ void ProgramImpl::install_prompt_readout(const SequenceState& sequence, RequestC
                                          std::span<const TokenId> prompt) {
     request.prompt_logprobs.clear();
     request.prompt_readout = execution::PromptReadout{};
-    const auto& positions  = request.logprobs.prompt_positions;
+    request.reasoning_features.clear();
+    if (request.reasoning_feature_position) {
+        if (static_cast<std::size_t>(*request.reasoning_feature_position) >= prompt.size()) {
+            throw std::logic_error("reasoning feature position was not validated at submission");
+        }
+        const auto hidden =
+            static_cast<std::size_t>(dimension(parameters.model.config().text.hidden_size));
+        if (!reasoning_feature_host) {
+            reasoning_feature_host.emplace(hidden * max_concurrency * sizeof(std::uint16_t));
+        }
+        request.prompt_readout.feature_position = request.reasoning_feature_position;
+        request.prompt_readout.feature_host =
+            static_cast<std::uint16_t*>(reasoning_feature_host->data()) +
+            static_cast<std::size_t>(sequence.lane) * hidden;
+    }
+    const auto& positions = request.logprobs.prompt_positions;
     if (positions.empty()) { return; }
     if (!request.logprobs_device_readout || positions.size() > kMaximumPromptReadouts ||
         static_cast<std::size_t>(positions.back()) + 1U >= prompt.size()) {
@@ -371,6 +387,16 @@ void ProgramImpl::install_prompt_readout(const SequenceState& sequence, RequestC
 void ProgramImpl::collect_prompt_readout(RequestControl& request) {
     request.prompt_logprobs.clear();
     const execution::PromptReadout& readout = request.prompt_readout;
+    request.reasoning_features.clear();
+    if (readout.feature_host != nullptr) {
+        const auto hidden =
+            static_cast<std::size_t>(dimension(parameters.model.config().text.hidden_size));
+        request.reasoning_features.reserve(hidden);
+        for (std::size_t i = 0; i < hidden; ++i) {
+            request.reasoning_features.push_back(std::bit_cast<float>(
+                static_cast<std::uint32_t>(readout.feature_host[i]) << 16U));
+        }
+    }
     if (readout.positions.empty()) { return; }
     const runtime::TokenLogprobReadoutLayout layout{.columns = 1, .candidates = readout.candidates};
     for (std::size_t i = 0; i < readout.positions.size(); ++i) {
@@ -386,6 +412,13 @@ std::span<const TokenLogprobs> ProgramImpl::prompt_token_logprobs(std::uint32_t 
         throw std::out_of_range("prompt logprobs lane is out of range");
     }
     return requests[lane].prompt_logprobs;
+}
+
+std::span<const float> ProgramImpl::reasoning_features(std::uint32_t lane) const {
+    if (lane >= max_concurrency) {
+        throw std::out_of_range("reasoning feature lane is out of range");
+    }
+    return requests[lane].reasoning_features;
 }
 
 void ProgramImpl::copy_tail(SequenceState& sequence, const Tensor& source) {

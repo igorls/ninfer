@@ -184,6 +184,7 @@ struct RequestBasePlanImpl {
     ops::SamplingConfig sampling;
     std::shared_ptr<const runtime::CompiledOutputConstraint> output_constraint;
     TokenLogprobOptions logprobs;
+    std::optional<std::uint32_t> reasoning_feature_position;
     std::uint32_t text_kv_page_entitlement    = 0;
     std::uint32_t backend_kv_page_entitlement = 0;
     std::shared_ptr<const qwen3_5::VisionControlPlan> vision_control_plan;
@@ -250,6 +251,7 @@ struct AdmissionCandidateImpl : ResourceCandidateState {
     ops::SamplingConfig sampling;
     std::shared_ptr<const runtime::CompiledOutputConstraint> output_constraint;
     TokenLogprobOptions logprobs;
+    std::optional<std::uint32_t> reasoning_feature_position;
     std::uint32_t text_kv_page_entitlement    = 0;
     std::uint32_t backend_kv_page_entitlement = 0;
     runtime::LaneId destination{};
@@ -421,6 +423,9 @@ struct RequestControl {
     std::vector<TokenLogprobs> prompt_logprobs;
     execution::PromptReadout prompt_readout;
     std::vector<TokenId> prompt_readout_next_ids;
+    std::optional<std::uint32_t> reasoning_feature_position;
+    // Exact FP32 expansion of the BF16 feature row, complete once prefill has finished.
+    std::vector<float> reasoning_features;
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
     detail::PhysicalResources active_resources;
@@ -631,6 +636,7 @@ public:
     std::optional<PinnedHostBuffer> token_logits_host;
     std::optional<PinnedHostBuffer> logprob_readout_host;
     std::optional<PinnedHostBuffer> logprob_prompt_readout_host;
+    std::optional<PinnedHostBuffer> reasoning_feature_host;
 
     std::vector<SequenceState> continuation_states;
     std::vector<ContinuationSlot> continuation_slots;
@@ -1184,6 +1190,7 @@ private:
 public:
     [[nodiscard]] std::span<const TokenLogprobs> round_token_logprobs(std::uint32_t lane) const;
     [[nodiscard]] std::span<const TokenLogprobs> prompt_token_logprobs(std::uint32_t lane) const;
+    [[nodiscard]] std::span<const float> reasoning_features(std::uint32_t lane) const;
 
 private:
     void set_device_i32(Tensor& tensor, std::int32_t value);

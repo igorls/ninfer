@@ -662,7 +662,8 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
                 ? std::make_unique<runtime::OutputConstraintState>(
                       request_plan.output_constraint, staged.prompt.starts_in_reasoning)
                 : nullptr;
-        request.logprobs = request_plan.logprobs;
+        request.logprobs                   = request_plan.logprobs;
+        request.reasoning_feature_position = request_plan.reasoning_feature_position;
         request.round_logprobs.clear();
         install_sampling(sequence, request, request_plan.sampling, staged.prompt.token_ids);
         install_prompt_readout(sequence, request, staged.prompt.token_ids);
@@ -1040,7 +1041,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             token_logits_capture(request)};
         const execution::FirstTokenReadout readout = first_token_readout(sequence, request);
         if (request.logprobs_device_readout) { schedule_state.first_token_readout = &readout; }
-        if (!request.prompt_readout.positions.empty()) {
+        if (!request.prompt_readout.positions.empty() || request.prompt_readout.feature_position) {
             schedule_state.prompt_readout = &request.prompt_readout;
         }
 
@@ -1113,6 +1114,14 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                     if (rewrite_split != staged.prompt.identity.rewrite_execution_frontiers.end() &&
                         (!split_frontier || *rewrite_split < *split_frontier)) {
                         split_frontier = *rewrite_split;
+                    }
+                }
+                // The reasoning feature row ends a sub-block, so it is computed exactly as for a
+                // prompt that stops there, whatever suffix the chosen action renders after it.
+                if (request.reasoning_feature_position) {
+                    const std::uint32_t frontier = *request.reasoning_feature_position + 1U;
+                    if (frontier > staged.cursor && (!split_frontier || frontier < *split_frontier)) {
+                        split_frontier = frontier;
                     }
                 }
                 execution::PrefillChunkResult result;
