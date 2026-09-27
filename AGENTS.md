@@ -66,6 +66,25 @@ changing it. Prefer explicit implementations for supported architectures. Do not
 graphs, family base classes, plugin discovery, string-driven execution, hidden device allocation,
 runtime weight repacking, or placeholders for hypothetical targets without a product requirement.
 
+## Fork contract
+
+This repository is Igor's fork (`igorls/ninfer`) of Neroued/ninfer. The upstream product above
+applies with these additions, which take precedence where they differ:
+
+- Windows 11 with MSVC and CUDA 13.3 is a native build and runtime platform beside Linux
+  ([build system](docs/maintainer/build-system.md#windows-msvc)). Release builds bundle only the
+  LGPL FFmpeg.
+- Production is one RTX PRO 6000 Blackwell (`sm_120a`, 96 GB) serving Qwen3.8-27B NVFP4 on a
+  shared desktop. Performance decisions for the fork are measured on that device, and the engine
+  must leave the desktop usable (memory reserve, no whole-GPU assumptions).
+- The pre-v3 fork line is being ported onto v3: the supervisor app, serving extensions (structured
+  output, token logprobs and `/v1/score`, System One, admin/telemetry endpoints), the OrcaRouter
+  checkpoint, and Qwen3.8-Flash-Next as a second architecture package. Until each lands, the
+  [port ledger](docs/research/upstream-v3-port-2026-09-27.md) is the authority for its status.
+- Upstream sync merges upstream and reverts rejected commits, so the merge-base records the last
+  reviewed upstream commit.
+- Builds on the production machine run at below-normal priority whenever an engine is serving.
+
 ## Change consistency
 
 Project-owned APIs, CLIs, Python tools, fixtures, reports, formats, and documentation do not preserve
