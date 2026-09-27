@@ -10,8 +10,8 @@
 namespace ninfer::ops {
 
 struct SpeculativeAcceptExecutionEnvelope {
-    // Execution promise: every row has temperature<=0 and both penalties disabled. When false,
-    // the general route remains valid for any supported mixture of greedy and stochastic rows.
+    // Execution promise: every row has temperature<=0, both penalties disabled, and no
+    // allowed_tokens mask. When false, the general route supports mixed greedy/stochastic rows.
     bool all_rows_greedy_without_penalties = false;
 };
 
@@ -62,7 +62,10 @@ void speculative_prepare_verify_ids(const Tensor& anchors, const Tensor& drafts,
  * Algorithm:
  *   Independently for each row b, greedy mode accepts the longest available draft prefix matching
  *   the per-column penalty-adjusted argmax and commits that argmax at the first mismatch (or the
- *   bonus column). With both penalties disabled, target_tokens is the exact raw-logit fast path.
+ *   bonus column). With both penalties disabled and no allowed_tokens mask, target_tokens is
+ *   the exact raw-logit fast path. A mask constrains every valid column before selection; column j
+ *   reads allowed_tokens + j*allowed_tokens_column_stride (sampling.h), so a structured-output
+ *   caller can give each verification column the grammar state after drafts[0..j-1].
  *   Sampling mode applies configs[b] to each valid verification column, accepts draft i with
  *   target probability p_i(draft_i), samples from the residual distribution on first rejection,
  *   and samples a bonus from column Pcur[b] when every available draft is accepted. The draft
@@ -78,7 +81,7 @@ void speculative_prepare_verify_ids(const Tensor& anchors, const Tensor& drafts,
  *   configs[b].token_counts do not overlap except for the explicitly mutated objects.
  *
  * Numeric:
- *   Sampling filtering, penalties, normalization, and RNG semantics are those of sampling.h.
+ *   Sampling masks, filtering, penalties, normalization, and RNG semantics are those of sampling.h.
  *
  * Effects:
  *   For each row, let A be the accepted draft count and L=A+1. licensed_tokens[0:A,b] receives
@@ -112,9 +115,10 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
  * Algorithm:
  *   This is the variable-K, 16-candidate form of speculative rejection sampling.
  *   For row b, let P=clamp(current_extents[b],0,K). Only target columns 0..P are live.
- *   Greedy rows accept the longest prefix matching the penalty-adjusted target argmax,
+ *   Greedy rows accept the longest prefix matching the mask- and penalty-adjusted target argmax
+ *   (column j's mask is allowed_tokens + j*allowed_tokens_column_stride),
  *   then emit that argmax as correction/bonus. Positive-temperature rows construct p
- *   using sampling.h penalties and filters. A live draft d is accepted with probability
+ *   using sampling.h masks, penalties, and filters. A live draft d is accepted with probability
  *   min(1,p(d)/q(d)); first rejection samples normalized max(p-q,0). After accepting all
  *   P drafts, the terminal token is sampled from target column P.
  *
@@ -126,7 +130,7 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
  *   The registered domain is token_domain=248077, K=1..15, B=1..8. Each live draft
  *   position has distinct global candidate ids in [0,token_domain). proposal_q is the
  *   normalized FP32 distribution used to draw that draft; the draft occurs with positive q.
- *   For greedy rows without penalties, live target_tokens are the unpenalized target argmax
+ *   For greedy rows without penalties or an allowed_tokens mask, live target_tokens are the raw target argmax
  *   over the valid token domain, with lower ids breaking ties.
  *
  * Numeric:
@@ -147,7 +151,8 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
  *
  * Execution:
  *   all_rows_greedy_without_penalties=true promises the matching device configs and enables the
- *   raw target_tokens route. A false flag selects the general route and supports mixed rows.
+ *   raw target_tokens route and requires every allowed_tokens pointer to be null. A false flag
+ *   selects the general route and supports mixed rows, including masked P=0 rows.
  *
  * Workspace:
  *   Caller-owned transient storage reported by

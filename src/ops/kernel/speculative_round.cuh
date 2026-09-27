@@ -243,7 +243,7 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_accept_greedy_draft
     std::int32_t* row_tokens        = licensed_tokens + row * cols;
     const __nv_bfloat16* row_logits =
         logits + static_cast<std::int64_t>(row) * cols * physical_rows;
-    const bool penalties = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f;
+    const bool penalties = cfg.allowed_tokens != nullptr || cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f || cfg.repetition_penalty != 1.0f;
 
     if (!(cfg.temperature > 0.0f) && !penalties) {
         if (tid == 0) {
@@ -289,7 +289,7 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_accept_greedy_draft
             int best_index          = INT_MAX;
             for (int v = tid; v < token_domain; v += blockDim.x) {
                 const float value = sampling_adjusted_logit(__bfloat162float(row_logits[base + v]),
-                                                            v, cfg, row_drafts, i);
+                                                            v, cfg, row_drafts, i, i);
                 if (sampling_better(value, v, best_value, best_index)) {
                     best_value = value;
                     best_index = v;
@@ -334,11 +334,11 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_accept_greedy_draft
         const std::int64_t base = static_cast<std::int64_t>(i) * physical_rows;
         if (token_domain <= kSamplerTileItems) {
             sampling_build_truncated_small(row_logits, base, token_domain, cfg, red_val, red_idx,
-                                           cand_val, cand_idx, prob, &n_support, row_drafts, i);
+                                           cand_val, cand_idx, prob, &n_support, row_drafts, i, i);
         } else {
             sampling_build_truncated_block_fast(row_logits, base, token_domain, cfg, merge_val,
                                                 merge_idx, cand_val, cand_idx, prob, &n_support,
-                                                row_drafts, i);
+                                                row_drafts, i, i);
         }
         if (tid == 0 && done_sh == 0) {
             const int L = L_sh;
@@ -394,7 +394,7 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_sampling_partial_to
     if (col > extent) { return; }
     const SamplingConfig cfg = configs[row];
     const bool greedy        = !(cfg.temperature > 0.0f);
-    const bool penalties     = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f;
+    const bool penalties     = cfg.allowed_tokens != nullptr || cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f || cfg.repetition_penalty != 1.0f;
     if ((greedy && !penalties) || token_domain <= kSamplerTileItems) { return; }
     workspace = speculative_workspace_row(workspace, workspace_row_stride, row);
     if (partial == 0 && threadIdx.x == 0) {
@@ -433,7 +433,7 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_sampling_partial_to
         if (v < token_domain) {
             const __nv_bfloat16 raw = logits[base + v];
             keys[item]              = sampling_sort_key(
-                sampling_adjusted_logit(__bfloat162float(raw), v, cfg, row_drafts, col), v);
+                sampling_adjusted_logit(__bfloat162float(raw), v, cfg, row_drafts, col, col), v);
         } else {
             keys[item] = 0ull;
         }
@@ -476,7 +476,7 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void speculative_sampling_group
     std::int32_t* row_tokens        = licensed_tokens + row * cols;
     if (token_domain <= kSamplerTileItems) { return; }
     const bool greedy    = !(cfg.temperature > 0.0f);
-    const bool penalties = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f;
+    const bool penalties = cfg.allowed_tokens != nullptr || cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f || cfg.repetition_penalty != 1.0f;
 
     if (greedy && !penalties) {
         if constexpr (SparseProposal) {
