@@ -174,10 +174,36 @@ def qwen3_8_27b_nvfp4(model, recipe, sources):
         )
 
 
+def qwen3_8_27b_orcarouter_nvfp4(model, recipe, sources):
+    """OrcaRouter's compressed-tensors checkpoint is the base: its NVFP4/FP8 matrix codes are
+    imported as published, and its BF16 token embedding and full output head stay BF16."""
+    if "num_experts" in model.config:
+        raise ValueError("this recipe requires Qwen3.5 Dense mathematics")
+    _optional(model, recipe)
+    base = sources["base"]
+    for name, parameter in model.parameters.items():
+        if not name.startswith("text/layers/") or not parameter.projection:
+            continue
+        if name.endswith(("/gdn/a_projection", "/gdn/b_projection")):
+            continue
+        # The same allocation as the official Qwen3.8-27B NVFP4 checkpoint; a source matrix
+        # stored in another encoding fails the import.
+        layer = int(name.split("/")[2])
+        format = "nvfp4" if "/mlp/" in name and layer < 56 else FP8
+        recipe.assign(
+            name,
+            format=format,
+            method=import_encoded,
+            source=model.source(name, base, format),
+            activation_policy="AllowA4" if format == "nvfp4" else "AllowA8",
+        )
+
+
 RECIPES = {
     "qwen3_6_27b": qwen3_6_27b,
     "qwen3_6_27b_nvfp4": qwen3_6_27b_nvfp4,
     "qwen3_8_27b": qwen3_8_27b,
     "qwen3_8_27b_nvfp4": qwen3_8_27b_nvfp4,
+    "qwen3_8_27b_orcarouter_nvfp4": qwen3_8_27b_orcarouter_nvfp4,
     "qwen3_6_35b_a3b": qwen3_6_35b_a3b,
 }

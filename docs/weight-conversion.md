@@ -57,6 +57,7 @@ The built-in recipes are ordinary Python functions in
 | `qwen3_6_35b_a3b` | Q4 experts, Q5/Q6 expert down, Q8 shared/projection weights | None |
 | `qwen3_6_27b_nvfp4` | Imported NVFP4, selected BF16 projections, Q8 vocabulary weights | `quantized` |
 | `qwen3_8_27b_nvfp4` | Imported NVFP4/FP8, FP8 embedding generated from BF16 | `quantized` |
+| `qwen3_8_27b_orcarouter_nvfp4` | Imported NVFP4/FP8 from a compressed-tensors `--model`, BF16 embedding and full output head kept | None |
 
 These names select conversion choices. Runtime execution is selected from the architecture,
 configuration and actual bindings stored in the artifact. `--name` sets the public model name;
@@ -76,6 +77,29 @@ python3 -m tools.convert \
   --name qwen3.8-27b \
   --out models/qwen3_8_27b_nvfp4.ninfer
 ```
+
+The OrcaRouter Qwen3.8-27B NVFP4 derivative
+([orcarouter/Qwen3.8-27B-Uncensored-NVFP4](https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-NVFP4),
+revision `69d21348b2d6c11439fb69368f40414c2256e44e`) is its own base: its compressed-tensors
+checkpoint supplies the imported matrices, BF16 embedding, BF16 output head, MTP and Vision. Its
+tokenizer resources are kept as published; its chat template is the canonical Qwen3.8 template, so
+the maintained one is installed:
+
+```bash
+python3 -m tools.convert \
+  --model /path/to/OrcaRouter-Qwen3.8-27B-Uncensored-NVFP4 \
+  --recipe qwen3_8_27b_orcarouter_nvfp4 \
+  --source dflash2=/path/to/Qwen3.8-27B-DFlash2 \
+  --components text,vision,mtp,dflash2 \
+  --resource chat_template.jinja=tools/chat_templates/qwen3_8.jinja \
+  --proposal \
+  --name qwen3.8-27b-orcarouter \
+  --out models/qwen3_8_27b_orcarouter_nvfp4.ninfer
+```
+
+Its BF16 head runs through the registered BF16 `[248320,5120]` Linear and LinearTopK problems. The
+DFlash2 companion was trained for the canonical target; the derivative executes it but is not
+qualified as equivalent.
 
 MTP and Vision use the main source. DFlash and DFlash2 use the corresponding named source, supplied
 as `--source dflash=PATH` or `--source dflash2=PATH`. An artifact may contain several optional
