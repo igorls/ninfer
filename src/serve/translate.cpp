@@ -175,7 +175,7 @@ ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& reques
     kwargs.erase("reasoning_effort");
     ResolvedPromptSemantics result{
         .enable_thinking           = thinking ? thinking : server.enable_thinking,
-        .preserve_thinking         = preserve ? preserve : server.preserve_thinking,
+        .preserve_thinking         = preserve.value_or(server.preserve_thinking),
         .chat_template_kwargs_json = kwargs.dump(),
     };
     if (effort) {

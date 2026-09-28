@@ -362,8 +362,10 @@ interprets the other standard values (`minimal`, `low`, `medium`, `high`, `xhigh
 Conflicting explicit `enable_thinking` and effort values return `conflicting_template_option`.
 
 `preserve_thinking` controls reasoning retention according to the selected template. Request
-options override server defaults set with `--no-thinking` and `--preserve-thinking`. Unspecified
-thinking, effort and preservation options use the template's defaults.
+options override server defaults set with `--no-thinking` and `--preserve-thinking`. Unless a
+request or `--preserve-thinking` asks to keep it, closed-turn assistant reasoning sent back in the
+history is dropped, even where the template would keep it by default (Qwen3.8). Unspecified
+thinking and effort options use the template's defaults.
 
 Streaming begins with an assistant-role chunk, sends separate reasoning and content deltas, then a
 finish-reason chunk and `[DONE]`. When `stream_options.include_usage` is true, a final empty
@@ -1293,8 +1295,9 @@ they do not infer request behavior from process-global counter deltas.
 | `request_error` | the resolved request configuration and the generation, cancellation, or pre-outcome transport terminal message |
 | `throughput` | interval token/decode/context-cache pressure counter deltas, authoritative worker Host-work deltas, current scheduler/resource gauges, and decode-round batch statistics |
 
-`requested_reasoning_effort` and `preserve_thinking` record the explicit options, or `null` when
-unspecified. `enable_thinking` records whether the response starts in thinking mode.
+`requested_reasoning_effort` records the explicit option, or `null` when unspecified;
+`preserve_thinking` records the resolved value, including the server default.
+`enable_thinking` records whether the response starts in thinking mode.
 
 `request_done.result.tool_call_parse` records whether a complete marker was seen, the structured
 call count, empty non-string arguments omitted during normalization, schema-mismatched arguments

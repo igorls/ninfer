@@ -291,6 +291,8 @@ int main() {
                           explicit_effort.enable_thinking == true,
                       "explicit reasoning effort did not remain the effective effort");
     request.reasoning_effort.reset();
+    failures += check(resolve_prompt_semantics(request, defaults).preserve_thinking == false,
+                      "an unspecified request did not resolve to dropped closed-turn reasoning");
     failures += check(resolve_prompt_semantics(request, configured).preserve_thinking == true,
                       "server preserve-thinking default was not resolved");
     request.preserve_thinking = false;
