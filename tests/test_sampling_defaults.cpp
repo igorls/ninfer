@@ -42,6 +42,8 @@ int main() {
     const ninfer::SamplingPreset dense_thinking{
         .temperature = 1.0F, .top_k = 20, .top_p = 0.95F, .min_p = 0.0F};
     const ninfer::SamplingPreset dense_non_thinking{
+        .temperature = 0.7F, .top_k = 20, .top_p = 0.8F, .min_p = 0.0F};
+    const ninfer::SamplingPreset moe_non_thinking{
         .temperature      = 0.7F,
         .top_k            = 20,
         .top_p            = 0.8F,
@@ -61,7 +63,7 @@ int main() {
     failures += check(same_preset(dense.non_thinking, dense_non_thinking),
                       "Dense non-thinking defaults mismatch");
     failures += check(same_preset(moe.thinking, moe_thinking) &&
-                          same_preset(moe.non_thinking, dense_non_thinking),
+                          same_preset(moe.non_thinking, moe_non_thinking),
                       "MoE mode defaults mismatch");
 
     const ninfer::ResolvedSamplingParameters thinking = ninfer::runtime::resolve_sampling(
@@ -72,7 +74,7 @@ int main() {
                           thinking.presence_penalty == 0.0F && thinking.seed == 0,
                       "omitted overrides did not select Dense thinking defaults");
     failures += check(non_thinking.temperature == 0.7F && non_thinking.top_p == 0.8F &&
-                          non_thinking.presence_penalty == 1.5F,
+                          non_thinking.presence_penalty == 0.0F,
                       "omitted overrides did not select Dense non-thinking defaults");
 
     ninfer::SamplingOverrides overrides;

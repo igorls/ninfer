@@ -1246,8 +1246,8 @@ selected source.
 
 Engine selects sampling defaults from the loaded architecture and the request's resolved thinking mode.
 Qwen3.6-27B and Qwen3.8-27B use `1.0/0.95/20/0/0` for
-temperature/top-p/top-k/min-p/presence penalty in thinking mode and `0.7/0.80/20/0/1.5` in
-non-thinking mode. Qwen3.6-35B-A3B differs only in its thinking presence penalty, which is `1.5`.
+temperature/top-p/top-k/min-p/presence penalty in thinking mode and `0.7/0.80/20/0/0` in
+non-thinking mode. Qwen3.6-35B-A3B uses a presence penalty of `1.5` in both modes.
 Frequency penalty is `0` for all registered presets. Process flags override registered values,
 request fields override process flags, and `--greedy` finally forces temperature `0`.
 

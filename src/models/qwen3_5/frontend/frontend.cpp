@@ -557,11 +557,13 @@ ModelSamplingDefaults default_sampling(Architecture architecture) {
                              .min_p            = 0.0F,
                              .presence_penalty = architecture == Architecture::Qwen3_5Moe ? 1.5F : 0.0F,
                              .frequency_penalty = 0.0F};
+    // Dense models keep a neutral presence penalty in both modes; applications that want Qwen's
+    // non-thinking 1.5 request it.
     sampling.non_thinking = {.temperature       = 0.7F,
                              .top_k             = 20,
                              .top_p             = 0.80F,
                              .min_p             = 0.0F,
-                             .presence_penalty  = 1.5F,
+                             .presence_penalty  = architecture == Architecture::Qwen3_5Moe ? 1.5F : 0.0F,
                              .frequency_penalty = 0.0F};
     return sampling;
 }

@@ -236,14 +236,15 @@ and rendered prompt mode. The current official models use:
 | Model | Prompt mode | Temperature | Top-p | Top-k | Min-p | Presence penalty |
 |---|---|---:|---:|---:|---:|---:|
 | Qwen3.6-27B | thinking | `1.0` | `0.95` | `20` | `0` | `0` |
-| Qwen3.6-27B | non-thinking | `0.7` | `0.80` | `20` | `0` | `1.5` |
+| Qwen3.6-27B | non-thinking | `0.7` | `0.80` | `20` | `0` | `0` |
 | Qwen3.8-27B | thinking | `1.0` | `0.95` | `20` | `0` | `0` |
-| Qwen3.8-27B | non-thinking | `0.7` | `0.80` | `20` | `0` | `1.5` |
+| Qwen3.8-27B | non-thinking | `0.7` | `0.80` | `20` | `0` | `0` |
 | Qwen3.6-35B-A3B | thinking | `1.0` | `0.95` | `20` | `0` | `1.5` |
 | Qwen3.6-35B-A3B | non-thinking | `0.7` | `0.80` | `20` | `0` | `1.5` |
 
-Frequency penalty is `0` in every registered preset. Task-specific profiles such as Qwen's
-precise-coding profile use explicit sampling overrides.
+Frequency penalty is `0` in every registered preset. The Dense presets keep a neutral presence
+penalty in both modes; request Qwen's non-thinking `1.5` explicitly where wanted. Task-specific
+profiles such as Qwen's precise-coding profile use explicit sampling overrides.
 
 Repeat `--stop-token-id`, `--stop`, or `--reasoning-stop` to add stop conditions. Use
 `--raw-output` to expose the frontend's raw output stream and `--print-token-ids` to include
