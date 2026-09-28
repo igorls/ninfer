@@ -92,6 +92,13 @@ Fork SHAs are on `research/qwen4-flash-next`.
 | Arcade, JevBench, router, probes | ARC, JEV, RTR, BEN commits | `a1f8b2d9` `6dfd01b8` `7c8555cb` | |
 | Docs, model card | DOC commits, `97200f2b` | `174fdb87` `b80c497b` | Fork README; the OrcaRouter card describes the published v2 artifact |
 
+The port missed nine documents, which were carried unchanged on 2026-09-28 (only links to moved
+v3 paths were updated): the research records `docs/research/jevbench-qwen-intelligence-dossier.md`,
+`learned-reasoning-router.md`, `qwen3.8-27b-decision-study.md`,
+`qwen3_8_27b_derivative_artifacts.md` and `r610-cuda-tile.md`; the Supervisor's design-system and
+product documents `DESIGN.md` and `PRODUCT.md`; and the demo design sidecars
+`docs/decide-demo.DESIGN.md` and `docs/dual-purpose.DESIGN.md`.
+
 The DFlash2 residue of `ddeeec19` needed nothing: v3 rejects an unsettled StateImage Fork at seal
 revalidation instead of the fork's early admission gate, and the fork-only all-constrained
 width-one DFlash path is not carried.
