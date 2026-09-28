@@ -22,9 +22,11 @@ constexpr SyncSchedule kSyncSchedules[] = {
     {"auto", cudaDeviceScheduleAuto},
 };
 
+// The fork's default is blocking: on the shared RTX PRO 6000 desktop it frees the core a spinning
+// wait holds with no measured prefill or decode cost (docs/maintainer/upstream-ports.md).
 unsigned int sync_schedule_from_environment() {
     const char* value = std::getenv("NINFER_CUDA_SYNC");
-    if (value == nullptr) { return cudaDeviceScheduleSpin; }
+    if (value == nullptr) { return cudaDeviceScheduleBlockingSync; }
     for (const auto& schedule : kSyncSchedules) {
         if (schedule.name == value) { return schedule.flags; }
     }

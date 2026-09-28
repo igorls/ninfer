@@ -255,13 +255,16 @@ Run `./build/apps/ninfer --help` for the exact option contract.
 ## CUDA synchronization
 
 `NINFER_CUDA_SYNC` selects the CUDA device synchronization schedule at startup for both the CLI
-and HTTP server. When unset, it defaults to `spin`, prioritizing low synchronization latency at
-the cost of CPU usage while waiting for the GPU. Use `blocking` to let the waiting thread sleep;
-the decode performance cost depends on the host. `yield` yields the CPU while waiting, and `auto`
-uses CUDA's scheduling heuristic, not an automatic performance benchmark.
+and HTTP server. When unset, it defaults to `blocking`: the waiting thread sleeps instead of
+occupying a CPU core. On the fork's RTX PRO 6000 workstation this frees about one core during
+decode with no measurable prefill or decode cost
+([measurement](performance/rtx-pro-6000.md#v3-port-against-the-production-build-2026-09-28));
+upstream defaults to `spin`. Use `spin` for the lowest synchronization latency at the cost of a busy
+CPU core; the difference depends on the host. `yield` yields the CPU while waiting, and `auto` uses
+CUDA's scheduling heuristic, not an automatic performance benchmark.
 
 ```bash
-NINFER_CUDA_SYNC=blocking ./build/apps/ninfer models/qwen3_8_27b_nvfp4.ninfer --prompt "Hello"
+NINFER_CUDA_SYNC=spin ./build/apps/ninfer models/qwen3_8_27b_nvfp4.ninfer --prompt "Hello"
 ```
 
 The Engine-ready log reports the selected mode. Empty or unrecognized values, or failure to apply
