@@ -18,7 +18,8 @@ struct alignas(64) Bf16TmaDescriptors {
     CUtensorMap weight;
     CUtensorMap activation;
 };
-static_assert(alignof(Bf16TmaDescriptors) == 64);
+// Elsewhere CUtensorMap keeps its own 128-byte alignas, which the struct inherits.
+static_assert(alignof(Bf16TmaDescriptors) % 64 == 0);
 
 inline CUtensorMap bf16_tma_map(const __nv_bfloat16* pointer, int rows, int k, int block_rows,
                                 int block_k) {

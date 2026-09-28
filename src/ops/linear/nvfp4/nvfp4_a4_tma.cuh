@@ -30,7 +30,8 @@ struct alignas(64) Nvfp4A4TmaDescriptors {
     CUtensorMap a_scales;
     CUtensorMap b_scales;
 };
-static_assert(alignof(Nvfp4A4TmaDescriptors) == 64);
+// Elsewhere CUtensorMap keeps its own 128-byte alignas, which the struct inherits.
+static_assert(alignof(Nvfp4A4TmaDescriptors) % 64 == 0);
 
 inline void nvfp4_check_driver(CUresult status, const char* operation) {
     if (status == CUDA_SUCCESS) { return; }
