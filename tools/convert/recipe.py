@@ -21,6 +21,7 @@ from .methods import (
     grouped_absmax,
     fp8_row_maxabs,
     import_encoded,
+    nvfp4_maxabs,
 )
 from .model import Model
 from .sources.logical import LogicalSource, select_rows
@@ -379,7 +380,9 @@ class Recipe:
                 )
             emit([(name, self.selections[name][0]) for name in names], chosen)
             used.update(names)
-        standard = (cast_direct, grouped_absmax, fp8_row_maxabs, import_encoded)
+        # Built-in methods that encode a multi-input parent as one matrix. nvfp4_maxabs derives
+        # its weight divisor from the complete parent, so grouped inputs share it by construction.
+        standard = (cast_direct, grouped_absmax, fp8_row_maxabs, import_encoded, nvfp4_maxabs)
         for names in self.model.packing_groups:
             if any(
                 name in used or name in self.aliases or name in self.separate_parameters

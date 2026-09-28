@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack
+import hashlib
 import importlib.util
 from pathlib import Path
 import sys
@@ -23,6 +24,7 @@ class SourceInputs(Mapping):
     def __init__(self, base, paths, stack):
         self._sources = {"base": base}
         self._paths = dict(paths)
+        self._used_paths = set()
         self._stack = stack
 
     def __getitem__(self, name):
@@ -42,9 +44,27 @@ class SourceInputs(Mapping):
     def __len__(self):
         return len(set(self._sources) | set(self._paths))
 
+    def path(self, name):
+        """A named non-tensor recipe input, such as a calibration document."""
+        if name in self._sources:
+            return Path(self._sources[name].path)
+        if name not in self._paths:
+            raise ValueError(
+                f"selected recipe requires source {name!r}; provide --source {name}=PATH"
+            )
+        self._used_paths.add(name)
+        return self._paths[name]
+
     def provenance(self):
-        return {
+        opened = {
             name: {"path": str(source.path)} for name, source in self._sources.items()
+        }
+        return opened | {
+            name: {
+                "path": str(self._paths[name]),
+                "sha256": hashlib.sha256(self._paths[name].read_bytes()).hexdigest(),
+            }
+            for name in sorted(self._used_paths)
         }
 
 

@@ -26,6 +26,8 @@ from tools.artifact.tensor_output import TensorOutput
 
 from .quantization.fp8_row import quantize_bf16_rows
 from .quantization.groupwise import quantize_matrix
+from .quantization.nvfp4 import encode_rows as encode_nvfp4_rows
+from .quantization.nvfp4 import weight_divisor as nvfp4_weight_divisor
 from .sources.logical import EncodedRows, LogicalSource
 
 UseKey = tuple[str, str]
@@ -293,9 +295,51 @@ def import_encoded(request: PrepareRequest) -> PreparedMethod:
     return request.job(produce=produce, auxiliaries=auxiliaries)
 
 
+def nvfp4_maxabs(request: PrepareRequest) -> PreparedMethod:
+    """Encode values with NVFP4_MAXABS_DIVISOR_RNE_V1 over the complete packed parent.
+
+    Every AllowA4 Use needs a calibrated activation divisor from the recipe; the weight carries
+    no source input scale to derive one from.
+    """
+    if request.target.format != "nvfp4" or len(request.target.shape) != 2:
+        raise ValueError("nvfp4_maxabs requires an NVFP4 matrix target")
+    _preflight(request)
+    n, k = request.target.shape
+    if n % 128 or k % 16:
+        raise ValueError("NVFP4 parent requires complete 128-row and 16-column tiles")
+    chunk = max(128, request.rows_per_chunk // 128 * 128)
+    auxiliaries = {}
+    for item in request.inputs:
+        for use in item.uses:
+            if request.policies[use] != "AllowA4":
+                continue
+            key = (*use, "activation_input_divisor")
+            if key not in request.auxiliary_overrides:
+                raise ValueError(f"{use[0]}: a calibrated activation divisor is required")
+            auxiliaries[key] = request.auxiliary_overrides[key]
+
+    def produce(output):
+        # The divisor is a property of the whole parent, so it needs a first pass over every row.
+        maximum = 0.0
+        for begin in range(0, n, chunk):
+            values = request.values(begin * k, min(n, begin + chunk) * k).float()
+            if not bool(torch.isfinite(values).all()):
+                raise ValueError("NVFP4 source contains NaN or infinity")
+            maximum = max(maximum, float(values.abs().max()))
+        divisor = nvfp4_weight_divisor(maximum)
+        for begin in range(0, n, chunk):
+            end = min(n, begin + chunk)
+            values = request.values(begin * k, end * k).reshape(end - begin, k)
+            codes, scales = encode_nvfp4_rows(values.to(request.device), divisor)
+            output.write_codes(begin, codes.cpu(), scales.cpu(), divisor)
+
+    return request.job(produce=produce, auxiliaries=auxiliaries)
+
+
 METHODS: dict[str, Method] = {
     "cast_direct": cast_direct,
     "grouped_absmax": grouped_absmax,
     "fp8_row_maxabs": fp8_row_maxabs,
     "import_encoded": import_encoded,
+    "nvfp4_maxabs": nvfp4_maxabs,
 }
