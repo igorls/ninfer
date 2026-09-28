@@ -1,10 +1,47 @@
 # RTX PRO 6000 workstation records (fork)
 
-These results were measured on the fork's pre-v3 engine (`research/qwen4-flash-next`) on its
-RTX PRO 6000 Blackwell 96 GB workstation, beside other desktop GPU work. They are historical
-records, not v3 measurements, and they do not follow every rule of the
-[publication methodology](methodology.md). Each section states its own conditions. Qwen3.8-Flash-Next
-records stay with that line until its port.
+These results were measured on the fork's RTX PRO 6000 Blackwell 96 GB workstation. The first
+section compares the v3 port with the production build; the others are records of the fork's
+pre-v3 engine (`research/qwen4-flash-next`), taken beside other desktop GPU work. They do not
+follow every rule of the [publication methodology](methodology.md); each section states its own
+conditions. Qwen3.8-Flash-Next records stay with that line until its port.
+
+## v3 port against the production build (2026-09-28)
+
+Measured in a production stop window on the RTX PRO 6000 Blackwell (driver 616.92, 600 W limit,
+ECC on), with Blender and Unreal paused and idle. Each arm is a fresh `ninfer-serve` on a spare
+port with the production flags: `--max-context 131072 --kv-capacity 524288 --max-concurrency 8
+--prefill-chunk 2048 --kv-dtype fp8 --vision --spec mtp --draft-tokens 5 --lm-head-draft
+--desktop-reserve-gib 6`. Two rounds alternate the four arms. Per arm and round: one warmup, five
+cold 7,680-token prefills (the `long_niah_8k` fixture trimmed to exactly 7,680 prompt tokens, a
+fresh salt per request, read-only cache, one output token) and five greedy 256-token decodes
+(counting prompt, thinking off). Prefill and decode times are the server's own request-log
+timings; decode tok/s excludes the first token. CPU cores are the process's CPU time over the
+decode repetitions divided by their wall time. Values are over both rounds (ten samples).
+
+| Arm | Build | 7,680-token prefill ms, median [min–max] | Decode tok/s, median [min–max] | MTP acceptance | CPU cores in decode | Presence penalty |
+|---|---|---:|---:|---:|---:|---:|
+| Production | installed fork build, v2 artifact, spin | 683.6 [673.5–696.0] | 153.8 [150.7–154.8] | 36.9% | 0.96 | 0 |
+| Port | v3 `27426227`, v3 copy, spin (token-fast W4A4 raster) | 683.4 [664.6–698.2] | 148.4 [132.9–153.0] | 36.6% | 0.96–0.98 | 0 |
+| Port, blocking sync | same, `NINFER_CUDA_SYNC=blocking` | 681.0 [670.8–693.9] | 152.9 [149.7–154.0] | 36.8% | 0.03 | 0 |
+| Port, weight-fast raster | same, W4A4 TMA grid in weight-fast order | 678.2 [673.7–681.8] | 153.2 [151.8–154.9] | 36.8% | 0.96–0.97 | 0 |
+
+Every arm processed exactly 7,680 prompt tokens and 256 completion tokens. Round-to-round drift is
+as large as any arm difference: the production arm's prefill median moved from 676.5 to 694.3 ms
+between rounds, and the token-fast and weight-fast ordering of prefill reversed between rounds
+(674.0 vs 677.1 ms, then 689.4 vs 678.4 ms).
+
+- **Parity.** The v3 port prefills the probe in the same time as the production build (683.4 vs
+  683.6 ms). Its decode medians are 152.9–153.2 tok/s in the blocking and weight-fast arms, whose
+  decode path is the port's own (a single token tile orders identically under both rasters), against
+  153.8 for production. The token-fast spin arm's lower median comes from slow samples (132.9 tok/s
+  in round one, 141.6–149.9 in round two), not from a code difference.
+- **W4A4 raster (P1).** Weight-fast against the v3 default token-fast: −0.8% prefill median, inside
+  the noise and with inconsistent sign across rounds. The fork's 2026-09-10 regression (741.4 to
+  749.9 ms, a different configuration) does not reproduce on v3, which also carries upstream's
+  tiled activation-scale fetch. v3 keeps upstream's unconditional token-fast raster.
+- **Blocking CUDA sync.** Prefill and decode are unchanged within noise, and the engine's CPU use
+  during decode falls from about 0.96 core to 0.03. This is data only; the default stays spin.
 
 ## NVFP4 W4A4 prefill schedule (RTX 5090 record)
 
@@ -13,7 +50,8 @@ activation-scale TMA fetch per K-tile pair for NVFP4 Linear and LinearSwiGLU, wh
 6000 kept weight-fast rasterization and per-tile scale fetches: the combined change had regressed
 its measured 7,680-token prefill from 741.4 to 749.9 ms. The v3 base makes token-fast rasterization
 unconditional (upstream `ee9d5192`) and fetches activation scales one tile per TMA request
-(`1d8587bc`); the RTX PRO 6000 decision is re-measured on v3.
+(`1d8587bc`); re-measured on v3 in the section above, the RTX PRO 6000 shows no difference between
+the two rasters, so v3 keeps token-fast on every device.
 
 [Issue #22](https://github.com/igorls/ninfer/issues/22#issuecomment-5741594802) and
 its [raw reports and reproduction scripts](https://gist.github.com/patrickscd/a1f67f1b693962d6cd6a826748cc24a3)

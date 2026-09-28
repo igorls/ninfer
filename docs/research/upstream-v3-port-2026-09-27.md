@@ -55,9 +55,9 @@ confirm in M2), `dropped` (after approval).
 | 9 | Y1 TypeSafe System One | b | `e20e7e23` `147370d7` `ff20cd06` `87812bc8` | `src/serve/typesafe_systemone*`, `tests/test_typesafe_schema.cpp` | done `1833011e`. Sources carried verbatim onto the v3 generation service; the decision-arcade client paragraph of `docs/serving.md` returns with the ARC pages. Real-model /v1/systemone check in the M2 smoke |
 | 10 | Q1 Reasoning feature readout | b | `15f0c5aa` | `ExecutionOptions`, `src/models/qwen3_5` frontend frontier and program readout, `apps/reasoning-collect` | done `f290c8e7`. The frontier comes from the rendered layout's final open assistant block and is absent (capture refused at submit) when not an exact token frontier, instead of the fork's throw during every prepare. The collector is the 87812bc8 version (concurrency, derive-2048, direct-only); it checks `model_name` qwen3.8-27b plus an `nvfp4` weight format. Real test passes on both v3 artifacts. `reasoning_router.py` and the Colab tools move with RTR |
 | 11 | O1 OrcaRouter NVFP4 | b | `91ce2f2c` | `tools/convert` recipe (BF16 embedding + full head), tokenizer resource handling, BF16 Linear/LinearTopK qualification, supervisor preset | done `e35b663d` (BF16 [248320,5120] Linear and LinearTopK, oracle tests), `9a9a1823` (letters-only split, optional added_tokens_decoder/add_bos_token, 17-case tokenizers fixture), `74c5343f` (recipe `qwen3_8_27b_orcarouter_nvfp4`). v3 artifact `E:\models\v3\OrcaRouter-Qwen3.8-27B-NVFP4\qwen3_8_27b_orcarouter_nvfp4.ninfer` (26,268,683,012 bytes, CPU conversion 127 s) loads with MTP and DFlash2. The v3 proposal already force-includes special tokens. Supervisor preset moves with SUP |
-| 12 | D2 DFlash2 residue | b/a | `ddeeec19` | StateImage-fork admission block in the Program; 27B DFlash2 real test | verify. v3 rejects an unsettled Fork at seal revalidation (`StalePolicyState`, seal returns no plan) instead of the fork's early `inspect_admission` gate; not carried unless a test shows a stall. DFlash2 serving smoke passes; `ninfer_qwen3_5_dflash2_real_test` needs about 3.7 GB (4 rows) to 6.3 GB (8 rows) beyond weights under the fixed 8 GiB default desktop reserve and cannot run beside production |
+| 12 | D2 DFlash2 residue | b/a | `ddeeec19` | StateImage-fork admission block in the Program; 27B DFlash2 real test | done: nothing to carry. v3 rejects an unsettled Fork at seal revalidation (`StalePolicyState`, seal returns no plan) instead of the fork's early `inspect_admission` gate. `ninfer_qwen3_5_dflash2_real_test` passes on the v3 production copy in the 2026-09-28 window (defaults K=15, graph, optimized head, 8 rows, BF16 KV: 21/23 accepted; K=7, 8 rows: 20/20), and the DFlash2 serving smoke passes |
 | 13 | Tooling and apps | d | SUP, W2, RTR, JEV, ARC, BEN, DOC rows below | `apps/ninfer-supervisor`, `apps/windows`, `scripts/windows`, `tools/bench`, `docs`, `model-cards` | done: `168bdf12` supervisor (unit test passes; monitor-only twin on 8098 observed a v3 engine), `a1f8b2d9` arcade (12 Node tests pass), `fc9a1ebe` installer scripts, `6dfd01b8` JevBench and router (13 pytest pass), `7c8555cb` probes and CUDA 13.3 container, `174fdb87` fork README and `docs/performance/rtx-pro-6000.md` (pre-v3 DFlash2, OrcaRouter and W4A4 records), `b80c497b` OrcaRouter card carried as-is (describes the published v2 artifact; republishing v3 is a later decision, Igor 2026-09-28). `docs/tribuno-production-evaluation-plan.md` dropped as a completed plan (Igor, 2026-09-28). The fork's edits to `run_serve_*`/`run_ninfer_bench_matrix.py` are superseded by v3 (report schema v15, DFlash2 modes); Flash-Next tools, `shortlist_*.i32` and the Flash-Next card wait for M3 |
-| 14 | P1 NVFP4 W4A4 schedule by device | b | `db1a3694` | `src/ops/linear/nvfp4` TMA raster selection | measure first |
+| 14 | P1 NVFP4 W4A4 schedule by device | b | `db1a3694` | `src/ops/linear/nvfp4` TMA raster selection | done, not carried: on v3 the weight-fast raster (measurement build, oracle tests pass) prefills the 7,680-token probe in 678.2 ms against 683.4 ms for the default token-fast, inside the noise and with inconsistent sign across rounds. The fork's 741.4 to 749.9 ms regression does not reproduce; upstream `ee9d5192` stays unconditional. Results in `docs/performance/rtx-pro-6000.md` |
 | 15 | Flash-Next package + converter + v3 artifact | c | 140 rows (FN, FA) | second architecture package beside `src/models/qwen3_5`, v3 converter recipe | M3 |
 
 Order rationale: tool-call, protocol and admin work (2-5) are self-contained and restore the
@@ -126,9 +126,9 @@ P1 A/B.
 Recorded decisions (Igor, 2026-09-28):
 
 - Remove the private-catalog clamp (fork `aec32ee0`, carried in `352958d5`): done `1c390ca6`, no
-  option left behind. The three `prefix_real` pressure scenarios passed with the clamp disabled;
-  their confirmation run on the final build needs about 30 GB free (21.34 GiB weights plus the
-  test's fixed 8 GiB default reserve) and is in the GPU window.
+  option left behind. The three `prefix_real` pressure scenarios (pressure-resume,
+  private-checkpoint-pressure, source-pressure-protection) pass on the final build in the GPU
+  window.
 - OrcaRouter keeps following its `tokenizer.json` (letters-only split), documented in the
   OrcaRouter section of `docs/weight-conversion.md` (`7130a888`), which replaces the fork's
   per-target artifact reference on v3.
@@ -232,6 +232,32 @@ images: Host state slots 8/8, 34 private owners evicted (counted in `/admin/stat
 revisits hit. With `--host-state-slots 44`, all 12 revisits hit at 99% (12 Host state restores) and
 6 owners were evicted. A catalog of 48 therefore needs matching state slots to retain 48 sessions;
 nothing fails silently.
+
+## GPU window (2026-09-28)
+
+Production stop requested 05:37:17 UTC; the supervisor acted on a second `POST /api/stop` sent at
+05:39:31 and :8010 closed by 05:40:00. Restart requested 05:44:35; the supervisor acted on a second
+`POST /api/start` at 05:48:42 (HTTP 200 after 28 s), the engine started 05:48:47, `/health` answered
+at 05:49:10 and a real `qwen3.8-27b` chat completion was verified at 05:49:16 UTC, with the same
+command line as before. :8010 was down 9 min 16 s. The first POST of each pair returned without
+acting; holding the connection until the supervisor answers is what worked.
+
+In the window, on the v3 production copy with the full GPU (87 GB free):
+
+- `ninfer_qwen3_5_dflash2_real_test`: pass with its defaults (K=15, graph, optimized head, 8
+  rows, BF16 KV; 21/23 accepted) and with K=7 at 8 rows (20/20).
+- `ninfer_qwen3_5_prefix_real_test` pressure-resume, private-checkpoint-pressure and
+  source-pressure-protection: pass on the final build.
+- Same-flags A/B of the production build against the port, the port with blocking CUDA sync and
+  the port with the weight-fast W4A4 raster, two alternating rounds of fresh processes, ten samples
+  per metric: 7,680-token prefill medians 683.6 / 683.4 / 681.0 / 678.2 ms and decode medians
+  153.8 / 148.4 / 152.9 / 153.2 tok/s, MTP acceptance 36.6–36.9% everywhere, presence penalty 0 in
+  every arm. The port matches production within the round-to-round drift (the production arm's
+  prefill median moved 18 ms between rounds); the token-fast spin arm's lower decode median comes
+  from slow samples, since the blocking and weight-fast arms run the same decode code at 152.9 and
+  153.2 tok/s. Blocking sync frees about 0.93 of a CPU core during decode (0.96 to 0.03) at no
+  measurable cost (data only; spin stays the default). Table and conditions:
+  `docs/performance/rtx-pro-6000.md`.
 
 ## M1 — pristine Windows baseline
 
