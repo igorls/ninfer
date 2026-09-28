@@ -13,17 +13,16 @@ workstation.
 
 | Item | Value |
 |---|---|
-| Fork line | `port/upstream-v3`, based on upstream [`bace20dc`](https://github.com/Neroued/ninfer/commit/bace20dc70249eed6402b66d4852c6c3f9612905) (September 24, 2026) |
-| Last reviewed upstream commit | `bace20dc`, the merge-base |
+| Fork line | `workstation` (named `port/upstream-v3` until September 28, 2026), based on upstream [`bace20dc`](https://github.com/Neroued/ninfer/commit/bace20dc70249eed6402b66d4852c6c3f9612905) (September 24, 2026) and merged with upstream `e31bc99b` in `e2a149f1` |
+| Last reviewed upstream commit | [`e31bc99b`](https://github.com/Neroued/ninfer/commit/e31bc99b13f517c8aae70b997b7c4a49b4dcdc5d) (September 26, 2026), the merge-base |
 | Pre-v3 fork line | `research/qwen4-flash-next` at `87812bc8` (September 26); the source for Flash-Next |
-| Not yet reviewed | 15 upstream commits after `bace20dc` (September 26): Q4/Q5/Q6/Q8/FP8/NVFP4 and BF16 Linear template unification (`229c1832`, `42614c0e`, `fc62790a`, `502cd9d6`, `5d08cba8`, `fc3993d8`, `ecbc3357`), GDN two-stage kernels (`0784e76f`), KDA recurrent and chunked paths (`619e3f4c`, `6d333ce0`, `d4ea63ea`, `71a1cb0e`) and documentation rules (`b24a439f`, `2ddef207`, `e31bc99b`) |
+| Not yet reviewed | Nothing: upstream `master` was at `e31bc99b` on September 28, 2026 |
 
 The fork syncs by merging `origin/master` into the fork line, never by rebasing or cherry-picking
 upstream work. Each merge records every upstream change it brings in here as integrated, deferred
 or reverted, so the merge-base is the reviewed point. A rejected upstream change is reverted in the
 fork line (or device-gated) with its measurement recorded; a deferred one names the condition that
-would make it useful. The next merge must re-fit the fork's registered BF16 `[248320,5120]` shape
-(OrcaRouter) into upstream's unified BF16 Linear templates.
+would make it useful.
 
 ## How to maintain this document
 
@@ -69,6 +68,56 @@ of `1d8587bc`, a weight-fast measurement build prefilled the same-size probe in 
 683.4 ms for token-fast: inside the round-to-round drift and with inconsistent sign across rounds, so
 the device gate (fork `db1a3694`) is not carried
 ([measurement](../performance/rtx-pro-6000.md#v3-port-against-the-production-build-2026-09-28)).
+
+## Upstream `bace20dc..e31bc99b` (merged September 28, 2026)
+
+The fork line merged upstream `e31bc99b` in `e2a149f1`, the first real merge, so the merge-base now
+records the reviewed point. The merge commit holds only the three conflict resolutions: upstream
+moved `nvfp4_w4a4_tma.cuh` to `nvfp4_a4_tma.cuh`, and the fork's 64-byte descriptor alignment moved
+with it; the GDN Replay Record and Replay Fold tests keep the fork's non-`constexpr` scale. Two
+follow-ups made the merged tree build and run on the fork's surfaces: `24e04e99` gives upstream's
+new BF16 TMA descriptors the same 64-byte alignment (MSVC error C2719), and `267a201a` routes the
+fork's BF16 `[248320,5120]` head (OrcaRouter) through the unified BF16 schedules of `[14336,5120]`,
+since the old per-shape templates are gone.
+
+In the 27B production artifact, NVFP4 serves MLP layers 0–55; FP8 serves every attention and GDN
+projection, MLP layers 56–63, the output head and the embedding; Q8 serves MTP and DFlash2; Q4, Q5
+and Q6 serve Vision, and Q4 the optimized proposal head used by `--lm-head-draft`.
+
+| Upstream | Subject | Verdict |
+|---|---|---|
+| `229c1832` | unify Q6 templates, add sliced-K MMA | Integrated: Vision patch embedding; Q6 Linear oracle test |
+| `42614c0e` | unify Q4 schedules, tune sliced-K dispatch | Integrated: Vision and the optimized proposal head (in every MTP decode); Q4 Linear, LinearAdd and LinearSwiGLU oracle tests |
+| `fc62790a` | unify Q5 templates, tune sliced-K Linear | Integrated: Vision; Q5 Linear and LinearAdd oracle tests |
+| `502cd9d6` | unify Q8 templates, tune sliced-K schedules | Integrated: MTP and DFlash2 drafter; Q8 Linear, LinearAdd, LinearPair and LinearSwiGLU oracle tests, `dflash2_real` |
+| `5d08cba8` | unify FP8 templates, preserve FP32 SwiGLU fusion | Integrated: attention/GDN projections, late MLP, head; FP8 A16/A8 Linear, LinearAdd and LinearSwiGLU oracle tests |
+| `fc3993d8` | unify NVFP4 templates, add A16 MMA routes | Integrated with the 64-byte TMA alignment carried in the merge: MLP layers 0–55; NVFP4 A16/A4 Linear, LinearAdd, LinearSwiGLU, attention- and GDN-input oracle tests |
+| `ecbc3357` | expand BF16 templates, unify epilogues | Integrated with `24e04e99` and `267a201a`: the OrcaRouter head (the production artifact's decode runs no BF16 Linear kernel); BF16 Linear (including `[248320,5120]`) and LinearAdd oracle tests, OrcaRouter real-model tests |
+| `0784e76f` | two-stage GDN chunked path | Integrated: every 27B prefill (48 GDN layers); GDN, Replay Record and Replay Fold oracle tests |
+| `619e3f4c` `6d333ce0` `d4ea63ea` `71a1cb0e` | KDA recurrent, batch and chunked paths | Integrated, not exercised: no fork model uses Kimi Delta Attention; its oracle test passes on MSVC and the PRO 6000 |
+| `b24a439f` `2ddef207` | reporting and completion rules | Integrated into AGENTS.md beside the fork's upstream-ports rule |
+| `e31bc99b` | Linear guidance, Q4 performance report | Integrated (documentation; the report is upstream's RTX 5090 data) |
+
+Qualification on Windows (MSVC 19.51, CUDA 13.3, `sm_120a`, RTX PRO 6000, driver 616.92), beside
+the running production service:
+
+- Full CTest, 138 tests: 129 passed, 9 skipped (artifact- or source-gated), 0 failed. The pre-merge
+  build (`b84c4d86`) had 137 tests: 128 passed, 9 skipped, 0 failed. The new test is KDA's.
+- Every NVFP4, FP8, BF16 and Q-format Linear, LinearAdd, LinearPair and LinearSwiGLU oracle test,
+  the attention- and GDN-input projection tests, and the GDN, Replay Record, Replay Fold and KDA
+  tests pass against their independent oracles.
+- Real-model tests on the v3 production artifact give the same results before and after the merge:
+  loading (MTP with Vision, DFlash2, scoring), causal scoring, reasoning features, the Vision
+  workspace, `dflash2_real` (K=15 and K=7 at 8 rows) and twelve `prefix_real` scenarios pass; the
+  default `prefix_real` run stops at the known Host-restore check (below). None needed a stop
+  window: about 44 GB was free beside production. On the OrcaRouter artifact, loading, causal
+  scoring, reasoning features and stream observations pass.
+- Production-flag A/B against the installed release on a spare port, clean rounds: 7,680-token
+  prefill 663.4 vs 689.7 ms (−3.8%), 256-token MTP decode 149.1 vs 148.5 tok/s (equal within
+  noise), with the same MTP acceptance
+  ([measurement](../performance/rtx-pro-6000.md#upstream-e31bc99b-merge-against-the-production-build-2026-09-28)).
+
+Not deployed: production still runs `2026.09.28-v3port.1`.
 
 ## Fork features carried onto v3
 
@@ -162,6 +211,10 @@ Approved by Igor, 2026-09-27 and 2026-09-28.
   whitespace. A bound on outer whitespace would fix it.
 - On the pre-v3 line, exploratory T=1500 GDN input and LinearAdd 5120x6144 NVFP4 fixtures disagreed
   with their oracles on both baseline and candidate; not re-examined on v3.
+- `dflash2_real`'s default probe (K=15, one 24-token generation) accepted 21 of 23 drafted tokens
+  before the upstream `e31bc99b` merge and 20 of 31 after it; the test passes both times. The merge
+  changed the Q8, BF16 and GDN kernels the drafter and target run. DFlash2 acceptance on real
+  requests was not re-measured; production uses MTP, whose acceptance is unchanged.
 
 ## Qualification of the fork line
 

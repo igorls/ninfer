@@ -1,10 +1,54 @@
 # RTX PRO 6000 workstation records (fork)
 
-These results were measured on the fork's RTX PRO 6000 Blackwell 96 GB workstation. The first
-section compares the v3 port with the production build; the others are records of the fork's
+These results were measured on the fork's RTX PRO 6000 Blackwell 96 GB workstation. The first two
+sections compare the fork line with the production build; the others are records of the fork's
 pre-v3 engine (`research/qwen4-flash-next`), taken beside other desktop GPU work. They do not
 follow every rule of the [publication methodology](methodology.md); each section states its own
 conditions. Qwen3.8-Flash-Next records stay with that line until its port.
+
+## Upstream `e31bc99b` merge against the production build (2026-09-28)
+
+Measured beside the running production service on the RTX PRO 6000 Blackwell (driver 616.92), not
+in a stop window. Arms: the installed release `2026.09.28-v3port.1` (source `e92c2078`) and the
+`workstation` build at `267a201a` (upstream `e31bc99b` merged, with the fork's follow-ups), both
+with the v3 production artifact and blocking CUDA sync. Each arm is a fresh `ninfer-serve` on port
+8021 with the production flags except the KV capacity: `--max-context 131072 --kv-capacity 131072
+--max-concurrency 8 --prefill-chunk 2048 --kv-dtype fp8 --vision --spec mtp --draft-tokens 5
+--lm-head-draft --desktop-reserve-gib 6`. The probe is the one of the next section (one warmup,
+five cold 7,680-token prefills, five greedy 256-token MTP decodes per arm and round). Three sets of
+four rounds alternate the arm order (ABBA). A round is clean when the production request log
+recorded no completed request during its window; production traffic reached six of the 24 rounds.
+
+| Rounds | Arm | Rounds | 7,680-token prefill ms, median [min–max] | Decode tok/s, median [min–max] | MTP acceptance |
+|---|---|---:|---:|---:|---:|
+| All clean | release | 9 | 689.7 [661.0–794.0] | 148.5 [141.8–151.7] | 36.4–37.0% |
+| All clean | merged | 9 | 663.4 [651.1–694.0] | 149.1 [139.5–152.6] | 36.5–37.0% |
+| Set 1 (all clean) | release | 4 | 689.2 [661.0–794.0] | 148.3 [143.7–151.6] | 36.6–37.0% |
+| Set 1 (all clean) | merged | 4 | 666.5 [651.1–694.0] | 145.7 [139.5–151.9] | 36.6–37.0% |
+| Sets 2–3, clean | release | 5 | 689.7 [673.4–710.6] | 148.7 [141.8–151.7] | 36.4–37.0% |
+| Sets 2–3, clean | merged | 5 | 663.2 [654.1–675.8] | 150.8 [148.2–152.6] | 36.5–36.9% |
+| With production traffic | release | 3 | 698.2 [681.4–703.7] | 149.5 [44.4–151.1] | 36.7–36.9% |
+| With production traffic | merged | 3 | 1042.7 [672.3–3754.1] | 149.7 [28.0–152.5] | 36.5–36.7% |
+
+Every sample processed exactly 7,680 prompt tokens or produced 256 completion tokens. The engine's
+CPU use during decode was 0.02–0.05 core in both arms.
+
+- **Prefill.** The merged build prefills the probe 3.8% faster over the clean rounds (663.4 vs
+  689.7 ms; a permutation test on the medians gives p < 0.001), and is faster in 8 of the 9 clean
+  round pairs. The upstream changes on this path are the two-stage GDN chunked kernels
+  (`0784e76f`) and the NVFP4 and FP8 template routes (`fc3993d8`, `5d08cba8`); the gain was not
+  attributed further.
+- **Decode.** Equal within the measurement: 149.1 vs 148.5 tok/s over the clean rounds (p = 0.35).
+  The first set alone was 1.8% slower (145.7 vs 148.3 tok/s, lower in 3 of 4 rounds); the next two
+  sets were 1.4% faster (150.8 vs 148.7). A kernel trace of six 256-token decodes per arm (Nsight
+  Systems, CUDA graphs traced per node, same flags) favours the merge: GPU kernel time fell from
+  10,133 to 9,928 ms (−2.0%) and the wall time from 10.81 to 10.56 s. Every rewritten Linear
+  family is faster, the largest being the FP8 A16 projections (the sliced-K MMA takes 3,023 ms
+  against 3,098 ms for the former K-split MMA and SIMT kernels). The GDN replay kernels took 7 ms
+  more (per launch, `recurrent_fold` +4% and `recurrent_record` +1%).
+- **Production traffic.** Six rounds overlapped production requests (1–4 each). They spread both
+  arms' samples (prefill up to 3.75 s, decode down to 28 tok/s) and are excluded from the
+  comparison above.
 
 ## v3 port against the production build (2026-09-28)
 
