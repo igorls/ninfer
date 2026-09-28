@@ -704,6 +704,10 @@ const ModelSamplingDefaults& Frontend::sampling_defaults() const noexcept {
     return impl_->sampling;
 }
 
+const PromptCapabilities& Frontend::prompt_capabilities() const noexcept {
+    return impl_->chat_template.capabilities();
+}
+
 Frontend make_frontend(const FrontendResources& resources, FrontendOptions options) {
     return Frontend(std::make_shared<const Frontend::Impl>(resources, options));
 }

@@ -138,12 +138,15 @@ public:
                                       ChatRenderOptions options         = {},
                                       const PreparationControl& control = {}) const;
 
+    // Observed from the template's own rendering when it is resolved.
+    [[nodiscard]] const PromptCapabilities& capabilities() const noexcept { return capabilities_; }
+
 private:
-    CompiledChatTemplate(text::JinjaTemplate compiled, nlohmann::ordered_json special_tokens)
-        : compiled_(std::move(compiled)), special_tokens_(std::move(special_tokens)) {}
+    CompiledChatTemplate(text::JinjaTemplate compiled, nlohmann::ordered_json special_tokens);
 
     text::JinjaTemplate compiled_;
     nlohmann::ordered_json special_tokens_;
+    PromptCapabilities capabilities_;
 };
 
 } // namespace ninfer::models::qwen3_5::frontend

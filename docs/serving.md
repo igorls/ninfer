@@ -296,7 +296,9 @@ Malformed protocol values return field-specific HTTP 400 errors. Invalid media s
 decoded content use `invalid_media`; remote fetch and timeout failures retain their dedicated
 server-error codes. Failures in the normalized prompt contract use `invalid_prompt`; typed capacity
 and availability failures retain their dedicated codes. Internal invariant failures are not
-relabeled as client input errors.
+relabeled as client input errors. When the chat template itself rejects a request, the message is
+the template's own `raise_exception` text (or the interpreter's cause) after the template's source
+name, without a template trace.
 
 The request `model` must equal the public model ID: the artifact `identity.model_id` by default, or
 the explicit `--model-id` override. Reasoning is returned separately as `reasoning_content`; answer
@@ -357,9 +359,19 @@ post-close model token, preparation is rejected with HTTP 400 code
 `thinking_budget_capacity_insufficient` rather than partially inserting control. The server does
 not promise that the model will emit nonempty content or a tool call after the marker.
 
-For Chat Completions, `reasoning_effort: "none"` requests disabled thinking. The selected template
-interprets the other standard values (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`).
-Conflicting explicit `enable_thinking` and effort values return `conflicting_template_option`.
+For Chat Completions, top-level `reasoning_effort` and `chat_template_kwargs.reasoning_effort` name
+the same option and must agree. `reasoning_effort: "none"` requests disabled thinking with any
+template. The selected template decides which other standard values (`minimal`, `low`, `medium`,
+`high`, `xhigh`, `max`) exist: at startup, NInfer renders one user turn with each effort and records
+the efforts the template accepts and the one it renders by default. The maintained Qwen3.8 template
+accepts `low`, `medium` and `xhigh` (default). Any other effort returns HTTP 400 with code
+`reasoning_effort_not_supported` on `reasoning_effort` before the prompt is rendered, and the
+message lists the accepted efforts, for example
+`Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low.` A template
+that renders every effort like an unspecified one (the Qwen3.6 template) does not interpret
+reasoning effort; any effort other than `none` then returns
+`the loaded chat template does not support reasoning effort` with the same code. Conflicting explicit
+`enable_thinking` and effort values return `conflicting_template_option`.
 
 `preserve_thinking` controls reasoning retention according to the selected template. Request
 options override server defaults set with `--no-thinking` and `--preserve-thinking`. Unless a
@@ -555,7 +567,7 @@ wire response contains typed `output` Items.
 | `top_p` | finite number in `[0,1]` |
 | `metadata` | at most 16 string pairs; keys at most 64 characters and values at most 512 |
 | `client_metadata` | Codex client extension; an object or `null`, accepted as opaque tracing metadata with no generation effect |
-| `reasoning.effort` | `none` requests disabled thinking; other standard effort values pass to the selected template |
+| `reasoning.effort` | `none` requests disabled thinking; another standard effort must be one the selected template accepts, otherwise `reasoning_effort_not_supported` on `reasoning.effort` (see [Chat Completions](#openai-chat-completions)) |
 | `chat_template_kwargs` | template parameters as a JSON object; standard options merge with typed fields |
 | `preserve_thinking` | alias for `chat_template_kwargs.preserve_thinking`; conflicting values are rejected |
 | `text.format` | `text`, `json_object`, or flat `json_schema` (`name`, `schema`, optional `strict`, `description`); echoed on the Response object |
@@ -827,8 +839,9 @@ before closing the block. Request lowering reconstructs the local prompt from th
 remains usable across serve restarts.
 `display:"omitted"` is rejected because NInfer cannot provide Anthropic's
 encrypted hidden-reasoning restore semantics. `preserve_thinking` remains a NInfer extension for
-closed-turn reasoning history. `output_config.effort` passes its protocol-validated value to the
-selected template.
+closed-turn reasoning history. `output_config.effort` follows the Chat Completions effort rules: an
+effort the selected template does not accept returns `invalid_request_error` with code
+`reasoning_effort_not_supported` on `output_config.effort` and the list of accepted efforts.
 
 User-defined, non-strict tools support `name`, `description`, object `input_schema`, and
 `input_examples`. `tool_choice` `auto`, `none`, `any` and `tool` (one named tool) are

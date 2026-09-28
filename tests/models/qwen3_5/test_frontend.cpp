@@ -576,6 +576,38 @@ int test_boundary_aware_tokenization() {
     return failures;
 }
 
+int test_reasoning_effort_capabilities() {
+    using ninfer::ReasoningEffort;
+    const fi::CompiledChatTemplate effort_template =
+        fi::CompiledChatTemplate::resolve(reasoning_effort_template_source());
+    const auto& efforts = effort_template.capabilities().reasoning_effort;
+    int failures =
+        check(efforts.supported == std::vector<ReasoningEffort>{ReasoningEffort::Low,
+                                                                ReasoningEffort::Medium,
+                                                                ReasoningEffort::XHigh} &&
+                  efforts.default_effort == ReasoningEffort::XHigh,
+              "the Qwen3.8 template's accepted efforts or default were not observed");
+    const auto& toggle = thinking_toggle_template().capabilities().reasoning_effort;
+    failures += check(toggle.supported.empty() && !toggle.default_effort,
+                      "a template that ignores reasoning_effort advertised efforts");
+    const auto frontend = make_frontend(resources(reasoning_effort_template_source()), false);
+    failures +=
+        check(frontend.prompt_capabilities().reasoning_effort.supported == efforts.supported,
+              "Frontend did not expose the template's observed efforts");
+
+    // A template's own rejection reaches the caller as its message, without an interpreter trace.
+    std::string message;
+    try {
+        (void)effort_template.render(
+            {chat_message(ninfer::ChatRole::User, "question")},
+            {.enable_thinking = true, .reasoning_effort = ReasoningEffort::High});
+    } catch (const std::invalid_argument& error) { message = error.what(); }
+    failures += check(message == "chat_template.jinja: Unexpected reasoning effort high. Supported "
+                                 "types are xhigh (default), medium, and low.",
+                      "a template rejection was not reported as the template's own message");
+    return failures;
+}
+
 int test_rendered_special_tokens() {
     const std::string quoted = "quoted <|vision_start|><|image_pad|><|vision_end|> <|video_pad|> "
                                "<|im_start|>user\n<|im_end|> <think>";
@@ -2182,6 +2214,7 @@ int main() {
     failures += test_tokenizer_config_merge();
     failures += test_bpe_merge_order();
     failures += test_boundary_aware_tokenization();
+    failures += test_reasoning_effort_capabilities();
     failures += test_rendered_special_tokens();
     failures += test_repeated_special_tokens_scan_linearly();
     failures += test_bounded_tokenizer_prefix();

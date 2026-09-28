@@ -23,6 +23,98 @@ ServeOptions parse(std::vector<std::string> arguments) {
     return parse_serve_options(static_cast<int>(argv.size()), argv.data());
 }
 
+template <typename Function>
+ApiError api_error(Function&& function) {
+    try {
+        function();
+    } catch (const ApiException& exception) { return exception.error(); }
+    return ApiError{.status = 0, .message = "no exception"};
+}
+
+// What the frontend observes from the maintained Qwen3.8 template (tests/models/qwen3_5).
+ninfer::PromptCapabilities reasoning_effort_template() {
+    ninfer::PromptCapabilities capabilities;
+    capabilities.reasoning_effort.supported      = {ninfer::ReasoningEffort::Low,
+                                                    ninfer::ReasoningEffort::Medium,
+                                                    ninfer::ReasoningEffort::XHigh};
+    capabilities.reasoning_effort.default_effort = ninfer::ReasoningEffort::XHigh;
+    return capabilities;
+}
+
+int test_reasoning_effort_capabilities(const ServeOptions& defaults) {
+    const ninfer::PromptCapabilities efforts = reasoning_effort_template();
+    GenerationRequest request;
+    request.max_tokens = 1;
+    int failures       = 0;
+    for (const auto [requested, resolved] :
+         {std::pair{RequestedReasoningEffort::Low, ninfer::ReasoningEffort::Low},
+          std::pair{RequestedReasoningEffort::Medium, ninfer::ReasoningEffort::Medium},
+          std::pair{RequestedReasoningEffort::XHigh, ninfer::ReasoningEffort::XHigh}}) {
+        request.reasoning_effort = requested;
+        const auto semantics     = resolve_prompt_semantics(request, defaults, efforts);
+        failures += check(semantics.reasoning_effort == resolved && semantics.enable_thinking,
+                          "a supported reasoning effort did not resolve to itself");
+    }
+    for (const auto requested : {RequestedReasoningEffort::Minimal, RequestedReasoningEffort::High,
+                                 RequestedReasoningEffort::Max}) {
+        request.reasoning_effort = requested;
+        const ApiError error =
+            api_error([&] { (void)resolve_prompt_semantics(request, defaults, efforts); });
+        failures += check(error.status == 400 && error.code == "reasoning_effort_not_supported" &&
+                              error.param == "reasoning_effort" &&
+                              error.message ==
+                                  "Unexpected reasoning effort " +
+                                      std::string(requested_reasoning_effort_name(requested)) +
+                                      ". Supported types are xhigh (default), medium, and low.",
+                          "an unsupported effort did not list the template's supported efforts");
+    }
+    request.reasoning_effort = RequestedReasoningEffort::None;
+    const auto disabled      = resolve_prompt_semantics(request, defaults, efforts);
+    failures += check(disabled.enable_thinking == false &&
+                          disabled.reasoning_effort == ninfer::ReasoningEffort::None,
+                      "reasoning_effort none did not disable thinking");
+    request.reasoning_effort          = std::nullopt;
+    request.chat_template_kwargs_json = R"({"reasoning_effort":"max"})";
+    const ApiError nested =
+        api_error([&] { (void)resolve_prompt_semantics(request, defaults, efforts); });
+    failures +=
+        check(nested.code == "reasoning_effort_not_supported" && nested.param == "reasoning_effort",
+              "an unsupported effort in chat_template_kwargs reached the template");
+    request.chat_template_kwargs_json.clear();
+
+    // Conflicts are about the request itself and are reported first.
+    request.enable_thinking  = false;
+    request.reasoning_effort = RequestedReasoningEffort::High;
+    failures += check(api_error([&] {
+                          (void)resolve_prompt_semantics(request, defaults, efforts);
+                      }).code == "conflicting_template_option",
+                      "an effort conflicting with enable_thinking was not reported as a conflict");
+    request.enable_thinking.reset();
+
+    ninfer::PromptCapabilities ignores_effort;
+    request.reasoning_effort = RequestedReasoningEffort::Low;
+    const ApiError unsupported =
+        api_error([&] { (void)resolve_prompt_semantics(request, defaults, ignores_effort); });
+    failures += check(unsupported.code == "reasoning_effort_not_supported" &&
+                          unsupported.param == "reasoning_effort" &&
+                          unsupported.message ==
+                              "the loaded chat template does not support reasoning effort",
+                      "a template without reasoning effort accepted one");
+    request.reasoning_effort = RequestedReasoningEffort::None;
+    failures +=
+        check(resolve_prompt_semantics(request, defaults, ignores_effort).enable_thinking == false,
+              "reasoning_effort none was rejected by a template without efforts");
+
+    ninfer::PromptCapabilities two;
+    two.reasoning_effort.supported = {ninfer::ReasoningEffort::Low, ninfer::ReasoningEffort::High};
+    request.reasoning_effort       = RequestedReasoningEffort::Max;
+    failures +=
+        check(api_error([&] { (void)resolve_prompt_semantics(request, defaults, two); }).message ==
+                  "Unexpected reasoning effort max. Supported types are high and low.",
+              "two supported efforts without a default were misformatted");
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -252,7 +344,7 @@ int main() {
 
     GenerationRequest request;
     request.max_tokens   = 1;
-    const auto semantics = resolve_prompt_semantics(request, defaults);
+    const auto semantics = resolve_prompt_semantics(request, defaults, reasoning_effort_template());
     failures += check(!semantics.reasoning_effort && !semantics.enable_thinking &&
                           !semantics.reasoning_effort,
                       "omitted reasoning effort did not resolve to the template default");
@@ -277,7 +369,8 @@ int main() {
                 .execution.thinking.budget == 37,
         "thinking-enabled request did not inherit the server budget");
     request.enable_thinking = false;
-    const auto non_thinking = resolve_prompt_semantics(request, thinking_budget);
+    const auto non_thinking =
+        resolve_prompt_semantics(request, thinking_budget, reasoning_effort_template());
     failures += check(!non_thinking.reasoning_effort,
                       "disabled thinking retained an effective reasoning effort");
     failures += check(!to_request_options(request, thinking_budget, non_thinking,
@@ -286,18 +379,24 @@ int main() {
                       "non-thinking request inherited the server thinking budget");
     request.enable_thinking.reset();
     request.reasoning_effort   = RequestedReasoningEffort::Low;
-    const auto explicit_effort = resolve_prompt_semantics(request, defaults);
+    const auto explicit_effort =
+        resolve_prompt_semantics(request, defaults, reasoning_effort_template());
     failures += check(explicit_effort.reasoning_effort == ninfer::ReasoningEffort::Low &&
                           explicit_effort.enable_thinking == true,
                       "explicit reasoning effort did not remain the effective effort");
     request.reasoning_effort.reset();
-    failures += check(resolve_prompt_semantics(request, defaults).preserve_thinking == false,
+    failures += check(resolve_prompt_semantics(request, defaults, reasoning_effort_template())
+                              .preserve_thinking == false,
                       "an unspecified request did not resolve to dropped closed-turn reasoning");
-    failures += check(resolve_prompt_semantics(request, configured).preserve_thinking == true,
+    failures += check(resolve_prompt_semantics(request, configured, reasoning_effort_template())
+                              .preserve_thinking == true,
                       "server preserve-thinking default was not resolved");
     request.preserve_thinking = false;
-    failures += check(resolve_prompt_semantics(request, configured).preserve_thinking == false,
+    failures += check(resolve_prompt_semantics(request, configured, reasoning_effort_template())
+                              .preserve_thinking == false,
                       "request preserve-thinking override did not win");
+
+    failures += test_reasoning_effort_capabilities(defaults);
 
     failures +=
         check(serve_usage_text("ninfer-serve").find("--no-prefix-reuse") != std::string::npos,

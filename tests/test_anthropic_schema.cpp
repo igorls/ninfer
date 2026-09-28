@@ -60,10 +60,20 @@ std::string api_param(const std::function<void()>& action) {
     return {};
 }
 
+// What the frontend observes from the maintained Qwen3.8 template (tests/models/qwen3_5).
+ninfer::PromptCapabilities reasoning_effort_template() {
+    ninfer::PromptCapabilities capabilities;
+    capabilities.reasoning_effort.supported      = {ninfer::ReasoningEffort::Low,
+                                                    ninfer::ReasoningEffort::Medium,
+                                                    ninfer::ReasoningEffort::XHigh};
+    capabilities.reasoning_effort.default_effort = ninfer::ReasoningEffort::XHigh;
+    return capabilities;
+}
+
 ResolvedPromptSemantics semantics(const GenerationRequest& request, bool default_thinking = true) {
     ServeOptions options;
     options.enable_thinking = default_thinking;
-    return resolve_prompt_semantics(request, options);
+    return resolve_prompt_semantics(request, options, reasoning_effort_template());
 }
 
 ninfer::PromptInput prompt(const GenerationRequest& request) {
@@ -651,6 +661,24 @@ int test_aggregate_and_errors() {
     failures +=
         check(empty["content"].empty() && empty["stop_reason"] == "model_context_window_exceeded",
               "empty output was fabricated or context capacity was misclassified");
+
+    Json effort_body             = base_request();
+    effort_body["output_config"] = Json{{"effort", "max"}};
+    ApiError unsupported_effort;
+    try {
+        (void)semantics(parse(effort_body).generation);
+    } catch (const ApiException& exception) { unsupported_effort = exception.error(); }
+    unsupported_effort = normalize_anthropic_error(unsupported_effort);
+    const Json effort_error =
+        Json::parse(make_anthropic_error_body(unsupported_effort, "req_effort"));
+    failures += check(unsupported_effort.status == 400 &&
+                          unsupported_effort.code == "reasoning_effort_not_supported" &&
+                          unsupported_effort.param == "output_config.effort" &&
+                          effort_error["error"]["type"] == "invalid_request_error" &&
+                          effort_error["error"]["message"] ==
+                              "Unexpected reasoning effort max. Supported types are xhigh "
+                              "(default), medium, and low.",
+                      "an unsupported output_config.effort did not name the supported efforts");
 
     ApiError overloaded;
     overloaded.status         = 429;

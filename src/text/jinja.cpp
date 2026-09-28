@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <exception>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 
 namespace ninfer::text {
@@ -16,6 +18,21 @@ namespace {
 struct Interrupted {
     std::exception_ptr error;
 };
+
+// A template's own raise_exception(). Not a std::exception, so the interpreter passes it through
+// undecorated and the template's message stays exact.
+struct Raised {
+    std::string message;
+};
+
+// Render failures reach API clients. The interpreter prefixes the innermost failing statement's
+// cause with its location and a two-line source excerpt ending in "\nError: "; only the cause is
+// reported.
+std::string render_failure_cause(const std::string& message) {
+    constexpr std::string_view marker = "\nError: ";
+    const std::size_t at              = message.find(marker);
+    return at == std::string::npos ? message : message.substr(at + marker.size());
+}
 
 std::string pointer_component(std::string value) {
     jinja::string_replace_all(value, "~", "~0");
@@ -112,6 +129,12 @@ TemplateOutput JinjaTemplate::render(const nlohmann::ordered_json& input,
             context.set_val(item.key(), convert(item.value(), "/" + pointer_component(item.key()),
                                                 tags, literal));
         }
+        context.set_val("raise_exception",
+                        jinja::mk_val<jinja::value_func>(
+                            "raise_exception", [](const jinja::func_args& args) -> jinja::value {
+                                args.ensure_vals<jinja::value_string>();
+                                throw Raised{args.get_pos(0)->as_string().str()};
+                            }));
         jinja::runtime runtime(context);
         const auto rendered = jinja::runtime::gather_string_parts(runtime.execute(impl_->program));
         TemplateOutput result;
@@ -136,8 +159,10 @@ TemplateOutput JinjaTemplate::render(const nlohmann::ordered_json& input,
         return result;
     } catch (const Interrupted& interrupted) {
         std::rethrow_exception(interrupted.error);
+    } catch (const Raised& raised) {
+        throw std::invalid_argument(impl_->source_name + ": " + raised.message);
     } catch (const std::exception& error) {
-        throw std::invalid_argument(impl_->source_name + ": " + error.what());
+        throw std::invalid_argument(impl_->source_name + ": " + render_failure_cause(error.what()));
     }
 }
 

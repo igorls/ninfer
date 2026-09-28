@@ -76,9 +76,23 @@ int language_semantics() {
             (void)JinjaTemplate(source, "error-test").render(Json::object());
             ++failures;
         } catch (const std::invalid_argument& error) {
-            failures += check(std::string(error.what()).starts_with("error-test:"),
+            const std::string message = error.what();
+            failures += check(message.starts_with("error-test: "),
                               "template error omitted its source name");
+            // Render errors reach API clients: the cause only, no source excerpt or location.
+            failures += check(message.find('\n') == std::string::npos &&
+                                  message.find("While executing") == std::string::npos,
+                              "template error carried an interpreter trace");
         }
+    }
+    try {
+        (void)JinjaTemplate("{% if x %}{{ raise_exception('declined: ' ~ x) }}{% endif %}",
+                            "raise-test")
+            .render({{"x", "reason"}});
+        ++failures;
+    } catch (const std::invalid_argument& error) {
+        failures += check(std::string(error.what()) == "raise-test: declined: reason",
+                          "raise_exception did not report the template's exact message");
     }
     return failures;
 }

@@ -484,6 +484,27 @@ enum class ReasoningEffort : std::uint8_t {
     return {};
 }
 
+// What the loaded chat template does with a reasoning effort, derived once at load from the
+// template's own rendering. None is never listed: it disables thinking on every template.
+struct ReasoningEffortCapabilities {
+    // Efforts the template accepts, in ReasoningEffort order. Empty when the template rejects
+    // every effort or renders them all like an unspecified one.
+    std::vector<ReasoningEffort> supported;
+    // The supported effort whose rendering equals an unspecified effort's, when exactly one does.
+    std::optional<ReasoningEffort> default_effort;
+
+    [[nodiscard]] bool supports(ReasoningEffort effort) const noexcept {
+        for (const ReasoningEffort value : supported) {
+            if (value == effort) { return true; }
+        }
+        return false;
+    }
+};
+
+struct PromptCapabilities {
+    ReasoningEffortCapabilities reasoning_effort;
+};
+
 enum class PromptContinuationMode : std::uint8_t {
     NewAssistantTurn,
     ContinueFinalAssistant,

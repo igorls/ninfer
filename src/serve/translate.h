@@ -22,8 +22,10 @@ struct ResolvedPromptSemantics {
     std::string chat_template_kwargs_json;
 };
 
+// Validates prompt options against the loaded chat template's capabilities before rendering.
 ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& req,
-                                                 const ServeOptions& server);
+                                                 const ServeOptions& server,
+                                                 const ninfer::PromptCapabilities& capabilities);
 
 ninfer::PromptInput to_prompt_input(const GenerationRequest& req,
                                     const ResolvedPromptSemantics& semantics,

@@ -122,6 +122,55 @@ bool same_prefix(const text::TemplateOutput& lhs, const text::TemplateOutput& rh
     }
 }
 
+// One user turn with thinking enabled, rendered by the template alone. A fixed clock keeps a
+// date-dependent template comparable across probes. Empty when the template rejects the options.
+std::optional<std::string> render_effort_probe(const text::JinjaTemplate& compiled,
+                                               const Json& special_tokens,
+                                               std::optional<ReasoningEffort> effort) {
+    ChatRenderOptions options;
+    options.enable_thinking           = true;
+    options.reasoning_effort          = effort;
+    Json context                      = template_parameters(options, special_tokens);
+    context["continue_final_message"] = false;
+    context["messages"]               = Json::array({Json{{"role", "user"}, {"content", "Hi"}}});
+    context["add_generation_prompt"]  = true;
+    std::vector<std::string> control_variables;
+    for (const auto& item : special_tokens.items()) control_variables.push_back(item.key());
+    const text::TemplateRenderOptions execution{.timestamp         = 0,
+                                                .control_variables = control_variables};
+    try {
+        return compiled.render(context, execution).text;
+    } catch (const std::invalid_argument&) { return std::nullopt; }
+}
+
+// The template decides which efforts exist: an effort it rejects is unsupported, and a template
+// that renders every effort like an unspecified one does not interpret reasoning effort at all.
+ReasoningEffortCapabilities observe_reasoning_efforts(const text::JinjaTemplate& compiled,
+                                                      const Json& special_tokens) {
+    const auto unspecified = render_effort_probe(compiled, special_tokens, std::nullopt);
+    if (!unspecified) return {};
+    ReasoningEffortCapabilities result;
+    std::vector<ReasoningEffort> defaults;
+    bool interpreted = false;
+    for (const ReasoningEffort effort :
+         {ReasoningEffort::Minimal, ReasoningEffort::Low, ReasoningEffort::Medium,
+          ReasoningEffort::High, ReasoningEffort::XHigh, ReasoningEffort::Max}) {
+        const auto rendered = render_effort_probe(compiled, special_tokens, effort);
+        if (!rendered) {
+            interpreted = true;
+            continue;
+        }
+        result.supported.push_back(effort);
+        if (*rendered == *unspecified)
+            defaults.push_back(effort);
+        else
+            interpreted = true;
+    }
+    if (!interpreted) return {};
+    if (defaults.size() == 1) result.default_effort = defaults.front();
+    return result;
+}
+
 bool real_user(const ChatMessage& message) {
     if (message.role != ChatRole::User) return false;
     if (message.has_media()) return true;
@@ -142,6 +191,11 @@ bool real_user(const ChatMessage& message) {
 bool ChatMessage::has_media() const noexcept {
     return std::any_of(parts.begin(), parts.end(),
                        [](const ChatPart& part) { return part.kind != ChatPartKind::Text; });
+}
+
+CompiledChatTemplate::CompiledChatTemplate(text::JinjaTemplate compiled, Json special_tokens)
+    : compiled_(std::move(compiled)), special_tokens_(std::move(special_tokens)) {
+    capabilities_.reasoning_effort = observe_reasoning_efforts(compiled_, special_tokens_);
 }
 
 CompiledChatTemplate CompiledChatTemplate::resolve(std::string_view source, std::string source_name,

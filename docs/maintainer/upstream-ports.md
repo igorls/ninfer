@@ -110,6 +110,7 @@ width-one DFlash path is not carried.
 | CUDA synchronization default (`300ddb9f`) | `spin` | `blocking` when `NINFER_CUDA_SYNC` is unset; the variable still selects `spin`, `yield` or `auto` | Shared desktop. Production-flag A/B on the RTX PRO 6000: 7,680-token prefill 681.0 vs 683.4 ms, decode 152.9 vs 148.4 tok/s (medians, within noise), CPU during decode 0.03 vs 0.96 core ([measurement](../performance/rtx-pro-6000.md#v3-port-against-the-production-build-2026-09-28)). Igor, 2026-09-28 |
 | Dense non-thinking presence penalty (`92ad4c47`) | `1.5` | `0`; MoE keeps `1.5` | Production parity: the pre-v3 27B package used 0 and production requests record 0 |
 | `preserve_thinking` server default (`3cb5e718`) | unset, so the Qwen3.8 template keeps returned closed-turn reasoning | `false` unless a request or `--preserve-thinking` asks | Production parity (Igor, 2026-09-28). Keeping the template default is a later change to agree with bentokit |
+| Unsupported reasoning effort | passed to the chat template, whose `raise_exception` comes back as HTTP 400 `invalid_prompt` on `messages` with the interpreter's source trace | checked before rendering against the efforts observed from the loaded template at startup: HTTP 400 `reasoning_effort_not_supported` on the effort field, listing the supported efforts; template errors carry no trace | Restores the pre-v3 fork contract (`8264394c`) on Chat Completions, Responses and Anthropic Messages; the protocol vocabulary is unchanged |
 | Continued final assistant turn (`737b570a`) | rendered without a think block | rendered behind the empty think block the generation prompt carries (thinking off) | `/v1/score` text form and assistant prefill are conditioned like a generated answer |
 
 ## Dropped
@@ -198,6 +199,7 @@ Windows, MSVC 19.51, CUDA 13.3, `sm_120a`, RTX PRO 6000 Blackwell (driver 616.92
     body differs. The fork line returns `invalid_prompt` on `messages`, with the template's message
     and a Jinja trace. Production returns `reasoning_effort_not_supported` on `reasoning_effort`.
     No client sent an unsupported effort in the production request log (2026-09-08 to 2026-09-28).
+    The fork line restored the production contract afterwards (divergence table above).
   - A 24-question `/v1/systemone` replay (`noul`, `choice` and `score` on six states) is
     bit-identical to production.
   - The upgrade tool, run from a Windows checkout (`core.autocrlf=true`), embeds the chat template

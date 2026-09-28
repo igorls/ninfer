@@ -49,9 +49,19 @@ Json base_request() {
 
 OpenAIChatRequest parse(Json body) { return parse_chat_completion_request(body, limits()); }
 
+// What the frontend observes from the maintained Qwen3.8 template (tests/models/qwen3_5).
+ninfer::PromptCapabilities reasoning_effort_template() {
+    ninfer::PromptCapabilities capabilities;
+    capabilities.reasoning_effort.supported      = {ninfer::ReasoningEffort::Low,
+                                                    ninfer::ReasoningEffort::Medium,
+                                                    ninfer::ReasoningEffort::XHigh};
+    capabilities.reasoning_effort.default_effort = ninfer::ReasoningEffort::XHigh;
+    return capabilities;
+}
+
 ResolvedPromptSemantics semantics(const GenerationRequest& request) {
     ServeOptions server;
-    return resolve_prompt_semantics(request, server);
+    return resolve_prompt_semantics(request, server, reasoning_effort_template());
 }
 
 ninfer::PromptInput prompt(const GenerationRequest& request) {
@@ -619,6 +629,30 @@ int test_reasoning_and_extensions() {
     body["chat_template_kwargs"] = Json{{"future", nullptr}};
     failures += check(parse(body).generation.messages.size() == 1,
                       "null unknown template option is neutral");
+
+    body                         = base_request();
+    body["reasoning_effort"]     = "high";
+    const GenerationRequest high = parse(body).generation;
+    failures += check(high.reasoning_effort == RequestedReasoningEffort::High,
+                      "a standard effort the template lacks was not parsed");
+    ApiError effort = api_error([&] { (void)semantics(high); });
+    failures += check(effort.status == 400 && effort.code == "reasoning_effort_not_supported" &&
+                          effort.param == "reasoning_effort" &&
+                          effort.message == "Unexpected reasoning effort high. Supported types are "
+                                            "xhigh (default), medium, and low.",
+                      "Chat Completions reasoning_effort:high did not name the supported efforts");
+    body                         = base_request();
+    body["chat_template_kwargs"] = Json{{"reasoning_effort", "minimal"}};
+    effort                       = api_error([&] { (void)semantics(parse(body).generation); });
+    failures += check(effort.code == "reasoning_effort_not_supported" &&
+                          effort.param == "reasoning_effort" &&
+                          effort.message == "Unexpected reasoning effort minimal. Supported types "
+                                            "are xhigh (default), medium, and low.",
+                      "chat_template_kwargs.reasoning_effort bypassed template validation");
+    body["chat_template_kwargs"] = Json{{"reasoning_effort", "low"}};
+    failures +=
+        check(semantics(parse(body).generation).reasoning_effort == ninfer::ReasoningEffort::Low,
+              "a supported kwargs effort was not resolved");
 
     body                        = base_request();
     body["repetition_penalty"]  = 1.0;

@@ -129,10 +129,52 @@ std::string render_tool_definition(const ToolDefinition& tool) {
     return Json{{"type", "function"}, {"function", std::move(function)}}.dump();
 }
 
+ninfer::ReasoningEffort engine_reasoning_effort(RequestedReasoningEffort effort) {
+    switch (effort) {
+    case RequestedReasoningEffort::None:
+        return ninfer::ReasoningEffort::None;
+    case RequestedReasoningEffort::Minimal:
+        return ninfer::ReasoningEffort::Minimal;
+    case RequestedReasoningEffort::Low:
+        return ninfer::ReasoningEffort::Low;
+    case RequestedReasoningEffort::Medium:
+        return ninfer::ReasoningEffort::Medium;
+    case RequestedReasoningEffort::High:
+        return ninfer::ReasoningEffort::High;
+    case RequestedReasoningEffort::XHigh:
+        return ninfer::ReasoningEffort::XHigh;
+    case RequestedReasoningEffort::Max:
+        return ninfer::ReasoningEffort::Max;
+    }
+    throw std::logic_error("invalid requested reasoning effort");
+}
+
+// "xhigh (default), medium, and low": the template default first, then descending effort.
+std::string supported_reasoning_efforts(const ninfer::ReasoningEffortCapabilities& capabilities) {
+    std::vector<std::string> names;
+    if (capabilities.default_effort) {
+        names.push_back(std::string(ninfer::reasoning_effort_name(*capabilities.default_effort)) +
+                        " (default)");
+    }
+    for (auto it = capabilities.supported.rbegin(); it != capabilities.supported.rend(); ++it) {
+        if (*it != capabilities.default_effort) {
+            names.emplace_back(ninfer::reasoning_effort_name(*it));
+        }
+    }
+    std::string text;
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        if (i > 0) { text += names.size() == 2 ? " " : ", "; }
+        if (i > 0 && i + 1 == names.size()) { text += "and "; }
+        text += names[i];
+    }
+    return text;
+}
+
 } // namespace
 
 ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& request,
-                                                 const ServeOptions& server) {
+                                                 const ServeOptions& server,
+                                                 const ninfer::PromptCapabilities& capabilities) {
     using Json  = RequestJson;
     Json kwargs = request.chat_template_kwargs_json.empty()
                       ? Json::object()
@@ -185,28 +227,20 @@ ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& reques
                                   "reasoning_effort", "conflicting_template_option");
         // A request effort overrides the server's thinking default.
         result.enable_thinking = enables;
-        switch (*effort) {
-        case RequestedReasoningEffort::None:
-            result.reasoning_effort = ninfer::ReasoningEffort::None;
-            break;
-        case RequestedReasoningEffort::Minimal:
-            result.reasoning_effort = ninfer::ReasoningEffort::Minimal;
-            break;
-        case RequestedReasoningEffort::Low:
-            result.reasoning_effort = ninfer::ReasoningEffort::Low;
-            break;
-        case RequestedReasoningEffort::Medium:
-            result.reasoning_effort = ninfer::ReasoningEffort::Medium;
-            break;
-        case RequestedReasoningEffort::High:
-            result.reasoning_effort = ninfer::ReasoningEffort::High;
-            break;
-        case RequestedReasoningEffort::XHigh:
-            result.reasoning_effort = ninfer::ReasoningEffort::XHigh;
-            break;
-        case RequestedReasoningEffort::Max:
-            result.reasoning_effort = ninfer::ReasoningEffort::Max;
-            break;
+        result.reasoning_effort = engine_reasoning_effort(*effort);
+        // None disables thinking on every template. Any other effort must be one the loaded
+        // template accepts, checked here so the template never rejects it during rendering.
+        const ninfer::ReasoningEffortCapabilities& efforts = capabilities.reasoning_effort;
+        if (enables && !efforts.supports(*result.reasoning_effort)) {
+            if (efforts.supported.empty()) {
+                invalid_prompt_option("the loaded chat template does not support reasoning effort",
+                                      "reasoning_effort", "reasoning_effort_not_supported");
+            }
+            invalid_prompt_option("Unexpected reasoning effort " +
+                                      std::string(requested_reasoning_effort_name(*effort)) +
+                                      ". Supported types are " +
+                                      supported_reasoning_efforts(efforts) + ".",
+                                  "reasoning_effort", "reasoning_effort_not_supported");
         }
     }
     if (request.continuation == ninfer::PromptContinuationMode::ContinueFinalAssistant &&
