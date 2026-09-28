@@ -101,6 +101,16 @@ Its BF16 head runs through the registered BF16 `[248320,5120]` Linear and Linear
 DFlash2 companion was trained for the canonical target; the derivative executes it but is not
 qualified as equivalent.
 
+Its tokenizer resources are embedded verbatim. Vocabulary and BPE merges agree with the canonical
+checkpoint, but the word-splitting regex in its `tokenizer.json` groups Unicode letters without
+combining marks (`\p{L}+`), while the `pretokenize_regex` in its `tokenizer_config.json` names the
+canonical letters-and-marks pattern. The frontend follows `tokenizer.json`, the file the Hugging Face
+tokenizer executes, with NFC normalization; the two differ only for text with combining marks. Its
+`tokenizer_config.json` omits `add_bos_token` (no automatic BOS) and `added_tokens_decoder` (the
+added tokens come from `tokenizer.json`). `ninfer_qwen3_5_orcarouter_tokenizer_test` compares 17
+cases, including combining marks, multilingual text, special tokens and a 3,613-token input, with the
+ids and decodes of the stored tokenizer, when `NINFER_ORCAROUTER_MODEL_DIR` names the source.
+
 MTP and Vision use the main source. DFlash and DFlash2 use the corresponding named source, supplied
 as `--source dflash=PATH` or `--source dflash2=PATH`. An artifact may contain several optional
 components; the Engine loads only the ones selected at startup, including at most one speculative
