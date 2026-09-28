@@ -199,13 +199,24 @@ Windows, MSVC 19.51, CUDA 13.3, `sm_120a`, RTX PRO 6000 Blackwell (driver 616.92
 
 ## Deployment
 
-As of September 28, 2026 the x870e production service on :8010 runs the installed pre-v3 build
-(`ninfer-serve` from fork `87812bc8`, supervisor from `bbe3e16e`, release `2026.09.24-alpha.1`
-runtime files) with the v2 production artifact
-`C:\models\Qwen3.8-27B\qwen3_8_27b_nvfp4_dflash2.ninfer`. The fork line is not deployed. Its v3
-copy of that artifact is `E:\models\v3\Qwen3.8-27B\qwen3_8_27b_nvfp4_dflash2.ninfer`.
+Since September 28, 2026 10:02 UTC, the x870e production service on :8010 runs release
+`2026.09.28-v3port.1` (source `e92c2078`). The cutover replaced the four executables
+(`ninfer-serve`, `ninfer-supervisor`, `ninfer`, `ninfer-launcher`) and the release manifest; every
+runtime DLL was already byte-identical. It pointed the supervisor configuration at the v3
+artifacts, and the production model is
+`E:\models\v3\Qwen3.8-27B\qwen3_8_27b_nvfp4_dflash2.ninfer`.
+- The engine starts with `CUDA sync blocking` and the unchanged production flags.
+- The service was down for 9 s.
+- After the restart, 11 checks against :8010 passed: model id `qwen3.8-27b`, chat with and without
+  thinking, an image message, a tool call, `json_object`, `json_schema`, `/v1/systemone`,
+  `/admin/vram`, `/admin/stats` and `/health`.
+- Rendered prompts on 21 request shapes are byte-identical to the previous build.
+- A 24-question System One replay is identical.
 
-Igor decided on 2026-09-28 to switch x870e to the fork line. The cutover is prepared but waits for
-his go. It swaps the four executables for `2026.09.28-v3port.1` and points the supervisor
-configuration at the v3 artifacts. z690 (RTX 5090) runs `2026.09.24-alpha.1`; it will get the same
-release through its installer, and its service was down on 2026-09-28.
+The previous build and configuration are archived in
+`E:\NInfer-archive\x870e-87812bc8-20260928-100213`; the prepared rollback restores them in about a
+minute.
+
+z690 (RTX 5090) still runs `2026.09.24-alpha.1`, and its service was down on 2026-09-28. It gets
+the same release through its installer, installed by hand. The System One consumers then compare
+it with x870e on their 400-case set, because the two GPUs were never bit-identical.
