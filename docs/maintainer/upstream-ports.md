@@ -279,6 +279,15 @@ The previous build and configuration are archived in
 `E:\NInfer-archive\x870e-87812bc8-20260928-100213`; the prepared rollback restores them in about a
 minute.
 
-z690 (RTX 5090) still runs `2026.09.24-alpha.1`, and its service was down on 2026-09-28. It gets
-the same release through its installer, installed by hand. The System One consumers then compare
-it with x870e on their 400-case set, because the two GPUs were never bit-identical.
+z690 (RTX 5090) also runs `2026.09.28-v3port.1` since September 28, 2026, installed by hand from
+the same installer.
+- It serves `qwen3.8-27b` with 65,536-token context, 4 concurrent requests, vision on and a 1 GiB
+  desktop reserve.
+- Its build was confirmed over the tailnet by the v3 error signature for an unsupported reasoning
+  effort, and the same 11 checks passed.
+- On a 400-case System One comparison against x870e, the two machines made the same flag decision on
+  396 of 400 cases, with a mean |Δ| of 0.0197. That matches the pre-v3 cross-GPU gap (0.021), so the
+  difference is the GPU, not the build. Both machines serve System One in rotation.
+
+The upstream merge `e2a149f1` (September 28) is not deployed yet. Deploying it needs a release
+build, a rollout to both machines, and a System One re-check.
