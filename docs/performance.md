@@ -26,6 +26,9 @@ The Qwen3.6-27B NVFP4 MTP3 phase table comes from a corpus C=1 point whose full 
 not published here. The Qwen3.8 NVFP4 saturation reports retain configuration and
 values but no tested Git revision; the model page records that provenance limitation.
 
+The fork's [RTX PRO 6000 workstation records](performance/rtx-pro-6000.md) keep its pre-v3
+DFlash2, OrcaRouter and NVFP4 prefill-schedule measurements with their own conditions.
+
 ## Reading the results
 
 | Question | Metric to use |

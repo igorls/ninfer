@@ -1,13 +1,120 @@
-# NInfer
+# NInfer — workstation fork
 
-> Selected checkpoints. Maximum single-GPU inference performance.
+> Specialized single-GPU inference for long-running agents and structured application workloads.
 
-NInfer is a from-scratch C++/CUDA inference engine for Qwen3.5 Dense and MoE architectures on a
-single NVIDIA GeForce RTX 5090. It runs text, image, and video prompts through a local CLI or
-OpenAI-/Anthropic-compatible HTTP APIs. The runtime is deliberately specialized: one GPU, one
-resident model, and a startup-fixed capacity of one to eight active requests.
+This is [igorls/ninfer](https://github.com/igorls/ninfer), a fork of
+[Neroued/ninfer](https://github.com/Neroued/ninfer). It builds on upstream's from-scratch C++/CUDA
+engine and `.ninfer` v3 artifacts, and focuses on native Windows operation, the NVIDIA RTX PRO 6000
+Blackwell workstation, and application serving. Qwen3.8-Flash-Next is not yet ported to the v3
+engine; it runs on the fork's `research/qwen4-flash-next` line.
 
-Five official artifacts are available. The quick-start commands use Qwen3.8-27B NVFP4.
+The intended product is a dependable local inference service: efficient prefill and decode,
+correct continuation reuse across long agent sessions, constrained JSON responses for applications,
+and operational visibility into latency, memory pressure and failures. Performance changes must
+preserve model semantics and improve the workload they claim to improve.
+
+## What this fork adds
+
+- **Native Windows builds, a Windows Supervisor and an installer.** A tray application and browser
+  dashboard manage engine startup, shutdown and restart, inspect health and device-wide GPU memory,
+  edit configuration, hold a desktop memory reserve, adapt KV capacity to the reservation the
+  engine can get, and switch between configured model artifacts. The dashboard shows
+  request/client activity, prefix reuse, speculative acceptance and context pressure.
+- **Native structured output.** JSON-object mode, a supported JSON Schema subset and
+  `tool_choice: "required"`, constrained during generation through XGrammar, with MTP drafting kept
+  under the constraint. OpenAI Chat Completions, Responses and Anthropic Messages translate their
+  documented formats into the same engine contract.
+- **Native decision readout.** Chat Completions returns token log probabilities read from the
+  model's logits before any sampling adjustment, with `top_logprobs` alternatives, the
+  distribution over a caller-supplied closed set of candidates (`logprob_candidates`, up to 1,024
+  options, renormalised over the set and reported beside the vocabulary-wide value), and log
+  probabilities at chosen prompt positions for scoring a given continuation. `POST /v1/score` scores
+  up to 256 isolated questions against one shared prefix in a single call, in single-token and
+  multi-token candidate forms. Without `top_logprobs` alternatives the readout runs on the device and
+  speculative decoding stays on.
+- **TypeSafe System One drop-in.** `POST /v1/systemone` serves TypeSafe's Noul, Choice and Score
+  decisions from next-token probabilities with Jev's request, answer and error contract, so an
+  application built on the official TypeSafe SDKs switches with its base URL alone. The
+  [decision arcade](docs/decision-arcade.md) exercises it interactively.
+- **Read-only cache participation.** `prompt_cache_read_only` lets a one-shot request start from a
+  published prefix while capturing no checkpoint and publishing nothing, so bursts of classification
+  requests cannot evict other conversations' cached state; such a request prefills in one pass.
+- **Operations.** API-key files, device-wide memory sizing with a desktop reserve, `/admin/vram`,
+  `/admin/stats` and `/admin/quiesce` that never wait on execution, request JSONL logs with client
+  attribution and tool-block fingerprints, and a cache that stays useful under a full checkpoint
+  pool.
+- **Research readouts.** `ExecutionOptions::capture_reasoning_features` returns the hidden row at
+  the reasoning frontier; `ninfer-reasoning-collect` and `tools/bench/jevbench/reasoning_router.py`
+  train a learned reasoning router from it.
+- **More artifacts.** A conversion recipe for the OrcaRouter Qwen3.8-27B NVFP4 derivative, which
+  keeps BF16 embeddings and a BF16 full output head (native BF16 Linear and LinearTopK paths).
+
+These capabilities are implemented in this branch. Application-specific quality qualification is
+separate: valid JSON and fast inference do not establish correct legal analysis or reliable behavior
+on every agent workload.
+
+## Direction and boundaries
+
+The priorities are sustained agent-session reliability, measured prefill/decode improvements on our
+hardware, complete supported API behavior, and evaluation through real application workflows. The
+fork follows upstream by merging it; upstream changes that regress this workstation are reverted or
+device-gated with measurements.
+
+The engine remains specialized: one GPU and one resident model per Engine, with one to eight active
+requests configured at startup and bounded FIFO admission. Supervisor model switching replaces the
+resident engine; it does not provide simultaneous model residency. Multi-GPU/distributed serving and
+request preemption are outside the current implementation.
+
+The build targets **`sm_120a` only**. This fork's primary workstation is the **RTX PRO 6000
+Blackwell 96 GB**. Upstream's published measurements below use the **RTX 5090**; they are not
+measurements of this fork's workstation.
+
+## Build on Windows
+
+Use a 64-bit Visual Studio C++ environment with CUDA 13.3; the qualified local toolchain is
+Visual Studio 2026 (MSVC 19.51), CUDA 13.3 and CMake 4.3. FFmpeg and libcurl are required: point
+`FFMPEG_ROOT` at a shared FFmpeg distribution and `CURL_ROOT` at a libcurl (>= 7.85) install, each
+with `include/`, `lib/` and `bin/`. Ship only an LGPL FFmpeg; a GPL distribution is for local
+development builds.
+
+```powershell
+git clone https://github.com/igorls/ninfer.git
+cd ninfer
+
+cmake -S . -B build-win -G "Visual Studio 18 2026" -A x64 `
+  -DFFMPEG_ROOT=C:/deps/ffmpeg-lgpl-shared -DCURL_ROOT=C:/deps/curl
+cmake --build build-win --config Release -j
+```
+
+The CLI and HTTP engine are under `build-win/apps/Release/`; the Supervisor is under
+`build-win/apps/ninfer-supervisor/Release/`. Put the FFmpeg, libcurl and CUDA runtime DLLs on
+`PATH` to run them from the build tree. Add `-DBUILD_TESTING=ON` for the test suite, which CTest
+runs with those directories already on its `PATH`.
+
+Official v2 downloads upgrade in place without downloading the weights again:
+
+```powershell
+python tools\upgrade_ninfer_v2_to_v3.py models\qwen3_8_27b_nvfp4.ninfer models\v3\qwen3_8_27b_nvfp4.ninfer
+```
+
+### Windows Supervisor
+
+Edit a copy of the [example configuration](apps/ninfer-supervisor/supervisor.example.json) with
+your executable, artifact, working directory and API-key paths, then install the Windows app:
+
+```powershell
+.\scripts\windows\install.ps1 -ConfigPath .\supervisor.local.json
+```
+
+This installs binaries and runtime DLLs under `%LOCALAPPDATA%\Programs\NInfer`, adds a **NInfer**
+Start menu entry and an **Installed apps** entry, and enables startup at sign-in. Configuration and
+logs live under `%LOCALAPPDATA%\NInfer`; models stay in their existing directories. The dashboard
+listens at `http://127.0.0.1:8099`. See [Windows app operations](docs/windows-app.md) for updates,
+removal and the installer build.
+
+## Models
+
+Upstream publishes five official artifacts; the quick-start commands use Qwen3.8-27B NVFP4.
 
 | Model | Weights | Artifact | Download and model card |
 |---|---|---|---|
@@ -16,6 +123,7 @@ Five official artifacts are available. The quick-start commands use Qwen3.8-27B 
 | Qwen3.8-27B | `groupwise-int` | `qwen3_8_27b.ninfer` | [Qwen3.8-27B](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) |
 | Qwen3.8-27B | `nvfp4` | `qwen3_8_27b_nvfp4.ninfer` | [Qwen3.8-27B NVFP4](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) |
 | Qwen3.6-35B-A3B | `groupwise-int` | `qwen3_6_35b_a3b.ninfer` | [Qwen3.6-35B-A3B](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer) |
+| Qwen3.8-27B OrcaRouter Uncensored | `nvfp4`, BF16 embedding and head | converted locally with recipe `qwen3_8_27b_orcarouter_nvfp4` | [conversion](docs/weight-conversion.md), [v2 release card](model-cards/Qwen3.8-27B-Uncensored-NVFP4-NInfer/README.md) |
 
 Each v3 `.ninfer` artifact carries model configuration, encoded weights, logical bindings and
 frontend resources. Runtime execution uses those facts with the implemented model and Op
@@ -26,18 +134,20 @@ The current engine requires v3 artifacts. Existing official v2 downloads can be
 [upgraded locally](docs/weight-conversion.md#upgrade-an-existing-v2-artifact) without downloading
 the weights again.
 
-## Quick start
+## Quick start on Linux
 
-NInfer requires 64-bit Linux, an NVIDIA GeForce RTX 5090, a CUDA toolkit supporting `sm_120a`,
+NInfer requires 64-bit Linux, an `sm_120a` GPU (RTX 5090 or RTX PRO 6000 Blackwell), a CUDA
+toolkit supporting `sm_120a`,
 CMake 3.28 or newer, a C++20 host compiler, Ninja, `pkg-config`, FFmpeg development libraries
 (`libavformat`, `libavcodec`, `libavutil`, and `libswscale`), and `libcurl >= 7.85`.
-CUDA 13.1 is the validated development toolkit; CMake does not impose a CUDA version floor.
+CUDA 13.1 is upstream's validated toolkit and this fork builds with CUDA 13.3; CMake does not
+impose a CUDA version floor.
 The build rejects CUDA architectures other than `sm_120a`.
 
 Build the product binaries:
 
 ```bash
-git clone https://github.com/Neroued/ninfer.git
+git clone https://github.com/igorls/ninfer.git
 cd ninfer
 
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -50,7 +160,8 @@ Python 3 interpreter. Both presets use `build/` and explicitly reset the build o
 Machine-specific compiler and Python paths belong in the ignored `CMakeUserPresets.json`.
 See [build organization and configuration](docs/maintainer/build-system.md) for details.
 
-There is no install target or packaged binary distribution; run NInfer from its source build tree.
+There is no Linux install target or packaged binary distribution; run NInfer from its source build
+tree. The Windows app installer packages a local Release build.
 Python tools run independently of CMake; the standalone HBM probe has its own
 [build command](tools/README.md#standalone-hbm-probe).
 
@@ -182,6 +293,17 @@ limit. Text evaluation used 262,144 tokens except Qwen3.8-27B NVFP4, which used 
 fit the RTX 5090 after weights. Each score is one sample per problem; model cards contain the
 correct/total counts and evaluation notes.
 
+[JevBench](https://github.com/fstandhartinger/jevbench) measures decision models: state and rubric
+in, a probability per option out, scored on accuracy, calibration, latency and cost.
+[`tools/bench/jevbench/`](tools/bench/jevbench/) holds an adapter in that repository's contract, a
+TypeSafe-wire-format shim so its stock adapter runs unchanged, and a driver that runs the 231
+public decisions and scores them with the board's own formula. On the public items, the fork's
+pre-v3 Linux build on an RTX PRO 6000 answered 100 / 97.2 / 66.7 % of the easy / standard / hard
+tiers with Qwen3.8-27B NVFP4 at a 0.033 s median decision (2026-09-21); Jev 1.13.0 scores
+100 / 98.6 / 73.0 % on the same items. Half the benchmark is held out, so the official rows come
+only from the maintainer's own run; the submission is
+[issue #12](https://github.com/fstandhartinger/jevbench/issues/12).
+
 ## Startup notes
 
 GPU residency is fixed at process startup. `--spec` selects speculative decoding residency, and
@@ -240,7 +362,7 @@ and either full or optimized proposal heads.
 
 The product boundary remains intentionally small:
 
-- one RTX 5090 and one resident model per Engine;
+- one `sm_120a` GPU and one resident model per Engine;
 - a startup-fixed capacity of one to eight active requests with bounded FIFO ingress;
 - no request preemption, priority/QoS, active-request swapping, weight offload, multi-GPU, or
   distributed serving;
@@ -258,7 +380,9 @@ capacities remain fixed for the process lifetime.
 
 - [Documentation index](docs/README.md)
 - [CLI](docs/cli.md)
-- [HTTP serving](docs/serving.md)
+- [HTTP serving](docs/serving.md), including TypeSafe System One
+- [Decision arcade](docs/decision-arcade.md)
+- [Windows app](docs/windows-app.md)
 - [Performance](docs/performance.md)
 - [Perplexity evaluation](docs/perplexity.md)
 - [Weight conversion and custom recipes](docs/weight-conversion.md)
@@ -269,17 +393,13 @@ capacities remain fixed for the process lifetime.
 
 Run the relevant `--help` for the exact current option contract.
 
-## Support
+## Upstream and licensing
 
-NInfer is a personal project that I develop out of interest. If you find it useful and would like
-to support its continued development, you can [support the project on Ko-fi](https://ko-fi.com/neroued).
-
-Support is entirely voluntary. It is not a purchase or investment and does not come with financial
-returns, promised services or features, or a role in project decisions. The project's direction,
-priorities, technical choices, and release schedule remain independently determined by the
-maintainer.
-
-## License
+The original inference engine and its published Qwen artifacts are the work of
+[Neroued/ninfer](https://github.com/Neroued/ninfer) and its contributors; upstream's own README
+describes how to support that project. This repository maintains the workstation and
+application-serving changes described above; upstream benchmarks and model cards retain their own
+provenance.
 
 NInfer is licensed under the [Apache License 2.0](LICENSE).
 
