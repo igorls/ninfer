@@ -216,7 +216,11 @@ request log):
   closed-turn `reasoning_content` a client sends back is dropped (production log:
   `preserve_thinking: false`). v3 leaves it unset and the Qwen3.8 template then retains that
   reasoning. Clients that return reasoning in their history would see longer prompts and different
-  model input. Decision pending (Igor).
+  model input. Restored for parity (Igor, 2026-09-28): the server default is `false` again, as on
+  the fork (`bool` option, request value or server default), in `3cb5e718`. Checked live: the same
+  history with returned reasoning renders 76 prompt tokens by default and 101 with
+  `preserve_thinking: true`; the request log records `false` like production. Moving to the Qwen3.8
+  template default (retain) is a later, deliberate change to agree with bentokit.
 - Reasoning effort (xhigh when unset), `kDefaultMaxTokens` (8192) and the other serve defaults
   match.
 
