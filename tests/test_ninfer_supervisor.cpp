@@ -5,6 +5,8 @@
 #include "reserve_budget.hpp"
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <cmath>
 #include <iostream>
 #include <string>
@@ -1218,6 +1220,43 @@ int test_engine_param_round_trip() {
     return f;
 }
 
+// Catalog availability and identity read the v3 entry header and directory; a v2 artifact is
+// reported as needing the upgrade, not as available.
+int test_artifact_headers() {
+    using namespace ninfer::supervisor;
+    int f = 0;
+    const auto dir = std::filesystem::temp_directory_path() / "ninfer_supervisor_artifact_test";
+    std::filesystem::create_directories(dir);
+    const auto write = [&](const char* name, const char magic[8], const std::string& json) {
+        const auto path = dir / name;
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out.write(magic, 8);
+        const std::uint64_t size = json.size();
+        for (unsigned i = 0; i < 8; ++i) { out.put(static_cast<char>((size >> (8 * i)) & 0xff)); }
+        out.write(std::string(16, '\x5a').data(), 16);
+        out << json;
+        return path.string();
+    };
+    const std::string v3 = write("v3.ninfer", kNinferV3Magic, R"({"metadata":{"name":"qwen3.8-27b"},"files":[]})");
+    const std::string v3_unnamed = write("v3u.ninfer", kNinferV3Magic, R"({"files":[]})");
+    const std::string v2 = write("v2.ninfer", kNinferV2Magic, R"({"identity":{"model_id":"qwen3.8-27b"}})");
+    const std::string other = write("other.ninfer", "GGUF\3\0\0\0", "{}");
+    ModelEntry entry;
+    entry.artifact = v3;
+    f += check(check_model_available(entry).available, "a v3 artifact is available");
+    f += check(artifact_model_identity(v3) == "qwen3.8-27b", "v3 identity is metadata.name");
+    f += check(artifact_model_identity(v3_unnamed).empty(), "a v3 artifact without a name has no identity");
+    entry.artifact = v2;
+    const ModelAvailability old = check_model_available(entry);
+    f += check(!old.available && old.reason.find("upgrade") != std::string::npos,
+               "a v2 artifact is unavailable and names the upgrade");
+    f += check(artifact_model_identity(v2).empty(), "a v2 artifact has no identity");
+    entry.artifact = other;
+    f += check(!check_model_available(entry).available, "a foreign file is unavailable");
+    std::filesystem::remove_all(dir);
+    return f;
+}
+
 int test_engine_param_validation() {
     using namespace ninfer::supervisor;
     int f = 0;
@@ -1390,6 +1429,7 @@ int main() {
     failures += test_with_desktop_reserve();
     failures += test_model_reserve_budget();
     failures += test_engine_param_round_trip();
+    failures += test_artifact_headers();
     failures += test_engine_param_validation();
     failures += test_redact_engine_args();
     failures += test_engine_endpoint_sync();

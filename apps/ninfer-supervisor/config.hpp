@@ -51,19 +51,27 @@ struct ModelEntry {
 
 // Inspect only the small directory, never model payloads. The engine remains
 // responsible for complete artifact binding and numerical compatibility.
+// The engine reads v3 artifacts only: a 32-byte entry header (magic, little-endian directory
+// length, artifact id) followed by the JSON directory (docs/maintainer/artifact-container.md).
+inline constexpr char kNinferV3Magic[8] = {'N', 'I', 'N', 'F', 'E', 'R', '\0', '\3'};
+inline constexpr char kNinferV2Magic[8] = {'N', 'I', 'N', 'F', 'E', 'R', '\0', '\2'};
+
+// The artifact's public model name (`metadata.name`), or empty when it has none or is not v3.
 inline std::string artifact_model_identity(const std::string& path) {
     try {
         std::ifstream in(std::filesystem::path(path), std::ios::binary);
-        unsigned char prefix[16]{};
-        in.read(reinterpret_cast<char*>(prefix), sizeof(prefix));
-        if (!in || std::memcmp(prefix, "NINFER\0\2", 8) != 0) { return {}; }
+        unsigned char header[32]{};
+        in.read(reinterpret_cast<char*>(header), sizeof(header));
+        if (!in || std::memcmp(header, kNinferV3Magic, 8) != 0) { return {}; }
         std::uint64_t size = 0;
-        for (unsigned i = 0; i < 8; ++i) { size |= std::uint64_t(prefix[8 + i]) << (8 * i); }
-        if (size == 0 || size > 16 * 1024 * 1024) { return {}; }
+        for (unsigned i = 0; i < 8; ++i) { size |= std::uint64_t(header[8 + i]) << (8 * i); }
+        if (size == 0 || size > 64 * 1024 * 1024) { return {}; }
         std::string directory(static_cast<std::size_t>(size), '\0');
         in.read(directory.data(), static_cast<std::streamsize>(size));
         if (!in) { return {}; }
-        return nlohmann::json::parse(directory).at("identity").at("model_id").get<std::string>();
+        const auto json = nlohmann::json::parse(directory);
+        if (!json.contains("metadata") || !json.at("metadata").is_object()) { return {}; }
+        return json.at("metadata").value("name", std::string{});
     } catch (const std::exception&) { return {}; }
 }
 
@@ -77,10 +85,10 @@ struct ModelAvailability {
     std::uint64_t size_bytes = 0;
 };
 
-// Reads the artifact header. `NINFER\0\2` is the v2 artifact magic (see
-// src/artifact/reader.cpp), so a file that exists but is a partial copy, the
-// wrong format, or a stray rename is caught here instead of costing a failed
-// engine start and a crash-loop backoff.
+// Reads the artifact header, so a file that exists but is a partial copy, the wrong format,
+// or a stray rename is caught here instead of costing a failed engine start and a crash-loop
+// backoff. A v2 artifact is named as such: the v3 engine cannot load it, and
+// tools/upgrade_ninfer_v2_to_v3.py converts it.
 inline ModelAvailability check_model_available(const ModelEntry& model) {
     ModelAvailability out;
     if (model.artifact.empty()) {
@@ -114,9 +122,12 @@ inline ModelAvailability check_model_available(const ModelEntry& model) {
         out.reason = "artifact is truncated";
         return out;
     }
-    static constexpr char kNinferV2[8] = {'N', 'I', 'N', 'F', 'E', 'R', '\0', '\2'};
-    if (std::memcmp(magic, kNinferV2, sizeof(magic)) != 0) {
-        out.reason = "not an NInfer v2 artifact";
+    if (std::memcmp(magic, kNinferV2Magic, sizeof(magic)) == 0) {
+        out.reason = "NInfer v2 artifact; upgrade it to v3 with tools/upgrade_ninfer_v2_to_v3.py";
+        return out;
+    }
+    if (std::memcmp(magic, kNinferV3Magic, sizeof(magic)) != 0) {
+        out.reason = "not an NInfer v3 artifact";
         return out;
     }
     out.available = true;
