@@ -77,12 +77,13 @@ applies with these additions, which take precedence where they differ:
 - Production is one RTX PRO 6000 Blackwell (`sm_120a`, 96 GB) serving Qwen3.8-27B NVFP4 on a
   shared desktop. Performance decisions for the fork are measured on that device, and the engine
   must leave the desktop usable (memory reserve, no whole-GPU assumptions).
-- The pre-v3 fork line is being ported onto v3: the supervisor app, serving extensions (structured
-  output, token logprobs and `/v1/score`, System One, admin/telemetry endpoints), the OrcaRouter
-  checkpoint, and Qwen3.8-Flash-Next as a second architecture package. Until each lands, the
-  [port ledger](docs/research/upstream-v3-port-2026-09-27.md) is the authority for its status.
-- Upstream sync merges upstream and reverts rejected commits, so the merge-base records the last
-  reviewed upstream commit.
+- The fork carries the supervisor app, serving extensions (structured output, token logprobs and
+  `/v1/score`, System One, admin/telemetry endpoints) and the OrcaRouter checkpoint on v3;
+  Qwen3.8-Flash-Next is still to be ported as a second architecture package.
+  [Upstream ports](docs/maintainer/upstream-ports.md) records what was carried, dropped and
+  deferred, the fork's deliberate divergences, qualification and deployment.
+- Upstream sync merges `origin/master` into the fork line and reverts rejected commits, so the
+  merge-base records the last reviewed upstream commit.
 - Builds on the production machine run at below-normal priority whenever an engine is serving.
 
 ## Change consistency
@@ -97,6 +98,11 @@ affected schema tests and serving documentation together.
 Keep stable requirements in their existing active reference. Temporary plans are useful only for
 active work; remove them when completed or abandoned. Maintain one current authority rather than
 parallel `final`, `v2`, or `new-design` documents.
+
+When adapting, integrating, qualifying, reverting, or deferring an upstream change, update
+`docs/maintainer/upstream-ports.md` in the same change. Keep candidate, source integration,
+hardware qualification, and deployment status distinct. Performance methodology and detailed
+results remain in `docs/performance.md`.
 
 ## Verification and completion
 
@@ -154,6 +160,7 @@ Read the authority relevant to the current decision; this is not a mandatory rea
 | Artifact, layout, codec, conversion, or model mathematics | model/artifact references and conversion guide linked from `docs/README.md` |
 | Op contracts, implementation ownership, numerical/performance qualification | `docs/maintainer/op-development.md` |
 | Test/benchmark commands and published performance | `tests/README.md`, `bench/README.md`, `docs/performance.md` |
+| Upstream port priorities, integrated features, provenance, fork divergences and deployment | `docs/maintainer/upstream-ports.md` |
 | In-tree C++ interface | `include/ninfer/engine.h`, `include/ninfer/types.h` |
 
 [Documentation map](docs/README.md) routes to narrower authorities when needed.
