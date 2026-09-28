@@ -1,6 +1,6 @@
 # System One decision arcade
 
-[Play Tetris](tetris-demo.html) · [Play Chess](chess-demo.html) · [Play Kitchen Rush](kitchen-demo.html) · [Play Beacon Runner](beacon-demo.html)
+[All demos](index.html) · [Play Arena Duel](arena-demo.html) · [Play Tetris](tetris-demo.html) · [Play Chess](chess-demo.html) · [Play Kitchen Rush](kitchen-demo.html) · [Play Beacon Runner](beacon-demo.html) · [Play Cube](rubiks-demo.html)
 
 The arcade demonstrates the [TypeSafe-compatible System One API](serving.md#typesafe-system-one):
 the application supplies an observation and a finite set of legal actions, NInfer scores the
@@ -15,14 +15,16 @@ a request label, not a resident-model switch. Bearer
 tokens stay in memory and are excluded from exports. Fonts have local fallbacks; chess rules are
 vendored locally. Human and local-reference modes work without a model server.
 
-## Four games, one decision interface
+## Six games, one decision interface
 
 | Game | Legal actions supplied by the client | Local reference | Details |
 |---|---|---|---|
+| Arena Duel | Seven combat actions, filtered by stamina and action recovery | An explicit reactive sparring policy | Live clock, parries, dodges and counterattacks below |
 | Tetris | Every supported rotation/column straight-drop landing and resulting board metrics | Lexicographic lines, holes, height, bumpiness | [Controls, method and measured comparison](tetris-demo.md) |
 | Chess | Every legal move, including castling, en passant and all four promotions | A one-ply material heuristic with a small development tie-break | Controls and limits below |
 | Kitchen Rush | Every available chef/order/station job, plus waiting | A greedy scheduler favoring completed dishes, urgency and the selected goal | Paired clocks and rules below |
 | Beacon Runner | Fixed eight screen directions plus brake; continuous collision physics | None; Qwen vision or human input | Camera-only control and ablations below |
+| Cube | Eighteen face turns; model modes omit returns to visited states by default | Exact search proves an optimal line within eleven turns; a two-phase line beyond | Speed run below |
 
 The instruments separate live inference, human input and local reference play. They display
 measured request P50/P95, warm-up separately, token usage and exact wire JSON. Tetris and chess
@@ -35,12 +37,61 @@ full-response timing, cancellation, strict deadline races and measurement summar
 `arcade/instrument.css` supplies the common console. Each game owns its rules/observation adapter
 and controller in `<game>-game.js` and `<game>-ui.js`. The HTML pages own their controls and markup.
 Kitchen Rush also owns a DOM-independent `kitchen-match.js` for its paired clock and concurrent
-decision lifecycle. The CLI evaluators load these same adapters and transport; they do not reimplement the games.
+decision lifecycle. The cube splits further: `rubiks-cube.js` owns geometry and notation,
+`rubiks-solver.js` exact and two-phase search, and a DOM-independent `rubiks-session.js` its clocks
+and decisions. The CLI evaluators load these same adapters and transport; they do not reimplement the games.
 
 An additional game should enumerate its complete supported legal action set, attach factual
 outcomes, build its question, and apply only the returned action. It should expose its reference
 policy separately, name its timing/deadline semantics and export the request/response evidence.
 Keep game semantics in its adapter and reusable API behavior in the shared transport.
+
+## Arena Duel
+
+Open [Arena Duel](arena-demo.html) and choose **Qwen · System One**, **You**, or **Local sparring
+policy**. Vector, the cyan fighter, faces Maul, a seeded opponent with three attack tells:
+blockable Slash and Lunge, and an unblockable Crush. Guard within 190 ms of impact to parry;
+an ordinary block costs stamina and takes 3 damage. Dodge grants 360 ms of invulnerability.
+An early dodge can finish before a hit lands. Attacks commit the fighter until recovery ends;
+hits during Maul's recovery deal 40% extra damage.
+
+Each bout lasts at most 45 seconds. A knockout ends it immediately; otherwise the higher remaining
+health fraction wins (Vector starts at 100 HP, Maul at 150). Sparring, Duel and Blitz change attack
+windups. Human controls, while the arena has focus: A/D move, J quick strike, K power strike,
+L guard, Space dodge, S recover, P pause. Touch buttons apply the same actions. Sound is opt-in.
+
+The 3D scene shows the simulation. Qwen receives structured facts: distance, health, stamina,
+current action, enemy attack type, range, time until impact, and recovery remaining. It receives
+neither the reference policy's choice nor rendered images. The seven actions have stable codes;
+unaffordable moves are omitted and requests wait until the fighter can act. The API's explicit
+choice is authoritative. Reference mode calls only the labeled local policy.
+
+The world advances with real elapsed time during inference. A separate warm-up leaves the clock
+still. Only one decision may be outstanding. Each live request races the selected 150/300/500 ms
+deadline; expiry aborts transport. On arrival, elapsed time and current action legality are checked
+again. Expired and newly unavailable choices are discarded without substituting another move.
+Pause, reset, a hidden page, and bout completion cancel outstanding work. Errors pause the fight
+and retain a receipt. Browser rendering never slows the simulation clock for impact effects.
+
+P50/P95 use completed validated live responses and exclude warm-up. Incomplete expired requests
+are counted as late without inventing a response time. The decision stream distinguishes applied
+(cyan), expired/failed (red), unavailable (amber), and warm-up (muted). Inspect the last request,
+response and raw probabilities, or export the full bout without the bearer token. Damage is shown
+as dealt : taken. Action preferences are not win probabilities.
+
+The deterministic simulation is in `arcade/arena-game.js`; the clock and decision lifecycle are in
+`arena-session.js`; `arena-view.js` owns procedural 3D rendering and `arena-ui.js` the browser.
+The evaluator uses the same simulation, session and shared transport, with a real running clock:
+
+```sh
+node --test tests/test_arena_duel.mjs
+node tools/bench/arena-eval.mjs --mode=qwen --seed=1 --difficulty=duel --deadline=300 --out=arena-qwen.json
+node tools/bench/arena-eval.mjs --mode=reference --seed=1 --difficulty=duel --out=arena-reference.json
+```
+
+Seed controls the opponent's random attack sequence; the resulting fight also depends on actions
+and request arrival times. Compare several seeds and report health, damage, defenses, late replies
+and latency together. A single win demonstrates that bout, not a general fighting-game ability.
 
 ## Jev vs Qwen
 
@@ -312,6 +363,111 @@ score before division by temperature. The previous implementation could turn a d
 temperature choice into a uniform distribution. The candidate passed this live regression and
 the serving schema tests. Candidate token strings are validated/resolved once per request and
 reused across question branches; no measured backend speedup is claimed for this CPU optimization.
+
+## Cube speed run
+
+[Open the cube](rubiks-demo.html). Choose a scramble of three to eight turns, or a random state. A
+three-to-eight scramble is drawn from the seed and kept only when the solver proves the cube is
+exactly that many turns from solved, so its length is par. A random state is uniform over every
+reachable arrangement; the page scrambles it by reversing a two-phase solution, so its par is
+unproven. The scramble plays from solved before any clock starts.
+
+Notation is standard: a face letter is a clockwise quarter turn of that face as you look at it, a
+prime is counterclockwise and a 2 is a half turn. All eighteen turns are legal on every unsolved
+position. Qwen reads the six faces as the page's model view shows them, the turns made so far, and
+for each offered turn the stickers it would leave misplaced. The instruction asks for the turn that leaves
+the cube fewest turns from solved. The scramble, the solver's distances and every grade stay out of
+the request.
+
+**Avoid repeats**, enabled by default for both Qwen modes, tracks exact cube states from the start
+of the solve and excludes any turn that would return to one. This blocks immediate reversals and
+longer cycles. The model chooses among the remaining options, with stable option codes; its answer
+is applied directly. The filter uses move mechanics and visited states, with no solver grades.
+It prevents cycling but does not ensure progress or a solution, and can prevent useful backtracking
+after a bad decision. If every neighbor was visited, the run stops with **NO NEW TURN**. Human and
+local-search moves remain unrestricted.
+
+Select **Allow repeats · raw comparison**, or pass `--repeats allow`, to reproduce the original
+eighteen-choice policy. The inspector and exports record excluded moves. Choice probabilities and
+optimal mass are conditional on the offered candidates: use the same repeat policy when comparing
+reasoning and System One, and report filtered results separately from raw model results.
+
+The local solver is exact within eleven turns: iterative-deepening search over Kociemba's cubie
+coordinates with admissible pattern tables, bounded by a node budget. Past that horizon the page
+shows a proven lower bound, and local search follows a two-phase line of about twenty turns,
+switching to a proven optimal line once the cube is close enough. The tables build in slices after
+the page loads, in about a third of a second on the development machine.
+
+Every turn is graded by exact distance: one turn closer (optimal), level, or one turn farther.
+Turns past the horizon stay ungraded. For System One the page also reports optimal mass, the probability
+Qwen placed on the turns the solver proves optimal. Several turns can be optimal at once, so this is
+a proven grade rather than agreement with one reference line.
+
+Clocks count only the solver's own time: Qwen's while a request is out, local search's while it
+searches, and a person's from their first turn. Warm-up, grading and turn animation stay off every
+clock, so turn speed never changes a time. Qwen stops after three times par plus six turns, or sixty
+from a random state. A paused or stopped solve can be handed to local search or to you without a new
+scramble.
+
+Drag a face to turn it: the layer follows the pointer and settles on the nearest quarter, and a
+flick carries it on. Tap a face for a clockwise turn, Shift-tap for counterclockwise and Alt-tap for
+a half turn; U D L R F B do the same from the keyboard. Drag the space around the cube, or use the
+arrow keys on the focused view, to look around. P pauses, and so does hiding the tab. Without WebGL
+the model view still shows the whole cube and the keys still turn it. Export holds the scramble,
+every graded turn and the request/response receipts, and omits bearer tokens.
+
+```sh
+node tools/bench/rubiks-eval.mjs --player local --distance 8 --seed 1
+node tools/bench/rubiks-eval.mjs --player live --endpoint http://127.0.0.1:8010 --distance 5 --seed 1 --runs 6
+```
+
+The evaluator runs the page's session controller headless, with the same requests and grading.
+
+**Qwen · Reasoning** uses thinking-enabled Chat Completions with low reasoning effort, greedy
+decoding, the scramble seed as its sampling seed, and a structured answer selecting one of the
+same candidate option tokens. It receives exactly the same face grids, move history, misplaced
+sticker counts and option descriptions as System One. Its system instruction asks for a short plan
+and explains that a correct move can increase misplaced stickers. It gets no simulator, reference
+line or solver grades. Each turn is a fresh request; generated reasoning from earlier turns is not
+carried forward. This provides a first comparison
+of a reasoning policy with the existing immediate-choice policy. The prompts differ, so this is
+not a controlled measurement of the thinking switch alone.
+
+The output budget includes both thinking and the final answer; the default is 4,096 tokens per
+request. A token-limit response stops the run without applying a partial answer. Both model modes
+exclude one full warm-up request and animation from the solve clock. Exports retain the warm-up,
+each request and response, output usage, and any failed request with its elapsed time. Reasoning
+has no move-probability distribution, so its optimal mass is unavailable. Compare solved fraction,
+turns, graded optimal turns, total request time and token usage; report failed runs as failures.
+The same-seed runs below are paired, and a complete export preserves the actual prompt and budget:
+
+```sh
+node tools/bench/rubiks-eval.mjs --player reasoning --endpoint http://127.0.0.1:8010 --distance 5 --seed 1 --repeats avoid --max-tokens 4096 --output out/cube-reasoning.json
+node tools/bench/rubiks-eval.mjs --player live --endpoint http://127.0.0.1:8010 --distance 5 --seed 1 --repeats avoid --output out/cube-systemone.json
+```
+
+September 26 raw-policy runs against the local resident qwen3.8-27b server covered 18 games (distances 3, 4 and
+5, seeds 1–6). Qwen solved 3, all at par; 34% of graded turns were optimal, mean optimal mass was
+0.42 and request P50 was about 93 ms. Unsolved runs settle into a turn and its inverse. The earlier
+instruction, which asked for the fewest misplaced stickers, scored the same: 3 of 18, 33% and 0.42.
+These runs establish the request path and the grading, not cube-solving ability.
+
+September 27 raw-policy reasoning trial on the resident `qwen3.8-27b` server used distance 5, seed 1. With the
+cube-specific prompt above, both 4,096- and 8,192-token budgets produced the correct first turn
+(`U'`), then exhausted the entire second request on reasoning without producing an answer. The
+8,192-token trial spent 10.12 seconds on the first turn and 34.37 seconds on the failed second
+request: 44.49 seconds excluding warm-up, or 54.69 seconds including it. Total output was 12,886
+tokens including warm-up and failure. Neither run solved the cube. A generic evaluation-assistant
+prompt had already exhausted 4,096 tokens during warm-up.
+
+A same-server System One check of that seed again stopped at 21 turns, with one optimal turn,
+1.96 seconds of decision time and zero generated output tokens. These single-seed trials verify
+the routes and expose budget exhaustion; they do not establish a general solve-rate comparison.
+
+With Avoid repeats enabled, the same System One seed completed 21 moves without revisiting any
+cube state, in 2.21 seconds of decision time. It still did not solve the cube and eventually moved
+beyond the exact grading horizon. The change fixes cycling; this run does not establish better
+solving ability.
 
 ## Beacon Runner: camera-only control
 

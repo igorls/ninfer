@@ -1,0 +1,100 @@
+/* Cube console: the shared instrument with a WebGL turntable, a model-view net and a distance trace. */
+.rubiks-console .frame { align-self: start; grid-template-rows: auto auto auto; }
+.rubiks-console .play { grid-template-columns: minmax(0, 1.35fr) minmax(250px, 340px); align-items: start; }
+.rubiks-console .signal-path span { white-space: nowrap; }
+.cube-column { min-width: 0; }
+
+.cube-stage {
+  position: relative; width: 100%; max-width: 640px; aspect-ratio: 1; margin: 0 auto;
+  touch-action: none; cursor: grab; border-radius: 12px; outline-offset: 4px;
+  background: radial-gradient(58% 50% at 50% 60%, #ffb0000f, transparent 72%);
+}
+.cube-stage.grabbing { cursor: grabbing; }
+.cube-stage.can-turn { cursor: pointer; }
+.cube-stage:focus-visible { outline: 3px solid var(--phosphor); }
+.cube-stage canvas { display: block; width: 100%; height: 100%; }
+.stage-fallback { position: absolute; inset: 30% 12% auto; margin: 0; color: var(--phosphor-dim); font-size: 13px; line-height: 1.6; text-align: center; }
+
+/* Heads-up readouts drawn over the glass. */
+.hud { position: absolute; pointer-events: none; display: grid; gap: 3px; font-variant-numeric: tabular-nums; }
+.hud span { font-size: 11px; letter-spacing: .08em; color: var(--phosphor-dim); }
+.hud b { font-weight: 700; color: var(--phosphor); line-height: 1; }
+.hud-turn { left: 4px; top: 2px; }
+.hud-turn b { font-size: clamp(30px, 4.4vw, 46px); letter-spacing: -.02em; min-width: 3ch; }
+.hud-turn b.fresh { animation: hud-turn .38s cubic-bezier(.16, 1, .3, 1); }
+@keyframes hud-turn { from { color: #fff1c6; transform: translateY(-3px); } to { color: var(--phosphor); transform: none; } }
+.hud-distance { right: 4px; top: 2px; justify-items: end; text-align: right; }
+.hud-distance b { font-size: clamp(30px, 4.4vw, 46px); letter-spacing: -.02em; }
+.hud-distance b.unknown { color: var(--phosphor-dim); }
+
+.cube-banner { top: auto; bottom: 14px; left: 12%; right: 12%; border-radius: 3px; box-shadow: 0 10px 24px -12px #000c; }
+.cube-banner.limit { background: #b98a3a; }
+
+/* The scramble and every graded turn, as tape. */
+.tape { display: flex; flex-wrap: wrap; gap: 5px; list-style: none; margin: 10px 0 0; padding: 0; min-height: 26px; font-size: 12px; line-height: 1; }
+.tape li { display: inline-grid; place-items: center; min-width: 30px; padding: 5px 6px 4px; border: 1px solid var(--phosphor-faint); border-radius: 2px; color: var(--phosphor); font-variant-numeric: tabular-nums; }
+.tape li.scramble { color: var(--phosphor-dim); border-style: dashed; }
+.tape li.divider { min-width: 0; border: 0; padding-inline: 3px; color: var(--phosphor-dim); letter-spacing: .08em; }
+.tape li.closer { background: #3b2906; border-color: #8a6420; }
+.tape li.level { color: var(--phosphor-dim); }
+.tape li.farther { color: var(--alarm); border-color: #6b3322; }
+.tape li.now { box-shadow: inset 0 -2px 0 var(--phosphor); }
+
+.cube-foot { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 20px; align-items: start; margin-top: 16px; }
+.net { margin: 0; display: grid; gap: 7px; }
+.net figcaption { font-size: 11px; letter-spacing: .08em; color: var(--phosphor-dim); }
+.net-grid { display: grid; grid-template-columns: repeat(4, 34px); grid-template-rows: repeat(3, 34px); gap: 3px; }
+.net-grid .face { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; padding: 1px; background: #0c0703; box-shadow: 0 0 0 1px var(--phosphor-faint); }
+.net-grid .face i { border-radius: 1px; }
+.net-grid .U { grid-area: 1 / 2; } .net-grid .L { grid-area: 2 / 1; } .net-grid .F { grid-area: 2 / 2; }
+.net-grid .R { grid-area: 2 / 3; } .net-grid .B { grid-area: 2 / 4; } .net-grid .D { grid-area: 3 / 2; }
+.sticker-meters { min-width: 0; }
+.sticker-meters .deadline-head { margin-top: 0; }
+.sticker-meters .screen-note { margin-top: 6px; }
+
+/* Distance to solved, one point per turn. */
+.descent { display: grid; gap: 6px; }
+#distance-now { font-size: 16px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+#descent { width: 100%; height: auto; overflow: visible; font: 10px var(--mono); }
+#descent .grid { stroke: var(--phosphor-faint); stroke-width: 1; }
+#descent .axis { fill: var(--phosphor-dim); }
+#descent .ideal { stroke: var(--phosphor-dim); stroke-width: 1; stroke-dasharray: 3 4; fill: none; }
+#descent .path { stroke: var(--phosphor); stroke-width: 1.6; fill: none; stroke-linejoin: round; }
+#descent .bound { stroke: var(--phosphor-dim); stroke-width: 1; stroke-dasharray: 2 3; fill: none; }
+#descent .closer { fill: var(--phosphor); }
+#descent .level { fill: var(--glass); stroke: var(--phosphor-dim); stroke-width: 1.4; }
+#descent .farther { fill: var(--alarm); }
+#descent .unknown { fill: none; stroke: var(--phosphor-dim); stroke-width: 1.2; }
+#descent .start { fill: var(--phosphor-dim); }
+#descent .now { stroke: var(--phosphor); stroke-width: 1; fill: none; }
+.descent-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 11px; line-height: 1.5; letter-spacing: .04em; color: var(--phosphor-dim); }
+.descent-legend span::before { content: ""; display: inline-block; width: 16px; margin-right: 6px; vertical-align: middle; border-top: 2px solid var(--phosphor); }
+.descent-legend .par::before { border-top: 1px dashed var(--phosphor-dim); }
+/* An empty decision area collapses instead of holding space for rows that local search never draws. */
+.rubiks-console #probabilities:empty { min-height: 0; }
+
+/* Probability rows carry the solver's grade beside the model's probability. */
+.rubiks-console .prob-row { grid-template-columns: 28px minmax(0, 1fr) 46px 30px; }
+.prob-row .grade { text-align: right; font-size: 11px; font-variant-numeric: tabular-nums; }
+.prob-row .grade.closer { color: var(--phosphor); }
+.prob-row .grade.level { color: var(--phosphor-dim); }
+.prob-row .grade.farther { color: var(--alarm); }
+.prob-row .grade:empty::before { content: "—"; color: var(--phosphor-faint); }
+.plan { display: flex; flex-wrap: wrap; gap: 5px; list-style: none; margin: 0; padding: 0; font-size: 12px; }
+.plan li { padding: 5px 7px 4px; border: 1px solid var(--phosphor-faint); border-radius: 2px; color: var(--phosphor-dim); }
+.plan li:first-child { color: var(--glass); background: var(--phosphor); border-color: var(--phosphor); }
+td.closer { color: var(--phosphor); } td.farther { color: var(--alarm); } td.level { color: var(--phosphor-dim); }
+
+@media (max-width: 1080px) {
+  .rubiks-console .play { grid-template-columns: minmax(0, 1fr) 250px; }
+  .net-grid { grid-template-columns: repeat(4, 28px); grid-template-rows: repeat(3, 28px); }
+}
+@media (max-width: 860px) {
+  .rubiks-console .play { grid-template-columns: minmax(0, 1fr); }
+  .cube-stage { max-width: 520px; }
+}
+@media (max-width: 570px) {
+  .cube-foot { grid-template-columns: 1fr; gap: 14px; }
+  .hud span { font-size: 10px; }
+  .cube-banner { left: 6px; right: 6px; }
+}

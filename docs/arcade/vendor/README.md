@@ -13,3 +13,10 @@ The distribution is wrapped in a local `ChessRules` closure for classic browser 
 unavailable source-map comment is removed. The rules implementation is otherwise unchanged. No
 runtime CDN or package installation is required. The library supplies move legality and game
 end conditions; it supplies no computer opponent or search engine.
+
+## Three.js
+
+`three.min.js` vendors the UMD build of **Three.js r159**, licensed under MIT. Copyright 2010–2023
+Three.js Authors. The startup deprecation warning was removed so the cube page does not print it;
+the library body is otherwise unchanged. Cube and Arena Duel use it for their WebGL views.
+Game rules, decisions and evaluation do not depend on it.

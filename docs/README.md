@@ -9,7 +9,8 @@ run the CLI or HTTP server.
 |---|---|
 | [CLI](cli.md) | text, chat-history, image/video input, output streams, sampling, MTP, and common runtime options |
 | [HTTP serving](serving.md) | OpenAI Responses/Chat Completions, Anthropic Messages, TypeSafe System One, state, streaming, token counting, authentication, and tool calls |
-| [Decision arcade](decision-arcade.md) | Tetris, chess, cooperative Kitchen Rush and Beacon Runner vision control, with reproducible decision evaluation |
+| [Demos](index.html) | Arena Duel, Tetris, chess, Kitchen Rush, Beacon Runner, the cube speed run, the decision analyzer, and the dual-purpose readout |
+| [Decision arcade](decision-arcade.md) | real-time Arena Duel combat, Tetris, chess, Kitchen Rush, Beacon Runner and Cube, with reproducible decision evaluation |
 | [Windows app](windows-app.md) | install the standalone Supervisor, launch at sign-in, update, and uninstall |
 | [Performance](performance.md) | RTX 5090 measurement coverage, per-model serving results, methodology, and publication rules |
 | [Weight conversion](weight-conversion.md) | official recipes, custom formats and sources, conversion methods, optional components and artifact output |

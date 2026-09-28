@@ -1073,7 +1073,7 @@ Errors use FastAPI's `{"detail": ...}` body with the statuses Jev returns:
 ### Client usage examples
 
 The [decision arcade](decision-arcade.md) provides interactive [Tetris](tetris-demo.html),
-[Chess](chess-demo.html) and [Kitchen Rush](kitchen-demo.html) clients. They expose the full choice
+[Chess](chess-demo.html), [Kitchen Rush](kitchen-demo.html) and [Cube](rubiks-demo.html) clients. They expose the full choice
 distribution, measured client latency, exact requests/responses and a separately labeled local
 reference policy. Kitchen Rush compares paired kitchens with identical seeded orders and either
 real-time or paused decision clocks. Its cooperative mode assigns independent model actors to

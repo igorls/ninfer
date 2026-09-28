@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>NInfer · Arena Duel</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&family=Kode+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="arcade/instrument.css"><link rel="stylesheet" href="arcade/arena.css">
+</head>
+<body>
+<main class="panel duel-console">
+  <span class="screw tr" aria-hidden="true"></span><span class="screw bl" aria-hidden="true"></span>
+  <aside class="side" aria-label="Arena settings">
+    <header class="plate">
+      <nav class="game-switch" aria-label="Demos"><a href="index.html">DEMOS</a><a href="tetris-demo.html">TETRIS</a><a href="rubiks-demo.html">CUBE</a><a href="arena-demo.html" aria-current="page">ARENA</a></nav>
+      <div class="brand">NInfer</div><h1 class="model">ARENA DUEL</h1>
+      <div class="power"><span class="led" id="led" aria-hidden="true"></span><span id="power-label">STANDING BY</span></div>
+    </header>
+    <p class="intro">Read the tell.<br>Beat the clock.<br>Land the counter.</p>
+    <fieldset class="block settings"><legend>IN THE CYAN CORNER</legend>
+      <label for="pilot">Fighter control</label><select id="pilot"><option value="qwen">Qwen · System One</option><option value="human">You · keys / touch</option><option value="reference">Local sparring policy</option></select>
+      <label for="difficulty">Opponent tempo</label><select id="difficulty"><option value="sparring">Sparring · longer tells</option><option value="duel" selected>Duel · 540–780 ms tells</option><option value="blitz">Blitz · 389–562 ms tells</option></select>
+      <div class="field-pair"><div><label for="seed">Seed</label><input id="seed" type="number" value="1" min="0" max="4294967295" step="1"></div><div><label for="deadline">Reply deadline</label><select id="deadline"><option value="150">150 ms</option><option value="300" selected>300 ms</option><option value="500">500 ms</option></select></div></div>
+      <p class="field-note">45 seconds. One live world. The opponent keeps moving while the model decides.</p>
+    </fieldset>
+    <details class="block connection"><summary>QWEN CONNECTION</summary><label for="endpoint">NInfer API base URL</label><input id="endpoint" type="url" value="http://127.0.0.1:8010" spellcheck="false"><label for="model">Resident model label</label><input id="model" value="qwen3.8-27b" spellcheck="false"><label for="key">Bearer token, if required</label><input id="key" type="password" autocomplete="off"><p class="field-note">Requires --cors. The model label does not switch the resident model. Keys stay in this page.</p></details>
+    <details class="block rules"><summary>THE FIGHT MANUAL</summary><p>SLASH and LUNGE can be guarded. Guard just before impact to parry. CRUSH breaks guard: dodge or leave its range.</p><p>Strike during the red fighter’s recovery for 40% extra damage. Attacks and dodges commit you until recovery ends. Stamina returns faster when you catch your breath.</p><p>A / D: backstep / approach. J: quick strike. K: power strike. L: guard. Space: dodge. S: recover. P: pause. Focus the arena to use keys, or use the buttons below it.</p><p>At time, the higher remaining health fraction wins. Qwen receives structured combat facts and legal actions. The 3D view is for you. Local policy is a separate comparison mode.</p></details>
+    <footer class="repo"><code>POST /v1/systemone</code><br>Seven moves. No time to monologue.<br><a href="decision-arcade.md#arena-duel">Rules &amp; measurements</a></footer>
+  </aside>
+  <section class="frame duel-frame" aria-label="Arena Duel">
+    <div class="crt duel-crt">
+      <header class="status"><span><b>ARENA DUEL</b><span class="dim"> / </span><span id="mode-label">SYSTEM ONE</span></span><button id="sound" aria-pressed="false" title="Enable synthesized combat audio">SOUND OFF</button></header>
+      <div class="combat-stage" id="stage">
+        <canvas id="arena" tabindex="0" aria-label="3D combat arena. Cyan fighter versus red fighter. Focus for keyboard controls in human mode."></canvas>
+        <div class="fight-hud">
+          <div class="fighter-hud cyan"><div class="fighter-name"><strong>VECTOR</strong><span id="player-tag">QWEN / SYSTEM ONE</span></div><div class="health-track"><div id="player-health"></div></div><div class="health-caption"><span id="player-hp">100 / 100</span><span>HEALTH</span></div><div class="stamina-track"><div id="stamina"></div></div></div>
+          <div class="round-clock"><strong id="round-clock">45</strong><span id="round-state">READY</span></div>
+          <div class="fighter-hud red"><div class="fighter-name"><strong>MAUL</strong><span>SEEDED OPPONENT</span></div><div class="health-track"><div id="enemy-health"></div></div><div class="health-caption"><span>HEALTH</span><span id="enemy-hp">150 / 150</span></div><div class="opponent-caption">HEAVY CLASS / CLOSE COMBAT</div></div>
+        </div>
+        <div class="attack-tell" id="tell" hidden><span id="tell-kind">INCOMING</span><strong id="tell-name">CRUSH</strong><div class="tell-track"><div id="tell-fill"></div></div><span id="tell-time">780 ms TO IMPACT</span></div>
+        <div class="combat-call" id="combat-call" aria-hidden="true"></div>
+        <div class="stage-intro" id="stage-intro"><span class="intro-rule"></span><h2>Milliseconds<br>make the difference.</h2><p id="intro-pilot">Qwen steps into the ring.<br>Every opening is a decision.</p></div>
+        <div class="bout-result" id="bout-result" hidden><span id="result-reason">TIME</span><h2 id="result-title">VICTORY</h2><p id="result-detail"></p></div>
+        <div class="stage-floor-label"><span>VECTOR / CYAN</span><span id="stage-message" role="status">PRESS START FIGHT</span><span>MAUL / RED</span></div>
+      </div>
+      <div class="decision-deck">
+        <div class="chosen-action"><span>LAST ACTION</span><strong id="action">READY TO REACT</strong><small id="action-status">Waiting for the bell</small></div>
+        <div class="reaction-meter"><div><span>REQUEST TIME</span><strong id="latency">—<small> ms</small></strong></div><div class="reaction-track"><i id="reaction-fill"></i><b id="deadline-marker"></b></div><p><span id="latency-range">P50 — / P95 —</span><span id="missed">0 LATE</span></p></div>
+        <div class="combat-stats"><div><span>DAMAGE</span><strong id="damage">0 : 0</strong></div><div><span>PARRIES</span><strong id="parries">0</strong></div><div><span>DODGES</span><strong id="dodges">0</strong></div></div>
+      </div>
+      <div class="decision-history"><span id="history-label">DECISION STREAM</span><div id="history" aria-label="Recent decision statuses"></div><span id="decision-count">0 APPLIED</span></div>
+      <section id="manual" hidden aria-label="Your combat actions"><p>Focus the arena to use keys, or tap an action.</p><div id="manual-actions"></div></section>
+      <div class="fault" id="fault" role="alert"></div>
+      <details class="inspector"><summary><span>INSPECT THE DECISION</span><span id="inspector-count">STRUCTURED STATE → ONE ACTION</span></summary><p class="screen-note" id="receipt-note">Warm-up and full validated response timings are recorded separately. Probabilities express action preference, not a chance of winning.</p><div class="probabilities" id="probabilities"></div><div class="wire"><pre id="request-wire">No request yet.</pre><pre id="response-wire">No response yet.</pre></div></details>
+    </div>
+    <nav class="softkeys" aria-label="Fight controls"><div class="softkey lit"><button id="run">START FIGHT</button></div><div class="softkey"><button id="reset">NEW BOUT</button></div><div class="softkey"><button id="export" disabled>EXPORT BOUT</button></div></nav>
+    <div class="bezel-note"><span id="bezel-source">QWEN · SEED 1</span><span>LIVE CLOCK / REAL DECISIONS</span></div>
+  </section>
+</main>
+<script src="arcade/vendor/three.min.js"></script><script src="arcade/system-one.js"></script><script src="arcade/arena-game.js"></script><script src="arcade/arena-session.js"></script><script src="arcade/arena-view.js"></script><script src="arcade/arena-ui.js"></script>
+</body>
+</html>

@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NInfer · Cube speed run</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500&family=Kode+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="arcade/instrument.css">
+  <link rel="stylesheet" href="arcade/rubiks.css">
+</head>
+<body>
+  <main class="panel rubiks-console">
+    <span class="screw tr" aria-hidden="true"></span><span class="screw bl" aria-hidden="true"></span>
+    <aside class="side" aria-label="Cube controls">
+      <header class="plate">
+        <nav class="game-switch" aria-label="Demos"><a href="index.html">DEMOS</a><a href="tetris-demo.html">TETRIS</a><a href="chess-demo.html">CHESS</a><a href="kitchen-demo.html">KITCHEN</a><a href="beacon-demo.html">BEACON</a><a href="rubiks-demo.html" aria-current="page">CUBE</a></nav>
+        <div class="brand">NInfer</div><h1 class="model">CUBE</h1><div class="series">THE DECISION ARCADE</div>
+        <div class="power"><span class="led" id="led" aria-hidden="true"></span><span id="power-label">READY</span></div>
+      </header>
+      <p class="intro">Scramble the cube.<br>Race it back to solved.</p>
+      <fieldset class="block settings">
+        <legend>THE RUN</legend>
+        <label for="player">Solver</label>
+        <select id="player"><option value="reference">Local search</option><option value="qwen">Qwen · System One</option><option value="reasoning">Qwen · Reasoning</option><option value="human">You</option></select>
+        <div id="repeat-settings" hidden>
+          <label for="repeat-policy">Repeated positions</label>
+          <select id="repeat-policy"><option value="avoid">Avoid repeats</option><option value="allow">Allow repeats · raw comparison</option></select>
+          <p class="field-note">Avoid repeats removes turns that return to a cube state already seen in this solve. Applies to both Qwen modes.</p>
+        </div>
+        <div id="reasoning-settings" hidden>
+          <label for="max-tokens">Output budget per request</label>
+          <select id="max-tokens"><option value="2048">2,048 tokens</option><option value="4096" selected>4,096 tokens</option><option value="8192">8,192 tokens</option><option value="16384">16,384 tokens</option></select>
+          <p class="field-note">Includes thinking and the final answer. Reasoning sees the same state and turns as System One.</p>
+        </div>
+        <div class="field-pair">
+          <div><label for="distance">Scramble</label><select id="distance"><option value="3">3 turns</option><option value="4">4 turns</option><option value="5" selected>5 turns</option><option value="6">6 turns</option><option value="7">7 turns</option><option value="8">8 turns</option><option value="random">Random state</option></select></div>
+          <div><label for="seed">Seed</label><input id="seed" type="number" min="0" max="4294967295" step="1" value="1"></div>
+        </div>
+        <p class="field-note" id="scramble-note">The solver proves each scramble is exactly this many turns from solved, so its length is par.</p>
+        <label for="pace">Turn speed <output id="pace-value" for="pace">1×</output></label>
+        <input id="pace" type="range" min="0.5" max="3" step="0.25" value="1">
+      </fieldset>
+      <details class="block connection" id="qwen-connection">
+        <summary>QWEN CONNECTION</summary>
+        <label for="endpoint">NInfer API base URL</label><input id="endpoint" value="http://127.0.0.1:8010" type="url" spellcheck="false">
+        <label for="model">Model label</label><input id="model" value="qwen3.8-27b" spellcheck="false">
+        <p class="field-note">NInfer uses its resident model. This label does not switch models.</p>
+        <label for="key">NInfer bearer token (if required)</label><input type="password" id="key" autocomplete="off">
+      </details>
+      <details class="block rules">
+        <summary>HOW TO PLAY</summary>
+        <p>Drag a face to turn it; the layer follows your pointer and settles on the nearest quarter. Tap a face for a clockwise turn, Shift-tap for counterclockwise, Alt-tap for a half turn. Keys U D L R F B do the same. Drag the space around the cube, or use the arrow keys, to look around it. P pauses.</p>
+        <p>Your clock starts with your first turn. Qwen's clock runs only while a request is out, and local search's only while it searches. Scramble playback, the warm-up request and turn animation stay off every clock, so turn speed never changes a time.</p>
+        <p>Both Qwen modes see the six faces, move history and available turns, with the misplaced stickers each turn would leave. Avoid repeats excludes turns leading to a previously visited position; Allow repeats offers all eighteen turns. Reasoning plans before answering; System One selects from next-token probabilities. The local solver grades every turn afterward. That grade never reaches the model.</p>
+      </details>
+      <footer class="repo">System One / Chat Completions<br>Eighteen face turns, one choice<br><a href="decision-arcade.md">Arcade guide &amp; measurement notes</a></footer>
+    </aside>
+    <section class="frame" aria-label="Cube speed run">
+      <div class="crt">
+        <header class="status"><span><b id="source">LOCAL SEARCH</b> <span class="dim">/</span> <span id="mode" role="status">READY</span></span><span id="solve-state">Scrambled</span></header>
+        <div class="signal-path"><span id="stage-scramble">SCRAMBLE</span><span id="stage-choose">CHOICE</span><span id="stage-turn">TURN</span></div>
+        <div class="play">
+          <section class="cube-column" aria-label="Cube">
+            <div class="cube-stage" id="stage" tabindex="0" aria-label="Rubik cube. Drag the space around it or use the arrow keys to look around. On your solve, drag or tap a face, or press U D L R F B.">
+              <canvas id="cube" aria-hidden="true"></canvas>
+              <div class="hud hud-turn" aria-hidden="true"><b id="hud-move">—</b><span id="hud-caption">READY</span></div>
+              <div class="hud hud-distance" aria-hidden="true"><span>TO SOLVED</span><b id="hud-distance">—</b><span id="hud-par">PAR —</span></div>
+              <p class="stage-fallback" id="stage-fallback" hidden>This browser could not start WebGL. The model view below shows the whole cube, and the face keys still turn it.</p>
+              <div class="banner cube-banner" id="banner"></div>
+            </div>
+            <ol class="tape" id="tape" aria-label="Scramble and solve turns"></ol>
+            <div class="cube-foot">
+              <figure class="net" aria-labelledby="net-caption">
+                <div class="net-grid" id="net" role="img" aria-label="Cube faces"></div>
+                <figcaption id="net-caption">MODEL VIEW</figcaption>
+              </figure>
+              <div class="sticker-meters">
+                <div class="deadline-head"><span>MISPLACED STICKERS</span><b id="misplaced-label">0 / 48</b></div>
+                <progress id="misplaced" max="48" value="0" aria-label="Misplaced stickers"></progress>
+                <p class="screen-note">The net is the observation Qwen reads: each face as you look at it, up and down faces with their back and front edges on top.</p>
+              </div>
+            </div>
+          </section>
+          <section class="meters" aria-label="Speed run">
+            <div class="readout">
+              <div class="dt"><span id="clock-label">SEARCH CLOCK</span><div><b id="clock">0.00</b><small id="clock-unit">s</small></div></div>
+              <dl class="percentiles"><div><dt>TURNS</dt><dd id="moves">0</dd></div><div><dt>PAR</dt><dd id="par">—</dd></div><div><dt>TPS</dt><dd id="tps">—</dd></div><div><dt>P50</dt><dd id="p50">—</dd></div></dl>
+            </div>
+            <div class="descent">
+              <div class="decision-heading"><h2>DISTANCE TO SOLVED</h2><span id="distance-now">—</span></div>
+              <svg id="descent" viewBox="0 0 320 112" role="img" aria-labelledby="descent-label"><title id="descent-label">Distance to solved after each turn</title></svg>
+              <div class="descent-legend" aria-hidden="true"><span class="solve">THIS SOLVE</span><span class="par" id="legend-par">PAR: ONE TURN CLOSER EACH TURN</span></div>
+            </div>
+            <div class="decision-heading"><h2 id="decision-title">NEXT TURN</h2><span id="selection-prob">—</span></div>
+            <p class="screen-note" id="decision-note">The scramble plays, then Run starts the clock.</p>
+            <div id="probabilities" aria-label="Leading turn probabilities"></div>
+            <dl class="quality">
+              <div><dt>API / SEARCH</dt><dd id="decision-ms">—</dd></div>
+              <div><dt>OPTIMAL TURNS</dt><dd id="optimal-turns">—</dd></div>
+              <div><dt>OPTIMAL MASS</dt><dd id="optimal-mass">—</dd></div>
+              <div><dt>INPUT / OUTPUT TOKENS</dt><dd id="tokens">—</dd></div>
+              <div><dt>WARM-UP</dt><dd id="warmup">—</dd></div>
+            </dl>
+            <p class="screen-note">An optimal turn leaves the cube one turn closer to solved, as the local solver proves. Optimal mass is the probability Qwen put on such turns. The model never sees either.</p>
+            <div id="fault" class="fault" role="alert"></div>
+          </section>
+        </div>
+        <details class="inspector" id="inspector"><summary>INSPECT LAST DECISION <span id="inspector-count"></span></summary>
+          <p class="screen-note" id="excluded-turns" hidden></p>
+          <div class="table-scroll"><table><caption class="sr-only">Candidate turns, what each leaves, and model probabilities</caption><thead><tr><th>Option</th><th>Turn</th><th>Stickers left</th><th>Solver distance</th><th>P</th></tr></thead><tbody id="candidate-table"></tbody></table></div>
+          <details><summary>REQUEST / RESPONSE</summary><div class="wire"><pre id="request-wire">No request yet.</pre><pre id="response-wire">No response yet.</pre></div></details>
+        </details>
+      </div>
+      <nav class="softkeys" aria-label="Run controls"><div class="softkey lit"><button type="button" id="run">RUN</button></div><div class="softkey"><button type="button" id="step">STEP</button></div><div class="softkey"><button type="button" id="reset">RESET</button></div><div class="softkey"><button type="button" id="export" disabled>EXPORT</button></div></nav>
+      <div class="bezel-note"><span id="session-note">LOCAL SEARCH</span><span>FACE TURNS · MODEL CHOICE · SOLVER GRADE</span></div>
+    </section>
+  </main>
+  <script src="arcade/vendor/three.min.js"></script>
+  <script src="arcade/system-one.js"></script>
+  <script src="arcade/rubiks-cube.js"></script>
+  <script src="arcade/rubiks-solver.js"></script>
+  <script src="arcade/rubiks-game.js"></script>
+  <script src="arcade/rubiks-reasoning.js"></script>
+  <script src="arcade/rubiks-session.js"></script>
+  <script src="arcade/rubiks-ui.js"></script>
+</body>
+</html>

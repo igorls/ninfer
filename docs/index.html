@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NInfer · Demos</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500&family=Kode+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --putty: #c8c3b4;
+      --putty-deep: #b3ad9d;
+      --putty-shadow: #8f8979;
+      --silk: #2b2822;
+      --silk-soft: #3e3a2e;
+      --frame: #3a352c;
+      --frame-edge: #201c15;
+      --glass: #170f06;
+      --glass-lit: #24170a;
+      --phosphor: #ffb000;
+      --phosphor-dim: #c69846;
+      --phosphor-faint: #4f3a12;
+      --bench: #5b574c;
+      --mono: "Kode Mono", ui-monospace, Menlo, monospace;
+      --silkface: "Barlow Condensed", "Barlow", sans-serif;
+      --body: "Barlow", system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; }
+    html {
+      background: var(--bench);
+      scrollbar-color: var(--putty-shadow) var(--frame);
+    }
+    body {
+      min-height: 100%;
+      color: var(--silk);
+      font-family: var(--body);
+      font-size: 16px;
+      line-height: 1.45;
+      caret-color: var(--silk);
+    }
+    ::selection { background: var(--phosphor); color: var(--glass); }
+    :focus-visible { outline: 3px solid #176b80; outline-offset: 3px; }
+    a { color: var(--silk); text-underline-offset: 0.2em; }
+
+    .panel {
+      position: relative;
+      max-width: 1080px;
+      margin: 28px auto 48px;
+      padding: 32px 36px 28px;
+      border-radius: 10px;
+      background: radial-gradient(120% 90% at 50% 0%, #d4cfc1 0%, var(--putty) 55%, var(--putty-deep) 100%);
+      box-shadow: 0 30px 60px -24px rgb(0 0 0 / 0.55), inset 0 1px 0 rgb(255 255 255 / 0.35);
+    }
+    .screw {
+      position: absolute;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 35%, #efeadb, #8f8979 70%, #6c665a);
+      box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.4);
+    }
+    .screw.tl { left: 14px; top: 14px; }
+    .screw.tr { right: 14px; top: 14px; }
+    .screw.bl { left: 14px; bottom: 14px; }
+    .screw.br { right: 14px; bottom: 14px; }
+
+    .switch {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 20px;
+      margin: 0 0 22px;
+      font: 600 14px/1.4 var(--silkface);
+      letter-spacing: 0.08em;
+    }
+    .switch a {
+      color: var(--silk-soft);
+      text-decoration: none;
+      padding: 5px 0;
+      border-bottom: 2px solid transparent;
+    }
+    .switch a:hover { color: var(--silk); }
+    .switch a[aria-current="page"] { color: var(--silk); border-bottom-color: var(--silk); }
+
+    .brand {
+      margin: 0;
+      font-family: var(--silkface);
+      font-size: 44px;
+      font-weight: 700;
+      line-height: 0.95;
+      letter-spacing: -0.01em;
+    }
+    h1 {
+      margin: 6px 0 0;
+      font-family: var(--silkface);
+      font-size: 34px;
+      font-weight: 600;
+      line-height: 0.95;
+      letter-spacing: 0.08em;
+      color: var(--silk-soft);
+    }
+    .lede {
+      max-width: 62ch;
+      margin: 16px 0 0;
+      font-size: 20px;
+      line-height: 1.35;
+    }
+
+    .frame {
+      margin-top: 26px;
+      padding: 14px;
+      border-radius: 8px;
+      background: linear-gradient(180deg, var(--frame), var(--frame-edge));
+      box-shadow: inset 0 2px 6px rgb(0 0 0 / 0.55), 0 1px 0 rgb(255 255 255 / 0.25);
+    }
+    .crt {
+      position: relative;
+      padding: 18px 22px 8px;
+      border-radius: 14px / 18px;
+      background: radial-gradient(130% 110% at 50% 40%, var(--glass-lit), var(--glass) 70%);
+      color: var(--phosphor);
+      box-shadow: inset 0 0 60px rgb(0 0 0 / 0.67);
+    }
+    .crt::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      pointer-events: none;
+      background: repeating-linear-gradient(180deg, transparent 0 2px, rgb(0 0 0 / 0.09) 2px 3px);
+    }
+    .status {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--phosphor-faint);
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .status .dim { color: var(--phosphor-dim); }
+
+    .group {
+      position: relative;
+      z-index: 1;
+      margin: 22px 0 8px;
+    }
+    .group h2 {
+      margin: 0 0 4px;
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: 0.08em;
+      color: var(--phosphor-dim);
+    }
+    .channels {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: grid;
+      grid-template-columns: max-content minmax(0, 1fr) auto;
+    }
+    .channels > li {
+      display: grid;
+      grid-template-columns: subgrid;
+      grid-column: 1 / -1;
+    }
+    .channel {
+      display: grid;
+      grid-template-columns: subgrid;
+      grid-column: 1 / -1;
+      gap: 6px 32px;
+      align-items: baseline;
+      padding: 14px 8px;
+      border-bottom: 1px solid var(--phosphor-faint);
+      color: inherit;
+      text-decoration: none;
+    }
+    .channel:hover,
+    .channel:focus-visible { background: #2a1c0c; }
+    .crt :focus-visible { outline-color: var(--phosphor); }
+    .name {
+      font-family: var(--silkface);
+      font-size: clamp(26px, 3vw, 36px);
+      font-weight: 600;
+      line-height: 0.95;
+      letter-spacing: 0.02em;
+      color: var(--phosphor);
+    }
+    .blurb {
+      font-family: var(--body);
+      font-size: 16px;
+      line-height: 1.35;
+      color: var(--phosphor-dim);
+    }
+    .file {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--phosphor-dim);
+      white-space: nowrap;
+    }
+    .channel:hover .file,
+    .channel:focus-visible .file { color: var(--phosphor); }
+
+    .repo {
+      margin: 18px 4px 0;
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--silk-soft);
+    }
+    .repo a { color: var(--silk); }
+
+    @media (max-width: 760px) {
+      .panel { margin: 0; padding: 22px 16px 20px; border-radius: 0; }
+      .brand { font-size: 36px; }
+      h1 { font-size: 28px; }
+      .lede { font-size: 18px; }
+      .frame { padding: 9px; }
+      .crt { padding: 14px 12px 6px; }
+      .frame, .crt, .group, .channels, .channels > li { min-width: 0; max-width: 100%; }
+      .channels { display: block; }
+      .channels > li { display: block; }
+      .channel {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 4px;
+        max-width: 100%;
+        padding: 14px 4px;
+      }
+      .name, .blurb, .file { max-width: 100%; }
+      .blurb { overflow-wrap: anywhere; }
+      .file { white-space: normal; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .channel { transition: none; }
+    }
+  </style>
+</head>
+<body>
+  <main class="panel">
+    <span class="screw tl" aria-hidden="true"></span>
+    <span class="screw tr" aria-hidden="true"></span>
+    <span class="screw bl" aria-hidden="true"></span>
+    <span class="screw br" aria-hidden="true"></span>
+
+    <header>
+      <nav class="switch" aria-label="Demos">
+        <a href="index.html" aria-current="page">DEMOS</a>
+        <a href="tetris-demo.html">TETRIS</a>
+        <a href="chess-demo.html">CHESS</a>
+        <a href="kitchen-demo.html">KITCHEN</a>
+        <a href="beacon-demo.html">BEACON</a>
+        <a href="rubiks-demo.html">CUBE</a>
+      </nav>
+      <p class="brand">NInfer</p>
+      <h1>DEMOS</h1>
+      <p class="lede">Eight pages on this bench. The arcade plays. The readouts show how a closed set of options sits in the model's probabilities.</p>
+    </header>
+
+    <section class="frame" aria-label="Demo list">
+      <div class="crt">
+        <div class="status">
+          <span><b>BENCH</b> <span class="dim">/</span> LOCAL FILES</span>
+          <span>8 PAGES</span>
+        </div>
+
+        <section class="group" aria-labelledby="arcade-heading">
+          <h2 id="arcade-heading">ARCADE</h2>
+          <ul class="channels">
+            <li>
+              <a class="channel" href="arena-demo.html">
+                <span class="name">Arena Duel</span>
+                <span class="blurb">Read the tell. Land the counter. A live 3D fight against the decision clock.</span>
+                <span class="file">arena-demo.html</span>
+              </a>
+            </li>
+            <li>
+              <a class="channel" href="tetris-demo.html">
+                <span class="name">Tetris</span>
+                <span class="blurb">One falling piece. One decision from the logits.</span>
+                <span class="file">tetris-demo.html</span>
+              </a>
+            </li>
+            <li>
+              <a class="channel" href="chess-demo.html">
+                <span class="name">Chess</span>
+                <span class="blurb">Read the position. Choose the next move.</span>
+                <span class="file">chess-demo.html</span>
+              </a>
+            </li>
+            <li>
+              <a class="channel" href="kitchen-demo.html">
+                <span class="name">Kitchen Rush</span>
+                <span class="blurb">Two chefs. One stove. Every second is a choice.</span>
+                <span class="file">kitchen-demo.html</span>
+              </a>
+            </li>
+            <li>
+              <a class="channel" href="beacon-demo.html">
+                <span class="name">Beacon Runner</span>
+                <span class="blurb">Give it eyes. Then move the world.</span>
+                <span class="file">beacon-demo.html</span>
+              </a>
+            </li>
+            <li>
+              <a class="channel" href="rubiks-demo.html">
+                <span class="name">Cube</span>
+                <span class="blurb">Scramble it. Then race the clock.</span>
+                <span class="file">rubiks-demo.html</span>
+              </a>
+            </li>
+          </ul>
+        </section>
+
+        <section class="group" aria-labelledby="readout-heading">
+          <h2 id="readout-heading">READOUTS</h2>
+          <ul class="channels">
+            <li>
+              <a class="channel" href="decide-demo.html">
+                <span class="name">Decision analyzer</span>
+                <span class="blurb">Four closed questions, scored from the logits.</span>
+                <span class="file">decide-demo.html</span>
+              </a>
+            </li>
+            <li>
+              <a class="channel" href="dual-purpose.html">
+                <span class="name">Dual-purpose decode</span>
+                <span class="blurb">Peaks inside the list, and the mass left outside.</span>
+                <span class="file">dual-purpose.html</span>
+              </a>
+            </li>
+          </ul>
+        </section>
+      </div>
+    </section>
+
+    <footer class="repo">
+      <a href="decision-arcade.md">Arcade guide</a> — controls, method, and measurements.
+    </footer>
+  </main>
+</body>
+</html>
