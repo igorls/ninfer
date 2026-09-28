@@ -88,7 +88,7 @@ Fork SHAs are on `research/qwen4-flash-next`.
 | TypeSafe System One | `e20e7e23` `147370d7` `ff20cd06` `87812bc8` | `1833011e` | Jev drop-in contract |
 | Reasoning feature readout | `15f0c5aa` and the collector at `87812bc8` | `f290c8e7` | `capture_reasoning_features`, `ninfer-reasoning-collect` |
 | OrcaRouter NVFP4 | `91ce2f2c` | `e35b663d` `9a9a1823` `74c5343f` `7130a888` | BF16 `[248320,5120]` Linear and LinearTopK, Qwen2-style tokenizer resources, conversion recipe (re-converted, not upgraded) |
-| Supervisor, Windows app, installer | SUP and W2 commits, `bbe3e16e` | `168bdf12` `fc9a1ebe` | |
+| Supervisor, Windows app, installer | SUP and W2 commits, `bbe3e16e` | `168bdf12` `fc9a1ebe` `e92c2078` | The model catalog reads the v3 header and `metadata.name`; a v2 artifact is listed as needing the upgrade |
 | Arcade, JevBench, router, probes | ARC, JEV, RTR, BEN commits | `a1f8b2d9` `6dfd01b8` `7c8555cb` | |
 | Docs, model card | DOC commits, `97200f2b` | `174fdb87` `b80c497b` | Fork README; the OrcaRouter card describes the published v2 artifact |
 
@@ -176,6 +176,26 @@ Windows, MSVC 19.51, CUDA 13.3, `sm_120a`, RTX PRO 6000 Blackwell (driver 616.92
   ([table](../performance/rtx-pro-6000.md#v3-port-against-the-production-build-2026-09-28)).
 - A 48-entry private catalog is accepted and reported; retention follows the state-image backing
   (`--device-state-slots` and `--host-state-slots`), and evictions are counted in `/admin/stats`.
+- Release candidate `2026.09.28-v3port.1` (source `e92c2078`, LGPL FFmpeg; its runtime DLLs are
+  byte-identical to the installed `2026.09.24-alpha.1` files, so only the four executables change).
+  - Staged smoke: the payload ran with nothing but its own DLLs on `PATH`, on a spare port, with
+    production flags. It passed 11 of 11 checks: models list, chat with and without thinking, image,
+    tool call, `json_object`, `json_schema`, `/v1/systemone`, `/admin/vram`, `/admin/stats` and
+    `/health`.
+  - Supervisor: run monitor-only on the prepared v3 configuration, the new supervisor lists the four
+    27B entries as available and Flash-Next as unavailable (it is still v2).
+  - Rendered prompts are byte-identical to production for 21 request shapes, read back through
+    prompt-position logprobs. The shapes cover the default, every effort, thinking on and off, a
+    system message, tools, a tool loop, multi-turn with reasoning, preserve, image and `json_object`.
+  - Unsupported efforts (`minimal`, `high`, `max`) get HTTP 400 from both builds, but the error
+    body differs. The fork line returns `invalid_prompt` on `messages`, with the template's message
+    and a Jinja trace. Production returns `reasoning_effort_not_supported` on `reasoning_effort`.
+    No client sent an unsupported effort in the production request log (2026-09-08 to 2026-09-28).
+  - A 24-question `/v1/systemone` replay (`noul`, `choice` and `score` on six states) is
+    bit-identical to production.
+  - The upgrade tool, run from a Windows checkout (`core.autocrlf=true`), embeds the chat template
+    with CRLF line endings. The vendored Jinja lexer normalizes line endings, so the rendered
+    prompts are unchanged; only the embedded bytes differ from a Linux run.
 
 ## Deployment
 
@@ -184,3 +204,8 @@ As of September 28, 2026 the x870e production service on :8010 runs the installe
 runtime files) with the v2 production artifact
 `C:\models\Qwen3.8-27B\qwen3_8_27b_nvfp4_dflash2.ninfer`. The fork line is not deployed. Its v3
 copy of that artifact is `E:\models\v3\Qwen3.8-27B\qwen3_8_27b_nvfp4_dflash2.ninfer`.
+
+Igor decided on 2026-09-28 to switch x870e to the fork line. The cutover is prepared but waits for
+his go. It swaps the four executables for `2026.09.28-v3port.1` and points the supervisor
+configuration at the v3 artifacts. z690 (RTX 5090) runs `2026.09.24-alpha.1`; it will get the same
+release through its installer, and its service was down on 2026-09-28.
