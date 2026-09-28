@@ -1,5 +1,6 @@
 #include "corpus.h"
 #include "evaluation.h"
+#include "reference.h"
 
 #include "core/platform.h"
 #include "ninfer/engine.h"
@@ -23,6 +24,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -44,6 +46,8 @@ struct Options {
     std::filesystem::path artifact;
     std::optional<std::filesystem::path> corpus;
     std::optional<std::filesystem::path> text;
+    std::optional<std::filesystem::path> reference;
+    std::optional<std::filesystem::path> dump_positions;
     std::optional<std::filesystem::path> output;
     std::uint32_t context               = 4096;
     std::uint32_t stride                = 2048;
@@ -55,7 +59,8 @@ struct Options {
 
 std::string usage_text() {
     return "usage: ninfer-perplexity <model.ninfer> "
-           "(--corpus <manifest.json> [--quick] | --text <utf8-file>)\n"
+           "(--corpus <manifest.json> [--quick] | --text <utf8-file> |\n"
+           "        --reference <file> [--dump-positions <file>])\n"
            "       [--context N] [--stride N] [--device N]\n"
            "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--output <directory>]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n";
@@ -94,6 +99,10 @@ Options parse_options(int argc, char** argv) {
             out.corpus = std::filesystem::path(value("--corpus"));
         } else if (option == "--text") {
             out.text = std::filesystem::path(value("--text"));
+        } else if (option == "--reference") {
+            out.reference = std::filesystem::path(value("--reference"));
+        } else if (option == "--dump-positions") {
+            out.dump_positions = std::filesystem::path(value("--dump-positions"));
         } else if (option == "--quick") {
             out.quick = true;
         } else if (option == "--context") {
@@ -125,10 +134,15 @@ Options parse_options(int argc, char** argv) {
             usage_error("unknown option: " + std::string(option));
         }
     }
-    if (out.corpus.has_value() == out.text.has_value()) {
-        usage_error("exactly one of --corpus and --text is required");
+    if (static_cast<int>(out.corpus.has_value()) + static_cast<int>(out.text.has_value()) +
+            static_cast<int>(out.reference.has_value()) !=
+        1) {
+        usage_error("exactly one of --corpus, --text and --reference is required");
     }
     if (out.quick && !out.corpus) { usage_error("--quick requires --corpus"); }
+    if (out.dump_positions && !out.reference) {
+        usage_error("--dump-positions requires --reference");
+    }
     if (out.context < 2 || out.stride == 0 || out.stride >= out.context) {
         usage_error("context/stride must satisfy context>=2 and 1<=stride<context");
     }
@@ -204,6 +218,200 @@ struct EvaluationStream {
     std::vector<ninfer::TokenId> tokens;
     std::vector<WindowPlan> windows;
 };
+
+json distribution_json(const ninfer::perplexity::DistributionAggregate& value) {
+    return json{{"positions", value.positions()},
+                {"kl_mean", value.mean_kl()},
+                {"kl_p50", value.kl_quantile(0.50)},
+                {"kl_p90", value.kl_quantile(0.90)},
+                {"kl_p99", value.kl_quantile(0.99)},
+                {"kl_p999", value.kl_quantile(0.999)},
+                {"kl_max", value.kl_quantile(1.0)},
+                {"top1_agreement", value.top1_agreement()},
+                {"evaluated_mean_nll", value.mean_evaluated_nll()},
+                {"reference_mean_nll", value.mean_reference_nll()},
+                {"delta_mean_nll", value.mean_evaluated_nll() - value.mean_reference_nll()}};
+}
+
+// Scores the reference file's exact token sequences and compares every next-token distribution
+// with the reference model's top-K distribution.
+int run_reference(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
+                  ninfer::product::StartupLogRenderer& startup_log,
+                  const std::shared_ptr<ninfer::product::TerminalProgress>& progress) {
+    using ninfer::perplexity::DistributionAggregate;
+    const Clock::time_point total_started = Clock::now();
+    const Clock::time_point read_started  = Clock::now();
+    const ninfer::perplexity::ReferenceCorpus reference =
+        ninfer::perplexity::load_reference(*options.reference);
+    if (reference.top_k > ninfer::kMaximumCausalReferenceTokens) {
+        throw std::runtime_error("reference top_k exceeds kMaximumCausalReferenceTokens");
+    }
+    std::uint64_t total_positions = 0;
+    for (const auto& sequence : reference.sequences) {
+        if (sequence.tokens.size() > options.context) {
+            throw std::runtime_error("reference sequence " + sequence.id +
+                                     " is longer than --context");
+        }
+        total_positions += sequence.tokens.size() - 1;
+    }
+    const double read_seconds = seconds_since(read_started);
+
+    ninfer::EngineOptions engine_options;
+    engine_options.artifact_path    = options.artifact;
+    engine_options.purpose          = ninfer::EnginePurpose::CausalScoring;
+    engine_options.device           = options.device;
+    engine_options.max_context      = options.context;
+    engine_options.kv_cache         = options.kv;
+    engine_options.startup_observer = startup_log.observer();
+    ninfer::Engine engine(std::move(engine_options));
+    const ninfer::LoadSummary load = engine.load_summary();
+    startup_log.engine_ready(load);
+    logger->info("reference ready | {} | {} sequences | {} positions | top-{}",
+                 reference.corpus_id, reference.sequences.size(),
+                 ninfer::product::format_pretty_count(total_positions), reference.top_k);
+
+    CorpusSelection selection{.corpus_id = reference.corpus_id,
+                              .mode      = "reference",
+                              .source    = reference.source,
+                              .streams   = {}};
+    const std::filesystem::path output_directory =
+        prepare_output_directory(options, load, selection);
+    const Clock::time_point scoring_started = Clock::now();
+    Clock::time_point next_progress         = scoring_started + std::chrono::seconds(10);
+    const std::uint32_t k                   = reference.top_k;
+    DistributionAggregate overall;
+    std::map<std::string, DistributionAggregate> domains;
+    json sequence_reports = json::array();
+    // Per scored target, in reference order: float32 KL, float32 evaluated target log
+    // probability, int32 evaluated argmax token.
+    std::ofstream positions;
+    if (options.dump_positions) {
+        positions.open(*options.dump_positions, std::ios::binary | std::ios::trunc);
+        if (!positions) {
+            throw std::runtime_error("cannot create " + options.dump_positions->string());
+        }
+    }
+    for (std::size_t index = 0; index < reference.sequences.size(); ++index) {
+        const auto& sequence = reference.sequences[index];
+        const std::size_t targets = sequence.tokens.size() - 1;
+        ninfer::CausalScoreReadout readout{.reference_count  = k,
+                                           .reference_tokens = sequence.top_tokens};
+        const Clock::time_point started = Clock::now();
+        ninfer::CausalScores scores;
+        try {
+            scores = engine.score_tokens(sequence.tokens, 1, readout);
+        } catch (const std::exception& error) {
+            throw std::runtime_error("scoring reference sequence " + sequence.id +
+                                     " failed: " + error.what());
+        }
+        DistributionAggregate local;
+        for (std::size_t target = 0; target < targets; ++target) {
+            const std::span<const float> p(sequence.top_logprobs.data() + target * k, k);
+            const std::span<const float> q(scores.reference_logprobs.data() + target * k, k);
+            const double kl = ninfer::perplexity::top_k_kl_divergence(p, q);
+            local.add(kl, scores.argmax_tokens[target] == sequence.top_tokens[target * k],
+                      scores.target_logprobs[target], sequence.target_logprobs[target]);
+            if (positions.is_open()) {
+                const float values[2] = {static_cast<float>(kl), scores.target_logprobs[target]};
+                positions.write(reinterpret_cast<const char*>(values), sizeof(values));
+                positions.write(reinterpret_cast<const char*>(&scores.argmax_tokens[target]),
+                                sizeof(ninfer::TokenId));
+            }
+        }
+        overall.add(local);
+        domains[sequence.domain].add(local);
+        json item      = distribution_json(local);
+        item["id"]     = sequence.id;
+        item["domain"] = sequence.domain;
+        item["seconds"] = seconds_since(started);
+        sequence_reports.push_back(std::move(item));
+        if (Clock::now() >= next_progress) {
+            std::ostringstream line;
+            line << "scoring | " << ninfer::product::format_pretty_count(overall.positions())
+                 << '/' << ninfer::product::format_pretty_count(total_positions)
+                 << " positions | mean KL " << std::scientific << std::setprecision(4)
+                 << overall.mean_kl();
+            if (progress->enabled()) {
+                progress->update("  " + line.str());
+            } else {
+                logger->info("{}", line.str());
+            }
+            next_progress = Clock::now() + std::chrono::seconds(10);
+        }
+    }
+    const double scoring_seconds = seconds_since(scoring_started);
+    progress->clear();
+
+    json domain_reports = json::array();
+    for (const auto& [domain, aggregate] : domains) {
+        json item      = distribution_json(aggregate);
+        item["domain"] = domain;
+        domain_reports.push_back(std::move(item));
+    }
+    json report{
+        {"schema_version", 2},
+        {"metric",
+         {{"name", "next-token distribution agreement with a reference"},
+          {"divergence", "KL(reference || evaluated) over the reference top-K plus a tail bucket"},
+          {"log_base", "natural"}}},
+        {"artifact",
+         {{"path", std::filesystem::absolute(options.artifact).lexically_normal().string()},
+          {"architecture", load.architecture},
+          {"name", load.model_name},
+          {"prefill_signature", load.prefill_signature},
+          {"formats", load.weight_formats}}},
+        {"reference",
+         {{"path", std::filesystem::absolute(reference.source).lexically_normal().string()},
+          {"corpus_id", reference.corpus_id},
+          {"model", json::parse(reference.model)},
+          {"top_k", k},
+          {"sequences", reference.sequences.size()}}},
+        {"execution",
+         {{"purpose", "causal_scoring"},
+          {"device", options.device},
+          {"context_tokens", options.context},
+          {"kv_dtype", kv_name(options.kv)}}},
+        {"timing",
+         {{"load_seconds", load.load_seconds},
+          {"read_seconds", read_seconds},
+          {"score_seconds", scoring_seconds},
+          {"total_seconds", seconds_since(total_started)}}},
+        {"sequences", std::move(sequence_reports)},
+        {"domains", std::move(domain_reports)},
+        {"overall", distribution_json(overall)},
+    };
+    const std::filesystem::path temporary = output_directory / "report.json.tmp";
+    const std::filesystem::path final     = output_directory / "report.json";
+    {
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output) { throw std::runtime_error("cannot create report: " + temporary.string()); }
+        output << std::setw(2) << report << '\n';
+        output.flush();
+        if (!output) { throw std::runtime_error("cannot write report: " + temporary.string()); }
+    }
+    std::filesystem::rename(temporary, final);
+
+    std::cout << "Reference distribution result\n"
+              << "artifact: " << load.model_name << ", kv: " << kv_name(options.kv)
+              << ", reference: " << reference.corpus_id << " (top-" << k << ")\n\n";
+    std::cout << std::left << std::setw(20) << "domain" << std::right << std::setw(10)
+              << "positions" << std::setw(12) << "KL mean" << std::setw(12) << "KL p50"
+              << std::setw(12) << "KL p99" << std::setw(10) << "top-1" << std::setw(12)
+              << "dNLL" << '\n';
+    const auto row = [](const std::string& label, const DistributionAggregate& value) {
+        std::cout << std::left << std::setw(20) << label << std::right << std::setw(10)
+                  << value.positions() << std::scientific << std::setprecision(3)
+                  << std::setw(12) << value.mean_kl() << std::setw(12) << value.kl_quantile(0.5)
+                  << std::setw(12) << value.kl_quantile(0.99) << std::fixed
+                  << std::setprecision(4) << std::setw(10) << value.top1_agreement()
+                  << std::setprecision(5) << std::setw(12)
+                  << value.mean_evaluated_nll() - value.mean_reference_nll() << '\n';
+    };
+    for (const auto& [domain, aggregate] : domains) { row(domain, aggregate); }
+    row("overall", overall);
+    std::cout << "\nreport: " << final << '\n';
+    return 0;
+}
 
 int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
         ninfer::product::StartupLogRenderer& startup_log,
@@ -455,7 +663,9 @@ int main(int argc, char** argv) {
     const std::shared_ptr<spdlog::logger> logger = logging.logger();
     ninfer::product::StartupLogRenderer startup_log(logging);
     try {
-        return run(options, logger, startup_log, logging.terminal_progress());
+        return options.reference
+                   ? run_reference(options, logger, startup_log, logging.terminal_progress())
+                   : run(options, logger, startup_log, logging.terminal_progress());
     } catch (const std::exception& error) {
         logging.terminal_progress()->clear();
         logger->error("{}", ninfer::product::format_pretty_text(error.what()));

@@ -270,6 +270,11 @@ std::string Engine::token_bytes(TokenId token) const {
 }
 
 std::vector<float> Engine::score_tokens(std::vector<TokenId> tokens, std::uint32_t first_target) {
+    return score_tokens(std::move(tokens), first_target, CausalScoreReadout{}).target_logprobs;
+}
+
+CausalScores Engine::score_tokens(std::vector<TokenId> tokens, std::uint32_t first_target,
+                                  const CausalScoreReadout& readout) {
     nvtx::ScopedRange score_range(nvtx::Name::Score, nvtx::Category::Scoring,
                                   static_cast<std::uint64_t>(tokens.size()));
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
@@ -282,19 +287,32 @@ std::vector<float> Engine::score_tokens(std::vector<TokenId> tokens, std::uint32
     if (first_target == 0 || first_target >= tokens.size()) {
         throw std::invalid_argument("score_tokens first_target must be in [1,token_count-1]");
     }
-    PreparedPrompt prompt      = prepare_tokens(std::move(tokens), false);
-    const std::size_t expected = prompt.summary().prompt_tokens - first_target;
-    std::vector<float> result  = std::visit(
-        [&](auto& core) -> std::vector<float> {
+    const std::size_t targets = tokens.size() - first_target;
+    if (readout.reference_count > kMaximumCausalReferenceTokens ||
+        readout.reference_tokens.size() != targets * readout.reference_count) {
+        throw std::invalid_argument(
+            "score_tokens readout needs reference_count<=kMaximumCausalReferenceTokens ids per "
+            "scored target");
+    }
+    PreparedPrompt prompt = prepare_tokens(std::move(tokens), false);
+    if (prompt.summary().prompt_tokens != targets + first_target) {
+        throw std::logic_error("score_tokens preparation changed the token count");
+    }
+    CausalScores result = std::visit(
+        [&](auto& core) -> CausalScores {
             using CoreState = std::remove_cvref_t<decltype(core)>;
             if constexpr (std::is_same_v<CoreState, std::unique_ptr<Impl::ScoringCore>>) {
-                return core->score(std::move(prompt.impl_->value), first_target);
+                return core->score(std::move(prompt.impl_->value), first_target, readout);
             } else {
                 throw std::logic_error("Engine scoring core is unavailable");
             }
         },
         impl_->core);
-    if (result.size() != expected) {
+    const bool distributions = readout.reference_count != 0;
+    if (result.target_logprobs.size() != targets ||
+        result.reference_logprobs.size() != targets * readout.reference_count ||
+        result.argmax_tokens.size() != (distributions ? targets : 0) ||
+        result.argmax_logprobs.size() != result.argmax_tokens.size()) {
         throw std::logic_error("target Program returned an invalid causal score count");
     }
     return result;

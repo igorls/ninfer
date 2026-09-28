@@ -298,6 +298,28 @@ inline constexpr std::uint32_t kMaximumTopLogprobs     = 20;
 inline constexpr std::size_t kMaximumLogprobCandidates = 1024;
 inline constexpr std::size_t kMaximumPromptReadouts    = 256;
 
+// Optional distribution readout of causal scoring, used to compare an artifact's next-token
+// distributions with a reference model's on the same tokens.
+inline constexpr std::uint32_t kMaximumCausalReferenceTokens = 32;
+
+struct CausalScoreReadout {
+    // Reference tokens per scored target, at most kMaximumCausalReferenceTokens; 0 disables.
+    std::uint32_t reference_count = 0;
+    // reference_count token ids for every scored target, target-major.
+    std::vector<TokenId> reference_tokens;
+};
+
+struct CausalScores {
+    // log p(tokens[i] | tokens[0..i)) for every scored target i, over the whole vocabulary.
+    std::vector<float> target_logprobs;
+    // Log probability of each requested reference token, target-major, reference_count per target.
+    std::vector<float> reference_logprobs;
+    // With a readout: the most likely token of every scored target (lowest id on a tie) and its
+    // log probability.
+    std::vector<TokenId> argmax_tokens;
+    std::vector<float> argmax_logprobs;
+};
+
 struct TokenLogprob {
     TokenId token = 0;
     // Log probability over the tokens the structured-output mask allows at this position; equal

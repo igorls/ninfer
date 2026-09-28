@@ -11,6 +11,8 @@
 namespace ninfer::ops {
 namespace {
 
+constexpr std::int32_t kMaximumTargetLogprobSlots = 256;
+
 void require_rank_two(const Tensor& tensor, const char* label) {
     if (tensor.ne[0] <= 0 || tensor.ne[1] <= 0 || tensor.ne[2] != 1 || tensor.ne[3] != 1) {
         throw std::invalid_argument(std::string("target_logprobs: ") + label +
@@ -18,11 +20,17 @@ void require_rank_two(const Tensor& tensor, const char* label) {
     }
 }
 
-void require_vector(const Tensor& tensor, std::int32_t columns, const char* label) {
-    if (tensor.ne[0] != columns || tensor.ne[1] != 1 || tensor.ne[2] != 1 || tensor.ne[3] != 1) {
-        throw std::invalid_argument(std::string("target_logprobs: ") + label +
-                                    " must have shape [columns]");
+// Target slots per column: 1 for [columns], T for [T,columns].
+std::int32_t target_slots(const Tensor& tensor, std::int32_t columns, const char* label) {
+    if (tensor.ne[2] == 1 && tensor.ne[3] == 1) {
+        if (tensor.ne[0] == columns && tensor.ne[1] == 1) { return 1; }
+        if (tensor.ne[1] == columns && tensor.ne[0] >= 1 &&
+            tensor.ne[0] <= kMaximumTargetLogprobSlots) {
+            return tensor.ne[0];
+        }
     }
+    throw std::invalid_argument(std::string("target_logprobs: ") + label +
+                                " must have shape [columns] or [T,columns] with T<=256");
 }
 
 void require_accessible(const Tensor& tensor, std::size_t alignment, const char* label) {
@@ -63,8 +71,10 @@ void target_logprobs(const Tensor& logits, const Tensor& target_ids, std::int32_
 
     require_rank_two(logits, "logits");
     const std::int32_t columns = logits.ne[1];
-    require_vector(target_ids, columns, "target_ids");
-    require_vector(output, columns, "output");
+    const std::int32_t slots   = target_slots(target_ids, columns, "target_ids");
+    if (target_slots(output, columns, "output") != slots || output.ne[0] != target_ids.ne[0]) {
+        throw std::invalid_argument("target_logprobs: output shape must equal target_ids shape");
+    }
     if (valid_rows <= 0 || valid_rows > logits.ne[0]) {
         throw std::invalid_argument("target_logprobs: valid_rows must be in [1, physical_rows]");
     }

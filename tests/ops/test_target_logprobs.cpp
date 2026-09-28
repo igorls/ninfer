@@ -161,6 +161,56 @@ int run_case(const std::string& label, std::int32_t physical_rows, std::int32_t 
     return failures;
 }
 
+// T target slots per column, stored slot-fastest; the reference distribution readout of causal
+// scoring. Slot t of column c repeats the one-target oracle with its own id.
+int run_multi_case(const std::string& label, std::int32_t physical_rows, std::int32_t valid_rows,
+                   std::int32_t columns, std::int32_t slots,
+                   const std::vector<std::uint16_t>& logits) {
+    std::vector<std::int32_t> targets(static_cast<std::size_t>(slots) * columns);
+    for (std::int32_t column = 0; column < columns; ++column) {
+        for (std::int32_t slot = 0; slot < slots; ++slot) {
+            const auto mixed = static_cast<std::uint64_t>(column) * 104729u +
+                               static_cast<std::uint64_t>(slot) * 7919u;
+            targets[static_cast<std::size_t>(column) * slots + slot] =
+                slot == 0 ? valid_rows - 1
+                          : static_cast<std::int32_t>(mixed % static_cast<std::uint32_t>(valid_rows));
+        }
+    }
+    std::vector<double> expected(targets.size());
+    for (std::int32_t slot = 0; slot < slots; ++slot) {
+        std::vector<std::int32_t> single(static_cast<std::size_t>(columns));
+        for (std::int32_t column = 0; column < columns; ++column) {
+            single[column] = targets[static_cast<std::size_t>(column) * slots + slot];
+        }
+        const auto values = target_logprobs_oracle(logits, single, physical_rows, valid_rows);
+        for (std::int32_t column = 0; column < columns; ++column) {
+            expected[static_cast<std::size_t>(column) * slots + slot] = values[column];
+        }
+    }
+
+    GuardedDeviceBuffer device_logits(logits.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer device_targets(targets.size() * sizeof(std::int32_t));
+    GuardedDeviceBuffer device_output(targets.size() * sizeof(float));
+    device_logits.copy_from_host(logits.data(), device_logits.bytes());
+    device_targets.copy_from_host(targets.data(), device_targets.bytes());
+    device_output.fill(0xcd);
+
+    Tensor logits_tensor(device_logits.data(), DType::BF16, {physical_rows, columns});
+    Tensor targets_tensor(device_targets.data(), DType::I32, {slots, columns});
+    Tensor output_tensor(device_output.data(), DType::FP32, {slots, columns});
+    ops::target_logprobs(logits_tensor, targets_tensor, valid_rows, output_tensor, nullptr);
+    cuda_synchronize();
+
+    int failures = verify_reduction(label, fp32_as_double(device_output.data(), targets.size()),
+                                    expected, kTargetLogprobsFp32Criterion);
+    failures +=
+        verify_exact((label + " preserves targets").c_str(),
+                     from_device<std::int32_t>(device_targets.data(), targets.size()), targets);
+    failures += device_targets.verify_guards(label + " target guards");
+    failures += device_output.verify_guards(label + " output guards");
+    return failures;
+}
+
 template <class Function>
 int expect_invalid(const char* label, Function&& function) {
     try {
@@ -189,6 +239,18 @@ int run_validation_cases() {
     failures += expect_invalid("target_logprobs rejects target shape mismatch", [&] {
         Tensor wrong_targets(targets_data.p, DType::I32, {2});
         ops::target_logprobs(logits, wrong_targets, 8, output, nullptr);
+    });
+    failures += expect_invalid("target_logprobs rejects output slots differing from targets", [&] {
+        DeviceBuffer wide(2 * 3 * sizeof(std::int32_t));
+        Tensor two_slots(wide.p, DType::I32, {2, 3});
+        ops::target_logprobs(logits, two_slots, 8, output, nullptr);
+    });
+    failures += expect_invalid("target_logprobs rejects more than 256 target slots", [&] {
+        DeviceBuffer wide(257 * 3 * sizeof(std::int32_t));
+        DeviceBuffer wide_out(257 * 3 * sizeof(float));
+        Tensor many(wide.p, DType::I32, {257, 3});
+        Tensor many_out(wide_out.p, DType::FP32, {257, 3});
+        ops::target_logprobs(logits, many, 8, many_out, nullptr);
     });
     failures += expect_invalid("target_logprobs rejects output dtype", [&] {
         Tensor wrong_output(output_data.p, DType::BF16, {3});
@@ -238,6 +300,10 @@ int main() {
                          make_shift_logits(257, 257, 31, 0.0f));
     failures += run_case("target_logprobs shifted logits", 257, 257, 31,
                          make_shift_logits(257, 257, 31, 32.0f));
+    failures += run_multi_case("target_logprobs 34 slots full vocabulary C=1024", 248320, 248077,
+                               1024, 34, make_random_logits(248320, 248077, 1024));
+    failures += run_multi_case("target_logprobs 2 slots C=1", 263, 257, 1, 2,
+                               make_extreme_logits(263, 257, 1));
     failures += run_validation_cases();
 
     std::cout << (failures ? "FAIL" : "OK") << " target_logprobs\n";

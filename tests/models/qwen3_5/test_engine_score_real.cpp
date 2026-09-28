@@ -65,6 +65,42 @@ int main() {
             return 1;
         }
     }
+    // Reference readout: per target the actual token, a fixed token and the same token again.
+    constexpr std::uint32_t kReferences = 3;
+    ninfer::CausalScoreReadout readout{.reference_count = kReferences, .reference_tokens = {}};
+    for (std::size_t i = 513; i < tokens.size(); ++i) {
+        readout.reference_tokens.insert(readout.reference_tokens.end(),
+                                        {tokens[i], tokens[0], tokens[i]});
+    }
+    const ninfer::CausalScores scores = engine.score_tokens(tokens, 513, readout);
+    if (scores.target_logprobs != suffix ||
+        scores.reference_logprobs.size() != suffix.size() * kReferences ||
+        scores.argmax_tokens.size() != suffix.size() ||
+        scores.argmax_logprobs.size() != suffix.size()) {
+        std::cerr << "the readout changed the target scores or returned an invalid shape\n";
+        return 1;
+    }
+    for (std::size_t i = 0; i < suffix.size(); ++i) {
+        const float* row = scores.reference_logprobs.data() + i * kReferences;
+        if (row[0] != suffix[i] || row[2] != suffix[i]) {
+            std::cerr << "a reference slot disagrees with the target score of the same token\n";
+            return 1;
+        }
+        const float best = scores.argmax_logprobs[i];
+        if (!std::isfinite(best) || best > 0.0F || best < row[0] || best < row[1]) {
+            std::cerr << "the argmax log probability is not the column maximum\n";
+            return 1;
+        }
+    }
+    bool rejected = false;
+    try {
+        readout.reference_tokens.pop_back();
+        (void)engine.score_tokens(tokens, 513, readout);
+    } catch (const std::invalid_argument&) { rejected = true; }
+    if (!rejected) {
+        std::cerr << "a readout with the wrong reference count was accepted\n";
+        return 1;
+    }
     std::cout << "OK causal_score_real\n";
     return 0;
 }

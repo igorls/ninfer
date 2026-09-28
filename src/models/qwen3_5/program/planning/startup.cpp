@@ -477,10 +477,13 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
 
     if (plan.causal_scoring) {
         WorkspaceLayoutBuilder causal_score;
-        matrix(causal_score, DType::BF16, dimension(config.vocab_size),
-               static_cast<std::int32_t>(kCausalScoreTile));
-        matrix(causal_score, DType::I32, 1, static_cast<std::int32_t>(kCausalScoreTile));
-        matrix(causal_score, DType::FP32, 1, static_cast<std::int32_t>(kCausalScoreTile));
+        constexpr auto tile = static_cast<std::int32_t>(kCausalScoreTile);
+        constexpr auto rows = static_cast<std::int32_t>(kCausalScoreReadoutRows);
+        matrix(causal_score, DType::BF16, dimension(config.vocab_size), tile);
+        matrix(causal_score, DType::I32, rows, tile);
+        matrix(causal_score, DType::FP32, rows, tile);
+        matrix(causal_score, DType::I32, 1, tile);
+        matrix(causal_score, DType::FP32, 1, tile);
         linear_scratch(causal_score, parameters.text.output_head, 1, kCausalScoreTile);
         out.causal_score = finish(causal_score);
     }

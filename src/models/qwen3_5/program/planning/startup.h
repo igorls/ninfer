@@ -21,6 +21,8 @@ namespace ninfer::models::qwen3_5::detail {
 
 using TensorLayout                              = TensorRegion;
 inline constexpr std::uint32_t kCausalScoreTile = 1024;
+// Log-probability rows one causal-score column reads: its target and the reference tokens.
+inline constexpr std::uint32_t kCausalScoreReadoutRows = 1U + kMaximumCausalReferenceTokens;
 
 // Floats one lane's device logprob readout needs for the widest speculative round, and for the
 // largest prompt-position readout; each column is (sampled, raw) followed by candidate pairs.

@@ -73,6 +73,32 @@ int main() {
     failures += require(std::abs(a.mean_nll() - 2.0) < 1e-12, "aggregate computes mean NLL");
     failures += require(std::abs(a.ppl() - std::exp(2.0)) < 1e-12, "aggregate computes perplexity");
 
+    // Top-K divergence: P = (0.7, 0.2 | tail 0.1), Q = (0.5, 0.3 | tail 0.2).
+    const std::vector<float> p{std::log(0.7F), std::log(0.2F)};
+    const std::vector<float> q{std::log(0.5F), std::log(0.3F)};
+    const double expected_kl = 0.7 * std::log(0.7 / 0.5) + 0.2 * std::log(0.2 / 0.3) +
+                               0.1 * std::log(0.1 / 0.2);
+    failures += require(std::abs(ninfer::perplexity::top_k_kl_divergence(p, q) - expected_kl) < 1e-6,
+                        "top-K divergence includes the tail bucket");
+    failures += require(ninfer::perplexity::top_k_kl_divergence(p, p) < 1e-9,
+                        "top-K divergence of equal distributions is zero");
+    // Q with (numerically) no tail while P keeps 0.1 of its mass there stays finite and large.
+    const std::vector<float> saturated{std::log(0.999999F), std::log(1.0e-7F)};
+    const double large = ninfer::perplexity::top_k_kl_divergence(p, saturated);
+    failures += require(std::isfinite(large) && large > 1.0, "top-K divergence floors the tail");
+
+    ninfer::perplexity::DistributionAggregate d;
+    for (const float value : {4.0F, 1.0F, 3.0F, 2.0F}) { d.add(value, value < 2.5F, -1.0F, -0.5F); }
+    failures += require(d.positions() == 4, "distribution aggregate counts positions");
+    failures += require(std::abs(d.mean_kl() - 2.5) < 1e-12, "distribution aggregate mean");
+    failures += require(d.kl_quantile(0.5) == 2.0 && d.kl_quantile(0.99) == 4.0 &&
+                            d.kl_quantile(0.0) == 1.0,
+                        "distribution aggregate nearest-rank quantiles");
+    failures += require(std::abs(d.top1_agreement() - 0.5) < 1e-12, "top-1 agreement rate");
+    failures += require(std::abs(d.mean_evaluated_nll() - 1.0) < 1e-12 &&
+                            std::abs(d.mean_reference_nll() - 0.5) < 1e-12,
+                        "distribution aggregate NLL means");
+
     std::cout << (failures == 0 ? "OK" : "FAIL") << " perplexity_evaluation\n";
     return failures == 0 ? 0 : 1;
 }

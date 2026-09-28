@@ -35,7 +35,8 @@ endif()
 add_executable(ninfer-perplexity
   perplexity/main.cpp
   perplexity/corpus.cpp
-  perplexity/evaluation.cpp)
+  perplexity/evaluation.cpp
+  perplexity/reference.cpp)
 ninfer_internal_includes(ninfer-perplexity)
 target_link_libraries(ninfer-perplexity PRIVATE
   ninfer_engine ninfer_product_logging ninfer::json)

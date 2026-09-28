@@ -1,7 +1,7 @@
 #pragma once
 
 // Implements: include/ninfer/ops/target_logprobs.h
-// Match: contiguous BF16 [physical_rows,C], I32 [C], and FP32 [C].
+// Match: contiguous BF16 [physical_rows,C], I32 [T,C], and FP32 [T,C] with T<=block size.
 // Algorithm assumptions: one 256-thread CTA performs a stable two-pass logsumexp per column.
 
 #include "ops/common/warp.cuh"
@@ -42,7 +42,7 @@ template <int BlockSize>
 __launch_bounds__(BlockSize) __global__
     void target_logprobs_kernel(const __nv_bfloat16* logits, const std::int32_t* target_ids,
                                 float* output, std::int32_t valid_rows,
-                                std::int32_t physical_rows) {
+                                std::int32_t physical_rows, std::int32_t targets) {
     const std::int32_t column = static_cast<std::int32_t>(blockIdx.x);
     const std::int64_t base   = static_cast<std::int64_t>(column) * physical_rows;
 
@@ -59,10 +59,16 @@ __launch_bounds__(BlockSize) __global__
         local_sum += expf(__bfloat162float(logits[base + row]) - maximum);
     }
     __shared__ float warp_sums[BlockSize / kWarpSize];
+    __shared__ float log_sum;
+    // The block sum is complete in thread 0 only; publish it to every target slot.
     const float sum = block_reduce_sum<BlockSize>(local_sum, warp_sums);
-    if (threadIdx.x == 0) {
-        const float target = __bfloat162float(logits[base + target_ids[column]]);
-        output[column]     = target - maximum - logf(sum);
+    if (threadIdx.x == 0) { log_sum = logf(sum); }
+    __syncthreads();
+    if (static_cast<std::int32_t>(threadIdx.x) < targets) {
+        const std::int64_t slot =
+            static_cast<std::int64_t>(column) * targets + static_cast<std::int64_t>(threadIdx.x);
+        const float target = __bfloat162float(logits[base + target_ids[slot]]);
+        output[slot]       = target - maximum - log_sum;
     }
 }
 

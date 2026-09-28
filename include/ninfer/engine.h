@@ -84,6 +84,10 @@ public:
     // Returns log p(tokens[i] | tokens[0..i)) for i in [first_target,tokens.size()).
     [[nodiscard]] std::vector<float> score_tokens(std::vector<TokenId> tokens,
                                                   std::uint32_t first_target);
+    // The same scores plus, for every scored target, the log probabilities of the readout's
+    // reference tokens and the model's most likely token.
+    [[nodiscard]] CausalScores score_tokens(std::vector<TokenId> tokens, std::uint32_t first_target,
+                                            const CausalScoreReadout& readout);
 
     [[nodiscard]] std::uint32_t count_tokens(PromptInput input,
                                              const PreparationControl& control = {}) const;
