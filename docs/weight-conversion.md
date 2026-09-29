@@ -179,10 +179,21 @@ parent against a re-encode and an independent FP64 nearest-value decode oracle, 
 and Q8 endpoints, and, with `--reference`, compares object payload digests with the production
 artifact.
 
-This profile is **not qualified for production**: its next-token distributions move measurably
-further from BF16 than the production profile's (KL 1.56x, top-1 agreement 2.8 points lower on
-`kld-400k-v1`), although it is 2.95 GiB smaller, prefills 22-26% faster and decodes 9-13% faster. See
-the [measurements](performance/rtx-pro-6000.md#qwen38-27b-nvfp4full-against-the-production-profile-2026-09-28).
+This is an **opt-in profile for GPUs with limited memory** (e.g. 32 GB cards), not a replacement for
+`qwen3_8_27b_nvfp4`.
+- **Size and speed:** 2.95 GiB smaller, prefill 22-26% faster, decode 9-13% faster.
+- **Distribution shift:** its next-token distributions move measurably further from BF16 than the
+  production profile's: KL 1.56x, top-1 agreement 2.8 points lower on `kld-400k-v1`.
+- **Task-level evaluation (2026-09-28).** This used 645 synthetic, labelled legal-domain cases, with
+  greedy decoding on an RTX PRO 6000, against BF16 and the production profile.
+  - Classification and extraction were within noise: yes/no and choice decisions, 17-field
+    extraction, JSON validity.
+  - Document-grounded chat lost 4.8 rubric points (95% CI [-9.3, -1.0]), concentrated in answers
+    needing multi-step arithmetic. It also produced occasional calls to tools that were not offered.
+- **Use it for:** conversational and classification workloads where that trade-off is acceptable.
+  Avoid it for numeric reasoning in chat.
+
+See the [measurements](performance/rtx-pro-6000.md#qwen38-27b-nvfp4full-against-the-production-profile-2026-09-28).
 
 MTP and Vision use the main source. DFlash and DFlash2 use the corresponding named source, supplied
 as `--source dflash=PATH` or `--source dflash2=PATH`. An artifact may contain several optional
