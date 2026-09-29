@@ -16,10 +16,15 @@
 
 namespace ninfer::ops::detail {
 
-struct alignas(128) Fp8TmaDescriptors {
+// Passed by value as a __grid_constant__ kernel parameter. TMA requires 64-byte descriptor
+// alignment. It is stated here because cuda.h keys CUtensorMap's alignas on __cplusplus, which
+// MSVC reports as 199711L, and MSVC cannot pass a parameter aligned beyond 64 bytes by value.
+struct alignas(64) Fp8TmaDescriptors {
     CUtensorMap activation;
     CUtensorMap weight;
 };
+// Elsewhere CUtensorMap keeps its own 128-byte alignas, which the struct inherits.
+static_assert(alignof(Fp8TmaDescriptors) % 64 == 0);
 
 struct Fp8TmaSplitKPlan {
     int full_tiles = 0;
