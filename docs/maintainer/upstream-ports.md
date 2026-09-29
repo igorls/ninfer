@@ -1,6 +1,6 @@
 # Upstream ports
 
-Updated: September 28, 2026.
+Updated: September 29, 2026.
 
 This is the living record of how this workstation fork ([igorls/ninfer](https://github.com/igorls/ninfer))
 tracks [Neroued/ninfer](https://github.com/Neroued/ninfer): the reviewed upstream point, the fork
@@ -13,10 +13,10 @@ workstation.
 
 | Item | Value |
 |---|---|
-| Fork line | `workstation` (named `port/upstream-v3` until September 28, 2026), based on upstream [`bace20dc`](https://github.com/Neroued/ninfer/commit/bace20dc70249eed6402b66d4852c6c3f9612905) (September 24, 2026) and merged with upstream `e31bc99b` in `e2a149f1` |
-| Last reviewed upstream commit | [`e31bc99b`](https://github.com/Neroued/ninfer/commit/e31bc99b13f517c8aae70b997b7c4a49b4dcdc5d) (September 26, 2026), the merge-base |
+| Fork line | `workstation` (named `port/upstream-v3` until September 28, 2026), based on upstream [`bace20dc`](https://github.com/Neroued/ninfer/commit/bace20dc70249eed6402b66d4852c6c3f9612905) (September 24, 2026) and merged with upstream `e31bc99b` in `e2a149f1` and `d44ab584` in `d29866c9` |
+| Last reviewed upstream commit | [`d44ab584`](https://github.com/Neroued/ninfer/commit/d44ab58408aa389728cd8b1ee50179527e1f3e0d) (September 29, 2026), the merge-base |
 | Pre-v3 fork line | `research/qwen4-flash-next` at `87812bc8` (September 26); the source for Flash-Next |
-| Not yet reviewed | Nothing: upstream `master` was at `e31bc99b` on September 28, 2026 |
+| Not yet reviewed | Nothing: upstream `master` was at `d44ab584` on September 29, 2026 |
 
 The fork syncs by merging `origin/master` into the fork line, never by rebasing or cherry-picking
 upstream work. Each merge records every upstream change it brings in here as integrated, deferred
@@ -117,7 +117,84 @@ the running production service:
   noise), with the same MTP acceptance
   ([measurement](../performance/rtx-pro-6000.md#upstream-e31bc99b-merge-against-the-production-build-2026-09-28)).
 
-Not deployed: production still runs `2026.09.28-v3port.1`.
+Deployed later: release `2026.09.29-v3port.3` (source `28c40898`) contains this merge
+([Deployment](#deployment)).
+
+## Upstream `e31bc99b..d44ab584` (merged September 29, 2026)
+
+Branch `sync/upstream-d44ab584`. The merge commit `d29866c9` holds only two conflict resolutions,
+both in the Program's prefill context. Upstream `4201b5d2` binds DFlash prefill controls per chunk
+(a `DFlashPrefillIngress` with the chunk's KV table row, in place of the shared decode ingress), and
+the fork had appended its first-token logits capture and first-token and prompt readouts
+(`737b570a`, `f290c8e7`) to the same `PrefillContext`. The resolution keeps both, upstream's fields
+first: `program/context.h` declares the union, and `program/prefill.cpp`'s `advance_prefill`
+initialises the DFlash row as upstream does (0, rebound per chunk) and keeps the fork's readout
+wiring. The other `PrefillContext` initialisers (causal scoring, forced-token append) merged
+cleanly and match the field order. Follow-ups: `183cdca6` gives upstream's new FP8 TMA descriptors
+the fork's 64-byte alignment (MSVC error C2719 in every FP8 Linear, LinearAdd, SwiGLU and
+attention-input unit; Linux code unchanged), and `5482fd99` reverts `1cfdb4d6`.
+
+In the production artifact, FP8 KV makes the FP8 causal attention routes the production attention
+path; FP8 serves every attention and GDN projection, MLP layers 56–63 and the output head; NVFP4
+serves MLP layers 0–55. z690 runs `nvfp4full` with NVFP4 KV.
+
+| Upstream | Subject | Verdict |
+|---|---|---|
+| `23b0997d` `98ba2dac` | reorganize and tune BF16 causal attention; stabilize its graphs | Integrated: BF16 KV (not a production configuration); attention oracle test (all KV dtypes), `prefix_real` attention scenario with BF16 KV |
+| `4e8939d6` `5a15a166` | reorganize and tune FP8 causal attention; unify its graphs and query tiling | Integrated: x870e production attention; oracle test, `prefix_real` attention with FP8 KV (MTP3 and MTP5), G4 A/B |
+| `20a36378` | organize and tune INT8 causal attention | Integrated: not a production KV; oracle test, `prefix_real` attention with INT8 KV |
+| `1192ad76` | organize and tune NVFP4 causal attention | Integrated: z690 attention; oracle test, `prefix_real` attention with NVFP4 KV, G4 z690-like A/B (neutral) |
+| `a637f28f` | organize and tune K8V4 causal attention | Integrated: not a production KV; oracle test, `prefix_real` attention with K8V4 KV |
+| `1737ca11` | share causal attention primitives | Integrated (refactor of the five above) |
+| `a012e2bc` | align attention qualification and engine graph planning | Integrated: graph profiles and startup planning; the nvfp4/k8v4 attention CTest aliases fold into the one attention test; every `prefix_real` scenario, G4 A/B |
+| `582c9a8f` | varied benchmark inputs, restored mutable operands | Integrated, not exercised (Op benchmarks are not built by the fork); `bench_fixtures` test passes |
+| `909fb087` `344d69b8` `7489500d` `b3f018ab` `7ede9b44` | FP8 Linear TMA split-K and schedule tuning at `[34816,5120]`, `[14336,5120]`, `[16384,5120]`, `[5120,6144]`, `[5120,17408]` | Integrated with `183cdca6`: the production FP8 projections and late MLP; FP8 A16/A8 Linear oracle tests; the series brings most of the 7,680-token prefill gain |
+| `40bfe7dc` | FP8 fused projections (attention/GDN input, LinearAdd, SwiGLU) with TMA split-K | Integrated: FP8 LinearAdd, LinearSwiGLU, attention- and GDN-input and conv-snapshot/record oracle tests |
+| `7f6aafed` | split-KV prefill for FP8 and K8V4 KV | Integrated: x870e long-context prefill (−19.5% at 61,625 tokens); oracle test, G4 A/B; device memory unchanged at `--prefill-chunk 2048` |
+| `c1c48a6a` | configurable KV dtype in the serve benchmark runners | Integrated, not exercised (upstream's benchmark tooling) |
+| `d23835c1` | Qwen3.8 FP8 KV serving results | Integrated (documentation; upstream's RTX 5090 data) |
+| `84cf93e4` | native FP8-to-BF16 conversion (CUDA 13.2+) | Integrated: exact; neutral on G4 decode (217.5 vs 217.7 tok/s with and without it); FP8 A16 oracle tests |
+| `1cfdb4d6` | native NVFP4 A16 decoding (CUDA 13.2+) | **Reverted** (`5482fd99`): exact, but the production decode on the RTX PRO 6000 G4 falls from 230.9 to 217.7 tok/s (−5.7%) with it, prefill unchanged; the effect on the RTX 5090 is unmeasured and both machines run one build |
+| `4201b5d2` | bind DFlash prefill controls per chunk | Integrated through the merge resolution: `dflash_prefill_real` (new upstream test) and `dflash2_real` at K=15 (8 rows) and K=7 with FP8 and NVFP4 KV pass |
+| `d44ab584` | extend grouped small prefill to every KV dtype | Integrated: attention oracle test, G4 A/B |
+
+Qualification:
+
+- **Windows** (MSVC 19.51, CUDA 13.3, `sm_120a`, RTX PRO 6000, driver 616.92, beside the running
+  production service): full CTest, 138 tests: 128 passed, 10 skipped (artifact- or source-gated),
+  0 failed. The pre-merge build had 138 tests with 129 passed and 9 skipped. The merge removes the
+  two attention aliases (`--nvfp4-only`, `--k8v4-only`; the main attention test now covers all
+  five KV dtypes), and adds `bench_fixtures` (passes) and `dflash_prefill_real` (skipped without an
+  artifact). The attention test passes against its FP64 oracle for BF16, FP8, INT8, NVFP4 and K8V4
+  KV, as do every FP8 and NVFP4 Linear, LinearAdd and LinearSwiGLU test, the attention- and
+  GDN-input projection tests, the KV append tests and the speculative-round and masked-block tests.
+  The run was repeated on the tip with the revert.
+- **Real-model tests on Colab G4** (Linux build of `183cdca6`, `NINFER_TEST_ARTIFACT` = the
+  production artifact from Hugging Face): loading (MTP, Vision, optimized proposal head), causal
+  scoring, reasoning features, `dflash2_real` (K=15 at 8 rows: 21 of 23 drafted tokens accepted;
+  K=7 at 2 rows with FP8 and with NVFP4 KV: 20 of 20), `dflash_prefill_real` (DFlash2), the
+  `prefix_real` attention scenario with each of the five KV dtypes (MTP3, and FP8 with MTP5), and
+  the twelve other `prefix_real` scenarios run one by one all pass. The default `prefix_real` run
+  stops at the known Host-restore check with the byte-identical message and counters recorded on
+  the pristine base and the previous merge (open question below).
+- **Speed** (G4, production flags, alternating arms): the tip prefills 10.5% faster at 7,680 tokens
+  and 19.5% faster at 61,625 tokens and decodes 1.8% faster than the deployed build; without the
+  revert the merge decoded 4.0% slower. The z690-like configuration (`nvfp4full`, NVFP4 KV, MTP3)
+  is unchanged within 0.2%, with identical device memory
+  ([measurement](../performance/rtx-pro-6000.md#upstream-d44ab584-merge-against-the-production-build-2026-09-29-colab-g4)).
+- **Tribuno synthetic set** (645 cases, G4, production flags; pre-registered addendum criterion
+  `E:\tribuno-synth\criterion-sync2.md`, results in `E:\tribuno-synth\results\sync2\`): the merge
+  does not change Tribuno-type outcomes. Every accuracy metric is PASS or INCONCLUSIVE (SO-inicial
+  −0.5 points [−2.3, +1.1]; chat rubric coverage −0.0 [−2.4, +2.5]), extraction validity and the
+  publication gate are unchanged, and System One decisions flip on 3 of 187 petição-inicial
+  questions (1.6%, within the 2% bound) and on none of the 385 valor questions (mean |ΔP| 0.034,
+  0.007 and 0.015). The three flips are borderline JEC atermação petitions near the threshold in
+  the deployed build (P(yes) 0.593, 0.531, 0.438); the merge's decision agrees with the BF16
+  reference on all three, so agreement with BF16 rises from 98.4% to 100%. System One is
+  bit-identical between two runs of the merge, and between the merge and a build without both
+  codec commits.
+
+Not deployed.
 
 ## Fork features carried onto v3
 
@@ -251,7 +328,9 @@ Approved by Igor, 2026-09-27 and 2026-09-28.
 - `dflash2_real`'s default probe (K=15, one 24-token generation) accepted 21 of 23 drafted tokens
   before the upstream `e31bc99b` merge and 20 of 31 after it; the test passes both times. The merge
   changed the Q8, BF16 and GDN kernels the drafter and target run. DFlash2 acceptance on real
-  requests was not re-measured; production uses MTP, whose acceptance is unchanged.
+  requests was not re-measured; production uses MTP, whose acceptance is unchanged. After the
+  `d44ab584` merge the same probe accepted 21 of 23 on a Colab G4 (Linux); the Windows figures
+  are from the workstation, so the two are not a like-for-like pair.
 
 ## Qualification of the fork line
 
@@ -298,7 +377,14 @@ Windows, MSVC 19.51, CUDA 13.3, `sm_120a`, RTX PRO 6000 Blackwell (driver 616.92
 
 ## Deployment
 
-Since September 28, 2026 10:02 UTC, the x870e production service on :8010 runs release
+Current state, September 29, 2026: the x870e production service on :8010 runs release
+`2026.09.29-v3port.3` (source `28c40898`, which contains the `e31bc99b` merge), checked by the
+installed release manifest and the `ninfer-serve.exe` hash. z690 runs the same release with the
+`nvfp4full` profile, NVFP4 KV and MTP3, as reported by the installing agent (not checked from
+here). The upstream `d44ab584` merge is not deployed. The paragraphs below record the first v3
+cutover.
+
+On September 28, 2026 10:02 UTC, the x870e production service on :8010 moved to release
 `2026.09.28-v3port.1` (source `e92c2078`). The cutover replaced the four executables
 (`ninfer-serve`, `ninfer-supervisor`, `ninfer`, `ninfer-launcher`) and the release manifest; every
 runtime DLL was already byte-identical. It pointed the supervisor configuration at the v3
@@ -326,5 +412,5 @@ the same installer.
   396 of 400 cases, with a mean |Δ| of 0.0197. That matches the pre-v3 cross-GPU gap (0.021), so the
   difference is the GPU, not the build. Both machines serve System One in rotation.
 
-The upstream merge `e2a149f1` (September 28) is not deployed yet. Deploying it needs a release
-build, a rollout to both machines, and a System One re-check.
+Deploying the `d44ab584` merge needs a release build, a rollout to both machines, and a System One
+re-check against the running release.

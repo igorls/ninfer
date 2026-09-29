@@ -2,7 +2,7 @@
 
 These results were measured on the fork's RTX PRO 6000 Blackwell 96 GB workstation and, where a
 section says so, on Colab G4 VMs with the same GPU in its Server Edition. The first section compares
-weight profiles; the next two compare the fork line with the production build; the others are records of the fork's
+weight profiles; the next three compare the fork line with the production build; the others are records of the fork's
 pre-v3 engine (`research/qwen4-flash-next`), taken beside other desktop GPU work. They do not
 follow every rule of the [publication methodology](methodology.md); each section states its own
 conditions. Qwen3.8-Flash-Next records stay with that line until its port.
@@ -138,6 +138,94 @@ divided by the context length; "free" is the emulated 5090's free memory after s
 
 The production row matches the ~2.2 GB z690 reports free at 65K. The projection does not model a
 consumer card's WDDM or CUDA-context differences.
+
+## Upstream `d44ab584` merge against the production build (2026-09-29, Colab G4)
+
+All measurements in this section ran on Colab G4 VMs (RTX PRO 6000 Blackwell Server Edition,
+Linux, CUDA 13.3), not on the workstation. Each arm is a Linux build of the fork: the deployed
+release source `28c40898` (`2026.09.29-v3port.3`), the merge `183cdca6` (upstream `d44ab584` merged
+in `d29866c9`, plus the MSVC-only descriptor alignment that leaves Linux code unchanged), and
+variants built on the VM by merging an intermediate upstream commit into `28c40898` or reverting
+commits from `183cdca6`. The weights are the production artifact from
+`neroued/Qwen3.8-27B-nvfp4-NInfer@f0b43ad4`, object-identical to the workstation's copy.
+
+The harness (`vm_ab.py`, built on `tools/bench/serve_ab_probe.py`) starts a fresh `ninfer-serve` per
+arm and round and alternates the arm order each round. Per arm and round: one warmup of each kind,
+five cold 7,680-token prefills (a `long_64k_independent` prefix trimmed to exactly 7,680 prompt
+tokens, a fresh salt per request, read-only cache, one output token), five greedy 256-token
+counting decodes (thinking off), and long-context requests (the first 262,000 characters of the same
+fixture plus a counting instruction: 61,625 prompt tokens, fresh salt, 128 greedy output tokens).
+Times are the server's request-log timings; decode excludes the first token. Production flags:
+`--max-context 131072 --kv-capacity 524288 --max-concurrency 8 --prefill-chunk 2048 --kv-dtype fp8
+--vision --spec mtp --draft-tokens 5 --lm-head-draft --desktop-reserve-gib 6`.
+
+### Merge against the deployed build (6 rounds, 30 short and 18 long samples per arm)
+
+| Arm | 7,680-token prefill ms, median [min–max] | 256-token decode tok/s | MTP acceptance | 61,625-token prefill ms | 61,625-token context decode tok/s |
+|---|---:|---:|---:|---:|---:|
+| deployed `28c40898` | 585.8 [578.9–588.3] | 226.8 [226.6–227.0] | 67.6% | 7,264.8 [7,226.7–7,273.2] | 272.8 [206.8–272.9] |
+| merge `183cdca6` | 524.9 [518.1–526.7] | 217.7 [217.4–217.9] | 69.1% | 5,834.9 [5,738.7–5,843.9] | 261.7 [191.4–261.9] |
+
+The merge prefills 10.4% faster at 7,680 tokens and 19.7% faster at 61,625 tokens, and decodes 4.0%
+slower at short context and 4.1% slower at long context (median). Device free memory after startup
+is identical to the byte in both arms (53.99 GiB): at `--prefill-chunk 2048` the larger split-KV
+prefill workspace of `7f6aafed` does not change the allocation. (The `prefix_real` attention
+scenario, a different configuration, reports a workspace peak of 255 MB for FP8 and K8V4 KV
+against 130 MB for BF16, INT8 and NVFP4.) Long-context decode samples fall into modes set by the
+MTP acceptance of each salted request (the low values in every arm are requests with about 65%
+acceptance instead of 95–99%), so the long-context medians carry the comparison, not the ranges.
+
+### Attribution (4 rounds, 20 short samples per arm)
+
+| Arm | 7,680-token prefill ms | 256-token decode tok/s |
+|---|---:|---:|
+| deployed `28c40898` | 585.7 [572.2–587.2] | 226.8 [226.5–227.0] |
+| `28c40898` + upstream through `a012e2bc` (causal attention series) | 585.5 [577.7–587.2] | 230.1 [229.8–230.2] |
+| `28c40898` + upstream through `40bfe7dc` (plus the FP8 Linear series) | 518.4 [516.4–519.9] | 226.6 [226.4–226.8] |
+| merge without `84cf93e4` and `1cfdb4d6` | 525.7 [523.4–527.1] | 230.5 [230.4–230.8] |
+| merge | 525.4 [523.6–526.8] | 217.8 [217.5–217.9] |
+
+A second VM separated the two codec commits (4 rounds, 20 samples per arm):
+
+| Arm | 7,680-token prefill ms | 256-token decode tok/s | 61,625-token prefill ms |
+|---|---:|---:|---:|
+| deployed `28c40898` | 587.9 [582.7–588.9] | 226.9 [226.4–227.1] | 7,277.8 |
+| merge | 526.4 [524.8–527.3] | 217.7 [217.3–217.8] | 5,850.3 |
+| merge without `1cfdb4d6` (native NVFP4 A16 decoding) | 526.2 [524.6–527.2] | 230.9 [230.8–231.1] | 5,857.8 |
+| merge without `84cf93e4` (native FP8-to-BF16 conversion) | 526.2 [524.5–527.2] | 217.5 [217.4–217.7] | 5,854.2 |
+| merge without both | 526.0 [524.4–527.1] | 230.5 [230.1–230.8] | 5,853.1 |
+
+- The causal attention series speeds up decode by 1.5% and leaves prefill unchanged at these
+  lengths. The FP8 Linear series brings the 7,680-token prefill gain (−11.5%) and costs about
+  1.5% of decode. Split-KV FP8 prefill (`7f6aafed`) brings most of the long-context prefill gain
+  (6,735 ms without it, 5,835 ms with it).
+- The native NVFP4 A16 decoding of `1cfdb4d6` alone costs 5.7% of decode and nothing on prefill.
+  The fork line reverts it (`5482fd99`); the tip is code-identical on Linux to the "merge without
+  `1cfdb4d6`" arm: **prefill −10.5% at 7,680 tokens and −19.5% at 61,625 tokens, decode +1.8%**
+  against the deployed build, and 276.2 against 272.7 tok/s at 61,625 tokens of context in
+  matched high-acceptance samples. `84cf93e4` is neutral and stays.
+- Both codec paths are exact: System One on a build without either codec gives the same answers
+  and probabilities as the merge on all 390 questions of the Tribuno synthetic set.
+
+### z690-like configuration (6 rounds, 30 short and 18 long samples per arm)
+
+The `nvfp4full` profile (converted on the G4 with the `workstation` recipe and the committed
+`broad-v1` calibration; 17.05 GiB of weights), NVFP4 KV, MTP3. Flags: `--max-context 65536
+--kv-capacity 262144 --kv-dtype nvfp4 --spec mtp --draft-tokens 3`, with the others as above.
+`--max-concurrency 8` and `--lm-head-draft` are assumptions (the z690 record states 4 concurrent
+requests), and the G4 is not an RTX 5090. The long-context request is 240,000 characters (56,449
+prompt tokens) to fit the 65,536-token context.
+
+| Arm | 7,680-token prefill ms | 256-token decode tok/s | MTP acceptance | 56,449-token prefill ms | Device free |
+|---|---:|---:|---:|---:|---:|
+| deployed `28c40898` | 456.8 [454.4–457.2] | 232.6 [232.3–233.1] | 85.9% | 6,710.1 | 69.33 GiB |
+| merge | 456.7 [453.4–457.2] | 232.2 [231.7–232.6] | 85.9% | 6,710.1 | 69.33 GiB |
+| merge without both codec commits | 456.8 [455.0–457.4] | 231.9 [231.6–232.1] | 85.9% | 6,709.9 | 69.33 GiB |
+
+The merge is neutral here: `nvfp4full` runs almost no FP8 Linear, split-KV prefill covers FP8 and
+K8V4 KV only, and the codec revert changes nothing in this configuration. Device memory is
+identical to the byte. At matched full acceptance, long-context decode is 241.1–241.6 tok/s in
+every arm.
 
 ## Upstream `e31bc99b` merge against the production build (2026-09-28)
 
