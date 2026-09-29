@@ -57,6 +57,7 @@ The built-in recipes are ordinary Python functions in
 | `qwen3_6_35b_a3b` | Q4 experts, Q5/Q6 expert down, Q8 shared/projection weights | None |
 | `qwen3_6_27b_nvfp4` | Imported NVFP4, selected BF16 projections, Q8 vocabulary weights | `quantized` |
 | `qwen3_8_27b_nvfp4` | Imported NVFP4/FP8, FP8 embedding generated from BF16 | `quantized` |
+| `qwen3_8_27b_nvfp4full` | Imported NVFP4 MLP 0-55, locally encoded NVFP4 attention, GDN and MLP 56-63, nine BF16 exception parents, Q8 vocabulary weights | `quantized`, `calibration` |
 | `qwen3_8_27b_orcarouter_nvfp4` | Imported NVFP4/FP8 from a compressed-tensors `--model`, BF16 embedding and full output head kept | None |
 
 These names select conversion choices. Runtime execution is selected from the architecture,
@@ -110,6 +111,78 @@ tokenizer executes, with NFC normalization; the two differ only for text with co
 added tokens come from `tokenizer.json`). `ninfer_qwen3_5_orcarouter_tokenizer_test` compares 17
 cases, including combining marks, multilingual text, special tokens and a 3,613-token input, with the
 ids and decodes of the stored tokenizer, when `NINFER_ORCAROUTER_MODEL_DIR` names the source.
+
+### Qwen3.8-27B `nvfp4full`
+
+`qwen3_8_27b_nvfp4full` is a fuller-NVFP4 profile of Qwen3.8-27B adapted from
+[cometkim/ninfer](https://github.com/cometkim/ninfer) (`feat/qwen3.8-nvfp4full`). Its `--model` is
+the official BF16 checkpoint ([Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B), revision
+`1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0`) and its `quantized` source is
+[unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) (revision
+`f0b7c9e722f5565102fff8481c99e4d86ae099c7`; its `model.safetensors` LFS object is the same as at the
+`7d6f8d4d` revision the fork cites).
+
+| Text projections | Representation |
+|---|---|
+| MLP layers 0-55 (112 parents) | NVFP4 words and divisors imported bit-exactly from `quantized`; identical to the production `nvfp4` artifact's |
+| MLP 56-63, GDN query/key/value/z and output, attention query/key/gate/value on layers 27-63 and output on all but 3 and 7 (135 parents) | NVFP4 encoded locally with `nvfp4_maxabs`, AllowA4 with calibrated activation divisors |
+| Attention query/key/gate/value on layers 3-23, attention output on 3 and 7, GDN output on 4 | BF16 (the Qwen3.6-27B NVFP4 exception set) |
+| GDN a/b | BF16 |
+| Token embedding and output head | Q8 (`q8_g32_fp16`) |
+
+MTP, Vision and a DFlash2 companion keep the official formats (Q8 for MTP and DFlash2). Norms and the
+other direct Text tensors come from the BF16 checkpoint; the production artifact takes them from the
+Unsloth checkpoint, whose zero-centred RMSNorm weights were rounded through `1 + w` in BF16.
+
+`nvfp4_maxabs` implements `NVFP4_MAXABS_DIVISOR_RNE_V1`: one FP32 weight divisor
+`binary32(2688 / max|W|)` over the complete packed parent, an E4M3FN scale `min(max|y| / 6, 448)` per
+16 values of `y = W * d`, and round-to-nearest-even E2M1 codes. The locally encoded parents measure
+0.095 relative Frobenius error against BF16 (the fork measured 0.107-0.126 for the imported
+Unsloth parents).
+
+An A4 site's activation divisor `binary32(2688 / max|x|)` fixes the largest input the A4 route
+represents; larger inputs saturate. `tools.convert.calibrate_nvfp4` measures `max|x|` for every
+site with Transformers on a whole BF16 load and writes the document the recipe reads through
+`--source calibration=PATH`. `--corpus cometkim-v1` is the fork's ten-document, 2,690-token corpus;
+the default `broad-v1` adds 251,213 tokens of pinned public text and rendered chats that do not overlap
+the `kld-400k-v1` evaluation corpus. On that corpus the ten-document maxima were exceeded at 131 of
+135 sites (GDN outputs by a median factor of 2.2), `broad-v1`'s at 64 sites by a median factor of 1.0.
+[`tools/convert/calibration/qwen3_8_27b_nvfp4full.json`](../tools/convert/calibration/qwen3_8_27b_nvfp4full.json)
+is the `broad-v1` document.
+
+```bash
+python3 -m tools.convert.calibrate_nvfp4 --model /path/to/Qwen3.8-27B \
+  --corpus broad-v1 --out qwen3_8_27b_nvfp4full_calibration.json
+
+python3 -m tools.convert \
+  --model /path/to/Qwen3.8-27B \
+  --recipe qwen3_8_27b_nvfp4full \
+  --source quantized=/path/to/Qwen3.8-27B-NVFP4 \
+  --source calibration=tools/convert/calibration/qwen3_8_27b_nvfp4full.json \
+  --source dflash2=/path/to/Qwen3.8-27B-DFlash2 \
+  --components text,vision,mtp,dflash2 \
+  --resource chat_template.jinja=tools/chat_templates/qwen3_8.jinja \
+  --proposal \
+  --name qwen3.8-27b \
+  --out models/qwen3_8_27b_nvfp4full_dflash2.ninfer
+
+python3 -m tools.convert.verify_nvfp4full models/qwen3_8_27b_nvfp4full_dflash2.ninfer \
+  --model /path/to/Qwen3.8-27B --quantized /path/to/Qwen3.8-27B-NVFP4 \
+  --calibration tools/convert/calibration/qwen3_8_27b_nvfp4full.json \
+  --reference models/qwen3_8_27b_nvfp4.ninfer
+```
+
+The artifact keeps the public name `qwen3.8-27b`. Its Text weights are 16.03 GiB against 18.98 GiB for
+`qwen3_8_27b_nvfp4` (20.55 GB file with Vision, MTP, DFlash2 and the proposal head). The verifier
+checks the allocation, the imported words and divisors against the Unsloth source, every local
+parent against a re-encode and an independent FP64 nearest-value decode oracle, the BF16 exceptions
+and Q8 endpoints, and, with `--reference`, compares object payload digests with the production
+artifact.
+
+This profile is **not qualified for production**: its next-token distributions move measurably
+further from BF16 than the production profile's (KL 1.56x, top-1 agreement 2.8 points lower on
+`kld-400k-v1`), although it is 2.95 GiB smaller, prefills 22-26% faster and decodes 9-13% faster. See
+the [measurements](performance/rtx-pro-6000.md#qwen38-27b-nvfp4full-against-the-production-profile-2026-09-28).
 
 MTP and Vision use the main source. DFlash and DFlash2 use the corresponding named source, supplied
 as `--source dflash=PATH` or `--source dflash2=PATH`. An artifact may contain several optional
@@ -188,7 +261,7 @@ The converter currently writes these formats:
 | `bf16`, `fp32`, `int32` | `cast_direct` | Direct words through the source reader |
 | `q4_g64_fp16`, `q5_g64_fp16`, `q6_g64_fp16`, `q8_g32_fp16` | `grouped_absmax` | Supply a custom method/source if needed |
 | `fp8_e4m3fn_row_bf16` | `fp8_row_maxabs` | `import_encoded` |
-| `nvfp4` | Supply a custom quantizer | `import_encoded` |
+| `nvfp4` | `nvfp4_maxabs` (with calibrated activation divisors for A4 Uses) | `import_encoded` |
 
 `grouped_absmax` stores one FP16 scale per group and signed integer codes. `fp8_row_maxabs` first
 rounds input values to BF16, then produces E4M3FN codes and one BF16 multiplier per row.

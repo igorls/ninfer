@@ -1,10 +1,143 @@
 # RTX PRO 6000 workstation records (fork)
 
-These results were measured on the fork's RTX PRO 6000 Blackwell 96 GB workstation. The first two
-sections compare the fork line with the production build; the others are records of the fork's
+These results were measured on the fork's RTX PRO 6000 Blackwell 96 GB workstation and, where a
+section says so, on Colab G4 VMs with the same GPU in its Server Edition. The first section compares
+weight profiles; the next two compare the fork line with the production build; the others are records of the fork's
 pre-v3 engine (`research/qwen4-flash-next`), taken beside other desktop GPU work. They do not
 follow every rule of the [publication methodology](methodology.md); each section states its own
 conditions. Qwen3.8-Flash-Next records stay with that line until its port.
+
+## Qwen3.8-27B `nvfp4full` against the production profile (2026-09-28)
+
+Candidate: the [`qwen3_8_27b_nvfp4full`](../weight-conversion.md#qwen38-27b-nvfp4full) profile
+(recipe adapted from cometkim/ninfer), converted locally with the `broad-v1` activation calibration
+and a Q8 DFlash2 companion. Current: the production artifact
+`qwen3_8_27b_nvfp4_dflash2.ninfer` (Unsloth mixed NVFP4/FP8). Both arms ran the same build of the
+task branch. Clean measurements ran on Colab G4 VMs (RTX PRO 6000 Blackwell Server Edition, driver
+580.82, Linux build with CUDA 13.3); the G4 copy of the production weights is
+`neroued/Qwen3.8-27B-nvfp4-NInfer` at `f0b43ad4`, whose 1,072 bound objects and Use divisors are
+byte-identical to the local production artifact's (only the embedded chat template's line endings
+differ). The Colab-converted candidate is object-for-object identical to the local conversion.
+
+### Quality: distribution agreement with BF16
+
+Criterion, written before any artifact was scored on the full corpus: a candidate passes when its
+mean KL(BF16 || candidate) is at most 1.25 times production's, its top-1 agreement with BF16 is at
+most 1.0 point below production's, and its MTP acceptance is at most 2.0 points below.
+
+`ninfer-perplexity --reference` on `kld-400k-v1` (399,892 scored positions, FP8 KV,
+[method](../perplexity.md#distribution-agreement-with-a-reference-model)). The G4 and the x870e
+workstation produce identical numbers for the same artifact.
+
+| Profile | Text weights | KL mean | KL p50 | KL p99 | Top-1 | NLL - BF16 | Gate |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Production `nvfp4` | 18.98 GiB | 0.0611 | 0.00616 | 0.976 | 93.10% | +0.0123 | reference |
+| `nvfp4full`, `broad-v1` calibration | 16.03 GiB | 0.0954 (1.56x) | 0.01333 | 1.550 | 90.30% | +0.0208 | fails |
+| `nvfp4full`, `cometkim-v1` calibration | 16.03 GiB | 0.0993 (1.63x) | 0.01359 | 1.628 | 90.30% | +0.0174 | fails |
+| Variant: NVFP4 on MLP 56-63 only | 18.25 GiB | 0.0668 (1.09x) | 0.00823 | 0.999 | 92.29% | +0.0330 | passes |
+| Variant: NVFP4 on MLP 56-63 and attention | 17.8 GiB | 0.0739 (1.21x) | 0.00972 | 1.131 | 91.74% | +0.0439 | fails (top-1) |
+| Variant: NVFP4 on GDN layers 8-55 only | 17.43 GiB | 0.0759 (1.24x) | 0.00806 | 1.256 | 92.03% | +0.0105 | fails (top-1 by 0.07) |
+
+The variants keep everything else of the production allocation (imported FP8), take the Q8
+vocabulary endpoints and BF16-checkpoint norms of `nvfp4full`, and were made with recipe overrides.
+Per domain, `nvfp4full` (`broad-v1`) roughly doubles mean KL on C++ code, the Belebele languages and
+English prose (2.0-2.1x) and raises it least on UltraChat (1.35x) and MATH-500 (1.40x); top-1
+agreement drops 1.2 (MATH-500) to 5.0 (UltraChat) points per domain.
+
+Attribution on an 18-sequence development subset (69,144 positions; production 0.0721 mean KL,
+92.98% top-1): the Q8 endpoints and exact norms alone improve on production (0.0636, 93.24%); NVFP4
+on GDN alone gives 0.0975 and 91.58%, on MLP 56-63 alone 0.0708 and 92.08%, on attention alone
+0.0699 and 92.62%. Keeping every locally encoded site except MLP gate/up at A16 (weight-only NVFP4;
+the fused SwiGLU has no A16 route beyond 16 tokens) gives 0.0849 and 91.48% against the full
+profile's 0.1006 and 90.55%: activation quantization accounts for about half of the KL increase and
+two fifths of the top-1 loss, weight rounding for the rest. The calibration corpus changes little:
+`broad-v1` lowers mean KL 4% against `cometkim-v1`.
+
+### MTP acceptance
+
+24 prompts (MATH-500 rows 0-11 and UltraChat `test_gen` rows 0-11), thinking on, temperature 0,
+512 output tokens, one request at a time, production flags with MTP5 and the proposal head. The G4
+and x870e runs of the same artifact generated identical tokens; the variants ran on x870e.
+
+| Profile | Completion tokens | Acceptance | Tokens per round | Accepted per draft position |
+|---|---:|---:|---:|---|
+| Production | 9,825 | 43.3% | 3.16 | 2342 / 1671 / 1177 / 870 / 647 |
+| `nvfp4full`, `broad-v1` | 9,639 | 45.3% | 3.25 | 2270 / 1657 / 1197 / 885 / 674 |
+| `nvfp4full`, `cometkim-v1` | 9,754 | 45.1% | 3.25 | 2272 / 1664 / 1213 / 911 / 695 |
+| Variant: MLP 56-63 only | 9,670 | 45.2% | 3.25 | 2296 / 1649 / 1197 / 885 / 670 |
+| Variant: GDN layers 8-55 only | 9,728 | 43.9% | 3.19 | 2347 / 1641 / 1177 / 874 / 637 |
+
+No profile's MTP acceptance is lower than production's.
+
+### GPQA-Diamond, paired (supporting evidence)
+
+Production and `nvfp4full` (`broad-v1`) served side by side on one G4 (MTP5, FP8 KV, 8 concurrent
+requests each), EvalScope 1.10.0 through `eval/ninfer_eval`, 0-shot rule scoring, thinking on with
+`reasoning_effort: low`, temperature 1.0, top_p 0.95, top_k 20, 16,384 output tokens, one seed per
+VM. The low effort and output bound keep a seed inside a Colab VM's lifetime; they lower both arms'
+scores, so these are paired comparisons, not published-style GPQA numbers.
+
+| Seed | Paired questions | Production | `nvfp4full` | Only production correct | Only `nvfp4full` correct | Difference |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 197 | 78.68% | 78.17% | 14 | 13 | -0.51 pts |
+| 2 (VM reclaimed mid-run) | 61 | 88.52% | 90.91%* | 2 | 3 | +1.64 pts |
+| 3 | 197 | 82.23% | 81.73% | 11 | 10 | -0.51 pts |
+| Pooled | 455 answers | | | 27 | 26 | -0.22 pts, 95% CI [-3.52, +3.10] |
+
+\* Over its 66 answered questions; the difference uses the 61 both arms answered. One question per
+complete seed returned no scored answer. The interval is a question-level bootstrap over the pooled
+paired answers.
+
+The paired difference is inside the noise; GPQA at this size cannot resolve the token-level shift
+the KL gate measures.
+
+### Speed and memory
+
+`tools/bench/serve_ab_probe.py`: a fresh `ninfer-serve` per arm and round with the production flags
+except the KV capacity (`--max-context 131072 --kv-capacity 131072 --max-concurrency 8
+--prefill-chunk 2048 --kv-dtype fp8 --vision --spec mtp --draft-tokens 5 --lm-head-draft
+--desktop-reserve-gib 6`), alternating arm order; per arm and round one warmup, five cold
+7,680-token prefills (a `long_64k_independent` prefix trimmed to exactly 7,680 prompt tokens, a
+fresh salt per request, read-only cache, one output token) and five greedy 256-token counting
+decodes (thinking off). Times are the server's request-log timings; decode excludes the first token.
+Weights are the loaded weight arena (Text, MTP, Vision and proposal head).
+
+| Machine | Arm | Samples | 7,680-token prefill ms, median [min-max] | Decode tok/s, median [min-max] | MTP acceptance | Weights | Device free |
+|---|---|---:|---:|---:|---:|---:|---:|
+| G4, 5 rounds | production | 25 | 574.5 [571.4-576.7] | 226.9 [226.8-227.1] | 67.6% | 20.00 GiB | 66.84 GiB |
+| G4, 5 rounds | `nvfp4full` | 25 | 444.6 [444.2-445.1] | 248.4 [248.2-248.5] | 66.1% | 17.05 GiB | 69.79 GiB |
+| G4, 5 rounds | NVFP4 on MLP 56-63 only | 25 | 537.8 [535.4-540.0] | 233.6 [233.5-233.8] | 67.6% | 19.28 GiB | 67.56 GiB |
+| x870e, 2 rounds | production | 10 | 651.4 [642.3-660.9] | 233.9 [231.0-236.5] | 67.6% | 20.00 GiB | 12.95 GiB |
+| x870e, 2 rounds | `nvfp4full` | 10 | 483.2 [476.5-487.3] | 264.3 [263.6-269.4] | 69.1% | 17.05 GiB | 15.90 GiB |
+
+The G4 `nvfp4full` arm used the `cometkim-v1` conversion (same weights, different activation
+divisors); the x870e arm the `broad-v1` one. The x870e rounds ran on port 8021 beside the production
+service (Windows, driver 616.92); its request log recorded no request inside their windows.
+`nvfp4full` prefills 22.6% (G4) and 25.8% (x870e) faster and decodes 9.5% and 13.0% faster, with 2.95
+GiB more free device memory.
+
+### RTX 5090 projection
+
+The engine's own sizing on a G4, with the desktop reserve raised by the capacity difference so that
+it sees what a 32,607 MiB RTX 5090 with a 1 GiB desktop reserve leaves (`--desktop-reserve-mib
+66304`), `--kv-capacity auto`, FP8 KV, 4 concurrent requests. "Contexts" is the automatic KV capacity
+divided by the context length; "free" is the emulated 5090's free memory after startup.
+
+| Profile | Context | Configuration | Weights | Automatic KV tokens | Contexts | Free |
+|---|---:|---|---:|---:|---:|---:|
+| Production | 65,536 | MTP, Vision (z690 today) | 20.00 GiB | 192,960 | 2.94 | 2.29 GiB |
+| Production | 65,536 | DFlash2, Vision | 21.33 GiB | 97,664 | 1.49 | 3.80 GiB |
+| Production | 131,072 | MTP, Vision | 20.00 GiB | 192,960 | 1.47 | 2.29 GiB |
+| Production | 131,072 | DFlash2, with or without Vision | - | does not start | - | - |
+| `nvfp4full` | 65,536 | MTP, Vision | 17.05 GiB | 262,144 (4 x 65,536 cap) | 4.00 | 2.98 GiB |
+| `nvfp4full` | 65,536 | DFlash2, Vision | 18.37 GiB | 193,600 | 2.95 | 3.80 GiB |
+| `nvfp4full` | 131,072 | MTP, Vision | 17.05 GiB | 283,264 | 2.16 | 2.29 GiB |
+| `nvfp4full` | 131,072 | DFlash2, Vision | 18.37 GiB | 193,600 | 1.48 | 3.80 GiB |
+| MLP 56-63 only | 65,536 | MTP, Vision | 19.28 GiB | 215,104 | 3.28 | 2.29 GiB |
+| MLP 56-63 only | 131,072 | DFlash2, Vision | - | does not start | - | - |
+
+The production row matches the ~2.2 GB z690 reports free at 65K. The projection does not model a
+consumer card's WDDM or CUDA-context differences.
 
 ## Upstream `e31bc99b` merge against the production build (2026-09-28)
 

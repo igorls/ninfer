@@ -124,6 +124,7 @@ Upstream publishes five official artifacts; the quick-start commands use Qwen3.8
 | Qwen3.8-27B | `nvfp4` | `qwen3_8_27b_nvfp4.ninfer` | [Qwen3.8-27B NVFP4](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) |
 | Qwen3.6-35B-A3B | `groupwise-int` | `qwen3_6_35b_a3b.ninfer` | [Qwen3.6-35B-A3B](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer) |
 | Qwen3.8-27B OrcaRouter Uncensored | `nvfp4`, BF16 embedding and head | converted locally with recipe `qwen3_8_27b_orcarouter_nvfp4` | [conversion](docs/weight-conversion.md), [v2 release card](model-cards/Qwen3.8-27B-Uncensored-NVFP4-NInfer/README.md) |
+| Qwen3.8-27B | `nvfp4full`: NVFP4 attention, GDN and MLP, Q8 vocabulary weights | converted locally with recipe `qwen3_8_27b_nvfp4full`; not qualified for production | [conversion](docs/weight-conversion.md#qwen38-27b-nvfp4full), [measurements](docs/performance/rtx-pro-6000.md#qwen38-27b-nvfp4full-against-the-production-profile-2026-09-28) |
 
 Each v3 `.ninfer` artifact carries model configuration, encoded weights, logical bindings and
 frontend resources. Runtime execution uses those facts with the implemented model and Op

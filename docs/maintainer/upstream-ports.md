@@ -152,6 +152,43 @@ The DFlash2 residue of `ddeeec19` needed nothing: v3 rejects an unsettled StateI
 revalidation instead of the fork's early admission gate, and the fork-only all-constrained
 width-one DFlash path is not carried.
 
+## Adapted from other forks
+
+### cometkim/ninfer `nvfp4full` weight profile
+
+Status: **integrated as a conversion recipe; not qualified for production; not deployed**
+(September 28, 2026).
+
+| Item | Value |
+|---|---|
+| Source | [cometkim/ninfer](https://github.com/cometkim/ninfer) (Apache-2.0): branch `feat/qwen3.8-nvfp4full` at `ac8e0b75` (recipe, `nvfp4_maxabs` encoder and tests over upstream `1d8587bc`), and the v2 line at `55152a4f` (`calibrate_nvfp4full.py`, `verify_nvfp4full.py`, fork artifact document section 14) |
+| Fork-line commits | `3db1caee` recipe, encoder, calibration and verification; `07085988` the BF16-reference distribution readout used to qualify it; `0f25f279` the Linux build fix it needed |
+| Artifact | `E:\models\v3\Qwen3.8-27B\qwen3_8_27b_nvfp4full_dflash2.ninfer` (local, `broad-v1` calibration) |
+
+What changed in the adaptation:
+
+- The recipe is an official recipe, `qwen3_8_27b_nvfp4full`, beside `qwen3_8_27b_nvfp4`; the fork's
+  shared profile helper and explicit parent grouping are gone because `nvfp4_maxabs` is a built-in
+  method that the default packing groups accept.
+- The DFlash2 companion is Q8 (the upstream schema), not the fork's NVFP4-encoded module, so no
+  fork runtime is needed. Text, MTP and Vision need no runtime change.
+- Calibration loads the whole BF16 model instead of streaming layers. The fork's ten-document corpus
+  is kept as `cometkim-v1`; the recipe's committed calibration is `broad-v1`, which adds pinned public
+  text and rendered chats. With the same corpus, 64 of the 135 divisors are bit-identical to the
+  published fork artifact's and the rest within -2% to +21% (different BF16 forward paths).
+- Verification reads the v3 artifact and compares object payloads with the production artifact:
+  the 112 imported MLP parents and their Use divisors are production's words.
+
+Qualification (Colab G4 and x870e, [measurements](../performance/rtx-pro-6000.md#qwen38-27b-nvfp4full-against-the-production-profile-2026-09-28)):
+the profile is 2.95 GiB smaller, prefills 22-26% faster and decodes 9-13% faster, with equal MTP
+acceptance, but it fails the quality gate set before the full scoring (mean KL to BF16 at most 1.25x
+production's, top-1 agreement at most 1 point lower): KL 1.56x, top-1 2.8 points lower. GDN
+projections cause most of the shift; weight-only NVFP4 (A16 activations) halves the KL increase but
+still fails. Of the
+narrower allocations tried, only NVFP4 on MLP 56-63 alone passes (KL 1.09x, top-1 0.81 points lower,
+0.73 GiB smaller); NVFP4 on GDN layers 8-55 misses the top-1 bound by 0.07 points. Those variants
+were produced with recipe overrides and are not committed recipes.
+
 ## Deliberate divergences from upstream
 
 | Behaviour | Upstream | Fork | Reason and evidence |

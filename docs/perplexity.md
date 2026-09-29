@@ -73,3 +73,48 @@ aggregate.
 
 The schema-v2 report identifies the artifact's architecture, public name, actual weight formats
 and prefill signature alongside the workload and numerical results.
+
+## Distribution agreement with a reference model
+
+`--reference FILE` compares an artifact's next-token distributions with a reference model's on
+exactly the reference file's token ids, so tokenization and chat rendering cannot differ between
+the two sides. For every scored position the reference stores its 32 most likely tokens with
+their log probabilities and the log probability of the actual next token; the evaluator reads the
+artifact's log probabilities of those same tokens, its own most likely token, and the actual
+token's log probability through `Engine::score_tokens` with a `CausalScoreReadout`.
+
+```bash
+./build/apps/ninfer-perplexity models/qwen3_8_27b_nvfp4.ninfer \
+  --reference kld-400k-v1.reference --context 4096 --kv-dtype fp8
+```
+
+The report gives, per sequence, domain and overall:
+
+- `kl_mean` and the `kl_p50`/`kl_p90`/`kl_p99`/`kl_p999`/`kl_max` quantiles of
+  KL(reference || artifact), computed over the reference top-32 tokens plus one bucket holding
+  each side's remaining mass. Merging the tail makes it a lower bound on the full-vocabulary
+  divergence; it is exact when the 32 tokens carry all of the reference's mass.
+- `top1_agreement`: the fraction of positions where the artifact's most likely token is the
+  reference's.
+- `evaluated_mean_nll`, `reference_mean_nll` and their difference. NLL deltas are not a quality
+  score on their own: a noisier model can predict text better at positions where the reference is
+  confidently wrong.
+
+`--dump-positions FILE` also writes, per scored position in reference order, the float32
+divergence, the float32 target log probability and the int32 argmax token of the artifact.
+
+`kld-400k-v1` is built by [`eval/kld/build_reference.py`](../eval/kld/build_reference.py) from
+pinned public sources: the first 40,960 tokens of the `00` streams of `ninfer-ppl-1m-v1` (English
+reference and long-form text, Chinese, NInfer C++/CUDA), 32,768 tokens of CPython 3.13 standard
+library modules, 24,576 tokens of MATH-500 problems and solutions, 8,192 tokens of Belebele
+passages in each of Portuguese, Spanish, French, German, Russian, Japanese, Arabic and Hindi, 20
+s1K-1.1 reasoning conversations (thinking on) and 24 UltraChat conversations (thinking off),
+rendered with the Qwen3.8 chat template. Every sequence is an independent window of at most 4,096
+tokens; 114 sequences hold 400,006 tokens. The reference is the official BF16 Qwen3.8-27B
+(revision `1d4bf0f2`) in Hugging Face Transformers, with log-softmax taken over FP32 logits of the
+BF16 final hidden state. The builder records source revisions and SHA-256 digests in the corpus
+manifest; the reference file itself is a local, regenerable artifact (about 106 MB).
+
+On the UltraChat sequences the BF16 model assigns more than half its mass to `<|im_end|>` at about a
+third of the positions inside answers; NInfer artifacts reproduce this, so their NLL there is often
+lower than the reference's.
