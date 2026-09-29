@@ -193,14 +193,17 @@ bool ChatMessage::has_media() const noexcept {
                        [](const ChatPart& part) { return part.kind != ChatPartKind::Text; });
 }
 
-CompiledChatTemplate::CompiledChatTemplate(text::JinjaTemplate compiled, Json special_tokens)
-    : compiled_(std::move(compiled)), special_tokens_(std::move(special_tokens)) {
+CompiledChatTemplate::CompiledChatTemplate(std::string source, text::JinjaTemplate compiled,
+                                           Json special_tokens)
+    : source_(std::move(source)), compiled_(std::move(compiled)),
+      special_tokens_(std::move(special_tokens)) {
     capabilities_.reasoning_effort = observe_reasoning_efforts(compiled_, special_tokens_);
 }
 
 CompiledChatTemplate CompiledChatTemplate::resolve(std::string_view source, std::string source_name,
                                                    Json special_tokens) {
-    return CompiledChatTemplate(text::JinjaTemplate(std::string(source), std::move(source_name)),
+    return CompiledChatTemplate(std::string(source),
+                                text::JinjaTemplate(std::string(source), std::move(source_name)),
                                 std::move(special_tokens));
 }
 

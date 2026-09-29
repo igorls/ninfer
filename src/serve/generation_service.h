@@ -161,6 +161,10 @@ public:
         return engine_->sampling_defaults();
     }
 
+    [[nodiscard]] const std::string& chat_template_source() const {
+        return engine_->chat_template_source();
+    }
+
     [[nodiscard]] PreparedRequest prepare(const GenerationRequest& req,
                                           GenerationConsumerMode consumer_mode,
                                           ninfer::GenerationObservationOptions observation = {},

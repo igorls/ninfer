@@ -6,6 +6,7 @@
 #include <functional>
 #include <optional>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -95,6 +96,9 @@ public:
     // Resolved once from the loaded chat template, so callers can validate prompt options
     // before preparation.
     [[nodiscard]] const PromptCapabilities& prompt_capabilities() const;
+    // Jinja source of the chat template prompts are rendered with: the artifact's embedded
+    // template, or the --chat-template override.
+    [[nodiscard]] const std::string& chat_template_source() const;
 
     // Establishes queue membership synchronously with a fixed output consumer mode. Destroying an
     // unconsumed handle cancels its request; wait() owns result consumption and may run

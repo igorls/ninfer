@@ -333,6 +333,11 @@ const PromptCapabilities& Engine::prompt_capabilities() const {
     return impl_->active->frontend.prompt_capabilities();
 }
 
+const std::string& Engine::chat_template_source() const {
+    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+    return impl_->active->frontend.chat_template_source();
+}
+
 GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
                                 OutputConsumerMode consumer_mode,
                                 GenerationObservationOptions observation,

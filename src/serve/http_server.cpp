@@ -3,6 +3,7 @@
 #include "serve/anthropic_messages.h"
 #include "serve/device_snapshot_cache.h"
 #include "serve/http_transport.h"
+#include "serve/llamacpp_props.h"
 #include "serve/openai_common.h"
 #include "serve/request_log.h"
 #include "serve/typesafe_systemone.h"
@@ -13,6 +14,7 @@
 
 #include <chrono>
 #include <exception>
+#include <filesystem>
 #include <functional>
 #include <mutex>
 #include <stdexcept>
@@ -447,6 +449,9 @@ void HttpServer::register_routes() {
     server_.Get(R"(/v1/models/(.+))", [this](const httplib::Request& req, httplib::Response& res) {
         handle_model(req, res);
     });
+    server_.Get("/props", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_props(req, res);
+    });
     // A rejection must follow reading the body: closing a socket with unread request bytes resets
     // the connection, and the reset can overtake the 401. Exact POST routes therefore authenticate
     // in their handler; the pre-routing check covers every other request.
@@ -873,6 +878,20 @@ void HttpServer::handle_model(const httplib::Request& req, httplib::Response& re
     }
     res.set_content(make_model_object(public_model_id_, unix_time_now(), options_.max_context),
                     "application/json");
+}
+
+void HttpServer::handle_props(const httplib::Request&, httplib::Response& res) const {
+    // One model is served, so llama.cpp's per-model `?model=` query selects the same answer.
+    const ninfer::EngineOptions& engine = service_->engine_options();
+    res.set_content(
+        make_llamacpp_props(
+            {.model_alias   = public_model_id_,
+             .model_path    = std::filesystem::path(options_.artifact_path).filename().string(),
+             .n_ctx         = engine.max_context,
+             .total_slots   = engine.max_concurrency,
+             .vision        = engine.enable_vision,
+             .chat_template = service_->chat_template_source()}),
+        "application/json");
 }
 
 bool HttpServer::bind() { return server_.bind_to_port(options_.host, options_.port); }

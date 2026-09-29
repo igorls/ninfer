@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -873,6 +874,17 @@ TemplateOptions parse_template_options(const Json& body) {
     return output;
 }
 
+void parse_thinking_budget(const Json& body, GenerationRequest& output) {
+    // llama.cpp's reasoning budget: -1 leaves reasoning unbounded, a positive count ends it there.
+    const std::optional<int> budget = optional_int(body, "thinking_budget_tokens");
+    if (!budget || *budget == -1) { return; }
+    if (*budget <= 0) {
+        bad_request("thinking_budget_tokens must be a positive integer, or -1 for no budget",
+                    "thinking_budget_tokens");
+    }
+    output.thinking_budget = static_cast<std::uint32_t>(*budget);
+}
+
 void parse_reasoning_effort(const Json& body, GenerationRequest& output) {
     if (!body.contains("reasoning_effort") || body.at("reasoning_effort").is_null()) { return; }
     if (!body.at("reasoning_effort").is_string()) {
@@ -913,7 +925,15 @@ void parse_output_limit(const Json& body, const RequestLimits& limits, OpenAICha
         param = "max_tokens";
     }
     if (limit) {
-        if (*limit < 0) { bad_request(std::string(param) + " must be nonnegative", param); }
+        // llama.cpp spells "no output limit" as -1; the Engine then stops at context capacity.
+        if (*limit == -1) {
+            output.generation.max_tokens  = std::numeric_limits<int>::max();
+            output.output_tokens_explicit = true;
+            return;
+        }
+        if (*limit < 0) {
+            bad_request(std::string(param) + " must be nonnegative, or -1 for no limit", param);
+        }
         output.generation.max_tokens  = *limit;
         output.output_tokens_explicit = true;
     } else {
@@ -934,11 +954,14 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
         output.generation.structured_output =
             parse_structured_output_format(body["response_format"], "response_format", true);
     }
-    if (!body.contains("model") || !body.at("model").is_string() ||
-        body.at("model").get<std::string>().empty()) {
-        bad_request("missing required field: model", "model");
+    // An omitted model selects the served one, as llama.cpp does for clients that address a
+    // single-model server without naming it (its web UI among them).
+    if (body.contains("model") && !body.at("model").is_null()) {
+        if (!body.at("model").is_string() || body.at("model").get<std::string>().empty()) {
+            bad_request("model must be a nonempty string", "model");
+        }
+        output.model = body.at("model").get<std::string>();
     }
-    output.model = body.at("model").get<std::string>();
 
     const OpenAIPromptCachePolicy cache_policy = parse_openai_prompt_cache_policy(body);
 
@@ -975,6 +998,7 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
     }
     parse_output_limit(body, limits, output);
     parse_reasoning_effort(body, output.generation);
+    parse_thinking_budget(body, output.generation);
     const TemplateOptions template_options      = parse_template_options(body);
     output.generation.enable_thinking           = template_options.enable_thinking;
     output.generation.preserve_thinking         = template_options.preserve_thinking;

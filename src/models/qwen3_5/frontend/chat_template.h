@@ -141,9 +141,14 @@ public:
     // Observed from the template's own rendering when it is resolved.
     [[nodiscard]] const PromptCapabilities& capabilities() const noexcept { return capabilities_; }
 
-private:
-    CompiledChatTemplate(text::JinjaTemplate compiled, nlohmann::ordered_json special_tokens);
+    // The Jinja source this template was compiled from.
+    [[nodiscard]] const std::string& source() const noexcept { return source_; }
 
+private:
+    CompiledChatTemplate(std::string source, text::JinjaTemplate compiled,
+                         nlohmann::ordered_json special_tokens);
+
+    std::string source_;
     text::JinjaTemplate compiled_;
     nlohmann::ordered_json special_tokens_;
     PromptCapabilities capabilities_;

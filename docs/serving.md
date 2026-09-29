@@ -59,6 +59,7 @@ selected for this process.
 | `GET /health` | Engine readiness |
 | `GET /v1/models` | configured OpenAI model alias and effective `max_model_len` |
 | `GET /v1/models/{id}` | lookup of the configured alias and effective `max_model_len` |
+| `GET /props` | llama.cpp-compatible server properties for llama.cpp's web UI |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
 | `POST /v1/score` | closed-set scoring of isolated questions against one shared prefix |
 | `POST /v1/responses` | OpenAI Responses Core generation, state, typed Items, and SSE |
@@ -117,13 +118,16 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 
 The endpoint supports:
 
+- `model` naming the configured public model ID; an omitted or null `model` selects it, as
+  llama.cpp does, and any other name is `model_not_found`;
 - `system`, `developer`, `user`, `assistant`, and `tool` history, plus legacy `function` history;
 - string content and ordered text/refusal parts; adjacent parts are preserved without inserted
   separators, and empty wire content remains an empty turn;
 - User `image_url` parts, tool-result `image_url` parts used by compatible clients, and the User
   `video_url` extension using HTTP(S) or data URIs; image detail is omitted or `auto`;
 - nonnegative `max_completion_tokens` and the legacy `max_tokens` spelling; zero performs prompt
-  processing without generation;
+  processing without generation, and llama.cpp's `-1` removes the output limit so the request
+  stops at its context capacity;
 - `temperature`, `top_p`, presence/frequency penalties, and signed integer `seed`;
 - the compatible `top_k` (`0..20`) and `min_p` (`0..1`) sampler extensions;
 - up to four non-empty stop strings, applied to both reasoning and answer output;
@@ -136,7 +140,8 @@ The endpoint supports:
 - non-strict function tools with `tool_choice` `auto`, `none`, `required`, a named function, or
   `allowed_tools` in `auto` or `required` mode, parallel calls enabled, assistant tool-call
   history, tool-result messages, and legacy function-call history;
-- the top-level `reasoning_effort` field;
+- the top-level `reasoning_effort` field, and llama.cpp's `thinking_budget_tokens` (a positive
+  reasoning budget, or `-1` for none) for requests that think;
 - `enable_thinking` and `preserve_thinking`, either at top level or in
   `chat_template_kwargs`;
 - Assistant `reasoning_content` and `reasoning` history aliases.
@@ -446,6 +451,45 @@ For an exact full-prefix hit, the initial event already has `cache == processed 
 synthetic prompt work is reported. `time_ms` is elapsed wall time since committed admission;
 clients may calculate actual suffix progress as `(processed-cache)/(total-cache)` when the
 denominator is nonzero.
+
+### llama.cpp web UI
+
+llama.cpp's web UI (`llama-ui`, shipped with llama.cpp 0.5.0) runs against NInfer as a single-model
+llama.cpp server. At startup it reads `GET /props`; NInfer answers with the values its loaded Engine
+determines:
+
+```json
+{
+  "default_generation_settings": {"n_ctx": 131072},
+  "total_slots": 8,
+  "model_alias": "qwen3.8-27b",
+  "model_path": "qwen3_8_27b_nvfp4.ninfer",
+  "role": "model",
+  "modalities": {"vision": true, "audio": false, "video": false},
+  "chat_template": "{%- set image_count = namespace(value=0) %}..."
+}
+```
+
+`n_ctx` is `--max-context`, `total_slots` the effective `--max-concurrency`, `model_alias` the
+public model ID, `model_path` the artifact file name, and `vision` follows `--vision`. The chat
+template is the Jinja source prompts are rendered with (the artifact's own, or `--chat-template`);
+the UI inspects it to offer its thinking toggle. llama.cpp's sampling `params`, special tokens and
+`build_info` are omitted, so the UI's settings show no server defaults: NInfer's sampling defaults
+depend on whether the request thinks. A `?model=` query returns the same properties.
+
+The UI calls relative paths, so it must be served from the same origin as the API, for example by a
+reverse proxy that serves its files and forwards `/v1/*`, `/props`, `/health`, `/slots`, `/tools`,
+and `/models*` to NInfer without buffering streams. `--cors` does not affect it. Its chat requests
+omit `model`, send `timings_per_token`, and put its thinking toggle in
+`chat_template_kwargs.enable_thinking`; answers stream `content` and `reasoning_content` deltas
+with the timings above. Its reasoning-effort menu sends `thinking_budget_tokens`.
+
+llama.cpp-specific features without an NInfer route stay unavailable, and the UI degrades as it does
+against a llama.cpp server started without them: `/slots` (the UI then assumes idle slots), server
+`/tools` and MCP proxying, `/v1/chat/completions/control` behind the "Skip reasoning" button, the
+resumable-stream routes (`/v1/stream`, `/v1/streams/lookup`) that reattach a stream after a dropped
+connection or reload, and router-mode `/models` loading. `reasoning_format` is ignored: reasoning
+is always returned separately. Audio and llama.cpp's `input_video` content part are not accepted.
 
 ### Multimodal request
 

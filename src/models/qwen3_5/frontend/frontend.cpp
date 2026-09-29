@@ -708,6 +708,10 @@ const PromptCapabilities& Frontend::prompt_capabilities() const noexcept {
     return impl_->chat_template.capabilities();
 }
 
+const std::string& Frontend::chat_template_source() const noexcept {
+    return impl_->chat_template.source();
+}
+
 Frontend make_frontend(const FrontendResources& resources, FrontendOptions options) {
     return Frontend(std::make_shared<const Frontend::Impl>(resources, options));
 }

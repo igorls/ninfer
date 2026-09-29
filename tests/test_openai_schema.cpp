@@ -1,4 +1,5 @@
 #include "serve/generation_service.h"
+#include "serve/llamacpp_props.h"
 #include "serve/openai_chat.h"
 #include "serve/openai_common.h"
 #include "serve/translate.h"
@@ -895,6 +896,64 @@ int test_common_objects() {
     return failures;
 }
 
+// llama.cpp's web UI addresses a single-model server without naming the model, spells an unlimited
+// output as max_tokens=-1, maps its reasoning-effort menu to thinking_budget_tokens, and reads
+// GET /props before it lets the user chat.
+int test_llamacpp_web_ui_surface() {
+    int failures = 0;
+    Json unnamed = base_request();
+    unnamed.erase("model");
+    failures += check(parse(unnamed).model.empty(), "an omitted model is left to the server");
+    unnamed["model"] = nullptr;
+    failures += check(parse(unnamed).model.empty(), "a null model is left to the server");
+    unnamed["model"] = "";
+    failures += check(api_error([&] { (void)parse(unnamed); }).param == "model",
+                      "an empty model name is rejected");
+
+    Json unlimited                     = base_request();
+    unlimited["max_tokens"]            = -1;
+    const OpenAIChatRequest open_ended = parse(unlimited);
+    failures += check(open_ended.output_tokens_explicit &&
+                          open_ended.generation.max_tokens == std::numeric_limits<int>::max(),
+                      "max_tokens=-1 leaves output bounded by context capacity only");
+    unlimited["max_tokens"] = -2;
+    failures += check(api_error([&] { (void)parse(unlimited); }).param == "max_tokens",
+                      "other negative output limits are rejected");
+
+    Json budgeted                      = base_request();
+    budgeted["thinking_budget_tokens"] = 512;
+    failures += check(parse(budgeted).generation.thinking_budget == 512U,
+                      "thinking_budget_tokens reaches the request's thinking budget");
+    budgeted["thinking_budget_tokens"] = -1;
+    failures += check(!parse(budgeted).generation.thinking_budget,
+                      "thinking_budget_tokens=-1 leaves reasoning unbounded");
+    budgeted["thinking_budget_tokens"] = 0;
+    failures += check(api_error([&] { (void)parse(budgeted); }).param == "thinking_budget_tokens",
+                      "a zero thinking budget is rejected");
+
+    const Json props = Json::parse(make_llamacpp_props({.model_alias   = "qwen3.8-27b",
+                                                        .model_path    = "qwen3_8_27b.ninfer",
+                                                        .n_ctx         = 131072,
+                                                        .total_slots   = 8,
+                                                        .vision        = true,
+                                                        .chat_template = "{{ messages }}"}));
+    failures += check(props["model_alias"] == "qwen3.8-27b" &&
+                          props["model_path"] == "qwen3_8_27b.ninfer" && props["role"] == "model",
+                      "props name the served model the way llama.cpp's MODEL mode does");
+    failures +=
+        check(props["default_generation_settings"]["n_ctx"] == 131072 && props["total_slots"] == 8,
+              "props report the context ceiling and parallel slots");
+    failures +=
+        check(props["modalities"]["vision"] == true && props["modalities"]["audio"] == false &&
+                  props["modalities"]["video"] == false,
+              "props report only the input modalities the server accepts from the UI");
+    failures += check(props["chat_template"] == "{{ messages }}",
+                      "props carry the chat template the UI inspects for thinking support");
+    failures += check(!props["default_generation_settings"].contains("params"),
+                      "props omit sampling defaults that depend on the thinking mode");
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -942,6 +1001,7 @@ int main() {
     failures += test_stream_response();
     failures += test_stream_observations();
     failures += test_common_objects();
+    failures += test_llamacpp_web_ui_surface();
     if (failures == 0) { std::cout << "OpenAI Chat protocol tests passed\n"; }
     return failures == 0 ? 0 : 1;
 }

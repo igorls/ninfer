@@ -84,6 +84,7 @@ public:
     [[nodiscard]] const StopPolicy& default_stop_policy() const noexcept;
     [[nodiscard]] const ModelSamplingDefaults& sampling_defaults() const noexcept;
     [[nodiscard]] const PromptCapabilities& prompt_capabilities() const noexcept;
+    [[nodiscard]] const std::string& chat_template_source() const noexcept;
     // Null for unconstrained output. Throws invalid_argument for a schema the compiler cannot
     // enforce. Compilers over the vocabulary are built once and shared by later requests.
     [[nodiscard]] std::shared_ptr<const runtime::CompiledOutputConstraint>
