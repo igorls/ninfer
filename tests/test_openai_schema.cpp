@@ -41,7 +41,7 @@ bool throws_logic(Function&& function) {
     return false;
 }
 
-RequestLimits limits() { return RequestLimits{.default_max_tokens = 512}; }
+RequestLimits limits() { return RequestLimits{.default_max_tokens = 512, .max_context = 4096}; }
 
 Json base_request() {
     return Json{{"model", "qwen"},
@@ -914,8 +914,8 @@ int test_llamacpp_web_ui_surface() {
     unlimited["max_tokens"]            = -1;
     const OpenAIChatRequest open_ended = parse(unlimited);
     failures += check(open_ended.output_tokens_explicit &&
-                          open_ended.generation.max_tokens == std::numeric_limits<int>::max(),
-                      "max_tokens=-1 leaves output bounded by context capacity only");
+                          open_ended.generation.max_tokens == limits().max_context,
+                      "max_tokens=-1 leaves output bounded by the context ceiling only");
     unlimited["max_tokens"] = -2;
     failures += check(api_error([&] { (void)parse(unlimited); }).param == "max_tokens",
                       "other negative output limits are rejected");

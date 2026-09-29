@@ -45,6 +45,8 @@ private:
 // Server-side context needed while parsing/validating a request.
 struct RequestLimits {
     int default_max_tokens = 8192;
+    // Output budget of a request that asks for no output limit: the per-request context ceiling.
+    int max_context = 8192;
 };
 
 enum class ContentKind {

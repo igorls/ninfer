@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -925,9 +924,10 @@ void parse_output_limit(const Json& body, const RequestLimits& limits, OpenAICha
         param = "max_tokens";
     }
     if (limit) {
-        // llama.cpp spells "no output limit" as -1; the Engine then stops at context capacity.
+        // llama.cpp spells "no output limit" as -1: the budget is the whole context, which the
+        // Engine further clamps to what remains after the prompt.
         if (*limit == -1) {
-            output.generation.max_tokens  = std::numeric_limits<int>::max();
+            output.generation.max_tokens  = limits.max_context;
             output.output_tokens_explicit = true;
             return;
         }

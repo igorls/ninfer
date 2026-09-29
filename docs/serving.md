@@ -482,11 +482,14 @@ reverse proxy that serves its files and forwards `/v1/*`, `/props`, `/health`, `
 and `/models*` to NInfer without buffering streams. `--cors` does not affect it. Its chat requests
 omit `model`, send `timings_per_token`, and put its thinking toggle in
 `chat_template_kwargs.enable_thinking`; answers stream `content` and `reasoning_content` deltas
-with the timings above. Its reasoning-effort menu sends `thinking_budget_tokens`.
+with the timings above. Its reasoning-effort menu sends `thinking_budget_tokens`. Every request
+also carries the UI's browser tools (`get_datetime`, `get_info`); tool calls stream as ordinary
+`tool_calls` deltas, the UI asks the user before running one in the browser, and it returns the
+result as a `tool` message.
 
 llama.cpp-specific features without an NInfer route stay unavailable, and the UI degrades as it does
 against a llama.cpp server started without them: `/slots` (the UI then assumes idle slots), server
-`/tools` and MCP proxying, `/v1/chat/completions/control` behind the "Skip reasoning" button, the
+`/tools` and MCP proxying (the UI logs the 404 and keeps its browser tools), `/v1/chat/completions/control` behind the "Skip reasoning" button, the
 resumable-stream routes (`/v1/stream`, `/v1/streams/lookup`) that reattach a stream after a dropped
 connection or reload, and router-mode `/models` loading. `reasoning_format` is ignored: reasoning
 is always returned separately. Audio and llama.cpp's `input_video` content part are not accepted.
