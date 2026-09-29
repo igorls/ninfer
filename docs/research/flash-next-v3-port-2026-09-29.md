@@ -96,7 +96,10 @@ Design of the seam (the "closed Engine registry" that `qwen3_5/program/program.h
 but that does not exist yet):
 
 - `models/registry.h`: add `Architecture::Qwen4Exp`, resolved from `Qwen4ExpForCausalLM` /
-  `qwen4_exp_text` in the artifact's `text` component config.
+  `qwen4_exp_text` in the artifact's `text` component config. This mirrors `qwen3_5`: the HF
+  checkpoint's top-level class is `...ForConditionalGeneration`, while the v3 `text` component
+  records the text-only `...ForCausalLM` class. The upgrader (§4.2) writes exactly this pair, so
+  the registry and the artifact agree by construction.
 - `runtime/engine/model_instance.*`: turn `ModelInstance` into one struct per package
   (`qwen3_5::Instance`, `qwen4_exp::Instance`), each with its own `ModelContract`.
   `construct_model` reads the architecture from the directory, then dispatches to that package's
@@ -215,7 +218,8 @@ template appended. Flash-Next adds:
 
 - **Directory synthesis.**
   - `components.text.config` is the real `qwen4_exp_text` config from the pinned
-    `config.json`, not a stub.
+    `config.json`, not a stub. Its `architectures` is `["Qwen4ExpForCausalLM"]` and its
+    `model_type` is `qwen4_exp_text`, the pair §3.1 resolves.
   - `components.vision` has the 27/1152/4304/16 config (merger output 2560).
   - `components.mtp` is `{architectures: ["Qwen4ExpMTP"], target: "text"}`.
   - Resources are the six frontend files.
@@ -277,7 +281,9 @@ the v3 writer as an official recipe `qwen3_8_flash_next_mixed`. Inputs:
 
 Sources plus output (~210 GiB) do not fit on a G4, so the converter must stream: fetch one source
 file, emit its objects, then delete it. The peak is then the output plus ~2 GiB. At ~300 MB/s this
-is ~6 min of download plus conversion.
+is ~6 min of download plus conversion. That rate is extrapolated, not measured on the primitive-ai
+repositories: it was measured on `igorls/...-NInfer`, which sits behind the same HF xet CDN. Only
+the primitive-ai file listing (sizes) was fetched on the G4.
 
 Verification: every emitted object must be byte-identical to the corresponding object of the
 upgraded artifact, except the MTP banks and template when the recipe chooses them. This makes the
