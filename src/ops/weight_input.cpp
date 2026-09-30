@@ -212,6 +212,35 @@ SingleProjectionWeight prepare_linear_swiglu_weight(const WeightInput& gate,
     return single(inputs);
 }
 
+Nvfp4ExpertBankWeight prepare_nvfp4_expert_bank_weight(const WeightInput& input) {
+    const auto& view = input.weight;
+    require(view.shape.size() == 3 && is_complete_weight(view),
+            "NVFP4 expert bank requires one complete [E,N,K] parent");
+    const auto& parent = *view.parts.front().parent;
+    const auto& g      = parent.geometry;
+    require(g.format == QType::NVFP4 && g.layout == QuantLayout::ExpertBlockScaleK16M128x4 &&
+                parent.data != nullptr,
+            "NVFP4 expert bank requires a resident expert block-scale parent");
+    require(!input.activation_input_divisor,
+            "NVFP4 expert bank scales activations dynamically and takes no stored divisor");
+    (void)common_policy({&input, 1});
+    constexpr std::uint64_t kMaximum = std::numeric_limits<std::int32_t>::max();
+    require(g.shape[0] <= kMaximum && g.shape[1] <= kMaximum && g.shape[2] <= kMaximum,
+            "NVFP4 expert bank dimensions exceed the native i32 domain");
+    const auto experts = g.shape[0];
+    Nvfp4ExpertBankWeight out;
+    out.codes                  = parent.data;
+    out.scales                 = parent.data + g.scale_offset;
+    out.weight_scale_divisors  = reinterpret_cast<const float*>(parent.data + g.divisor_offset);
+    out.experts                = static_cast<std::int32_t>(experts);
+    out.n                      = static_cast<std::int32_t>(g.shape[1]);
+    out.k                      = static_cast<std::int32_t>(g.shape[2]);
+    out.code_bytes_per_expert  = g.code_bytes / experts;
+    out.scale_bytes_per_expert = g.scale_bytes / experts;
+    out.policy                 = input.policy;
+    return out;
+}
+
 SparseMoeWeights
 prepare_sparse_moe_weights(const WeightInput& router, const WeightInput& shared_score,
                            std::span<const WeightInput> expert_gate_up,
