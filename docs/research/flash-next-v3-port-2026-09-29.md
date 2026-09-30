@@ -643,6 +643,9 @@ the session scratch (`E:\v3port-scratch\m3\m33\{moe,attn,misc}`).
 - **Gap: no fused GDN input projection at `[16384,2560]` FP32-scale.** Compose `linear` with the
   `causal_conv1d_silu` split/snapshot forms, or extend `gdn_input_proj` (the FP8 scale word is
   now a template parameter, so this is cheap).
+- **Counter-free MoE router (decided by Igor, 2026-09-30).** M3.4 replaces the fused decode
+  router's workspace arrival counter with a counter-free reduction: no module-global device
+  state and no per-call memset node in the graph. This removes the MoE T=1/T=2 gap to v2 above.
 - **Workspace at chunk 8192, 131,072 context:** MoE 590 MiB (AllowA4 banks, T 1..8192; 948 MiB
   if A16Only); indexer select ~72 MB; batched attention ≤ 2.6 MB.
 - **Parity:** the MoE A4 prefill route (T ≥ 256) carries ~7.5% relative error on the routed term
