@@ -170,8 +170,8 @@ void check_native_inputs(const flash::Model& model) {
         const auto& moe = weights.moe;
         linear(moe.router);
         linear(moe.shared_expert_gate);
-        (void)ops::prepare_linear_swiglu_weight(model.input(moe.shared_gate),
-                                                model.input(moe.shared_up));
+        linear(moe.shared_gate);
+        linear(moe.shared_up);
         linear(moe.shared_down);
         expert_bank(moe.experts_gate_up);
         expert_bank(moe.experts_down);
