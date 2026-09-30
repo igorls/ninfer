@@ -427,7 +427,7 @@ spare-port instances.
 | # | Milestone | Size (new/adapted lines, excluding tests) | G4 verification |
 |---|---|---:|---|
 | M3.1 | Container registrations (§4.1) + Flash-Next upgrader + MTP NVFP4 bake + docs | ~1,800 (+ ~600 tests) | download v2 → upgrade in place; §4.5 checks 1-3; MTP bytes equal the v2 loader dump. **Done** on `m3/1-container` (§4.5 evidence) |
-| M3.2 | `qwen4_exp` skeleton: config, binder/load with `Residency::Mapped`, Engine variant seam, frontend geometry seam, `Architecture::Qwen4Exp` | ~3,000 | artifact loads through the public Engine; device-weight checksums equal v2's; qwen3_5 CTest unchanged |
+| M3.2 | `qwen4_exp` skeleton: config, binder/load with `Residency::Mapped`, Engine dispatch seam, frontend geometry seam, `Architecture::Qwen4Exp` | ~3,000 (as built ~1,500) | artifact loads through the public Engine; device-weight checksums equal v2's; qwen3_5 CTest unchanged. **Done** on `m3/2-skeleton` (§6.1) |
 | M3.3 | Op ports with FP64 oracles: selected-block attention, QSA indexer, NVFP4 E512/K10 MoE, hyper-connection, PLE n-gram, FP8-F32 linear + Flash-Next shapes, rmsnorm_rope 24/2; `block_reduce_sum` audit | ~8,000 (+ ~6,000 tests) | `ctest -R ops` on G4 |
 | M3.4 | Text execution + Program on the v3 contract: prefill/decode, KV + indexer + GDN + PLE state, checkpoints/continuations/pressure, CUDA-graph decode, logprobs, structured output | ~10,000 (+ ~8,000 tests) | greedy + teacher-forced parity (§5.3); continuation/prefix tests; pressure scenarios |
 | M3.5 | MTP + Vision | ~1,500 (+ ~1,500 tests) | §5.4, §5.5 |
@@ -435,17 +435,81 @@ spare-port instances.
 
 M3.3 and the load half of M3.2 can proceed in parallel once M3.1 lands.
 
-**Inputs M3.1 fixes for M3.2+:**
+### 6.1 M3.2 as built (`m3/2-skeleton`, 2026-09-30)
+
+**Design decisions beyond §3.**
+- **Engine seam = dispatch at construction, no variant yet.** `construct_model` resolves
+  `models::resolve_architecture(reader.directory())` after `ArtifactInspect` and calls
+  `construct_qwen3_5` (the old body) or `reject_qwen4_exp`. The latter runs the real load
+  (`plan_load` with every Binding and Use checked, the VRAM headroom check, materialization with
+  the PLE mapped and warmed, `qwen3_5::make_frontend` with `Architecture::Qwen4Exp`) and then
+  throws inside `TargetFinalize` with the load facts in the message. `engine.cpp` is untouched: a
+  `qwen4_exp::Instance` needs the ~32-type `ModelContract` (M3.4), and a core-less alternative
+  would be a placeholder that lets `ninfer-serve` listen with a model that cannot answer.
+  M3.4 replaces `reject_qwen4_exp` with instance creation and adds the `EngineCore` variant.
+- **`Residency::Mapped`** (`src/artifact/{file_io,reader,binder,materializer,views}`): one
+  read-only mapping per object (`FileMapping`, offset aligned down to the page size or the 64 KiB
+  Windows allocation granularity; it outlives the Reader). A straddling object is owned as a copy
+  (`mapped_copy_count`; the v3 artifact has exactly one straddling shard). Warm-up is v2's
+  read-ahead-and-touch, inside `WeightsMaterialize` (its byte total now includes mapped bytes), so
+  there is no new public `StartupPhase`. `LoadSummary` is unchanged until Flash-Next reaches it.
+- **Package reuse.** `qwen4_exp` takes the Qwen3.5 weight-handle vocabulary (`WeightId`,
+  `BoundWeight`, `VisionWeights`), leaf config structs (`AttentionConfig`, `RopeConfig`,
+  `GdnConfig`, `MoeConfig`, `VisionConfig`) and `FrontendResources`; it owns its config parser,
+  `loading::Bindings` (Device, Mapped and INT64 values, with `require_complete`), `bind_vision`
+  (the Qwen3.5 one takes a `qwen3_5::TextConfig`) and a `Model` with a `PleTable`. The shard
+  height (2,500,012) comes from the stored shape; the tables are checked as consecutive head
+  ranges covered by the shards.
+- **Geometry seam** is `FrontendGeometry{embedding_rows, vision patch, selector_top_k}`;
+  `default_sampling` needed no change (Flash-Next's defaults equal the dense ones).
+- **Gap (c)** is an Op entry, `ops::prepare_nvfp4_expert_bank_weight`, returning
+  `Nvfp4ExpertBankWeight` (planes, E/N/K, per-expert plane bytes, policy). It rejects a stored
+  activation divisor. M3.3's MoE Op consumes it.
+
+**Conflict surface added to §3.1:** `src/artifact/{file_io,reader,binder,materializer,views}`,
+`include/ninfer/ops/weight_input.h`, `src/ops/weight_input.cpp`,
+`src/models/qwen3_5/load/resources.cpp`, `tests/CMakeLists.txt`,
+`tests/artifact/test_materialization.cpp`, `docs/maintainer/engine-architecture.md`. Not touched:
+`engine.cpp`, `model_instance.h`, `frontend.h`, `src/artifact/formats.cpp`.
+
+**G4 evidence** (sessions `m3-2a` and `m3-2b`, 2026-09-30 08:37-09:25 UTC, commit `ee7b3d32`).
+
+| Check | Result |
+|---|---|
+| v2 reference | `87812bc8` loader with Vision and MTP (scratch `ninfer_v2_dump`): 1,429 Device buffers, 77,667,520,224 bytes, CUDA used +72.34 GiB, cold load 161 s (PLE warm 56.7 s) |
+| v3 load, Vision and MTP | `ninfer_qwen4_exp_loading_real_test`: 1,668 bindings and all 959 Uses consumed, 1,429 Device parents, **72.33 GiB** (NVML +72.88 GiB), 128 mapped shards of 32,000,161,792 bytes (1 straddle copy); warm load: upload 5.2 s, PLE warm 1.8 s |
+| v3 load, Text only | 1,198 bindings, 1,067 parents, **70.01 GiB** (v2: 70.01 GiB) |
+| Device checksums | SHA256 of every Device buffer keyed by object: **1,429 of 1,429 equal** v2, including both MTP banks (`9e25663a...`, `fa78245b...`, the v2 loader's quantized NVFP4 buffers) |
+| PLE | 128 of 128 mapped shards SHA256-equal v2's mappings; tables: 3 multipliers, 16 consecutive heads covering 320,001,446 of 320,001,536 rows; the shards are plain (unregistered) host mappings |
+| Admission | every BF16 and FP8 projection Use prepared; all 98 banks admitted `AllowA4` with positive finite per-expert divisors; the Frontend renders the official template (56-token chat prompt) |
+| Public Engine | `ninfer_qwen4_exp_engine_real_test` and `ninfer V3 --prompt`: `TargetPlan`, `WeightsMaterialize` and `FrontendInitialize` complete, `TargetFinalize` fails with "Qwen4ExpForCausalLM artifact 'qwen3.8-flash-next' loaded (1668 bindings, 72.33 GiB of Device weights, 29.80 GiB of mapped PLE table), but this build has no qwen4_exp execution Program; it cannot generate or score yet" |
+| qwen3_5 unchanged | 27B NVFP4 (`neroued/Qwen3.8-27B-nvfp4-NInfer@f0b43ad4`): `loading_real --vision --speculative mtp` output identical on `93e76556` and the branch (1,004 parents, 21,122,608,640 bytes); CTest `artifact_*`, `qwen3_5_*`, `tool_call_parser` and `sampling_defaults` with the real artifact all pass except `qwen3_5_prefix_real_test`, which fails identically on the base ("Complete MTP checkpoint was not materialized from Host"), and `orcarouter_tokenizer` (not built) |
+| Windows | MSVC 14.51 and CUDA 13.3: `ninfer`, `ninfer_engine`, both qwen4_exp tests and `ninfer_artifact_materialization_test` build with no warnings in the touched files |
+
+**Corrections for M3.3+.**
+- G4 order is forced by disk: download v2, take every v2 reference dump, then `derive` in place,
+  then run v3. Any v2 fixture a later milestone needs (M3.4 tokens and logprobs) must be produced
+  in that window.
+- A scratch tool that loads through the v2 `StandaloneLoadedModel` must link `ninfer_engine` (the
+  Qwen3.6 frontend lives there at `87812bc8`).
+- `qwen3_5_prefix_real_test` already fails on `workstation` with the 27B NVFP4 artifact; it is not
+  an M3 signal.
+- M3.3 inputs: expert banks arrive as `ops::Nvfp4ExpertBankWeight`; PLE shards are `WeightView`s
+  over mapped `u4z8_g16_fp16` parents (`qwen4_exp::PleTable`); the shared-expert gate and up are
+  two parents, so a fused SwiGLU needs a two-parent form or two projections.
+
+**Inputs M3.1 fixed for M3.2+ (all closed in M3.2):**
 - Logical names, Uses and input positions are those of
   `docs/maintainer/qwen3.8-flash-next-artifact.md` §5; the binder follows them (changing them is a
   converter change, cheap because every session re-derives).
 - An NVFP4 expert bank's `WeightParent` has `weight_scale_divisor = 0`; its E divisors are the
   payload's divisor plane at `geometry.divisor_offset`. There is no native `Weight` form for it.
-- `Binder::values` accepts `int64`, but `HostValues` has only an INT32 accessor; the PLE tables
-  need an INT64 one. `Residency::Mapped` is still to add (decision 6).
+- `Binder::values` accepts `int64`; `HostValues::integers64()` reads the PLE tables, and
+  `Residency::Mapped` holds the shards (decision 6).
 - `ple_layer_ids = [2]` in the config counts from 1; the PLE weights are at 0-based layer 1.
 - Expert banks carry `AllowA4` with no activation-divisor auxiliary: an A4 path scales
-  activations dynamically, as v2 did. M3.4 is the critical path.
+  activations dynamically, as v2 did (`prepare_nvfp4_expert_bank_weight`). M3.4 is the critical
+  path.
 Each milestone is its own branch, then fast-forwarded into `workstation` after its G4 checks,
 following the one-worktree-per-issue rule.
 

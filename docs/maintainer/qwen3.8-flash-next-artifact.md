@@ -173,7 +173,7 @@ unbound. Residency follows the role:
 
 | Parameters | Residency |
 |---|---|
-| every projection, norm, embedding, expert bank and Vision weight | `Device` (the stored bytes, ~70 GiB with Vision and MTP) |
+| every projection, norm, embedding, expert bank and Vision weight | `Device`: the stored bytes, 70.01 GiB for Text, 72.33 GiB with Vision and MTP |
 | the 128 PLE shards | `Mapped`: page-cache views of the file set, warmed before readiness; a shard that straddles two part files is owned as a copy |
 | the three PLE index tables | `Values` (owning INT64), checked as consecutive head row ranges covered by the shards |
 
