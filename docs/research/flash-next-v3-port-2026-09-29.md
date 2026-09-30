@@ -476,15 +476,15 @@ M3.3 and the load half of M3.2 can proceed in parallel once M3.1 lands.
 
 | Check | Result |
 |---|---|
-| v2 reference | `87812bc8` loader with Vision and MTP (scratch `ninfer_v2_dump`): 1,429 Device buffers, 77,667,520,224 bytes, CUDA used +72.34 GiB, cold load 161 s (PLE warm 56.7 s) |
-| v3 load, Vision and MTP | `ninfer_qwen4_exp_loading_real_test`: 1,668 bindings and all 959 Uses consumed, 1,429 Device parents, **72.33 GiB** (NVML +72.88 GiB), 128 mapped shards of 32,000,161,792 bytes (1 straddle copy); warm load: upload 5.2 s, PLE warm 1.8 s |
+| v2 reference | `87812bc8` loader with Vision and MTP (scratch `ninfer_v2_dump`): 1,429 Device buffers, 77,667,520,224 bytes: a 71.02 GiB arena plus the two loader-quantized MTP banks outside it; cold load 161 s (PLE warm 56.7 s) |
+| v3 load, Vision and MTP | `ninfer_qwen4_exp_loading_real_test`: 1,668 bindings and all 959 Uses consumed, 1,429 Device parents in one **72.33 GiB** arena (banks inside; the same bytes as v2's arena plus banks; the NVML delta of +72.88 GiB also counts the CUDA context), 128 mapped shards of 32,000,161,792 bytes (1 straddle copy); warm load: upload 5.2 s, PLE warm 1.8 s |
 | v3 load, Text only | 1,198 bindings, 1,067 parents, **70.01 GiB** (v2: 70.01 GiB) |
 | Device checksums | SHA256 of every Device buffer keyed by object: **1,429 of 1,429 equal** v2, including both MTP banks (`9e25663a...`, `fa78245b...`, the v2 loader's quantized NVFP4 buffers) |
 | PLE | 128 of 128 mapped shards SHA256-equal v2's mappings; tables: 3 multipliers, 16 consecutive heads covering 320,001,446 of 320,001,536 rows; the shards are plain (unregistered) host mappings |
 | Admission | every BF16 and FP8 projection Use prepared; all 98 banks admitted `AllowA4` with positive finite per-expert divisors; the Frontend renders the official template (56-token chat prompt) |
 | Public Engine | `ninfer_qwen4_exp_engine_real_test` and `ninfer V3 --prompt`: `TargetPlan`, `WeightsMaterialize` and `FrontendInitialize` complete, `TargetFinalize` fails with "Qwen4ExpForCausalLM artifact 'qwen3.8-flash-next' loaded (1668 bindings, 72.33 GiB of Device weights, 29.80 GiB of mapped PLE table), but this build has no qwen4_exp execution Program; it cannot generate or score yet" |
 | qwen3_5 unchanged | 27B NVFP4 (`neroued/Qwen3.8-27B-nvfp4-NInfer@f0b43ad4`): `loading_real --vision --speculative mtp` output identical on `93e76556` and the branch (1,004 parents, 21,122,608,640 bytes); CTest `artifact_*`, `qwen3_5_*`, `tool_call_parser` and `sampling_defaults` with the real artifact all pass except `qwen3_5_prefix_real_test`, which fails identically on the base ("Complete MTP checkpoint was not materialized from Host"), and `orcarouter_tokenizer` (not built) |
-| Windows | MSVC 14.51 and CUDA 13.3: `ninfer`, `ninfer_engine`, both qwen4_exp tests and `ninfer_artifact_materialization_test` build with no warnings in the touched files |
+| Windows | MSVC 14.51 and CUDA 13.3: `ninfer`, `ninfer_engine`, both qwen4_exp tests and `ninfer_artifact_materialization_test` build with no warnings in the touched files; a scratch CPU-only program linked to the MSVC `ninfer_artifact.lib` maps a single-file fixture object (64 KiB align-down), warms it, reads it after Reader destruction and refuses to map the straddling one |
 
 **Corrections for M3.3+.**
 - G4 order is forced by disk: download v2, take every v2 reference dump, then `derive` in place,
@@ -492,6 +492,12 @@ M3.3 and the load half of M3.2 can proceed in parallel once M3.1 lands.
   in that window.
 - A scratch tool that loads through the v2 `StandaloneLoadedModel` must link `ninfer_engine` (the
   Qwen3.6 frontend lives there at `87812bc8`).
+- The startup log reports Device and mapped bytes in one `WeightsMaterialize` phase (the CLI
+  prints "loading weights | 99.8 GiB" for a 70.01 GiB Text load plus the 29.8 GiB PLE). A separate
+  public phase is a `types.h` change, left to M3.4 or M3.6 if wanted.
+- v3 cold PLE warm-up is unmeasured (every G4 v3 load ran from the page cache `derive` had just
+  filled); v2's cold 32 GB warm took 56.7 s. The x870e confirmation (§5.8) is the first cold
+  Windows number.
 - `qwen3_5_prefix_real_test` already fails on `workstation` with the 27B NVFP4 artifact; it is not
   an M3 signal.
 - M3.3 inputs: expert banks arrive as `ops::Nvfp4ExpertBankWeight`; PLE shards are `WeightView`s
