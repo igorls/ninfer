@@ -10,7 +10,10 @@
 
 namespace ninfer::artifact {
 
-enum class Residency { Device, Host, Values };
+// Device: uploaded parent. Host: owning heap copy. Mapped: read-only page-cache view of the file,
+// warmed before readiness (an owning copy only when the object straddles two files). Values:
+// owning numeric values read through Binder::values, without a parent.
+enum class Residency { Device, Host, Mapped, Values };
 
 struct ParameterReference {
     std::string name;
@@ -26,6 +29,7 @@ struct HostValues {
 
     [[nodiscard]] float scalar_f32() const;
     [[nodiscard]] std::vector<std::int32_t> integers() const;
+    [[nodiscard]] std::vector<std::int64_t> integers64() const;
 };
 
 // Collects selected logical demands; neither physical object IDs nor whole-artifact profiles
@@ -46,6 +50,7 @@ public:
     [[nodiscard]] const Reader& reader() const noexcept { return reader_; }
 
     void require_device(ObjectHandle object, std::uint64_t alignment = 256);
+    void require_mapped(ObjectHandle object);
     [[nodiscard]] std::span<const std::byte> host_object(ObjectHandle object);
     [[nodiscard]] ObjectHandle resource(std::string_view component, std::string_view role);
     [[nodiscard]] HostValues values(const Binding& binding, std::optional<QType> format = {});
@@ -55,6 +60,7 @@ private:
     struct Demand {
         bool device             = false;
         bool host               = false;
+        bool mapped             = false;
         std::uint64_t alignment = 256;
         std::vector<std::byte> host_data;
     };

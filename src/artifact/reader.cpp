@@ -169,6 +169,14 @@ std::vector<std::byte> Reader::read_object(ObjectHandle handle) const {
     return read_range(object_offset(object), object_bytes(object));
 }
 
+std::optional<FileMapping> Reader::map_object(ObjectHandle handle) const {
+    validate_object(handle);
+    const auto& object = directory().object(handle);
+    const auto ranges  = segments(object_offset(object), object_bytes(object));
+    if (ranges.size() != 1) { return std::nullopt; }
+    return impl_->file(ranges[0].file_index).map(ranges[0].file_offset, ranges[0].bytes);
+}
+
 std::size_t Reader::read_direct(std::size_t file_index, std::uint64_t file_offset,
                                 std::span<std::byte> destination) const {
     return impl_->file(file_index).read_direct(file_offset, destination);

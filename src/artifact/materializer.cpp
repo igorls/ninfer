@@ -116,6 +116,13 @@ const WeightParent& MaterializedArtifact::host_parent(ObjectHandle handle) const
     return *objects_[handle.index].host;
 }
 
+const WeightParent& MaterializedArtifact::mapped_parent(ObjectHandle handle) const {
+    if (handle.index >= objects_.size() || !objects_[handle.index].mapped) {
+        throw ArtifactError("object has no mapped Host backing");
+    }
+    return *objects_[handle.index].mapped;
+}
+
 std::span<const std::byte> MaterializedArtifact::host_bytes(ObjectHandle handle) const {
     if (handle.index >= objects_.size() || objects_[handle.index].host_data.empty()) {
         throw ArtifactError("object has no retained Host bytes");
@@ -138,6 +145,9 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
     for (const auto& placement : plan.device_objects) {
         total = checked_add(total, placement.bytes, "device payload bytes");
     }
+    for (const auto handle : plan.mapped_objects) {
+        total = checked_add(total, reader.directory().tensor(handle).bytes, "mapped bytes");
+    }
     StartupPhaseScope phase(observer, StartupPhase::WeightsMaterialize, StartupProgressUnit::Bytes,
                             total);
     MaterializedArtifact out;
@@ -148,6 +158,7 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
     out.stats_.device_capacity_bytes = plan.device_capacity_bytes;
     out.stats_.device_object_count   = plan.device_objects.size();
     out.stats_.host_object_count     = plan.host_objects.size();
+    out.stats_.mapped_object_count   = plan.mapped_objects.size();
     if (plan.device_capacity_bytes > std::numeric_limits<std::size_t>::max()) {
         throw ArtifactError("device backing exceeds size_t");
     }
@@ -178,6 +189,37 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
             storage.host = WeightParent{geometry, storage.host_data.data(), divisor};
         }
     }
+    // Mapped parents are page-cache views warmed here, before readiness, so the first request does
+    // not pay synchronous file faults. Device upload reads bypass the page cache.
+    std::uint64_t mapped_done = 0;
+    const auto warm_start     = std::chrono::steady_clock::now();
+    for (const auto handle : plan.mapped_objects) {
+        auto& storage = out.objects_.at(handle.index);
+        if (storage.mapped) { throw ArtifactError("duplicate mapped placement"); }
+        const auto& geometry = reader.geometry(handle);
+        std::span<const std::byte> bytes;
+        if (auto mapping = reader.map_object(handle)) {
+            storage.mapping = std::move(*mapping);
+            storage.mapping.warm();
+            bytes = storage.mapping.bytes();
+        } else {
+            storage.mapped_copy = reader.read_object(handle);
+            out.stats_.read_bytes =
+                checked_add(out.stats_.read_bytes, storage.mapped_copy.size(), "mapped copy bytes");
+            ++out.stats_.mapped_copy_count;
+            bytes = storage.mapped_copy;
+        }
+        if (bytes.size() != geometry.bytes) {
+            throw ArtifactError("mapped placement size differs from object");
+        }
+        const auto divisor = read_divisor(reader, handle, geometry, bytes, out.stats_);
+        storage.mapped     = WeightParent{geometry, bytes.data(), divisor};
+        mapped_done        = checked_add(mapped_done, bytes.size(), "mapped bytes");
+        phase.progress(mapped_done, total);
+    }
+    out.stats_.mapped_bytes = mapped_done;
+    out.stats_.mapped_warm_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - warm_start).count();
     std::vector<CopyRange> ranges;
     for (const auto& placement : plan.device_objects) {
         const auto& geometry = reader.geometry(placement.object);
@@ -205,7 +247,7 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
         }
     }
     if (ranges.empty()) {
-        phase.complete();
+        phase.complete(mapped_done, total);
         return out;
     }
     std::sort(ranges.begin(), ranges.end(), [](const auto& a, const auto& b) {
@@ -282,19 +324,19 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
             check_cuda(cudaEventRecord(slot.event, device.transfer_stream),
                        "record weight staging completion");
             slot.pending = true;
-            phase.progress(copied, total);
+            phase.progress(mapped_done + copied, total);
         }
     }
     for (const auto& slot : slots) { slot->wait(); }
     completion.finish();
-    if (copied != total || next_range != ranges.size()) {
+    if (mapped_done + copied != total || next_range != ranges.size()) {
         throw ArtifactError("incomplete device upload");
     }
     out.stats_.h2d_bytes = copied;
     out.stats_.upload_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     slots.clear();
-    phase.complete(copied, total);
+    phase.complete(mapped_done + copied, total);
     return out;
 }
 

@@ -71,6 +71,34 @@ void materialization(DeviceContext& device) {
     require(code[0] == std::byte{0x52}, "native row pointer addressed a different row");
 }
 
+void mapped(DeviceContext& device) {
+    Fixture fixture;
+    fixture.write(true);
+    std::optional<MaterializedArtifact> backing;
+    ParameterReference straddling;
+    ParameterReference contained;
+    {
+        Reader reader(fixture.entry);
+        Binder binder(reader);
+        straddling = binder.parameter("matrix", {2, 130}, Residency::Mapped);
+        contained  = binder.parameter("values", {2}, Residency::Mapped, QType::FP32);
+        backing.emplace(materialize(reader, std::move(binder).finish(), device));
+    }
+    const auto& stats = backing->stats();
+    require(stats.mapped_object_count == 2 && stats.mapped_copy_count == 1 &&
+                stats.mapped_bytes == 536 && stats.device_capacity_bytes == 0 &&
+                stats.h2d_bytes == 0,
+            "mapped demand was uploaded, duplicated or not mapped");
+    const auto matrix = bind_view(straddling, *backing);
+    const auto values = bind_view(contained, *backing);
+    require(std::equal(matrix.parts[0].parent->data, matrix.parts[0].parent->data + 528,
+                       fixture.payload.begin() + 256),
+            "cross-file mapped copy differs from its object bytes");
+    require(std::equal(values.parts[0].parent->data, values.parts[0].parent->data + 8,
+                       fixture.payload.begin() + 1024),
+            "file mapping differs from its object bytes after Reader destruction");
+}
+
 void failure_and_host_only(DeviceContext& device) {
     Fixture fixture;
     fixture.write();
@@ -228,6 +256,7 @@ int main(int argc, char** argv) {
             throw std::invalid_argument("expected [--artifact|--writer-fixture PATH]");
         }
         materialization(device);
+        mapped(device);
         failure_and_host_only(device);
         ninfer::test::materialization_cuda_errors(device);
         staging_reuse(device);

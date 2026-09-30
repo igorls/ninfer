@@ -29,6 +29,18 @@ std::vector<std::int32_t> HostValues::integers() const {
     return out;
 }
 
+std::vector<std::int64_t> HostValues::integers64() const {
+    if (format != QType::INT64 || data.size() != checked_mul(elements, 8, "integer values")) {
+        throw ArtifactError("semantic table requires INT64 values");
+    }
+    std::vector<std::int64_t> out;
+    out.reserve(static_cast<std::size_t>(elements));
+    for (std::size_t i = 0; i < elements; ++i) {
+        out.push_back(std::bit_cast<std::int64_t>(read_u64_le(data.data() + i * 8)));
+    }
+    return out;
+}
+
 Binder::Binder(const Reader& reader)
     : reader_(reader), demands_(reader.directory().objects.size()) {}
 
@@ -58,6 +70,8 @@ ParameterReference Binder::binding(std::string name, const Binding& binding, Sha
             require_device(part.object);
         } else if (residency == Residency::Host) {
             (void)host_object(part.object);
+        } else if (residency == Residency::Mapped) {
+            require_mapped(part.object);
         }
     }
     return {std::move(name), std::move(shape), binding, residency};
@@ -83,6 +97,11 @@ void Binder::require_device(ObjectHandle object, std::uint64_t alignment) {
     auto& demand     = demands_.at(object.index);
     demand.device    = true;
     demand.alignment = std::max({demand.alignment, alignment, geometry.alignment});
+}
+
+void Binder::require_mapped(ObjectHandle object) {
+    (void)reader_.geometry(object);
+    demands_.at(object.index).mapped = true;
 }
 
 std::span<const std::byte> Binder::host_object(ObjectHandle object) {
@@ -175,6 +194,7 @@ MaterializationPlan Binder::finish() && {
         if (demand.host) {
             plan.host_objects.push_back({ObjectHandle{i}, std::move(demand.host_data)});
         }
+        if (demand.mapped) { plan.mapped_objects.push_back(ObjectHandle{i}); }
     }
     return plan;
 }

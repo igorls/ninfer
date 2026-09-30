@@ -1,5 +1,6 @@
 #pragma once
 
+#include "artifact/file_io.h"
 #include "artifact/schema.h"
 #include "core/arena.h"
 #include "core/device.h"
@@ -35,6 +36,7 @@ struct MaterializationPlan {
     std::uint64_t owned_value_bytes     = 0;
     std::vector<DevicePlacement> device_objects;
     std::vector<HostPlacement> host_objects;
+    std::vector<ObjectHandle> mapped_objects;
 };
 
 struct MaterializationStats {
@@ -45,9 +47,13 @@ struct MaterializationStats {
     std::uint64_t retained_host_bytes   = 0;
     std::uint64_t owned_value_bytes     = 0;
     std::uint64_t peak_staging_bytes    = 0;
+    std::uint64_t mapped_bytes          = 0; // Page-cache views plus straddle copies.
     std::size_t device_object_count     = 0;
     std::size_t host_object_count       = 0;
+    std::size_t mapped_object_count     = 0;
+    std::size_t mapped_copy_count       = 0; // Mapped objects owned as copies (straddle files).
     double upload_seconds               = 0;
+    double mapped_warm_seconds          = 0;
 };
 
 class MaterializedArtifact {
@@ -61,6 +67,7 @@ public:
 
     [[nodiscard]] const WeightParent& device_parent(ObjectHandle handle) const;
     [[nodiscard]] const WeightParent& host_parent(ObjectHandle handle) const;
+    [[nodiscard]] const WeightParent& mapped_parent(ObjectHandle handle) const;
     [[nodiscard]] std::span<const std::byte> host_bytes(ObjectHandle handle) const;
     [[nodiscard]] bool has_device(ObjectHandle handle) const noexcept;
 
@@ -73,7 +80,10 @@ private:
     struct ObjectStorage {
         std::optional<WeightParent> device;
         std::optional<WeightParent> host;
+        std::optional<WeightParent> mapped;
         std::vector<std::byte> host_data;
+        FileMapping mapping;
+        std::vector<std::byte> mapped_copy;
     };
 
     std::unique_ptr<DeviceArena> arena_;

@@ -1,11 +1,13 @@
 #pragma once
 
+#include "artifact/file_io.h"
 #include "artifact/framing.h"
 #include "artifact/schema.h"
 #include "core/weight_view.h"
 
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <span>
 
 namespace ninfer::artifact {
@@ -43,6 +45,9 @@ public:
     [[nodiscard]] std::vector<std::byte> read_object(ObjectHandle handle) const;
     [[nodiscard]] std::size_t read_direct(std::size_t file_index, std::uint64_t file_offset,
                                           std::span<std::byte> destination) const;
+    // Maps one object's payload read-only. Empty when the object straddles two files, which one
+    // mapping cannot address; the caller then owns a copy instead.
+    [[nodiscard]] std::optional<FileMapping> map_object(ObjectHandle handle) const;
 
 private:
     struct Impl;

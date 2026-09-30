@@ -15,6 +15,7 @@
 #include <windows.h>
 #else
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -168,6 +169,109 @@ std::size_t InputFile::read_direct(std::uint64_t offset, std::span<std::byte> de
         if (read == 0 || read % kPayloadAlignment != 0) { break; }
     }
     return total;
+}
+
+FileMapping::~FileMapping() { release(); }
+
+FileMapping::FileMapping(FileMapping&& other) noexcept
+    : view_(std::exchange(other.view_, nullptr)), length_(std::exchange(other.length_, 0)),
+      data_(std::exchange(other.data_, nullptr)), bytes_(std::exchange(other.bytes_, 0)) {}
+
+FileMapping& FileMapping::operator=(FileMapping&& other) noexcept {
+    if (this != &other) {
+        release();
+        view_   = std::exchange(other.view_, nullptr);
+        length_ = std::exchange(other.length_, 0);
+        data_   = std::exchange(other.data_, nullptr);
+        bytes_  = std::exchange(other.bytes_, 0);
+    }
+    return *this;
+}
+
+void FileMapping::release() noexcept {
+    if (!view_) { return; }
+#if defined(_WIN32)
+    ::UnmapViewOfFile(view_);
+#else
+    ::munmap(view_, length_);
+#endif
+    view_ = nullptr;
+}
+
+void FileMapping::warm() const noexcept {
+    if (!bytes_) { return; }
+#if defined(_WIN32)
+    SYSTEM_INFO info{};
+    ::GetSystemInfo(&info);
+    const std::size_t page_bytes = info.dwPageSize;
+#else
+    const auto page_bytes = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
+#endif
+    // Bounded read-ahead requests replace serialized random faults; touching each page after the
+    // hint establishes the working set, which the hint alone does not.
+    constexpr std::size_t kReadAheadBytes = 64ULL * 1024 * 1024;
+    for (std::size_t offset = 0; offset < bytes_; offset += kReadAheadBytes) {
+        const auto count = std::min(kReadAheadBytes, bytes_ - offset);
+        const auto* data = data_ + offset;
+#if defined(_WIN32)
+        WIN32_MEMORY_RANGE_ENTRY range{const_cast<std::byte*>(data), count};
+        (void)::PrefetchVirtualMemory(::GetCurrentProcess(), 1, &range, 0);
+#else
+        const auto address = reinterpret_cast<std::uintptr_t>(data);
+        const auto aligned = address - address % page_bytes;
+        (void)::madvise(reinterpret_cast<void*>(aligned), count + (address - aligned),
+                        MADV_WILLNEED);
+#endif
+        const volatile std::byte* pages = data;
+        for (std::size_t page = 0; page < count; page += page_bytes) { (void)pages[page]; }
+        (void)pages[count - 1];
+    }
+}
+
+FileMapping InputFile::map(std::uint64_t offset, std::uint64_t bytes) const {
+    if (!bytes || offset > bytes_ || bytes > bytes_ - offset) {
+        throw ArtifactError(path_.string() + ": mapping is empty or exceeds file length");
+    }
+#if defined(_WIN32)
+    // View offsets must be multiples of the allocation granularity (64 KiB), not the page size.
+    SYSTEM_INFO info{};
+    ::GetSystemInfo(&info);
+    const std::uint64_t granularity = info.dwAllocationGranularity;
+#else
+    const auto granularity = static_cast<std::uint64_t>(::sysconf(_SC_PAGESIZE));
+#endif
+    const auto aligned = offset / granularity * granularity;
+    const auto length  = bytes + (offset - aligned);
+    if (length > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        throw ArtifactError(path_.string() + ": mapping exceeds the address space");
+    }
+    FileMapping out;
+#if defined(_WIN32)
+    const HANDLE mapping =
+        ::CreateFileMappingW(handle(file_), nullptr, PAGE_READONLY, 0, 0, nullptr);
+    if (!mapping) { fail(path_, "create file mapping"); }
+    void* view       = ::MapViewOfFile(mapping, FILE_MAP_READ, static_cast<DWORD>(aligned >> 32U),
+                                       static_cast<DWORD>(aligned), static_cast<SIZE_T>(length));
+    const auto error = ::GetLastError();
+    // The view keeps the mapping object and the file alive until it is unmapped.
+    ::CloseHandle(mapping);
+    if (!view) {
+        ::SetLastError(error);
+        fail(path_, "map view");
+    }
+#else
+    if (aligned > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) {
+        throw ArtifactError(path_.string() + ": mapping offset exceeds the file offset range");
+    }
+    void* view = ::mmap(nullptr, static_cast<std::size_t>(length), PROT_READ, MAP_SHARED,
+                        static_cast<int>(file_), static_cast<off_t>(aligned));
+    if (view == MAP_FAILED) { fail(path_, "mmap"); }
+#endif
+    out.view_   = view;
+    out.length_ = static_cast<std::size_t>(length);
+    out.data_   = static_cast<const std::byte*>(view) + (offset - aligned);
+    out.bytes_  = static_cast<std::size_t>(bytes);
+    return out;
 }
 
 } // namespace ninfer::artifact
