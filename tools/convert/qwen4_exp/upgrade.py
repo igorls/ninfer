@@ -36,7 +36,13 @@ from tools.artifact.writer import ArtifactWriter
 from tools.convert.quantization.nvfp4 import encode_rows, weight_divisor
 
 from .inventory import Plan, plan_upgrade
-from .source import MTP_BANK_SHA256, MTP_BANKS, V2_BYTES, V2_SHA256
+from .source import (
+    CHAT_TEMPLATE_SHA256,
+    MTP_BANK_SHA256,
+    MTP_BANKS,
+    V2_BYTES,
+    V2_SHA256,
+)
 
 CHUNK_BYTES = 64 * 1024 * 1024
 V2_MAGIC = b"NINFER\x00\x02"
@@ -196,6 +202,10 @@ def upgrade(
                 release_input=release_input,
                 mtp_reference=mtp_reference,
             )
+            # Decision 1: the official Flash-Next template is the one carried into v3.
+            template = result["v2_objects"]["frontend/chat_template.jinja"]
+            if template != CHAT_TEMPLATE_SHA256:
+                raise ValueError(f"chat template {template} != {CHAT_TEMPLATE_SHA256}")
     finally:
         os.close(fd)
     result.update(
