@@ -250,6 +250,15 @@ void require_shape(const Weight& w, const char* name) {
     }
 }
 
+void require_shape_flash_next(const Weight& w, const char* name) {
+    if (w.n != Bf16GdnFlashNextGeometry::kHeads || w.k != Bf16GdnFlashNextGeometry::kHidden ||
+        w.shape[0] != Bf16GdnFlashNextGeometry::kHeads ||
+        w.shape[1] != Bf16GdnFlashNextGeometry::kHidden) {
+        throw std::invalid_argument(std::string("gdn_gating_proj: ") + name +
+                                    " requires contiguous BF16 [48,2560]");
+    }
+}
+
 void require_shape35(const Weight& w, const char* name) {
     if (w.n != k35N || w.k != k35K || w.shape[0] != k35N || w.shape[1] != k35K) {
         throw std::invalid_argument(std::string("gdn_gating_proj: ") + name +
@@ -260,7 +269,12 @@ void require_shape35(const Weight& w, const char* name) {
 template <class Geometry, int SplitK>
 constexpr std::int32_t cooperative_resident_ctas_per_sm() noexcept {
     static_assert(SplitK > 1);
-    if constexpr (std::is_same_v<Geometry, Bf16Gdn27Geometry>) {
+    if constexpr (std::is_same_v<Geometry, Bf16GdnFlashNextGeometry>) {
+        static_assert(SplitK == 8 || SplitK == 4 || SplitK == 2);
+        // BN64 with eight warps: 256 threads and 24 KiB of shared memory. Two resident CTAs per
+        // SM is a conservative residency bound for the cooperative grid.
+        return 2;
+    } else if constexpr (std::is_same_v<Geometry, Bf16Gdn27Geometry>) {
         static_assert(SplitK == 8 || SplitK == 4 || SplitK == 2);
         // Qualified on the sm_120a build: BN128 split-8 uses 256 threads and split-4/2 use
         // 512 threads; registers and 40-KiB shared memory admit two resident CTAs per SM.
@@ -612,6 +626,37 @@ bool bf16_gdn_gating_proj_35_mma_split2_launch(Bf16GdnGatingTokenVariant variant
     return launch_bf16_prefill_mma<Bf16Gdn35Geometry, 2, 8>(
         variant, x, nullptr, 0.0F, nullptr, a_weight, b_weight, A_log, dt_bias, workspace, g, beta,
         stream, multiprocessor_count);
+}
+
+bool bf16_gdn_gating_proj_flash_next_mma_launch(std::int32_t split_k,
+                                                Bf16GdnGatingTokenVariant variant, const Tensor& x,
+                                                const Weight& a_weight, const Weight& b_weight,
+                                                const Tensor& A_log, const Tensor& dt_bias,
+                                                void* workspace, Tensor& g, Tensor& beta,
+                                                std::int32_t multiprocessor_count,
+                                                cudaStream_t stream) {
+    require_shape_flash_next(a_weight, "a_weight");
+    require_shape_flash_next(b_weight, "b_weight");
+    switch (split_k) {
+    case 8:
+        return launch_bf16_prefill_mma<Bf16GdnFlashNextGeometry, 8, 8>(
+            variant, x, nullptr, 0.0F, nullptr, a_weight, b_weight, A_log, dt_bias, workspace, g,
+            beta, stream, multiprocessor_count);
+    case 4:
+        return launch_bf16_prefill_mma<Bf16GdnFlashNextGeometry, 4, 8>(
+            variant, x, nullptr, 0.0F, nullptr, a_weight, b_weight, A_log, dt_bias, workspace, g,
+            beta, stream, multiprocessor_count);
+    case 2:
+        return launch_bf16_prefill_mma<Bf16GdnFlashNextGeometry, 2, 8>(
+            variant, x, nullptr, 0.0F, nullptr, a_weight, b_weight, A_log, dt_bias, workspace, g,
+            beta, stream, multiprocessor_count);
+    case 1:
+        return launch_bf16_prefill_mma<Bf16GdnFlashNextGeometry, 1, 8>(
+            variant, x, nullptr, 0.0F, nullptr, a_weight, b_weight, A_log, dt_bias, nullptr, g,
+            beta, stream);
+    default:
+        throw std::invalid_argument("BF16 GDN gating: unsupported Flash-Next split");
+    }
 }
 
 void bf16_gdn_gating_proj_35_mma_unsplit_launch(Bf16GdnGatingTokenVariant variant, const Tensor& x,

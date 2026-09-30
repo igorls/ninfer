@@ -48,7 +48,15 @@ struct Bf16Gdn35Geometry {
     static constexpr int kBlockN = 64;
 };
 
+// Qwen3.8-Flash-Next: the 27B head count over a 2560-wide input.
+struct Bf16GdnFlashNextGeometry {
+    static constexpr int kHeads  = 48;
+    static constexpr int kHidden = 2560;
+    static constexpr int kBlockN = 64;
+};
+
 static_assert(Bf16Gdn27Geometry::kHidden % kBf16GdnBlockK == 0);
+static_assert(Bf16GdnFlashNextGeometry::kHidden % kBf16GdnBlockK == 0);
 static_assert(Bf16Gdn35Geometry::kHidden % kBf16GdnBlockK == 0);
 
 __device__ __forceinline__ int bf16_gdn_swizzle(int row, int col) {

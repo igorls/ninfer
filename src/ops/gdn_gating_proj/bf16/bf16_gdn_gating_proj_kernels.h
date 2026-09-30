@@ -50,6 +50,14 @@ void bf16_gdn_gating_proj_mma_unsplit_launch(Bf16GdnGatingTokenVariant variant, 
                                              const Tensor& A_log, const Tensor& dt_bias, Tensor& g,
                                              Tensor& beta, cudaStream_t stream);
 
+// Flash-Next [48,2560] geometry; split_k is 8, 4, 2 (cooperative) or 1 (plain launch, always
+// submitted). Returns false only for a cooperative split whose token tile cannot be resident.
+[[nodiscard]] bool bf16_gdn_gating_proj_flash_next_mma_launch(
+    std::int32_t split_k, Bf16GdnGatingTokenVariant variant, const Tensor& x,
+    const Weight& a_weight, const Weight& b_weight, const Tensor& A_log, const Tensor& dt_bias,
+    void* workspace, Tensor& g, Tensor& beta, std::int32_t multiprocessor_count,
+    cudaStream_t stream);
+
 void bf16_gdn_gating_proj_35_simt_c4_launch(const Tensor& x, const Weight& a_weight,
                                             const Weight& b_weight, const Tensor& A_log,
                                             const Tensor& dt_bias, Tensor& g, Tensor& beta,

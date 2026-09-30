@@ -48,6 +48,14 @@ constexpr std::array<RouteSpec, 5> k35Routes{{
     {{4097, kAnyCols}, Bf16GdnGatingScheduleId::MmaUnsplit},
 }};
 
+// Qwen3.8-Flash-Next [48,2560]: forty K tiles; split-K keeps the small-T grid busy.
+constexpr std::array<RouteSpec, 4> kFlashNextRoutes{{
+    {{1, 1024}, Bf16GdnGatingScheduleId::MmaCooperativeSplit8},
+    {{1025, 2048}, Bf16GdnGatingScheduleId::MmaCooperativeSplit4},
+    {{2049, 4096}, Bf16GdnGatingScheduleId::MmaCooperativeSplit2},
+    {{4097, kAnyCols}, Bf16GdnGatingScheduleId::MmaUnsplit},
+}};
+
 template <std::size_t N>
 constexpr bool catalog_is_closed(const std::array<RouteSpec, N>& routes,
                                  std::int32_t last) noexcept {
@@ -61,9 +69,14 @@ constexpr bool catalog_is_closed(const std::array<RouteSpec, N>& routes,
 
 static_assert(catalog_is_closed(k27Routes, kAnyCols));
 static_assert(catalog_is_closed(k35Routes, kAnyCols));
+static_assert(catalog_is_closed(kFlashNextRoutes, kAnyCols));
 
 bool is_27(const Bf16GdnGatingProblem& problem) noexcept {
     return problem.heads == 48 && problem.input_rows == 5120;
+}
+
+bool is_flash_next(const Bf16GdnGatingProblem& problem) noexcept {
+    return problem.heads == 48 && problem.input_rows == 2560;
 }
 
 bool is_35(const Bf16GdnGatingProblem& problem) noexcept {
@@ -89,7 +102,7 @@ bool schedule_uses_mma(Bf16GdnGatingScheduleId schedule) noexcept {
 }
 
 std::int32_t mma_tile_cols(const Bf16GdnGatingProblem& problem) noexcept {
-    return is_35(problem) ? 64 : 128;
+    return is_35(problem) || is_flash_next(problem) ? 64 : 128;
 }
 
 std::int32_t schedule_split_k(Bf16GdnGatingScheduleId schedule) {
@@ -118,6 +131,12 @@ std::int32_t schedule_split_k(Bf16GdnGatingScheduleId schedule) {
 bool candidate_is_legal(Bf16GdnGatingScheduleId schedule,
                         const Bf16GdnGatingProblem& problem) noexcept {
     if (!bf16_gdn_gating_admits(problem)) { return false; }
+    if (is_flash_next(problem)) {
+        return schedule == Bf16GdnGatingScheduleId::MmaCooperativeSplit8 ||
+               schedule == Bf16GdnGatingScheduleId::MmaCooperativeSplit4 ||
+               schedule == Bf16GdnGatingScheduleId::MmaCooperativeSplit2 ||
+               schedule == Bf16GdnGatingScheduleId::MmaUnsplit;
+    }
     if (is_27(problem)) {
         switch (schedule) {
         case Bf16GdnGatingScheduleId::GemvPairedRows:
@@ -180,6 +199,17 @@ void execute_resolved(const Bf16GdnGatingPlan& plan, const Bf16GdnGatingProblem&
     auto scratch_scope = ws.scope();
     DeviceSpan scratch{};
     if (plan.workspace_bytes != 0) { scratch = ws.alloc_bytes(plan.workspace_bytes); }
+    if (is_flash_next(problem)) {
+        const std::int32_t split = schedule_split_k(plan.schedule);
+        if (!bf16_gdn_gating_proj_flash_next_mma_launch(
+                split, plan.token_variant, x, a_weight, b_weight, A_log, dt_bias, scratch.data, g,
+                beta, execution.multiprocessor_count, execution.stream)) {
+            (void)bf16_gdn_gating_proj_flash_next_mma_launch(1, plan.token_variant, x, a_weight,
+                                                             b_weight, A_log, dt_bias, nullptr, g,
+                                                             beta, 0, execution.stream);
+        }
+        return;
+    }
     const auto launch_unsplit = [&] {
         if (is_35(problem)) {
             bf16_gdn_gating_proj_35_mma_unsplit_launch(plan.token_variant, x, a_weight, b_weight,
@@ -317,7 +347,7 @@ const char* bf16_gdn_norm_gating_schedule_name(Bf16GdnNormGatingScheduleId sched
 
 bool bf16_gdn_gating_admits(const Bf16GdnGatingProblem& problem) noexcept {
     if (problem.cols < 1) { return false; }
-    return is_27(problem) || is_35(problem);
+    return is_27(problem) || is_35(problem) || is_flash_next(problem);
 }
 
 Bf16GdnGatingPlan bf16_gdn_gating_resolve_candidate(Bf16GdnGatingScheduleId schedule,
@@ -347,6 +377,12 @@ Bf16GdnGatingPlan bf16_gdn_gating_resolve_plan(const Bf16GdnGatingProblem& probl
                 return bf16_gdn_gating_resolve_candidate(route.schedule, problem);
             }
         }
+    } else if (is_flash_next(problem)) {
+        for (const RouteSpec& route : kFlashNextRoutes) {
+            if (route.cols.contains(problem.cols)) {
+                return bf16_gdn_gating_resolve_candidate(route.schedule, problem);
+            }
+        }
     } else {
         for (const RouteSpec& route : k35Routes) {
             if (route.cols.contains(problem.cols)) {
@@ -365,8 +401,9 @@ std::size_t bf16_gdn_gating_capacity_workspace_bytes(std::int32_t heads, std::in
     const Bf16GdnGatingProblem base{heads, input_rows, 1};
     (void)bf16_gdn_gating_resolve_plan({heads, input_rows, min_cols});
     (void)bf16_gdn_gating_resolve_plan({heads, input_rows, max_cols});
-    return is_27(base) ? route_capacity(k27Routes, base, min_cols, max_cols)
-                       : route_capacity(k35Routes, base, min_cols, max_cols);
+    if (is_27(base)) return route_capacity(k27Routes, base, min_cols, max_cols);
+    if (is_flash_next(base)) return route_capacity(kFlashNextRoutes, base, min_cols, max_cols);
+    return route_capacity(k35Routes, base, min_cols, max_cols);
 }
 
 Bf16GdnNormGatingPlan bf16_gdn_norm_gating_resolve_plan(const Bf16GdnGatingProblem& problem) {

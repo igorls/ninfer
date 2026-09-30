@@ -30,6 +30,7 @@ struct Geometry {
 constexpr Geometry kQwen27{"qwen3_6_27b", 5120, 48, false};
 constexpr Geometry kQwen38Parent{"qwen3_8_27b_parent", 5120, 48, true};
 constexpr Geometry kQwen35{"qwen3_6_35b_a3b", 2048, 32, true};
+constexpr Geometry kFlashNextParent{"qwen3_8_flash_next_parent", 2560, 48, true};
 
 constexpr ReductionCriterion kGdnProjectionFp32{/*relative_l2=*/1.4e-6,
                                                 /*gross_absolute=*/5.0e-7,
@@ -452,7 +453,8 @@ int run_norm_projection_case(const Geometry& geometry, std::int32_t tokens, std:
 }
 
 int verify_workspace_capacity_contract(const Geometry& geometry,
-                                       std::initializer_list<std::int32_t> route_endpoints) {
+                                       std::initializer_list<std::int32_t> route_endpoints,
+                                       bool norm_form = true) {
     const std::int32_t last = *std::max_element(route_endpoints.begin(), route_endpoints.end());
     const std::size_t interval =
         ops::gdn_gating_proj_workspace_capacity_bytes(geometry.heads, geometry.hidden, 1, last);
@@ -466,6 +468,8 @@ int verify_workspace_capacity_contract(const Geometry& geometry,
         std::cerr << geometry.label << ": GDN control interval missed a route endpoint\n";
         ++failures;
     }
+    // Flash-Next registers only the control projection; its input norm is a separate Op.
+    if (!norm_form) return failures;
     for (const auto bounds :
          std::vector<std::pair<int, int>>{{1, 42}, {40, 43}, {1, 128}, {120, 129}, {1, 256}}) {
         std::size_t witness = 0;
@@ -496,6 +500,8 @@ int main() {
     int failures = 0;
     failures += verify_workspace_capacity_contract(kQwen27, {1, 8, 1024, 2048, 4096, 4097});
     failures += verify_workspace_capacity_contract(kQwen35, {1, 127, 1024, 2048, 4096, 4097});
+    failures +=
+        verify_workspace_capacity_contract(kFlashNextParent, {1, 64, 1024, 2048, 4096, 4097}, false);
 
     // Every registered 27B projection route, including predicated and full token tiles.
     for (const std::int32_t tokens : {1, 8, 9, 1024, 1025, 2049, 4097}) {
@@ -505,6 +511,11 @@ int main() {
     // The Qwen3.8 parent changes only the public storage boundary. One direct oracle case proves
     // its [A,B] row partition; the split 27B cases above cover every unchanged execution route.
     failures += run_projection_case(kQwen38Parent, 1, 0x1801u, execution);
+    // Every registered Flash-Next [96,2560] route boundary through its contiguous parent.
+    for (const std::int32_t tokens : {1, 63, 64, 65, 1024, 1025, 2048, 2049, 4096, 4097}) {
+        failures += run_projection_case(kFlashNextParent, tokens,
+                                        0x2800u + static_cast<std::uint32_t>(tokens), execution);
+    }
     // Every registered 35B projection route and its contiguous-parent storage contract.
     for (const std::int32_t tokens : {1, 127, 128, 1024, 1025, 2049, 4097}) {
         failures += run_projection_case(kQwen35, tokens,
