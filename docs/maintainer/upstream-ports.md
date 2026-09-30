@@ -377,12 +377,28 @@ Windows, MSVC 19.51, CUDA 13.3, `sm_120a`, RTX PRO 6000 Blackwell (driver 616.92
 
 ## Deployment
 
-Current state, September 29, 2026: the x870e production service on :8010 runs release
-`2026.09.29-v3port.3` (source `28c40898`, which contains the `e31bc99b` merge), checked by the
-installed release manifest and the `ninfer-serve.exe` hash. z690 runs the same release with the
-`nvfp4full` profile, NVFP4 KV and MTP3, as reported by the installing agent (not checked from
-here). The upstream `d44ab584` merge is not deployed. The paragraphs below record the first v3
-cutover.
+Current state, September 30, 2026: the x870e production service on :8010 runs release
+`2026.09.30-v3port.4` (source `f01ae642`, which contains the `d44ab584` merge with `1cfdb4d6`
+reverted), checked by the installed release manifest and the `ninfer-serve.exe` hash. z690 still
+runs `2026.09.29-v3port.3` (source `28c40898`) with the `nvfp4full` profile, NVFP4 KV and MTP3, as
+reported by its installing agent (not checked from here).
+
+On September 30, 2026 17:45 UTC, x870e moved from `2026.09.29-v3port.3` to
+`2026.09.30-v3port.4`. The cutover replaced `ninfer-serve.exe`, `ninfer.exe` and the release
+manifest; the supervisor, the launcher and every runtime DLL are byte-identical between the two
+releases, and the supervisor configuration and production flags are unchanged.
+- Besides the `d44ab584` merge (G4 A/B against v3port.3: prefill -10.5% at 7,680 tokens and -19.5%
+  at 61.6K, decode +1.8%, Tribuno set unchanged), the release adds the qwen4_exp (Flash-Next)
+  loading code, which does not touch the Qwen3.8 route, and llama.cpp web UI compatibility
+  (`GET /props`, optional `model`, `max_tokens: -1`).
+- The service was down for 12 s.
+- After the restart, 14/14 checks against :8010 passed: the 12 v3port.3 checks plus `GET /props`
+  and a chat request without `model` and with `max_tokens: -1`.
+
+The v3port.3 files and the supervisor configuration are archived in
+`E:\NInfer-archive\x870e-v3port.3-20260930-174505`; `rollback4.ps1` in the cutover kit restores them.
+
+The paragraphs below record the first v3 cutover.
 
 On September 28, 2026 10:02 UTC, the x870e production service on :8010 moved to release
 `2026.09.28-v3port.1` (source `e92c2078`). The cutover replaced the four executables
@@ -412,5 +428,5 @@ the same installer.
   396 of 400 cases, with a mean |Δ| of 0.0197. That matches the pre-v3 cross-GPU gap (0.021), so the
   difference is the GPU, not the build. Both machines serve System One in rotation.
 
-Deploying the `d44ab584` merge needs a release build, a rollout to both machines, and a System One
-re-check against the running release.
+The `d44ab584` merge still needs a rollout to z690 and a System One re-check against the running
+release on both machines.
