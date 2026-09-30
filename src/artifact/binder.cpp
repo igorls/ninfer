@@ -116,6 +116,8 @@ HostValues Binder::values(const Binding& binding, std::optional<QType> format) {
         word_bytes = 2;
     } else if (out.format == QType::FP32 || out.format == QType::INT32) {
         word_bytes = 4;
+    } else if (out.format == QType::INT64) {
+        word_bytes = 8;
     } else {
         throw ArtifactError("owning Host values require a direct numeric format");
     }

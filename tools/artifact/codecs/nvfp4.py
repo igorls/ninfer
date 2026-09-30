@@ -8,7 +8,7 @@ from typing import Sequence
 import torch
 
 from ..formats import valid_positive_fp32_word
-from ..layouts import block_scale_geometry
+from ..layouts import block_scale_geometry, expert_block_scale_geometry
 from ._tensor_bytes import (
     Payload,
     _exact_uint8_matrix,
@@ -142,3 +142,95 @@ def decode_nvfp4_words(
         ()
     )
     return codes, scales, divisor
+
+
+def _valid_scale_words(scales: torch.Tensor) -> None:
+    if bool((((scales & 0x80) != 0) | (scales == 0x7F)).any()):
+        raise ValueError("NVFP4 scales must be nonnegative finite E4M3FN words")
+
+
+def _valid_divisors(divisors: torch.Tensor) -> None:
+    words = divisors.view(torch.int32).to(torch.int64) & 0xFFFFFFFF
+    if bool(((words & 0x80000000) != 0).any() | (words == 0).any()) or not bool(
+        torch.isfinite(divisors).all()
+    ):
+        raise ValueError("NVFP4 expert divisors must be finite and positive")
+
+
+def encode_nvfp4_expert_bank(
+    packed_codes: torch.Tensor,
+    natural_scales: torch.Tensor,
+    weight_divisors: torch.Tensor,
+    shape: Sequence[int],
+) -> bytearray:
+    """Encode an ``[E,N,K]`` bank from exact per-expert NVFP4 words.
+
+    ``packed_codes`` is ``[E,N,K/2]``, ``natural_scales`` ``[E,N,K/16]`` and
+    ``weight_divisors`` holds one FP32 divisor per expert.
+    """
+
+    geometry = expert_block_scale_geometry("nvfp4", shape)
+    e, n, k = geometry.experts, geometry.n, geometry.k
+    if packed_codes.dtype != torch.uint8 or tuple(packed_codes.shape) != (e, n, k // 2):
+        raise TypeError(f"NVFP4 bank codes must be uint8 with shape {(e, n, k // 2)}")
+    if natural_scales.dtype != torch.uint8 or tuple(natural_scales.shape) != (
+        e,
+        n,
+        geometry.groups_per_row,
+    ):
+        raise TypeError(
+            f"NVFP4 bank scales must be uint8 with shape {(e, n, geometry.groups_per_row)}"
+        )
+    if weight_divisors.dtype != torch.float32 or tuple(weight_divisors.shape) != (e,):
+        raise TypeError(f"NVFP4 bank divisors must be FP32 with shape ({e},)")
+    codes = packed_codes.detach().contiguous().cpu()
+    scales = natural_scales.detach().contiguous().cpu()
+    divisors = weight_divisors.detach().contiguous().cpu()
+    _valid_scale_words(scales)
+    _valid_divisors(divisors)
+    swizzled = (
+        scales.reshape(e, n // 128, 4, 32, geometry.k_tiles, 4)
+        .permute(0, 1, 4, 3, 2, 5)
+        .contiguous()
+        .reshape(-1)
+    )
+    payload = bytearray(geometry.payload_bytes)
+    view = memoryview(payload)
+    view[: geometry.code_plane_bytes] = codes.reshape(-1).numpy()
+    view[
+        geometry.scale_plane_offset : geometry.scale_plane_offset
+        + geometry.scale_plane_bytes
+    ] = swizzled.numpy()
+    view[geometry.weight_divisor_offset :] = encode_direct(divisors, "fp32")
+    return payload
+
+
+def decode_nvfp4_expert_bank_words(
+    payload: Payload,
+    shape: Sequence[int],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Decode ``[E,N,K/2]`` codes, natural ``[E,N,K/16]`` scales and ``[E]`` divisors."""
+
+    geometry = expert_block_scale_geometry("nvfp4", shape)
+    if _payload_length(payload) != geometry.payload_bytes:
+        raise ValueError(
+            f"NVFP4 bank payload has {_payload_length(payload)} bytes, "
+            f"expected {geometry.payload_bytes}"
+        )
+    e, n, k = geometry.experts, geometry.n, geometry.k
+    raw = _payload_tensor(payload, torch.device("cpu"))
+    codes = raw[: geometry.code_plane_bytes].reshape(e, n, k // 2)
+    scales = (
+        raw[
+            geometry.scale_plane_offset : geometry.scale_plane_offset
+            + geometry.scale_plane_bytes
+        ]
+        .reshape(e, n // 128, geometry.k_tiles, 32, 4, 4)
+        .permute(0, 1, 4, 3, 2, 5)
+        .contiguous()
+        .reshape(e, n, geometry.groups_per_row)
+    )
+    divisors = raw[geometry.weight_divisor_offset :].clone().view(torch.float32)
+    _valid_scale_words(scales)
+    _valid_divisors(divisors)
+    return codes, scales, divisors

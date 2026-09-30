@@ -9,7 +9,13 @@ from math import prod
 from typing import Sequence
 
 from tools.artifact.layouts import encoded_size
-from tools.artifact.formats import DirectFormat, Fp8RowFormat, Nvfp4Format, get_format
+from tools.artifact.formats import (
+    DirectFormat,
+    Fp8RowFormat,
+    Nvfp4Format,
+    U4Z8Format,
+    get_format,
+)
 from tools.artifact.schema import ACTIVATION_POLICIES, TensorSpec
 from .methods import (
     AuxiliaryValue,
@@ -61,9 +67,11 @@ def default_layout(format: str) -> str:
     if isinstance(kind, DirectFormat):
         return "contiguous_le_v1"
     if isinstance(kind, Fp8RowFormat):
-        return "row_scale_v1"
+        return "row_scale_v1" if kind.scale_bytes == 2 else "row_scale_fp32_v1"
     if isinstance(kind, Nvfp4Format):
         return "block_scale_k16_m128x4_v1"
+    if isinstance(kind, U4Z8Format):
+        return "packed_u4_g16_v1"
     return "row_split_k128_v1"
 
 

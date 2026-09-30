@@ -113,6 +113,59 @@ void geometry_and_views() {
             "per-use native parameters changed the parent");
 }
 
+void flash_next_registrations() {
+    const auto bank = weight_geometry(QType::NVFP4, QuantLayout::ExpertBlockScaleK16M128x4,
+                                      std::array<std::uint64_t, 3>{2, 128, 64});
+    require(bank.scale_offset == 8192 && bank.scale_bytes == 1024 && bank.divisor_offset == 9216 &&
+                bank.bytes == 9224,
+            "NVFP4 expert bank lost its expert-major planes or per-expert divisors");
+    rejects<std::invalid_argument>(
+        [] {
+            (void)weight_geometry(QType::NVFP4, QuantLayout::ExpertBlockScaleK16M128x4,
+                                  std::array<std::uint64_t, 2>{128, 64});
+        },
+        "expert bank accepted a matrix");
+
+    std::vector<std::byte> fp8(268);
+    const WeightParent fp8_parent{weight_geometry(QType::FP8_E4M3FN_ROW_FP32,
+                                                  QuantLayout::RowScaleFp32,
+                                                  std::array<std::uint64_t, 2>{3, 5}),
+                                  fp8.data()};
+    const auto fp8_weight = native_weight({{3, 5}, {{&fp8_parent, 0, 15}}});
+    require(fp8_parent.geometry.bytes == 268 && fp8_weight.scales == fp8.data() + 256 &&
+                fp8_weight.scale_dtype == DType::FP32 && fp8_weight.scale_nb[0] == 4,
+            "FP32 row scales were interpreted as BF16");
+    rejects<std::invalid_argument>(
+        [] {
+            (void)weight_geometry(QType::FP8_E4M3FN_ROW_BF16, QuantLayout::RowScaleFp32,
+                                  std::array<std::uint64_t, 2>{3, 5});
+        },
+        "BF16-scaled FP8 accepted the FP32 row-scale layout");
+
+    std::vector<std::byte> u4(264);
+    const WeightParent u4_parent{weight_geometry(QType::U4Z8_G16_FP16, QuantLayout::PackedU4G16,
+                                                 std::array<std::uint64_t, 2>{2, 32}),
+                                 u4.data()};
+    const auto u4_row = weight_row_planes({&u4_parent, 32, 64});
+    require(u4_parent.geometry.bytes == 264 && u4_row.codes == u4.data() + 16 &&
+                u4_row.scales == u4.data() + 260 && u4_row.scale_row_bytes == 4,
+            "U4 row view selected the wrong code or FP16 scale row");
+    rejects<std::invalid_argument>(
+        [] {
+            (void)weight_geometry(QType::U4Z8_G16_FP16, QuantLayout::PackedU4G16,
+                                  std::array<std::uint64_t, 2>{2, 24});
+        },
+        "U4 table accepted a partial K16 group");
+
+    const std::array<std::int64_t, 3> integers{-3, 1LL << 40, 7};
+    const WeightParent int64_parent{
+        weight_geometry(QType::INT64, QuantLayout::Contiguous, std::array<std::uint64_t, 1>{3}),
+        reinterpret_cast<const std::byte*>(integers.data())};
+    const auto table = weight_tensor({{3}, {{&int64_parent, 0, 3}}}, {3});
+    require(int64_parent.geometry.bytes == 24 && table.dtype == DType::I64,
+            "INT64 table lost its word width");
+}
+
 void invalid_directories() {
     Fixture fixture;
     const auto bad = [&](auto mutate) {
@@ -158,6 +211,7 @@ int main(int argc, char** argv) {
     try {
         file_set_and_bindings();
         geometry_and_views();
+        flash_next_registrations();
         invalid_directories();
         // Optional production-writer fixture or explicitly selected real artifact.
         if (argc == 2) {

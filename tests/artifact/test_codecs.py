@@ -7,9 +7,21 @@ import torch
 
 from tools.artifact.layouts import (
     block_scale_geometry,
+    encoded_size,
+    expert_block_scale_geometry,
 )
 from tools.artifact.codecs.direct import decode_direct, encode_direct
-from tools.artifact.codecs.nvfp4 import decode_nvfp4_words, encode_nvfp4
+from tools.artifact.codecs.nvfp4 import (
+    decode_nvfp4_expert_bank_words,
+    decode_nvfp4_words,
+    encode_nvfp4,
+    encode_nvfp4_expert_bank,
+)
+from tools.artifact.codecs.packed_u4 import (
+    decode_u4z8_g16_words,
+    dequantize_u4z8_g16,
+    encode_u4z8_g16,
+)
 from tools.artifact.codecs.row_split import decode_row_split_codes, encode_row_split
 
 
@@ -49,6 +61,13 @@ def _signed_word(word: int, bits: int) -> int:
             (0, -1, -(1 << 31), (1 << 31) - 1),
             "i",
             torch.int32,
+        ),
+        (
+            "int64",
+            torch.tensor((0, -1, -(1 << 63), (1 << 40) + 3), dtype=torch.int64),
+            (0, -1, -(1 << 63), (1 << 40) + 3),
+            "q",
+            torch.int64,
         ),
     ],
 )
@@ -186,3 +205,72 @@ def test_nvfp4_known_vector_geometry_swizzle_tail_and_round_trip():
     assert torch.equal(decoded_packed, packed)
     assert torch.equal(decoded_scales, scales)
     assert bytes(decoded_divisor.reshape(1).view(torch.uint8).numpy()) == divisor
+
+
+def test_nvfp4_expert_bank_concatenates_independent_expert_planes():
+    shape = (3, 128, 64)
+    geometry = expert_block_scale_geometry("nvfp4", shape)
+    assert (
+        geometry.code_plane_bytes,
+        geometry.scale_plane_offset,
+        geometry.scale_plane_bytes,
+        geometry.weight_divisor_offset,
+        geometry.payload_bytes,
+    ) == (12288, 12288, 1536, 13824, 13836)
+    assert encoded_size("expert_block_scale_k16_m128x4_v1", "nvfp4", shape) == 13836
+    with pytest.raises(ValueError):
+        encoded_size("expert_block_scale_k16_m128x4_v1", "nvfp4", (128, 64))
+
+    generator = torch.Generator().manual_seed(7)
+    codes = torch.randint(0, 256, (3, 128, 32), dtype=torch.uint8, generator=generator)
+    scales = torch.randint(0, 0x7F, (3, 128, 4), dtype=torch.uint8, generator=generator)
+    divisors = torch.tensor([0.5, 2688.0, 3.25], dtype=torch.float32)
+    payload = encode_nvfp4_expert_bank(codes, scales, divisors, shape)
+
+    # Every expert is the registered rank-2 block-scale matrix, split by plane.
+    for expert in range(3):
+        matrix = encode_nvfp4(
+            codes[expert], scales[expert], struct.pack("<f", divisors[expert]), (128, 64)
+        )
+        assert payload[expert * 4096 : (expert + 1) * 4096] == matrix[:4096]
+        scale_begin = geometry.scale_plane_offset + expert * 512
+        assert payload[scale_begin : scale_begin + 512] == matrix[4096:4608]
+        divisor_begin = geometry.weight_divisor_offset + 4 * expert
+        assert payload[divisor_begin : divisor_begin + 4] == matrix[4608:]
+
+    decoded = decode_nvfp4_expert_bank_words(payload, shape)
+    assert torch.equal(decoded[0], codes)
+    assert torch.equal(decoded[1], scales)
+    assert torch.equal(decoded[2], divisors)
+    with pytest.raises(ValueError, match="finite and positive"):
+        encode_nvfp4_expert_bank(codes, scales, torch.tensor([1.0, 0.0, 1.0]), shape)
+
+
+def test_u4z8_packs_low_nibble_first_and_decodes_affine_values():
+    shape = (2, 32)
+    assert encoded_size("packed_u4_g16_v1", "u4z8_g16_fp16", shape) == 264
+    with pytest.raises(ValueError):
+        encoded_size("packed_u4_g16_v1", "u4z8_g16_fp16", (2, 24))
+
+    codes = torch.full(shape, 8, dtype=torch.uint8)
+    codes[0, :4] = torch.tensor([0, 15, 9, 7], dtype=torch.uint8)
+    codes[1, 16] = 12
+    scales = torch.tensor([[0.5, 0.0], [0.0, 0.25]], dtype=torch.float16)
+    payload = encode_u4z8_g16(codes, scales, shape)
+
+    assert payload[:2] == bytes((0xF0, 0x79))  # (k=0 low, k=1 high), (k=2 low, k=3 high)
+    assert payload[24] == 0x8C  # row 1, k=16 low nibble 12, k=17 high nibble 8
+    assert payload[32:256] == bytes(224)
+    assert payload[256:] == struct.pack("<HHHH", 0x3800, 0, 0, 0x3400)
+
+    decoded_codes, decoded_scales = decode_u4z8_g16_words(payload, shape)
+    assert torch.equal(decoded_codes, codes)
+    assert torch.equal(decoded_scales, scales)
+    values = dequantize_u4z8_g16(payload, shape)
+    assert values[0, :4].tolist() == [-4.0, 3.5, 0.5, -0.5]
+    assert values[1, 16].item() == 1.0 and values[1, :16].abs().sum().item() == 0.0
+
+    invalid = codes.clone()
+    invalid[0, 16] = 9
+    with pytest.raises(ValueError, match="zero-point code 8"):
+        encode_u4z8_g16(invalid, scales, shape)

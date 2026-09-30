@@ -77,3 +77,27 @@ def test_row_scaled_fp8_rejects_invalid_words_and_signatures():
     nonzero_codes[0, 0] = 0x38
     with pytest.raises(ValueError, match="zero row scale"):
         encode_fp8_row_scaled(nonzero_codes, _bf16_words(0x0000), (1, 2))
+
+
+def test_row_scale_fp32_layout_preserves_binary32_multipliers():
+    shape = (2, 3)
+    geometry = row_scale_geometry("fp8_e4m3fn_row_fp32", shape)
+    assert (geometry.scale_plane_offset, geometry.payload_bytes) == (256, 264)
+    assert encoded_size("row_scale_fp32_v1", "fp8_e4m3fn_row_fp32", shape) == 264
+    with pytest.raises(ValueError):
+        encoded_size("row_scale_v1", "fp8_e4m3fn_row_fp32", shape)
+
+    codes = torch.tensor([[0x38, 0xB8, 0x00], [0x40, 0x80, 0x7E]], dtype=torch.uint8)
+    # 1 + 2^-20 is not a BF16 value: an FP32-to-BF16 conversion would change the weight.
+    scales = torch.tensor([1.0 + 2.0**-20, 0.125], dtype=torch.float32)
+    format_name = "fp8_e4m3fn_row_fp32"
+    payload = encode_fp8_row_scaled(codes, scales, shape, format_name)
+    assert payload[256:] == struct.pack("<ff", *scales.tolist())
+
+    decoded_codes, decoded_scales = decode_fp8_row_scaled_words(payload, shape, format_name)
+    assert torch.equal(decoded_codes, codes) and torch.equal(decoded_scales, scales)
+    values = dequantize_fp8_row_scaled(payload, shape, format=format_name)
+    assert values[0].tolist() == [1.0 + 2.0**-20, -(1.0 + 2.0**-20), 0.0]
+    assert values[1].tolist() == [0.25, -0.0, 56.0]
+    with pytest.raises(ValueError, match="nonnegative finite FP32"):
+        encode_fp8_row_scaled(codes, torch.tensor([1.0, -0.0]), shape, format_name)

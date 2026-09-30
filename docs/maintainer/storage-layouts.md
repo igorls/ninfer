@@ -11,14 +11,17 @@ The storage registry contains exactly these identities:
 
 | Identity | Kind | Compatible numeric formats | Logical shape | Object alignment |
 |---|---|---|---|---:|
-| `contiguous_le_v1` | tensor layout | `bf16`, `fp32`, `int32` | rank `0..16` | 256 bytes |
+| `contiguous_le_v1` | tensor layout | `bf16`, `fp32`, `int32`, `int64` | rank `0..16` | 256 bytes |
 | `row_split_k128_v1` | tensor layout | `q4_g64_fp16`, `q5_g64_fp16`, `q6_g64_fp16`, `q8_g32_fp16` | rank 2 `[N,K]` | 256 bytes |
 | `block_scale_k16_m128x4_v1` | tensor layout | `nvfp4` | rank 2 `[N,K]`, `N % 128 == 0`, `K % 64 == 0` | 256 bytes |
 | `row_scale_v1` | tensor layout | `fp8_e4m3fn_row_bf16` | rank 2 `[N,K]` | 256 bytes |
+| `row_scale_fp32_v1` | tensor layout | `fp8_e4m3fn_row_fp32` | rank 2 `[N,K]` | 256 bytes |
+| `expert_block_scale_k16_m128x4_v1` | tensor layout | `nvfp4` | rank 3 `[E,N,K]`, `N % 128 == 0`, `K % 64 == 0` | 256 bytes |
+| `packed_u4_g16_v1` | tensor layout | `u4z8_g16_fp16` | rank 2 `[N,K]`, `K % 16 == 0` | 256 bytes |
 | `raw_bytes_v1` | resource encoding | not applicable | nonempty byte string | 1 byte |
 
 These format/layout pairs define the current codec support. Native consumer requirements are
-covered separately in Section 8.
+covered separately in Section 11.
 
 Object alignment applies to the object's payload-relative `offset` in the `.ninfer` JSON. Internal
 plane offsets and padding belong to the selected layout. Inter-object padding belongs to the
@@ -62,6 +65,7 @@ Words are serialized least-significant byte first:
 | `bf16` | 2 | the exact 16-bit bfloat16 logical word, little-endian |
 | `fp32` | 4 | the exact 32-bit IEEE-754 binary32 logical word, little-endian |
 | `int32` | 4 | the exact 32-bit two's-complement logical word, little-endian |
+| `int64` | 8 | the exact 64-bit two's-complement logical word, little-endian |
 
 Signed zero, subnormal, infinity, NaN payload, and integer-word behavior are determined by the
 numeric-format contract. The layout only preserves the word bits.
@@ -321,7 +325,63 @@ encoded by concatenating the selected code rows, recomputing the scale-plane ali
 row count, and appending the selected scale words in the same row order. It does not decode or
 requantize either plane.
 
-## 6. `raw_bytes_v1`
+## 6. `row_scale_fp32_v1`
+
+`row_scale_fp32_v1` stores rank-two `fp8_e4m3fn_row_fp32` matrices `[N,K]`. Its code plane,
+padding and row views are those of Section 5, but the scale plane holds one little-endian FP32
+word per row:
+
+```text
+code_plane_bytes   = N * K
+scale_plane_offset = align_up(code_plane_bytes, 256)
+scale_plane_bytes  = N * 4
+payload_bytes      = scale_plane_offset + scale_plane_bytes
+```
+
+Scale word `n` begins at `scale_plane_offset + 4 * n`. No FP32-to-BF16 conversion is permitted: it
+would select a different represented weight.
+
+## 7. `expert_block_scale_k16_m128x4_v1`
+
+This layout stores an `nvfp4` expert bank `[E,N,K]` as `E` independent Section 4 matrices whose
+planes are concatenated plane by plane, so each plane stays contiguous for a fused expert kernel.
+It requires positive dimensions, `N % 128 == 0` and `K % 64 == 0`:
+
+```text
+code_plane_bytes      = E * N * K / 2
+scale_plane_offset    = align_up(code_plane_bytes, 256)
+scale_plane_bytes     = E * N * K / 16
+weight_divisor_offset = scale_plane_offset + scale_plane_bytes
+payload_bytes         = weight_divisor_offset + 4 * E
+```
+
+Codes use expert-major `[E,N,K/2]` order. Expert `e`'s scale matrix is swizzled by the Section 4
+formula and begins at `scale_plane_offset + e * N * K / 16`; no scale tile crosses an expert. The
+divisor plane holds one little-endian positive FP32 weight divisor per expert, in expert order.
+The bank is one parent with one divisor per expert, not a matrix: it has no parent-level divisor,
+and an expert cannot be addressed as a Section 4 payload without re-encoding its planes.
+
+## 8. `packed_u4_g16_v1`
+
+`packed_u4_g16_v1` stores rank-two `u4z8_g16_fp16` matrices `[N,K]` with `K % 16 == 0`: a
+row-major packed-code plane, zero padding to a 256-byte boundary, and a row-major FP16 scale
+plane:
+
+```text
+groups_per_row     = K / 16
+code_plane_bytes   = N * K / 2
+scale_plane_offset = align_up(code_plane_bytes, 256)
+scale_plane_bytes  = N * groups_per_row * 2
+payload_bytes      = scale_plane_offset + scale_plane_bytes
+```
+
+For each adjacent coordinate pair `(k,k+1)` the smaller K coordinate occupies the low nibble.
+Scale word `(n,g)` is the little-endian FP16 word at
+`scale_plane_offset + 2 * (n * groups_per_row + g)`. A logical row view is its `K/2` code bytes
+and its `groups_per_row` scale words. The layout preserves the unsigned nibbles; subtracting the
+zero point 8 belongs to the numeric decode.
+
+## 9. `raw_bytes_v1`
 
 `raw_bytes_v1` is a resource encoding, not a tensor layout. Its enclosing object payload is
 the resource byte string itself:
@@ -336,24 +396,30 @@ trailing padding. The resource object's JSON `bytes` is its exact nonzero length
 returns the complete span unchanged. A model contract assigns a resource name and interprets those
 bytes; the common encoding does not infer that meaning from the name.
 
-## 7. Decode boundary
+## 10. Decode boundary
 
 Layout decoding yields only persistent logical words:
 
-- `contiguous_le_v1` yields the direct BF16, FP32, or I32 words in logical coordinate order;
+- `contiguous_le_v1` yields the direct BF16, FP32, INT32, or INT64 words in logical coordinate
+  order;
 - `row_split_k128_v1` yields the grouped signed codes and binary16 scales for logical columns
   `0..K-1`, discarding physical columns `K..K_pad-1`;
 - `block_scale_k16_m128x4_v1` yields the packed E2M1 words, natural E4M3FN group-scale words, and
   matrix-level FP32 weight divisor;
 - `row_scale_v1` yields the natural row-major E4M3FN code words and one BF16 multiplier per logical
   row;
+- `row_scale_fp32_v1` yields the same code words and one FP32 multiplier per logical row;
+- `expert_block_scale_k16_m128x4_v1` yields, per expert, the packed E2M1 words, natural E4M3FN
+  group-scale words, and that expert's FP32 weight divisor;
+- `packed_u4_g16_v1` yields low-nibble-first unsigned code words and one FP16 multiplier per K-axis
+  group of 16;
 - `raw_bytes_v1` yields the enclosing resource bytes.
 
 Dequantized values follow the reconstruction rule in `tensor-formats.md`. This document does
 not select a quantization encoder, output dtype, accumulation dtype, kernel, runtime device layout,
 or model consumer.
 
-## 8. Logical views and native operands
+## 11. Logical views and native operands
 
 Bindings address C-order logical element ranges of a parent object. The parent retains its full
 geometry and backing allocation, so a view can locate code and scale planes using the original
@@ -363,7 +429,8 @@ matrix dimensions. Materialization uploads each required parent once and binds n
 native operands. Direct tensors can use a contiguous element range. Grouped integer matrices can
 use consecutive complete rows with unchanged K, using independent code, high-bit and scale pointers.
 
-The current native `Weight` bridge requires a complete parent for FP8 and NVFP4. Their consumers
+The current native `Weight` bridge requires a complete parent for FP8 and NVFP4, and has no form
+for a rank-3 expert bank or a U4Z8 table: their consumers take the `WeightParent` and its planes. Their consumers
 use the complete matrix geometry for plane addressing; a row slice cannot be passed as though its
 payload were a newly packed smaller matrix. Adjacent logical projections can still share one
 parent: when the chosen fused implementation consumes their complete union, it receives that

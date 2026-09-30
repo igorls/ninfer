@@ -20,6 +20,7 @@ from .formats import (
     Nvfp4Format,
     NumericFormat,
     QuantFormat,
+    U4Z8Format,
     get_format,
 )
 
@@ -68,6 +69,35 @@ class BlockScaleGeometry:
 
 
 @dataclass(frozen=True, slots=True)
+class ExpertBlockScaleGeometry:
+    experts: int
+    n: int
+    k: int
+    groups_per_row: int
+    k_tiles: int
+    expert_code_bytes: int
+    expert_scale_bytes: int
+    code_plane_bytes: int
+    scale_plane_offset: int
+    scale_plane_bytes: int
+    weight_divisor_offset: int
+    payload_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class PackedU4Geometry:
+    n: int
+    k: int
+    groups_per_row: int
+    code_row_bytes: int
+    scale_row_bytes: int
+    code_plane_bytes: int
+    scale_plane_offset: int
+    scale_plane_bytes: int
+    payload_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
 class RowScaleGeometry:
     n: int
     k: int
@@ -77,7 +107,9 @@ class RowScaleGeometry:
     payload_bytes: int
 
 
-CONTIGUOUS_LE_V1 = Layout("contiguous_le_v1", 256, frozenset(("bf16", "fp32", "int32")))
+CONTIGUOUS_LE_V1 = Layout(
+    "contiguous_le_v1", 256, frozenset(("bf16", "fp32", "int32", "int64"))
+)
 ROW_SPLIT_K128_V1 = Layout(
     "row_split_k128_v1",
     256,
@@ -93,6 +125,21 @@ ROW_SCALE_V1 = Layout(
     256,
     frozenset(("fp8_e4m3fn_row_bf16",)),
 )
+ROW_SCALE_FP32_V1 = Layout(
+    "row_scale_fp32_v1",
+    256,
+    frozenset(("fp8_e4m3fn_row_fp32",)),
+)
+EXPERT_BLOCK_SCALE_K16_M128X4_V1 = Layout(
+    "expert_block_scale_k16_m128x4_v1",
+    256,
+    frozenset(("nvfp4",)),
+)
+PACKED_U4_G16_V1 = Layout(
+    "packed_u4_g16_v1",
+    256,
+    frozenset(("u4z8_g16_fp16",)),
+)
 
 LAYOUTS = MappingProxyType(
     {
@@ -102,6 +149,9 @@ LAYOUTS = MappingProxyType(
             ROW_SPLIT_K128_V1,
             BLOCK_SCALE_K16_M128X4_V1,
             ROW_SCALE_V1,
+            ROW_SCALE_FP32_V1,
+            EXPERT_BLOCK_SCALE_K16_M128X4_V1,
+            PACKED_U4_G16_V1,
         )
     }
 )
@@ -226,16 +276,72 @@ def block_scale_geometry(
     )
 
 
+def expert_block_scale_geometry(
+    format: str | Nvfp4Format, shape: Sequence[int]
+) -> ExpertBlockScaleGeometry:
+    """Expert-major ``[E,N,K]`` NVFP4 bank: all codes, all swizzled scales, E divisors."""
+
+    spec = _format(format)
+    if not isinstance(spec, Nvfp4Format):
+        raise ValueError("expert_block_scale_k16_m128x4_v1 requires NVFP4")
+    experts, n, k = _shape(shape, rank=3)
+    matrix = block_scale_geometry(spec, (n, k))
+    code_plane_bytes = experts * matrix.code_plane_bytes
+    scale_plane_offset = align_up(code_plane_bytes, PLANE_ALIGNMENT)
+    scale_plane_bytes = experts * matrix.scale_plane_bytes
+    weight_divisor_offset = scale_plane_offset + scale_plane_bytes
+    return ExpertBlockScaleGeometry(
+        experts=experts,
+        n=n,
+        k=k,
+        groups_per_row=matrix.groups_per_row,
+        k_tiles=matrix.k_tiles,
+        expert_code_bytes=matrix.code_plane_bytes,
+        expert_scale_bytes=matrix.scale_plane_bytes,
+        code_plane_bytes=code_plane_bytes,
+        scale_plane_offset=scale_plane_offset,
+        scale_plane_bytes=scale_plane_bytes,
+        weight_divisor_offset=weight_divisor_offset,
+        payload_bytes=weight_divisor_offset + 4 * experts,
+    )
+
+
+def packed_u4_geometry(
+    format: str | U4Z8Format, shape: Sequence[int]
+) -> PackedU4Geometry:
+    spec = _format(format)
+    if not isinstance(spec, U4Z8Format):
+        raise ValueError("packed_u4_g16_v1 requires U4Z8 G16")
+    n, k = _shape(shape, rank=2)
+    if k % spec.group_size:
+        raise ValueError("packed_u4_g16_v1 requires K divisible by 16")
+    groups_per_row = k // spec.group_size
+    code_plane_bytes = n * k // 2
+    scale_plane_offset = align_up(code_plane_bytes, PLANE_ALIGNMENT)
+    scale_plane_bytes = n * groups_per_row * 2
+    return PackedU4Geometry(
+        n=n,
+        k=k,
+        groups_per_row=groups_per_row,
+        code_row_bytes=k // 2,
+        scale_row_bytes=groups_per_row * 2,
+        code_plane_bytes=code_plane_bytes,
+        scale_plane_offset=scale_plane_offset,
+        scale_plane_bytes=scale_plane_bytes,
+        payload_bytes=scale_plane_offset + scale_plane_bytes,
+    )
+
+
 def row_scale_geometry(
     format: str | Fp8RowFormat, shape: Sequence[int]
 ) -> RowScaleGeometry:
     spec = _format(format)
     if not isinstance(spec, Fp8RowFormat):
-        raise ValueError("row_scale_v1 requires a row-scaled FP8 format")
+        raise ValueError("row-scale layouts require a row-scaled FP8 format")
     n, k = _shape(shape, rank=2)
     code_plane_bytes = n * k
     scale_plane_offset = align_up(code_plane_bytes, PLANE_ALIGNMENT)
-    scale_plane_bytes = n * 2
+    scale_plane_bytes = n * spec.scale_bytes
     return RowScaleGeometry(
         n=n,
         k=k,
@@ -272,8 +378,12 @@ def encoded_size(
         if not isinstance(numeric_spec, Nvfp4Format):
             raise ValueError("block_scale_k16_m128x4_v1 requires NVFP4")
         return block_scale_geometry(numeric_spec, shape).payload_bytes
-    if layout_spec is ROW_SCALE_V1:
+    if layout_spec is ROW_SCALE_V1 or layout_spec is ROW_SCALE_FP32_V1:
         if not isinstance(numeric_spec, Fp8RowFormat):
-            raise ValueError("row_scale_v1 requires a row-scaled FP8 format")
+            raise ValueError(f"{layout_spec.name} requires a row-scaled FP8 format")
         return row_scale_geometry(numeric_spec, shape).payload_bytes
+    if layout_spec is EXPERT_BLOCK_SCALE_K16_M128X4_V1:
+        return expert_block_scale_geometry(numeric_spec, shape).payload_bytes
+    if layout_spec is PACKED_U4_G16_V1:
+        return packed_u4_geometry(numeric_spec, shape).payload_bytes
     raise ValueError(f"unsupported tensor layout: {layout_spec.name!r}")

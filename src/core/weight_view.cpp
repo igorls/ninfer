@@ -39,8 +39,10 @@ std::uint64_t word_bytes(QType format) {
     case QType::FP32:
     case QType::INT32:
         return 4;
+    case QType::INT64:
+        return 8;
     default:
-        throw std::invalid_argument("direct weight requires BF16, FP32 or INT32");
+        throw std::invalid_argument("direct weight requires BF16, FP32, INT32 or INT64");
     }
 }
 
@@ -52,6 +54,8 @@ DType direct_dtype(QType format) {
         return DType::FP32;
     case QType::INT32:
         return DType::I32;
+    case QType::INT64:
+        return DType::I64;
     default:
         throw std::invalid_argument("quantized weight cannot be bound as a direct tensor");
     }
@@ -91,6 +95,22 @@ WeightGeometry weight_geometry(QType format, QuantLayout layout,
         }
         return out;
     }
+    if (layout == QuantLayout::ExpertBlockScaleK16M128x4) {
+        // [E,N,K]: every plane is expert-major; one FP32 divisor per expert closes the payload.
+        if (format != QType::NVFP4 || shape.size() != 3 || shape[1] % 128 || shape[2] % 64) {
+            throw std::invalid_argument("NVFP4 expert bank requires [E,N,K], N%128=0 and K%64=0");
+        }
+        out.padded_columns      = shape[2];
+        out.group_size          = 16;
+        out.code_bytes_per_row  = shape[2] / 2;
+        out.scale_bytes_per_row = shape[2] / 16;
+        out.code_bytes          = out.elements / 2;
+        out.scale_offset        = aligned(out.code_bytes, 256);
+        out.scale_bytes         = out.elements / 16;
+        out.divisor_offset      = add(out.scale_offset, out.scale_bytes);
+        out.bytes               = add(out.divisor_offset, mul(shape[0], 4));
+        return out;
+    }
     if (shape.size() != 2) { throw std::invalid_argument("quantized weight must be a matrix"); }
     const auto n       = shape[0];
     const auto k       = shape[1];
@@ -124,13 +144,14 @@ WeightGeometry weight_geometry(QType format, QuantLayout layout,
         out.high_offset         = aligned(out.code_bytes, 256);
         out.high_bytes          = mul(n, out.high_bytes_per_row);
         out.scale_offset        = add(out.high_offset, aligned(out.high_bytes, 256));
-    } else if (layout == QuantLayout::RowScale) {
-        if (format != QType::FP8_E4M3FN_ROW_BF16) {
-            throw std::invalid_argument("RowScale requires row-scaled FP8");
+    } else if (layout == QuantLayout::RowScale || layout == QuantLayout::RowScaleFp32) {
+        const bool fp32_scale = layout == QuantLayout::RowScaleFp32;
+        if (format != (fp32_scale ? QType::FP8_E4M3FN_ROW_FP32 : QType::FP8_E4M3FN_ROW_BF16)) {
+            throw std::invalid_argument("row-scale layout requires its row-scaled FP8 format");
         }
         out.group_size          = k;
         out.code_bytes_per_row  = k;
-        out.scale_bytes_per_row = 2;
+        out.scale_bytes_per_row = fp32_scale ? 4 : 2;
         out.code_bytes          = out.elements;
         out.scale_offset        = aligned(out.code_bytes, 256);
     } else if (layout == QuantLayout::BlockScaleK16M128x4) {
@@ -141,6 +162,15 @@ WeightGeometry weight_geometry(QType format, QuantLayout layout,
         out.code_bytes_per_row  = k / 2;
         out.scale_bytes_per_row = k / 16;
         out.code_bytes          = out.elements / 2;
+        out.scale_offset        = aligned(out.code_bytes, 256);
+    } else if (layout == QuantLayout::PackedU4G16) {
+        if (format != QType::U4Z8_G16_FP16 || k % 16) {
+            throw std::invalid_argument("PackedU4G16 requires U4Z8_G16_FP16 and K%16=0");
+        }
+        out.group_size          = 16;
+        out.code_bytes_per_row  = k / 2;
+        out.scale_bytes_per_row = k / 16 * 2;
+        out.code_bytes          = mul(n, out.code_bytes_per_row);
         out.scale_offset        = aligned(out.code_bytes, 256);
     } else {
         throw std::invalid_argument("unknown quantized weight layout");
@@ -262,7 +292,11 @@ Weight native_weight(const WeightView& view, float input_divisor) {
         throw std::invalid_argument("quantized native Weight requires unchanged parent K");
     }
     const auto planes = weight_row_planes(region);
-    if ((g.layout == QuantLayout::RowScale || g.layout == QuantLayout::BlockScaleK16M128x4) &&
+    if (g.layout == QuantLayout::PackedU4G16) {
+        throw std::invalid_argument("U4Z8 G16 tables have no native Weight ABI");
+    }
+    if ((g.layout == QuantLayout::RowScale || g.layout == QuantLayout::RowScaleFp32 ||
+         g.layout == QuantLayout::BlockScaleK16M128x4) &&
         !is_complete_weight(view)) {
         throw std::invalid_argument(
             "this native Weight input requires a complete FP8/NVFP4 parent");
@@ -282,11 +316,13 @@ Weight native_weight(const WeightView& view, float input_divisor) {
         out.scale_nb[0] = 2;
         out.scale_nb[1] = static_cast<std::int64_t>(g.scale_bytes_per_row);
         out.scale_nb[2] = out.scale_nb[3] = out.scale_nb[1] * out.n;
-    } else if (g.layout == QuantLayout::RowScale) {
-        out.scale_dtype = DType::BF16;
+    } else if (g.layout == QuantLayout::RowScale || g.layout == QuantLayout::RowScaleFp32) {
+        const auto word = static_cast<std::int64_t>(g.scale_bytes_per_row);
+        out.scale_dtype = word == 4 ? DType::FP32 : DType::BF16;
         out.scale_ne[0] = out.n;
-        out.scale_nb[0] = 2;
-        out.scale_nb[1] = out.scale_nb[2] = out.scale_nb[3] = static_cast<std::int64_t>(out.n) * 2;
+        out.scale_nb[0] = word;
+        out.scale_nb[1] = out.scale_nb[2] = out.scale_nb[3] =
+            static_cast<std::int64_t>(out.n) * word;
     } else if (g.layout == QuantLayout::BlockScaleK16M128x4) {
         out.scale_dtype = DType::FP8_E4M3FN;
     }

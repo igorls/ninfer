@@ -100,10 +100,13 @@ class TensorOutput:
         elif isinstance(self.format, Fp8RowFormat):
             g = row_scale_geometry(self.format, obj.shape)
             local = row_scale_geometry(self.format, (rows, k))
-            block = memoryview(encode_fp8_row_scaled(codes, scales, (rows, k)))
+            block = memoryview(
+                encode_fp8_row_scaled(codes, scales, (rows, k), self.format)
+            )
             self.write_bytes(row_begin * k, block[: local.code_plane_bytes])
             self.write_bytes(
-                g.scale_plane_offset + row_begin * 2, block[local.scale_plane_offset :]
+                g.scale_plane_offset + row_begin * self.format.scale_bytes,
+                block[local.scale_plane_offset :],
             )
         elif isinstance(self.format, Nvfp4Format):
             if row_begin % 128 or rows % 128 or weight_divisor is None:
@@ -124,4 +127,4 @@ class TensorOutput:
             elif self._divisor != weight_divisor:
                 raise ValueError(f"{obj.id}: weight divisor changed between row blocks")
         else:
-            raise TypeError(f"{obj.id}: direct format does not accept quantized codes")
+            raise TypeError(f"{obj.id}: {self.format.name} has no row-code encoder")

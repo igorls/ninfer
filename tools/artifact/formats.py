@@ -38,34 +38,59 @@ class Nvfp4Format:
 
 @dataclass(frozen=True, slots=True)
 class Fp8RowFormat:
-    """E4M3FN weights with one BF16 multiplier per logical row."""
+    """E4M3FN weights with one BF16 or FP32 multiplier per logical row."""
 
     name: str
+    scale_bytes: int
 
 
-NumericFormat: TypeAlias = DirectFormat | QuantFormat | Nvfp4Format | Fp8RowFormat
+@dataclass(frozen=True, slots=True)
+class U4Z8Format:
+    """Unsigned four-bit codes, fixed zero point 8, one binary16 multiplier per group."""
+
+    name: str
+    group_size: int
+
+
+NumericFormat: TypeAlias = (
+    DirectFormat | QuantFormat | Nvfp4Format | Fp8RowFormat | U4Z8Format
+)
 
 
 BF16 = DirectFormat("bf16", 2)
 FP32 = DirectFormat("fp32", 4)
 INT32 = DirectFormat("int32", 4)
+INT64 = DirectFormat("int64", 8)
 
 Q4_G64_FP16 = QuantFormat("q4_g64_fp16", 4, 64, -8, 7)
 Q5_G64_FP16 = QuantFormat("q5_g64_fp16", 5, 64, -16, 15)
 Q6_G64_FP16 = QuantFormat("q6_g64_fp16", 6, 64, -32, 31)
 Q8_G32_FP16 = QuantFormat("q8_g32_fp16", 8, 32, -127, 127)
 NVFP4 = Nvfp4Format("nvfp4", 16)
-FP8_E4M3FN_ROW_BF16 = Fp8RowFormat("fp8_e4m3fn_row_bf16")
+FP8_E4M3FN_ROW_BF16 = Fp8RowFormat("fp8_e4m3fn_row_bf16", 2)
+FP8_E4M3FN_ROW_FP32 = Fp8RowFormat("fp8_e4m3fn_row_fp32", 4)
+U4Z8_G16_FP16 = U4Z8Format("u4z8_g16_fp16", 16)
 
 
-DIRECT_FORMATS = MappingProxyType({item.name: item for item in (BF16, FP32, INT32)})
+DIRECT_FORMATS = MappingProxyType(
+    {item.name: item for item in (BF16, FP32, INT32, INT64)}
+)
 QUANT_FORMATS = MappingProxyType(
     {item.name: item for item in (Q4_G64_FP16, Q5_G64_FP16, Q6_G64_FP16, Q8_G32_FP16)}
 )
 NVFP4_FORMATS = MappingProxyType({NVFP4.name: NVFP4})
-FP8_ROW_FORMATS = MappingProxyType({FP8_E4M3FN_ROW_BF16.name: FP8_E4M3FN_ROW_BF16})
+FP8_ROW_FORMATS = MappingProxyType(
+    {item.name: item for item in (FP8_E4M3FN_ROW_BF16, FP8_E4M3FN_ROW_FP32)}
+)
+U4Z8_FORMATS = MappingProxyType({U4Z8_G16_FP16.name: U4Z8_G16_FP16})
 NUMERIC_FORMATS = MappingProxyType(
-    {**DIRECT_FORMATS, **QUANT_FORMATS, **NVFP4_FORMATS, **FP8_ROW_FORMATS}
+    {
+        **DIRECT_FORMATS,
+        **QUANT_FORMATS,
+        **NVFP4_FORMATS,
+        **FP8_ROW_FORMATS,
+        **U4Z8_FORMATS,
+    }
 )
 
 
@@ -119,6 +144,22 @@ def valid_fp8_row_scale_word(word: int) -> bool:
     return math.isfinite(value)
 
 
+def valid_nonnegative_fp32_word(word: int) -> bool:
+    """Return whether *word* is a nonnegative finite binary32 multiplier, including +0."""
+
+    if type(word) is not int or not 0 <= word <= 0xFFFFFFFF or word & 0x80000000:
+        return False
+    return word & 0x7F800000 != 0x7F800000
+
+
+def valid_nonnegative_fp16_word(word: int) -> bool:
+    """Return whether *word* is a nonnegative finite binary16 multiplier, including +0."""
+
+    if type(word) is not int or not 0 <= word <= 0xFFFF or word & 0x8000:
+        return False
+    return word & 0x7C00 != 0x7C00
+
+
 def valid_positive_fp32_word(word: int) -> bool:
     """Return whether an IEEE binary32 word represents a finite positive value."""
 
@@ -141,27 +182,34 @@ __all__ = [
     "BF16",
     "FP32",
     "INT32",
+    "INT64",
     "Q4_G64_FP16",
     "Q5_G64_FP16",
     "Q6_G64_FP16",
     "Q8_G32_FP16",
     "NVFP4",
     "FP8_E4M3FN_ROW_BF16",
+    "FP8_E4M3FN_ROW_FP32",
+    "U4Z8_G16_FP16",
     "DIRECT_FORMATS",
     "QUANT_FORMATS",
     "NVFP4_FORMATS",
     "FP8_ROW_FORMATS",
+    "U4Z8_FORMATS",
     "NUMERIC_FORMATS",
     "DirectFormat",
     "QuantFormat",
     "Nvfp4Format",
     "Fp8RowFormat",
+    "U4Z8Format",
     "NumericFormat",
     "get_format",
     "decode_e2m1_word",
     "decode_e4m3fn_word",
     "valid_fp8_row_scale_word",
     "valid_fp8_weight_word",
+    "valid_nonnegative_fp16_word",
+    "valid_nonnegative_fp32_word",
     "valid_nvfp4_scale_word",
     "valid_positive_fp32_word",
 ]

@@ -1,6 +1,6 @@
 # NInfer Persistent Tensor Numeric Formats
 
-This reference defines the nine persistent numeric tensor formats accepted by current `.ninfer`
+This reference defines the twelve persistent numeric tensor formats accepted by current `.ninfer`
 artifacts: their logical words, quantization semantics, canonical reference encoders where
 applicable, and conformance boundaries. [Container framing](artifact-container.md),
 [physical layouts](storage-layouts.md), weight recipes and runtime-state codecs are defined
@@ -8,7 +8,7 @@ separately.
 
 ## 1. Registered formats
 
-NInfer has exactly nine persistent numeric tensor formats in four categories.
+NInfer has exactly twelve persistent numeric tensor formats in five categories.
 
 Direct scalar formats preserve one logical scalar word per tensor element:
 
@@ -17,6 +17,7 @@ Direct scalar formats preserve one logical scalar word per tensor element:
 | `bf16` | direct floating point | 16 | bfloat16 bit encoding |
 | `fp32` | direct floating point | 32 | IEEE-754 binary32 |
 | `int32` | direct signed integer | 32 | 32-bit two's-complement integer |
+| `int64` | direct signed integer | 64 | 64-bit two's-complement integer |
 
 Grouped quantized-weight formats preserve signed codes plus one scale per logical group:
 
@@ -33,11 +34,18 @@ The block-scaled floating-point weight format is:
 |---|---|---:|---|---|
 | `nvfp4` | E2M1, 4 bits/weight | 16 | one E4M3FN word/group | one positive FP32 weight divisor |
 
-The row-scaled floating-point weight format is:
+The row-scaled floating-point weight formats are:
 
 | Canonical name | Code | Scale granularity | Scale |
 |---|---|---|---|
 | `fp8_e4m3fn_row_bf16` | E4M3FN, 8 bits/weight | one multiplier per logical row | BF16 |
+| `fp8_e4m3fn_row_fp32` | E4M3FN, 8 bits/weight | one multiplier per logical row | FP32 |
+
+The affine unsigned weight format (the Qwen3.8-Flash-Next PLE table) is:
+
+| Canonical name | Code | Zero point | Group size | Scale |
+|---|---|---:|---:|---|
+| `u4z8_g16_fp16` | unsigned 4-bit `u` | 8 | 16 | one binary16 multiplier/group |
 
 Each name fixes a code and scale contract. The format registry is implemented in
 [`tools/artifact/formats.py`](../../tools/artifact/formats.py) and
@@ -118,10 +126,12 @@ among other things:
 
 One format may have more than one deliberately supported layout, but every layout must decode to
 exactly the same direct words or logical codes and scales. The currently registered layouts are
-`contiguous_le_v1` for direct words, `row_split_k128_v1` for grouped signed-integer formats, and
-`block_scale_k16_m128x4_v1` for `nvfp4`, and `row_scale_v1` for
-`fp8_e4m3fn_row_bf16`. Their byte order, plane packing, padding, swizzle, divisor placement, and
-alignment rules belong to the layout registry, not to these nine numeric formats.
+`contiguous_le_v1` for direct words, `row_split_k128_v1` for grouped signed-integer formats,
+`block_scale_k16_m128x4_v1` for `nvfp4` matrices and `expert_block_scale_k16_m128x4_v1` for `nvfp4`
+expert banks, `row_scale_v1` for `fp8_e4m3fn_row_bf16`, `row_scale_fp32_v1` for
+`fp8_e4m3fn_row_fp32`, and `packed_u4_g16_v1` for `u4z8_g16_fp16`. Their byte order, plane
+packing, padding, swizzle, divisor placement, and alignment rules belong to the layout registry,
+not to these twelve numeric formats.
 
 ### 2.7 Compute profile and kernel support
 
@@ -199,6 +209,12 @@ scale, zero point, saturation behavior, sentinel convention, or dependency on th
 type. Requirements such as nonnegativity, vocabulary bounds, or the meaning of `-1` belong to the
 specific tensor role.
 
+#### `int64`
+
+`int64` is a 64-bit two's-complement signed integer with the same rules as `int32`: every word is
+valid, value `u` for `u < 2^63` and `u - 2^64` otherwise, and the tensor role owns any range or
+sentinel meaning.
+
 #### Common direct-format rules
 
 For a direct tensor, every logical coordinate owns one independent word of the selected format.
@@ -259,6 +275,10 @@ For code `c[n,k]`, scale word `s[n,g]`, and `g=floor(k/16)`, the exact represent
 W[n,k] = decode_e2m1(c[n,k]) * decode_e4m3fn(s[n,g]) / d_w
 ```
 
+An `nvfp4` expert bank `[E,N,K]` (layout `expert_block_scale_k16_m128x4_v1`) is `E` such
+matrices: expert `e` has its own codes, scales and divisor `d_w[e]`, and
+`W[e,n,k] = decode_e2m1(c[e,n,k]) * decode_e4m3fn(s[e,n,g]) / d_w[e]`.
+
 `import_encoded` copies all three fields without requantizing or canonicalizing them. Activation
 calibration is not part of this weight format. In particular, a
 site-level input divisor used by an NVFP4 execution path is a separate model-role tensor and cannot
@@ -297,6 +317,39 @@ The format does not define how a floating-point source is assigned a scale or ro
 A recipe either preserves already selected code and scale words exactly or names its
 conversion method. Activation quantization and activation scales are separate compute or runtime-state
 concerns and are not persistent fields of this format.
+
+### 3.5 `fp8_e4m3fn_row_fp32`
+
+`fp8_e4m3fn_row_fp32` has the rank-two `[N,K]` geometry, code domain and signed-zero rule of
+Section 3.4, but every row multiplier is an IEEE-754 binary32 word. A valid multiplier is
+nonnegative and finite, including positive zero and positive subnormals; negative values, negative
+zero, infinity and NaN are invalid. The exact represented weight is:
+
+```text
+c32        = exact_e4m3fn_to_binary32(c[n,k])
+w_hat[n,k] = binary32(c32 * s[n])
+```
+
+The FP32 word is preserved exactly; converting it to BF16 selects a different represented weight.
+
+### 3.6 `u4z8_g16_fp16`
+
+`u4z8_g16_fp16` is a positive rank-two matrix `[N,K]` with `K` divisible by 16. Every coordinate
+owns one unsigned four-bit word `u` in `[0,15]`; each consecutive K-axis group of 16 owns one
+IEEE-754 binary16 multiplier. A valid multiplier is nonnegative and finite, including positive zero
+and positive subnormals; negative values, negative zero, infinity and NaN are invalid. A
+positive-zero multiplier admits only the zero-point code `u = 8` in its group. For
+`g = floor(k/16)`:
+
+```text
+q[n,k]     = integer(u[n,k]) - 8
+s32        = exact_binary16_to_binary32(s[n,g])
+w_hat[n,k] = binary32(binary32(q[n,k]) * s32)
+```
+
+This is an affine unsigned-code contract, not the signed two's-complement `q4_g64_fp16`; the
+fixed zero point belongs to the identity. NInfer owns no encoder for it: the Flash-Next recipe
+preserves the selected packed codes and FP16 multipliers of the pinned PLE source.
 
 ## 4. Grouped signed-integer tensor model
 
@@ -556,6 +609,9 @@ A conforming producer must:
   positive FP32 weight divisor under Section 3.3;
 - for `fp8_e4m3fn_row_bf16`, emit only finite E4M3FN code words and valid BF16 row multipliers,
   with signed-zero codes as the only legal codes in a positive-zero-scale row under Section 3.4;
+- for `fp8_e4m3fn_row_fp32`, the same with valid FP32 row multipliers under Section 3.5;
+- for `u4z8_g16_fp16`, emit valid FP16 group multipliers and only code 8 in a zero-scale group
+  under Section 3.6;
 - record enough conversion provenance for the artifact producer to identify how the values
   were derived;
 - when an encoder converts floating-point source values, fail rather than silently quantize
@@ -582,8 +638,9 @@ The `.ninfer` container and each registered storage layout must:
   implementation;
 - for `nvfp4`, reconstruct every E2M1 code word, natural E4M3FN scale word, and the matrix FP32
   divisor under Section 3.3;
-- for `fp8_e4m3fn_row_bf16`, reconstruct every E4M3FN code word and its owning BF16 row multiplier
-  under Section 3.4;
+- for `fp8_e4m3fn_row_bf16` and `fp8_e4m3fn_row_fp32`, reconstruct every E4M3FN code word and its
+  owning row multiplier under Sections 3.4 and 3.5;
+- for `u4z8_g16_fp16`, reconstruct every unsigned code word and its group's FP16 multiplier;
 - define its canonical physical-padding contents and producer responsibilities, if it materializes
   padding;
 - reject unknown formats and unsupported format/layout combinations;
@@ -613,8 +670,8 @@ producer contract and the represented values.
 
 A consuming kernel or model component must interpret direct logical words according to Section 3.1,
 grouped signed-integer identities, codes, and scales according to Section 3.2 and Sections 5 and 6,
-`nvfp4` words and divisor according to Section 3.3, and row-scaled FP8 words according to Section
-3.4. It may choose its private fusion, reduction, staging, and intermediate precision; the
+`nvfp4` words and divisor according to Section 3.3, row-scaled FP8 words according to Sections
+3.4 and 3.5, and `u4z8_g16_fp16` words according to Section 3.6. It may choose its private fusion, reduction, staging, and intermediate precision; the
 observable Op result is qualified against the independent oracle with the Op's named criterion for
 that implementation profile. Kernel implementation details do not alter the persistent format and
 must not be needed to decode an artifact independently.
@@ -627,7 +684,7 @@ weights to obtain another execution path.
 Implementation of this document is protected at the representation boundary, not by tests that scan
 enum spellings or private kernel layout. The retained codec and encoder evidence covers:
 
-- exact representative BF16, FP32, and I32 word round trips, including signed zeros, subnormals, NaN
+- exact representative BF16, FP32, INT32 and INT64 word round trips, including signed zeros, subnormals, NaN
   payload bits, and integer extrema, plus rejection of implicit cross-type encoding;
 - Q4, Q5, Q6, and Q8 plane bit order, legal interval endpoints, encoded-size geometry, partial-K zero
   padding, consecutive row views, and arbitrary row gathers;
@@ -635,7 +692,10 @@ enum spellings or private kernel layout. The retained codec and encoder evidence
   reconstruction equation, and known block-scale swizzle offsets;
 - finite E4M3FN weight-code validity, BF16 row-scale validity, signed-zero rows, exact code/scale
   plane round trips, and the row-multiplier reconstruction equation for
-  `fp8_e4m3fn_row_bf16`;
+  `fp8_e4m3fn_row_bf16`, and an FP32 multiplier that BF16 cannot represent for
+  `fp8_e4m3fn_row_fp32`;
+- NVFP4 expert banks as plane-wise concatenations of independent matrices with per-expert divisors;
+- `u4z8_g16_fp16` low-nibble-first packing, the zero-point decode and the zero-scale rule;
 - canonical binary16 scale rounding, reciprocal-multiply rather than direct division, positive and
   negative ties-to-even, minimum-subnormal rescue, and rejection of non-finite or overflowing source
   groups;
