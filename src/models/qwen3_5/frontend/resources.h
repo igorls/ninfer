@@ -1,9 +1,10 @@
 #pragma once
 
-#include "models/qwen3_5/config.h"
 #include "models/qwen3_5/frontend/tokenizer.h"
 
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string_view>
 
 namespace ninfer::models::qwen3_5 {
@@ -21,6 +22,20 @@ struct FrontendResources {
     std::uint32_t public_token_count = 0;
 };
 
-void parse_resources(FrontendResources& resources, const Config& config);
+// The model facts a package validates its frontend resources against; any architecture whose
+// prompts use this Frontend fills it from its own config.
+struct FrontendGeometry {
+    struct VisionPatch {
+        std::uint32_t patch_size          = 0;
+        std::uint32_t temporal_patch_size = 0;
+        std::uint32_t spatial_merge_size  = 0;
+    };
+
+    std::uint32_t embedding_rows = 0;
+    std::optional<VisionPatch> vision;
+    std::optional<std::uint32_t> selector_top_k;
+};
+
+void parse_resources(FrontendResources& resources, const FrontendGeometry& geometry);
 
 } // namespace ninfer::models::qwen3_5

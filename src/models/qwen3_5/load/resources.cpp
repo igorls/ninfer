@@ -17,7 +17,16 @@ FrontendResources bind_resources(artifact::Binder& binder, const Config& config)
         out.preprocessor_config_json       = resource("vision", "preprocessor_config.json");
         out.video_preprocessor_config_json = resource("vision", "video_preprocessor_config.json");
     }
-    parse_resources(out, config);
+    FrontendGeometry geometry{.embedding_rows = config.text.vocab_size};
+    if (config.vision) {
+        geometry.vision = FrontendGeometry::VisionPatch{config.vision->patch_size,
+                                                        config.vision->temporal_patch_size,
+                                                        config.vision->spatial_merge_size};
+    }
+    if (config.draft && config.draft->dflash2) {
+        geometry.selector_top_k = config.draft->dflash2->selector_top_k;
+    }
+    parse_resources(out, geometry);
     return out;
 }
 
