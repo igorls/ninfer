@@ -28,20 +28,7 @@ struct PairedProjectionWeights {
 
 using ProjectionWeights = std::variant<SingleProjectionWeight, PairedProjectionWeights>;
 
-// One complete NVFP4 expert bank [E,N,K] (expert_block_scale_k16_m128x4_v1): E code planes, then E
-// swizzled K16 block-scale planes, then E FP32 weight divisors. A bank Use stores no activation
-// divisor: its A4 route quantizes each activation row with a dynamic scale.
-struct Nvfp4ExpertBankWeight {
-    const std::byte* codes               = nullptr;
-    const std::byte* scales              = nullptr;
-    const float* weight_scale_divisors   = nullptr;
-    std::int32_t experts                 = 0;
-    std::int32_t n                       = 0;
-    std::int32_t k                       = 0;
-    std::uint64_t code_bytes_per_expert  = 0;
-    std::uint64_t scale_bytes_per_expert = 0;
-    LinearPolicy policy                  = LinearPolicy::A16Only;
-};
+// Nvfp4ExpertBankWeight is declared with its consuming Op in sparse_moe.h.
 
 // Prepare the existing native forms; no device allocation, upload, execution or graph rewrite.
 // Runtime shape/phase choices and scratch remain with the actual calling Op.

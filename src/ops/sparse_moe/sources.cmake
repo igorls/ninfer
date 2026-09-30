@@ -6,4 +6,8 @@ target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/small_t/sparse_moe_small_t_kernels.cu"
   "${CMAKE_CURRENT_LIST_DIR}/small_t/sparse_moe_small_t_plan.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/../wrapper/sparse_moe.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/nvfp4_bank/route.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/nvfp4_bank/decode.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/nvfp4_bank/grouped.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/../wrapper/sparse_moe_nvfp4_bank.cpp"
 )
