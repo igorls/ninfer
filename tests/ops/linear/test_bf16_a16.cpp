@@ -276,6 +276,28 @@ int run_bf16_linear() {
         }
     }
     failures += run_selector_linear();
+
+    // Flash-Next K=2560 problems plus its BF16 MTP output projection [2560,6144]. The token set
+    // covers every registered route boundary of these shapes.
+    struct FlashNextShape {
+        std::int32_t n, k;
+        std::uint32_t seed;
+    };
+    for (const FlashNextShape shape : {FlashNextShape{640, 2560, 433U}, FlashNextShape{2560, 2560, 439U},
+                                       FlashNextShape{10240, 2560, 443U},
+                                       FlashNextShape{13312, 2560, 449U},
+                                       FlashNextShape{248320, 2560, 457U},
+                                       FlashNextShape{2560, 6144, 461U}}) {
+        DeviceWeight weight(make_patterned(shape.n, shape.k, shape.seed));
+        for (int tokens : {1,  2,  3,  4,  5,   8,   15,  16,  17,  31,  32,  33,  63,  64,  65, 95,
+                           96, 97, 127, 128, 129, 191, 192, 193, 511, 512, 513, 640, 641,
+                           1024, 1536, 2048, 2049}) {
+            failures += run_bf16_linear_case(weight, tokens);
+        }
+        for (int tokens : {1, 4, 5, 17, 33, 65, 129, 513}) {
+            failures += run_bf16_linear_case(weight, tokens, true);
+        }
+    }
     return failures;
 }
 

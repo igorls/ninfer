@@ -35,7 +35,10 @@ std::uint64_t align_up(std::uint64_t value, std::uint64_t alignment, const char*
 
 } // namespace
 
-Fp8WeightGeometry validate_fp8_weight(const Weight& weight, const char* operation) {
+namespace {
+
+Fp8WeightGeometry validate_row_scaled(const Weight& weight, const char* operation,
+                                      bool fp32_scale) {
     if (weight.n <= 0 || weight.k <= 0) {
         throw std::invalid_argument(std::string(operation) + ": FP8 shape must be positive");
     }
@@ -44,19 +47,23 @@ Fp8WeightGeometry validate_fp8_weight(const Weight& weight, const char* operatio
     geometry.code_plane_bytes   = checked_mul(static_cast<std::uint64_t>(weight.n),
                                               static_cast<std::uint64_t>(weight.k), operation);
     geometry.scale_plane_offset = align_up(geometry.code_plane_bytes, 256, operation);
-    geometry.scale_plane_bytes  = checked_mul(static_cast<std::uint64_t>(weight.n), 2, operation);
+    const std::uint64_t word    = fp32_scale ? 4 : 2;
+    geometry.scale_word_bytes   = word;
+    geometry.scale_plane_bytes  = checked_mul(static_cast<std::uint64_t>(weight.n), word, operation);
     geometry.required_payload_bytes =
         checked_add(geometry.scale_plane_offset, geometry.scale_plane_bytes, operation);
 
-    const std::int64_t scale_stride = static_cast<std::int64_t>(weight.n) * 2;
-    if (weight.qtype != QType::FP8_E4M3FN_ROW_BF16 || weight.layout != QuantLayout::RowScale ||
-        weight.scale_dtype != DType::BF16 ||
+    const std::int64_t scale_stride = static_cast<std::int64_t>(weight.n) * word;
+    const QType qtype   = fp32_scale ? QType::FP8_E4M3FN_ROW_FP32 : QType::FP8_E4M3FN_ROW_BF16;
+    const auto layout   = fp32_scale ? QuantLayout::RowScaleFp32 : QuantLayout::RowScale;
+    const DType dtype   = fp32_scale ? DType::FP32 : DType::BF16;
+    if (weight.qtype != qtype || weight.layout != layout || weight.scale_dtype != dtype ||
         weight.group_size != static_cast<std::uint32_t>(weight.k) || weight.group != weight.k ||
         weight.ndim != 2 || weight.shape[0] != weight.n || weight.shape[1] != weight.k ||
         weight.shape[2] != 1 || weight.shape[3] != 1 || weight.padded_shape[0] != weight.n ||
         weight.padded_shape[1] != weight.k || weight.padded_shape[2] != 1 ||
         weight.padded_shape[3] != 1 || weight.scale_ne[0] != weight.n || weight.scale_ne[1] != 1 ||
-        weight.scale_ne[2] != 1 || weight.scale_ne[3] != 1 || weight.scale_nb[0] != 2 ||
+        weight.scale_ne[2] != 1 || weight.scale_ne[3] != 1 || weight.scale_nb[0] != static_cast<std::int64_t>(word) ||
         weight.scale_nb[1] != scale_stride || weight.scale_nb[2] != scale_stride ||
         weight.scale_nb[3] != scale_stride || weight.payload == nullptr ||
         weight.qdata == nullptr || weight.scales == nullptr || weight.qhigh != nullptr ||
@@ -70,6 +77,16 @@ Fp8WeightGeometry validate_fp8_weight(const Weight& weight, const char* operatio
         throw std::invalid_argument(std::string(operation) + ": invalid FP8 plane geometry");
     }
     return geometry;
+}
+
+} // namespace
+
+Fp8WeightGeometry validate_fp8_weight(const Weight& weight, const char* operation) {
+    return validate_row_scaled(weight, operation, false);
+}
+
+Fp8WeightGeometry validate_fp8_row_weight(const Weight& weight, const char* operation) {
+    return validate_row_scaled(weight, operation, weight.qtype == QType::FP8_E4M3FN_ROW_FP32);
 }
 
 } // namespace ninfer::ops::detail

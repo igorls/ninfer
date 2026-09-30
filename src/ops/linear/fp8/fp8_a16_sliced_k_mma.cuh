@@ -20,10 +20,10 @@
 
 namespace ninfer::ops::detail {
 
-template <class Schedule, class Output, class Epilogue, class RowPolicy>
+template <class Schedule, class Output, class Epilogue, class RowPolicy, class Scale>
 __global__
 __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_a16_sliced_k_mma_kernel(
-    Fp8A16Operands operands, Output output, Epilogue epilogue, RowPolicy row_policy,
+    Fp8A16OperandsT<Scale> operands, Output output, Epilogue epilogue, RowPolicy row_policy,
     int token_offset) {
     const auto* __restrict__ x            = operands.x;
     const auto* __restrict__ weight_codes = operands.codes;
@@ -201,17 +201,13 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_a16_sl
     if (warp == 0) {
         const auto destination =
             linear_output_tile<kBlockRows / (RowPolicy::kPaired ? 2 : 1)>(output, row0);
-        unsigned lane_scale = 0;
+        float lane_scale = 0.0F;
         if (lid < 2) {
-            lane_scale = static_cast<unsigned>(reinterpret_cast<const std::uint16_t*>(
-                row_scales)[row_policy.weight_row(row0, gid + lid * 8, operands.rows)]);
+            lane_scale = fp8_row_scale(
+                row_scales + row_policy.weight_row(row0, gid + lid * 8, operands.rows));
         }
-        const unsigned top_scale_bits    = __shfl_sync(kMask, lane_scale, lane & ~3);
-        const unsigned bottom_scale_bits = __shfl_sync(kMask, lane_scale, (lane & ~3) + 1);
-        const float top_scale =
-            __bfloat162float(__ushort_as_bfloat16(static_cast<std::uint16_t>(top_scale_bits)));
-        const float bottom_scale =
-            __bfloat162float(__ushort_as_bfloat16(static_cast<std::uint16_t>(bottom_scale_bits)));
+        const float top_scale    = __shfl_sync(kMask, lane_scale, lane & ~3);
+        const float bottom_scale = __shfl_sync(kMask, lane_scale, (lane & ~3) + 1);
 
 #pragma unroll
         for (int token_mma = 0; token_mma < kTokenMmas; ++token_mma) {

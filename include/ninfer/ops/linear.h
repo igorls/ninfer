@@ -70,20 +70,27 @@ enum class LinearPolicy : std::uint8_t {
  *
  * @par Supported execution domain
  * Registered execution uses RowSplit Q4_G64_FP16, Q5_G64_FP16, Q6_G64_FP16, or Q8_G32_FP16 weights
- * with FP16 scales, block-scaled NVFP4 weights, row-scaled FP8_E4M3FN_ROW_BF16 weights, plus
+ * with FP16 scales, block-scaled NVFP4 weights, row-scaled FP8_E4M3FN_ROW_BF16 (RowScale, BF16
+ * row multipliers) and FP8_E4M3FN_ROW_FP32 (RowScaleFp32, FP32 row multipliers) weights, plus
  * registered contiguous BF16 problems. Each format owns a finite registry of exact physical
  * weight problems and selects its kernel internally; a valid encoding and alignment do not imply
  * arbitrary N/K support. FP8 currently registers `[N,K]` in `{[14336,5120], [16384,5120],
- * [34816,5120], [248320,5120], [5120,6144], [5120,17408]}` at every positive T. The current NVFP4
+ * [34816,5120], [248320,5120], [5120,6144], [5120,17408]}` with BF16 row multipliers and
+ * `{[13312,2560], [16384,2560], [2560,6144]}` with FP32 row multipliers, at every positive T; the
+ * registered problem is the pair of multiplier format and `[N,K]`. The current NVFP4
  * problems register the five non-vocabulary FP8 geometries and accept every positive T. Q8 also
  * registers `[5120,25600]` at every positive T. BF16 registers `[14336,5120]`,
- * `[5120,6144]`, `[256,5120]`, and the full vocabulary head `[248320,5120]` at every positive T. Text and MTP packed-weight problems accept
+ * `[5120,6144]`, `[256,5120]`, the full vocabulary head `[248320,5120]`, `[640,2560]`,
+ * `[2560,2560]`, `[10240,2560]`, `[13312,2560]`, `[2560,6144]`, and the vocabulary head
+ * `[248320,2560]` at every positive T. Text and MTP packed-weight problems accept
  * every positive column extent T. Registered Vision problems accept raw-patch P in
  * `{4,8,...,131072}` or merged-token V in `[1,32768]`; a matrix column does not inherently
  * represent a text token. FP32 is unsupported.
  *
  * @par Numerical contract
- * Test fixture code materializes the persistent weight as its logical FP32 dequantized matrix.
+ * Test fixture code materializes the persistent weight as its logical FP32 dequantized matrix;
+ * for row-scaled FP8 that is binary32(E4M3FN code * stored row multiplier), whichever multiplier
+ * word the format stores.
  * The one Linear oracle accepts that matrix and the FP32 values represented by the BF16 activation,
  * evaluates every complete dot product with naive FP64 accumulation, and retains the FP64 result.
  * The BF16 output is promoted and compared against that result. Output representation,
@@ -96,8 +103,8 @@ enum class LinearPolicy : std::uint8_t {
  * `policy` specifies the permitted private activation-compute set. A permission does not require a
  * corresponding low-precision route: the resolved plan may remain A16 when that is the qualified
  * choice. Every policy permits the existing A16 implementations of BF16 and Q4/Q5/Q6/Q8.
- * FP8 accepts all three policies; AllowA8 and AllowA4 permit the private resolver to select a
- * qualified A16 or A8 route for the registered problem and T. FP8 `[248320,5120]` retains A16
+ * FP8 (either multiplier format) accepts all three policies; AllowA8 and AllowA4 permit the
+ * private resolver to select a qualified A16 or A8 route for the registered problem and T. FP8 `[248320,5120]` retains A16
  * compute under every policy at every positive T. NVFP4 uses A16 for A16Only and
  * AllowA8; AllowA4 permits the private resolver to select either a qualified A16 route or
  * activation quantization to NVFP4 at every positive T. The selected route depends only on the

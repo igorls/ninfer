@@ -9,6 +9,8 @@ struct Fp8LinearShape {
     void (*a8)(const Tensor&, const Weight&, Tensor&, Fp8A8Workspace, cudaStream_t);
     bool (*uses_a8)(std::int32_t min_tokens, std::int32_t max_tokens);
     std::size_t (*partial_capacity_bytes)(std::int32_t max_tokens) = nullptr;
+    // Row-multiplier format of the registered problem; its launches decode that word.
+    QType qtype = QType::FP8_E4M3FN_ROW_BF16;
 };
 
 extern const Fp8LinearShape kFp8N14336K5120;
@@ -17,4 +19,7 @@ extern const Fp8LinearShape kFp8N34816K5120;
 extern const Fp8LinearShape kFp8N5120K6144;
 extern const Fp8LinearShape kFp8N5120K17408;
 extern const Fp8LinearShape kFp8N248320K5120;
+extern const Fp8LinearShape kFp8F32N13312K2560;
+extern const Fp8LinearShape kFp8F32N16384K2560;
+extern const Fp8LinearShape kFp8F32N2560K6144;
 } // namespace ninfer::ops::detail

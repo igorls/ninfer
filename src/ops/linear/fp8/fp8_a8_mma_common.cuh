@@ -134,12 +134,13 @@ fp8_mma_compute_stage(const std::uint8_t* activation_stage, const std::uint8_t* 
     }
 }
 
-template <class Schedule, bool FullTokens, class Epilogue, class Output, class RowPolicy>
+template <class Schedule, bool FullTokens, class Epilogue, class Output, class RowPolicy,
+          class Scale>
 __device__ __forceinline__ void
 fp8_finish_mma_tile(Output output, Epilogue epilogue, RowPolicy row_policy,
                     unsigned char* shared_raw,
                     float (&accumulators)[Schedule::kMmaTokens][Schedule::kMmaRows][4],
-                    const float* activation_scales, const __nv_bfloat16* weight_scales,
+                    const float* activation_scales, const Scale* weight_scales,
                     int row_begin, int token_begin, int rows, int tokens, int warp, int lane) {
     constexpr bool PairRows = RowPolicy::kPaired;
     constexpr int BM = Schedule::kBlockTokens, BN = Schedule::kBlockRows;
@@ -179,11 +180,10 @@ fp8_finish_mma_tile(Output output, Epilogue epilogue, RowPolicy row_policy,
             const float2 weight_scale = [&] {
                 if constexpr (requires { RowPolicy::kContiguousPairs; }) {
                     if constexpr (RowPolicy::kContiguousPairs)
-                        return bf16x2_bits_to_float2(
-                            load_ldg<std::uint32_t>(weight_scales + parent_row0));
+                        return fp8_row_scale_pair(weight_scales + parent_row0);
                 }
-                return make_float2(__bfloat162float(weight_scales[parent_row0]),
-                                   __bfloat162float(weight_scales[parent_row1]));
+                return make_float2(fp8_row_scale(weight_scales + parent_row0),
+                                   fp8_row_scale(weight_scales + parent_row1));
             }();
             float value00 =
                 accumulators[mma_token][mma_row][0] * activation_scale0 * weight_scale.x;
