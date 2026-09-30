@@ -41,8 +41,8 @@ The whole port can be built and qualified on G4 without touching x870e.
   the v2 file is released, so the peak is ~105.5 GiB plus one chunk.
 - **Host RAM.** 176 GiB holds 30 GiB of PLE (mapped or pinned), the 4.7 GiB BF16 MTP banks if
   they were still host-read, and the page cache the loader needs.
-- **Time.** The critical path of a fresh session is about 12 minutes: CUDA install then build
-  (11.3 min), in parallel with download then upgrade (~6.3 + ~5 min). Cold engine start is ~3 min
+- **Time.** The critical path of a fresh session is about 13 minutes: CUDA install then build
+  (11.3 min), in parallel with download then upgrade (6.5 + 6.7 min measured in M3.1). Cold engine start is ~3 min
   at the measured cold-read rate. That leaves 20-50 minutes of GPU work in a 37-67 minute window.
 - **Cold-read caveat.** Cold reads of a just-downloaded file ran at 0.31-0.45 GB/s. The first
   engine start of a session costs ~3 minutes, and later starts ~13 s from page cache.
@@ -57,17 +57,18 @@ The artifact is on HF. Results are small files pulled every few minutes with `co
    own, and unassign a lost slot (`colab_cli Client.unassign(endpoint)`).
 2. Bootstrap script (extend `E:\v3port-scratch\sync2\colab\vm_build2.py`), launched detached:
    - A: apt CUDA 13.3 + deps, clone at `COMMIT`, cmake/ninja build of the needed targets.
-   - B, in parallel: `aria2c -x16 -s16 -k64M` of the pinned v2 artifact, then (for v3 arms) the
-     punch-hole upgrade to v3. Run the SHA256 check once per new input revision, not every session.
+   - B, in parallel: `python -m tools.convert.qwen4_exp.derive` (pinned v2 download, then the
+     punch-hole upgrade to v3, which checks the v2 SHA256 during its single read).
 3. Each experiment writes a self-describing result directory (commit, artifact id, command,
    output). Pull it after every step.
 4. Fixtures produced once, such as v2 baseline tokens and top-k logprobs for the public prompt set,
    are committed to the repo. Later sessions compare against them without re-running the v2 arm.
 
-Faster restarts need an HF write token on the VM (§8, decision 4). The qualified v3 artifact could
-then be published once and downloaded directly (6.3 min instead of download + upgrade). Build
-outputs could also be cached there, saving ~5.5 min. Drive cannot serve this purpose because it
-needs a browser consent per session.
+There is no HF write token (§8, decision 4): each session re-derives the v3 artifact with
+`python -m tools.convert.qwen4_exp.derive WORKDIR` (download with `aria2c -c`, in-place upgrade with
+the v2 SHA256 checked in the same read, optional verify; an interrupted upgrade discards its
+partly released input and downloads again). Drive cannot cache it because it needs a browser
+consent per session.
 
 ### If a single G4 could not hold everything
 
@@ -128,12 +129,13 @@ but that does not exist yet):
 edits: `src/models/registry.{h,cpp}`, `src/models/CMakeLists.txt`,
 `src/runtime/engine/{model_instance.h,model_instance.cpp,engine.cpp}`,
 `src/models/qwen3_5/frontend/{resources.*,frontend.h}` (geometry seam),
-`src/artifact/{formats,layouts,materializer,binder}.*`, `src/core/weight.h` (new QTypes),
-`tools/artifact/{formats,layouts}.py` + `codecs/`, `tools/upgrade_ninfer_v2_to_v3.py`,
+`src/artifact/{formats,materializer,binder}.cpp`, `src/core/{weight.h,weight_view.cpp}` (new
+QTypes/layouts; landed in M3.1), `tools/artifact/{formats,layouts,writer,tensor_output}.py` +
+`codecs/`, `tools/convert/recipe.py`, `tools/upgrade_ninfer_v2_to_v3.py` (a Flash-Next redirect),
 `src/ops/CMakeLists.txt` and the linear/rmsnorm_rope shape registries,
 `docs/maintainer/{artifact-container,storage-layouts,tensor-formats}.md`. Everything else is new
 directories (`src/models/qwen4_exp`, new `src/ops/*` families, `tests/models/qwen4_exp`,
-`tests/ops/*`, `tools/convert/qwen4_exp*`).
+`tests/ops/*`, `tools/convert/qwen4_exp`).
 
 ### 3.2 Component map, v2 → v3
 
@@ -210,11 +212,18 @@ Each needs the matching entries in `src/artifact/{formats,layouts}.cpp`, `core/w
 
 ### 4.2 Recommended route: upgrade the published v2 artifact
 
-Extend `tools/upgrade_ninfer_v2_to_v3.py` with a Flash-Next branch: known identity
-`("qwen3.8-flash-next", "mixed-nvfp4-fp8-ple-int4")` with 1,566 objects. It remains
-standard-library only. The existing upgrader already works this way: the v3 payload is the v2
-payload copied byte-for-byte at the same offsets, with a new directory, and the replacement chat
-template appended. Flash-Next adds:
+**As built (M3.1):** the upgrade is `tools/convert/qwen4_exp` (`upgrade`, `verify`, `derive`), not
+a branch of the standard-library `tools/upgrade_ninfer_v2_to_v3.py`. The MTP bake (§4.3) quantizes
+2.5G BF16 values, which the repository's torch NVFP4 encoder does in ~20 s on CPU and a
+standard-library script cannot do in session time; AGENTS.md places target-private inventories and
+converter-side verification under `tools/convert/<target>`; and `tools/artifact/writer.py` is the
+generic v3 writer, so the framing is not copied a third time. The generic upgrader rejects the
+Flash-Next identity and points to `python -m tools.convert.qwen4_exp.upgrade`. The artifact
+contract is recorded in `docs/maintainer/qwen3.8-flash-next-artifact.md`.
+
+Original design, kept for the record: known identity
+`("qwen3.8-flash-next", "mixed-nvfp4-fp8-ple-int4")` with 1,566 objects; the v3 payload is the v2
+payload copied byte-for-byte with a new directory. Flash-Next adds:
 
 - **Directory synthesis.**
   - `components.text.config` is the real `qwen4_exp_text` config from the pinned
@@ -233,8 +242,13 @@ template appended. Flash-Next adds:
 - **Streaming in place on G4.** An optional `--release-input` flag punches holes in the input
   behind the copy cursor, so the peak disk is one artifact.
 - **Chat template.** The Flash-Next official template (`c3cf9e34...`, 8,952 B) differs from the
-  maintained `tools/chat_templates/qwen3_8.jinja` (`c97bd026...`). The generic upgrader would
-  install the latter, because the model id starts with `qwen3.8-`. See decision 1.
+  maintained `tools/chat_templates/qwen3_8.jinja` (`c97bd026...`). Decided (decision 1): the v3
+  artifact keeps the official template, so the v2 resource is copied and nothing is appended.
+- **One ordered read.** The single pass that copies the payload also hashes every v2 object
+  range and the whole file. The whole-file digest replaces the separate `sha256sum -c` step, and
+  the object digests are check 1's reference, since the in-place input no longer exists afterwards.
+- **Reproducible output.** The v3 `artifact_id` is derived from the v2 digest and the directory
+  (the container only recommends a fresh UUID), so G4 and x870e produce identical files.
 
 **Object inventory in v3 terms** (with MTP baked):
 
@@ -248,20 +262,28 @@ template appended. Flash-Next adds:
 | resources | 6 |
 | **objects** | **1,566** |
 
-About 1,560 bindings. The file is about 102.2 GiB (105.52 − 4.69 + 1.32), split into 4 files at
-the 32 GB default. The device weights remain ~71 GiB.
+1,668 bindings (Vision `qkv` splits into three Parts, as in `qwen3_5`) and 959 Uses. The logical
+payload is exactly 109,680,552,704 bytes (102.15 GiB), split into 4 files at the 32 GB default.
+The device weights remain ~71 GiB.
 
 ### 4.3 MTP expert banks: bake NVFP4 offline
 
-In v2 the two BF16 MTP banks (4.69 GiB, the last two payload objects at offsets 107.26-112.30 GB)
-are quantized to NVFP4 at every engine start. v3's contract forbids runtime weight repacking, so
-the upgrader replaces them with two NVFP4 `expert_block_scale` objects. All other objects keep
-their offsets because the banks are the payload tail.
+In v2 the two BF16 MTP banks (4.69 GiB at payload offsets 107.26-112.30 GB) are quantized to NVFP4
+at every engine start. v3's contract forbids runtime weight repacking, so the upgrader replaces
+them with two NVFP4 `expert_block_scale` objects.
+
+*Correction (M3.1):* the banks are **not** the payload tail. They are v2 objects 1222 and 1223, and
+342 objects (1.0 GB: the MTP attention, indexer and norms, then all of Vision) follow them. The
+1,223 objects up to and including the gate/up bank keep their offsets; the down bank and the 342
+objects behind it move down by the 3.62 GB the NVFP4 banks save. Check 1 compares by object id,
+so the relocation costs nothing.
 
 The quantizer must produce bytes identical to the v2 loader's device buffers, so v3 MTP matches
-the v2 engine exactly. Two options:
-- a Python/numpy transliteration of `quantize_nvfp4_expert_bank.cu`;
-- the existing `ninfer_quantize_mtp` / `splice_mtp.py` from the old branch, run once on a G4.
+the v2 engine exactly. *As built:* the v2 kernel is exactly the repository's
+`NVFP4_MAXABS_DIVISOR_RNE_V1` encoder (`tools/convert/quantization/nvfp4.py`) applied per expert,
+so the upgrade reuses it on CPU (~20 s for both banks) and pins the digests of the result. The
+oracle dump comes from `ninfer_quantize_mtp` at `87812bc8`, which calls the same
+`quantize_bf16_expert_bank_to_nvfp4` on the same host-mapped BF16 bytes as `materialized.cpp:395`.
 
 The oracle is byte equality with the v2 loader's device banks, dumped from the old engine on G4.
 
@@ -301,9 +323,28 @@ when a new source revision is adopted.
    missing or extra object.
 4. **End to end.** Parity against the v2 engine (§5).
 
-**Time on G4** (upgrade route): download 6.3 min; SHA check ~6 min, only once per input revision;
-in-place copy ~3-5 min (2 GB/s writes, reads partly from page cache); MTP bake <1 min on GPU.
-Total ~10-12 min, peak disk ~106 GiB.
+**M3.1 evidence (G4 session `m3-1`, 2026-09-30 01:07-01:31 UTC, commit `c7d5c6b9`).**
+
+| Check | Result |
+|---|---|
+| v2 input | the upgrade's single read hashed the whole file: `3d383e51...0d1d02`, equal to `SHA256SUMS` |
+| 1. payload identity | `verify` re-read all 1,566 objects through `tools.artifact.reader.Artifact`: 1,564 unchanged objects (1,558 tensors + 6 resources) equal their v2 object digests |
+| 2. MTP banks | `ninfer_quantize_mtp` at `87812bc8` (the v2 loader's `quantize_bf16_expert_bank_to_nvfp4` on the host-mapped BF16 banks) dumped gate/up `9e25663a...2087b1f6` and down `fa78245b...6fb8c9f60`; the baked banks are byte-identical (`reference.equal`). FP64 oracle on experts 0/256/511: divisors and signs exact, scales within 0.50 E4M3FN step, code excess ≤ 3e-7 |
+| 3. container | `python -m tools.artifact.inspect`: 1,566 objects, 1,668 bindings, 959 Uses, formats bf16 1,235 / nvfp4 98 / fp8 row fp32 96 / u4z8 128 / int64 3; C++ `ninfer_artifact_reader_test <v3>` ran `Reader::validate_object` on every object (`v3 objects=1566`) |
+| v3 artifact | `artifact_id 1e7e026e9f634926ae26b80f0fc8591e`, 4 files, 109,681,105,664 bytes; entry `0de7b5f6...5fda15fb4618444343502fc798dff2282714`, part-0001 `e5d74e6a...`, part-0002 `67a30b1e...`, part-0003 `8bc02c73...` (full digests pinned in `tools/convert/qwen4_exp/source.py`) |
+| regressions | `ctest -R '^ninfer_artifact|^ninfer_qwen3_5_loading_test$'` 4/4 on G4; `pytest tests/artifact tests/convert` 59 passed (Python 3.11.16, torch 2.14 CPU) |
+
+**Time on G4** (measured): download 6.5 min (`aria2c -x16`, ~290 MB/s); in-place upgrade 7.3 min
+(435 s: 81 s waiting on reads, 347 s writing, both banks baked in 5.5 s on CPU; the overlay disk
+sustained ~300 MB/s reads plus ~300 MB/s writes, not the 2 GB/s of a pure write); optional
+verify 2.7 min (object pass 22 s, file digests 138 s). Peak disk stayed one artifact (the
+released v2 file shrank as the output grew; 161 GiB used at the end including the build trees).
+
+**Unattended re-derivation (fresh G4 session `m3-2`, commit `8f7a0aaa`, digests pinned):**
+`python -m tools.convert.qwen4_exp.derive /content/m3/work --verify --file-digests` took 15.5 min
+wall: setup 7 s (Python 3.11 venv, torch CPU), download 6.5 min (392 s), upgrade 6.7 min (401 s),
+verify 2.1 min (128 s). The four file digests equal `m3-1`'s, so the derivation is reproducible
+byte for byte across VMs. Without `--verify`, a session has the artifact after ~13.3 min.
 
 **x870e deployment.** The same tool upgrades Igor's local v2 copy on Windows, with no 105 GB
 transfer. Windows has no punch-hole in the script; it needs 102 GiB free beside the input, or
@@ -385,14 +426,26 @@ spare-port instances.
 
 | # | Milestone | Size (new/adapted lines, excluding tests) | G4 verification |
 |---|---|---:|---|
-| M3.1 | Container registrations (§4.1) + Flash-Next upgrader + MTP NVFP4 bake + docs | ~1,800 (+ ~600 tests) | download v2 → upgrade in place; §4.5 checks 1-3; MTP bytes equal the v2 loader dump |
+| M3.1 | Container registrations (§4.1) + Flash-Next upgrader + MTP NVFP4 bake + docs | ~1,800 (+ ~600 tests) | download v2 → upgrade in place; §4.5 checks 1-3; MTP bytes equal the v2 loader dump. **Done** on `m3/1-container` (§4.5 evidence) |
 | M3.2 | `qwen4_exp` skeleton: config, binder/load with `Residency::Mapped`, Engine variant seam, frontend geometry seam, `Architecture::Qwen4Exp` | ~3,000 | artifact loads through the public Engine; device-weight checksums equal v2's; qwen3_5 CTest unchanged |
 | M3.3 | Op ports with FP64 oracles: selected-block attention, QSA indexer, NVFP4 E512/K10 MoE, hyper-connection, PLE n-gram, FP8-F32 linear + Flash-Next shapes, rmsnorm_rope 24/2; `block_reduce_sum` audit | ~8,000 (+ ~6,000 tests) | `ctest -R ops` on G4 |
 | M3.4 | Text execution + Program on the v3 contract: prefill/decode, KV + indexer + GDN + PLE state, checkpoints/continuations/pressure, CUDA-graph decode, logprobs, structured output | ~10,000 (+ ~8,000 tests) | greedy + teacher-forced parity (§5.3); continuation/prefix tests; pressure scenarios |
 | M3.5 | MTP + Vision | ~1,500 (+ ~1,500 tests) | §5.4, §5.5 |
 | M3.6 | CLI/serve options, harness into `tools/bench/flash_next`, performance A/B, VRAM envelope, docs (`qwen3.8-flash-next-{artifact,model}.md` rewritten for v3, `upstream-ports.md`, `performance.md`, AGENTS product line), model card for the v3 artifact | ~1,000 | §5.6, §5.7; then the x870e confirmation (§5.8) |
 
-M3.3 and the load half of M3.2 can proceed in parallel once M3.1 lands. M3.4 is the critical path.
+M3.3 and the load half of M3.2 can proceed in parallel once M3.1 lands.
+
+**Inputs M3.1 fixes for M3.2+:**
+- Logical names, Uses and input positions are those of
+  `docs/maintainer/qwen3.8-flash-next-artifact.md` §5; the binder follows them (changing them is a
+  converter change, cheap because every session re-derives).
+- An NVFP4 expert bank's `WeightParent` has `weight_scale_divisor = 0`; its E divisors are the
+  payload's divisor plane at `geometry.divisor_offset`. There is no native `Weight` form for it.
+- `Binder::values` accepts `int64`, but `HostValues` has only an INT32 accessor; the PLE tables
+  need an INT64 one. `Residency::Mapped` is still to add (decision 6).
+- `ple_layer_ids = [2]` in the config counts from 1; the PLE weights are at 0-based layer 1.
+- Expert banks carry `AllowA4` with no activation-divisor auxiliary: an A4 path scales
+  activations dynamically, as v2 did. M3.4 is the critical path.
 Each milestone is its own branch, then fast-forwarded into `workstation` after its G4 checks,
 following the one-worktree-per-issue rule.
 
@@ -424,21 +477,16 @@ following the one-worktree-per-issue rule.
    Rebuild the environment on a G4 from `tools/reference/qwen3_8_flash_next/oracle/README.md` if
    an end-to-end oracle beyond v2-engine parity is needed.
 
-## 8. Decisions for Igor
+## 8. Decisions (Igor, 2026-09-29)
 
-1. **Chat template in the v3 artifact.**
-   - Recommended: keep Flash-Next's official template (`c3cf9e34`). This gives parity with v2
-     now; switch to a maintained template later as a separate, measured change.
-   - Alternative: install `qwen3_8.jinja`, as the generic upgrader would.
-2. **MTP banks.** Bake NVFP4 into the v3 artifact (recommended, required by v3's
-   no-runtime-repacking rule; the SHA then differs from the published v2), or keep BF16 with a
-   load-time quantizer.
-3. **Drop the v2-only runtime flags.** These are the FP8 output head and FP8 embedding (both
-   measured to add VRAM), the BF16 GDN state, and the QSA MMA switch. Recommended: yes.
-4. **HF write token on Colab.** It allows publishing the qualified v3 artifact (and cached build
-   outputs) once, so each session starts ~6 min faster. Without a token, every session re-derives
-   the v3 artifact from the v2 download (~10-12 min, fully automatic). The v3 artifact could also be
-   published from x870e after the local upgrade.
-5. **Accept the upstream conflict surface of §3.1** (Engine variant, registry, frontend geometry
-   seam, container registrations), or ask to propose these seams upstream first.
-6. **PLE residency for M3:** mapped page cache (v2 behaviour, recommended) or pinned host memory.
+1. **Chat template:** keep Flash-Next's official template (`c3cf9e34`) in the v3 artifact. A
+   maintained template is a later, separately measured change.
+2. **MTP banks:** bake NVFP4 offline into the v3 artifact (v3 forbids runtime repacking; the
+   artifact SHA256 differs from v2's).
+3. **v2-only runtime flags dropped:** FP8 output head, FP8 embedding, BF16 GDN state and the QSA
+   MMA switch. Neither the artifact nor the converter carries them.
+4. **No HF write token:** every Colab session re-derives the v3 artifact from the public v2
+   download (`igorls/Qwen3.8-Flash-Next-mixed-NInfer@5f0ee7e2`, SHA256 `3d383e51...0d1d02`) with
+   `python -m tools.convert.qwen4_exp.derive`, fully automatic and resumable.
+5. **Upstream conflict surface of §3.1 accepted.**
+6. **PLE residency for M3:** mapped page cache (v2 behaviour).
