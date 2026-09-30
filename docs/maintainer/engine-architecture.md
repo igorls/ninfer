@@ -51,6 +51,8 @@ inactive cache 的保留而丢失完成能力。
 模型代码拥有数学公式、调用顺序、组件交接和状态转移。Config 提供层数、维度、Attention/GDN
 分布和 expert 几何等实例参数。当前标准架构入口是 `Qwen3_5ForCausalLM` 与
 `Qwen3_5MoeForCausalLM`；训练实例和物理权重分配作为数据进入对应实现。
+`Qwen4ExpForCausalLM`（Qwen3.8-Flash-Next，`src/models/qwen4_exp`）目前只有加载实现：artifact
+能完整加载，但该包还没有执行 Program，Engine 在加载完成后拒绝构造（见 3.4）。
 
 V3 artifact 保存配置、物理对象、逻辑参数的 Binding、使用位置的 Use，以及 Frontend 资源。
 Converter 负责源映射、量化或保值导入、融合存储、packing 和 layout 转换；loader 根据实际绑定
@@ -215,6 +217,13 @@ Materializer 建立稳定 backing 并上传原字节，得到只读 Model。Mode
 Planner 与实际执行借用同一 Parameters。Planner 根据启动范围查询各层及所选后端的需求，
 建立容量曲线；结合权重驻留后的 Device 余量解析 KV 容量，再构造 Program 的最终布局。
 GenerationCore 或 CausalScoreCore 在实例准备完成后使用它。
+
+构造先从 text component config 的架构对解析出模型包，再调用该包的加载与规划；每个包拥有自己
+的 config、绑定和只读 Model，Frontend 通过 `FrontendGeometry` 只读取词表行数、Vision patch
+几何和 DFlash2 selector 这几项事实。Qwen4Exp 包解析全部 Binding 与 Use、上传 Device 权重、
+映射并预热 PLE 表、构建 Frontend，随后在 `TargetFinalize` 阶段以显式错误结束构造：没有
+Program 就不产生一个看似可以服务的 Engine。它的 Program 加入后，`Engine::Impl` 才持有按架构
+区分的 core。
 
 模型配置、绑定和权重地址在实例存活期间固定；每个 Program 独占自己的可变 State/KV、
 workspace 和 Graph。销毁时先结束 Engine core 和未决设备工作，再销毁实例的 Program、
@@ -590,7 +599,7 @@ checkpoint catalog。
 | 实例构造与有效期 | `src/runtime/engine/model_instance.*` |
 | ResourceManager 与 materialization planner | `src/runtime/engine/context_cache/` |
 | 请求、执行、资源与计时合同 | `src/runtime/contract/` |
-| 模型 config、绑定与只读数据 | `src/models/qwen3_5/config.*`, `load/`, `model.*` |
+| 模型 config、绑定与只读数据 | `src/models/qwen3_5/config.*`, `load/`, `model.*`；Qwen4Exp 为 `src/models/qwen4_exp/` |
 | 原生参数与固定模型调用 | `src/models/qwen3_5/execution/` |
 | Program 规划、存储与事务 | `src/models/qwen3_5/program/` |
 | Frontend 与模型状态布局 | `src/models/qwen3_5/frontend/`, `state/` |

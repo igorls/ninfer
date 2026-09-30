@@ -5,12 +5,14 @@
 #include "core/startup.h"
 #include "models/qwen3_5/load.h"
 #include "models/qwen3_5/measurement.h"
+#include "models/qwen4_exp/load.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace ninfer::runtime {
@@ -229,25 +231,25 @@ ModelInstance::ModelInstance(std::unique_ptr<models::qwen3_5::Model> source,
 
 ModelInstance::~ModelInstance() = default;
 
-ConstructedModel construct_model(EngineOptions& options, DeviceContext& device) {
-    validate_options(options);
-    const auto start = Clock::now();
-    set_runtime_desktop_reserve_floor(0);
-    StartupPhaseScope inspect(options.startup_observer, StartupPhase::ArtifactInspect);
-    artifact::Reader reader(options.artifact_path);
-    inspect.complete();
+namespace {
+
+// Fail before a multi-GiB upload when the weights alone cannot leave the reserve.
+void require_weight_headroom(const DeviceContext& device, std::uint64_t weight_bytes,
+                             std::size_t desktop_reserve_bytes) {
+    const DeviceMemorySnapshot memory = query_device_memory(device.device);
+    const auto weights                = static_cast<std::size_t>(weight_bytes);
+    if (memory.free_bytes < weights + desktop_reserve_bytes) {
+        throw std::invalid_argument(format_insufficient_memory_error(memory, device.device, weights,
+                                                                     desktop_reserve_bytes));
+    }
+}
+
+ConstructedModel construct_qwen3_5(const artifact::Reader& reader, EngineOptions& options,
+                                   DeviceContext& device, Clock::time_point start) {
     StartupPhaseScope binding(options.startup_observer, StartupPhase::TargetPlan);
     auto plan = models::qwen3_5::plan_load(reader, models::load_options(options));
-    {
-        // Fail before a multi-GiB upload when the weights alone cannot leave the reserve.
-        const DeviceMemorySnapshot memory = query_device_memory(device.device);
-        const std::size_t weights =
-            static_cast<std::size_t>(plan.materialization().device_capacity_bytes);
-        if (memory.free_bytes < weights + options.desktop_reserve_bytes) {
-            throw std::invalid_argument(format_insufficient_memory_error(
-                memory, device.device, weights, options.desktop_reserve_bytes));
-        }
-    }
+    require_weight_headroom(device, plan.materialization().device_capacity_bytes,
+                            options.desktop_reserve_bytes);
     binding.complete();
     auto model =
         models::qwen3_5::materialize_model(std::move(plan), device, &options.startup_observer);
@@ -313,6 +315,63 @@ ConstructedModel construct_model(EngineOptions& options, DeviceContext& device) 
     summary.host_object_count    = stats.host_object_count;
     summary.context_cost         = std::move(context_cost.summary);
     return {std::move(instance), std::move(summary), std::move(context_cost.model)};
+}
+
+// A Qwen4Exp artifact loads completely: every Binding resolved, Device weights uploaded, the PLE
+// table mapped and warmed, and the Frontend built from its resources. The package has no execution
+// Program yet, so construction stops here rather than exposing an Engine that cannot answer.
+[[noreturn]] void reject_qwen4_exp(const artifact::Reader& reader, const EngineOptions& options,
+                                   DeviceContext& device) {
+    StartupPhaseScope binding(options.startup_observer, StartupPhase::TargetPlan);
+    auto plan = models::qwen4_exp::plan_load(reader, models::load_options(options));
+    const std::size_t bindings = plan.binding_count();
+    require_weight_headroom(device, plan.materialization().device_capacity_bytes,
+                            options.desktop_reserve_bytes);
+    binding.complete();
+    const auto model =
+        models::qwen4_exp::materialize_model(std::move(plan), device, &options.startup_observer);
+    device.synchronize();
+    StartupPhaseScope frontend(options.startup_observer, StartupPhase::FrontendInitialize);
+    (void)models::qwen3_5::make_frontend(
+        model->resources(), {.chat_template_path       = options.chat_template_path,
+                             .architecture             = models::Architecture::Qwen4Exp,
+                             .vision_enabled           = options.enable_vision,
+                             .max_context              = options.max_context,
+                             .media_cache_bytes        = options.media_cache_bytes,
+                             .media_live_bytes         = options.media_live_bytes,
+                             .media_preprocess_threads = options.media_preprocess_threads});
+    frontend.complete();
+    StartupPhaseScope finalize(options.startup_observer, StartupPhase::TargetFinalize);
+    const auto& stats = model->storage_stats();
+    char loaded[160];
+    std::snprintf(loaded, sizeof(loaded),
+                  "%zu bindings, %.2f GiB of Device weights, %.2f GiB of mapped PLE table",
+                  bindings, static_cast<double>(stats.device_capacity_bytes) / (1ULL << 30U),
+                  static_cast<double>(stats.mapped_bytes) / (1ULL << 30U));
+    throw std::runtime_error(
+        std::string(models::architecture_name(models::Architecture::Qwen4Exp)) + " artifact '" +
+        model->info().name + "' loaded (" + loaded +
+        "), but this build has no qwen4_exp execution Program; it cannot generate or score yet");
+}
+
+} // namespace
+
+ConstructedModel construct_model(EngineOptions& options, DeviceContext& device) {
+    validate_options(options);
+    const auto start = Clock::now();
+    set_runtime_desktop_reserve_floor(0);
+    StartupPhaseScope inspect(options.startup_observer, StartupPhase::ArtifactInspect);
+    artifact::Reader reader(options.artifact_path);
+    const auto architecture = models::resolve_architecture(reader.directory());
+    inspect.complete();
+    switch (architecture) {
+    case models::Architecture::Qwen3_5:
+    case models::Architecture::Qwen3_5Moe:
+        return construct_qwen3_5(reader, options, device, start);
+    case models::Architecture::Qwen4Exp:
+        reject_qwen4_exp(reader, options, device);
+    }
+    throw std::logic_error("unhandled model architecture");
 }
 
 } // namespace ninfer::runtime

@@ -163,3 +163,20 @@ That gives 1,668 bindings. Each projection has one Use per mathematical input po
 The activation policy follows the stored format: `AllowA4` for NVFP4 expert banks, `AllowA8` for
 the FP32-scaled FP8 projections, `A16Only` otherwise. The artifact has no activation-divisor
 auxiliaries: v2 carried none, so an A4 expert path scales its activations dynamically.
+
+## 6. Loading (`src/models/qwen4_exp`)
+
+The `qwen4_exp` loader consumes this contract exactly. With Vision and MTP selected it binds all
+1,668 Bindings and 959 Uses and fails on a missing or unconsumed one; a narrower selection may
+leave only `vision/` or `mtp/` entries (and the `text/output_head` Use at `mtp/final_hidden`)
+unbound. Residency follows the role:
+
+| Parameters | Residency |
+|---|---|
+| every projection, norm, embedding, expert bank and Vision weight | `Device` (the stored bytes, ~70 GiB with Vision and MTP) |
+| the 128 PLE shards | `Mapped`: page-cache views of the file set, warmed before readiness; a shard that straddles two part files is owned as a copy |
+| the three PLE index tables | `Values` (owning INT64), checked as consecutive head row ranges covered by the shards |
+
+`ops::prepare_nvfp4_expert_bank_weight` admits a complete bank with its `AllowA4` Use and rejects a
+stored activation divisor, because the A4 route quantizes activations dynamically. The shard height
+(2,500,012 rows) is read from the stored shape, not from the config.
