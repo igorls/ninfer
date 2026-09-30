@@ -169,6 +169,13 @@ selectively (`tests/targets/qwen3_8_flash_next`, 35 files).
 (needs the 2560 instance), `sampling`, `argmax`, `candidate_logprobs`, `speculative_round`,
 `scatter`, `residual_add`, `kv_cache_append` (paged), and all vision Ops.
 
+*Correction (M3.3):* v3 Ops are shape-registered for the 27B's 5120 width, so "unchanged" held
+only after an inventory. `gdn_gating_proj` needed the `[96,2560]` parent (registered in M3.3);
+`embedding` BF16 `[248320,2560]`, `rmsnorm` at D 2560/10240/256, `gated_rmsnorm`, the GDN Ops at
+Hqk 16/Hv 48, `causal_conv1d_silu` at C 10240, the sampling/logprob Ops at vocab 248320,
+`sigmoid_mul` and `kv_cache_append` D256/Hkv 2 were already admitted. `rope` is not needed: the
+Flash-Next q/k path uses the new gated `rmsnorm_rope` form. Two gaps remain for M3.4 (§6.2).
+
 **Must be ported from the old branch:** `selected_block_attention`, QSA indexer, NVFP4 E512/top-10
 MoE (route, expert banks, shared expert), hyper-connection, PLE n-gram decode, the FP8 F32-scale
 linear path, and the Flash-Next linear/rope shape instances.
@@ -187,7 +194,7 @@ linear path, and the Flash-Next linear/rope shape instances.
 | Vision | `qwen3_vision::Encoder`, `qwen3_6/vision_control.h` | `qwen3_5/execution/vision.h`, `program/vision_control.h` | adapt |
 | Runtime contract | `runtime/contract/types.h`, `resource_manager.h`, `context_cost.h`, `sampling_history.h` | split `contract/{request,execution,resources,timing}.h`; `context_cache/`; `prompt_token_presence` inline in `qwen3_5` | all ~45 `runtime::` symbols Flash-Next uses still exist; the pressure/capture/materialization protocol is richer (`start_resource_transaction`, `progress_context_transaction`, `prove_persistent_backfill`, capture-pressure plans), so the Program port is the largest item |
 | Linear internals | `Nvfp4Gemv*`, `Bf16Mma*`, `bf16_gemm_mma_kernel` | renamed/restructured (`nvfp4_a16_gemv.cuh`, `nvfp4_a4_mma.cuh`, `bf16_a16_mma.cuh`, `bf16_schedule.cuh`) | rewrite the MoE/hyper kernels' includes against the new internals |
-| `ops/common/warp.cuh::block_reduce_sum` | ended with `__syncthreads()` | no trailing barrier | **audit** the 3 uses in the hyper kernels and 5 in the PLE kernels for shared-memory reuse races |
+| `ops/common/warp.cuh::block_reduce_sum` | ended with `__syncthreads()` | no trailing barrier | **audit** the 3 uses in the hyper kernels and 5 in the PLE kernels for shared-memory reuse races. *Resolved in M3.3 (§6.2): `warp.cuh` stays upstream's; every ported call site owns its barrier* |
 | `ninfer/types.h` flags | `quantize_output_head_fp8`, `quantize_token_embedding_fp8`, `use_qsa_prefill_mma`, `gdn_state_storage` | removed | drop; QSA prefill uses the MMA route unconditionally; GDN state FP32 |
 | `speculative_options.h` | Flash-Next rule `(draft+1)*concurrency ≤ 64` slots | fixed `[1,5]` draft check | validate in the `qwen4_exp` planner (slots are a Program fact) |
 
@@ -366,7 +373,9 @@ public images), and synthetic cases.
 - **Starting point.** The v2 tests (`test_moe*`, `test_qsa_*`, `test_hyper_connection`,
   `test_ple_*`, `test_fp8_f32`, `test_gdn`) already hold these oracles; port them to
   `tests/ops/*`.
-- **The `block_reduce_sum` barrier change** gets a test that fails if the race exists.
+- **The `block_reduce_sum` barrier change** gets a test that fails if the race exists. *As built (M3.3):
+  no deterministic failing test is constructible for a missing barrier; the evidence is the
+  call-site audit plus `compute-sanitizer` racecheck/synccheck over every new route (§6.2).*
 
 **2. Artifact.**
 - §4.5 checks 1-3.
@@ -428,7 +437,7 @@ spare-port instances.
 |---|---|---:|---|
 | M3.1 | Container registrations (§4.1) + Flash-Next upgrader + MTP NVFP4 bake + docs | ~1,800 (+ ~600 tests) | download v2 → upgrade in place; §4.5 checks 1-3; MTP bytes equal the v2 loader dump. **Done** on `m3/1-container` (§4.5 evidence) |
 | M3.2 | `qwen4_exp` skeleton: config, binder/load with `Residency::Mapped`, Engine dispatch seam, frontend geometry seam, `Architecture::Qwen4Exp` | ~3,000 (as built ~1,500) | artifact loads through the public Engine; device-weight checksums equal v2's; qwen3_5 CTest unchanged. **Done** on `m3/2-skeleton` (§6.1) |
-| M3.3 | Op ports with FP64 oracles: selected-block attention, QSA indexer, NVFP4 E512/K10 MoE, hyper-connection, PLE n-gram, FP8-F32 linear + Flash-Next shapes, rmsnorm_rope 24/2; `block_reduce_sum` audit | ~8,000 (+ ~6,000 tests) | `ctest -R ops` on G4 |
+| M3.3 | Op ports with FP64 oracles: selected-block attention, QSA indexer, NVFP4 E512/K10 MoE, hyper-connection, PLE n-gram, FP8-F32 linear + Flash-Next shapes, rmsnorm_rope 24/2; `block_reduce_sum` audit | ~8,000 (+ ~6,000 tests) (as built ~6,800 + ~2,200 tests) | `ctest -R ops` on G4. **Done** on `m3/3-ops` (§6.2) |
 | M3.4 | Text execution + Program on the v3 contract: prefill/decode, KV + indexer + GDN + PLE state, checkpoints/continuations/pressure, CUDA-graph decode, logprobs, structured output | ~10,000 (+ ~8,000 tests) | greedy + teacher-forced parity (§5.3); continuation/prefix tests; pressure scenarios |
 | M3.5 | MTP + Vision | ~1,500 (+ ~1,500 tests) | §5.4, §5.5 |
 | M3.6 | CLI/serve options, harness into `tools/bench/flash_next`, performance A/B, VRAM envelope, docs (`qwen3.8-flash-next-{artifact,model}.md` rewritten for v3, `upstream-ports.md`, `performance.md`, AGENTS product line), model card for the v3 artifact | ~1,000 | §5.6, §5.7; then the x870e confirmation (§5.8) |
@@ -519,6 +528,129 @@ M3.3 and the load half of M3.2 can proceed in parallel once M3.1 lands.
 Each milestone is its own branch, then fast-forwarded into `workstation` after its G4 checks,
 following the one-worktree-per-issue rule.
 
+### 6.2 M3.3 as built (`m3/3-ops`, 2026-09-30)
+
+All M3.3 Ops live in `src/ops` behind contracts in `include/ninfer/ops/`, with the formula,
+domain, effects and workspace in the header. No Op has an environment switch or a second
+selectable kernel; each extent has one private route.
+
+| Contract | Entries | Routes (private) |
+|---|---|---|
+| `sparse_moe.h` (NVFP4-bank profile) | `sparse_moe(x, SparseMoeNvfp4BankWeights, SparseMoeEpilogue::Store, out, ws, stream)`; capacity query over `(LinearPolicy gate_up, LinearPolicy down, min_T, max_T)` | T ≤ 8: fused router, NVFP4 A16 GEMV gate/up, per-row down. T 9-255 (or any T > 8 when a bank forbids A4): grouped A16 SIMT. T ≥ 256 with AllowA4 banks: grouped block-scaled FP4 MMA with dynamic per-16 activation scales |
+| `selected_block_attention.h` | batched form (C 1..8, `PagedKVBatchLayerView` + `table_rows`, caller workspace, graph-safe); shared-row form (C 1..262144, `PagedKVLayerView`, no workspace) | tensor-core partitions + merge; KV profiles BFloat16 (BF16 K, FP16 V) and FP8-E4M3FN-row256 (the Op rotates q by the D256 Hadamard) |
+| `qsa_indexer.h` | `qsa_indexer_append` (shared-row prefill form; snapshot form W ≤ 16, B ≤ 8); `qsa_indexer_select` with a `{max_complete_blocks}` envelope and a capacity query | identity route when complete ≤ 512; otherwise tiled scores + exact in-house radix top-512 (no CUB, no CCCL internals) |
+| `rmsnorm_rope.h` (gated D256 form) | packed `[13312,T]` projection → q `[256,24,T]`, gate `[256,24,T]`, k `[256,2,T]`, v `[256,2,T]`; one-centered RMSNorm, interleaved MRoPE on dims 0..63, theta 1e7 | one kernel, any T |
+| `hyper_connection.h` | `hyper_connection_prepare` (block input `[2560,T]` + FP32 injection `[4,T]`), `hyper_connection_mix` (final mixers), `hyper_connection_inject` (in place), capacity query | decode: v2's fused 9a/G3 chain; prefill: v3 split-K BF16 MMA with a fixed-order reduce |
+| `ple_ngram.h` | `ple_ngram_decode` (exact u4z8_g16 row decode), `ple_ngram` (prefill, one slot pair, in-place allowed), `ple_ngram_snapshot` (B 1..8, one history snapshot per column, the `causal_conv1d_silu_snapshot` convention) | column-parallel dilated convolution (replaces v2's serial per-channel scan) |
+| `linear.h` | FP8 admits both row-scale words; FP32-scaled problems `[13312,2560]`, `[16384,2560]`, `[2560,6144]`; BF16 adds `[640,2560]`, `[2560,2560]`, `[10240,2560]`, `[13312,2560]`, `[2560,6144]`, `[248320,2560]` | the scale word is a template parameter through every FP8 route (A16 GEMV/sliced/MMA, A8 MMA/TMA/split-K) |
+| `gdn_gating_proj.h` | the Flash-Next parent `[96,2560]` | existing kernels |
+
+**Design decisions beyond §3.**
+- **KV codec.** Flash-Next attention consumes v3's paged KV exactly as `kv_cache_append` writes it
+  (page-major `[256,64,2,N]`). v3's BFloat16 profile stores V as FP16 and its FP8 profile is
+  row-scaled with a Hadamard-rotated K, where v2 stored BF16 V and unscaled FP8. This is a named
+  codec change for the §5.3 parity criteria.
+- **Indexer block keys** share the main KV page groups: a BF16 `[128,16,Npages]` plane (16 blocks
+  per 64-token page) addressed through the main block table, allocatable as a `[32,64,1,N]` plane
+  beside K/V. v2's separate plane pool and table are gone. The pooled block mean is cast to BF16
+  before normalization, as the checkpoint does (a declared semantic seam).
+- **v2's FP8-F32 kernel is not ported.** v3's A8 routes with FP32 row scales beat
+  `fp8_f32_a8.cu` at every measured point.
+- **MoE expert addressing** goes through one device helper `nvfp4_expert(bank, e)`, so a later
+  VRAM expert cache replaces one function. No cache is implemented.
+- **`Nvfp4ExpertBankWeight`** moved from `weight_input.h` to `sparse_moe.h`, next to its consumer.
+- **PLE gate/combine** no longer rounds the gated value to BF16 between kernels (it put v2 2-5e-2
+  from the FP64 oracle).
+- **One shape translation unit per K** for shared kernel instances (`bf16/shapes/k2560.cu`,
+  `fp8/shapes/k2560_fp32.cu`): memcheck reports "duplicate entry kernels" when two shape files
+  instantiate the same kernel.
+
+**`block_reduce_sum` audit.** Upstream's `warp.cuh` stays unchanged (no conflict surface). The two
+hyper call sites make one reduction per launch with the broadcast behind its own barrier. v2's PLE
+helper reused one shared buffer for four reductions; its replacement gives each call site its own
+array, written once and read after one barrier. The MoE, attention and indexer kernels do not call
+it; their shared-buffer reuses (indexer norm/rotate, snapshot append, select histogram and scan,
+attention K/V tile, MoE grouping scan) each end with an explicit barrier. v3's existing call sites
+already separate reuses with a barrier. A deterministic test cannot make a missing barrier fail, so
+the evidence is `compute-sanitizer`: racecheck 0 hazards and memcheck/synccheck 0 errors on every
+new route (MoE at T 1, 2, 9, 300; the attention, indexer and norm/rope routes; hyper, PLE and the
+new linear problems).
+
+**G4 evidence** (CUDA 13.3, RTX PRO 6000 Blackwell Server Edition; per-family sessions `m3-3a/b/c`
+2026-09-30 17:02-18:45 UTC, integrated session `m3-3i` 18:41 UTC onward).
+
+**Integrated suite** (`m3-3i`, the combined `m3/3-ops` tree): all 74 `tests/ops` targets built
+and `ctest` over them (76 tests, including the two `kv_cache_append` aliases and every existing
+`qwen3_5` Op test) passed 76/76, none skipped, in 1,482 s. Per-family details:
+
+| Test | Criterion | Worst measured |
+|---|---|---|
+| `ninfer_sparse_moe_nvfp4_test`, A16 banks (T 1, 1 graph, 2, 8, 9, 64 graph, 255, 256, 1000) | rel-L2 ≤ 6e-3, gross ≤ 6e-3 of max ref | rel-L2 3.55e-3 |
+| same, AllowA4 banks (T 1, 7, 8 graph, 9, 10, 255, 256, 257, 300 graph, 1000, 4097, 8192) | rel-L2 ≤ 0.12, gross ≤ 0.12 of max ref (dynamic FP4 activations) | rel-L2 7.49e-2 |
+| same, exact 16-way score tie across the top-10 boundary; guards, NaN-prefilled output, input preservation, workspace high-water = query | exact | pass |
+| `ninfer_selected_block_attention_test`: BF16 and FP8 profiles, batched B 1/2/5/8 with graph replay, shared row T 1..96, NaN in unselected cache, empty set | rel-L2 ≤ 4e-3, gross ≤ 2e-3 + 1.2e-2·max\|ref\|; empty set exact 0 | rel-L2 1.69e-3 (BF16), 1.90e-3 (FP8) |
+| `ninfer_qsa_indexer_test`: four forming-block phases, snapshot W 1/4 up to B 8 with graph, select at 7.5K blocks over 8 rows and 65,575 blocks on one row, all-ties case | block keys pair-scaled 6.9e-3 + rel-L2 2.5e-3; state bytes, untouched plane regions and selections exact | rel-L2 1.87e-3; exact checks equal |
+| `ninfer_rmsnorm_rope_test`, gated D256 form (T 1, 8, 2048; positions to 262100; graph) | pair-scaled 6.9e-3, rel-L2 1.85e-3; gate/v exact | rel-L2 1.73e-3 |
+| `ninfer_hyper_connection_test` (T 1..9, 16, 31-33, 63-65, 256, 512, 8192; inject to T 65537; graph) | block input rel-L2 6e-3; injection 1e-3; inject pointwise 1.01·2^-8 | rel-L2 2.46e-3 |
+| `ninfer_ple_ngram_test` (decode 1-65,536 rows incl. subnormal/zero scales; T 1..8192; B 1/5/8 snapshots; graph) | decode exact; output rel-L2 3e-3; state one BF16 step; untouched slots exact | decode exact; rel-L2 1.7e-3 |
+| `ninfer_linear_fp8_fp32_test`, A16 and A8 (T 17..8192 incl. split-K); FP32-row-scale `native_weight` branch | Linear A16 / A8 (0.04) criteria; the prepared operand gives bit-identical output | rel-L2 2.1e-3 / 3.1e-2 |
+| `ninfer_linear_bf16_a16_test`, new shapes at every route boundary, graph | Linear A16 | rel-L2 2.2e-3 |
+
+**v2 (`87812bc8`) vs v3, same G4 session per family** (µs; decode points in CUDA-graph replay
+where the family runs graphs, L2 flushed per call; medians).
+
+| Op / point | v2 | v3 |
+|---|---:|---:|
+| MoE T=1 / 2 / 4 / 8 (graph) | 66.00 / 91.82 / 156.70 / 242.89 | 67.12 / 94.22 / 156.00 / 241.93 |
+| MoE T=16 / 64 / 256 / 512 (graph) | 514.4 / 1135.6 / 1170.2 / 1256.9 | 504.2 / 1089.7 / 1159.2 / 1233.9 |
+| MoE T=8192 (eager) | 8152 | 7839 |
+| attention decode B=1 at 8K or 30K / B=8 at 30K | 28.2 / 79.4 | 11.8 / 22.7 |
+| attention prefill, 8192 tokens at 30K | 16,672 | 9,064 |
+| indexer decode B=1 / B=8 at 30K | 39.0 / 174 | 22.0 / 32.3 |
+| indexer prefill, 8192 tokens at 30K | 4,489 | 640 |
+| q/k norm+rope (+ KV write) T=1 / T=8192 | 5.66 / 355 | 5.63 / 315 |
+| hyper prepare T=1 / 8 / 512 / 8192 | 31.7 / 39.9 / 123.9 / 1544 | 31.7 / 39.9 / 123.9 / 1547 |
+| PLE layer T=1 / 8 / 512 / 8192 | 97.3 / 103.4 / 416.8 / 8228 | 94.2 / 96.3 / 217.1 / 2770 |
+| FP8 FP32-scale `[13312,2560]` T=1 / 512 / 8192 | 40.9 / 97.3 / 1058 | 39.9 / 91.1 / 845 |
+| FP8 FP32-scale `[16384,2560]` T=1 / 512 / 8192 | 47.1 / 115.7 / 1289 | 48.1 / 101.4 / 1027 |
+| FP8 FP32-scale `[2560,6144]` T=1 / 512 / 8192 | 27.6 / 70.6 / 586 | 27.6 / 57.3 / 503 |
+| BF16 `[640,2560]` T=1 / 64 / 8192 | 14.3 / 37.9 / 138 | 11.2 / 18.4 / 128 |
+| BF16 `[248320,2560]` T=1 / 8 | 900.1 / 901.1 | 898.0 / 900.1 |
+
+v3 is at or below v2 everywhere except: MoE T=1 and T=2, +1.1 and +2.4 µs. nsys shows v3's
+kernels are faster (62.5 vs 63.4 µs at T=1); the difference is the 4-byte memset graph node that
+zeroes the fused router's arrival counter in caller workspace. v2 kept that counter as a
+module-global `__device__` variable across calls, which the v3 Op contract forbids. Four
+hyper/linear points differed by one timer quantum (≈1 µs) and changed sign between passes. v2
+had no route for BF16 `[2560,6144]` and `[248320,2560]` above T=8. Full per-point tables are in
+the session scratch (`E:\v3port-scratch\m3\m33\{moe,attn,misc}`).
+
+**Windows.** MSVC 14.51 + CUDA 13.3 build `ninfer_ops`, all 74 `tests/ops` targets, `ninfer`,
+`ninfer-serve`, both `qwen4_exp` tests, `ninfer_artifact_materialization_test` and
+`ninfer_qwen3_5_loading_test` with no errors and no new warnings in the touched files.
+
+**Corrections for M3.4.**
+- **Attention layer call order:** `linear [13312,2560]` (FP8 FP32-scale; BF16 for MTP) →
+  gated `rmsnorm_rope` → `kv_cache_append` → `linear [640,2560]` → `qsa_indexer_append` →
+  `qsa_indexer_select` (pass the graph context bucket as `max_complete_blocks`) →
+  `selected_block_attention` → `sigmoid_mul(gate, attended)` in place → `linear [2560,6144]`.
+- **Program state per QSA layer (12 target + MTP):** main K/V planes (plus scale planes for FP8),
+  one indexer block-key plane in the same page groups, and per state slot the forming-block state
+  (`[128,4,S]` BF16 + `[3,4,S]` I32) with the same source/destination/snapshot handling as the
+  GDN convolution state. PLE: the 9-column BF16 history per state slot.
+- **Gap: `kv_cache_append` has only a single-sequence D256 form.** Batched decode needs one launch
+  per lane or a batched D256 append.
+- **Gap: no fused GDN input projection at `[16384,2560]` FP32-scale.** Compose `linear` with the
+  `causal_conv1d_silu` split/snapshot forms, or extend `gdn_input_proj` (the FP8 scale word is
+  now a template parameter, so this is cheap).
+- **Workspace at chunk 8192, 131,072 context:** MoE 590 MiB (AllowA4 banks, T 1..8192; 948 MiB
+  if A16Only); indexer select ~72 MB; batched attention ≤ 2.6 MB.
+- **Parity:** the MoE A4 prefill route (T ≥ 256) carries ~7.5% relative error on the routed term
+  by design (v2's profile), so M3.4 expects near-v2, not bit-close, prefill; decode is A16.
+- **G4 tooling:** concurrent `colab new` calls clobber `sessions.json`; create sessions one at a
+  time and re-adopt a lost live VM (`E:\v3port-scratch\m3\m33\misc\recover.py`). `vm_ops.sh`
+  setup must install the ffmpeg and curl dev packages for the v3 configure.
+
 ## 7. Risks
 
 1. **Program port size.** The v2 Program targeted a thinner v2 contract. The v3 contract adds
@@ -528,7 +660,7 @@ following the one-worktree-per-issue rule.
    internals can change reduction order. Parity criteria (§5.3) allow only near-tie divergences and
    bounded KL, and FP64 oracles judge each Op.
 3. **`block_reduce_sum` lost its trailing barrier.** This is a silent shared-memory race in
-   ported kernels unless audited.
+   ported kernels unless audited. *Closed by M3.3 (§6.2).*
 4. **Checkpoint-slot accounting.** The v3 `ResourceManager` owns the logical catalog, while
    Flash-Next's owners pair two physical slots. If the Program does not report that physical
    pressure at admission, the v2 catalog-exhaustion defect (0% reuse forever after ~8 owners)
