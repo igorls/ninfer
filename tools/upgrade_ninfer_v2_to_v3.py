@@ -276,6 +276,11 @@ def _input_names(name, components):
 
 def make_directory(identity, old_objects):
     key = (identity["model_id"], identity["weights_id"])
+    if key[0] == "qwen3.8-flash-next":
+        raise ValueError(
+            "Flash-Next needs its MTP banks baked to NVFP4; from the repository root run: "
+            "python -m tools.convert.qwen4_exp.upgrade INPUT.ninfer OUTPUT.ninfer"
+        )
     if key not in KNOWN_COUNTS or len(old_objects) not in KNOWN_COUNTS[key]:
         raise ValueError(f"unsupported v2 input {key} with {len(old_objects)} objects")
     moe = key[0] == "qwen3.6-35b-a3b"

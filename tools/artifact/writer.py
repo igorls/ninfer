@@ -120,7 +120,14 @@ class ArtifactWriter:
         metadata: dict | None = None,
         provenance: dict | None = None,
         max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
+        artifact_id: bytes | None = None,
     ) -> None:
+        """``artifact_id`` defaults to a fresh UUID; a content-derived id makes the file set
+        reproducible byte for byte."""
+        if artifact_id is not None and (
+            not isinstance(artifact_id, bytes) or len(artifact_id) != 16
+        ):
+            raise ArtifactError("artifact_id must be exactly 16 bytes")
         self.path = Path(path)
         self.objects = plan_objects(specs)
         self.by_id = {obj.id: obj for obj in self.objects}
@@ -138,7 +145,7 @@ class ArtifactWriter:
             self.objects[-1].offset + self.objects[-1].bytes,
             max_file_bytes=max_file_bytes,
         )
-        self.artifact_id = uuid4().bytes
+        self.artifact_id = uuid4().bytes if artifact_id is None else artifact_id
         self._coverage = {obj.id: _Coverage() for obj in self.objects}
         self._prefixes = [0]
         for file in self.directory.files:
