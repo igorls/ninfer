@@ -625,6 +625,19 @@ hyper/linear points differed by one timer quantum (≈1 µs) and changed sign be
 had no route for BF16 `[2560,6144]` and `[248320,2560]` above T=8. Full per-point tables are in
 the session scratch (`E:\v3port-scratch\m3\m33\{moe,attn,misc}`).
 
+**Production FP8 regression A/B** (G4 session `m3-3ab`, 2026-09-30 19:30-19:55 UTC). The FP8
+routes are now templated on the row-scale word, so the Qwen3.8-27B production FP8 (BF16-scale)
+problems were compared between `workstation` `3a6d078b` and this branch in one session:
+`linear` at all six registered `[N,K]`, `attn_input_proj` `[14336,5120]`, `gdn_input_proj` and
+`gdn_input_proj_conv_snapshot` `[16384,5120]`, `linear_add` `[5120,6144]`/`[5120,17408]`,
+`linear_swiglu` `[34816,5120]`, `linear_topk` and `embedding` `[248320,5120]`, policy AllowA8, at
+T = 1, 2, 8, 512, 8192 (topk U = 1, 2, 8). Outputs: all 68 cases bit-identical (FNV-1a of every
+output byte). Timing: the existing op benchmarks, cold L2, 100 samples per run, 5 rounds with
+alternating arm order; every point is within ±0.25% of `workstation`, except points that sit on
+the benchmark's two timer levels in both arms. The largest, `linear [34816,5120]` T=512 (+4.8% in
+5 rounds, bimodal 256/268 µs in both arms), measured +0.00% (median) / −0.08% (mean) over 20
+alternating rounds of 200 samples.
+
 **Windows.** MSVC 14.51 + CUDA 13.3 build `ninfer_ops`, all 74 `tests/ops` targets, `ninfer`,
 `ninfer-serve`, both `qwen4_exp` tests, `ninfer_artifact_materialization_test` and
 `ninfer_qwen3_5_loading_test` with no errors and no new warnings in the touched files.
