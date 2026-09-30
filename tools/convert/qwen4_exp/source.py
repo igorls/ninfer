@@ -21,7 +21,20 @@ CHAT_TEMPLATE_SHA256 = "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9
 # MTP expert banks baked from the v2 BF16 banks. Each digest equals the SHA256 of the
 # device buffer the v2 loader quantizes at startup (`ninfer_quantize_mtp` at 87812bc8 on G4).
 MTP_BANKS = ("mtp/layer/mlp/experts/gate_up", "mtp/layer/mlp/experts/down")
-MTP_BANK_SHA256: dict[str, str] = {}
+MTP_BANK_SHA256 = {
+    "mtp/layer/mlp/experts/gate_up": (
+        "9e25663a0c5435ac498c8f3032db9c745909eeded17aba853f36685a2087b1f6"
+    ),
+    "mtp/layer/mlp/experts/down": (
+        "fa78245bce9efe1073a7eaef0a4f6f294ce521ce1094d6d69f846f46fb8c9f60"
+    ),
+}
 
-# SHA256 of every file of the qualified v3 artifact, in `files` order.
-V3_FILE_SHA256: tuple[str, ...] = ()
+# The qualified v3 artifact (artifact_id 1e7e026e9f634926ae26b80f0fc8591e): SHA256 of every file,
+# in `files` order (entry, part-0001, part-0002, part-0003).
+V3_FILE_SHA256 = (
+    "0de7b5f6c3ac9719e1c6e5811a765fda15fb4618444343502fc798dff2282714",
+    "e5d74e6a4874ef270f000799db5e171786dd685fb4c0d14c0baa075cae13cda8",
+    "67a30b1e718f2205d45ed22235ea93d1c0f9f0bf7cba963155002b5bccbf7baa",
+    "8bc02c7328ff27ce22858ce447afeb5a60d4d01f1f3a12955f9e2a5220780565",
+)
