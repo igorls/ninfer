@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <stdexcept>
 #include <string>
 
@@ -57,6 +58,12 @@ void require_single_nonoverlap(const Tensor& positions, const Tensor& norm_weigh
     }
 }
 
+void require_aligned16(const Tensor& tensor, const char* label) {
+    if (!aligned_to(tensor.data, 16)) {
+        throw std::invalid_argument(std::string("rmsnorm_rope: misaligned ") + label);
+    }
+}
+
 } // namespace
 
 void rmsnorm_rope(const Tensor& positions, const Tensor& q_norm_weight, const Tensor& k_norm_weight,
@@ -88,6 +95,45 @@ void rmsnorm_rope(const Tensor& positions, const Tensor& norm_weight, Tensor& x,
     require_tensor(positions, DType::I32, {tokens, 1, 1, 1}, "positions");
     require_single_nonoverlap(positions, norm_weight, x);
     detail::rmsnorm_rope_single_launch(positions, norm_weight, x, tokens, stream);
+}
+
+void rmsnorm_rope(const Tensor& projected, const Tensor& positions, const Tensor& q_norm_weight,
+                  const Tensor& k_norm_weight, Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
+                  cudaStream_t stream) {
+    constexpr std::int32_t kGatedHeadDim   = 256;
+    constexpr std::int32_t kGatedRows      = 13'312;
+    constexpr std::int32_t kGatedQueryHeads = 24;
+    constexpr std::int32_t kGatedKeyHeads  = 2;
+    const std::int32_t tokens              = projected.ne[1];
+    if (tokens < 1) { throw std::invalid_argument("rmsnorm_rope: gated T must be positive"); }
+    require_tensor(projected, DType::BF16, {kGatedRows, tokens, 1, 1}, "gated projection");
+    require_tensor(positions, DType::I32, {tokens, 3, 1, 1}, "MRoPE positions");
+    require_tensor(q_norm_weight, DType::BF16, {kGatedHeadDim, 1, 1, 1}, "q norm weight");
+    require_tensor(k_norm_weight, DType::BF16, {kGatedHeadDim, 1, 1, 1}, "k norm weight");
+    require_tensor(q, DType::BF16, {kGatedHeadDim, kGatedQueryHeads, tokens, 1}, "q");
+    require_tensor(gate, DType::BF16, {kGatedHeadDim, kGatedQueryHeads, tokens, 1}, "gate");
+    require_tensor(k, DType::BF16, {kGatedHeadDim, kGatedKeyHeads, tokens, 1}, "k");
+    require_tensor(v, DType::BF16, {kGatedHeadDim, kGatedKeyHeads, tokens, 1}, "v");
+    for (const Tensor* tensor : std::initializer_list<const Tensor*>{&projected, &q_norm_weight,
+                                                                   &k_norm_weight, &q, &gate, &k, &v}) {
+        require_aligned16(*tensor, "gated operand");
+    }
+    const Tensor* outputs[] = {&q, &gate, &k, &v};
+    const Tensor* inputs[]  = {&projected, &positions, &q_norm_weight, &k_norm_weight};
+    for (std::size_t i = 0; i < 4; ++i) {
+        for (std::size_t j = i + 1; j < 4; ++j) {
+            if (overlaps(*outputs[i], *outputs[j])) {
+                throw std::invalid_argument("rmsnorm_rope: gated outputs overlap");
+            }
+        }
+        for (const Tensor* input : inputs) {
+            if (overlaps(*outputs[i], *input)) {
+                throw std::invalid_argument("rmsnorm_rope: gated output overlaps an input");
+            }
+        }
+    }
+    detail::rmsnorm_rope_gated_d256_launch(projected, positions, q_norm_weight, k_norm_weight, q,
+                                           gate, k, v, tokens, stream);
 }
 
 } // namespace ninfer::ops

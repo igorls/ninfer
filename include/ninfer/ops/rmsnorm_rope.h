@@ -39,4 +39,40 @@ void rmsnorm_rope(const Tensor& positions, const Tensor& q_norm_weight, const Te
 void rmsnorm_rope(const Tensor& positions, const Tensor& norm_weight, Tensor& x,
                   cudaStream_t stream);
 
+/**
+ * Split a packed gated-query projection and apply one-centered per-head RMSNorm followed by
+ * interleaved three-axis Text MRoPE to its query and key heads.
+ *
+ * Logical shapes: `projected` is BF16 [13312,T]. Its column t stores, for query head h in
+ * [0,24), the query row block [512h, 512h+256) followed by the output-gate row block
+ * [512h+256, 512h+512); key head g in [0,2) at [12288+256g, 12288+256g+256) and value head g at
+ * [12800+256g, 12800+256g+256). `positions` is planar I32 [T,3] (axis-major: axis a of column t
+ * at positions[a*T+t]). `q_norm_weight` and `k_norm_weight` are BF16 [256]. Outputs are q BF16
+ * [256,24,T], gate BF16 [256,24,T], k BF16 [256,2,T] and v BF16 [256,2,T]. T is any positive
+ * extent.
+ *
+ * Math, for every query head (weight w = q_norm_weight) and key head (w = k_norm_weight) of
+ * column t with input vector x[0..256):
+ *
+ *   inv    = 1 / sqrt(sum_d x[d]^2 / 256 + 1e-6)
+ *   n[d]   = x[d] * inv * (1 + w[d])
+ *   phi(i) = positions[(i mod 3)*T + t] * (1e7)^(-2i/64),          0 <= i < 32
+ *   out[i]    = n[i]    * cos(phi(i)) - n[i+32] * sin(phi(i))
+ *   out[i+32] = n[i+32] * cos(phi(i)) + n[i]    * sin(phi(i))
+ *   out[d]    = n[d],                                               64 <= d < 256
+ *
+ * gate and v are bit-exact copies of their projected rows. Normalization and rotation form one
+ * operation: there is no observable BF16 materialization of n, and the only rounding boundary is
+ * the final BF16 store of q and k. The oracle evaluates the formula naively in FP64 from the
+ * represented BF16 inputs. Reduction order, phase range reduction and intermediate precision are
+ * private implementation choices.
+ *
+ * Effects: q, gate, k and v are completely overwritten; nothing else is written. All tensors are
+ * contiguous with 16-byte-aligned data, and the four outputs must not overlap each other or any
+ * input. The Op owns no workspace or persistent state.
+ */
+void rmsnorm_rope(const Tensor& projected, const Tensor& positions, const Tensor& q_norm_weight,
+                  const Tensor& k_norm_weight, Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
+                  cudaStream_t stream);
+
 } // namespace ninfer::ops

@@ -282,6 +282,151 @@ int run_single_case(int tokens, int first_position, std::uint32_t seed, bool gra
     return failures;
 }
 
+
+// Flash-Next gated D256 profile: packed [q256,gate256]x24 | k 2x256 | v 2x256 per column.
+constexpr int kGatedDim        = 256;
+constexpr int kGatedQueryHeads = 24;
+constexpr int kGatedKeyHeads   = 2;
+constexpr int kGatedRows       = 13'312;
+
+// Independent FP64 oracle for one-centered RMSNorm + interleaved MRoPE (64 of 256 dimensions,
+// pair i on axis i%3). Unrotated dimensions use their own magnitude as the criterion scale.
+void gated_head_oracle(const std::vector<float>& projected, std::size_t source,
+                       const std::vector<float>& weight, const std::int32_t* axis_positions,
+                       std::vector<double>& out, std::vector<double>& scale, std::size_t target) {
+    double sum_squares = 0.0;
+    for (int d = 0; d < kGatedDim; ++d) {
+        const double x = projected[source + static_cast<std::size_t>(d)];
+        sum_squares += x * x;
+    }
+    const double inverse = 1.0 / std::sqrt(sum_squares / kGatedDim + kEpsilon);
+    std::vector<double> n(kGatedDim);
+    for (int d = 0; d < kGatedDim; ++d) {
+        n[static_cast<std::size_t>(d)] =
+            static_cast<double>(projected[source + static_cast<std::size_t>(d)]) * inverse *
+            (1.0 + static_cast<double>(weight[static_cast<std::size_t>(d)]));
+    }
+    for (int d = 64; d < kGatedDim; ++d) {
+        out[target + d]   = n[static_cast<std::size_t>(d)];
+        scale[target + d] = std::abs(n[static_cast<std::size_t>(d)]);
+    }
+    for (int pair = 0; pair < 32; ++pair) {
+        const double phase =
+            static_cast<double>(axis_positions[pair % 3]) * std::pow(kTheta, -2.0 * pair / 64.0);
+        const double c = std::cos(phase);
+        const double s = std::sin(phase);
+        const double a = n[static_cast<std::size_t>(pair)];
+        const double b = n[static_cast<std::size_t>(pair + 32)];
+        out[target + pair]        = a * c - b * s;
+        out[target + pair + 32]   = b * c + a * s;
+        scale[target + pair]      = std::hypot(a, b);
+        scale[target + pair + 32] = std::hypot(a, b);
+    }
+}
+
+int run_gated_case(int tokens, int first_position, bool distinct_axes, std::uint32_t seed,
+                   bool graph = false) {
+    const std::size_t projected_count = static_cast<std::size_t>(kGatedRows) * tokens;
+    const std::size_t q_count  = static_cast<std::size_t>(kGatedDim) * kGatedQueryHeads * tokens;
+    const std::size_t kv_count = static_cast<std::size_t>(kGatedDim) * kGatedKeyHeads * tokens;
+    const auto projected       = make_bf16_values(projected_count, seed, -6.0F, 6.0F);
+    const auto q_weight        = make_bf16_values(kGatedDim, seed + 1U, -0.75F, 0.75F);
+    const auto k_weight        = make_bf16_values(kGatedDim, seed + 2U, -0.75F, 0.75F);
+    std::vector<std::int32_t> positions(static_cast<std::size_t>(tokens) * 3);
+    for (int t = 0; t < tokens; ++t) {
+        for (int axis = 0; axis < 3; ++axis) {
+            // Vision-style axes differ from the text position; plain text repeats it.
+            const int offset = distinct_axes ? axis * 977 - (t % 37) * axis : 0;
+            positions[static_cast<std::size_t>(axis) * tokens + t] =
+                std::max(0, first_position + t - offset);
+        }
+    }
+    std::vector<double> q_ref(q_count), q_scale(q_count), k_ref(kv_count), k_scale(kv_count);
+    std::vector<std::uint16_t> gate_ref(q_count), v_ref(kv_count);
+    const auto projected_bits = bf16_bits(projected);
+    for (int t = 0; t < tokens; ++t) {
+        const std::int32_t axis_positions[3] = {
+            positions[static_cast<std::size_t>(t)],
+            positions[static_cast<std::size_t>(tokens) + t],
+            positions[2 * static_cast<std::size_t>(tokens) + t]};
+        const std::size_t column = static_cast<std::size_t>(t) * kGatedRows;
+        for (int h = 0; h < kGatedQueryHeads; ++h) {
+            const std::size_t target =
+                (static_cast<std::size_t>(t) * kGatedQueryHeads + h) * kGatedDim;
+            gated_head_oracle(projected, column + static_cast<std::size_t>(h) * 512, q_weight,
+                              axis_positions, q_ref, q_scale, target);
+            for (int d = 0; d < kGatedDim; ++d) {
+                gate_ref[target + d] = projected_bits[column + h * 512 + 256 + d];
+            }
+        }
+        for (int g = 0; g < kGatedKeyHeads; ++g) {
+            const std::size_t target =
+                (static_cast<std::size_t>(t) * kGatedKeyHeads + g) * kGatedDim;
+            gated_head_oracle(projected, column + 12'288 + static_cast<std::size_t>(g) * 256,
+                              k_weight, axis_positions, k_ref, k_scale, target);
+            for (int d = 0; d < kGatedDim; ++d) {
+                v_ref[target + d] = projected_bits[column + 12'800 + g * 256 + d];
+            }
+        }
+    }
+
+    DeviceBuffer projected_device = to_device(projected_bits);
+    DeviceBuffer position_device  = to_device(positions);
+    const auto q_weight_bits      = bf16_bits(q_weight);
+    const auto k_weight_bits      = bf16_bits(k_weight);
+    DeviceBuffer q_weight_device  = to_device(q_weight_bits);
+    DeviceBuffer k_weight_device  = to_device(k_weight_bits);
+    GuardedDeviceBuffer q_device(q_count * 2);
+    GuardedDeviceBuffer gate_device(q_count * 2);
+    GuardedDeviceBuffer k_device(kv_count * 2);
+    GuardedDeviceBuffer v_device(kv_count * 2);
+    Tensor projected_tensor(projected_device.p, DType::BF16, {kGatedRows, tokens});
+    Tensor position_tensor(position_device.p, DType::I32, {tokens, 3});
+    Tensor q_weight_tensor(q_weight_device.p, DType::BF16, {kGatedDim});
+    Tensor k_weight_tensor(k_weight_device.p, DType::BF16, {kGatedDim});
+    Tensor q_tensor(q_device.data(), DType::BF16, {kGatedDim, kGatedQueryHeads, tokens});
+    Tensor gate_tensor(gate_device.data(), DType::BF16, {kGatedDim, kGatedQueryHeads, tokens});
+    Tensor k_tensor(k_device.data(), DType::BF16, {kGatedDim, kGatedKeyHeads, tokens});
+    Tensor v_tensor(v_device.data(), DType::BF16, {kGatedDim, kGatedKeyHeads, tokens});
+    GuardedDeviceBuffer* outputs[] = {&q_device, &gate_device, &k_device, &v_device};
+    execute(
+        [&](cudaStream_t stream) {
+            ops::rmsnorm_rope(projected_tensor, position_tensor, q_weight_tensor, k_weight_tensor,
+                              q_tensor, gate_tensor, k_tensor, v_tensor, stream);
+        },
+        [&](cudaStream_t stream) {
+            for (auto* buffer : outputs) {
+                cuda_check(cudaMemsetAsync(buffer->data(), 0xff, buffer->bytes(), stream),
+                           "reset gated output");
+            }
+        },
+        graph);
+
+    const std::string label = "rmsnorm_rope gated T=" + std::to_string(tokens) +
+                              " P=" + std::to_string(first_position) +
+                              " axes=" + std::to_string(distinct_axes) +
+                              " graph=" + std::to_string(graph);
+    int failures = verify_profile(label + " q", from_device_bf16(q_device.data(), q_count),
+                                  OracleResult{q_ref, q_scale});
+    failures += verify_profile(label + " k", from_device_bf16(k_device.data(), kv_count),
+                               OracleResult{k_ref, k_scale});
+    failures += verify_exact((label + " gate").c_str(),
+                             from_device<std::uint16_t>(gate_device.data(), q_count), gate_ref);
+    failures += verify_exact((label + " v").c_str(),
+                             from_device<std::uint16_t>(v_device.data(), kv_count), v_ref);
+    for (auto* buffer : outputs) { failures += buffer->verify_guards(label + " guards"); }
+    failures += verify_exact((label + " projected").c_str(),
+                             from_device<std::uint16_t>(projected_device, projected_bits.size()),
+                             projected_bits);
+    failures += verify_exact((label + " q weight").c_str(),
+                             from_device<std::uint16_t>(q_weight_device, q_weight_bits.size()),
+                             q_weight_bits);
+    failures += verify_exact((label + " k weight").c_str(),
+                             from_device<std::uint16_t>(k_weight_device, k_weight_bits.size()),
+                             k_weight_bits);
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -304,6 +449,11 @@ int main() {
     failures += run_single_case(64, 262'080, 0x2003U);
     failures += run_single_case(1024, 130'048, 0x2004U);
     failures += run_single_case(2048, 260'032, 0x2005U);
+    failures += run_gated_case(1, 0, false, 0x3001U);
+    failures += run_gated_case(1, 261'000, true, 0x3002U, true);
+    failures += run_gated_case(8, 30'000, true, 0x3003U);
+    failures += run_gated_case(8, 262'100, false, 0x3004U, true);
+    failures += run_gated_case(2048, 200'000, true, 0x3005U);
 
     if (failures != 0) {
         std::cerr << "rmsnorm_rope failures=" << failures << '\n';
