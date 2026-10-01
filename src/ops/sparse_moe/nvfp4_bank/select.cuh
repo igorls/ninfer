@@ -52,36 +52,38 @@ __device__ __forceinline__ Nvfp4MoeRanked nvfp4_moe_warp_best(Nvfp4MoeRanked val
     return value;
 }
 
-// Lane l loads experts l + 32*i and sorts them best first (static compare-exchange insertion).
-__device__ __forceinline__ void nvfp4_moe_rank_lane(const float* __restrict__ token_scores,
-                                                    Nvfp4MoeRanked (&local)[16], int lane) {
+// Lane l owns experts l + 32*i (i = 0..15): their scores stay in registers and `taken` marks the
+// ones already selected. Each tournament round takes every lane's best remaining candidate and
+// the warp's best of those; the winner's lane is id & 31 and marks it taken. Ranking is a strict
+// total order, so round r yields the r-th best expert.
+struct Nvfp4MoeLaneScores {
+    float value[16];
+    unsigned taken;
+};
+
+__device__ __forceinline__ void nvfp4_moe_load_lane(const float* __restrict__ token_scores,
+                                                    Nvfp4MoeLaneScores& lane_scores, int lane) {
 #pragma unroll
     for (int item = 0; item < 16; ++item) {
-        const int id = lane + item * 32;
-        local[item]  = {__ldcg(token_scores + id), id};
+        lane_scores.value[item] = __ldcg(token_scores + lane + item * 32);
     }
-#pragma unroll
-    for (int item = 1; item < 16; ++item) {
-#pragma unroll
-        for (int j = item; j > 0; --j) {
-            if (nvfp4_moe_better(local[j], local[j - 1])) {
-                const Nvfp4MoeRanked moving = local[j];
-                local[j]                    = local[j - 1];
-                local[j - 1]                = moving;
-            }
-        }
-    }
+    lane_scores.taken = 0U;
 }
 
-// One tournament round: the best remaining head over the warp. The winner's lane is id & 31
-// because every candidate carries id = lane + 32*item; it pops its head.
-__device__ __forceinline__ Nvfp4MoeRanked nvfp4_moe_pop_winner(Nvfp4MoeRanked (&local)[16],
+__device__ __forceinline__ Nvfp4MoeRanked nvfp4_moe_pop_winner(Nvfp4MoeLaneScores& lane_scores,
                                                               int lane) {
-    const Nvfp4MoeRanked winner = nvfp4_moe_warp_best(local[0]);
-    if (lane == (winner.id & 31)) {
+    // At most ten of a lane's sixteen candidates are ever taken, so one always remains.
+    Nvfp4MoeRanked best{0.0F, -1};
 #pragma unroll
-        for (int item = 0; item < 15; ++item) { local[item] = local[item + 1]; }
+    for (int item = 0; item < 16; ++item) {
+        const Nvfp4MoeRanked candidate{lane_scores.value[item], lane + item * 32};
+        if (((lane_scores.taken >> item) & 1U) == 0U &&
+            (best.id < 0 || nvfp4_moe_better(candidate, best))) {
+            best = candidate;
+        }
     }
+    const Nvfp4MoeRanked winner = nvfp4_moe_warp_best(best);
+    if (lane == (winner.id & 31)) { lane_scores.taken |= 1U << (winner.id >> 5); }
     return winner;
 }
 
@@ -89,10 +91,10 @@ __device__ __forceinline__ Nvfp4MoeRanked nvfp4_moe_pop_winner(Nvfp4MoeRanked (&
 // warp. It is the rank-th winner of nvfp4_moe_select_token over the same scores.
 __device__ __forceinline__ int nvfp4_moe_select_rank(const float* __restrict__ token_scores,
                                                      int rank, int lane) {
-    Nvfp4MoeRanked local[16];
-    nvfp4_moe_rank_lane(token_scores, local, lane);
-    Nvfp4MoeRanked winner = nvfp4_moe_pop_winner(local, lane);
-    for (int round = 1; round <= rank; ++round) { winner = nvfp4_moe_pop_winner(local, lane); }
+    Nvfp4MoeLaneScores lane_scores;
+    nvfp4_moe_load_lane(token_scores, lane_scores, lane);
+    Nvfp4MoeRanked winner = nvfp4_moe_pop_winner(lane_scores, lane);
+    for (int round = 1; round <= rank; ++round) { winner = nvfp4_moe_pop_winner(lane_scores, lane); }
     return winner.id;
 }
 
@@ -102,12 +104,12 @@ __device__ __forceinline__ void nvfp4_moe_select_token(const float* __restrict__
                                                        float* __restrict__ weights,
                                                        float* __restrict__ shared_scale,
                                                        int lane) {
-    Nvfp4MoeRanked local[16];
-    nvfp4_moe_rank_lane(token_scores, local, lane);
+    Nvfp4MoeLaneScores lane_scores;
+    nvfp4_moe_load_lane(token_scores, lane_scores, lane);
     float my_score = 0.0F; // lane r keeps the r-th selected score
 #pragma unroll
     for (int rank = 0; rank < kNvfp4MoeTopK; ++rank) {
-        const Nvfp4MoeRanked winner = nvfp4_moe_pop_winner(local, lane);
+        const Nvfp4MoeRanked winner = nvfp4_moe_pop_winner(lane_scores, lane);
         if (lane == 0) { ids[rank] = winner.id; }
         if (lane == rank) { my_score = winner.value; }
     }
