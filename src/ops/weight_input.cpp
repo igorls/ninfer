@@ -127,7 +127,12 @@ ProjectionWeights input_projection(std::span<const WeightInput, 4> inputs, bool 
                         k == std::vector<std::uint64_t>{512, 2048} && third == q && fourth == k
                   : q == std::vector<std::uint64_t>{2048, 2048} && k == q &&
                         third == std::vector<std::uint64_t>{4096, 2048} && fourth == third;
-    require(dense || moe, "input projection: unsupported logical projection geometry");
+    // Qwen3.8-Flash-Next GDN: one FP32-row-scaled FP8 [16384,2560] parent.
+    const bool flash_next_gdn = !attention && q == std::vector<std::uint64_t>{2048, 2560} &&
+                                k == q && third == std::vector<std::uint64_t>{6144, 2560} &&
+                                fourth == third;
+    require(dense || moe || flash_next_gdn,
+            "input projection: unsupported logical projection geometry");
     const auto joined = concatenate_rows(inputs);
     if (contiguous(joined)) {
         auto result       = single(inputs);
@@ -135,7 +140,8 @@ ProjectionWeights input_projection(std::span<const WeightInput, 4> inputs, bool 
         const bool supported =
             (moe && format == QType::Q8_G32_FP16) ||
             (dense && (format == QType::NVFP4 || format == QType::FP8_E4M3FN_ROW_BF16 ||
-                       (attention && format == QType::BF16)));
+                       (attention && format == QType::BF16))) ||
+            (flash_next_gdn && format == QType::FP8_E4M3FN_ROW_FP32);
         require(supported, "input projection: unsupported single-parent format");
         return result;
     }

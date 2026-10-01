@@ -396,16 +396,27 @@ int run_nvfp4() {
     return failures;
 }
 
-int run_fp8_case(DevicePackedWeight& parent, std::int32_t width, std::int32_t batch,
-                 std::vector<std::int32_t> valid, ops::LinearPolicy policy, std::uint32_t seed) {
+// The registered row-scaled FP8 [16384,K] parents share the record/snapshot route selection.
+struct Fp8Parent {
+    QType qtype;
+    std::int32_t hidden;
+    const char* label;
+};
+
+constexpr Fp8Parent kFp8Bf16K5120{QType::FP8_E4M3FN_ROW_BF16, 5120, "FP8"};
+constexpr Fp8Parent kFp8Fp32K2560{QType::FP8_E4M3FN_ROW_FP32, 2560, "FP8-FP32 K2560"};
+
+int run_fp8_case(const Fp8Parent& profile, DevicePackedWeight& parent, std::int32_t width,
+                 std::int32_t batch, std::vector<std::int32_t> valid, ops::LinearPolicy policy,
+                 std::uint32_t seed) {
     const std::size_t snapshot_bytes = ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
-        QType::FP8_E4M3FN_ROW_BF16, 16384, 5120, policy, batch, width, width);
+        profile.qtype, 16384, profile.hidden, policy, batch, width, width);
     const std::size_t record_bytes = ops::gdn_input_proj_conv_record_workspace_capacity_bytes(
-        QType::FP8_E4M3FN_ROW_BF16, 16384, 5120, policy, batch, width, width);
+        profile.qtype, 16384, profile.hidden, policy, batch, width, width);
     return run_case(
-        "FP8 policy=" + std::to_string(static_cast<int>(policy)) + " B=" + std::to_string(batch) +
-            " W=" + std::to_string(width),
-        5120, 6144, 6144, width, batch, std::move(valid), snapshot_bytes, record_bytes,
+        std::string(profile.label) + " policy=" + std::to_string(static_cast<int>(policy)) +
+            " B=" + std::to_string(batch) + " W=" + std::to_string(width),
+        profile.hidden, 6144, 6144, width, batch, std::move(valid), snapshot_bytes, record_bytes,
         [&](const Tensor& x, const Tensor& conv, Tensor& state, const Tensor& valid_columns,
             const Tensor& initial, const Tensor& snapshot_base, Tensor& q, Tensor& k, Tensor& v,
             Tensor& z, WorkspaceArena& workspace, cudaStream_t stream) {
@@ -429,14 +440,35 @@ int run_fp8() {
     int failures = 0;
     for (auto policy : {ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA8}) {
         for (int width = 2; width <= 16; ++width) {
-            failures += run_fp8_case(parent, width, 1, {}, policy, 1700U + width);
-            failures += run_fp8_case(parent, width, 8, ragged(width, 8), policy, 1750U + width);
+            failures += run_fp8_case(kFp8Bf16K5120, parent, width, 1, {}, policy, 1700U + width);
+            failures += run_fp8_case(kFp8Bf16K5120, parent, width, 8, ragged(width, 8), policy,
+                                     1750U + width);
         }
         for (int batch : {2, 3, 4}) {
-            failures += run_fp8_case(parent, 4, batch, ragged(4, batch), policy, 1810U + batch);
+            failures += run_fp8_case(kFp8Bf16K5120, parent, 4, batch, ragged(4, batch), policy,
+                                     1810U + batch);
         }
     }
     failures += parent.verify_preserved("FP8 record parent weight");
+    return failures;
+}
+
+// Flash-Next FP32-scale [16384,2560] parent: the fused (W 2..3), materialized A16 and A8 record
+// routes against the snapshot execution of the same block.
+int run_fp8_flash_next() {
+    DevicePackedWeight parent(
+        quantized_weight::make_patterned_weight(QType::FP8_E4M3FN_ROW_FP32, 16384, 2560, 1709U));
+    int failures = 0;
+    for (auto policy : {ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA8}) {
+        for (int width : {2, 3, 4, 6, 16}) {
+            failures += run_fp8_case(kFp8Fp32K2560, parent, width, 1, {}, policy, 1900U + width);
+            failures += run_fp8_case(kFp8Fp32K2560, parent, width, 8, ragged(width, 8), policy,
+                                     1950U + width);
+        }
+        failures +=
+            run_fp8_case(kFp8Fp32K2560, parent, 4, 3, ragged(4, 3), policy, 1990U);
+    }
+    failures += parent.verify_preserved("FP8-FP32 K2560 record parent weight");
     return failures;
 }
 
@@ -453,6 +485,7 @@ int main() {
     failures += run_q8();
     failures += run_nvfp4();
     failures += run_fp8();
+    failures += run_fp8_flash_next();
     std::cout << (failures == 0 ? "OK" : "FAIL") << " gdn_input_proj_conv_record\n";
     return failures == 0 ? 0 : 1;
 }
