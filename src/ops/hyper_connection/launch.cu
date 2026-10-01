@@ -108,4 +108,13 @@ void hyper_inject_launch(const void* block_output, const float* injection, void*
     CUDA_CHECK(cudaGetLastError());
 }
 
+void hyper_expand_launch(const void* x, void* hidden, std::int32_t tokens, cudaStream_t stream) {
+    const std::int64_t chunks = static_cast<std::int64_t>(tokens) * kHyperHiddenChunks;
+    const auto blocks =
+        static_cast<unsigned>((chunks + kHyperExpandThreads - 1) / kHyperExpandThreads);
+    hyper_expand_kernel<<<blocks, kHyperExpandThreads, 0, stream>>>(
+        static_cast<const ulonglong2*>(x), static_cast<ulonglong2*>(hidden), chunks);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace ninfer::ops::detail

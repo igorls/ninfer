@@ -155,4 +155,14 @@ void hyper_connection_inject(const Tensor& block_output, const Tensor& injection
                                 hidden.data, tokens, stream);
 }
 
+void hyper_connection_expand(const Tensor& x, Tensor& hidden, cudaStream_t stream) {
+    constexpr const char* op  = "hyper_connection_expand";
+    const std::int32_t tokens = x.ne[1];
+    if (tokens <= 0) fail(op, "token extent");
+    require_matrix(x, DType::BF16, kHidden, tokens, op, "x");
+    require_matrix(hidden, DType::BF16, kConcat, tokens, op, "hidden");
+    if (overlaps(x.data, x.bytes(), hidden.data, hidden.bytes())) fail(op, "alias");
+    detail::hyper_expand_launch(x.data, hidden.data, tokens, stream);
+}
+
 } // namespace ninfer::ops

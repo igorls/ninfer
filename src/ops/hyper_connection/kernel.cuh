@@ -278,6 +278,27 @@ __global__ void __launch_bounds__(256)
     }
 }
 
+inline constexpr int kHyperExpandThreads = 256;
+inline constexpr int kHyperHiddenChunks  = kHyperHidden / 8;
+
+// Grid ceil(320*T / 256), 256 threads: each thread copies one 16-byte chunk of x into the four
+// streams of its token.
+__global__ void __launch_bounds__(kHyperExpandThreads)
+    hyper_expand_kernel(const ulonglong2* __restrict__ x, ulonglong2* __restrict__ hidden,
+                        std::int64_t chunks) {
+    const std::int64_t index =
+        static_cast<std::int64_t>(blockIdx.x) * kHyperExpandThreads + threadIdx.x;
+    if (index >= chunks) return;
+    const std::int64_t token = index / kHyperHiddenChunks;
+    const std::int64_t chunk = index - token * kHyperHiddenChunks;
+    const ulonglong2 value   = x[index];
+    ulonglong2* destination  = hidden + token * (kHyperStreams * kHyperHiddenChunks) + chunk;
+#pragma unroll
+    for (int stream = 0; stream < kHyperStreams; ++stream) {
+        destination[stream * kHyperHiddenChunks] = value;
+    }
+}
+
 inline constexpr int kHyperInjectBlocksPerToken = (kHyperConcat / 8 + 255) / 256;
 
 // Grid 5*T, 256 threads: hidden += block_output * injection over 8-value chunks.

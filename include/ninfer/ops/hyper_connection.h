@@ -103,4 +103,24 @@ void hyper_connection_mix(const Tensor& hidden, const HyperConnectionWeights& we
 void hyper_connection_inject(const Tensor& block_output, const Tensor& injection, Tensor& hidden,
                              cudaStream_t stream);
 
+/**
+ * Op: four-stream hyper-connection state initialization.
+ *
+ * Math / indexing:
+ *   hidden[s*2560+c,t] = x[c,t] for s = 0..3, c = 0..2559: every stream starts as a copy of the
+ *   token's input column.
+ *
+ * Supported domain:
+ *   x contiguous BF16 [2560,T], hidden contiguous BF16 [10240,T], every positive T, 16-byte-aligned
+ *   storage.
+ *
+ * Numeric:
+ *   Exact: every hidden element is the bit pattern of its source x element.
+ *
+ * Effects:
+ *   hidden is overwritten completely and its incoming value is not read; x is unchanged and must
+ *   not overlap hidden. No workspace. Enqueued on `stream`; valid inside CUDA Graph capture.
+ */
+void hyper_connection_expand(const Tensor& x, Tensor& hidden, cudaStream_t stream);
+
 } // namespace ninfer::ops

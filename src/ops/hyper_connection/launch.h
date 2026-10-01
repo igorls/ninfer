@@ -29,4 +29,6 @@ void hyper_mix_launch(const void* hidden, const void* norm, const void* down, co
 void hyper_inject_launch(const void* block_output, const float* injection, void* hidden,
                          std::int32_t tokens, cudaStream_t stream);
 
+void hyper_expand_launch(const void* x, void* hidden, std::int32_t tokens, cudaStream_t stream);
+
 } // namespace ninfer::ops::detail
