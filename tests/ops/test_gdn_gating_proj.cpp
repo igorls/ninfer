@@ -25,12 +25,13 @@ struct Geometry {
     std::int32_t hidden;
     std::int32_t heads;
     bool parent_weight;
+    bool bf16_controls = false; // A_log/dt_bias stored as BF16 rather than FP32
 };
 
 constexpr Geometry kQwen27{"qwen3_6_27b", 5120, 48, false};
 constexpr Geometry kQwen38Parent{"qwen3_8_27b_parent", 5120, 48, true};
 constexpr Geometry kQwen35{"qwen3_6_35b_a3b", 2048, 32, true};
-constexpr Geometry kFlashNextParent{"qwen3_8_flash_next_parent", 2560, 48, true};
+constexpr Geometry kFlashNextParent{"qwen3_8_flash_next_parent", 2560, 48, true, true};
 
 constexpr ReductionCriterion kGdnProjectionFp32{/*relative_l2=*/1.4e-6,
                                                 /*gross_absolute=*/5.0e-7,
@@ -208,13 +209,23 @@ int verify_inputs_unchanged(const std::string& label, const DeviceBuffer& device
                             const DeviceBuffer& device_weight,
                             const std::vector<std::uint16_t>& weight_bits,
                             const DeviceBuffer& device_a_log, const std::vector<float>& a_log,
-                            const DeviceBuffer& device_dt_bias, const std::vector<float>& dt_bias) {
+                            const DeviceBuffer& device_dt_bias, const std::vector<float>& dt_bias,
+                            bool bf16_controls = false) {
     int failures = 0;
     failures += verify_exact((label + " x immutable").c_str(),
                              from_device<std::uint16_t>(device_x, x_bits.size()), x_bits);
     failures +=
         verify_exact((label + " weight immutable").c_str(),
                      from_device<std::uint16_t>(device_weight, weight_bits.size()), weight_bits);
+    if (bf16_controls) {
+        failures += verify_exact((label + " A_log immutable").c_str(),
+                                 from_device<std::uint16_t>(device_a_log, a_log.size()),
+                                 bf16_bits(a_log));
+        failures += verify_exact((label + " dt_bias immutable").c_str(),
+                                 from_device<std::uint16_t>(device_dt_bias, dt_bias.size()),
+                                 bf16_bits(dt_bias));
+        return failures;
+    }
     failures += verify_exact((label + " A_log immutable").c_str(),
                              from_device<float>(device_a_log, a_log.size()), a_log);
     failures += verify_exact((label + " dt_bias immutable").c_str(),
@@ -236,6 +247,11 @@ int run_projection_case(const Geometry& geometry, std::int32_t tokens, std::uint
     round_to_bf16(x);
     round_to_bf16(a_weight);
     round_to_bf16(b_weight);
+    if (geometry.bf16_controls) {
+        // The oracle uses the exact represented BF16 control values.
+        round_to_bf16(a_log);
+        round_to_bf16(dt_bias);
+    }
 
     const std::vector<std::int32_t> selected = oracle_tokens(tokens);
     std::vector<double> reference_g, reference_beta;
@@ -252,8 +268,11 @@ int run_projection_case(const Geometry& geometry, std::int32_t tokens, std::uint
     DeviceBuffer device_weight = to_device(weight_bits);
     DeviceBuffer device_b_weight;
     if (!geometry.parent_weight) { device_b_weight = to_device(b_weight_bits); }
-    DeviceBuffer device_a_log         = to_device(a_log);
-    DeviceBuffer device_dt_bias       = to_device(dt_bias);
+    const DType control_dtype = geometry.bf16_controls ? DType::BF16 : DType::FP32;
+    DeviceBuffer device_a_log =
+        geometry.bf16_controls ? to_device(bf16_bits(a_log)) : to_device(a_log);
+    DeviceBuffer device_dt_bias =
+        geometry.bf16_controls ? to_device(bf16_bits(dt_bias)) : to_device(dt_bias);
     const std::size_t output_elements = static_cast<std::size_t>(geometry.heads) * tokens;
     GuardedDeviceBuffer device_g(output_elements * sizeof(float));
     GuardedDeviceBuffer device_beta(output_elements * sizeof(float));
@@ -261,8 +280,8 @@ int run_projection_case(const Geometry& geometry, std::int32_t tokens, std::uint
     device_beta.fill(0xff);
 
     Tensor tensor_x(device_x.p, DType::BF16, {geometry.hidden, tokens});
-    Tensor tensor_a_log(device_a_log.p, DType::FP32, {geometry.heads});
-    Tensor tensor_dt_bias(device_dt_bias.p, DType::FP32, {geometry.heads});
+    Tensor tensor_a_log(device_a_log.p, control_dtype, {geometry.heads});
+    Tensor tensor_dt_bias(device_dt_bias.p, control_dtype, {geometry.heads});
     Tensor tensor_g(device_g.data(), DType::FP32, {geometry.heads, tokens});
     Tensor tensor_beta(device_beta.data(), DType::FP32, {geometry.heads, tokens});
     const std::size_t workspace_bytes = ops::gdn_gating_proj_workspace_capacity_bytes(
@@ -306,7 +325,8 @@ int run_projection_case(const Geometry& geometry, std::int32_t tokens, std::uint
     failures += device_g.verify_guards((label + " g").c_str());
     failures += device_beta.verify_guards((label + " beta").c_str());
     failures += verify_inputs_unchanged(label, device_x, x_bits, device_weight, weight_bits,
-                                        device_a_log, a_log, device_dt_bias, dt_bias);
+                                        device_a_log, a_log, device_dt_bias, dt_bias,
+                                        geometry.bf16_controls);
     if (!geometry.parent_weight) {
         failures += verify_exact((label + " b_weight immutable").c_str(),
                                  from_device<std::uint16_t>(device_b_weight, b_weight_bits.size()),
@@ -452,6 +472,57 @@ int run_norm_projection_case(const Geometry& geometry, std::int32_t tokens, std:
     return failures;
 }
 
+// The Flash-Next parent admits only its stored BF16 controls and only the control projection.
+int verify_flash_next_admission(DeviceExecutionView execution) {
+    const Geometry& geometry       = kFlashNextParent;
+    constexpr std::int32_t kTokens = 2;
+    const auto bytes = [](std::int64_t elements, std::int64_t size) {
+        return static_cast<std::size_t>(elements * size);
+    };
+    DeviceBuffer x(bytes(std::int64_t(geometry.hidden) * kTokens, 2));
+    DeviceBuffer h(bytes(std::int64_t(geometry.hidden) * kTokens, 2));
+    DeviceBuffer norm(bytes(geometry.hidden, 2));
+    DeviceBuffer weight(bytes(std::int64_t(2 * geometry.heads) * geometry.hidden, 2));
+    DeviceBuffer control32(bytes(geometry.heads, 4)), bias32(bytes(geometry.heads, 4));
+    DeviceBuffer control16(bytes(geometry.heads, 2)), bias16(bytes(geometry.heads, 2));
+    DeviceBuffer g(bytes(std::int64_t(geometry.heads) * kTokens, 4));
+    DeviceBuffer beta(bytes(std::int64_t(geometry.heads) * kTokens, 4));
+    Tensor tx(x.p, DType::BF16, {geometry.hidden, kTokens});
+    Tensor th(h.p, DType::BF16, {geometry.hidden, kTokens});
+    Tensor tn(norm.p, DType::BF16, {geometry.hidden});
+    Tensor ta32(control32.p, DType::FP32, {geometry.heads});
+    Tensor td32(bias32.p, DType::FP32, {geometry.heads});
+    Tensor ta16(control16.p, DType::BF16, {geometry.heads});
+    Tensor td16(bias16.p, DType::BF16, {geometry.heads});
+    Tensor tg(g.p, DType::FP32, {geometry.heads, kTokens});
+    Tensor tb(beta.p, DType::FP32, {geometry.heads, kTokens});
+    const Weight parent = bf16_weight(weight.p, 2 * geometry.heads, geometry.hidden);
+    WorkspaceArena workspace(std::size_t{1} << 20);
+    int failures            = 0;
+    const auto expect_throw = [&](const char* what, auto&& call) {
+        try {
+            call();
+            std::cerr << "gdn_gating_proj Flash-Next: " << what << " was accepted\n";
+            ++failures;
+        } catch (const std::invalid_argument&) {}
+    };
+    expect_throw("FP32 A_log/dt_bias", [&] {
+        ops::gdn_gating_proj(tx, parent, ta32, td32, workspace, tg, tb, execution);
+    });
+    expect_throw("BF16 A_log with FP32 dt_bias", [&] {
+        ops::gdn_gating_proj(tx, parent, ta16, td32, workspace, tg, tb, execution);
+    });
+    expect_throw("the input-norm form", [&] {
+        ops::gdn_norm_gating_proj(tx, tn, 1.0e-6F, parent, ta16, td16, workspace, th, tg, tb,
+                                  execution);
+    });
+    expect_throw("the input-norm workspace query", [&] {
+        (void)ops::gdn_norm_gating_proj_workspace_capacity_bytes(geometry.heads, geometry.hidden,
+                                                                 1, 1);
+    });
+    return failures;
+}
+
 int verify_workspace_capacity_contract(const Geometry& geometry,
                                        std::initializer_list<std::int32_t> route_endpoints,
                                        bool norm_form = true) {
@@ -512,7 +583,9 @@ int main() {
     // its [A,B] row partition; the split 27B cases above cover every unchanged execution route.
     failures += run_projection_case(kQwen38Parent, 1, 0x1801u, execution);
     // Every registered Flash-Next [96,2560] route boundary through its contiguous parent.
-    for (const std::int32_t tokens : {1, 63, 64, 65, 1024, 1025, 2048, 2049, 4096, 4097}) {
+    failures += verify_flash_next_admission(execution);
+    for (const std::int32_t tokens :
+         {1, 2, 8, 9, 63, 64, 65, 512, 1024, 1025, 2048, 2049, 4096, 4097, 8192}) {
         failures += run_projection_case(kFlashNextParent, tokens,
                                         0x2800u + static_cast<std::uint32_t>(tokens), execution);
     }

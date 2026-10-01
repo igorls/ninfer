@@ -55,11 +55,13 @@ void gdn_gating_proj(const Tensor& x, const Weight& a_weight, const Weight& b_we
  * - Qwen3.8-27B: BF16 `ab_weight [96,5120]`, with A in rows [0,48) and B in [48,96);
  * - Qwen3.6-35B-A3B: BF16 `ab_weight [64,2048]`, with A in rows [0,32) and B in [32,64);
  * - Qwen3.8-Flash-Next: BF16 `ab_weight [96,2560]`, with A in rows [0,48) and B in [48,96),
- *   `x` BF16 [2560,T].
+ *   `x` BF16 [2560,T], and A_log and dt_bias contiguous BF16 [48].
  *
  * The complete immutable parent is the public weight. Its halves are consumed as zero-copy views
- * and produce FP32 g/beta `[heads,T]` under the same logical formula and oracle. All other effects
- * and non-overlap requirements match the two-weight form.
+ * and produce FP32 g/beta `[heads,T]` under the same logical formula and oracle. A_log and dt_bias
+ * are FP32 [heads] for the Qwen3.8-27B and Qwen3.6-35B-A3B parents; the Flash-Next parent consumes
+ * its stored BF16 values directly, and the oracle uses their exact represented values. All other
+ * effects and non-overlap requirements match the two-weight form.
  */
 void gdn_gating_proj(const Tensor& x, const Weight& ab_weight, const Tensor& A_log,
                      const Tensor& dt_bias, WorkspaceArena& ws, Tensor& g, Tensor& beta,
@@ -90,7 +92,10 @@ void gdn_norm_gating_proj(const Tensor& x, const Tensor& norm_weight, float eps,
                           const Tensor& dt_bias, WorkspaceArena& ws, Tensor& h, Tensor& g,
                           Tensor& beta, DeviceExecutionView execution);
 
-/** The Qwen3.8-27B and Qwen3.6-35B-A3B contiguous-parent storage forms described above. */
+/**
+ * The Qwen3.8-27B and Qwen3.6-35B-A3B contiguous-parent storage forms described above (FP32
+ * A_log/dt_bias). The Flash-Next parent is not registered for this form.
+ */
 void gdn_norm_gating_proj(const Tensor& x, const Tensor& norm_weight, float eps,
                           const Weight& ab_weight, const Tensor& A_log, const Tensor& dt_bias,
                           WorkspaceArena& ws, Tensor& h, Tensor& g, Tensor& beta,
