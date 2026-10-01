@@ -1,8 +1,12 @@
 // Decode route (T <= 8) of the NVFP4-bank SparseMoe. Gate/up: one warp per (intermediate row,
 // token, path) evaluates both the gate and up rows against the represented BF16 activation (A16),
-// with the shared expert as path 10. Down: at T = 1 one CTA per output row gives each of the
-// eleven paths its own warp so every weight of the row is in flight at once; from T = 2, where
-// T x 320 CTAs fill the device, one warp per output row walks the paths.
+// with the shared expert as path 10. Each routed CTA first selects its own path's expert from the
+// token's router scores, which the router kernel wrote before this kernel began; the first
+// shared-path CTA of each token writes the token's complete selection for the down kernel. The
+// selection has no cross-CTA arrival counter, so the call carries no counter reset. Down: at
+// T = 1 one CTA per output row gives each of the eleven paths its own warp so every weight of the
+// row is in flight at once; from T = 2, where T x 320 CTAs fill the device, one warp per output
+// row walks the paths.
 
 #include "ops/sparse_moe/nvfp4_bank/nvfp4_bank_moe.h"
 
@@ -12,6 +16,7 @@
 #include "ops/linear/nvfp4/nvfp4_a16_gemv.cuh"
 #include "ops/linear/nvfp4/nvfp4_codec.cuh"
 #include "ops/sparse_moe/nvfp4_bank/expert_bank.cuh"
+#include "ops/sparse_moe/nvfp4_bank/select.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -59,24 +64,34 @@ __device__ __forceinline__ void dot_bf16_pair(const __nv_bfloat16* __restrict__ 
 
 template <class GateSchedule>
 __global__ void nvfp4_moe_decode_gate_up_kernel(
-    const __nv_bfloat16* __restrict__ x, const std::int32_t* __restrict__ ids,
-    const std::uint8_t* __restrict__ bank_codes, const std::uint8_t* __restrict__ bank_scales,
-    const float* __restrict__ bank_divisors, std::uint64_t bank_code_stride,
-    std::uint64_t bank_scale_stride, const __nv_bfloat16* __restrict__ shared_gate,
-    const __nv_bfloat16* __restrict__ shared_up, __nv_bfloat16* __restrict__ activations) {
+    const __nv_bfloat16* __restrict__ x, const float* __restrict__ scores,
+    std::int32_t* __restrict__ ids, float* __restrict__ route_weights,
+    float* __restrict__ shared_scale, const std::uint8_t* __restrict__ bank_codes,
+    const std::uint8_t* __restrict__ bank_scales, const float* __restrict__ bank_divisors,
+    std::uint64_t bank_code_stride, std::uint64_t bank_scale_stride,
+    const __nv_bfloat16* __restrict__ shared_gate, const __nv_bfloat16* __restrict__ shared_up,
+    __nv_bfloat16* __restrict__ activations) {
     const Nvfp4ExpertBankDevice bank{bank_codes, bank_scales, bank_divisors, bank_code_stride,
                                      bank_scale_stride};
     __shared__ Nvfp4A16GemvSharedStorage<GateGeometry, GateSchedule> shared;
-    const int token = static_cast<int>(blockIdx.y);
-    const int path  = static_cast<int>(blockIdx.z);
-    const int warp  = static_cast<int>(threadIdx.x) >> 5;
-    const int lane  = static_cast<int>(threadIdx.x) & 31;
-    const int row   = static_cast<int>(blockIdx.x) * GateSchedule::kWarpsPerCta + warp;
-    const auto* x_t = x + static_cast<std::int64_t>(token) * kHidden;
-    float gate      = 0.0F;
-    float up        = 0.0F;
+    __shared__ int selected_expert;
+    const int token      = static_cast<int>(blockIdx.y);
+    const int path       = static_cast<int>(blockIdx.z);
+    const int warp       = static_cast<int>(threadIdx.x) >> 5;
+    const int lane       = static_cast<int>(threadIdx.x) & 31;
+    const int row        = static_cast<int>(blockIdx.x) * GateSchedule::kWarpsPerCta + warp;
+    const auto* x_t      = x + static_cast<std::int64_t>(token) * kHidden;
+    const auto* scores_t = scores + static_cast<std::int64_t>(token) * kNvfp4MoeScoreRows;
+    float gate           = 0.0F;
+    float up             = 0.0F;
     if (path < kTopK) {
-        const Nvfp4ExpertPlanes expert = nvfp4_expert(bank, ids[token * kTopK + path]);
+        // path is CTA-uniform, so every thread of a routed CTA reaches this barrier.
+        if (warp == 0) {
+            const int expert_id = nvfp4_moe_select_rank(scores_t, path, lane);
+            if (lane == 0) { selected_expert = expert_id; }
+        }
+        __syncthreads();
+        const Nvfp4ExpertPlanes expert = nvfp4_expert(bank, selected_expert);
         const int parent_rows[GateSchedule::kRowsPerWarp] = {row, row + kIntermediate};
         float accumulators[GateSchedule::kRowsPerWarp][GateSchedule::kAccumulatorChains] = {};
         compute_nvfp4_rows<GateGeometry, GateSchedule>(
@@ -92,6 +107,12 @@ __global__ void nvfp4_moe_decode_gate_up_kernel(
     } else {
         dot_bf16_pair(x_t, shared_gate + static_cast<std::int64_t>(row) * kHidden,
                       shared_up + static_cast<std::int64_t>(row) * kHidden, gate, up);
+        // The shared path needs no selection; its first CTA publishes the token's selection for
+        // the down kernel, which runs after this kernel completes.
+        if (blockIdx.x == 0 && warp == 0) {
+            nvfp4_moe_select_token(scores_t, ids + token * kTopK, route_weights + token * kTopK,
+                                   shared_scale + token, lane);
+        }
     }
     if (lane == 0) {
         activations[(static_cast<std::int64_t>(token) * kPaths + path) * kIntermediate + row] =
@@ -251,9 +272,10 @@ void nvfp4_moe_decode(const Tensor& x, const SparseMoeNvfp4BankWeights& weights,
                       const Nvfp4MoeWorkspace& workspace, Tensor& destination,
                       cudaStream_t stream) {
     const int tokens         = x.ne[1];
-    const auto* ids          = static_cast<const std::int32_t*>(workspace.ids.data);
-    const auto* route_weight = static_cast<const float*>(workspace.weights.data);
-    const auto* shared_scale = static_cast<const float*>(workspace.shared_scale.data);
+    const auto* scores       = static_cast<const float*>(workspace.scores.data);
+    auto* ids                = static_cast<std::int32_t*>(workspace.ids.data);
+    auto* route_weight       = static_cast<float*>(workspace.weights.data);
+    auto* shared_scale       = static_cast<float*>(workspace.shared_scale.data);
     auto* activations        = static_cast<__nv_bfloat16*>(workspace.activations.data);
 
     const auto gate_up        = nvfp4_expert_bank_device(weights.gate_up);
@@ -261,8 +283,9 @@ void nvfp4_moe_decode(const Tensor& x, const SparseMoeNvfp4BankWeights& weights,
         const dim3 grid(kIntermediate / GateSchedule::kWarpsPerCta, static_cast<unsigned>(tokens),
                         kPaths);
         nvfp4_moe_decode_gate_up_kernel<GateSchedule><<<grid, GateSchedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data), ids, gate_up.codes, gate_up.scales,
-            gate_up.divisors, gate_up.code_stride, gate_up.scale_stride,
+            static_cast<const __nv_bfloat16*>(x.data), scores, ids, route_weight, shared_scale,
+            gate_up.codes, gate_up.scales, gate_up.divisors, gate_up.code_stride,
+            gate_up.scale_stride,
             static_cast<const __nv_bfloat16*>(weights.shared_gate.qdata),
             static_cast<const __nv_bfloat16*>(weights.shared_up.qdata), activations);
         CUDA_CHECK(cudaGetLastError());
