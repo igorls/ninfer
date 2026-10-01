@@ -23,4 +23,35 @@ namespace ninfer::ops {
 void gated_rmsnorm(const Tensor& x, const Tensor& weight, const Tensor& z, float eps, Tensor& out,
                    cudaStream_t stream);
 
+/**
+ * Op: sigmoid-gated RMS normalization over ne[0].
+ *
+ * Math / indexing:
+ *   For each logical row r of D = ne[0] values:
+ *     inv_r      = 1 / sqrt((1/D) * sum_d x[d,r]^2 + eps)
+ *     ideal[d,r] = x[d,r] * inv_r * weight[d] * sigmoid(z[d,r]),   sigmoid(v) = 1 / (1 + exp(-v)).
+ *   weight has no unit offset.
+ *
+ * Supported domain:
+ *   x, z and out are same-shaped contiguous BF16 tensors with any positive row count (e.g. a GDN
+ *   output [128,48,T] is 48*T rows of D=128); weight is contiguous BF16 [D]; eps is positive and
+ *   finite.
+ *
+ * Numeric:
+ *   The oracle evaluates `ideal` naively in FP64 from the represented inputs. The BF16 output is
+ *   promoted and compared directly with that result; its storage rounding belongs to the Op's
+ *   criterion. Reduction order, staging and accumulator precision are implementation choices.
+ *
+ * Effects:
+ *   Writes out completely; x, z and weight are unchanged. Inputs and output must not overlap.
+ *
+ * Workspace:
+ *   None.
+ *
+ * Execution:
+ *   Enqueued on `stream` without host synchronization; valid inside CUDA Graph capture.
+ */
+void gated_rmsnorm_sigmoid(const Tensor& x, const Tensor& weight, const Tensor& z, float eps,
+                           Tensor& out, cudaStream_t stream);
+
 } // namespace ninfer::ops
