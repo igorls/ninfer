@@ -204,6 +204,28 @@ void kv_cache_append_batch_launch(const Tensor& k, const Tensor& v, const Tensor
             .table_rows   = static_cast<const std::int32_t*>(table_rows.data),
             .table_stride = cache.block_tables.ne[0],
         };
+        if (cache.storage == KvCacheStorage::BFloat16 && k.ne[3] > 1) {
+            const auto append = [&]<class Geometry>() {
+                constexpr int Block         = Geometry::KVHeads == 4 ? 128 : 96;
+                const std::int64_t elements = static_cast<std::int64_t>(k.ne[2]) *
+                                              Geometry::KVHeads * (kKVCacheAppendFullHeadDim / 8);
+                const dim3 grid(static_cast<unsigned>(div_up(elements, std::int64_t{Block})),
+                                static_cast<unsigned>(k.ne[3]));
+                kv_cache_append_full_bf16_kernel<Geometry, PagedKVBatchMetadata<Masked>, true>
+                    <<<grid, Block, 0, stream>>>(
+                        static_cast<const __nv_bfloat16*>(k.data),
+                        static_cast<const __nv_bfloat16*>(v.data),
+                        static_cast<const std::int32_t*>(positions.data), metadata,
+                        static_cast<__nv_bfloat16*>(cache.k_pages.data),
+                        static_cast<__half*>(cache.v_pages.data), k.ne[2]);
+            };
+            if (k.ne[1] == KVCacheAppendD256Kv4::KVHeads)
+                append.template operator()<KVCacheAppendD256Kv4>();
+            else
+                append.template operator()<KVCacheAppendD256Kv2>();
+            CUDA_CHECK(cudaGetLastError());
+            return;
+        }
         if (cache.storage == KvCacheStorage::Fp8E4M3Row256 && k.ne[3] > 1) {
             const auto append = [&]<class Geometry>() {
                 const dim3 grid(div_up(k.ne[2] * Geometry::KVHeads, 8), 1, k.ne[3]);

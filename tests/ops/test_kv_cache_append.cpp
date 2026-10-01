@@ -13,6 +13,8 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <memory>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -1360,6 +1362,326 @@ int cyclic_variable_prefix_tests() {
 }
 
 
+// Batched D256 append: B independent rows in one call must leave exactly the cache bytes that B
+// single-sequence appends of each row's valid prefix leave, and nothing else.
+struct BatchPlane {
+    int extent      = 0;
+    std::size_t element_bytes = 0;
+    std::size_t elements      = 0;
+    std::vector<std::uint8_t> initial;
+    std::unique_ptr<GuardedDeviceBuffer> batched;
+    std::unique_ptr<GuardedDeviceBuffer> reference;
+};
+
+BatchPlane make_batch_plane(const TestVectorLayout& vector, bool code, int kv_heads,
+                            int physical_pages, std::uint32_t seed) {
+    BatchPlane plane;
+    plane.extent        = code ? vector.code_extent : vector.scale_extent;
+    plane.element_bytes = dtype_size(code ? vector.code_dtype : vector.scale_dtype);
+    plane.elements = static_cast<std::size_t>(plane.extent) * kPage * kv_heads * physical_pages;
+    const std::size_t bytes = std::max<std::size_t>(plane.elements * plane.element_bytes, 1);
+    const auto bits         = patterned_bits((bytes + 1) / 2, seed);
+    plane.initial.resize(bytes);
+    std::memcpy(plane.initial.data(), bits.data(), bytes);
+    plane.batched   = std::make_unique<GuardedDeviceBuffer>(bytes);
+    plane.reference = std::make_unique<GuardedDeviceBuffer>(bytes);
+    return plane;
+}
+
+Tensor batch_plane_tensor(const BatchPlane& plane, GuardedDeviceBuffer& buffer, DType dtype,
+                          int kv_heads, int physical_pages) {
+    if (plane.extent == 0) return Tensor{};
+    return Tensor(buffer.data(), dtype, {plane.extent, kPage, kv_heads, physical_pages});
+}
+
+struct BatchCase {
+    KvCacheStorage storage;
+    int kv_heads;
+    int batch;
+    int width;
+    bool masked;
+    bool graph = false;
+};
+
+const char* storage_name(KvCacheStorage storage) {
+    switch (storage) {
+    case KvCacheStorage::BFloat16:
+        return "bf16";
+    case KvCacheStorage::Int8Group64:
+        return "int8-g64";
+    case KvCacheStorage::Fp8E4M3Row256:
+        return "fp8-row256";
+    case KvCacheStorage::Nvfp4Group16:
+        return "nvfp4-g16";
+    case KvCacheStorage::Fp8KeyNvfp4Value:
+        return "k8v4";
+    }
+    return "unknown";
+}
+
+int batched_full_append_case(const BatchCase& c) {
+    const TestCacheLayout layout = test_cache_layout(c.storage);
+    constexpr int kRowPages      = 4; // logical pages per table row: capacity 256 positions
+    const int table_row_count    = c.batch + 1;
+    const int physical_pages     = table_row_count * kRowPages + 2; // two pages no row maps
+    const int kv_heads           = c.kv_heads;
+    const int width              = c.width;
+    const int batch              = c.batch;
+    const std::string label = std::string("kv_cache_append batched ") + storage_name(c.storage) +
+                              " Hkv=" + std::to_string(kv_heads) + " B=" + std::to_string(batch) +
+                              " W=" + std::to_string(width) + (c.masked ? " masked" : " dense") +
+                              (c.graph ? " graph" : "");
+
+    // Each table row owns distinct physical pages in reverse order; request row b uses table row
+    // table_rows[b], a rotation so that request and table indices differ.
+    std::vector<std::int32_t> tables(static_cast<std::size_t>(kRowPages) * table_row_count);
+    for (int row = 0; row < table_row_count; ++row)
+        for (int page = 0; page < kRowPages; ++page)
+            tables[static_cast<std::size_t>(row) * kRowPages + page] =
+                physical_pages - 1 - (row * kRowPages + page);
+    std::vector<std::int32_t> table_rows(static_cast<std::size_t>(batch));
+    for (int b = 0; b < batch; ++b) table_rows[static_cast<std::size_t>(b)] = (b + 1) % table_row_count;
+
+    // Sequential positions per row from a random start; every third row starts at a page end so
+    // its columns cross a page boundary.
+    std::mt19937 generator(0x5eedU + static_cast<std::uint32_t>(batch * 131 + width * 17 + kv_heads));
+    std::uniform_int_distribution<int> start(0, kRowPages * kPage - width);
+    std::vector<std::int32_t> positions(static_cast<std::size_t>(width) * batch);
+    std::vector<std::int32_t> valid(static_cast<std::size_t>(batch));
+    for (int b = 0; b < batch; ++b) {
+        const int first = b % 3 == 0 ? kPage * (1 + b % (kRowPages - 1)) - 1 - (width > 2 ? 1 : 0)
+                                     : start(generator);
+        for (int w = 0; w < width; ++w)
+            positions[static_cast<std::size_t>(b) * width + w] = first + w;
+        valid[static_cast<std::size_t>(b)] = c.masked ? (b * 2 + 1) % (width + 1) : width;
+    }
+    if (c.masked && batch > 1) valid[1] = 0; // one row commits nothing
+
+    const std::size_t input_count = static_cast<std::size_t>(kFullHeadDim) * kv_heads * width * batch;
+    std::vector<float> host_k(input_count), host_v(input_count);
+    fill_uniform(host_k, 0x777U + static_cast<std::uint32_t>(batch), -0.75F, 0.75F);
+    fill_uniform(host_v, 0x999U + static_cast<std::uint32_t>(width), -1.25F, 1.25F);
+    std::vector<std::uint16_t> input_k(input_count), input_v(input_count);
+    for (std::size_t i = 0; i < input_count; ++i) {
+        input_k[i] = f32_to_bf16(host_k[i]);
+        input_v[i] = f32_to_bf16(host_v[i]);
+    }
+    // A zero row exercises each codec's all-zero group.
+    for (int d = 0; d < kFullHeadDim; ++d) input_v[full_input_index(d, 0, 0, kv_heads)] = 0;
+
+    DeviceBuffer d_k         = to_device(input_k);
+    DeviceBuffer d_v         = to_device(input_v);
+    DeviceBuffer d_positions = to_device(positions);
+    DeviceBuffer d_valid     = to_device(valid);
+    DeviceBuffer d_rows      = to_device(table_rows);
+    DeviceBuffer d_tables    = to_device(tables);
+
+    std::array<BatchPlane, 4> planes{
+        make_batch_plane(layout.key, true, kv_heads, physical_pages, 0x1111U),
+        make_batch_plane(layout.value, true, kv_heads, physical_pages, 0x2222U),
+        make_batch_plane(layout.key, false, kv_heads, physical_pages, 0x3333U),
+        make_batch_plane(layout.value, false, kv_heads, physical_pages, 0x4444U),
+    };
+    const std::array<DType, 4> plane_dtypes{layout.key.code_dtype, layout.value.code_dtype,
+                                            layout.key.scale_dtype, layout.value.scale_dtype};
+    const std::array<const char*, 4> plane_names{"k codes", "v codes", "k scales", "v scales"};
+    const auto reset = [&] {
+        for (auto& plane : planes) {
+            plane.batched->copy_from_host(plane.initial.data(), plane.initial.size());
+            plane.reference->copy_from_host(plane.initial.data(), plane.initial.size());
+        }
+    };
+    const auto view_tensor = [&](int index, bool batched) {
+        auto& plane = planes[static_cast<std::size_t>(index)];
+        return batch_plane_tensor(plane, batched ? *plane.batched : *plane.reference,
+                                  plane_dtypes[static_cast<std::size_t>(index)], kv_heads,
+                                  physical_pages);
+    };
+
+    Tensor k(d_k.p, DType::BF16, {kFullHeadDim, kv_heads, width, batch});
+    Tensor v(d_v.p, DType::BF16, {kFullHeadDim, kv_heads, width, batch});
+    Tensor position_tensor(d_positions.p, DType::I32, {width, batch});
+    Tensor valid_tensor = c.masked ? Tensor(d_valid.p, DType::I32, {batch}) : Tensor{};
+    Tensor row_tensor(d_rows.p, DType::I32, {batch});
+    PagedKVBatchLayerView batched{
+        .k_pages       = view_tensor(0, true),
+        .v_pages       = view_tensor(1, true),
+        .k_scale_pages = view_tensor(2, true),
+        .v_scale_pages = view_tensor(3, true),
+        .block_tables  = Tensor(d_tables.p, DType::I32, {kRowPages, table_row_count}),
+        .head_dim      = kFullHeadDim,
+        .num_kv_heads  = kv_heads,
+        .storage       = c.storage,
+    };
+
+    DeviceContext context;
+    const auto launch = [&] {
+        ops::kv_cache_append(k, v, position_tensor, valid_tensor, row_tensor, batched,
+                             context.stream);
+    };
+    int failures = 0;
+    reset();
+    cuda_synchronize();
+    if (c.graph) {
+        // Capture on the initial input, then replay on a changed input and cache.
+        DecodeGraphDefinition definition;
+        DecodeGraphExecutable executable;
+        definition.capture(context.stream, launch);
+        executable.instantiate(definition);
+        for (auto& bits : input_k) bits ^= 0x8000U; // negate K
+        d_k.copy_from_host(input_k.data(), input_k.size() * sizeof(std::uint16_t));
+        reset();
+        cuda_synchronize();
+        executable.launch(context.stream);
+    } else {
+        launch();
+    }
+    cuda_synchronize(context.stream);
+
+    // Reference: one single-sequence append per row over its valid prefix.
+    const std::size_t row_elements = static_cast<std::size_t>(kFullHeadDim) * kv_heads * width;
+    for (int b = 0; b < batch; ++b) {
+        const int count = valid[static_cast<std::size_t>(b)];
+        if (count == 0) continue;
+        const auto row_k = static_cast<std::uint16_t*>(d_k.p) + row_elements * b;
+        const auto row_v = static_cast<std::uint16_t*>(d_v.p) + row_elements * b;
+        Tensor k_row(row_k, DType::BF16, {kFullHeadDim, kv_heads, count});
+        Tensor v_row(row_v, DType::BF16, {kFullHeadDim, kv_heads, count});
+        Tensor p_row(static_cast<std::int32_t*>(d_positions.p) + static_cast<std::size_t>(width) * b,
+                     DType::I32, {count});
+        PagedKVLayerView single{
+            .k_pages       = view_tensor(0, false),
+            .v_pages       = view_tensor(1, false),
+            .k_scale_pages = view_tensor(2, false),
+            .v_scale_pages = view_tensor(3, false),
+            .block_table   = Tensor(static_cast<std::int32_t*>(d_tables.p) +
+                                        static_cast<std::size_t>(kRowPages) *
+                                            table_rows[static_cast<std::size_t>(b)],
+                                    DType::I32, {kRowPages}),
+            .head_dim      = kFullHeadDim,
+            .num_kv_heads  = kv_heads,
+            .storage       = c.storage,
+        };
+        ops::kv_cache_append(k_row, v_row, p_row, single, context.stream);
+    }
+    cuda_synchronize(context.stream);
+
+    for (std::size_t index = 0; index < planes.size(); ++index) {
+        auto& plane = planes[index];
+        if (plane.extent == 0) continue;
+        const std::string name = label + " " + plane_names[index];
+        const std::size_t bytes = plane.initial.size();
+        const auto got          = from_device<std::uint8_t>(plane.batched->data(), bytes);
+        failures += verify_exact((name + " equals single-sequence appends").c_str(), got,
+                                 from_device<std::uint8_t>(plane.reference->data(), bytes));
+        // Every element outside the addressed rows keeps its initial bytes.
+        std::vector<bool> addressed(plane.elements, false);
+        for (int b = 0; b < batch; ++b)
+            for (int w = 0; w < valid[static_cast<std::size_t>(b)]; ++w) {
+                const int position = positions[static_cast<std::size_t>(b) * width + w];
+                const int page =
+                    tables[static_cast<std::size_t>(table_rows[static_cast<std::size_t>(b)]) *
+                               kRowPages +
+                           position / kPage];
+                for (int head = 0; head < kv_heads; ++head)
+                    for (int leading = 0; leading < plane.extent; ++leading)
+                        addressed[full_cache_index(plane.extent, leading, head, position, page,
+                                                   kv_heads)] = true;
+            }
+        std::size_t changed = 0;
+        for (std::size_t element = 0; element < plane.elements; ++element) {
+            if (addressed[element]) continue;
+            const std::size_t offset = element * plane.element_bytes;
+            if (std::memcmp(got.data() + offset, plane.initial.data() + offset,
+                            plane.element_bytes) != 0)
+                ++changed;
+        }
+        if (changed != 0) {
+            std::cerr << name << ": " << changed << " unaddressed elements changed\n";
+            ++failures;
+        }
+        failures += plane.batched->verify_guards((name + " guards").c_str());
+    }
+    failures += verify_exact((label + " input k unchanged").c_str(),
+                             from_device<std::uint16_t>(d_k, input_count), input_k);
+    failures += verify_exact((label + " input v unchanged").c_str(),
+                             from_device<std::uint16_t>(d_v, input_count), input_v);
+    failures += verify_exact((label + " positions unchanged").c_str(),
+                             from_device<std::int32_t>(d_positions, positions.size()), positions);
+    failures += verify_exact((label + " valid columns unchanged").c_str(),
+                             from_device<std::int32_t>(d_valid, valid.size()), valid);
+    failures += verify_exact((label + " table rows unchanged").c_str(),
+                             from_device<std::int32_t>(d_rows, table_rows.size()), table_rows);
+    failures += verify_exact((label + " block tables unchanged").c_str(),
+                             from_device<std::int32_t>(d_tables, tables.size()), tables);
+    return failures;
+}
+
+int batched_full_append_cases(KvCacheStorage storage) {
+    int failures = 0;
+    for (const int batch : {1, 2, 5, 8})
+        for (const int width : {1, 3})
+            for (const bool masked : {false, true})
+                failures += batched_full_append_case({storage, 2, batch, width, masked});
+    failures += batched_full_append_case({storage, 4, 5, 3, true});
+    failures += batched_full_append_case({storage, 2, 8, 16, true});
+    failures += batched_full_append_case({storage, 2, 8, 1, true, true});
+    failures += batched_full_append_case({storage, 2, 1, 3, false, true});
+    return failures;
+}
+
+// Domain validation of the batched form; every rejected call must throw before any launch.
+int batched_full_append_rejections() {
+    constexpr int kv_heads = 2;
+    DeviceBuffer input(static_cast<std::size_t>(kFullHeadDim) * 4 * 17 * 9 * 2);
+    DeviceBuffer metadata(4096);
+    DeviceBuffer planes(static_cast<std::size_t>(kFullHeadDim) * kPage * 4 * 8 * 2 * 2);
+    auto* base       = static_cast<std::uint8_t*>(planes.p);
+    const auto* meta = static_cast<std::int32_t*>(metadata.p);
+    const auto cache = [&](int heads, int table_rows) {
+        return PagedKVBatchLayerView{
+            .k_pages      = Tensor(base, DType::BF16, {kFullHeadDim, kPage, heads, 4}),
+            .v_pages      = Tensor(base + static_cast<std::size_t>(kFullHeadDim) * kPage * 4 * 4 * 2,
+                                   DType::FP16, {kFullHeadDim, kPage, heads, 4}),
+            .block_tables = Tensor(const_cast<std::int32_t*>(meta) + 512, DType::I32, {2, table_rows}),
+            .head_dim     = kFullHeadDim,
+            .num_kv_heads = heads,
+            .storage      = KvCacheStorage::BFloat16,
+        };
+    };
+    const auto run = [&](int heads, int width, int batch, int table_rows, bool bad_positions,
+                         bool bad_valid) {
+        Tensor k(input.p, DType::BF16, {kFullHeadDim, heads, width, batch});
+        Tensor positions(const_cast<std::int32_t*>(meta), DType::I32,
+                         {bad_positions ? width + 1 : width, batch});
+        Tensor valid(const_cast<std::int32_t*>(meta) + 256, DType::I32, {bad_valid ? batch + 1 : batch});
+        Tensor rows(const_cast<std::int32_t*>(meta) + 384, DType::I32, {batch});
+        ops::kv_cache_append(k, k, positions, valid, rows, cache(heads, table_rows), nullptr);
+    };
+    struct Rejection {
+        const char* what;
+        int heads, width, batch, table_rows;
+        bool bad_positions, bad_valid;
+    };
+    const std::array<Rejection, 6> rejections{{
+        {"B=9", kv_heads, 1, 9, 9, false, false},
+        {"W=17", kv_heads, 17, 2, 2, false, false},
+        {"Hkv=3", 3, 1, 2, 2, false, false},
+        {"fewer table rows than B", kv_heads, 1, 3, 2, false, false},
+        {"positions shape", kv_heads, 2, 2, 2, true, false},
+        {"valid columns shape", kv_heads, 2, 2, 2, false, true},
+    }};
+    int failures = 0;
+    for (const auto& r : rejections) {
+        try {
+            run(r.heads, r.width, r.batch, r.table_rows, r.bad_positions, r.bad_valid);
+            std::cerr << "kv_cache_append batched: accepted " << r.what << '\n';
+            ++failures;
+        } catch (const std::invalid_argument&) {}
+    }
+    return failures;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1381,6 +1703,7 @@ int main(int argc, char** argv) {
             nvfp4_only ? KvCacheStorage::Nvfp4Group16 : KvCacheStorage::Fp8KeyNvfp4Value;
         for (const int kv_heads : {4, 2}) { failures += full_append_case(kv_heads, storage); }
         failures += full_append_case(2, storage, 129);
+        failures += batched_full_append_cases(storage);
         if (failures != 0) {
             std::cerr << (nvfp4_only ? "nvfp4" : "k8v4") << " kv_cache_append failures=" << failures
                       << '\n';
@@ -1401,6 +1724,12 @@ int main(int argc, char** argv) {
     failures += full_append_case(2, KvCacheStorage::Fp8E4M3Row256, 129);
     failures += full_append_case(2, KvCacheStorage::Nvfp4Group16, 129);
     failures += full_append_case(2, KvCacheStorage::Fp8KeyNvfp4Value, 129);
+    for (const KvCacheStorage storage :
+         {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64, KvCacheStorage::Fp8E4M3Row256,
+          KvCacheStorage::Nvfp4Group16, KvCacheStorage::Fp8KeyNvfp4Value}) {
+        failures += batched_full_append_cases(storage);
+    }
+    failures += batched_full_append_rejections();
     failures += run_case(1, 0, 0, false, {0, 1, 2});
     failures += run_case(1, 1, 63, false, {2, 3, 4});
     failures += run_case(16, 7, 60, false, {5, 1, 4}, 5);

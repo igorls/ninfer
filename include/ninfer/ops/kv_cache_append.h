@@ -65,6 +65,51 @@ void kv_cache_append(const Tensor& k, const Tensor& v, const Tensor& positions,
                      PagedKVLayerView cache, cudaStream_t stream);
 
 /**
+ * Op: batched append of B independent D256 sequences to shared paged growing-cache storage.
+ *
+ * Math / indexing:
+ *   For request row b and column w < n[b], where n[b] = W for an empty valid_columns tensor and
+ *   n[b] = valid_columns[b] otherwise, the K/V vectors k/v[:,h,w,b] are stored at logical position
+ *   positions[w,b] through block-table row table_rows[b], exactly as the single-sequence overload
+ *   above stores the n[b]-column sequence k/v[:,:,0:n[b],b] with positions[0:n[b],b] and that
+ *   table row: every storage codec, Hadamard preparation and scale encoding is the one defined
+ *   there.
+ *
+ * Logical shapes:
+ *   k/v contiguous BF16 [256,Hkv,W,B] with Hkv 2 or 4, W = 1..16, B = 1..8; positions contiguous
+ *   device I32 [W,B], sequential within each row (positions[w,b] = positions[0,b] + w, nonnegative);
+ *   valid_columns empty (dense) or contiguous device I32 [B] with values in [0,W]; table_rows
+ *   contiguous device I32 [B] with values in [0, block_tables.ne[1]). The cache has the D256
+ *   page-major planes of the single-sequence form and block_tables I32 [logical_pages,rows] with
+ *   rows >= B; every addressed position lies below logical_pages*64 with a materialized entry.
+ *
+ * Supported domain:
+ *   Every D256 storage of the single-sequence form: BFloat16, Int8Group64, Fp8E4M3Row256,
+ *   Nvfp4Group16 and Fp8KeyNvfp4Value. k and v are 16-byte aligned.
+ *
+ * Numeric:
+ *   Exact: for every valid column the cache representation (codes and scales) is byte-identical to
+ *   the single-sequence form's.
+ *
+ * Effects:
+ *   Writes every code/value and scale of each addressed (position, head) row; columns
+ *   w >= n[b] and every other cache byte are neither written nor required to be readable. Inputs
+ *   and tables are unchanged. The caller guarantees that no two valid columns address the same
+ *   physical row and that inputs, metadata and cache planes are pairwise non-overlapping. The Op
+ *   owns no frontier, request identity or commit authority.
+ *
+ * Workspace:
+ *   None.
+ *
+ * Execution:
+ *   Enqueued on `stream` without host synchronization; valid inside CUDA Graph capture, where the
+ *   device metadata may change between replays.
+ */
+void kv_cache_append(const Tensor& k, const Tensor& v, const Tensor& positions,
+                     const Tensor& valid_columns, const Tensor& table_rows,
+                     PagedKVBatchLayerView cache, cudaStream_t stream);
+
+/**
  * Append device-selected BF16 prefixes to batched paged growing-cache storage.
  *
  * k/v are contiguous BF16 [128,8,T,B], positions is contiguous device I32 [T,B], and counts and
