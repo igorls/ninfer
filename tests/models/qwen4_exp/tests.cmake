@@ -4,7 +4,7 @@ ninfer_add_test(ninfer_qwen4_exp_loading_real_test
 
 ninfer_add_test(ninfer_qwen4_exp_engine_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_real.cpp"
-  LIBRARIES ninfer_engine)
+  LIBRARIES ninfer_engine ninfer::json)
 
 set_tests_properties(
   ninfer_qwen4_exp_loading_real_test

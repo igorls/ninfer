@@ -6,6 +6,7 @@
 #include "models/qwen3_5/load.h"
 #include "models/qwen3_5/measurement.h"
 #include "models/qwen4_exp/load.h"
+#include "models/qwen4_exp/measurement.h"
 
 #include <algorithm>
 #include <chrono>
@@ -216,8 +217,9 @@ EngineOptions normalize_engine_options(EngineOptions options) {
     return options;
 }
 
-ModelInstance::ModelInstance(std::unique_ptr<models::qwen3_5::Model> source,
-                             const EngineOptions& options)
+template <>
+Qwen3_5Instance::ModelInstanceOf(std::unique_ptr<models::qwen3_5::Model> source,
+                                 const EngineOptions& options)
     : model(std::move(source)), parameters(*model),
       frontend(models::qwen3_5::make_frontend(
           model->resources(), {.chat_template_path       = options.chat_template_path,
@@ -229,7 +231,25 @@ ModelInstance::ModelInstance(std::unique_ptr<models::qwen3_5::Model> source,
                                .media_preprocess_threads = options.media_preprocess_threads})),
       capacity(options.max_context) {}
 
-ModelInstance::~ModelInstance() = default;
+template <>
+Qwen4ExpInstance::ModelInstanceOf(std::unique_ptr<models::qwen4_exp::Model> source,
+                                  const EngineOptions& options)
+    : model(std::move(source)), parameters(*model),
+      frontend(models::qwen3_5::make_frontend(
+          model->resources(), {.chat_template_path       = options.chat_template_path,
+                               .architecture             = models::Architecture::Qwen4Exp,
+                               .vision_enabled           = options.enable_vision,
+                               .max_context              = options.max_context,
+                               .media_cache_bytes        = options.media_cache_bytes,
+                               .media_live_bytes         = options.media_live_bytes,
+                               .media_preprocess_threads = options.media_preprocess_threads})),
+      capacity(options.max_context) {}
+
+template <class Package>
+ModelInstanceOf<Package>::~ModelInstanceOf() = default;
+
+template struct ModelInstanceOf<Qwen3_5Package>;
+template struct ModelInstanceOf<Qwen4ExpPackage>;
 
 namespace {
 
@@ -244,27 +264,96 @@ void require_weight_headroom(const DeviceContext& device, std::uint64_t weight_b
     }
 }
 
-ConstructedModel construct_qwen3_5(const artifact::Reader& reader, EngineOptions& options,
-                                   DeviceContext& device, Clock::time_point start) {
+// Qwen3.5 validates its options while planning; Qwen4Exp rejects unavailable backends before
+// the weight upload.
+void require_supported(Qwen3_5Package, const EngineOptions&) {}
+
+void require_supported(Qwen4ExpPackage, const EngineOptions& options) {
+    models::qwen4_exp::require_supported_engine_options(options);
+}
+
+auto plan_load(Qwen3_5Package, const artifact::Reader& reader, const EngineOptions& options) {
+    return models::qwen3_5::plan_load(reader, models::load_options(options));
+}
+
+auto plan_load(Qwen4ExpPackage, const artifact::Reader& reader, const EngineOptions& options) {
+    return models::qwen4_exp::plan_load(reader, models::load_options(options));
+}
+
+auto materialize(Qwen3_5Package, models::qwen3_5::LoadPlan&& plan, DeviceContext& device,
+                 const StartupObserver* observer) {
+    return models::qwen3_5::materialize_model(std::move(plan), device, observer);
+}
+
+auto materialize(Qwen4ExpPackage, models::qwen4_exp::LoadPlan&& plan, DeviceContext& device,
+                 const StartupObserver* observer) {
+    return models::qwen4_exp::materialize_model(std::move(plan), device, observer);
+}
+
+std::string package_prefill_signature(const models::qwen3_5::Model& model) {
+    return models::qwen3_5::prefill_signature(model);
+}
+
+std::string package_prefill_signature(const models::qwen4_exp::Model& model) {
+    return models::qwen4_exp::prefill_signature(model);
+}
+
+models::Architecture architecture(const models::qwen3_5::Model& model) {
+    return model.config().text.architecture;
+}
+
+models::Architecture architecture(const models::qwen4_exp::Model&) {
+    return models::Architecture::Qwen4Exp;
+}
+
+auto make_planner(const models::qwen3_5::execution::Parameters& parameters, DeviceContext& device,
+                  const EngineOptions& options) {
+    return models::qwen3_5::make_sequence_planner(parameters, device, options);
+}
+
+auto make_planner(const models::qwen4_exp::execution::Parameters& parameters,
+                  DeviceContext& device, const EngineOptions& options) {
+    return models::qwen4_exp::make_sequence_planner(parameters, device, options);
+}
+
+auto make_program(const models::qwen3_5::execution::Parameters& parameters,
+                  models::qwen3_5::SequencePlan&& sequence, DeviceContext& device,
+                  const StartupObserver& observer) {
+    return models::qwen3_5::create_program(parameters, std::move(sequence), device, observer);
+}
+
+auto make_program(const models::qwen4_exp::execution::Parameters& parameters,
+                  models::qwen4_exp::SequencePlan&& sequence, DeviceContext& device,
+                  const StartupObserver& observer) {
+    return models::qwen4_exp::create_program(parameters, std::move(sequence), device, observer);
+}
+
+// Loads, plans and starts one architecture package. The package's load plan resolves every
+// Binding and Use; capacity resolution between planner and Program is shared.
+template <class Package>
+ConstructedModel construct_package(Package package, const artifact::Reader& reader,
+                                   EngineOptions& options, DeviceContext& device,
+                                   Clock::time_point start) {
+    using Instance = ModelInstanceOf<Package>;
     StartupPhaseScope binding(options.startup_observer, StartupPhase::TargetPlan);
-    auto plan = models::qwen3_5::plan_load(reader, models::load_options(options));
+    require_supported(package, options);
+    auto plan = plan_load(package, reader, options);
     require_weight_headroom(device, plan.materialization().device_capacity_bytes,
                             options.desktop_reserve_bytes);
     binding.complete();
-    auto model =
-        models::qwen3_5::materialize_model(std::move(plan), device, &options.startup_observer);
+    auto model = materialize(package, std::move(plan), device, &options.startup_observer);
     device.synchronize();
     StartupPhaseScope frontend(options.startup_observer, StartupPhase::FrontendInitialize);
-    auto instance = std::make_unique<ModelInstance>(std::move(model), options);
+    auto instance = std::make_unique<Instance>(std::move(model), options);
     frontend.complete();
     StartupPhaseScope planning(options.startup_observer, StartupPhase::TargetFinalize);
-    const auto signature = models::qwen3_5::prefill_signature(*instance->model);
+    const auto signature = package_prefill_signature(*instance->model);
     auto context_cost    = resolve_context_machine_cost(
         {.hardware_class =
                 context_cost_hardware_class(device.props.name, device.props.major, device.props.minor),
             .prefill_signature = signature},
         options.context_cost.preset_path);
-    auto planner = models::qwen3_5::make_sequence_planner(instance->parameters, device, options);
+    auto planner = make_planner(instance->parameters, device, options);
     const SequenceCapacityCurve curve = planner.capacity_curve();
     auto resolution                   = resolve_kv_capacity(
         options.kv_capacity, curve,
@@ -274,7 +363,7 @@ ConstructedModel construct_qwen3_5(const artifact::Reader& reader, EngineOptions
     if (effective_concurrency != options.max_concurrency) {
         options.max_concurrency = effective_concurrency;
         options                 = normalize_engine_options(std::move(options));
-        planner = models::qwen3_5::make_sequence_planner(instance->parameters, device, options);
+        planner                 = make_planner(instance->parameters, device, options);
     }
     auto sequence = std::move(planner).finalize(resolution.main_page_groups);
     if (sequence.device_reservation_bytes() != resolution.runtime_reservation_bytes ||
@@ -285,8 +374,8 @@ ConstructedModel construct_qwen3_5(const artifact::Reader& reader, EngineOptions
     planning.complete();
     StartupPhaseScope program(options.startup_observer, StartupPhase::ProgramInitialize);
     const std::size_t available_before_program = query_device_memory(device.device).free_bytes;
-    instance->program = models::qwen3_5::create_program(instance->parameters, std::move(sequence),
-                                                        device, options.startup_observer);
+    instance->program =
+        make_program(instance->parameters, std::move(sequence), device, options.startup_observer);
     device.synchronize();
     program.complete();
     instance->kv_capacity_resolution.available_after_startup_bytes =
@@ -296,8 +385,8 @@ ConstructedModel construct_qwen3_5(const artifact::Reader& reader, EngineOptions
     set_runtime_desktop_reserve_floor(options.desktop_reserve_bytes);
     const auto& stats = instance->model->storage_stats();
     LoadSummary summary;
-    summary.architecture = models::architecture_name(instance->model->config().text.architecture);
-    summary.model_name   = instance->model->info().name;
+    summary.architecture      = models::architecture_name(architecture(*instance->model));
+    summary.model_name        = instance->model->info().name;
     summary.prefill_signature = signature;
     std::set<std::string> formats;
     for (const auto& weight : instance->model->weight_data()) {
@@ -314,44 +403,8 @@ ConstructedModel construct_qwen3_5(const artifact::Reader& reader, EngineOptions
     summary.device_object_count  = stats.device_object_count;
     summary.host_object_count    = stats.host_object_count;
     summary.context_cost         = std::move(context_cost.summary);
-    return {std::move(instance), std::move(summary), std::move(context_cost.model)};
-}
-
-// A Qwen4Exp artifact loads completely: every Binding resolved, Device weights uploaded, the PLE
-// table mapped and warmed, and the Frontend built from its resources. The package has no execution
-// Program yet, so construction stops here rather than exposing an Engine that cannot answer.
-[[noreturn]] void reject_qwen4_exp(const artifact::Reader& reader, const EngineOptions& options,
-                                   DeviceContext& device) {
-    StartupPhaseScope binding(options.startup_observer, StartupPhase::TargetPlan);
-    auto plan = models::qwen4_exp::plan_load(reader, models::load_options(options));
-    const std::size_t bindings = plan.binding_count();
-    require_weight_headroom(device, plan.materialization().device_capacity_bytes,
-                            options.desktop_reserve_bytes);
-    binding.complete();
-    const auto model =
-        models::qwen4_exp::materialize_model(std::move(plan), device, &options.startup_observer);
-    device.synchronize();
-    StartupPhaseScope frontend(options.startup_observer, StartupPhase::FrontendInitialize);
-    (void)models::qwen3_5::make_frontend(
-        model->resources(), {.chat_template_path       = options.chat_template_path,
-                             .architecture             = models::Architecture::Qwen4Exp,
-                             .vision_enabled           = options.enable_vision,
-                             .max_context              = options.max_context,
-                             .media_cache_bytes        = options.media_cache_bytes,
-                             .media_live_bytes         = options.media_live_bytes,
-                             .media_preprocess_threads = options.media_preprocess_threads});
-    frontend.complete();
-    StartupPhaseScope finalize(options.startup_observer, StartupPhase::TargetFinalize);
-    const auto& stats = model->storage_stats();
-    char loaded[160];
-    std::snprintf(loaded, sizeof(loaded),
-                  "%zu bindings, %.2f GiB of Device weights, %.2f GiB of mapped PLE table",
-                  bindings, static_cast<double>(stats.device_capacity_bytes) / (1ULL << 30U),
-                  static_cast<double>(stats.mapped_bytes) / (1ULL << 30U));
-    throw std::runtime_error(
-        std::string(models::architecture_name(models::Architecture::Qwen4Exp)) + " artifact '" +
-        model->info().name + "' loaded (" + loaded +
-        "), but this build has no qwen4_exp execution Program; it cannot generate or score yet");
+    return {ModelInstance(std::move(instance)), std::move(summary),
+            std::move(context_cost.model)};
 }
 
 } // namespace
@@ -367,9 +420,9 @@ ConstructedModel construct_model(EngineOptions& options, DeviceContext& device) 
     switch (architecture) {
     case models::Architecture::Qwen3_5:
     case models::Architecture::Qwen3_5Moe:
-        return construct_qwen3_5(reader, options, device, start);
+        return construct_package(Qwen3_5Package{}, reader, options, device, start);
     case models::Architecture::Qwen4Exp:
-        reject_qwen4_exp(reader, options, device);
+        return construct_package(Qwen4ExpPackage{}, reader, options, device, start);
     }
     throw std::logic_error("unhandled model architecture");
 }
