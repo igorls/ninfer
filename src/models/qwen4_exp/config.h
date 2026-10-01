@@ -45,6 +45,9 @@ struct PleConfig {
     std::uint32_t ngram_size       = 0;
     std::uint32_t heads_per_ngram  = 0;
     std::uint32_t shards           = 0;
+    // Token that resets the n-gram history (the source text config's eos_token_id); history
+    // begins as [boundary, boundary].
+    std::int32_t boundary_token = 0;
 
     [[nodiscard]] std::uint32_t heads() const noexcept {
         return (ngram_size - 1) * heads_per_ngram;
