@@ -141,8 +141,9 @@ struct SupervisorConfig {
     // configuration, which is how every config before this worked and still does.
     std::vector<ModelEntry> models;
     std::string active_model;
-    // Static web frontends, each served with an engine API proxy on its own loopback port. Read
-    // at startup; adding or removing one takes a supervisor restart.
+    // Static web frontends, each served with an engine API proxy on its own loopback port. The
+    // dashboard edits and applies them while the Supervisor runs; a hand edit of the file applies
+    // at the next start.
     std::vector<FrontendSpec> frontends;
     // Where this config was loaded from. The dashboard writes edits back here, so
     // it must be the resolved path rather than whatever relative string the CLI

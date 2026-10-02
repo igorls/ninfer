@@ -282,10 +282,10 @@ void show_menu(HWND hwnd, TrayIcon* self) {
         AppendMenuW(menu, MF_STRING, kCmdOpenDashboard, L"Go to the dashboard");
     }
     if (const FrontendHost* frontends = self->frontends()) {
-        for (std::size_t i = 0; i < frontends->size() && i < kMaxFrontends; ++i) {
-            const FrontendServer& frontend = frontends->at(i);
-            const std::wstring label       = L"Open " + widen(frontend.spec().name);
-            switch (frontend.state()) {
+        const std::vector<FrontendLink> links = frontends->links();
+        for (std::size_t i = 0; i < links.size() && i < kMaxFrontends; ++i) {
+            const std::wstring label = L"Open " + widen(links[i].name);
+            switch (links[i].state) {
             case FrontendState::Serving:
                 AppendMenuW(menu, MF_STRING, tray_cmd_frontend(i), label.c_str());
                 break;
@@ -593,13 +593,13 @@ void TrayIcon::open_logs_folder() const {
 }
 
 void TrayIcon::open_frontend(int index) const {
-    if (frontends_ == nullptr || index < 0 || static_cast<std::size_t>(index) >= frontends_->size()) {
-        return;
-    }
-    const FrontendServer& frontend = frontends_->at(static_cast<std::size_t>(index));
-    if (frontend.state() != FrontendState::Serving) { return; }
-    const std::string url = frontend_url(frontend.bound_port());
-    ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    if (frontends_ == nullptr || index < 0) { return; }
+    // The list may have changed since the menu was drawn; open what is at that place now.
+    const std::vector<FrontendLink> links = frontends_->links();
+    if (static_cast<std::size_t>(index) >= links.size()) { return; }
+    const FrontendLink& link = links[static_cast<std::size_t>(index)];
+    if (link.state != FrontendState::Serving) { return; }
+    ShellExecuteA(nullptr, "open", link.url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
 void TrayIcon::copy_dashboard_url() const {
