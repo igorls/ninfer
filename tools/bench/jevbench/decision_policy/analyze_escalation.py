@@ -25,6 +25,7 @@ import decision_study as study  # noqa: E402
 
 COLLECT = Path(sys.argv[1] if len(sys.argv) > 1 else "run_collect")
 OUT = Path(sys.argv[2] if len(sys.argv) > 2 else "run_calibration")
+OUT.mkdir(parents=True, exist_ok=True)
 BASELINE = Path(sys.argv[3]) if len(sys.argv) > 3 else REPO / "profiles/bench/jevbench-native-20260927/run/results.jsonl"
 REFERENCE = Path(sys.argv[4]) if len(sys.argv) > 4 else REPO / "profiles/bench/jevbench-clef-20261002/run/results.jsonl"
 
@@ -191,17 +192,27 @@ configs = {f"{BASE_MODE}_only": ("conf", -1.0, 0.0, True)}
 for signal, lower in (("entropy", False), ("conf", True)):
     e = report[f"{signal}@0.5"]
     configs[f"escalate_{signal}_b50"] = (signal, e["threshold"], e["weight"], lower)
+# Same-server native rows (the collected `native` method on this server), as a second baseline.
+same_server = []
+for r in load("public"):
+    if r["method"] == "native" and r["ok"]:
+        same_server.append({"cohort": r["cohort"], "task_id": r["task_id"], "group": r.get("group", r["task_id"]), "family": r["family"],
+                            "question_type": "", "method": "native_server", "expected": r["expected"], "ok": True, "correct": r["correct"],
+                            "probs": r["probs"], "answer": r["answer"], "latency_s": r["latency_s"], "usage": {}, "request": None,
+                            "response": None, "error": None})
 paired = {}
 for name, (signal, threshold, weight, lower) in configs.items():
     cand = rows_for(name, signal, threshold, weight, lower)
-    rows = baseline + reference + cand
+    rows = baseline + same_server + reference + cand
     for cohort in ("all", "hard"):
         sel = rows if cohort == "all" else [r for r in rows if r["cohort"] == cohort]
-        m = {k: study.metrics([r for r in sel if r["method"] == k]) for k in ("native", "clef_bf16", name)}
-        pn, pc = study.paired(sel, "native").get(name, {}), study.paired(sel, "clef_bf16").get(name, {})
+        m = {k: study.metrics([r for r in sel if r["method"] == k]) for k in ("native", "native_server", "clef_bf16", name)}
+        pn, ps, pc = (study.paired(sel, "native").get(name, {}), study.paired(sel, "native_server").get(name, {}),
+                      study.paired(sel, "clef_bf16").get(name, {}))
         line = {"correct": {k: f"{v['correct']}/{v['n']}" for k, v in m.items()}, "brier": {k: round(v["brier_valid_only"], 4) for k, v in m.items()},
                 "ece": {k: round(v["ece_10_bins_valid_only"], 4) for k, v in m.items()},
-                "vs_native": [pn.get("fixed"), pn.get("broken"), [round(x, 3) for x in pn.get("scenario_bootstrap_95", [])]],
+                "vs_native_production": [pn.get("fixed"), pn.get("broken"), [round(x, 3) for x in pn.get("scenario_bootstrap_95", [])]],
+                "vs_native_same_server": [ps.get("fixed"), ps.get("broken"), [round(x, 3) for x in ps.get("scenario_bootstrap_95", [])]],
                 "vs_clef_bf16": [pc.get("fixed"), pc.get("broken"), [round(x, 3) for x in pc.get("scenario_bootstrap_95", [])]]}
         paired[f"{name}/{cohort}"] = line
         print(name, cohort, json.dumps(line))
