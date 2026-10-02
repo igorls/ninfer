@@ -244,12 +244,11 @@ int main(int argc, char** argv) {
         ninfer::supervisor::DashboardServer server(cfg, child, collector);
         // The live engine connection, so a key file or port saved through the dashboard reaches
         // the frontends' proxies without a supervisor restart.
-        ninfer::supervisor::FrontendHost frontends(cfg.frontends,
-                                                   [&child] { return child.config().engine; });
-        server.set_frontends_provider([&frontends] { return frontends.status_json(); });
+        ninfer::supervisor::FrontendHost frontends([&child] { return child.config().engine; });
+        server.set_frontend_host(&frontends);
         std::thread engine_thread([&] { child.run_loop(); });
         std::thread http_thread([&] { server.run(); });
-        frontends.start();
+        frontends.apply(cfg.frontends);
         std::cout << "ninfer-supervisor dashboard " << url << "\n";
         ninfer::supervisor::TrayIcon tray(child, collector, url,
                                           ninfer::supervisor::manages_engine_process(cfg),

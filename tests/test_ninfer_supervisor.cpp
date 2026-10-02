@@ -2116,6 +2116,90 @@ int test_frontend_proxy() {
     return f;
 }
 
+
+int test_frontends_request() {
+    using namespace ninfer::supervisor;
+    int f = 0;
+    const auto ok = parse_frontends_request(
+        nlohmann::json::parse(R"({"frontends":[{"name":"UI","dir":"C:/ui","port":8100}]})"), 8099, 8010);
+    f += check(ok.error.empty() && ok.frontends.size() == 1 && ok.frontends[0].port == 8100,
+               "a valid frontend list is accepted");
+    const auto empty = parse_frontends_request(nlohmann::json::parse(R"({"frontends":[]})"), 8099, 8010);
+    f += check(empty.error.empty() && empty.frontends.empty(), "an empty list removes every frontend");
+    const auto clash = parse_frontends_request(
+        nlohmann::json::parse(R"({"frontends":[{"name":"UI","dir":"d","port":8099}]})"), 8099, 8010);
+    f += check(!clash.error.empty() && clash.frontends.empty(),
+               "a frontend on the dashboard port is refused");
+    const auto missing = parse_frontends_request(nlohmann::json::parse(R"({"other":1})"), 8099, 8010);
+    f += check(!missing.error.empty(), "a body without frontends is refused");
+    const auto not_json = parse_frontends_request(nlohmann::json(), 8099, 8010);
+    f += check(!not_json.error.empty(), "an unparsable body is refused");
+    return f;
+}
+
+int test_frontend_host_apply() {
+    using namespace ninfer::supervisor;
+    namespace fs = std::filesystem;
+    int f = 0;
+    const fs::path root = fs::temp_directory_path() / "ninfer_frontend_host_test";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(root / "a");
+    fs::create_directories(root / "b");
+    fs::create_directories(root / "later");
+    std::ofstream(root / "a" / "index.html", std::ios::binary) << "a";
+    std::ofstream(root / "b" / "index.html", std::ios::binary) << "b";
+
+    EngineSpec engine;
+    FrontendHost host([engine] { return engine; });
+    const auto port_of = [&](const std::string& name) {
+        for (const auto& s : host.status_json()) {
+            if (s.value("name", "") == name && s.value("state", "") == "serving") {
+                return s.value("port", 0);
+            }
+        }
+        return 0;
+    };
+    const auto serves = [](int port) {
+        if (port <= 0) { return false; }
+        httplib::Client client("127.0.0.1", port);
+        client.set_connection_timeout(std::chrono::seconds(2));
+        auto r = client.Get("/");
+        return r && r->status == 200;
+    };
+    const FrontendSpec a{"A", (root / "a").string(), 0};
+    const FrontendSpec b{"B", (root / "b").string(), 0};
+
+    host.apply({a});
+    const int a_port = port_of("A");
+    f += check(serves(a_port), "apply starts a frontend");
+    host.apply({a});
+    f += check(port_of("A") == a_port && serves(a_port), "an unchanged serving frontend keeps running");
+    host.apply({a, b});
+    const int b_port = port_of("B");
+    f += check(port_of("A") == a_port && serves(b_port) && host.links().size() == 2 &&
+                   host.links()[1].name == "B",
+               "adding a frontend leaves the others untouched");
+    host.apply({a, FrontendSpec{"B renamed", b.dir, 0}});
+    f += check(port_of("A") == a_port && !serves(b_port) && serves(port_of("B renamed")),
+               "a changed frontend is restarted");
+
+    const FrontendSpec later{"Later", (root / "later").string(), 0};
+    host.apply({later});
+    f += check(!serves(a_port) && host.links().size() == 1 &&
+                   host.links()[0].state == FrontendState::AssetsMissing,
+               "removed frontends stop and a folder without index.html is reported");
+    std::ofstream(root / "later" / "index.html", std::ios::binary) << "later";
+    host.apply({later});
+    f += check(serves(port_of("Later")), "saving the same entry again retries it");
+
+    host.apply({});
+    f += check(host.links().empty() && host.status_json().empty(), "an empty list stops everything");
+    host.stop();
+    fs::remove_all(root, ec);
+    return f;
+}
+
 int main() {
     int failures = 0;
     failures += test_kv_capacity_adaptation();
@@ -2166,6 +2250,8 @@ int main() {
     failures += test_frontend_config();
     failures += test_frontend_routing();
     failures += test_frontend_proxy();
+    failures += test_frontends_request();
+    failures += test_frontend_host_apply();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }

@@ -110,6 +110,13 @@ svg{flex-shrink:0}
 R"HTML(.context-note{font-size:12px;line-height:1.65;margin-top:14px}
 .frontend-list{list-style:none;margin:14px 0 0;padding:0;display:grid;gap:8px}
 .frontend-list li{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;font-size:13px}
+.fe-editor{grid-column:1/-1;display:grid;gap:12px}
+.fe-row{display:grid;grid-template-columns:minmax(120px,1fr) minmax(200px,2fr) 110px auto;gap:10px;align-items:end;padding:14px;border:1px solid var(--border-dim);border-radius:10px;background:var(--bg-card)}
+.fe-row label{display:grid;gap:4px;font-size:11px;color:var(--text-muted)}
+.fe-row input{min-width:0}
+.fe-meta{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;font-size:12px;color:var(--text-muted)}
+.fe-actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-top:6px}
+@media (max-width:760px){.fe-row{grid-template-columns:1fr}}
 .frontend-list code{font-size:11px;color:var(--text-muted);font-family:var(--font-mono)}
 /* Request readings live inside the activity card, beside the chart that shows
    them over time, rather than floating above the page as a separate strip. The
@@ -543,7 +550,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 )HTML"
 R"HTML(      <section class="guide-step"><span class="step-number">2</span><div><h2>Add an OpenAI-compatible provider</h2><p>In your app’s model or provider settings, choose a custom OpenAI-compatible connection. Paste this as its base URL.</p><label class="field-caption" for="api-address">Configured base URL · this computer</label><div class="copy-field"><input id="api-address" readonly value="Loading…"><button class="btn" id="copy-address"><svg class="icon"><use href="#i-copy"/></svg>Copy</button></div><p id="connection-pending" class="notice warning" hidden>Connection settings were saved but may not be active yet. Restart the engine and verify readiness before using this address.</p><p class="context-note">This is the saved connection address. After changing connection settings, restart the engine before connecting. This address works on the computer running NInfer. Connecting from another device requires network configuration.</p></div></section>
       <section class="guide-step"><span class="step-number">3</span><div><h2>Choose your model and send a message</h2><p id="model-instruction">Refresh your app’s model list after connecting. Select the model served by NInfer, then send a short message.</p><div class="notice" id="auth-guidance">Loading API authentication details…</div><p>Return to Overview to see response activity. If your app cannot connect, check that the engine is ready and the base URL matches.</p></div></section>
-      <section class="guide-step" id="frontends-step" hidden><span class="step-number">4</span><div><h2>Or chat in your browser</h2><p>These web apps are served by the supervisor on this computer and talk to your engine directly, with no base URL or API key to set.</p><ul id="frontend-list" class="frontend-list"></ul><p class="context-note">Add or remove one in the <code>frontends</code> list of the supervisor configuration, then restart the supervisor.</p></div></section>
+      <section class="guide-step" id="frontends-step"><span class="step-number">4</span><div><h2>Or chat in your browser</h2><p>These web apps are served by the supervisor on this computer and talk to your engine directly, with no base URL or API key to set.</p><ul id="frontend-list" class="frontend-list"></ul><p class="context-note">Add or change them in <a href="#settings" class="text-link" id="connect-frontends-settings">Settings, Web frontends</a>.</p></div></section>
     </div><aside class="guide-aside"><h2>What is an API?</h2><p>It is the connection your app uses to talk to the engine. NInfer generates the responses; your app provides the conversation interface.</p><h3>What is a token?</h3><p>A token is a small piece of text. Average generation speed measures how many of those pieces the engine produces each second.</p><a href="#diagnostics" class="text-link">Troubleshoot a connection<svg class="icon"><use href="#i-arrow"/></svg></a></aside></div>
   </section>
   <section id="view-diagnostics" class="view" aria-labelledby="diagnostics-title" hidden>
@@ -557,7 +564,7 @@ R"HTML(      <section class="guide-step"><span class="step-number">2</span><div>
   <section id="view-settings" class="view" aria-labelledby="settings-title" hidden>
     <div class="page-heading"><div><h1 id="settings-title">Settings</h1><p>Configure how your engine runs and how apps connect.</p></div><span id="cfg-path" class="file-label">Loading…</span></div>
     <div class="notice">Changes stay here until you save. Engine settings take effect the next time it starts.</div>
-    <div class="settings-layout"><nav class="cfg-tabs" aria-label="Settings categories"><button class="active" data-cfg-tab="network" aria-current="page">Connection</button><button data-cfg-tab="api">API &amp; access</button><span class="settings-divider">Advanced settings</span><button data-cfg-tab="capacity">Request capacity</button><button data-cfg-tab="memory">Memory &amp; precision</button><button data-cfg-tab="features">Model features</button><button data-cfg-tab="raw">Launch details</button></nav><div class="settings-content"><h2 id="settings-section-title">Connection</h2><p id="settings-section-help" class="settings-description">Addresses and ports used by the engine and this dashboard.</p><div id="cfg-body" class="cfg-groups"><p class="empty-state">Loading settings…</p></div><div id="cfg-errors" class="cfg-errors" role="alert" hidden></div></div></div>
+    <div class="settings-layout"><nav class="cfg-tabs" aria-label="Settings categories"><button class="active" data-cfg-tab="network" aria-current="page">Connection</button><button data-cfg-tab="api">API &amp; access</button><button data-cfg-tab="frontends">Web frontends</button><span class="settings-divider">Advanced settings</span><button data-cfg-tab="capacity">Request capacity</button><button data-cfg-tab="memory">Memory &amp; precision</button><button data-cfg-tab="features">Model features</button><button data-cfg-tab="raw">Launch details</button></nav><div class="settings-content"><h2 id="settings-section-title">Connection</h2><p id="settings-section-help" class="settings-description">Addresses and ports used by the engine and this dashboard.</p><div id="cfg-body" class="cfg-groups"><p class="empty-state">Loading settings…</p></div><div id="cfg-errors" class="cfg-errors" role="alert" hidden></div></div></div>
     <div class="cfg-actions"><span id="cfg-status" class="cfg-status" role="status">No unsaved changes</span><div class="control-group"><button id="cfg-revert" class="btn" disabled>Discard changes</button><button id="cfg-save" class="btn primary" disabled>Save changes</button><button id="cfg-save-restart" class="btn" disabled>Save &amp; restart</button></div></div>
   </section>
   <footer class="page-footer"><span>NInfer Supervisor</span><span>Local inference. Clearer control.</span></footer>
@@ -625,8 +632,12 @@ R"HTML(      <section class="guide-step"><span class="step-number">2</span><div>
 
 )HTML"
 R"HTML(  function renderFrontends(list) {
-    const step = document.getElementById('frontends-step');
-    step.hidden = !list.length;
+    if (!list.length) {
+      const none = document.createElement('li');
+      none.textContent = 'No web frontend is configured yet.';
+      document.getElementById('frontend-list').replaceChildren(none);
+      return;
+    }
     const reasons = {port_in_use: 'port in use', assets_missing: 'files not found', stopped: 'stopped'};
     document.getElementById('frontend-list').replaceChildren(...list.map(fe => {
       const li = document.createElement('li');
@@ -1401,6 +1412,7 @@ R"HTML(    if (id === 'prefix.reuse_mix') return {title:'Reusing earlier convers
     if (!s) return;
     lastState = s;
     renderFrontends(s.frontends || []);
+    if (cfgTab === 'frontends') feRefreshStatus();
     renderMemoryControls(s);
 
     const eng = s.engine || {};
@@ -2163,15 +2175,153 @@ R"HTML(  function fieldRow(spec, value) {
     return n;
   }
 
+)HTML"
+R"HTML(  // Web frontends editor. Edits stay local until Save, which posts the whole list to
+  // /api/frontends; the Supervisor saves it and starts or stops listeners without touching the engine.
+  let feDraft = null;
+  let feBusy = false;
+  const feStateText = {serving: 'Serving', assets_missing: 'Files not found', port_in_use: 'Port in use', stopped: 'Stopped'};
+  function feSaved() { return (cfgData && cfgData.frontends) || []; }
+  function feDirty() { return feDraft !== null && JSON.stringify(feDraft) !== JSON.stringify(feSaved()); }
+  function feStatusFor(fe) {
+    return ((lastState || {}).frontends || []).find(s => s.name === fe.name && s.port === Number(fe.port));
+  }
+  function feInput(label, value, attrs, onInput) {
+    const wrap = document.createElement('label');
+    wrap.textContent = label;
+    const input = document.createElement('input');
+    Object.entries(attrs).forEach(([k, v]) => input.setAttribute(k, v));
+    input.value = value == null ? '' : value;
+    input.addEventListener('input', () => { onInput(input.value); feSetActions(); });
+    wrap.appendChild(input);
+    return wrap;
+  }
+  function feRefreshStatus() {
+    if (!feDraft) return;
+    feDraft.forEach((fe, i) => {
+      const meta = document.getElementById('fe-meta-' + i);
+      if (!meta) return;
+      const saved = feSaved().some(s => s.name === fe.name && s.dir === fe.dir && s.port === Number(fe.port));
+      const st = saved ? feStatusFor(fe) : null;
+      meta.replaceChildren();
+      const state = document.createElement('span');
+      state.textContent = !saved ? 'Not saved yet' : st ? (feStateText[st.state] || st.state) + (st.reason ? ': ' + st.reason : '') : 'Starting';
+      meta.appendChild(state);
+      if (st && st.state === 'serving') {
+        const open = document.createElement('a');
+        open.href = st.url; open.target = '_blank'; open.rel = 'noopener'; open.className = 'text-link';
+        open.textContent = 'Open ' + st.url;
+        meta.appendChild(open);
+      }
+    });
+  }
+  function feSetActions() {
+    const save = document.getElementById('fe-save');
+    if (save) save.disabled = feBusy || !feDirty() || !(cfgData && cfgData.writable);
+    const status = document.getElementById('fe-status');
+    if (status && !feBusy && feDirty()) status.textContent = 'Unsaved changes';
+  }
+  function renderFrontendEditor() {
+    if (feDraft === null) feDraft = JSON.parse(JSON.stringify(feSaved()));
+    const editor = document.createElement('div');
+    editor.className = 'fe-editor';
+    feDraft.forEach((fe, i) => {
+      const row = document.createElement('div');
+      row.className = 'fe-row';
+      row.appendChild(feInput('Name', fe.name, {required: '', maxlength: '64', placeholder: 'llama.cpp web UI'}, v => { fe.name = v; }));
+      row.appendChild(feInput('Folder', fe.dir, {required: '', placeholder: 'C:\\path\\to\\built\\app', spellcheck: 'false'}, v => { fe.dir = v; }));
+      row.appendChild(feInput('Port', fe.port, {required: '', type: 'number', min: '1', max: '65535'}, v => { fe.port = v === '' ? '' : Number(v); }));
+      const remove = document.createElement('button');
+      remove.className = 'btn'; remove.type = 'button'; remove.textContent = 'Remove';
+      remove.onclick = () => { feDraft.splice(i, 1); renderConfig(); };
+      row.appendChild(remove);
+      const meta = document.createElement('div');
+      meta.className = 'fe-meta'; meta.id = 'fe-meta-' + i;
+      row.appendChild(meta);
+      editor.appendChild(row);
+    });
+    if (!feDraft.length) {
+      const none = document.createElement('p');
+      none.className = 'empty-state';
+      none.textContent = 'No web frontend yet. Add one to chat with your engine in a browser.';
+      editor.appendChild(none);
+    }
+    const actions = document.createElement('div');
+    actions.className = 'fe-actions';
+    const status = document.createElement('span');
+    status.id = 'fe-status'; status.className = 'cfg-status'; status.setAttribute('role', 'status');
+    status.textContent = feDirty() ? 'Unsaved changes' : 'No unsaved changes';
+    const group = document.createElement('div');
+    group.className = 'control-group';
+    const add = document.createElement('button');
+    add.className = 'btn'; add.type = 'button'; add.textContent = 'Add frontend';
+    add.disabled = feDraft.length >= 16;
+    add.onclick = () => {
+      const used = new Set(feDraft.map(f => Number(f.port)));
+      // One past the highest configured port: the lowest free number is often another app's.
+      let port = feDraft.length ? Math.max(...feDraft.map(f => Number(f.port) || 8099)) + 1 : 8100;
+      while (used.has(port)) port++;
+      feDraft.push({name: '', dir: '', port: port});
+      renderConfig();
+    };
+    const discard = document.createElement('button');
+    discard.className = 'btn'; discard.type = 'button'; discard.textContent = 'Discard changes';
+    discard.onclick = () => { feDraft = null; showCfgErrors(null); renderConfig(); };
+    const save = document.createElement('button');
+    save.className = 'btn primary'; save.type = 'button'; save.id = 'fe-save'; save.textContent = 'Save and apply';
+    save.onclick = feSave;
+    group.append(add, discard, save);
+    actions.append(status, group);
+    editor.appendChild(actions);
+    editor.appendChild(cfgNote('Each folder holds a built web app with index.html at its root. llama.cpp publishes its web UI prebuilt on Hugging Face (ggml-org/llama-ui). Frontends listen on this computer only, and removing or changing one ends the chats open in it.'));
+    cfgBody.appendChild(editor);
+    feRefreshStatus();
+    feSetActions();
+  }
+  async function feSave() {
+    if (feBusy) return;
+    const invalid = [...cfgBody.querySelectorAll('.fe-row input')].find(el => !el.checkValidity());
+    if (invalid) { invalid.reportValidity(); return; }
+    feBusy = true; feSetActions(); showCfgErrors(null);
+    const status = document.getElementById('fe-status');
+    status.textContent = 'Saving…';
+    try {
+      const res = await fetch('/api/frontends', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-NInfer-Supervisor': '1'},
+        body: JSON.stringify({frontends: feDraft.map(f => ({name: f.name.trim(), dir: f.dir.trim(), port: Number(f.port)}))})
+      });
+      let body = {};
+      try { body = await res.json(); } catch (e) {}
+      if (!res.ok) { showCfgErrors(body.details || [body.error || ('HTTP ' + res.status)]); status.textContent = 'Not saved'; return; }
+      cfgData.frontends = body.frontends || [];
+      if (lastState) lastState.frontends = body.status || [];
+      feDraft = null;
+      renderConfig();
+      renderFrontends((lastState || {}).frontends || []);
+      document.getElementById('fe-status').textContent = 'Saved and applied. The engine kept running.';
+    } catch (err) {
+      showCfgErrors([err.message || 'Could not save the frontends. Check the connection and try again.']);
+      status.textContent = 'Not saved';
+    } finally { feBusy = false; feSetActions(); }
+  }
+  document.getElementById('connect-frontends-settings').addEventListener('click', () => {
+    setTimeout(() => { const tab = document.querySelector('[data-cfg-tab="frontends"]'); if (tab) tab.click(); }, 0);
+  });
   function renderConfig() {
     if (!cfgData) { return; }
     cfgBody.innerHTML = '';
-    const category = {network:['Connection','Set the address apps use to reach your engine. Most local setups can keep these values.'],api:['API & access','Control API authentication and request logging.'],capacity:['Request capacity','Size the shared KV pool first. Max context is how long one request may be inside that pool. Max concurrency chooses how many of the Engine’s 8 lanes may be active.'],memory:['Memory & precision','Advanced: these settings can affect both memory use and generated responses.'],features:['Model features','Advanced: available options depend on the model and engine build.'],raw:['Launch details','Read-only information about the model and the command used to launch it.']}[cfgTab];
+    const category = {network:['Connection','Set the address apps use to reach your engine. Most local setups can keep these values.'],api:['API & access','Control API authentication and request logging.'],capacity:['Request capacity','Size the shared KV pool first. Max context is how long one request may be inside that pool. Max concurrency chooses how many of the Engine’s 8 lanes may be active.'],memory:['Memory & precision','Advanced: these settings can affect both memory use and generated responses.'],features:['Model features','Advanced: available options depend on the model and engine build.'],raw:['Launch details','Read-only information about the model and the command used to launch it.'],frontends:['Web frontends','Serve a web app, such as llama.cpp\u2019s web UI, on its own local port together with your engine\u2019s API. Saving applies the change right away; the engine keeps running.']}[cfgTab];
+    document.querySelector('.cfg-actions').hidden = cfgTab === 'frontends';
     document.getElementById('settings-section-title').textContent = category[0];
     document.getElementById('settings-section-help').textContent = category[1];
     const eng = cfgData.engine || {};
     const sup = cfgData.supervisor || {};
 
+    if (cfgTab === 'frontends') {
+      renderFrontendEditor();
+      return;
+    }
     if (cfgTab === 'network') {
       cfgBody.appendChild(plainField('engine', 'engine_host', 'Engine host', eng.engine_host,
         { help: 'Address the engine listens on. The supervisor polls health here.' }));

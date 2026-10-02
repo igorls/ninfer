@@ -125,6 +125,7 @@ nlohmann::json DashboardServer::config_json() const {
             {"crash_loop_max", cfg_.restart.crash_loop_max},
             {"health_fail_threshold", cfg_.restart.health_fail_threshold}}}}},
         {"params", values},
+        {"frontends", frontends_to_json(cfg_.frontends)},
         {"schema", schema}};
 }
 
@@ -275,6 +276,14 @@ DashboardServer::ConfigResult DashboardServer::apply_config(const std::string& r
                                       next.bind_any != cfg_.bind_any;
     }
 
+    // A frontend on the new dashboard or engine port would leave a file the supervisor refuses
+    // to start with.
+    try {
+        validate_frontends(next.frontends, next.port, next.engine.engine_port);
+    } catch (const std::exception& ex) {
+        errors.emplace_back(ex.what());
+    }
+
     if (!errors.empty()) { return {400, {{"error", "invalid configuration"}, {"details", errors}}}; }
 
     // Keep the selected preset in sync, so selecting it again preserves edits.
@@ -309,6 +318,33 @@ DashboardServer::ConfigResult DashboardServer::apply_config(const std::string& r
     out["engine_restart_required"]     = engine_restart_required;
     out["supervisor_restart_required"] = supervisor_restart_required;
     return {200, out};
+}
+
+DashboardServer::ConfigResult DashboardServer::apply_frontends(const std::string& request_body) {
+    if (cfg_.source_path.empty()) {
+        return {409, {{"error", "this supervisor has no config file to write to"}}};
+    }
+    const auto body = nlohmann::json::parse(request_body, nullptr, false);
+    const FrontendsRequest request = parse_frontends_request(body, cfg_.port, cfg_.engine.engine_port);
+    if (!request.error.empty()) {
+        return {400, {{"error", "invalid frontends"}, {"details", {request.error}}}};
+    }
+    SupervisorConfig next = cfg_;
+    next.frontends        = request.frontends;
+    try {
+        save_config_json(cfg_.source_path, next, cfg_.source_stamp);
+    } catch (const std::exception& ex) {
+        return {500, {{"error", ex.what()}}};
+    }
+    // The stamp of the write just made, as in apply_config, so the next edit is not refused as
+    // an external change.
+    next.source_stamp = config_file_stamp(cfg_.source_path);
+    cfg_              = next;
+    child_.update_config(next);
+    if (frontends_ != nullptr) { frontends_->apply(next.frontends); }
+    return {200,
+            {{"frontends", frontends_to_json(cfg_.frontends)},
+             {"status", frontends_ != nullptr ? frontends_->status_json() : nlohmann::json::array()}}};
 }
 
 // Blocks until the engine answers /health, or the breaker halts, or time runs out.
@@ -581,7 +617,7 @@ nlohmann::json DashboardServer::state_json() {
             {"series", collector_.series_json()},
             {"throughput", collector_.throughput_series_json()},
             {"health", std::move(health)},
-            {"frontends", frontends_provider_ ? frontends_provider_() : nlohmann::json::array()},
+            {"frontends", frontends_ != nullptr ? frontends_->status_json() : nlohmann::json::array()},
             {"log_tail", log}};
 }
 
@@ -711,6 +747,25 @@ void DashboardServer::run() {
             return;
         }
         const ConfigResult result = apply_config(req.body);
+        res.status                = result.status;
+        res.set_content(result.body.dump(), "application/json");
+    });
+
+    svr.Post("/api/frontends", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!control_allowed(req.remote_addr)) {
+            res.status = 403;
+            res.set_content(nlohmann::json{{"error", "frontends are loopback-only"}}.dump(),
+                            "application/json");
+            return;
+        }
+        if (!supervisor_control_header_ok(
+                req.get_header_value(std::string(kSupervisorControlHeader)))) {
+            res.status = 403;
+            res.set_content(nlohmann::json{{"error", "missing X-NInfer-Supervisor header"}}.dump(),
+                            "application/json");
+            return;
+        }
+        const ConfigResult result = apply_frontends(req.body);
         res.status                = result.status;
         res.set_content(result.body.dump(), "application/json");
     });
