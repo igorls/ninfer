@@ -497,6 +497,118 @@ int main() {
         failures += check(build_systemone_messages(parse_systemone_request(body)).size() == 1, "omitted images preserves text route");
     }
 
+    // Decision policy: parsing, defaults, prompts, mathematics.
+    {
+        Json body{{"model", "jev-latest"},
+                  {"state", "Customer: I was charged twice."},
+                  {"questions", Json{{"dept", Json{{"type", "choice"},
+                                                   {"instructions", "Which department?"},
+                                                   {"criteria", Json{{"billing", "Charges and refunds"},
+                                                                     {"shipping", "Delivery"},
+                                                                     {"general", nullptr}}}}},
+                                     {"urgent", Json{{"type", "noul"},
+                                                     {"instructions", "Is it urgent?"},
+                                                     {"criteria", Json{{"true", "Demands money back"},
+                                                                       {"false", nullptr}}}}},
+                                     {"mood", Json{{"type", "score"},
+                                                   {"instructions", "How upset?"},
+                                                   {"criteria", Json::array({"Calm", "Annoyed", "Hostile"})}}}}}};
+        const SystemOneRequest plain = parse_systemone_request(body);
+        failures += check(!plain.policy.active() &&
+                              plain.policy.readout == SystemOnePolicy::Readout::Single,
+                          "no policy field keeps the single readout");
+        SystemOnePolicy defaults;
+        defaults.readout          = SystemOnePolicy::Readout::Averaged;
+        defaults.reasoning_budget = 1024;
+        const SystemOneRequest defaulted = parse_systemone_request(body, defaults);
+        failures += check(defaulted.policy.readout == SystemOnePolicy::Readout::Averaged &&
+                              defaulted.policy.reasoning_budget == 1024,
+                          "server defaults apply when policy is omitted");
+        body["policy"] = Json{{"readout", "averaged"}, {"reasoning_budget", 512},
+                              {"escalate_entropy", 0.5}, {"answer_weight", 0.8}};
+        const SystemOneRequest explicit_policy = parse_systemone_request(body, defaults);
+        failures += check(explicit_policy.policy.reasoning_budget == 512 &&
+                              close_to(explicit_policy.policy.escalate_entropy, 0.5) &&
+                              close_to(explicit_policy.policy.answer_weight, 0.8),
+                          "explicit policy overrides the defaults");
+        body["policy"] = Json{{"readout", "single"}};
+        failures += check(parse_systemone_request(body, defaults).policy.readout ==
+                              SystemOnePolicy::Readout::Single,
+                          "explicit single readout overrides an averaged default");
+        for (const auto& invalid : std::vector<Json>{"averaged", Json{{"readout", "triple"}},
+                                                     Json{{"reasoning_budget", -1}},
+                                                     Json{{"escalate_entropy", 1.5}},
+                                                     Json{{"answer_weight", "high"}},
+                                                     Json{{"unknown", 1}}}) {
+            body["policy"] = invalid;
+            try {
+                (void)parse_systemone_request(body);
+                failures += check(false, "invalid policy rejected");
+            } catch (const SystemOneError& error) {
+                failures += check(error.status() == 400, "invalid policy is a usage error");
+            }
+        }
+        body.erase("policy");
+        const SystemOneRequest request = parse_systemone_request(body);
+        const SystemOneQuestion& dept  = request.questions.at(0);
+        const SystemOneQuestion& urgent = request.questions.at(1);
+        const SystemOneQuestion& mood  = request.questions.at(2);
+        failures += check(policy_option_count(dept) == 3 && policy_option_count(urgent) == 2 &&
+                              policy_option_count(mood) == 3,
+                          "policy option counts");
+
+        const SystemOneLetterPrompt rotated = build_letter_prompt(request, dept, 1, false);
+        failures += check(rotated.letters == std::vector<std::string>{"A", "B", "C"} &&
+                              rotated.options == std::vector<std::size_t>{1, 2, 0},
+                          "rotated letters name the next option");
+        failures += check(rotated.messages.size() == 2 &&
+                              rotated.messages[0]["content"] ==
+                                  "You are a decision engine. You read a state and answer one "
+                                  "bounded question by choosing exactly one of the given options. "
+                                  "Reply with the option letter only." &&
+                              rotated.messages[1]["content"] ==
+                                  "State:\nCustomer: I was charged twice.\n\nWhich department?"
+                                  "\n\nOptions:\nA. shipping: Delivery\nB. general\n"
+                                  "C. billing: Charges and refunds\n\n"
+                                  "Answer with the letter of the best option.",
+                          "lettered prompt renders the rotated option order");
+        const SystemOneLetterPrompt framed = build_letter_prompt(request, urgent, 0, true);
+        failures += check(framed.options == std::vector<std::size_t>{0, 1} &&
+                              framed.messages[1]["content"] ==
+                                  "Evidence:\nCustomer: I was charged twice.\n\nCriterion:\n"
+                                  "Is it urgent?\n\nOptions:\nA. no: no\n"
+                                  "B. yes: Demands money back\n\nSelected option token:",
+                          "framed prompt lists no then yes with criteria");
+        const SystemOneLetterPrompt levels = build_letter_prompt(request, mood, 0, true);
+        failures += check(levels.messages[1]["content"].get<std::string>().find(
+                              "Options (levels ordered lowest to highest):\nA. 0: Calm\n") !=
+                              std::string::npos,
+                          "framed score prompt orders levels");
+        failures += check(build_letter_prompt(request, mood, 0, false)
+                                  .messages[1]["content"]
+                                  .get<std::string>()
+                                  .find("How upset?\n\nLevels, lowest to highest:\nA. 0: Calm") !=
+                              std::string::npos,
+                          "lettered score prompt names the level scale");
+
+        const std::vector<double> swapped = native_to_option_order(urgent, {0.8, 0.2});
+        failures += check(close_to(swapped[0], 0.2) && close_to(swapped[1], 0.8),
+                          "noul native order Yes, No becomes no, yes");
+        failures += check(close_to(normalized_entropy({0.5, 0.5}), 1.0) &&
+                              close_to(normalized_entropy({1.0, 0.0, 0.0}), 0.0) &&
+                              close_to(normalized_entropy({1.0}), 0.0),
+                          "normalized entropy");
+        const std::vector<double> mean = average_distributions({{0.2, 0.8}, {0.6, 0.4}});
+        failures += check(close_to(mean[0], 0.4) && close_to(mean[1], 0.6), "distribution average");
+        const std::vector<std::string> letters{"A", "B", "C"};
+        failures += check(parse_letter_answer(" B.\n", letters) == std::optional<std::size_t>{1} &&
+                              parse_letter_answer("C)", letters) == std::optional<std::size_t>{2} &&
+                              !parse_letter_answer("D", letters) &&
+                              !parse_letter_answer("A B", letters) &&
+                              !parse_letter_answer("", letters),
+                          "letter answers parse strictly");
+    }
+
     if (failures == 0) {
         std::cout << "PASS: all typesafe schema tests succeeded\n";
     } else {

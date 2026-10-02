@@ -993,6 +993,7 @@ prefill and never see each other.
 | `questions` | Required map of 1 to 8,192 questions. Keys come back in `answers`, are never shown to the model and cannot be empty. |
 | `temperature` | NInfer extension. A finite positive number, default 1; candidate logits are divided by it before normalisation. |
 | `images` | NInfer extension. Image URLs or base64 data URIs shared by all questions, taking the same acquisition, preprocessing and Engine vision route as Chat Completions; the server needs `--vision`. This is not a TypeSafe feature, and a client should require nonzero `usage.vision_tokens` before treating an answer as image-grounded. |
+| `policy` | NInfer extension. `{"readout": "single" or "averaged", "reasoning_budget": N, "escalate_entropy": F, "answer_weight": F}`, every field optional; omitted fields take the server's `--systemone-*` defaults, and an omitted object takes them all. See [Decision policy](#decision-policy). |
 
 Any other top-level field, including `stream`, is
 `400 {"detail": {"error_type": "api_usage_error", "message": "Invalid request."}}`, as on Jev.
@@ -1090,6 +1091,32 @@ distance for a uniform distribution, clamped to $[0, 1]$; one option or level ha
 
 Both reproduce the confidences jev-1.13 returns for Choice answers and for Score answers of 1 to 10
 levels, within their two-decimal rounding.
+
+#### Decision policy
+
+The default answers each question from one readout of the native prompt above, and its prompt
+bytes do not change. The `policy` extension, or the server defaults `--systemone-readout`,
+`--systemone-reasoning-budget` and `--systemone-escalate-entropy`, add two measured
+improvements for questions with at most 26 options (a Noul, a Choice of up to 26 keys, a Score):
+
+- `"readout": "averaged"` reads the question through three prompts and averages their
+  renormalised distributions: the native prompt, a lettered decision prompt with the option
+  order rotated by one (Choice only), and an evidence/criterion framing with the options listed as
+  `A. key: description`. The lettered prompts render the state and the question themselves, so
+  each costs one more prefill per question and publishes nothing to the prefix cache.
+- `"reasoning_budget": N` (0 disables) escalates a question whose averaged distribution has
+  normalised entropy above `escalate_entropy` (default 0.66) to one bounded-thinking generation
+  over the lettered prompt, with `N` thinking tokens and 256 answer tokens. When the answer is
+  exactly one declared letter, it is mixed into the distribution at `answer_weight` (default 0.7);
+  any other outcome leaves the distribution as it was. An escalated question costs seconds, so
+  the budget is a per-request or per-deployment latency decision.
+
+`usage.policy` reports `readout`, the number of `escalated` questions and their
+`reasoning_tokens` whenever a policy was active. `usage.input_tokens` bills every readout and
+escalation prompt. On the 231 public JevBench items the averaged readout alone moved the
+Qwen3.8-27B NVFP4 artifact from 189 to 204 correct (Brier 0.246 to 0.174) and escalating the
+highest-entropy quarter with a 1,024-token budget to 210 (Brier 0.149); the study behind the
+defaults is recorded in [the decision head plan](research/decision-head-plan.md).
 
 ### Errors
 
@@ -1372,6 +1399,9 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--no-thinking` | disable thinking by default | thinking on |
 | `--preserve-thinking` | preserve closed-turn assistant reasoning by default | off |
 | `--cors` | permissive browser CORS headers | off |
+| `--systemone-readout single|averaged` | System One readout for requests without a `policy` ([decision policy](#decision-policy)) | single |
+| `--systemone-reasoning-budget N` | System One thinking budget for escalated questions; 0 disables escalation | 0 |
+| `--systemone-escalate-entropy F` | normalised-entropy threshold above which a System One question is escalated | 0.66 |
 | `--temperature F` | process-level temperature override | unset |
 | `--top-p F` | process-level top-p override | unset |
 | `--top-k N` | process-level top-k override (`0..20`; zero selects the top-20 cap) | unset |

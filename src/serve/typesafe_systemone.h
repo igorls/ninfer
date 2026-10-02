@@ -85,19 +85,41 @@ struct SystemOneQuestion {
     SystemOneJson score_legend = SystemOneJson::array();
 };
 
+// NInfer extension: how a question is decided beyond the single native readout. `Averaged` reads
+// each question through three prompts (the native prompt, a lettered prompt with the option order
+// rotated by one, and an evidence/criterion framing) and averages their renormalised
+// distributions. A positive `reasoning_budget` escalates a question whose averaged distribution
+// has normalised entropy above `escalate_entropy` to a bounded-thinking generation and mixes its
+// answer in at `answer_weight`. Both apply to questions with at most kMaximumPolicyOptions
+// options; other questions keep the native readout.
+struct SystemOnePolicy {
+    enum class Readout : std::uint8_t { Single, Averaged };
+    Readout readout                = Readout::Single;
+    std::uint32_t reasoning_budget = 0; // 0 disables escalation
+    double escalate_entropy        = 0.66;
+    double answer_weight           = 0.7;
+    [[nodiscard]] bool active() const noexcept {
+        return readout == Readout::Averaged || reasoning_budget != 0;
+    }
+};
+constexpr std::size_t kMaximumPolicyOptions = 26;
+
 struct SystemOneRequest {
     std::string state_text;
     // NInfer extension: observations acquired through the shared product media route.
     std::vector<std::string> images;
     double temperature = 1.0;
     std::vector<SystemOneQuestion> questions;
+    SystemOnePolicy policy;
 };
 
 // Parses the JSON body text; malformed or empty bodies fail with Jev's 422 `json_invalid`/`missing`.
 [[nodiscard]] SystemOneJson parse_systemone_body(std::string_view text);
 // Validates a request against TypeSafe's schema (422, every violation listed) and rules (400).
-// `temperature` and `images` are the only accepted fields beyond TypeSafe's own.
-[[nodiscard]] SystemOneRequest parse_systemone_request(const SystemOneJson& body);
+// `temperature`, `images` and `policy` are the only accepted fields beyond TypeSafe's own; a
+// request without `policy` takes `defaults`.
+[[nodiscard]] SystemOneRequest parse_systemone_request(const SystemOneJson& body,
+                                                       const SystemOnePolicy& defaults = {});
 // The model identity an answer reports: the served id, with `-t<T>` when the candidate logits are
 // scaled. Requested names (`jev-latest`, the served id, anything else) never change execution.
 [[nodiscard]] std::string systemone_executed_model(std::string_view served_model_id,
@@ -110,6 +132,30 @@ struct SystemOneRequest {
 
 [[nodiscard]] nlohmann::ordered_json build_systemone_messages(const SystemOneRequest& request);
 [[nodiscard]] std::string build_question_prompt(const SystemOneQuestion& question);
+
+// Policy readouts. Options are listed in policy order: a Noul as `no`, `yes`; a Choice by key in
+// request order; a Score by level index. Letter j names option (j + rotation) mod n.
+struct SystemOneLetterPrompt {
+    nlohmann::ordered_json messages;
+    std::vector<std::string> letters; // candidate tokens in letter order
+    std::vector<std::size_t> options; // option index of each letter
+};
+[[nodiscard]] std::size_t policy_option_count(const SystemOneQuestion& question);
+// `framed` selects the evidence/criterion rendering; otherwise the lettered decision prompt.
+[[nodiscard]] SystemOneLetterPrompt build_letter_prompt(const SystemOneRequest& request,
+                                                        const SystemOneQuestion& question,
+                                                        std::size_t rotation, bool framed);
+// The native branch's distribution (P(Yes) first for a Noul) in policy option order.
+[[nodiscard]] std::vector<double> native_to_option_order(const SystemOneQuestion& question,
+                                                         std::vector<double> probabilities);
+// Entropy divided by log(n); 0 for fewer than two options.
+[[nodiscard]] double normalized_entropy(const std::vector<double>& probabilities);
+[[nodiscard]] std::vector<double>
+average_distributions(const std::vector<std::vector<double>>& members);
+// The letter a bounded-reasoning answer names: exactly one declared letter, optionally followed
+// by '.' or ')', surrounded by whitespace only.
+[[nodiscard]] std::optional<std::size_t> parse_letter_answer(std::string_view text,
+                                                             const std::vector<std::string>& letters);
 
 // The first question bills its whole prompt, which holds the shared state. A later branch bills
 // only the tokens past a prefix-cache hit, so the state is not charged once per question.
@@ -132,6 +178,11 @@ struct SystemOneAnswer {
 struct SystemOneUsage {
     std::int64_t input_tokens   = 0;
     std::uint64_t vision_tokens = 0;
+    // Reported as `usage.policy` when a policy was active.
+    bool policy                    = false;
+    std::string readout            = "single";
+    std::uint32_t escalated        = 0;
+    std::uint32_t reasoning_tokens = 0;
 };
 
 [[nodiscard]] nlohmann::ordered_json

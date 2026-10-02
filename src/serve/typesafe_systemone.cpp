@@ -294,7 +294,8 @@ SystemOneJson parse_systemone_body(std::string_view text) {
     }
 }
 
-SystemOneRequest parse_systemone_request(const SystemOneJson& body) {
+SystemOneRequest parse_systemone_request(const SystemOneJson& body,
+                                         const SystemOnePolicy& defaults) {
     SchemaErrors errors;
     const Json root = Json::array({"body"});
     if (!body.is_object()) {
@@ -336,7 +337,7 @@ SystemOneRequest parse_systemone_request(const SystemOneJson& body) {
     for (auto field = body.begin(); field != body.end(); ++field) {
         const std::string& key = field.key();
         known_fields = known_fields && (key == "state" || key == "model" || key == "questions" ||
-                                        key == "temperature" || key == "images");
+                                        key == "temperature" || key == "images" || key == "policy");
     }
     if (!known_fields || !known_types) { systemone_usage_error("Invalid request."); }
     errors.raise_if_any();
@@ -371,6 +372,44 @@ SystemOneRequest parse_systemone_request(const SystemOneJson& body) {
         }
     }
 
+    request.policy = defaults;
+    if (const Json* policy = member(body, "policy")) {
+        if (!policy->is_object()) { systemone_usage_error("policy must be an object"); }
+        const auto unit = [](const Json& value, const char* name) {
+            if (!value.is_number() || !std::isfinite(value.get<double>()) ||
+                value.get<double>() < 0.0 || value.get<double>() > 1.0) {
+                systemone_usage_error(std::string(name) + " must be a number in [0, 1]");
+            }
+            return value.get<double>();
+        };
+        for (auto field = policy->begin(); field != policy->end(); ++field) {
+            const std::string& key = field.key();
+            const Json& value      = field.value();
+            if (key == "readout") {
+                const std::string text = value.is_string() ? value.get<std::string>() : "";
+                if (text == "single") {
+                    request.policy.readout = SystemOnePolicy::Readout::Single;
+                } else if (text == "averaged") {
+                    request.policy.readout = SystemOnePolicy::Readout::Averaged;
+                } else {
+                    systemone_usage_error("policy.readout must be \"single\" or \"averaged\"");
+                }
+            } else if (key == "reasoning_budget") {
+                if (!value.is_number_integer() || value.get<std::int64_t>() < 0 ||
+                    value.get<std::int64_t>() > 1'000'000) {
+                    systemone_usage_error("policy.reasoning_budget must be an integer in [0, 1000000]");
+                }
+                request.policy.reasoning_budget = value.get<std::uint32_t>();
+            } else if (key == "escalate_entropy") {
+                request.policy.escalate_entropy = unit(value, "policy.escalate_entropy");
+            } else if (key == "answer_weight") {
+                request.policy.answer_weight = unit(value, "policy.answer_weight");
+            } else {
+                systemone_usage_error("Invalid request.");
+            }
+        }
+    }
+
     if (questions->size() > kMaximumSystemOneQuestions) {
         throw SystemOneError(400, Json{{"error_type", "max_tokens_exceeded"}});
     }
@@ -379,6 +418,145 @@ SystemOneRequest parse_systemone_request(const SystemOneJson& body) {
         request.questions.push_back(build_question(entry.key(), *entry));
     }
     return request;
+}
+
+namespace {
+
+struct PolicyOption {
+    std::string label;
+    std::string description;
+};
+
+std::vector<PolicyOption> policy_options(const SystemOneQuestion& question) {
+    std::vector<PolicyOption> options;
+    switch (question.type) {
+    case SystemOneQuestionType::Noul:
+        options.push_back({"no", question.false_criteria.empty() ? "no" : question.false_criteria});
+        options.push_back({"yes", question.true_criteria.empty() ? "yes" : question.true_criteria});
+        break;
+    case SystemOneQuestionType::Choice:
+        for (const SystemOneChoiceOption& option : question.choice_options) {
+            options.push_back(
+                {option.key, option.description.empty() ? option.key : option.description});
+        }
+        break;
+    case SystemOneQuestionType::Score:
+        for (std::size_t level = 0; level < question.score_levels.size(); ++level) {
+            options.push_back({std::to_string(level), question.score_levels[level]});
+        }
+        break;
+    }
+    return options;
+}
+
+std::string policy_instructions(const SystemOneQuestion& question) {
+    if (!question.instructions.empty()) { return question.instructions; }
+    switch (question.type) {
+    case SystemOneQuestionType::Noul:
+        return "Based on the criteria below, is the answer Yes or No?";
+    case SystemOneQuestionType::Choice:
+        return "Which option best fits the state?";
+    case SystemOneQuestionType::Score:
+        return "Which rating level best fits the state?";
+    }
+    return {};
+}
+
+} // namespace
+
+std::size_t policy_option_count(const SystemOneQuestion& question) {
+    switch (question.type) {
+    case SystemOneQuestionType::Noul:
+        return 2;
+    case SystemOneQuestionType::Choice:
+        return question.choice_options.size();
+    case SystemOneQuestionType::Score:
+        return question.score_levels.size();
+    }
+    return 0;
+}
+
+SystemOneLetterPrompt build_letter_prompt(const SystemOneRequest& request,
+                                          const SystemOneQuestion& question, std::size_t rotation,
+                                          bool framed) {
+    SystemOneLetterPrompt prompt;
+    const std::vector<PolicyOption> options = policy_options(question);
+    const std::size_t count                 = options.size();
+    if (count == 0 || count > kMaximumPolicyOptions) { return prompt; }
+    const bool score = question.type == SystemOneQuestionType::Score;
+    std::string lines;
+    for (std::size_t j = 0; j < count; ++j) {
+        const std::size_t index   = (j + rotation) % count;
+        const PolicyOption& option = options[index];
+        const std::string letter(1, static_cast<char>('A' + j));
+        prompt.letters.push_back(letter);
+        prompt.options.push_back(index);
+        if (!lines.empty()) { lines += "\n"; }
+        lines += letter + ". " + option.label;
+        if (framed || option.description != option.label) { lines += ": " + option.description; }
+    }
+    std::string system;
+    std::string user;
+    if (framed) {
+        system = "Evaluate the evidence against the criterion. Reply with only the selected "
+                 "option token.";
+        user = "Evidence:\n" + request.state_text + "\n\nCriterion:\n" +
+               policy_instructions(question) + "\n\nOptions" +
+               (score ? std::string(" (levels ordered lowest to highest)") : std::string()) +
+               ":\n" + lines + "\n\nSelected option token:";
+    } else {
+        system = "You are a decision engine. You read a state and answer one bounded question by "
+                 "choosing exactly one of the given options. Reply with the option letter only.";
+        user = "State:\n" + request.state_text + "\n\n" + policy_instructions(question) +
+               (score ? "\n\nLevels, lowest to highest:" : "\n\nOptions:") + "\n" + lines +
+               "\n\nAnswer with the letter of the best option.";
+    }
+    prompt.messages = Json::array({Json{{"role", "system"}, {"content", system}},
+                                   Json{{"role", "user"}, {"content", user}}});
+    return prompt;
+}
+
+std::vector<double> native_to_option_order(const SystemOneQuestion& question,
+                                           std::vector<double> probabilities) {
+    if (question.type == SystemOneQuestionType::Noul && probabilities.size() == 2) {
+        std::swap(probabilities[0], probabilities[1]); // Yes, No -> no, yes
+    }
+    return probabilities;
+}
+
+double normalized_entropy(const std::vector<double>& probabilities) {
+    if (probabilities.size() < 2) { return 0.0; }
+    double entropy = 0.0;
+    for (const double p : probabilities) {
+        if (p > 0.0) { entropy -= p * std::log(p); }
+    }
+    return entropy / std::log(static_cast<double>(probabilities.size()));
+}
+
+std::vector<double> average_distributions(const std::vector<std::vector<double>>& members) {
+    if (members.empty()) { return {}; }
+    std::vector<double> mean(members.front().size(), 0.0);
+    for (const auto& member : members) {
+        if (member.size() != mean.size()) {
+            throw std::logic_error("policy readouts have different option counts");
+        }
+        for (std::size_t i = 0; i < mean.size(); ++i) { mean[i] += member[i]; }
+    }
+    for (double& value : mean) { value /= static_cast<double>(members.size()); }
+    return mean;
+}
+
+std::optional<std::size_t> parse_letter_answer(std::string_view text,
+                                               const std::vector<std::string>& letters) {
+    const auto is_space = [](char c) { return c == ' ' || c == '\n' || c == '\r' || c == '\t'; };
+    while (!text.empty() && is_space(text.front())) { text.remove_prefix(1); }
+    while (!text.empty() && is_space(text.back())) { text.remove_suffix(1); }
+    if (!text.empty() && (text.back() == '.' || text.back() == ')')) { text.remove_suffix(1); }
+    if (text.size() != 1) { return std::nullopt; }
+    for (std::size_t j = 0; j < letters.size(); ++j) {
+        if (letters[j].size() == 1 && letters[j][0] == text[0]) { return j; }
+    }
+    return std::nullopt;
 }
 
 std::string systemone_executed_model(std::string_view served_model_id, double temperature) {
@@ -621,6 +799,11 @@ nlohmann::ordered_json make_systemone_response_json(const SystemOneRequest& requ
                 {"answers", std::move(answer_map)},
                 {"usage", Json{{"input_tokens", usage.input_tokens}, {"output_tokens", 0}}}};
     if (usage.vision_tokens != 0) { result["usage"]["vision_tokens"] = usage.vision_tokens; }
+    if (usage.policy) {
+        result["usage"]["policy"] = Json{{"readout", usage.readout},
+                                         {"escalated", usage.escalated},
+                                         {"reasoning_tokens", usage.reasoning_tokens}};
+    }
     return result;
 }
 

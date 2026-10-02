@@ -28,8 +28,11 @@ using Json = nlohmann::ordered_json;
 // letter and the branch reads the digit, so log P(A7) = log P(A) + log P(7 | A). Labels are then
 // normalised over the option set exactly like one-token labels.
 struct SystemOneBranch {
+    enum class Member : std::uint8_t { Native, Letter, Framed };
     std::size_t question = 0;
     std::optional<std::size_t> letter;
+    Member member = Member::Native;
+    std::vector<std::size_t> options; // policy readouts: option index per candidate letter
     OpenAIChatRequest request;
     std::optional<GenerationOutcome> outcome;
 };
@@ -119,14 +122,22 @@ SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request
                  {"chat_template_kwargs", Json{{"enable_thinking", false}}}},
             limits);
     };
+    const auto letter_ids = [&](const SystemOneLetterPrompt& prompt) {
+        Json ids = Json::array();
+        for (const std::string& letter : prompt.letters) { ids.push_back(token_id(letter)); }
+        return ids;
+    };
 
     // Several questions about one state: the first prefill publishes the state and the rest
     // read it. A single question never reuses its own prefix, so it publishes nothing. A
     // two-token Choice also publishes its question, which each letter branch then extends
-    // by only the answer opener and one letter. A read-only run publishes neither.
+    // by only the answer opener and one letter. A read-only run publishes neither. The policy
+    // readouts render the state in their own prompts and publish nothing.
     const Json base          = build_systemone_messages(request);
     const bool publish_state = !read_only && request.questions.size() > 1;
     const std::string protocol(endpoint);
+    const SystemOnePolicy& policy = request.policy;
+    std::vector<bool> policy_question(request.questions.size(), false);
     for (std::size_t q = 0; q < request.questions.size(); ++q) {
         const SystemOneQuestion& question           = request.questions[q];
         const std::string prompt                    = build_question_prompt(question);
@@ -152,6 +163,30 @@ SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request
         first.request  = branch_request(std::move(messages), std::move(ids),
                                         state_here || publish_question);
         branches.push_back(std::move(first));
+
+        const std::size_t count = policy_option_count(question);
+        policy_question[q] = policy.active() && !question.two_token_labels && count >= 1 &&
+                             count <= kMaximumPolicyOptions;
+        if (policy_question[q] && policy.readout == SystemOnePolicy::Readout::Averaged) {
+            if (question.type == SystemOneQuestionType::Choice && count >= 2) {
+                SystemOneBranch letter;
+                letter.question = q;
+                letter.member   = SystemOneBranch::Member::Letter;
+                SystemOneLetterPrompt rotated = build_letter_prompt(request, question, 1, false);
+                letter.options = rotated.options;
+                letter.request = branch_request(std::move(rotated.messages), letter_ids(rotated),
+                                                false);
+                branches.push_back(std::move(letter));
+            }
+            SystemOneBranch framed;
+            framed.question = q;
+            framed.member   = SystemOneBranch::Member::Framed;
+            SystemOneLetterPrompt rendered = build_letter_prompt(request, question, 0, true);
+            framed.options = rendered.options;
+            framed.request =
+                branch_request(std::move(rendered.messages), letter_ids(rendered), false);
+            branches.push_back(std::move(framed));
+        }
         if (!question.two_token_labels) { continue; }
 
         // The pre-tokenizer must split a label into its letter and digit, or the answer
@@ -184,9 +219,11 @@ SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request
 
     std::shared_ptr<RequestLifetime> lifetime;
     SystemOneUsage usage;
-    for (SystemOneBranch& branch : branches) {
-        const OpenAIChatRequest& chat = branch.request;
-        const std::uint64_t req_id    = ++request_seq_;
+    usage.policy  = policy.active();
+    usage.readout = policy.readout == SystemOnePolicy::Readout::Averaged ? "averaged" : "single";
+    // One Engine request through the shared product path: prepared, logged, run to completion.
+    const auto run_chat = [&](const OpenAIChatRequest& chat) {
+        const std::uint64_t req_id = ++request_seq_;
         const RequestLogMetadata metadata{
             .model = chat.model, .stream = false, .output_tokens_explicit = true};
         PreparedRequest prepared;
@@ -202,10 +239,10 @@ SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request
 
         auto lifecycle = begin_request(make_request_log_context(
             req_id, protocol, chat.generation, metadata, prepared, client_label(req)));
+        GenerationOutcome outcome;
         try {
-            branch.outcome =
-                service_->run(prepared, nullptr, [&req] { return client_disconnected(req); });
-            lifecycle->done(*branch.outcome);
+            outcome = service_->run(prepared, nullptr, [&req] { return client_disconnected(req); });
+            lifecycle->done(outcome);
         } catch (const ApiException& exception) {
             lifecycle->failure(make_generation_request_failure(exception.error()));
             throw;
@@ -220,17 +257,29 @@ SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request
             // Shared observation count, once per request rather than once per question.
             usage.vision_tokens = prepared.preparation.vision_tokens;
         }
-    }
+        return outcome;
+    };
+    for (SystemOneBranch& branch : branches) { branch.outcome = run_chat(branch.request); }
 
     std::vector<SystemOneAnswer> answers(request.questions.size());
     std::vector<std::vector<double>> first(request.questions.size());
     std::vector<std::vector<std::vector<double>>> digits(request.questions.size());
+    std::vector<std::vector<std::vector<double>>> members(request.questions.size());
     for (std::size_t k = 0; k < branches.size(); ++k) {
         const SystemOneBranch& branch     = branches[k];
         const SystemOneQuestion& question = request.questions[branch.question];
         usage.input_tokens += systemone_billed_input_tokens(
             branch.outcome->prompt_tokens, branch.outcome->metrics.prefix_cache_hit_tokens, k == 0);
-        if (branch.letter) {
+        if (branch.member != SystemOneBranch::Member::Native) {
+            // A policy readout: letter j's probability belongs to option branch.options[j].
+            const std::vector<double> probabilities = softmax_probabilities(
+                candidate_logprobs(branch, branch.options.size()), request.temperature);
+            std::vector<double> ordered(policy_option_count(question), 0.0);
+            for (std::size_t j = 0; j < probabilities.size(); ++j) {
+                ordered[branch.options[j]] = probabilities[j];
+            }
+            members[branch.question].push_back(std::move(ordered));
+        } else if (branch.letter) {
             digits[branch.question].push_back(
                 candidate_logprobs(branch, letter_group_size(question, *branch.letter)));
         } else {
@@ -250,8 +299,49 @@ SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request
         }
         std::vector<double> probabilities =
             softmax_probabilities(label_logprobs, request.temperature);
-        if (question.type == SystemOneQuestionType::Noul) { probabilities.resize(1); }
-        answers[q].probabilities = std::move(probabilities);
+        if (!policy_question[q]) {
+            if (question.type == SystemOneQuestionType::Noul) { probabilities.resize(1); }
+            answers[q].probabilities = std::move(probabilities);
+            continue;
+        }
+        // Policy order (no, yes for a Noul); averaged with the other readouts when present.
+        std::vector<double> ordered = native_to_option_order(question, std::move(probabilities));
+        if (!members[q].empty()) {
+            members[q].push_back(std::move(ordered));
+            ordered = average_distributions(members[q]);
+        }
+        if (policy.reasoning_budget != 0 &&
+            normalized_entropy(ordered) > policy.escalate_entropy) {
+            // Bounded thinking over the lettered prompt; its answer, when it is exactly one
+            // declared letter, is mixed into the distribution. Any other outcome keeps it.
+            SystemOneLetterPrompt rendered = build_letter_prompt(request, question, 0, false);
+            OpenAIChatRequest thinking     = parse_chat_completion_request(
+                Json{{"model", public_model_id_},
+                     {"messages", std::move(rendered.messages)},
+                     {"max_tokens", policy.reasoning_budget + 256U},
+                     {"temperature", 0},
+                     {"prompt_cache_read_only", true},
+                     {"prompt_cache_options", Json{{"mode", "implicit"}}},
+                     {"chat_template_kwargs", Json{{"enable_thinking", true}}},
+                     {"thinking_budget_tokens", policy.reasoning_budget}},
+                limits);
+            const GenerationOutcome outcome = run_chat(thinking);
+            usage.input_tokens += systemone_billed_input_tokens(
+                outcome.prompt_tokens, outcome.metrics.prefix_cache_hit_tokens, false);
+            usage.reasoning_tokens += static_cast<std::uint32_t>(std::max(0, outcome.reasoning_tokens));
+            if (outcome.finish_reason == ninfer::FinishReason::StopToken) {
+                if (const auto letter = parse_letter_answer(outcome.text, rendered.letters)) {
+                    const std::size_t chosen = rendered.options.at(*letter);
+                    const double weight      = policy.answer_weight;
+                    for (std::size_t i = 0; i < ordered.size(); ++i) {
+                        ordered[i] = (1.0 - weight) * ordered[i] + (i == chosen ? weight : 0.0);
+                    }
+                    ++usage.escalated;
+                }
+            }
+        }
+        if (question.type == SystemOneQuestionType::Noul) { ordered = {ordered.at(1)}; }
+        answers[q].probabilities = std::move(ordered);
     }
     return SystemOneExecution{.answers = std::move(answers),
                               .usage    = usage,
@@ -261,7 +351,7 @@ SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request
 void HttpServer::handle_systemone(const httplib::Request& req, httplib::Response& res) {
     SystemOneRequest request;
     try {
-        request = parse_systemone_request(parse_systemone_body(req.body));
+        request = parse_systemone_request(parse_systemone_body(req.body), options_.systemone_policy);
     } catch (const SystemOneError& error) {
         write_typesafe_failure(res, error);
         return;

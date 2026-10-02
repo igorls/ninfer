@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ninfer/types.h"
+#include "serve/typesafe_systemone.h"
 #include "product/logging/logging.h"
 
 #include <cstddef>
@@ -67,6 +68,8 @@ struct ServeOptions {
     std::optional<std::uint32_t> default_thinking_budget;
     int default_max_tokens = kDefaultMaxTokens;
     bool enable_cors       = false; // send permissive CORS headers for browser UIs
+    // Defaults for System One requests that carry no `policy` field.
+    SystemOnePolicy systemone_policy;
     // Process-level explicit overrides layered between registered model/mode defaults and request
     // fields. An omitted seed is replaced per request with a fresh random seed.
     SamplingOverrides sampling_overrides;

@@ -119,6 +119,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--chat-template FILE] [--lm-head-draft] [--no-thinking] [--preserve-thinking] "
            "[--cors] "
+           "[--systemone-readout single|averaged] [--systemone-reasoning-budget N] "
+           "[--systemone-escalate-entropy F] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
            "[--frequency-penalty F] [--repetition-penalty F] [--seed N] [--greedy] "
            "[--rerank-max-documents N] [--rerank-model-id ID] "
@@ -362,6 +364,23 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.preserve_thinking = true;
         } else if (arg == "--cors") {
             options.enable_cors = true;
+        } else if (arg == "--systemone-readout") {
+            const std::string value = require_value("--systemone-readout");
+            if (value == "single") {
+                options.systemone_policy.readout = SystemOnePolicy::Readout::Single;
+            } else if (value == "averaged") {
+                options.systemone_policy.readout = SystemOnePolicy::Readout::Averaged;
+            } else {
+                throw std::invalid_argument("--systemone-readout must be single or averaged");
+            }
+        } else if (arg == "--systemone-reasoning-budget") {
+            options.systemone_policy.reasoning_budget = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--systemone-reasoning-budget"),
+                                      "systemone-reasoning-budget"));
+        } else if (arg == "--systemone-escalate-entropy") {
+            options.systemone_policy.escalate_entropy = parse_float_in(
+                require_value("--systemone-escalate-entropy"), "systemone-escalate-entropy", 0.0f,
+                1.0f);
         } else if (arg == "--temperature") {
             options.sampling_overrides.temperature =
                 parse_float_in(require_value("--temperature"), "temperature", 0.0f, 2.0f);
