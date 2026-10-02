@@ -3,7 +3,8 @@
 23 September 2026. Implementation and initial pilot for experiments 0–3 in the
 [JevBench dossier](jevbench-qwen-intelligence-dossier.md). Qwen3.8-27B NVFP4 is the sole target.
 
-Design follow-up: [learned reasoning router and Engine integration](learned-reasoning-router.md).
+Design follow-ups: [learned reasoning router and Engine integration](learned-reasoning-router.md);
+[decision head plan, learning from Cloudflare Clef](decision-head-plan.md).
 
 ## Findings
 
