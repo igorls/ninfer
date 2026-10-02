@@ -1254,13 +1254,14 @@ document count.
 string or an object with a nonempty `text` string. Other fields on a document object are ignored.
 An empty string is HTTP 400.
 
-`model` is optional. When it is present it must be a nonempty string equal to the served model id
-or the advertised rerank id (`--rerank-model-id`, `ninfer-choice-rerank-v1` by default). Either
-name runs the loaded model. An empty string is HTTP 400. Any other id is HTTP 404
-`model_not_found`.
+`model` is optional, and `null` counts as omitted, as on `POST /v1/chat/completions`. Any other
+value must be a nonempty string equal to the served model id or the advertised rerank id
+(`--rerank-model-id`, `ninfer-choice-rerank-v1` by default). Either name runs the loaded model. An
+empty string or a non-string value is HTTP 400. Any other id is HTTP 404 `model_not_found`.
 
-`top_n` is an optional integer. Omitted, it equals the document count. A value outside `1..N` is
-clamped into that range. Unknown top-level fields are ignored.
+`top_n` is an optional integer. Omitted or `null`, it equals the document count. Any integer
+outside `1..N`, including one beyond the 32-bit range, is clamped into that range; a non-integer is
+HTTP 400. Unknown top-level fields are ignored.
 
 `return_documents` defaults to true. Each result then includes `document.text`. `false` omits
 `document`.

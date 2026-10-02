@@ -102,6 +102,25 @@ int main() {
         const RerankRequest negative = parse_rerank_request(
             Json{{"query", "q"}, {"documents", Json::array({"a", "b"})}, {"top_n", -3}}, settings);
         failures += check(negative.top_n == 1, "negative top_n clamps to 1");
+        // Parsed request text stores positive integers unsigned; both representations clamp
+        // across the 32- and 64-bit boundaries instead of failing a narrowing check.
+        const auto parsed_top_n = [&](const char* top_n) {
+            return parse_rerank_request(
+                       Json::parse(std::string(R"({"query":"q","documents":["a","b"],"top_n":)") +
+                                   top_n + "}"),
+                       settings)
+                .top_n;
+        };
+        failures += check(parsed_top_n("2147483647") == 2 && parsed_top_n("2147483648") == 2 &&
+                              parsed_top_n("18446744073709551615") == 2 &&
+                              parsed_top_n("-2147483649") == 1 &&
+                              parsed_top_n("-9223372036854775808") == 1 &&
+                              parsed_top_n("null") == 2,
+                          "top_n outside the 32-bit range did not clamp into 1..N");
+        const RerankRequest null_model = parse_rerank_request(
+            Json{{"model", nullptr}, {"query", "q"}, {"documents", Json::array({"a"})}}, settings);
+        failures += check(null_model.documents.size() == 1,
+                          "a null model was not treated as omitted, as on chat completions");
     }
 
     {
