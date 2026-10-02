@@ -196,9 +196,16 @@ the native route directly (`tools/bench/jevbench/decision_policy/`, evidence in
   [+3.8, +13.2] pp; against the Clef BF16 head fixed 15, broken 8, [-1.3, +7.1] pp. Estimated
   single-stream mean latency 0.5 to 0.7 s per decision at that budget.
 
-This reaches Clef's accuracy and Brier from the native NVFP4 route, with the latency budget as an
-explicit knob and reasoning as the capability Clef lacks. It supersedes the head as the product
-path: the proposed serving change is (1) an averaged readout option for System One and (2) an
+- **A third readout, the Evidence/Criterion/Options framing**, chosen on dev as the averaging
+  base with native and rotated: 204/231, hard 85, Brier 0.174, ECE 0.046 with no reasoning
+  (against native fixed 18, broken 3, [+2.7, +10.9] pp); with the entropy gate at the same dev
+  budget (23% escalated): 210/231, hard 91/111, Brier 0.149, ECE 0.046; against the Clef BF16
+  head fixed 15, broken 6, [-0.4, +8.0] pp overall and [+0.9, +16.2] pp on the hard tier.
+
+This reaches and, on the hard tier and Brier, exceeds the Clef reference from the native NVFP4
+route, with the latency budget as an explicit knob and reasoning as the capability Clef lacks. It supersedes the head as the product
+path: the proposed serving change is (1) an averaged readout for System One (native plus
+rotated letters plus the framed rendering, three branches over one state prefix) and (2) an
 escalation policy with a per-request or per-server budget (`reasoning budget`, `escalate below`
 signal and threshold), both measured here with the exact request shapes. Both are serving
 changes for Igor's go; the head stays research.

@@ -55,13 +55,19 @@ def items(name):
             r = e.get(m)
             if r and r["ok"] and r.get("probs") and set(r["probs"]) == set(labels):
                 v[m] = [r["probs"][l] for l in labels]
-        base = v["native"] if "rotated" not in v else [(a + b) / 2 for a, b in zip(v["native"], v["rotated"])]
+        bases = {"native": v["native"]}
+        for mode, members in (("avg_rot", ("native", "rotated")), ("avg_rev_rot", ("native", "native_reversed", "rotated")),
+                              ("avg_rot_framed", ("native", "rotated", "framed")), ("avg_rot_sem", ("native", "rotated", "semantic")),
+                              ("avg_all", ("native", "native_reversed", "rotated", "framed", "semantic"))):
+            parts = [v[m] for m in members if m in v]
+            bases[mode] = [sum(x) / len(parts) for x in zip(*parts)]
+        base = bases[BASE_MODE]
         s = sorted(base, reverse=True)
         n = len(base)
         disagree = max([max(abs(a - b) for a, b in zip(v["native"], v[m])) for m in v if m != "native"] + [0.0])
         reason = e.get("reason_1024")
         out.append({"id": tid, "cohort": nat["cohort"], "group": nat.get("group", tid), "family": nat["family"], "labels": labels,
-                    "expected": nat["expected"], "base": base, "variants": v,
+                    "expected": nat["expected"], "base": base, "bases": bases, "variants": v,
                     "signals": {"conf": s[0], "margin": s[0] - (s[1] if n > 1 else 0.0), "disagree": disagree,
                                 "entropy": -sum(x * math.log(max(x, 1e-12)) for x in base) / math.log(max(n, 2))},
                     "reason": reason["answer"] if reason and reason["ok"] and reason["answer"] in labels else None,
@@ -99,6 +105,22 @@ def evaluate(selected, signal, threshold, weight, lower_is_uncertain):
             "latency_vm_s": lat_vm / n, "latency_est_s": lat_est / n}
 
 
+BASE_MODE = "native"
+sets = {k: items(k) for k in ("dev", "public", "oracle")}
+# Choose the averaging base on dev (Brier), then rebuild items with it.
+base_scores = {}
+for mode in sets["dev"][0]["bases"]:
+    for name in ("dev", "public"):
+        correct = brier = 0.0
+        for it in sets[name]:
+            ok, b = score(it["bases"][mode], it)
+            correct += ok
+            brier += b
+        base_scores.setdefault(mode, {})[name] = {"correct": int(correct), "n": len(sets[name]), "brier": brier / len(sets[name])}
+    print("base", f"{mode:15s}", "dev", base_scores[mode]["dev"]["correct"], "/", base_scores[mode]["dev"]["n"], "brier", round(base_scores[mode]["dev"]["brier"], 4),
+          "| public", base_scores[mode]["public"]["correct"], "/231 brier", round(base_scores[mode]["public"]["brier"], 4))
+BASE_MODE = min(base_scores, key=lambda m: base_scores[m]["dev"]["brier"])
+print("dev-selected base:", BASE_MODE)
 sets = {k: items(k) for k in ("dev", "public", "oracle")}
 dev = [it for it in sets["dev"] if it["reason_ok"]]
 public = sets["public"]
@@ -134,6 +156,8 @@ for signal, lower in (("conf", True), ("margin", True), ("disagree", False), ("e
         report[f"{signal}@{budget}"] = {"threshold": threshold, "weight": weight, "dev": d, "public": p, "hard": h}
         print(f"{signal:9s} budget {budget:<4} thr {threshold:7.3f} w {weight:<4} | dev {d['correct']}/{d['n']} brier {d['brier']:.3f} rate {d['rate']:.2f} "
               f"| public {p['correct']}/231 brier {p['brier']:.3f} rate {p['rate']:.2f} lat_est {p['latency_est_s']:.2f}s | hard {h['correct']}/111")
+report["_base_mode"] = BASE_MODE
+report["_base_scores"] = base_scores
 (OUT / "escalation_report.json").write_text(json.dumps(report, indent=1))
 print("ESCALATION_DONE")
 
@@ -163,7 +187,7 @@ def rows_for(name, signal, threshold, weight, lower):
     return out
 
 
-configs = {"avg_rot_only": ("conf", -1.0, 0.0, True)}
+configs = {f"{BASE_MODE}_only": ("conf", -1.0, 0.0, True)}
 for signal, lower in (("entropy", False), ("conf", True)):
     e = report[f"{signal}@0.5"]
     configs[f"escalate_{signal}_b50"] = (signal, e["threshold"], e["weight"], lower)
