@@ -50,7 +50,9 @@ preserve model semantics and improve the workload they claim to improve.
   pool.
 - **Research readouts.** `ExecutionOptions::capture_reasoning_features` returns the hidden row at
   the reasoning frontier; `ninfer-reasoning-collect` and `tools/bench/jevbench/reasoning_router.py`
-  train a learned reasoning router from it.
+  train a learned reasoning router from it. `CausalScoreReadout::capture_hidden_rows` returns the
+  final-normalized hidden row of every scored position, and `ninfer-hidden-export` writes those
+  rows for token sequences as a safetensors file ([perplexity guide](docs/perplexity.md#hidden-row-export)).
 - **More artifacts.** A conversion recipe for the OrcaRouter Qwen3.8-27B NVFP4 derivative, which
   keeps BF16 embeddings and a BF16 full output head (native BF16 Linear and LinearTopK paths).
 

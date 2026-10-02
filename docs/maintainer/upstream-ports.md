@@ -213,6 +213,7 @@ Fork SHAs are on `research/qwen4-flash-next`.
 | Token logprobs, `/v1/score` | `f596a68e` `2c307887` `da87a3f5` `c4288317` `a0b43ad4` `05797621` `3181627f` `e17813cf` `d49a8e0c` `282f013c` | `3bbb06fa` `737b570a` | `candidate_logprobs` Op, device readout, prompt positions, read-only participation |
 | TypeSafe System One | `e20e7e23` `147370d7` `ff20cd06` `87812bc8` | `1833011e` | Jev drop-in contract |
 | Reasoning feature readout | `15f0c5aa` and the collector at `87812bc8` | `f290c8e7` | `capture_reasoning_features`, `ninfer-reasoning-collect` |
+| Hidden row export | fork-native on `research/decision-head` (October 2026) | pending | `CausalScoreReadout::capture_hidden_rows` on the scoring route, `ninfer-hidden-export`; training readout for the decision head plan |
 | OrcaRouter NVFP4 | `91ce2f2c` | `e35b663d` `9a9a1823` `74c5343f` `7130a888` | BF16 `[248320,5120]` Linear and LinearTopK, Qwen2-style tokenizer resources, conversion recipe (re-converted, not upgraded) |
 | Supervisor, Windows app, installer | SUP and W2 commits, `bbe3e16e` | `168bdf12` `fc9a1ebe` `e92c2078` | The model catalog reads the v3 header and `metadata.name`; a v2 artifact is listed as needing the upgrade |
 | Arcade, JevBench, router, probes | ARC, JEV, RTR, BEN commits | `a1f8b2d9` `6dfd01b8` `7c8555cb` | |

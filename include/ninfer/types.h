@@ -307,6 +307,11 @@ struct CausalScoreReadout {
     std::uint32_t reference_count = 0;
     // reference_count token ids for every scored target, target-major.
     std::vector<TokenId> reference_tokens;
+    // Training readout: return the final-normalized hidden row of every scored predictor
+    // position, the row the output head reads, as BF16 words. Row i belongs to prompt position
+    // first_target - 1 + i; the last prompt token is never a predictor, so a caller that needs
+    // every position appends one token. Scores are unchanged by the capture.
+    bool capture_hidden_rows = false;
 };
 
 struct CausalScores {
@@ -318,6 +323,10 @@ struct CausalScores {
     // log probability.
     std::vector<TokenId> argmax_tokens;
     std::vector<float> argmax_logprobs;
+    // With capture_hidden_rows: scored-target-major BF16 words, hidden_size per row; otherwise
+    // empty and hidden_size is 0.
+    std::vector<std::uint16_t> hidden_rows;
+    std::uint32_t hidden_size = 0;
 };
 
 struct TokenLogprob {

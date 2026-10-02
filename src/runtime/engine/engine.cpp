@@ -315,6 +315,12 @@ CausalScores Engine::score_tokens(std::vector<TokenId> tokens, std::uint32_t fir
         result.argmax_logprobs.size() != result.argmax_tokens.size()) {
         throw std::logic_error("target Program returned an invalid causal score count");
     }
+    if (readout.capture_hidden_rows
+            ? (result.hidden_size == 0 ||
+               result.hidden_rows.size() != targets * static_cast<std::size_t>(result.hidden_size))
+            : (result.hidden_size != 0 || !result.hidden_rows.empty())) {
+        throw std::logic_error("target Program returned an invalid hidden row readout");
+    }
     return result;
 }
 

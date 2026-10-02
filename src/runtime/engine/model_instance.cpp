@@ -153,7 +153,8 @@ EngineOptions normalize_engine_options(EngineOptions options) {
     case EnginePurpose::CausalScoring:
         options.max_concurrency      = 1;
         options.max_pending_requests = 1;
-        options.prefill_chunk        = 1024;
+        // The prefill chunk is kept as given: a training readout must decompose the prompt the
+        // way the serving configuration it stands in for does.
         options.kv_capacity          = KvCapacityPolicy::explicit_capacity(options.max_context);
         options.speculative          = {};
         options.enable_vision        = false;

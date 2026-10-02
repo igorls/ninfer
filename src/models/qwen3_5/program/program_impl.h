@@ -653,6 +653,8 @@ public:
 
     std::optional<PinnedHostBuffer> round_host;
     std::optional<PinnedHostBuffer> score_logprobs_host;
+    // One causal score tile of final-normalized BF16 rows, for the hidden row readout.
+    std::optional<PinnedHostBuffer> score_hidden_host;
     TokenId* host_tokens = nullptr;
     std::optional<PinnedHostBuffer> ordinary_host;
     qwen3_5::OrdinaryDecodeIngress* ordinary_host_ingress = nullptr;

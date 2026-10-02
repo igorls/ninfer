@@ -118,3 +118,36 @@ manifest; the reference file itself is a local, regenerable artifact (about 106 
 On the UltraChat sequences the BF16 model assigns more than half its mass to `<|im_end|>` at about a
 third of the positions inside answers; NInfer artifacts reproduce this, so their NLL there is often
 lower than the reference's.
+
+## Hidden row export
+
+`ninfer-hidden-export` uses the same offline CausalScoring Engine to write the final-normalized
+hidden state of every predictor position, the row the output head reads, for a list of token
+sequences. It exists for training readouts over the artifact's actual numerics, such as a decision
+head that consumes the hidden states of a quantized backbone.
+
+```bash
+./build/apps/ninfer-hidden-export models/qwen3_8_27b_nvfp4.ninfer \
+  --input records.jsonl --output rows.safetensors \
+  --context 16384 --prefill-chunk 2048 --kv-dtype fp8
+```
+
+`records.jsonl` holds one `{"id": "...", "tokens": [...]}` object per line, with 2 to `--context`
+token ids per record. Rows cover predictor positions `0 .. tokens-2`: the last token of a sequence
+is never a predictor, so a caller that needs every real position appends one token (for example
+the pad token) and ignores nothing else. Each record is scored from fresh state with no context
+cache. A row never depends on later tokens, but on the quantized artifacts it does depend on how
+many tokens its prefill chunk holds: the same prefix exported at two lengths yields rows that can
+differ substantially at some positions, because activation quantization amplifies the small
+numerical differences of the chunk's GEMM shapes. The startup numerics are written into the file's
+metadata: `prefill_chunk` and `kv_dtype` must match the serving configuration whose hidden states
+the rows are meant to represent, and a consumer that must tolerate serving's variable chunk
+occupancy should export at several chunk sizes and truncations.
+
+The output is a standard safetensors file with, per record, `hidden/<id>` (BF16, `[tokens-1,
+hidden_size]`) and `logprobs/<id>` (F32, `[tokens-1]`, the log probability of `tokens[i+1]` at
+row `i`, the same value `score_tokens` returns). `safetensors.safe_open` reads it directly.
+
+The underlying readout is `CausalScoreReadout::capture_hidden_rows` on `Engine::score_tokens`; it
+leaves the scores unchanged, and `ninfer_qwen3_5_score_real_test` checks that the rows are
+deterministic and positionally indexed.
