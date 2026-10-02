@@ -39,6 +39,11 @@ paths for any other auxiliary resources in custom arguments.
 | Engine and request logs | `%LOCALAPPDATA%\NInfer\logs` |
 | Application shortcuts | Start menu → NInfer |
 
+The dashboard's request figures and its Troubleshooting findings come from the request log. The
+log is never trimmed, so the Supervisor reads an existing one once, in the background, when it
+starts (about 8 s for 750 MiB) and the findings show that progress until it finishes; after that
+it reads only the records the engine appends.
+
 The installed configuration is the active authority. Changes to the original source JSON do not
 alter the running installation. The dashboard saves model switches and settings to the installed
 copy. `-InstallDir` and `-DataDir` select custom app/data directories; keep them separate.
@@ -83,6 +88,13 @@ frontend gets its own loopback port, and so its own browser origin, which also s
 API. A page there needs neither `--cors` nor the engine's API key, and several frontends can run
 side by side without sharing browser storage.
 
+Add, change or remove frontends in the dashboard under **Settings > Web frontends**: give each a name,
+the folder of a built app and a port, then **Save and apply**. The Supervisor saves the list to its
+configuration and starts or stops the listeners right away, while the engine keeps running.
+Removing or changing a frontend ends the chats open in it, and saving an unchanged entry that is
+not serving retries it, for example after its files were copied in. The list is stored in the
+configuration file as:
+
 ```json
 "frontends": [
   {"name": "llama.cpp web UI", "dir": "C:/NInfer/frontends/llama-ui", "port": 8100}
@@ -106,9 +118,10 @@ On a frontend port, the Supervisor:
 
 Frontends listen on `127.0.0.1` only, because the proxy holds the engine's key. A request whose
 `Host` is not the frontend's loopback address, or whose `Origin` is another site, is refused, and
-engine admin writes such as `POST /admin/quiesce` are not available there. The list is read at
-startup: restart the Supervisor after editing it. Ports must be distinct and differ from the
-Supervisor and engine ports, with at most 16 frontends. A missing folder or a port already in use
+engine admin writes such as `POST /admin/quiesce` are not available there. A hand edit of the
+configuration file applies at the next Supervisor start. Ports must be distinct and differ from the
+Supervisor and engine ports, with at most 16 frontends; a dashboard or engine port change that would
+collide with a frontend is refused. A missing folder or a port already in use
 is reported in the tray and the dashboard and does not stop the Supervisor.
 
 ## Request capacity

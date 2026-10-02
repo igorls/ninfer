@@ -90,6 +90,33 @@ inline void validate_frontends(const std::vector<FrontendSpec>& frontends, int s
     }
 }
 
+// The dashboard's POST /api/frontends body, {"frontends": [{name, dir, port}, ...]}, checked like
+// the configuration file. `error` is empty when `frontends` is valid.
+struct FrontendsRequest {
+    std::vector<FrontendSpec> frontends;
+    std::string error;
+};
+
+inline FrontendsRequest parse_frontends_request(const nlohmann::json& body, int supervisor_port,
+                                                int engine_port) {
+    FrontendsRequest out;
+    try {
+        if (!body.is_object() || !body.contains("frontends")) {
+            throw std::invalid_argument("the request needs a frontends list");
+        }
+        out.frontends = parse_frontends(body.at("frontends"));
+        validate_frontends(out.frontends, supervisor_port, engine_port);
+    } catch (const std::exception& ex) {
+        out.frontends.clear();
+        out.error = ex.what();
+    }
+    return out;
+}
+
+inline bool same_frontend(const FrontendSpec& a, const FrontendSpec& b) {
+    return a.name == b.name && a.dir == b.dir && a.port == b.port;
+}
+
 // Empty when the directory can serve a page, otherwise the reason it cannot.
 inline std::string frontend_assets_problem(const std::string& dir) {
     std::error_code ec;

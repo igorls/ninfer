@@ -1,6 +1,7 @@
 #include "collector.hpp"
 #include "gpu_processes.hpp"
 #include "insights.hpp"
+#include "run_at_login.hpp"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -29,6 +30,125 @@ constexpr std::int64_t kThroughputStaleMs = 12'000;
 // Rolling window for the connected-clients panel. Long enough that an app pausing
 // between turns keeps its place, short enough that the list describes now.
 constexpr std::int64_t kClientWindowMs = 15 * 60 * 1000;
+
+// The request panel describes the newest request_done records.
+constexpr std::size_t kRecentDones = 32;
+
+// History read per poll of the request log while catching up. Each poll also follows what
+// was appended, so this bounds how stale live figures can get during a catch-up.
+constexpr std::uint64_t kRequestLogHistoryBytesPerPoll = 8ull << 20;
+
+// How often the request log is checked for appended records once caught up.
+constexpr auto kRequestLogPollPeriod = std::chrono::milliseconds(500);
+
+// Keeps the newest request_done lines and the latest server_start. Returns whether
+// anything changed.
+bool note_recent_line(std::string_view line, std::deque<std::string>& dones,
+                      std::string& server_start) {
+    if (jsonl_event_is(line, "request_done")) {
+        dones.emplace_back(line);
+        if (dones.size() > kRecentDones) { dones.pop_front(); }
+        return true;
+    }
+    if (jsonl_event_is(line, "server_start")) {
+        server_start.assign(line);
+        return true;
+    }
+    return false;
+}
+
+// The request panel's per-response figures from the newest request_done lines, oldest first.
+void fill_recent_mix(const std::vector<std::string_view>& lines, RequestMix& out) {
+    double ttft_sum   = 0;
+    double decode_sum = 0;
+    int n_ttft        = 0;
+    int n_dec         = 0;
+    for (const std::string_view line : lines) {
+        try {
+            const auto j = nlohmann::json::parse(line);
+            // The engine writes {"event":"request_done"}, not "type". Reading the wrong
+            // key made every record fall through and the panel read a permanent 0.
+            if (j.value("event", "") != "request_done") { continue; }
+            ++out.done;
+            if (j.contains("speculative") && j.at("speculative").is_object()) {
+                const auto& sp = j.at("speculative");
+                out.mtp_backend      = sp.value("backend", out.mtp_backend);
+                out.mtp_draft_window = sp.value("draft_window", out.mtp_draft_window);
+                const auto drafted   = sp.value("drafted_tokens", 0);
+                const auto accepted  = sp.value("accepted_tokens", 0);
+                out.mtp_drafted += drafted;
+                out.mtp_accepted += accepted;
+                out.mtp_fallback_steps += sp.value("fallback_steps", 0);
+                out.mtp_rounds += sp.value("rounds", 0);
+                if (drafted > 0) {
+                    out.mtp_last_accept_rate =
+                        static_cast<double>(accepted) / static_cast<double>(drafted);
+                }
+                if (sp.contains("accepted_per_position") && sp.at("accepted_per_position").is_array()) {
+                    const auto& pos = sp.at("accepted_per_position");
+                    if (out.mtp_accepted_per_position.size() < pos.size()) {
+                        out.mtp_accepted_per_position.resize(pos.size(), 0);
+                    }
+                    for (std::size_t p = 0; p < pos.size(); ++p) {
+                        out.mtp_accepted_per_position[p] += pos.at(p).get<std::uint64_t>();
+                    }
+                }
+            }
+            if (j.contains("timings_seconds") && j.at("timings_seconds").contains("ttft")) {
+                ttft_sum += j.at("timings_seconds").at("ttft").get<double>() * 1000.0;
+                ++n_ttft;
+            }
+            const auto& result = j.at("result");
+            const double dec_s =
+                j.contains("timings_seconds") ? j.at("timings_seconds").value("decode", 0.0) : 0.0;
+            const int gen = result.value("completion_tokens", 0);
+            if (dec_s > 0.0 && gen > 1) {
+                decode_sum += static_cast<double>(gen - 1) / dec_s;
+                ++n_dec;
+            }
+            const std::string reuse = result.value("prefix_reuse_path", "");
+            out.last_reuse = reuse;
+            if (reuse == "full_reset") {
+                ++out.reuse_full_reset;
+            } else if (reuse.find("append") != std::string::npos) {
+                ++out.reuse_append;
+            } else if (reuse.find("seed") != std::string::npos ||
+                       reuse.find("restore") != std::string::npos) {
+                ++out.reuse_seed;
+            } else if (!reuse.empty()) {
+                ++out.reuse_other;
+            }
+        } catch (...) {}
+    }
+    if (n_ttft != 0) { out.ttft_ms_mean = ttft_sum / n_ttft; }
+    if (n_dec != 0) { out.decode_tok_s_mean = decode_sum / n_dec; }
+}
+
+// The KV capacity line from the latest server_start, for when the engine's own log has none.
+std::string capacity_line_from_server_start(const std::string& line) {
+    if (line.empty()) { return {}; }
+    try {
+        const auto j = nlohmann::json::parse(line);
+        const auto& eng = j.at("engine");
+        const auto& mem = j.at("memory");
+        auto gib = [](const nlohmann::json& obj, const char* key) {
+            const auto n = obj.value(key, std::uint64_t{0});
+            return std::to_string(n / 1048576) + " MiB";
+        };
+        return std::string("KV capacity ") + eng.value("kv_capacity_mode", std::string("?")) +
+               " resolved=" + std::to_string(eng.value("kv_capacity", 0)) +
+               " tokens pages=" + std::to_string(eng.value("kv_capacity_page_groups", 0)) + "/" +
+               std::to_string(eng.value("kv_capacity_max_page_groups", 0)) +
+               " runtime=" + gib(mem, "runtime_reservation_bytes") +
+               " prefix-cache=" + gib(mem, "prefix_cache_bytes") +
+               " free-after-weights=" + gib(mem, "available_after_weights_bytes") +
+               " free-after-startup=" + gib(mem, "available_after_startup_bytes") +
+               " headroom=" + gib(mem, "kv_capacity_headroom_bytes") +
+               " slack=" + gib(mem, "planned_slack_bytes") +
+               " graphs=" + gib(mem, "cuda_graph_observed_bytes") + "/" +
+               gib(mem, "cuda_graph_allowance_bytes") + " (from request-log server_start)";
+    } catch (...) { return {}; }
+}
 
 // Runs a console command with no visible window and captures its stdout. The supervisor is a
 // windowless process, so `_popen` (which goes through cmd.exe) flashed a console on every poll.
@@ -97,6 +217,10 @@ httplib::Client engine_client(const EngineSpec& spec) {
 
 } // namespace
 
+Collector::Collector(EngineSpec spec, std::string logs_dir)
+    : spec_(std::move(spec)), logs_dir_(std::move(logs_dir)), series_(6000),
+      request_log_path_w_(widen_utf8(spec_.request_log)) {}
+
 void Collector::poll_health(Collected& out) {
     auto cli = engine_client(spec_);
     if (auto res = cli.Get("/health")) {
@@ -154,115 +278,51 @@ void Collector::poll_request_log(Collected& out) {
         out.requests.log_error = "request log path not configured";
         return;
     }
-    std::ifstream in(spec_.request_log);
-    if (!in) {
-        out.requests.log_error = "request log not present";
-        return;
+    // request_log_thread_ keeps the fold current. Before it exists, read here; the first
+    // call reads the whole log.
+    if (!request_log_threaded_.load()) {
+        while (poll_request_log_file()) {}
+    }
+    {
+        std::lock_guard lock(log_mu_);
+        switch (log_poll_.status) {
+        case RequestLogStatus::Ok: break;
+        case RequestLogStatus::NotPolled: out.requests.log_error = "request log not read yet"; return;
+        case RequestLogStatus::Missing: out.requests.log_error = "request log not present"; return;
+        case RequestLogStatus::Unreadable:
+            out.requests.log_error =
+                "request log unreadable (Windows error " + std::to_string(log_poll_.error) + ")";
+            return;
+        }
+        if (recent_cache_version_ != recent_version_) {
+            // The window's lines first; history before the window only once it has been read,
+            // and only if the window held fewer than the panel shows.
+            std::vector<std::string_view> lines;
+            if (log_history_ready_ && recent_dones_.size() < kRecentDones) {
+                const std::size_t want =
+                    std::min(kRecentDones - recent_dones_.size(), older_dones_.size());
+                for (std::size_t i = older_dones_.size() - want; i < older_dones_.size(); ++i) {
+                    lines.emplace_back(older_dones_[i]);
+                }
+            }
+            for (const auto& line : recent_dones_) { lines.emplace_back(line); }
+            recent_mix_cache_ = RequestMix{};
+            fill_recent_mix(lines, recent_mix_cache_);
+            recent_capacity_cache_ = capacity_line_from_server_start(
+                !recent_server_start_.empty() ? recent_server_start_
+                : log_history_ready_          ? older_server_start_
+                                              : std::string{});
+            recent_cache_version_ = recent_version_;
+        }
+        out.requests             = recent_mix_cache_;
+        out.engine_capacity_line = recent_capacity_cache_;
     }
     out.requests.log_available = true;
-    std::vector<std::string> lines;
-    std::string last_start;
-    std::string line;
-    while (std::getline(in, line)) {
-        if (jsonl_event_is(line, "request_done")) { lines.push_back(line); }
-        if (jsonl_event_is(line, "server_start")) { last_start = std::move(line); }
-    }
-    if (!last_start.empty()) {
-        try {
-            const auto j = nlohmann::json::parse(last_start);
-            const auto& eng = j.at("engine");
-            const auto& mem = j.at("memory");
-            auto gib = [](const nlohmann::json& obj, const char* key) {
-                const auto n = obj.value(key, std::uint64_t{0});
-                return std::to_string(n / 1048576) + " MiB";
-            };
-            out.engine_capacity_line =
-                std::string("KV capacity ") + eng.value("kv_capacity_mode", std::string("?")) +
-                " resolved=" + std::to_string(eng.value("kv_capacity", 0)) +
-                " tokens pages=" + std::to_string(eng.value("kv_capacity_page_groups", 0)) + "/" +
-                std::to_string(eng.value("kv_capacity_max_page_groups", 0)) +
-                " runtime=" + gib(mem, "runtime_reservation_bytes") +
-                " prefix-cache=" + gib(mem, "prefix_cache_bytes") +
-                " free-after-weights=" + gib(mem, "available_after_weights_bytes") +
-                " free-after-startup=" + gib(mem, "available_after_startup_bytes") +
-                " headroom=" + gib(mem, "kv_capacity_headroom_bytes") +
-                " slack=" + gib(mem, "planned_slack_bytes") +
-                " graphs=" + gib(mem, "cuda_graph_observed_bytes") + "/" +
-                gib(mem, "cuda_graph_allowance_bytes") + " (from request-log server_start)";
-        } catch (...) {}
-    }
-    const std::size_t start = lines.size() > 32 ? lines.size() - 32 : 0;
-    double ttft_sum = 0;
-    double decode_sum = 0;
-    int n_ttft = 0;
-    int n_dec  = 0;
-    for (std::size_t i = start; i < lines.size(); ++i) {
-        try {
-            const auto j = nlohmann::json::parse(lines[i]);
-            // The engine writes {"event":"request_done"}, not "type". Reading the wrong
-            // key made every record fall through and the panel read a permanent 0.
-            if (j.value("event", "") != "request_done") { continue; }
-            ++out.requests.done;
-            if (j.contains("speculative") && j.at("speculative").is_object()) {
-                const auto& sp = j.at("speculative");
-                out.requests.mtp_backend      = sp.value("backend", out.requests.mtp_backend);
-                out.requests.mtp_draft_window = sp.value("draft_window", out.requests.mtp_draft_window);
-                const auto drafted  = sp.value("drafted_tokens", 0);
-                const auto accepted = sp.value("accepted_tokens", 0);
-                out.requests.mtp_drafted += drafted;
-                out.requests.mtp_accepted += accepted;
-                out.requests.mtp_fallback_steps += sp.value("fallback_steps", 0);
-                out.requests.mtp_rounds += sp.value("rounds", 0);
-                if (drafted > 0) {
-                    out.requests.mtp_last_accept_rate =
-                        static_cast<double>(accepted) / static_cast<double>(drafted);
-                }
-                if (sp.contains("accepted_per_position") && sp.at("accepted_per_position").is_array()) {
-                    const auto& pos = sp.at("accepted_per_position");
-                    if (out.requests.mtp_accepted_per_position.size() < pos.size()) {
-                        out.requests.mtp_accepted_per_position.resize(pos.size(), 0);
-                    }
-                    for (std::size_t p = 0; p < pos.size(); ++p) {
-                        out.requests.mtp_accepted_per_position[p] += pos.at(p).get<std::uint64_t>();
-                    }
-                }
-            }
-            if (j.contains("timings_seconds") && j.at("timings_seconds").contains("ttft")) {
-                ttft_sum += j.at("timings_seconds").at("ttft").get<double>() * 1000.0;
-                ++n_ttft;
-            }
-            const auto& result = j.at("result");
-            const double dec_s =
-                j.contains("timings_seconds") ? j.at("timings_seconds").value("decode", 0.0) : 0.0;
-            const int gen = result.value("completion_tokens", 0);
-            if (dec_s > 0.0 && gen > 1) {
-                decode_sum += static_cast<double>(gen - 1) / dec_s;
-                ++n_dec;
-            }
-            const std::string reuse = result.value("prefix_reuse_path", "");
-            out.requests.last_reuse = reuse;
-            if (reuse == "full_reset") {
-                ++out.requests.reuse_full_reset;
-            } else if (reuse.find("append") != std::string::npos) {
-                ++out.requests.reuse_append;
-            } else if (reuse.find("seed") != std::string::npos ||
-                       reuse.find("restore") != std::string::npos) {
-                ++out.requests.reuse_seed;
-            } else if (!reuse.empty()) {
-                ++out.requests.reuse_other;
-            }
-        } catch (...) {}
-    }
-    if (n_ttft != 0) { out.requests.ttft_ms_mean = ttft_sum / n_ttft; }
-    if (n_dec != 0) { out.requests.decode_tok_s_mean = decode_sum / n_dec; }
-    // The aggregate comes from the incrementally tailed spans, which the 1 Hz
-    // thread maintains. Recomputing it from the 32 lines above would report one
+    // The aggregate comes from the engine's throughput reports, which request_log_thread_
+    // folds as they are appended. Recomputing it from the 32 lines above would report one
     // response's speed again under a different name.
     {
         std::lock_guard lock(mu_);
-        // With no series thread there is nobody tailing the log, so do it here. It
-        // is incremental either way: a seek and whatever was appended.
-        if (!series_run_.load()) { tail_throughput_locked(); }
         // The newest engine report, and only if it is recent: a stale one would
         // keep claiming the card is busy long after it went quiet.
         const auto samples = throughput_.samples();
@@ -271,6 +331,9 @@ void Collector::poll_request_log(Collected& out) {
             out.requests.prefill_tok_s_total = samples.back().prefill_tok_s;
             out.requests.running_requests    = samples.back().running;
         }
+        // Aged here as well as on every poll, so the list never shows a client that left while
+        // the engine was idle and no record arrived to trigger the poll's aging.
+        age_client_window_locked();
         out.requests.clients                = summarize_clients(client_window_);
         out.requests.clients_window_minutes = static_cast<int>(kClientWindowMs / 60000);
     }
@@ -366,12 +429,17 @@ void Collector::start_series() {
     load_persisted_series();
     series_thread_  = std::thread([this] { series_loop(); });
     observe_thread_ = std::thread([this] { observe_loop(); });
+    if (!spec_.request_log.empty()) {
+        request_log_threaded_ = true;
+        request_log_thread_   = std::thread([this] { request_log_loop(); });
+    }
 }
 
 void Collector::stop_series() {
     series_run_ = false;
     if (series_thread_.joinable()) { series_thread_.join(); }
     if (observe_thread_.joinable()) { observe_thread_.join(); }
+    if (request_log_thread_.joinable()) { request_log_thread_.join(); }
 }
 
 // One stat() per second. The request log is appended and flushed per record, so
@@ -424,10 +492,6 @@ void Collector::observe_loop() {
             const std::int64_t log_mtime = poll_request_log_mtime();
             std::lock_guard lock(mu_);
             request_log_mtime_ms_ = log_mtime;
-            // Sampled here rather than in the 10 Hz loop: a throughput point is
-            // only as fresh as the last completed request, and this thread already
-            // owns the once-a-second cadence.
-            tail_throughput_locked();
             detector_last_ran_ms_ = now_ms();
         } catch (...) {
             std::lock_guard lock(mu_);
@@ -439,91 +503,195 @@ void Collector::observe_loop() {
     }
 }
 
-void Collector::tail_throughput_locked() {
-    if (spec_.request_log.empty()) { return; }
-    std::error_code ec;
-    const auto size = std::filesystem::file_size(spec_.request_log, ec);
-    if (ec) { return; }
-    // A shorter file is a new one: the engine rotated or the log was cleared.
-    // Reading from a stale offset would splice a record in half and then treat
-    // every later line as garbage, so start over rather than guess.
-    if (size < throughput_offset_) { throughput_offset_ = 0; }
-    if (size == throughput_offset_) { return; }
-    // First pass on a log that already exists: start at the end. Replaying hours
-    // of history would fill the ring with samples from before this supervisor
-    // could have been watching, and the chart claims to be live.
-    if (throughput_offset_ == 0 && size > 0 && throughput_.size() == 0) {
-        throughput_offset_ = size;
-        return;
-    }
-    std::ifstream in(spec_.request_log, std::ios::binary);
-    if (!in) { return; }
-    in.seekg(static_cast<std::streamoff>(throughput_offset_), std::ios::beg);
-    std::string line;
-    while (std::getline(in, line)) {
-        // A partial final line is a record still being written. Leave the offset
-        // before it so the next pass reads it whole.
-        if (in.eof() && !line.empty() && line.back() != '\n') { break; }
-        throughput_offset_ += line.size() + 1U;
-        // request_start names the client; request_done carries what it cost. The
-        // pair is joined on request_id so the panel can attribute re-prefills to
-        // the app responsible for them.
-        if (jsonl_event_is(line, "request_start")) {
-            try {
-                const auto j = nlohmann::json::parse(line);
-                const auto& r = j.at("request");
-                pending_clients_.insert_or_assign(
-                    r.value("request_id", std::uint64_t{0}),
-                    std::pair{r.value("client", std::string{}), r.value("tool_count", 0)});
-                // An engine that dies mid-request leaves its starts unmatched. Cap
-                // the map so a crash loop cannot grow it without bound.
-                if (pending_clients_.size() > 512) { pending_clients_.clear(); }
-            } catch (...) {}
-            continue;
-        }
-        if (jsonl_event_is(line, "request_done")) {
-            try {
-                const auto j  = nlohmann::json::parse(line);
-                const auto& r = j.at("result");
-                const auto id = j.at("request").value("request_id", std::uint64_t{0});
-                ClientRequest c;
-                c.t_ms          = j.value("timestamp_unix_ms", std::int64_t{0});
-                c.prompt_tokens = r.value("prompt_tokens", std::uint64_t{0});
-                c.refill_tokens = r.value("computed_prefill_tokens", std::uint64_t{0});
-                const std::string path = r.value("prefix_reuse_path", std::string{});
-                c.from_root = path == "root" || path == "full_reset";
-                c.ttft_ms   = j.contains("timings_seconds")
-                                  ? j.at("timings_seconds").value("ttft", 0.0) * 1000.0
-                                  : 0.0;
-                if (const auto it = pending_clients_.find(id); it != pending_clients_.end()) {
-                    c.client     = it->second.first;
-                    c.tool_count = it->second.second;
-                    pending_clients_.erase(it);
-                }
-                if (c.t_ms != 0) { client_window_.push_back(std::move(c)); }
-            } catch (...) {}
-            continue;
-        }
-        if (!jsonl_event_is(line, "throughput")) { continue; }
+// Only lines appended after the supervisor first saw the log reach here. Replaying hours of
+// history would fill the ring with samples from before this supervisor could have been
+// watching, and the chart claims to be live.
+void Collector::fold_live_line_locked(std::string_view line) {
+    // request_start names the client; request_done carries what it cost. The
+    // pair is joined on request_id so the panel can attribute re-prefills to
+    // the app responsible for them.
+    if (jsonl_event_is(line, "request_start")) {
         try {
             const auto j = nlohmann::json::parse(line);
-            if (!j.contains("throughput_tokens_per_second")) { continue; }
-            const auto& tp = j.at("throughput_tokens_per_second");
-            ThroughputSample s;
-            s.t_ms          = j.value("timestamp_unix_ms", std::int64_t{0});
-            s.decode_tok_s  = tp.value("decode", 0.0);
-            s.prefill_tok_s = tp.value("prefill", 0.0);
-            if (j.contains("scheduler") && j.at("scheduler").is_object()) {
-                s.running = j.at("scheduler").value("running", 0);
-            }
-            if (s.t_ms != 0) { throughput_.push(s); }
+            const auto& r = j.at("request");
+            pending_clients_.insert_or_assign(
+                r.value("request_id", std::uint64_t{0}),
+                std::pair{r.value("client", std::string{}), r.value("tool_count", 0)});
+            // An engine that dies mid-request leaves its starts unmatched. Cap
+            // the map so a crash loop cannot grow it without bound.
+            if (pending_clients_.size() > 512) { pending_clients_.clear(); }
         } catch (...) {}
+        return;
     }
-    // Age the window. "Who is on the engine now" means recent, so a client that
-    // stopped an hour ago drops off rather than holding its place in the list.
+    if (jsonl_event_is(line, "request_done")) {
+        try {
+            const auto j  = nlohmann::json::parse(line);
+            const auto& r = j.at("result");
+            const auto id = j.at("request").value("request_id", std::uint64_t{0});
+            ClientRequest c;
+            c.t_ms          = j.value("timestamp_unix_ms", std::int64_t{0});
+            c.prompt_tokens = r.value("prompt_tokens", std::uint64_t{0});
+            c.refill_tokens = r.value("computed_prefill_tokens", std::uint64_t{0});
+            const std::string path = r.value("prefix_reuse_path", std::string{});
+            c.from_root = path == "root" || path == "full_reset";
+            c.ttft_ms   = j.contains("timings_seconds")
+                              ? j.at("timings_seconds").value("ttft", 0.0) * 1000.0
+                              : 0.0;
+            if (const auto it = pending_clients_.find(id); it != pending_clients_.end()) {
+                c.client     = it->second.first;
+                c.tool_count = it->second.second;
+                pending_clients_.erase(it);
+            }
+            if (c.t_ms != 0) { client_window_.push_back(std::move(c)); }
+        } catch (...) {}
+        return;
+    }
+    if (!jsonl_event_is(line, "throughput")) { return; }
+    try {
+        const auto j = nlohmann::json::parse(line);
+        if (!j.contains("throughput_tokens_per_second")) { return; }
+        const auto& tp = j.at("throughput_tokens_per_second");
+        ThroughputSample s;
+        s.t_ms          = j.value("timestamp_unix_ms", std::int64_t{0});
+        s.decode_tok_s  = tp.value("decode", 0.0);
+        s.prefill_tok_s = tp.value("prefill", 0.0);
+        if (j.contains("scheduler") && j.at("scheduler").is_object()) {
+            s.running = j.at("scheduler").value("running", 0);
+        }
+        if (s.t_ms != 0) { throughput_.push(s); }
+    } catch (...) {}
+}
+
+// "Who is on the engine now" means recent, so a client that stopped an hour ago drops off
+// rather than holding its place in the list.
+void Collector::age_client_window_locked() {
     const std::int64_t horizon = now_ms() - kClientWindowMs;
     while (!client_window_.empty() && client_window_.front().t_ms < horizon) {
         client_window_.pop_front();
+    }
+}
+
+void Collector::reset_request_log_locked() {
+    log_insights_      = RequestLogInsights{};
+    log_folded_        = 0;
+    log_report_folded_ = ~std::uint64_t{0};
+    log_history_ready_ = false;
+    recent_dones_.clear();
+    recent_server_start_.clear();
+    older_dones_.clear();
+    older_server_start_.clear();
+    ++recent_version_;
+}
+
+void Collector::reset_live_request_log_locked() {
+    throughput_.clear();
+    pending_clients_.clear();
+    client_window_.clear();
+}
+
+// Routes what the tail reads. History feeds the insights and the request panel's lines older
+// than the tail window; the window and appended lines feed the request panel; appended lines
+// also feed the live throughput and client figures. log_mu_ and mu_ are taken one at a time.
+struct Collector::RequestLogSink {
+    Collector& c;
+    RequestLogGeneration gen;
+
+    void begin(const RequestLogGeneration& g) {
+        gen = g;
+        {
+            std::lock_guard lock(c.log_mu_);
+            c.reset_request_log_locked();
+        }
+        {
+            std::lock_guard lock(c.mu_);
+            c.reset_live_request_log_locked();
+        }
+    }
+    void seed(std::string_view line) {
+        note_recent(line);
+        // A file that replaced the one the supervisor started with is new as a whole: its
+        // window is live data, as it was when the throughput tail started such a file at 0.
+        if (gen.number > 1) { fold_live(line); }
+    }
+    void live(std::string_view line) {
+        note_recent(line);
+        fold_live(line);
+    }
+    void history(std::string_view line, std::uint64_t begin) {
+        // Parsed before the lock is taken: parsing is nearly all of the cost of catching up.
+        const nlohmann::json record =
+            line.empty() ? nlohmann::json() : nlohmann::json::parse(line, nullptr, false);
+        std::lock_guard lock(c.log_mu_);
+        c.log_insights_.note_line_bytes(line.size());
+        c.log_insights_.fold(record);
+        ++c.log_folded_;
+        if (begin < gen.seed_begin &&
+            note_recent_line(line, c.older_dones_, c.older_server_start_)) {
+            ++c.recent_version_;
+        }
+    }
+    void gone() {
+        {
+            std::lock_guard lock(c.log_mu_);
+            c.reset_request_log_locked();
+        }
+        {
+            std::lock_guard lock(c.mu_);
+            c.reset_live_request_log_locked();
+        }
+    }
+
+private:
+    void note_recent(std::string_view line) {
+        std::lock_guard lock(c.log_mu_);
+        if (note_recent_line(line, c.recent_dones_, c.recent_server_start_)) { ++c.recent_version_; }
+    }
+    void fold_live(std::string_view line) {
+        std::lock_guard lock(c.mu_);
+        c.fold_live_line_locked(line);
+    }
+};
+
+bool Collector::poll_request_log_file() {
+    std::lock_guard tail_lock(tail_mu_);
+    RequestLogSink sink{*this, tail_.generation()};
+    std::uint64_t before = 0;
+    {
+        std::lock_guard lock(log_mu_);
+        before = log_poll_.history_offset;
+    }
+    const RequestLogPoll p = tail_.poll(request_log_path_w_, kRequestLogHistoryBytesPerPoll, sink);
+    {
+        std::lock_guard lock(log_mu_);
+        log_poll_ = p;
+        if (p.status == RequestLogStatus::Ok && p.history_at_end && !log_history_ready_) {
+            log_history_ready_ = true;
+            ++recent_version_;
+        }
+    }
+    // Every poll, not only when a record arrived: an idle engine appends nothing, and clients
+    // that left must still age out of the window.
+    {
+        std::lock_guard lock(mu_);
+        age_client_window_locked();
+    }
+    return p.status == RequestLogStatus::Ok && !p.history_at_end && p.history_offset != before;
+}
+
+void Collector::request_log_loop() {
+    // Catching up on a large log is a few seconds of one core. It is background work and must
+    // not take that core from the engine's host threads.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    while (series_run_.load()) {
+        bool more = false;
+        try {
+            more = poll_request_log_file();
+        } catch (...) {}
+        if (more) { continue; }
+        const auto until = std::chrono::steady_clock::now() + kRequestLogPollPeriod;
+        while (series_run_.load() && std::chrono::steady_clock::now() < until) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
     }
 }
 
@@ -729,8 +897,47 @@ nlohmann::json Collector::vram_control_json() {
     return out;
 }
 
+nlohmann::json Collector::request_log_report() {
+    if (spec_.request_log.empty()) { return request_log_unconfigured_report(); }
+    std::lock_guard lock(log_mu_);
+    switch (log_poll_.status) {
+    case RequestLogStatus::NotPolled:
+        return request_log_reading_report(spec_.request_log, 0, 0);
+    case RequestLogStatus::Missing:
+        return request_log_missing_report(spec_.request_log);
+    case RequestLogStatus::Unreadable:
+        // Locked for the moment. What was already read still holds; with nothing read yet
+        // there is nothing to report.
+        if (!log_history_ready_) {
+            nlohmann::json report;
+            report["source"] = {{"request_log", "unreadable"},
+                                {"path", spec_.request_log},
+                                {"error", log_poll_.error}};
+            report["insights"] = nlohmann::json::array({insight_unavailable(
+                "source.request_log", "Request log cannot be read",
+                "the request log exists but could not be opened (Windows error " +
+                    std::to_string(log_poll_.error) + "); no request_done records in window",
+                {{"path", spec_.request_log}, {"error", log_poll_.error}})});
+            return report;
+        }
+        break;
+    case RequestLogStatus::Ok:
+        if (!log_history_ready_) {
+            return request_log_reading_report(spec_.request_log, log_poll_.history_offset,
+                                              log_poll_.size);
+        }
+        break;
+    }
+    // Rebuilt only when records were folded since: /api/events asks every second.
+    if (log_report_folded_ != log_folded_) {
+        log_report_cache_  = log_insights_.report(spec_.request_log);
+        log_report_folded_ = log_folded_;
+    }
+    return log_report_cache_;
+}
+
 nlohmann::json Collector::insights_report() {
-    auto report = insights_from_request_log_path(spec_.request_log);
+    auto report = request_log_report();
     nlohmann::json admin;
     std::string note;
     {

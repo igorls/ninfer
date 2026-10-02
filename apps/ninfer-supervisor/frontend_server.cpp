@@ -7,6 +7,7 @@
 #endif
 #include <httplib.h>
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -298,34 +299,93 @@ nlohmann::json FrontendServer::status_json() const {
             {"reason", reason_}};
 }
 
-FrontendHost::FrontendHost(const std::vector<FrontendSpec>& specs, EngineSpecProvider engine) {
-    servers_.reserve(specs.size());
-    for (const auto& spec : specs) {
-        servers_.push_back(std::make_unique<FrontendServer>(spec, engine));
-    }
-}
+FrontendHost::FrontendHost(EngineSpecProvider engine) : engine_(std::move(engine)) {}
 
 FrontendHost::~FrontendHost() { stop(); }
 
-void FrontendHost::start() {
-    for (auto& server : servers_) {
-        if (server->bind()) {
-            threads_.emplace_back([raw = server.get()] { raw->run(); });
+void FrontendHost::shut_down(std::vector<Entry>& entries) {
+    for (auto& entry : entries) { entry.server->stop(); }
+    for (auto& entry : entries) {
+        if (entry.thread.joinable()) { entry.thread.join(); }
+    }
+    entries.clear();
+}
+
+void FrontendHost::apply(const std::vector<FrontendSpec>& specs) {
+    std::lock_guard<std::mutex> applying(apply_mutex_);
+    // Stopping waits for open connections to drain, so it happens outside `mutex_`: the tray and
+    // /api/state keep reading the status meanwhile.
+    std::vector<Entry> kept;
+    std::vector<Entry> retired;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto& entry : entries_) {
+            const bool wanted = std::any_of(specs.begin(), specs.end(), [&](const FrontendSpec& s) {
+                return same_frontend(s, entry.server->spec());
+            });
+            if (wanted && entry.server->state() == FrontendState::Serving) {
+                kept.push_back(std::move(entry));
+            } else {
+                retired.push_back(std::move(entry));
+            }
         }
+        entries_.clear();
+        // Kept frontends stay visible while the others stop.
+        for (auto& entry : kept) { entries_.push_back(std::move(entry)); }
+        kept.clear();
+    }
+    shut_down(retired);
+
+    std::vector<Entry> next;
+    next.reserve(specs.size());
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& spec : specs) {
+            const auto running = std::find_if(entries_.begin(), entries_.end(), [&](const Entry& e) {
+                return e.server && same_frontend(spec, e.server->spec());
+            });
+            if (running != entries_.end()) {
+                next.push_back(std::move(*running));
+                continue;
+            }
+            Entry entry;
+            entry.server = std::make_unique<FrontendServer>(spec, engine_);
+            if (entry.server->bind()) {
+                entry.thread = std::thread([raw = entry.server.get()] { raw->run(); });
+            }
+            next.push_back(std::move(entry));
+        }
+        entries_ = std::move(next);
     }
 }
 
 void FrontendHost::stop() {
-    for (auto& server : servers_) { server->stop(); }
-    for (auto& thread : threads_) {
-        if (thread.joinable()) { thread.join(); }
+    std::lock_guard<std::mutex> applying(apply_mutex_);
+    std::vector<Entry> all;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        all = std::move(entries_);
+        entries_.clear();
     }
-    threads_.clear();
+    shut_down(all);
 }
 
 nlohmann::json FrontendHost::status_json() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     nlohmann::json out = nlohmann::json::array();
-    for (const auto& server : servers_) { out.push_back(server->status_json()); }
+    for (const auto& entry : entries_) { out.push_back(entry.server->status_json()); }
+    return out;
+}
+
+std::vector<FrontendLink> FrontendHost::links() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<FrontendLink> out;
+    out.reserve(entries_.size());
+    for (const auto& entry : entries_) {
+        const nlohmann::json status = entry.server->status_json();
+        out.push_back(FrontendLink{status.value("name", ""), status.value("url", ""),
+                                   entry.server->state(), status.value("reason", "")});
+    }
     return out;
 }
 

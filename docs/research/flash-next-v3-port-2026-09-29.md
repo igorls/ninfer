@@ -7,7 +7,7 @@ maintainer references it names.
 Scope of M3: Qwen3.8-Flash-Next (transformers `Qwen4ExpForConditionalGeneration`,
 text `model_type = qwen4_exp_text`) becomes a second v3 architecture package beside
 `src/models/qwen3_5`, with a v3 artifact. All development and qualification runs on Colab G4. The
-on-site RTX PRO 6000 (x870e) only receives the finished build and artifact.
+on-site RTX PRO 6000 Workstation Edition only receives the finished build and artifact.
 
 ## 1. Measured G4 facts (session of 2026-09-29, 19:42-20:08 UTC)
 
@@ -28,12 +28,12 @@ on-site RTX PRO 6000 (x870e) only receives the finished build and artifact.
 | Disk after CUDA + clone + build + v2 artifact | 163 GiB used, 74 GiB free, so toolkit + build tree is ~9.5 GiB |
 | Google Drive | `colab drivemount` needs an interactive OAuth consent in a browser for every session. It cannot be an unattended mirror |
 
-The G4 is the Server Edition; x870e is the Workstation Edition. Compare performance only inside
+The G4 is the Server Edition; the on-site card is the Workstation Edition. Compare performance only inside
 one G4 session (same card, same clocks), never across machines.
 
 ## 2. Feasibility: yes
 
-The whole port can be built and qualified on G4 without touching x870e.
+The whole port can be built and qualified on G4 without touching the workstation.
 
 - **Disk.** One 105.5 GiB artifact plus toolkit and build (~10 GiB) fits (116 of 189 GiB). The v2
   input and a separate v3 output do not fit together (211 GiB). The upgrade therefore runs in place
@@ -255,7 +255,7 @@ payload copied byte-for-byte with a new directory. Flash-Next adds:
   range and the whole file. The whole-file digest replaces the separate `sha256sum -c` step, and
   the object digests are check 1's reference, since the in-place input no longer exists afterwards.
 - **Reproducible output.** The v3 `artifact_id` is derived from the v2 digest and the directory
-  (the container only recommends a fresh UUID), so G4 and x870e produce identical files.
+  (the container only recommends a fresh UUID), so G4 and the workstation produce identical files.
 
 **Object inventory in v3 terms** (with MTP baked):
 
@@ -353,7 +353,7 @@ wall: setup 7 s (Python 3.11 venv, torch CPU), download 6.5 min (392 s), upgrade
 verify 2.1 min (128 s). The four file digests equal `m3-1`'s, so the derivation is reproducible
 byte for byte across VMs. Without `--verify`, a session has the artifact after ~13.3 min.
 
-**x870e deployment.** The same tool upgrades Igor's local v2 copy on Windows, with no 105 GB
+**Workstation upgrade.** The same tool upgrades Igor's local v2 copy on Windows, with no 105 GB
 transfer. Windows has no punch-hole in the script; it needs 102 GiB free beside the input, or
 `--release-input` implemented with `FSCTL_SET_ZERO_DATA` on a sparse file. The output SHA256 is
 compared against the G4-produced v3 artifact.
@@ -427,9 +427,8 @@ public images), and synthetic cases.
 - **Report together:** single-stream tok/s, per-stream tok/s at C=8, and peak VRAM.
 - **Method.** A/B v2 against v3 in the same G4 session. Target: v3 ≥ v2 on every row.
 
-**8. x870e confirmation** (after G4 sign-off, with Igor's go): upgrade the local copy, compare its
-SHA with the G4 v3 artifact, and run one short confirmation run in a window Igor approves. No
-spare-port instances.
+**8. Workstation confirmation** (after G4 sign-off, with Igor's go): upgrade the local copy, compare its
+SHA with the G4 v3 artifact, and run one short confirmation run in a window Igor approves.
 
 ## 6. Milestones (implementation branches from `workstation` after `sync/upstream-d44ab584` lands)
 
@@ -440,7 +439,7 @@ spare-port instances.
 | M3.3 | Op ports with FP64 oracles: selected-block attention, QSA indexer, NVFP4 E512/K10 MoE, hyper-connection, PLE n-gram, FP8-F32 linear + Flash-Next shapes, rmsnorm_rope 24/2; `block_reduce_sum` audit | ~8,000 (+ ~6,000 tests) (as built ~6,800 + ~2,200 tests) | `ctest -R ops` on G4. **Done** on `m3/3-ops` (§6.2) |
 | M3.4 | Text execution + Program on the v3 contract: prefill/decode, KV + indexer + GDN + PLE state, checkpoints/continuations/pressure, CUDA-graph decode, logprobs, structured output | ~10,000 (+ ~8,000 tests) | greedy + teacher-forced parity (§5.3); continuation/prefix tests; pressure scenarios |
 | M3.5 | MTP + Vision | ~1,500 (+ ~1,500 tests) | §5.4, §5.5 |
-| M3.6 | CLI/serve options, harness into `tools/bench/flash_next`, performance A/B, VRAM envelope, docs (`qwen3.8-flash-next-{artifact,model}.md` rewritten for v3, `upstream-ports.md`, `performance.md`, AGENTS product line), model card for the v3 artifact | ~1,000 | §5.6, §5.7; then the x870e confirmation (§5.8) |
+| M3.6 | CLI/serve options, harness into `tools/bench/flash_next`, performance A/B, VRAM envelope, docs (`qwen3.8-flash-next-{artifact,model}.md` rewritten for v3, `upstream-ports.md`, `performance.md`, AGENTS product line), model card for the v3 artifact | ~1,000 | §5.6, §5.7; then the workstation confirmation (§5.8) |
 
 M3.3 and the load half of M3.2 can proceed in parallel once M3.1 lands.
 
@@ -505,7 +504,7 @@ M3.3 and the load half of M3.2 can proceed in parallel once M3.1 lands.
   prints "loading weights | 99.8 GiB" for a 70.01 GiB Text load plus the 29.8 GiB PLE). A separate
   public phase is a `types.h` change, left to M3.4 or M3.6 if wanted.
 - v3 cold PLE warm-up is unmeasured (every G4 v3 load ran from the page cache `derive` had just
-  filled); v2's cold 32 GB warm took 56.7 s. The x870e confirmation (§5.8) is the first cold
+  filled); v2's cold 32 GB warm took 56.7 s. The workstation confirmation (§5.8) is the first cold
   Windows number.
 - `qwen3_5_prefix_real_test` already fails on `workstation` with the 27B NVFP4 artifact; it is not
   an M3 signal.
@@ -681,9 +680,8 @@ alternating rounds of 200 samples.
    Flash-Next's owners pair two physical slots. If the Program does not report that physical
    pressure at admission, the v2 catalog-exhaustion defect (0% reuse forever after ~8 owners)
    comes back.
-5. **Mapped PLE on Windows.** x870e has 125.7 GiB RAM (46.9 GiB free at the time of writing),
-   next to production and the desktop. Page-cache-backed PLE can be evicted under pressure and
-   stall prefill. Pinning 30 GiB is safer for latency but takes the RAM from the desktop. M3 keeps
+5. **Mapped PLE on Windows.** The workstation has 125.7 GiB RAM, shared with the desktop.
+   Page-cache-backed PLE can be evicted under pressure and stall prefill. Pinning 30 GiB is safer for latency but takes the RAM from the desktop. M3 keeps
    v2's mapped behaviour. The SSD row cache (Strata `ple_reader.cpp` design) belongs to the
    hot-swap phase.
 6. **G4 reclaim mid-step.** Mitigated by the stateless workflow (§2). The first engine start per

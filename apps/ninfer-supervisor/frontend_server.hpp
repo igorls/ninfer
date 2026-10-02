@@ -63,24 +63,45 @@ private:
     void* server_ = nullptr; // httplib::Server*
 };
 
-// Every configured frontend, each on its own thread.
+// What the tray needs about one frontend, copied out so a later apply() cannot pull it away.
+struct FrontendLink {
+    std::string name;
+    std::string url;
+    FrontendState state = FrontendState::Stopped;
+    std::string reason;
+};
+
+// Every configured frontend, each on its own thread. apply() reconfigures the set while the
+// Supervisor and its engine keep running.
 class FrontendHost {
 public:
-    FrontendHost(const std::vector<FrontendSpec>& specs, EngineSpecProvider engine);
+    explicit FrontendHost(EngineSpecProvider engine);
     ~FrontendHost();
     FrontendHost(const FrontendHost&)            = delete;
     FrontendHost& operator=(const FrontendHost&) = delete;
 
-    void start();
+    // Makes the running set match `specs`, in that order. A frontend whose name, folder and port
+    // are unchanged and that is serving keeps running untouched; every other one is stopped
+    // (ending its open requests) and started anew, so saving an unchanged entry retries a
+    // missing folder or a taken port. Removed and changed frontends stop before new ones bind,
+    // so two frontends can swap ports.
+    void apply(const std::vector<FrontendSpec>& specs);
     void stop();
 
     [[nodiscard]] nlohmann::json status_json() const;
-    [[nodiscard]] std::size_t size() const noexcept { return servers_.size(); }
-    [[nodiscard]] const FrontendServer& at(std::size_t index) const { return *servers_.at(index); }
+    [[nodiscard]] std::vector<FrontendLink> links() const;
 
 private:
-    std::vector<std::unique_ptr<FrontendServer>> servers_;
-    std::vector<std::thread> threads_;
+    struct Entry {
+        std::unique_ptr<FrontendServer> server;
+        std::thread thread;
+    };
+    static void shut_down(std::vector<Entry>& entries);
+
+    EngineSpecProvider engine_;
+    mutable std::mutex mutex_;
+    std::mutex apply_mutex_; // one apply() at a time; never held by status readers
+    std::vector<Entry> entries_;
 };
 
 } // namespace ninfer::supervisor

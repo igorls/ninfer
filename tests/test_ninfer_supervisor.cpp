@@ -2,6 +2,7 @@
 #include "config.hpp"
 #include "frontend_server.hpp"
 #include "insights.hpp"
+#include "request_log_tail.hpp"
 #include "tray_prefs.hpp"
 #include "reserve_budget.hpp"
 
@@ -248,7 +249,7 @@ int test_monitor_only_config() {
 int test_insights_honesty() {
     using namespace ninfer::supervisor;
     int f = 0;
-    const auto missing = insights_from_request_log_path("");
+    const auto missing = request_log_unconfigured_report();
     f += check(missing.at("source").at("request_log") == "unconfigured", "unconfigured source");
     f += check(missing.at("insights").size() >= 1 &&
                    missing.at("insights").at(0).at("availability") == "unavailable",
@@ -256,6 +257,16 @@ int test_insights_honesty() {
     f += check(missing.at("insights").at(0).at("statement").get<std::string>().find(
                    "no request_done records") != std::string::npos,
                "unavailable statement");
+    // While an existing log is being read the dashboard shows progress, not a partial verdict.
+    const auto reading = request_log_reading_report("log.jsonl", 3u << 20, 12u << 20);
+    f += check(reading.at("source").at("request_log") == "reading" &&
+                   reading.at("source").at("bytes_read") == (3u << 20) &&
+                   reading.at("source").at("bytes_total") == (12u << 20) &&
+                   reading.at("insights").size() == 1 &&
+                   reading.at("insights").at(0).at("availability") == "unavailable" &&
+                   reading.at("insights").at(0).at("statement").get<std::string>().find("(25%)") !=
+                       std::string::npos,
+               "reading report carries progress and no findings");
 
     const auto typed = analyze_request_log_jsonl(
         R"({"type":"request_done","timestamp_unix_ms":1})"
@@ -263,6 +274,14 @@ int test_insights_honesty() {
         "mem");
     f += check(typed.at("insights").at(0).at("availability") == "unavailable",
                "type-key records do not count as request_done");
+
+    const auto malformed_done = analyze_request_log_jsonl(
+        R"({"event":"request_done","timestamp_unix_ms":1,"request":{"request_id":1},"result":{"prompt_tokens":"12"}})"
+        "\n",
+        "mem");
+    f += check(malformed_done.at("insights").at(0).at("id") == "source.request_log" &&
+                   malformed_done.at("insights").at(0).at("availability") == "unavailable",
+               "wrong-typed request_done numeric fields are skipped before aggregation");
 
     const char* jsonl =
         R"({"event":"request_start","server_instance_id":"a","timestamp_unix_ms":1000,"request":{"request_id":1,"enable_thinking":true,"tool_count":0,"requested_output_tokens":8}})"
@@ -774,6 +793,312 @@ int test_insights_prefix_collapse() {
     return f;
 }
 
+// The streak counts multi-turn requests stamped at or after the saturation run's first sample,
+// whatever their place in the file, and nothing stamped before it.
+int test_insights_prefix_collapse_run_boundary() {
+    using namespace ninfer::supervisor;
+    auto done = [](int id, std::int64_t ts, bool miss) {
+        return "{\"event\":\"request_done\",\"server_instance_id\":\"s\",\"timestamp_unix_ms\":" +
+               std::to_string(ts) + ",\"request\":{\"request_id\":" + std::to_string(id) +
+               ",\"message_count\":3},\"result\":{\"prefix_reuse_path\":\"" +
+               (miss ? "root" : "private_turn_closure") + "\",\"prefix_cache_hit_tokens\":" +
+               (miss ? "0" : "900") + ",\"computed_prefill_tokens\":100},\"timings_seconds\":{}}\n";
+    };
+    auto sample = [](std::int64_t ts, int slots) {
+        return "{\"event\":\"throughput\",\"server_instance_id\":\"s\",\"timestamp_unix_ms\":" +
+               std::to_string(ts) + ",\"context_cache\":{\"occupancy\":{\"host_state_slots\":" +
+               std::to_string(slots) + "}}}\n";
+    };
+    std::string jsonl =
+        R"({"event":"server_start","server_instance_id":"s","timestamp_unix_ms":1,"engine":{"context_cache":{"host_state_slots":2}}})"
+        "\n";
+    jsonl += sample(100, 1);
+    jsonl += done(1, 200, true);   // before the run: never counted
+    jsonl += done(2, 300, false);  // a hit before the run does not break the streak inside it
+    jsonl += done(3, 400, true);
+    jsonl += done(4, 1000, true);  // written before the run's first sample, stamped on it: counts
+    jsonl += sample(1000, 2);
+    jsonl += done(5, 1001, true);
+    jsonl += sample(36000, 2);
+    jsonl += done(6, 36001, true);
+    jsonl += sample(71000, 2);
+    jsonl += done(7, 71001, true);
+
+    const auto report = analyze_request_log_jsonl(jsonl, "mem");
+    const nlohmann::json* collapse = nullptr;
+    for (const auto& insight : report.at("insights")) {
+        if (insight.at("id") == "prefix.reuse_collapsed") { collapse = &insight; }
+    }
+    int f = check(collapse != nullptr, "a run with misses inside it is detected");
+    if (collapse != nullptr) {
+        const auto& e = collapse->at("evidence");
+        f += check(e.at("consecutive_multiturn_root_misses") == 4, "only misses inside the run count");
+        f += check(e.at("recomputed_prefill_tokens") == 400, "refill of the counted misses");
+        f += check(e.at("sample_request_ids") == nlohmann::json::array({7, 6, 5, 4}),
+                   "samples newest first");
+        f += check(e.at("saturated_since_unix_ms") == 1000 && e.at("saturated_until_unix_ms") == 71000,
+                   "the run spans its saturated samples");
+    }
+    // A sample below capacity ends the run; the next run starts over.
+    const auto broken = analyze_request_log_jsonl(jsonl + sample(72000, 1) + sample(73000, 2) +
+                                                      done(8, 73001, true),
+                                                  "mem");
+    bool fired = false;
+    for (const auto& insight : broken.at("insights")) {
+        fired = fired || insight.at("id") == "prefix.reuse_collapsed";
+    }
+    f += check(!fired, "a broken run does not carry its streak into the next one");
+    return f;
+}
+
+// ---- Request log tail -------------------------------------------------------------------
+
+struct RecordingSink {
+    std::vector<ninfer::supervisor::RequestLogGeneration> begins;
+    std::vector<std::string> seeds;
+    std::vector<std::string> lives;
+    std::vector<std::string> histories;
+    std::vector<std::uint64_t> history_begins;
+    int gones = 0;
+
+    void begin(const ninfer::supervisor::RequestLogGeneration& g) { begins.push_back(g); }
+    void seed(std::string_view line) { seeds.emplace_back(line); }
+    void live(std::string_view line) { lives.emplace_back(line); }
+    void history(std::string_view line, std::uint64_t begin) {
+        histories.emplace_back(line);
+        history_begins.push_back(begin);
+    }
+    void gone() { ++gones; }
+    void clear_lines() {
+        seeds.clear();
+        lives.clear();
+        histories.clear();
+        history_begins.clear();
+    }
+};
+
+void write_bytes(const std::filesystem::path& path, const std::string& bytes, bool append) {
+    std::ofstream out(path, std::ios::binary | (append ? std::ios::app : std::ios::trunc));
+    out << bytes;
+}
+
+using Lines = std::vector<std::string>;
+
+int test_request_log_tail() {
+    using namespace ninfer::supervisor;
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "ninfer_request_log_tail_test";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+    const fs::path log = dir / "requests.jsonl";
+    int f = 0;
+
+    RequestLogTail tail;
+    RecordingSink sink;
+    auto p = tail.poll(log.wstring(), 1u << 20, sink);
+    f += check(p.status == RequestLogStatus::Missing && sink.begins.empty() && sink.gones == 0,
+               "a log that does not exist yet is missing, not an error");
+
+    // An unfinished last line is a record still being written: not handed over yet.
+    write_bytes(log, "a\nb\r\nc", false);
+    p = tail.poll(log.wstring(), 1u << 20, sink);
+    f += check(p.status == RequestLogStatus::Ok && sink.begins.size() == 1 &&
+                   sink.begins[0].number == 1 && sink.begins[0].seed_begin == 0 &&
+                   sink.begins[0].seed_end == 5,
+               "first sight of the log starts generation 1 with its tail window");
+    f += check(sink.seeds == Lines{"a", "b"} && sink.histories == Lines{"a", "b"} &&
+                   sink.history_begins == std::vector<std::uint64_t>{0, 2} && sink.lives.empty(),
+               "complete lines only, CRLF stripped, nothing live yet");
+    f += check(p.history_at_end && p.history_offset == 5 && p.size == 6,
+               "history stops before the unfinished line");
+
+    sink.clear_lines();
+    write_bytes(log, "x\nd\n", true);
+    p = tail.poll(log.wstring(), 1u << 20, sink);
+    f += check(sink.lives == Lines{"cx", "d"} && sink.histories == Lines{"cx", "d"} &&
+                   sink.history_begins == std::vector<std::uint64_t>{5, 8} && sink.begins.size() == 1,
+               "the finished line and the next one reach both readers once");
+    sink.clear_lines();
+    p = tail.poll(log.wstring(), 1u << 20, sink);
+    f += check(sink.lives.empty() && sink.histories.empty() && p.history_offset == 10,
+               "nothing appended, nothing handed over");
+
+    // Truncated below what was read: a new file, read from its start.
+    write_bytes(log, "e\n", false);
+    p = tail.poll(log.wstring(), 1u << 20, sink);
+    f += check(sink.begins.size() == 2 && sink.begins[1].number == 2 &&
+                   sink.seeds == Lines{"e"} && sink.histories == Lines{"e"} && sink.lives.empty(),
+               "truncation starts a new generation");
+
+    // Replaced by a longer file: the size alone would not show it.
+    sink.clear_lines();
+    const fs::path next = dir / "next.jsonl";
+    write_bytes(next, "f\ng\nhhhhhhhhhh\n", false);
+    f += check(MoveFileExW(next.wstring().c_str(), log.wstring().c_str(), MOVEFILE_REPLACE_EXISTING) != 0,
+               "replace the log");
+    p = tail.poll(log.wstring(), 1u << 20, sink);
+    f += check(sink.begins.size() == 3 && sink.histories == Lines{"f", "g", "hhhhhhhhhh"},
+               "a replaced file is a new generation even when it is longer");
+
+    // Removed, then created again.
+    fs::remove(log, ec);
+    p = tail.poll(log.wstring(), 1u << 20, sink);
+    f += check(p.status == RequestLogStatus::Missing && sink.gones == 1, "removal is reported once");
+    p = tail.poll(log.wstring(), 1u << 20, sink);
+    f += check(p.status == RequestLogStatus::Missing && sink.gones == 1, "still missing, no repeat");
+    sink.clear_lines();
+    write_bytes(log, "i\n", false);
+    p = tail.poll(log.wstring(), 1u << 20, sink);
+    f += check(sink.begins.size() == 4 && sink.histories == Lines{"i"}, "a recreated log is read");
+
+    fs::remove_all(dir, ec);
+    return f;
+}
+
+int test_request_log_tail_window_and_budget() {
+    using namespace ninfer::supervisor;
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "ninfer_request_log_window_test";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+    const fs::path log = dir / "requests.jsonl";
+    int f = 0;
+
+    // Ten 10-byte lines; a 35-byte window starts inside line 6 and holds lines 7..9.
+    std::string body;
+    for (int i = 0; i < 10; ++i) { body += "line" + std::to_string(i) + "....\n"; }
+    write_bytes(log, body, false);
+    RequestLogTail tail(35, 1024, 3);  // 3-byte blocks: every line crosses a block boundary
+    RecordingSink sink;
+    auto p = tail.poll(log.wstring(), 1, sink);  // one line of history per poll
+    f += check(sink.begins.size() == 1 && sink.begins[0].seed_begin == 70 &&
+                   sink.begins[0].seed_end == 100 &&
+                   sink.seeds == Lines{"line7....", "line8....", "line9...."},
+               "the tail window holds the newest whole lines");
+    f += check(sink.histories == Lines{"line0...."} && !p.history_at_end && p.history_offset == 10,
+               "history advances a bounded amount per poll");
+    int polls = 1;
+    while (!p.history_at_end && polls < 100) {
+        p = tail.poll(log.wstring(), 1, sink);
+        ++polls;
+    }
+    f += check(sink.histories.size() == 10 && sink.histories[9] == "line9...." && polls == 10,
+               "history reaches the end one line at a time");
+    f += check(sink.history_begins[6] == 60 && sink.history_begins[7] == 70,
+               "line offsets let a sink tell history from the window");
+
+    // A line over the length limit is skipped, and the next line is intact.
+    RequestLogTail strict(1 << 20, 8, 4);
+    RecordingSink strict_sink;
+    write_bytes(log, "short\n" + std::string(20, 'x') + "\nafter\n", false);
+    strict.poll(log.wstring(), 1u << 20, strict_sink);
+    f += check(strict_sink.histories == Lines{"short", "after"} && strict.oversized_lines() == 1,
+               "an oversized line is skipped without buffering it");
+
+    fs::remove_all(dir, ec);
+    return f;
+}
+
+// Following a log as it grows gives the report a whole-file pass gives, however the reads fall.
+int test_request_log_fold_follows_growth() {
+    using namespace ninfer::supervisor;
+    namespace fs = std::filesystem;
+    std::string jsonl;
+    auto add = [&](const std::string& line) { jsonl += line + "\r\n"; };
+    auto start = [&](const char* inst, std::int64_t ts, int id, int messages) {
+        add("{\"event\":\"request_start\",\"server_instance_id\":\"" + std::string(inst) +
+            "\",\"timestamp_unix_ms\":" + std::to_string(ts) + ",\"request\":{\"request_id\":" +
+            std::to_string(id) + ",\"message_count\":" + std::to_string(messages) + "}}");
+    };
+    auto done = [&](const char* inst, std::int64_t ts, int id, int messages, int prompt,
+                    const char* reuse, const char* finish, int drafted, int accepted, int fallback) {
+        add("{\"event\":\"request_done\",\"server_instance_id\":\"" + std::string(inst) +
+            "\",\"timestamp_unix_ms\":" + std::to_string(ts) + ",\"request\":{\"request_id\":" +
+            std::to_string(id) + ",\"message_count\":" + std::to_string(messages) +
+            ",\"enable_thinking\":true,\"tool_count\":1,\"requested_output_tokens\":64},"
+            "\"result\":{\"prompt_tokens\":" + std::to_string(prompt) +
+            ",\"completion_tokens\":64,\"prefix_cache_hit_tokens\":0,\"computed_prefill_tokens\":" +
+            std::to_string(prompt) + ",\"prefix_reuse_path\":\"" + reuse + "\",\"finish_reason\":\"" +
+            finish + "\"},\"speculative\":{\"backend\":\"mtp\",\"draft_window\":4,\"rounds\":20,"
+            "\"drafted_tokens\":" + std::to_string(drafted) + ",\"accepted_tokens\":" +
+            std::to_string(accepted) + ",\"fallback_steps\":" + std::to_string(fallback) +
+            ",\"accepted_per_position\":[" + std::to_string(accepted / 2) + "," +
+            std::to_string(accepted / 4) + ",1,0]},\"timings_seconds\":{\"prepare\":0.01,"
+            "\"prefill\":0.2,\"decode\":0.5,\"ttft\":0.25,\"total\":0.75}}");
+    };
+    auto throughput = [&](const char* inst, std::int64_t ts, int waiting, int pages, int slots) {
+        add("{\"event\":\"throughput\",\"server_instance_id\":\"" + std::string(inst) +
+            "\",\"timestamp_unix_ms\":" + std::to_string(ts) +
+            ",\"scheduler\":{\"waiting\":" + std::to_string(waiting) +
+            ",\"running\":2,\"prefilling\":1},\"context_cache\":{\"occupancy\":{\"device_main_kv_pages\":" +
+            std::to_string(pages) + ",\"host_state_slots\":" + std::to_string(slots) +
+            "},\"pressure\":{\"private_owners_evicted\":1,\"checkpoints_dropped\":2}}}");
+    };
+    auto server = [&](const char* inst, std::int64_t ts) {
+        add("{\"event\":\"server_start\",\"server_instance_id\":\"" + std::string(inst) +
+            "\",\"timestamp_unix_ms\":" + std::to_string(ts) +
+            ",\"engine\":{\"max_context\":1000,\"max_concurrency\":2,\"kv_capacity\":4096,"
+            "\"kv_capacity_page_groups\":64,\"prefix_reuse\":true,\"context_cache\":{\"host_state_slots\":2}}}");
+    };
+    server("old", 1);
+    for (int i = 1; i <= 6; ++i) {
+        start("old", i * 100, i, i % 3);
+        done("old", i * 100 + 50, i, i % 3, 300 * i, i % 2 ? "full_reset" : "seed", "stop", 40, 30, 1);
+    }
+    throughput("old", 900, 1, 60, 1);
+    server("new", 1000);
+    for (int i = 1; i <= 40; ++i) {
+        const std::int64_t t = 1000 + i * 3000;
+        start("new", t, i, 2 + i % 2);
+        throughput("new", t + 10, i % 5 == 0 ? 1 : 0, 10 + i, 2);
+        done("new", t + 900, i, 2 + i % 2, 37 * i % 950, "root",
+             i % 4 == 0 ? "output_limit" : "stop", 4 * (i % 7), i % 7, i % 9 == 0 ? 12 : 1);
+    }
+    add(R"({"event":"request_error","server_instance_id":"new","timestamp_unix_ms":200000,"request":{"request_id":99},"error":{"message":"expired waiting for admission"}})");
+    add("not json");
+    add("");
+
+    const auto whole = analyze_request_log_jsonl(jsonl, "mem");
+    int ids = 0;
+    for (const auto& it : whole.at("insights")) {
+        const auto id = it.at("id").get<std::string>();
+        ids += id == "prefix.reuse_collapsed" || id == "speculative.draft_acceptance" ||
+               id == "capacity.context_kv_pressure" || id == "client.output_limit_while_thinking" ||
+               id == "prefix.multiturn_full_reset";
+    }
+    int f = check(ids == 5, "the fixture exercises the scoped and sampled insights");
+
+    const fs::path dir = fs::temp_directory_path() / "ninfer_request_log_fold_test";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+    const fs::path log = dir / "requests.jsonl";
+    RequestLogInsights folded;
+    struct FoldSink {
+        RequestLogInsights& insights;
+        void begin(const RequestLogGeneration&) { insights = RequestLogInsights{}; }
+        void seed(std::string_view) {}
+        void live(std::string_view) {}
+        void history(std::string_view line, std::uint64_t) { insights.fold_line(line); }
+        void gone() { insights = RequestLogInsights{}; }
+    } sink{folded};
+    RequestLogTail tail(64, 1u << 20, 7);
+    // Appended in uneven pieces that split lines, polled with a small history budget.
+    std::size_t written = 0;
+    for (std::size_t piece = 1; written < jsonl.size(); piece = piece * 3 + 5) {
+        const std::size_t n = std::min(piece, jsonl.size() - written);
+        write_bytes(log, jsonl.substr(written, n), written != 0);
+        written += n;
+        tail.poll(log.wstring(), 97, sink);
+    }
+    for (int i = 0; i < 1000 && !tail.poll(log.wstring(), 97, sink).history_at_end; ++i) {}
+    f += check(folded.report("mem") == whole, "the followed log reports what the whole file reports");
+    fs::remove_all(dir, ec);
+    return f;
+}
+
 int test_jsonl_event_key() {
     using namespace ninfer::supervisor;
     int f = 0;
@@ -821,6 +1146,19 @@ int test_series_ring() {
     const auto e = r.events();
     f += check(e.size() == 2 && e[0].kind == "engine_down" && e[1].kind == "engine_up",
                "event ring cap");
+    return f;
+}
+
+int test_throughput_ring_reset() {
+    ninfer::supervisor::ThroughputRing ring(2);
+    int f = 0;
+    ring.push({1, 2, 3, 4});
+    ring.push({2, 3, 4, 5});
+    ring.clear();
+    f += check(ring.size() == 0 && ring.samples().empty(), "throughput reset drops old samples");
+    ring.push({3, 4, 5, 6});
+    f += check(ring.size() == 1 && ring.samples().front().t_ms == 3,
+               "throughput ring accepts samples after reset");
     return f;
 }
 
@@ -1778,6 +2116,90 @@ int test_frontend_proxy() {
     return f;
 }
 
+
+int test_frontends_request() {
+    using namespace ninfer::supervisor;
+    int f = 0;
+    const auto ok = parse_frontends_request(
+        nlohmann::json::parse(R"({"frontends":[{"name":"UI","dir":"C:/ui","port":8100}]})"), 8099, 8010);
+    f += check(ok.error.empty() && ok.frontends.size() == 1 && ok.frontends[0].port == 8100,
+               "a valid frontend list is accepted");
+    const auto empty = parse_frontends_request(nlohmann::json::parse(R"({"frontends":[]})"), 8099, 8010);
+    f += check(empty.error.empty() && empty.frontends.empty(), "an empty list removes every frontend");
+    const auto clash = parse_frontends_request(
+        nlohmann::json::parse(R"({"frontends":[{"name":"UI","dir":"d","port":8099}]})"), 8099, 8010);
+    f += check(!clash.error.empty() && clash.frontends.empty(),
+               "a frontend on the dashboard port is refused");
+    const auto missing = parse_frontends_request(nlohmann::json::parse(R"({"other":1})"), 8099, 8010);
+    f += check(!missing.error.empty(), "a body without frontends is refused");
+    const auto not_json = parse_frontends_request(nlohmann::json(), 8099, 8010);
+    f += check(!not_json.error.empty(), "an unparsable body is refused");
+    return f;
+}
+
+int test_frontend_host_apply() {
+    using namespace ninfer::supervisor;
+    namespace fs = std::filesystem;
+    int f = 0;
+    const fs::path root = fs::temp_directory_path() / "ninfer_frontend_host_test";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(root / "a");
+    fs::create_directories(root / "b");
+    fs::create_directories(root / "later");
+    std::ofstream(root / "a" / "index.html", std::ios::binary) << "a";
+    std::ofstream(root / "b" / "index.html", std::ios::binary) << "b";
+
+    EngineSpec engine;
+    FrontendHost host([engine] { return engine; });
+    const auto port_of = [&](const std::string& name) {
+        for (const auto& s : host.status_json()) {
+            if (s.value("name", "") == name && s.value("state", "") == "serving") {
+                return s.value("port", 0);
+            }
+        }
+        return 0;
+    };
+    const auto serves = [](int port) {
+        if (port <= 0) { return false; }
+        httplib::Client client("127.0.0.1", port);
+        client.set_connection_timeout(std::chrono::seconds(2));
+        auto r = client.Get("/");
+        return r && r->status == 200;
+    };
+    const FrontendSpec a{"A", (root / "a").string(), 0};
+    const FrontendSpec b{"B", (root / "b").string(), 0};
+
+    host.apply({a});
+    const int a_port = port_of("A");
+    f += check(serves(a_port), "apply starts a frontend");
+    host.apply({a});
+    f += check(port_of("A") == a_port && serves(a_port), "an unchanged serving frontend keeps running");
+    host.apply({a, b});
+    const int b_port = port_of("B");
+    f += check(port_of("A") == a_port && serves(b_port) && host.links().size() == 2 &&
+                   host.links()[1].name == "B",
+               "adding a frontend leaves the others untouched");
+    host.apply({a, FrontendSpec{"B renamed", b.dir, 0}});
+    f += check(port_of("A") == a_port && !serves(b_port) && serves(port_of("B renamed")),
+               "a changed frontend is restarted");
+
+    const FrontendSpec later{"Later", (root / "later").string(), 0};
+    host.apply({later});
+    f += check(!serves(a_port) && host.links().size() == 1 &&
+                   host.links()[0].state == FrontendState::AssetsMissing,
+               "removed frontends stop and a folder without index.html is reported");
+    std::ofstream(root / "later" / "index.html", std::ios::binary) << "later";
+    host.apply({later});
+    f += check(serves(port_of("Later")), "saving the same entry again retries it");
+
+    host.apply({});
+    f += check(host.links().empty() && host.status_json().empty(), "an empty list stops everything");
+    host.stop();
+    fs::remove_all(root, ec);
+    return f;
+}
+
 int main() {
     int failures = 0;
     failures += test_kv_capacity_adaptation();
@@ -1793,6 +2215,10 @@ int main() {
     failures += test_insights_honesty();
     failures += test_insights_prefix();
     failures += test_insights_prefix_collapse();
+    failures += test_insights_prefix_collapse_run_boundary();
+    failures += test_request_log_tail();
+    failures += test_request_log_tail_window_and_budget();
+    failures += test_request_log_fold_follows_growth();
     failures += test_insights_speculative();
     failures += test_insights_capacity();
     failures += test_admin_vram_markers();
@@ -1800,6 +2226,7 @@ int main() {
     failures += test_jsonl_event_key();
     failures += test_series_persist();
     failures += test_series_ring();
+    failures += test_throughput_ring_reset();
     failures += test_health_threshold();
     failures += test_with_desktop_reserve();
     failures += test_model_reserve_budget();
@@ -1823,6 +2250,8 @@ int main() {
     failures += test_frontend_config();
     failures += test_frontend_routing();
     failures += test_frontend_proxy();
+    failures += test_frontends_request();
+    failures += test_frontend_host_apply();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }

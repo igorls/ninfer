@@ -3,6 +3,7 @@
 #include "collector.hpp"
 #include "dashboard.hpp"
 #include "engine_child.hpp"
+#include "frontend_server.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -26,10 +27,9 @@ public:
     // says nothing about it; the tray shows this as a disabled menu line.
     [[nodiscard]] bool listen_failed() const noexcept { return listen_failed_.load(); }
 
-    // The web frontends' status for /api/state. Set before run(); called from server threads.
-    void set_frontends_provider(std::function<nlohmann::json()> provider) {
-        frontends_provider_ = std::move(provider);
-    }
+    // The web frontends: their status for /api/state and the target of POST /api/frontends.
+    // Set before run(); owned by main and alive until after run() returns.
+    void set_frontend_host(FrontendHost* host) noexcept { frontends_ = host; }
 
 private:
     nlohmann::json state_json();
@@ -53,6 +53,9 @@ private:
     // the old one's device state, so a restart is the mechanism, not a side
     // effect.
     ConfigResult select_model(const std::string& request_body);
+    // Validates the frontend list, saves it, and applies it to the running frontends. The engine
+    // keeps running.
+    ConfigResult apply_frontends(const std::string& request_body);
     // Blocks until the engine answers /health, the crash-loop breaker halts, or
     // the limit passes. Used on both the switch and the rollback so a reported
     // "serving" is observed rather than merely requested.
@@ -64,7 +67,7 @@ private:
     Collector& collector_;
     std::atomic<bool> stop_{false};
     std::atomic<bool> listen_failed_{false};
-    std::function<nlohmann::json()> frontends_provider_;
+    FrontendHost* frontends_ = nullptr;
     void* server_ = nullptr; // httplib::Server*
 };
 
