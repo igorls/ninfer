@@ -378,11 +378,29 @@ Windows, MSVC 19.51, CUDA 13.3, `sm_120a`, RTX PRO 6000 Blackwell (driver 616.92
 
 ## Deployment
 
-Current state, September 30, 2026: the x870e production service on :8010 runs release
-`2026.09.30-v3port.4` (source `f01ae642`, which contains the `d44ab584` merge with `1cfdb4d6`
-reverted), checked by the installed release manifest and the `ninfer-serve.exe` hash. z690 still
-runs `2026.09.29-v3port.3` (source `28c40898`) with the `nvfp4full` profile, NVFP4 KV and MTP3, as
-reported by its installing agent (not checked from here).
+Current state, October 2, 2026: the x870e production service on :8010 runs release
+`2026.10.02-v3port.5` (source `d371b767`), checked by the installed release manifest and the
+`ninfer-serve.exe` hash. z690 still runs `2026.09.29-v3port.3` (source `28c40898`) with the
+`nvfp4full` profile, NVFP4 KV and MTP3, as reported by its installing agent (not checked from
+here).
+
+On October 2, 2026 14:03 UTC, x870e moved from `2026.09.30-v3port.4` to `2026.10.02-v3port.5`.
+The cutover replaced `ninfer-serve.exe`, `ninfer.exe` and the release manifest; the supervisor, the
+launcher and every runtime DLL are byte-identical between the two releases, and the supervisor
+configuration and production flags are unchanged.
+- The release adds `POST /v1/rerank` (read-only on the prompt cache) and the M3.3 Flash-Next Op
+  ports, whose production FP8 routes are bit-identical to v3port.4.
+- The service was down for 10 s. After the restart, the 14 v3port.4 checks passed, as did 13 live
+  rerank checks (33-68 ms per document beside chat traffic) and the serve contract smoke.
+- A 60-answer System One replay (single questions, four-question batches and two-question calls)
+  is bit-identical on 56 answers when old and new builds see a state cold. The other 4 belong to a
+  state the old process already held warm. Once warm, the two processes differ by up to 0.365 on
+  one Noul with no decision changed. The new build reproduces the old value on the old cache path,
+  and the old build alone moved by up to 0.18 between its cold and warm paths. The difference is
+  the prompt-cache path, not the build.
+
+The v3port.4 files and the supervisor configuration are archived in
+`E:\NInfer-archive\x870e-v3port.4-20261002-140253`; `rollback5.ps1` in the cutover kit restores them.
 
 On September 30, 2026 17:45 UTC, x870e moved from `2026.09.29-v3port.3` to
 `2026.09.30-v3port.4`. The cutover replaced `ninfer-serve.exe`, `ninfer.exe` and the release
