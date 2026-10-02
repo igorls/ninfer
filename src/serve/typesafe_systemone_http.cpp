@@ -88,7 +88,7 @@ void write_typesafe_error(httplib::Response& response, const ApiError& error) {
 
 SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request,
                                                     const httplib::Request& req,
-                                                    std::string_view endpoint) {
+                                                    std::string_view endpoint, bool read_only) {
     std::vector<SystemOneBranch> branches;
     // Labels are printable ASCII characters, "Yes"/"No" and digits: each one native token.
     std::unordered_map<std::string, ninfer::TokenId> token_ids;
@@ -123,9 +123,9 @@ SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request
     // Several questions about one state: the first prefill publishes the state and the rest
     // read it. A single question never reuses its own prefix, so it publishes nothing. A
     // two-token Choice also publishes its question, which each letter branch then extends
-    // by only the answer opener and one letter.
+    // by only the answer opener and one letter. A read-only run publishes neither.
     const Json base          = build_systemone_messages(request);
-    const bool publish_state = request.questions.size() > 1;
+    const bool publish_state = !read_only && request.questions.size() > 1;
     const std::string protocol(endpoint);
     for (std::size_t q = 0; q < request.questions.size(); ++q) {
         const SystemOneQuestion& question           = request.questions[q];
@@ -134,9 +134,10 @@ SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request
 
         Json ids = Json::array();
         for (const std::string& candidate : first_tokens) { ids.push_back(token_id(candidate)); }
-        const bool state_here = publish_state && q == 0;
-        Json messages         = state_here ? with_prefix_boundary(base) : base;
-        if (question.two_token_labels) {
+        const bool state_here       = publish_state && q == 0;
+        const bool publish_question = !read_only && question.two_token_labels;
+        Json messages               = state_here ? with_prefix_boundary(base) : base;
+        if (publish_question) {
             messages.push_back(Json{
                 {"role", "user"},
                 {"content", Json::array({Json{{"type", "text"},
@@ -149,7 +150,7 @@ SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request
         SystemOneBranch first;
         first.question = q;
         first.request  = branch_request(std::move(messages), std::move(ids),
-                                        state_here || question.two_token_labels);
+                                        state_here || publish_question);
         branches.push_back(std::move(first));
         if (!question.two_token_labels) { continue; }
 
@@ -268,7 +269,7 @@ void HttpServer::handle_systemone(const httplib::Request& req, httplib::Response
 
     SystemOneExecution execution;
     try {
-        execution = execute_systemone(request, req, "typesafe_systemone");
+        execution = execute_systemone(request, req, "typesafe_systemone", false);
     } catch (const ApiException& exception) {
         write_typesafe_error(res, exception.error());
         return;

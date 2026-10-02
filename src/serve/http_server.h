@@ -94,9 +94,10 @@ private:
     void handle_systemone(const httplib::Request& req, httplib::Response& res);
     void handle_rerank(const httplib::Request& req, httplib::Response& res);
     // Runs a parsed System One request on the loaded model. `endpoint` is the request-log name.
+    // A read-only run publishes and captures nothing in the prompt cache; it only reads.
     [[nodiscard]] SystemOneExecution execute_systemone(const SystemOneRequest& request,
                                                        const httplib::Request& http_request,
-                                                       std::string_view endpoint);
+                                                       std::string_view endpoint, bool read_only);
     void handle_messages(const httplib::Request& req, httplib::Response& res);
     void handle_count_tokens(const httplib::Request& req, httplib::Response& res);
     void handle_responses(const httplib::Request& req, httplib::Response& res);

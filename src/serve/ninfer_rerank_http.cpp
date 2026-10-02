@@ -32,8 +32,10 @@ void HttpServer::handle_rerank(const httplib::Request& req, httplib::Response& r
     const RerankSettings settings = rerank_settings(options_, public_model_id_);
     const RerankRequest request   = parse_rerank_request(parse_json_body(req), settings);
 
+    // Read-only: the prefix the documents share is only the short query, so publishing it would
+    // save almost no prefill and cost every call a prompt-cache slot other conversations need.
     const SystemOneExecution execution =
-        execute_systemone(build_rerank_choice_request(request), req, "ninfer_rerank");
+        execute_systemone(build_rerank_choice_request(request), req, "ninfer_rerank", true);
     if (execution.answers.size() != request.documents.size()) {
         throw std::runtime_error("rerank produced a different number of scores than documents");
     }

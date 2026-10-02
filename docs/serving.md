@@ -1237,7 +1237,9 @@ Jina-shaped reranking. Each document is one System One Choice over the query, ex
 on the loaded model. The route does not call `POST /v1/systemone`. The four Choice labels stay
 inside that scoring step; the response does not name them. Like System One questions, the
 documents run as consecutive Engine requests, one per document, so latency grows with the
-document count.
+document count. Unlike System One, rerank only reads the prompt cache: the prefix its documents
+share is the short query, so it publishes and captures nothing and cannot evict cached
+conversations.
 
 ```json
 {
