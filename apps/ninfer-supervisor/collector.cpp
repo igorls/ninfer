@@ -580,6 +580,12 @@ void Collector::reset_request_log_locked() {
     ++recent_version_;
 }
 
+void Collector::reset_live_request_log_locked() {
+    throughput_.clear();
+    pending_clients_.clear();
+    client_window_.clear();
+}
+
 // Routes what the tail reads. History feeds the insights and the request panel's lines older
 // than the tail window; the window and appended lines feed the request panel; appended lines
 // also feed the live throughput and client figures. log_mu_ and mu_ are taken one at a time.
@@ -590,8 +596,14 @@ struct Collector::RequestLogSink {
 
     void begin(const RequestLogGeneration& g) {
         gen = g;
-        std::lock_guard lock(c.log_mu_);
-        c.reset_request_log_locked();
+        {
+            std::lock_guard lock(c.log_mu_);
+            c.reset_request_log_locked();
+        }
+        {
+            std::lock_guard lock(c.mu_);
+            c.reset_live_request_log_locked();
+        }
     }
     void seed(std::string_view line) {
         note_recent(line);
@@ -617,8 +629,14 @@ struct Collector::RequestLogSink {
         }
     }
     void gone() {
-        std::lock_guard lock(c.log_mu_);
-        c.reset_request_log_locked();
+        {
+            std::lock_guard lock(c.log_mu_);
+            c.reset_request_log_locked();
+        }
+        {
+            std::lock_guard lock(c.mu_);
+            c.reset_live_request_log_locked();
+        }
     }
 
 private:

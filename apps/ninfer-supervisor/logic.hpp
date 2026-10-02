@@ -268,6 +268,11 @@ summarize_clients(const std::deque<ClientRequest>& window) {
 struct ThroughputRing {
     explicit ThroughputRing(std::size_t cap = 900) : cap_(cap), buf_(cap) {}
 
+    void clear() noexcept {
+        head_ = 0;
+        size_ = 0;
+    }
+
     void push(ThroughputSample s) {
         if (cap_ == 0) { return; }
         buf_[head_] = s;
