@@ -1571,7 +1571,11 @@ R"HTML(    if (av && av.desktop_reserve) {
     // Diagnostics & Insights Cards
     const rep = s.insights || {};
     const items = rep.insights || [];
-    document.getElementById('insights-count-badge').textContent = `${items.length} findings`;
+    // After a start the Supervisor reads the existing request log once before it reports on it.
+    const logSource = rep.source || {};
+    document.getElementById('insights-count-badge').textContent = logSource.request_log === 'reading'
+      ? `Reading log ${logSource.bytes_total ? Math.floor(100 * logSource.bytes_read / logSource.bytes_total) : 0}%`
+      : `${items.length} findings`;
     const problems = items.filter(it => ['critical', 'warning'].includes(it.severity));
     const navIssues = document.getElementById('nav-issues');
     navIssues.hidden = !problems.length;

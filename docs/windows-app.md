@@ -39,6 +39,11 @@ paths for any other auxiliary resources in custom arguments.
 | Engine and request logs | `%LOCALAPPDATA%\NInfer\logs` |
 | Application shortcuts | Start menu → NInfer |
 
+The dashboard's request figures and its Troubleshooting findings come from the request log. The
+log is never trimmed, so the Supervisor reads an existing one once, in the background, when it
+starts (about 8 s for 750 MiB) and the findings show that progress until it finishes; after that
+it reads only the records the engine appends.
+
 The installed configuration is the active authority. Changes to the original source JSON do not
 alter the running installation. The dashboard saves model switches and settings to the installed
 copy. `-InstallDir` and `-DataDir` select custom app/data directories; keep them separate.
