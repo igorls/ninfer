@@ -250,9 +250,10 @@ class NInferServeClient:
 
     def discover_model(self) -> str:
         value = self.get_json("/v1/models")
+        # The resident model is listed first; the advertised POST /v1/rerank id may follow it.
         entries = value.get("data")
-        if not isinstance(entries, list) or len(entries) != 1:
-            raise ServeProtocolError("ninfer-serve must expose exactly one resident model")
+        if not isinstance(entries, list) or not entries:
+            raise ServeProtocolError("ninfer-serve model listing has no resident model")
         model = entries[0].get("id") if isinstance(entries[0], dict) else None
         if not isinstance(model, str) or not model:
             raise ServeProtocolError("ninfer-serve model listing has no valid model id")

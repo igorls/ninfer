@@ -102,8 +102,8 @@ python3 -m tools.smoke.serve_contract \
   --model qwen3.6-27b
 ```
 
-The client exercises OpenAI, Anthropic, streaming, usage, multimodal, and tool-call response
-surfaces against the resident process.
+The client exercises OpenAI, Anthropic, rerank, streaming, usage, multimodal, and tool-call
+response surfaces against the resident process.
 
 For typed rewrite-checkpoint and thinking-history behavior, the managed smoke script launches a
 real server and consumes the repository fixture:

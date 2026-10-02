@@ -3,9 +3,8 @@
 #include "serve/http_server.h"
 #include "serve/http_transport.h"
 
-#include <exception>
+#include <stdexcept>
 #include <string>
-#include <utility>
 #include <vector>
 
 namespace ninfer::serve {
@@ -25,49 +24,31 @@ RerankSettings rerank_settings(const ServeOptions& options, const std::string& s
     };
 }
 
-void write_internal(httplib::Response& response, const char* what) {
-    ApiError error;
-    error.status  = 500;
-    error.type    = "internal_error";
-    error.message = what;
-    write_openai_error(response, error);
-}
-
 } // namespace
 
+// Failures propagate to the server's exception handler, which writes the OpenAI error object for
+// this path and records 5xx failures in the operational log under the response's request id.
 void HttpServer::handle_rerank(const httplib::Request& req, httplib::Response& res) {
     const RerankSettings settings = rerank_settings(options_, public_model_id_);
-    RerankRequest request;
-    try {
-        request = parse_rerank_request(parse_json_body(req), settings);
-    } catch (const ApiException& exception) {
-        write_openai_error(res, exception.error());
-        return;
-    }
+    const RerankRequest request   = parse_rerank_request(parse_json_body(req), settings);
 
-    SystemOneExecution execution;
-    try {
-        execution = execute_systemone(build_rerank_choice_request(request), req, "ninfer_rerank");
-        if (execution.answers.size() != request.documents.size()) {
-            throw std::runtime_error("rerank produced a different number of scores than documents");
-        }
-        std::vector<double> scores;
-        scores.reserve(execution.answers.size());
-        for (const SystemOneAnswer& answer : execution.answers) {
-            scores.push_back(rerank_relevance_score(answer.probabilities, settings));
-        }
-        const Json payload = make_rerank_response(request, rank_rerank_documents(scores, request.top_n),
-                                                  settings.advertised_model_id,
-                                                  execution.usage.input_tokens);
-        if (execution.lifetime) {
-            set_owned_json_content(res, payload.dump(), execution.lifetime);
-        } else {
-            res.set_content(payload.dump(), "application/json");
-        }
-    } catch (const ApiException& exception) {
-        write_openai_error(res, exception.error());
-    } catch (const std::exception& exception) {
-        write_internal(res, exception.what());
+    const SystemOneExecution execution =
+        execute_systemone(build_rerank_choice_request(request), req, "ninfer_rerank");
+    if (execution.answers.size() != request.documents.size()) {
+        throw std::runtime_error("rerank produced a different number of scores than documents");
+    }
+    std::vector<double> scores;
+    scores.reserve(execution.answers.size());
+    for (const SystemOneAnswer& answer : execution.answers) {
+        scores.push_back(rerank_relevance_score(answer.probabilities, settings));
+    }
+    const Json payload =
+        make_rerank_response(request, rank_rerank_documents(scores, request.top_n),
+                             settings.advertised_model_id, execution.usage.input_tokens);
+    if (execution.lifetime) {
+        set_owned_json_content(res, payload.dump(), execution.lifetime);
+    } else {
+        res.set_content(payload.dump(), "application/json");
     }
 }
 

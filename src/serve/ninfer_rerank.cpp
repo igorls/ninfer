@@ -171,8 +171,10 @@ nlohmann::ordered_json make_service_models_list(std::string_view served_model_id
                                                 std::uint32_t max_model_len) {
     Json payload = Json::parse(make_models_list(std::string(served_model_id), created, max_model_len));
     if (!rerank_model_id.empty() && rerank_model_id != served_model_id) {
-        payload["data"].push_back(Json::parse(
-            make_model_object(std::string(rerank_model_id), created, max_model_len)));
+        // The served entry is first; the rerank entry differs from it only by id.
+        Json rerank_entry  = payload["data"].front();
+        rerank_entry["id"] = std::string(rerank_model_id);
+        payload["data"].push_back(std::move(rerank_entry));
     }
     payload["models"] = systemone_model_entries(served_model_id, loaded_unix_seconds);
     return payload;
