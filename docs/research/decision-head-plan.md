@@ -163,6 +163,22 @@ chunk sizes and truncations so it tolerates the drift, evaluate it at serving's 
 prefer readouts that are robust to it (the last position and next-token distributions drift less
 than arbitrary span means) where the architecture allows.
 
+### First fine-tune (2 October 2026)
+
+`train_head.py` fine-tuned the released head on engine rows (production-recipe artifact, chunks
+2,048 and 1,024 as augmentation) with Clef-BF16 soft targets plus gold labels over 5,468 records
+(router synthetic corpus, seeded oracle cases, BoolQ, ANLI, AG News, Yelp; dev split of 539).
+Public set at the serving chunk: 118 (shipped head on engine rows) to 154 after the norms-and-scales
+stage alone, 172 after two full epochs, 176 after eight; Brier 0.63 to 0.35. Still below the native
+route (189, Brier 0.246; paired interval against native excludes zero) and the BF16 head (201,
+0.166), so the acceptance bar is not met. Chunk robustness held (1,024 and 2,048 within one item).
+Dev KL saturates after a few epochs; the weak families (judge_hard, multi_hop, probability,
+temporal_numeric) are absent from the corpus. Next levers, in order: in-distribution training data
+for those families (a synthetic generator with exact oracles exists for four families; the others
+need authoring), a larger head or a reset of its scoring layers, and training the head on BF16
+and engine rows jointly so it learns the drift rather than only its endpoint. Details in
+[the run directory](../../profiles/bench/jevbench-clef-20261002/README.md).
+
 ## Phase 2: engine integration (product change)
 
 Ownership, following [engine architecture](../maintainer/engine-architecture.md):
