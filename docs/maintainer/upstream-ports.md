@@ -5,7 +5,7 @@ Updated: September 29, 2026.
 This is the living record of how this workstation fork ([igorls/ninfer](https://github.com/igorls/ninfer))
 tracks [Neroued/ninfer](https://github.com/Neroued/ninfer): the reviewed upstream point, the fork
 features carried onto upstream v3, deliberate divergences, dropped and deferred work, qualification
-evidence and deployment. The first priority is **Qwen3.8-27B NVFP4 on native Windows and the RTX PRO
+evidence. The first priority is **Qwen3.8-27B NVFP4 on native Windows and the RTX PRO
 6000 Blackwell**. RTX 5090 results remain useful evidence for that device; they do not qualify the
 workstation.
 
@@ -35,8 +35,7 @@ model and workload, the fork commit, qualification and remaining work. Status va
 - **Deferred:** keep the reason and the condition that would make the change useful.
 - **Reverted:** removed or device-gated in the fork line, with the measurement.
 
-Source integration, hardware qualification and deployment are separate claims. Record deployment
-only after checking the installed build and service. Detailed performance results live in
+Source integration and hardware qualification are separate claims. Detailed performance results live in
 [performance](../performance.md) and its [RTX PRO 6000 records](../performance/rtx-pro-6000.md);
 link them here.
 
@@ -67,7 +66,7 @@ pre-v3 fork had gated it to the RTX 5090 after a 7,680-token prefill regression 
 of `1d8587bc`, a weight-fast measurement build prefilled the same-size probe in 678.2 ms against
 683.4 ms for token-fast: inside the round-to-round drift and with inconsistent sign across rounds, so
 the device gate (fork `db1a3694`) is not carried
-([measurement](../performance/rtx-pro-6000.md#v3-port-against-the-production-build-2026-09-28)).
+([measurement](../performance/rtx-pro-6000.md#v3-port-against-the-previous-release-build-2026-09-28)).
 
 ## Upstream `bace20dc..e31bc99b` (merged September 28, 2026)
 
@@ -98,8 +97,7 @@ and Q6 serve Vision, and Q4 the optimized proposal head used by `--lm-head-draft
 | `b24a439f` `2ddef207` | reporting and completion rules | Integrated into AGENTS.md beside the fork's upstream-ports rule |
 | `e31bc99b` | Linear guidance, Q4 performance report | Integrated (documentation; the report is upstream's RTX 5090 data) |
 
-Qualification on Windows (MSVC 19.51, CUDA 13.3, `sm_120a`, RTX PRO 6000, driver 616.92), beside
-the running production service:
+Qualification on Windows (MSVC 19.51, CUDA 13.3, `sm_120a`, RTX PRO 6000, driver 616.92):
 
 - Full CTest, 138 tests: 129 passed, 9 skipped (artifact- or source-gated), 0 failed. The pre-merge
   build (`b84c4d86`) had 137 tests: 128 passed, 9 skipped, 0 failed. The new test is KDA's.
@@ -109,16 +107,12 @@ the running production service:
 - Real-model tests on the v3 production artifact give the same results before and after the merge:
   loading (MTP with Vision, DFlash2, scoring), causal scoring, reasoning features, the Vision
   workspace, `dflash2_real` (K=15 and K=7 at 8 rows) and twelve `prefix_real` scenarios pass; the
-  default `prefix_real` run stops at the known Host-restore check (below). None needed a stop
-  window: about 44 GB was free beside production. On the OrcaRouter artifact, loading, causal
+  default `prefix_real` run stops at the known Host-restore check (below). On the OrcaRouter artifact, loading, causal
   scoring, reasoning features and stream observations pass.
-- Production-flag A/B against the installed release on a spare port, clean rounds: 7,680-token
+- Production-flag A/B against the previous release build, clean rounds: 7,680-token
   prefill 663.4 vs 689.7 ms (−3.8%), 256-token MTP decode 149.1 vs 148.5 tok/s (equal within
   noise), with the same MTP acceptance
-  ([measurement](../performance/rtx-pro-6000.md#upstream-e31bc99b-merge-against-the-production-build-2026-09-28)).
-
-Deployed later: release `2026.09.29-v3port.3` (source `28c40898`) contains this merge
-([Deployment](#deployment)).
+  ([measurement](../performance/rtx-pro-6000.md#upstream-e31bc99b-merge-against-the-previous-release-build-2026-09-28)).
 
 ## Upstream `e31bc99b..d44ab584` (merged September 29, 2026)
 
@@ -136,32 +130,31 @@ attention-input unit; Linux code unchanged), and `5482fd99` reverts `1cfdb4d6`.
 
 In the production artifact, FP8 KV makes the FP8 causal attention routes the production attention
 path; FP8 serves every attention and GDN projection, MLP layers 56–63 and the output head; NVFP4
-serves MLP layers 0–55. z690 runs `nvfp4full` with NVFP4 KV.
+serves MLP layers 0–55. The `nvfp4full` profile pairs with NVFP4 KV on an RTX 5090.
 
 | Upstream | Subject | Verdict |
 |---|---|---|
 | `23b0997d` `98ba2dac` | reorganize and tune BF16 causal attention; stabilize its graphs | Integrated: BF16 KV (not a production configuration); attention oracle test (all KV dtypes), `prefix_real` attention scenario with BF16 KV |
-| `4e8939d6` `5a15a166` | reorganize and tune FP8 causal attention; unify its graphs and query tiling | Integrated: x870e production attention; oracle test, `prefix_real` attention with FP8 KV (MTP3 and MTP5), G4 A/B |
+| `4e8939d6` `5a15a166` | reorganize and tune FP8 causal attention; unify its graphs and query tiling | Integrated: the production FP8-KV attention; oracle test, `prefix_real` attention with FP8 KV (MTP3 and MTP5), G4 A/B |
 | `20a36378` | organize and tune INT8 causal attention | Integrated: not a production KV; oracle test, `prefix_real` attention with INT8 KV |
-| `1192ad76` | organize and tune NVFP4 causal attention | Integrated: z690 attention; oracle test, `prefix_real` attention with NVFP4 KV, G4 z690-like A/B (neutral) |
+| `1192ad76` | organize and tune NVFP4 causal attention | Integrated: the NVFP4-KV attention (`nvfp4full` profile); oracle test, `prefix_real` attention with NVFP4 KV, G4 `nvfp4full` A/B (neutral) |
 | `a637f28f` | organize and tune K8V4 causal attention | Integrated: not a production KV; oracle test, `prefix_real` attention with K8V4 KV |
 | `1737ca11` | share causal attention primitives | Integrated (refactor of the five above) |
 | `a012e2bc` | align attention qualification and engine graph planning | Integrated: graph profiles and startup planning; the nvfp4/k8v4 attention CTest aliases fold into the one attention test; every `prefix_real` scenario, G4 A/B |
 | `582c9a8f` | varied benchmark inputs, restored mutable operands | Integrated, not exercised (Op benchmarks are not built by the fork); `bench_fixtures` test passes |
 | `909fb087` `344d69b8` `7489500d` `b3f018ab` `7ede9b44` | FP8 Linear TMA split-K and schedule tuning at `[34816,5120]`, `[14336,5120]`, `[16384,5120]`, `[5120,6144]`, `[5120,17408]` | Integrated with `183cdca6`: the production FP8 projections and late MLP; FP8 A16/A8 Linear oracle tests; the series brings most of the 7,680-token prefill gain |
 | `40bfe7dc` | FP8 fused projections (attention/GDN input, LinearAdd, SwiGLU) with TMA split-K | Integrated: FP8 LinearAdd, LinearSwiGLU, attention- and GDN-input and conv-snapshot/record oracle tests |
-| `7f6aafed` | split-KV prefill for FP8 and K8V4 KV | Integrated: x870e long-context prefill (−19.5% at 61,625 tokens); oracle test, G4 A/B; device memory unchanged at `--prefill-chunk 2048` |
+| `7f6aafed` | split-KV prefill for FP8 and K8V4 KV | Integrated: long-context prefill with FP8 KV (−19.5% at 61,625 tokens); oracle test, G4 A/B; device memory unchanged at `--prefill-chunk 2048` |
 | `c1c48a6a` | configurable KV dtype in the serve benchmark runners | Integrated, not exercised (upstream's benchmark tooling) |
 | `d23835c1` | Qwen3.8 FP8 KV serving results | Integrated (documentation; upstream's RTX 5090 data) |
 | `84cf93e4` | native FP8-to-BF16 conversion (CUDA 13.2+) | Integrated: exact; neutral on G4 decode (217.5 vs 217.7 tok/s with and without it); FP8 A16 oracle tests |
-| `1cfdb4d6` | native NVFP4 A16 decoding (CUDA 13.2+) | **Reverted** (`5482fd99`): exact, but the production decode on the RTX PRO 6000 G4 falls from 230.9 to 217.7 tok/s (−5.7%) with it, prefill unchanged; the effect on the RTX 5090 is unmeasured and both machines run one build |
+| `1cfdb4d6` | native NVFP4 A16 decoding (CUDA 13.2+) | **Reverted** (`5482fd99`): exact, but the production decode on the RTX PRO 6000 G4 falls from 230.9 to 217.7 tok/s (−5.7%) with it, prefill unchanged; the effect on the RTX 5090 is unmeasured and one build serves both devices |
 | `4201b5d2` | bind DFlash prefill controls per chunk | Integrated through the merge resolution: `dflash_prefill_real` (new upstream test) and `dflash2_real` at K=15 (8 rows) and K=7 with FP8 and NVFP4 KV pass |
 | `d44ab584` | extend grouped small prefill to every KV dtype | Integrated: attention oracle test, G4 A/B |
 
 Qualification:
 
-- **Windows** (MSVC 19.51, CUDA 13.3, `sm_120a`, RTX PRO 6000, driver 616.92, beside the running
-  production service): full CTest, 138 tests: 128 passed, 10 skipped (artifact- or source-gated),
+- **Windows** (MSVC 19.51, CUDA 13.3, `sm_120a`, RTX PRO 6000, driver 616.92): full CTest, 138 tests: 128 passed, 10 skipped (artifact- or source-gated),
   0 failed. The pre-merge build had 138 tests with 129 passed and 9 skipped. The merge removes the
   two attention aliases (`--nvfp4-only`, `--k8v4-only`; the main attention test now covers all
   five KV dtypes), and adds `bench_fixtures` (passes) and `dflash_prefill_real` (skipped without an
@@ -178,23 +171,10 @@ Qualification:
   stops at the known Host-restore check with the byte-identical message and counters recorded on
   the pristine base and the previous merge (open question below).
 - **Speed** (G4, production flags, alternating arms): the tip prefills 10.5% faster at 7,680 tokens
-  and 19.5% faster at 61,625 tokens and decodes 1.8% faster than the deployed build; without the
-  revert the merge decoded 4.0% slower. The z690-like configuration (`nvfp4full`, NVFP4 KV, MTP3)
+  and 19.5% faster at 61,625 tokens and decodes 1.8% faster than the previous release build (`28c40898`); without the
+  revert the merge decoded 4.0% slower. The `nvfp4full` configuration (`nvfp4full`, NVFP4 KV, MTP3)
   is unchanged within 0.2%, with identical device memory
-  ([measurement](../performance/rtx-pro-6000.md#upstream-d44ab584-merge-against-the-production-build-2026-09-29-colab-g4)).
-- **Tribuno synthetic set** (645 cases, G4, production flags; pre-registered addendum criterion
-  `E:\tribuno-synth\criterion-sync2.md`, results in `E:\tribuno-synth\results\sync2\`): the merge
-  does not change Tribuno-type outcomes. Every accuracy metric is PASS or INCONCLUSIVE (SO-inicial
-  −0.5 points [−2.3, +1.1]; chat rubric coverage −0.0 [−2.4, +2.5]), extraction validity and the
-  publication gate are unchanged, and System One decisions flip on 3 of 187 petição-inicial
-  questions (1.6%, within the 2% bound) and on none of the 385 valor questions (mean |ΔP| 0.034,
-  0.007 and 0.015). The three flips are borderline JEC atermação petitions near the threshold in
-  the deployed build (P(yes) 0.593, 0.531, 0.438); the merge's decision agrees with the BF16
-  reference on all three, so agreement with BF16 rises from 98.4% to 100%. System One is
-  bit-identical between two runs of the merge, and between the merge and a build without both
-  codec commits.
-
-Not deployed.
+  ([measurement](../performance/rtx-pro-6000.md#upstream-d44ab584-merge-against-the-previous-release-build-2026-09-29-colab-g4)).
 
 ## Fork features carried onto v3
 
@@ -233,14 +213,14 @@ width-one DFlash path is not carried.
 
 ### cometkim/ninfer `nvfp4full` weight profile
 
-Status: **integrated as a conversion recipe; not qualified for production; not deployed**
+Status: **integrated as a conversion recipe; not qualified for production**
 (September 28, 2026).
 
 | Item | Value |
 |---|---|
 | Source | [cometkim/ninfer](https://github.com/cometkim/ninfer) (Apache-2.0): branch `feat/qwen3.8-nvfp4full` at `ac8e0b75` (recipe, `nvfp4_maxabs` encoder and tests over upstream `1d8587bc`), and the v2 line at `55152a4f` (`calibrate_nvfp4full.py`, `verify_nvfp4full.py`, fork artifact document section 14) |
 | Fork-line commits | `3db1caee` recipe, encoder, calibration and verification; `07085988` the BF16-reference distribution readout used to qualify it; `0f25f279` the Linux build fix it needed |
-| Artifact | `E:\models\v3\Qwen3.8-27B\qwen3_8_27b_nvfp4full_dflash2.ninfer` (local, `broad-v1` calibration) |
+| Artifact | `qwen3_8_27b_nvfp4full_dflash2.ninfer` (local, `broad-v1` calibration) |
 
 What changed in the adaptation:
 
@@ -256,7 +236,7 @@ What changed in the adaptation:
 - Verification reads the v3 artifact and compares object payloads with the production artifact:
   the 112 imported MLP parents and their Use divisors are production's words.
 
-Qualification (Colab G4 and x870e, [measurements](../performance/rtx-pro-6000.md#qwen38-27b-nvfp4full-against-the-production-profile-2026-09-28)):
+Qualification (Colab G4 and the workstation, [measurements](../performance/rtx-pro-6000.md#qwen38-27b-nvfp4full-against-the-production-profile-2026-09-28)):
 the profile is 2.95 GiB smaller, prefills 22-26% faster and decodes 9-13% faster, with equal MTP
 acceptance, but it fails the quality gate set before the full scoring (mean KL to BF16 at most 1.25x
 production's, top-1 agreement at most 1 point lower): KL 1.56x, top-1 2.8 points lower. GDN
@@ -270,9 +250,9 @@ were produced with recipe overrides and are not committed recipes.
 
 | Behaviour | Upstream | Fork | Reason and evidence |
 |---|---|---|---|
-| CUDA synchronization default (`300ddb9f`) | `spin` | `blocking` when `NINFER_CUDA_SYNC` is unset; the variable still selects `spin`, `yield` or `auto` | Shared desktop. Production-flag A/B on the RTX PRO 6000: 7,680-token prefill 681.0 vs 683.4 ms, decode 152.9 vs 148.4 tok/s (medians, within noise), CPU during decode 0.03 vs 0.96 core ([measurement](../performance/rtx-pro-6000.md#v3-port-against-the-production-build-2026-09-28)). Igor, 2026-09-28 |
-| Dense non-thinking presence penalty (`92ad4c47`) | `1.5` | `0`; MoE keeps `1.5` | Production parity: the pre-v3 27B package used 0 and production requests record 0 |
-| `preserve_thinking` server default (`3cb5e718`) | unset, so the Qwen3.8 template keeps returned closed-turn reasoning | `false` unless a request or `--preserve-thinking` asks | Production parity (Igor, 2026-09-28). Keeping the template default is a later change to agree with bentokit |
+| CUDA synchronization default (`300ddb9f`) | `spin` | `blocking` when `NINFER_CUDA_SYNC` is unset; the variable still selects `spin`, `yield` or `auto` | Shared desktop. Production-flag A/B on the RTX PRO 6000: 7,680-token prefill 681.0 vs 683.4 ms, decode 152.9 vs 148.4 tok/s (medians, within noise), CPU during decode 0.03 vs 0.96 core ([measurement](../performance/rtx-pro-6000.md#v3-port-against-the-previous-release-build-2026-09-28)). Igor, 2026-09-28 |
+| Dense non-thinking presence penalty (`92ad4c47`) | `1.5` | `0`; MoE keeps `1.5` | Parity with the pre-v3 27B package, which used 0 |
+| `preserve_thinking` server default (`3cb5e718`) | unset, so the Qwen3.8 template keeps returned closed-turn reasoning | `false` unless a request or `--preserve-thinking` asks | Parity with the pre-v3 fork (Igor, 2026-09-28) |
 | Unsupported reasoning effort | passed to the chat template, whose `raise_exception` comes back as HTTP 400 `invalid_prompt` on `messages` with the interpreter's source trace | checked before rendering against the efforts observed from the loaded template at startup: HTTP 400 `reasoning_effort_not_supported` on the effort field, listing the supported efforts; template errors carry no trace | Restores the pre-v3 fork contract (`8264394c`) on Chat Completions, Responses and Anthropic Messages; the protocol vocabulary is unchanged |
 | Continued final assistant turn (`737b570a`) | rendered without a think block | rendered behind the empty think block the generation prompt carries (thinking off) | `/v1/score` text form and assistant prefill are conditioned like a generated answer |
 | `POST /v1/rerank` | no rerank route | Jina-shaped rerank scored by an in-process System One Choice; `GET /v1/models` advertises `ninfer-choice-rerank-v1`; missing or wrong API key is HTTP 401 with the OpenAI error object | Added 2026-10-02. `return_documents` defaults to true. Choice labels stay off the public response |
@@ -291,7 +271,7 @@ Approved by Igor, 2026-09-27 and 2026-09-28.
 | `NINFER_BUILD_MEDIA=OFF` stubs | v3 makes FFmpeg and libcurl mandatory |
 | `supervisor-logs-demo/`, `bench/d20_results*/` | Measurement output, not source |
 | Private-catalog clamp from `aec32ee0` | Removed capacity that exists: v3 backs catalog entries with idle lanes' state slots as well. By its own account it only corrected a reported number |
-| `docs/tribuno-production-evaluation-plan.md` | Completed 2026-09-07 handoff plan |
+| An external evaluation handoff plan | Completed 2026-09-07 handoff plan |
 | `db1a3694` device-gated W4A4 raster | Not reproduced on v3 (above) |
 
 `tools/freq_corpus/fixtures/ranking/*.i64` are upstream's own files (the default ranking of the
@@ -322,14 +302,14 @@ Approved by Igor, 2026-09-27 and 2026-09-28.
   pristine base and the fork line (the demoted turn closure is not the selected source): upstream
   behaviour on this artifact, not investigated further.
 - A json_schema request whose prompt asks for prose produces whitespace until its output limit on
-  both the pre-v3 production build and the fork line: the grammar admits unbounded leading
+  both the pre-v3 build and the fork line: the grammar admits unbounded leading
   whitespace. A bound on outer whitespace would fix it.
 - On the pre-v3 line, exploratory T=1500 GDN input and LinearAdd 5120x6144 NVFP4 fixtures disagreed
   with their oracles on both baseline and candidate; not re-examined on v3.
 - `dflash2_real`'s default probe (K=15, one 24-token generation) accepted 21 of 23 drafted tokens
   before the upstream `e31bc99b` merge and 20 of 31 after it; the test passes both times. The merge
   changed the Q8, BF16 and GDN kernels the drafter and target run. DFlash2 acceptance on real
-  requests was not re-measured; production uses MTP, whose acceptance is unchanged. After the
+  requests was not re-measured; the production configuration uses MTP, whose acceptance is unchanged. After the
   `d44ab584` merge the same probe accepted 21 of 23 on a Colab G4 (Linux); the Windows figures
   are from the workstation, so the two are not a like-for-like pair.
 
@@ -346,107 +326,31 @@ Windows, MSVC 19.51, CUDA 13.3, `sm_120a`, RTX PRO 6000 Blackwell (driver 616.92
   re-converted OrcaRouter artifact: loading with MTP and DFlash2, causal scoring, reasoning features
   and Vision workspace pass on both; `dflash2_real` (K=15 and K=7, 8 rows) and every `prefix_real`
   scenario except Host restore pass on the production copy.
-- Spare-port serving smoke (production flags, MTP and DFlash2): chat with and without thinking,
+- Serving smoke (production flags, MTP and DFlash2): chat with and without thinking,
   image input, reuse across turns, logprobs, `/v1/score`, `/v1/systemone`, required tool calls,
-  structured output, Anthropic Messages. The supervisor manages the engine as a monitor-only twin.
-- Production-flag A/B against the installed pre-v3 build: the fork line matches it within the
+  structured output, Anthropic Messages.
+- Production-flag A/B against the pre-v3 build: the fork line matches it within the
   round-to-round drift on a 7,680-token prefill and a 256-token MTP5 decode
-  ([table](../performance/rtx-pro-6000.md#v3-port-against-the-production-build-2026-09-28)).
+  ([table](../performance/rtx-pro-6000.md#v3-port-against-the-previous-release-build-2026-09-28)).
 - A 48-entry private catalog is accepted and reported; retention follows the state-image backing
   (`--device-state-slots` and `--host-state-slots`), and evictions are counted in `/admin/stats`.
 - Release candidate `2026.09.28-v3port.1` (source `e92c2078`, LGPL FFmpeg; its runtime DLLs are
-  byte-identical to the installed `2026.09.24-alpha.1` files, so only the four executables change).
-  - Staged smoke: the payload ran with nothing but its own DLLs on `PATH`, on a spare port, with
+  byte-identical to those of `2026.09.24-alpha.1`, so only the four executables change).
+  - Staged smoke: the release payload ran with nothing but its own DLLs on `PATH`, with
     production flags. It passed 11 of 11 checks: models list, chat with and without thinking, image,
     tool call, `json_object`, `json_schema`, `/v1/systemone`, `/admin/vram`, `/admin/stats` and
     `/health`.
-  - Supervisor: run monitor-only on the prepared v3 configuration, the new supervisor lists the four
+  - Supervisor: on a v3 configuration, the new supervisor lists the four
     27B entries as available and Flash-Next as unavailable (it is still v2).
-  - Rendered prompts are byte-identical to production for 21 request shapes, read back through
+  - Rendered prompts are byte-identical to the pre-v3 build for 21 request shapes, read back through
     prompt-position logprobs. The shapes cover the default, every effort, thinking on and off, a
     system message, tools, a tool loop, multi-turn with reasoning, preserve, image and `json_object`.
   - Unsupported efforts (`minimal`, `high`, `max`) get HTTP 400 from both builds, but the error
     body differs. The fork line returns `invalid_prompt` on `messages`, with the template's message
-    and a Jinja trace. Production returns `reasoning_effort_not_supported` on `reasoning_effort`.
-    No client sent an unsupported effort in the production request log (2026-09-08 to 2026-09-28).
-    The fork line restored the production contract afterwards (divergence table above).
+    and a Jinja trace. The pre-v3 build returns `reasoning_effort_not_supported` on `reasoning_effort`.
+    The fork line restored the pre-v3 contract afterwards (divergence table above).
   - A 24-question `/v1/systemone` replay (`noul`, `choice` and `score` on six states) is
-    bit-identical to production.
+    bit-identical to the pre-v3 build.
   - The upgrade tool, run from a Windows checkout (`core.autocrlf=true`), embeds the chat template
     with CRLF line endings. The vendored Jinja lexer normalizes line endings, so the rendered
     prompts are unchanged; only the embedded bytes differ from a Linux run.
-
-## Deployment
-
-Current state, October 2, 2026: the production service on the RTX PRO 6000 workstation runs
-release `2026.10.02-v3port.5` (source `d371b767`), checked by the installed release manifest and
-the `ninfer-serve.exe` hash. The RTX 5090 machine still runs `2026.09.29-v3port.3` (source
-`28c40898`) with the `nvfp4full` profile, NVFP4 KV and MTP3, as reported by its installing agent
-(not checked from here).
-
-On October 2, 2026 14:03 UTC, the production workstation moved from `2026.09.30-v3port.4` to
-`2026.10.02-v3port.5`.
-The cutover replaced `ninfer-serve.exe`, `ninfer.exe` and the release manifest; the supervisor, the
-launcher and every runtime DLL are byte-identical between the two releases, and the supervisor
-configuration and production flags are unchanged.
-- The release adds `POST /v1/rerank` (read-only on the prompt cache) and the M3.3 Flash-Next Op
-  ports, whose production FP8 routes are bit-identical to v3port.4.
-- The service was down for 10 s. After the restart, the 14 v3port.4 checks passed, as did 13 live
-  rerank checks (33-68 ms per document beside chat traffic) and the serve contract smoke.
-- A 60-answer System One replay (single questions, four-question batches and two-question calls)
-  is bit-identical on 56 answers when old and new builds see a state cold. The other 4 belong to a
-  state the old process already held warm. Once warm, the two processes differ by up to 0.365 on
-  one Noul with no decision changed. The new build reproduces the old value on the old cache path,
-  and the old build alone moved by up to 0.18 between its cold and warm paths. The difference is
-  the prompt-cache path, not the build.
-
-The v3port.4 files and the supervisor configuration are archived locally, and the cutover kit's
-rollback script restores them.
-
-On September 30, 2026 17:45 UTC, x870e moved from `2026.09.29-v3port.3` to
-`2026.09.30-v3port.4`. The cutover replaced `ninfer-serve.exe`, `ninfer.exe` and the release
-manifest; the supervisor, the launcher and every runtime DLL are byte-identical between the two
-releases, and the supervisor configuration and production flags are unchanged.
-- Besides the `d44ab584` merge (G4 A/B against v3port.3: prefill -10.5% at 7,680 tokens and -19.5%
-  at 61.6K, decode +1.8%, Tribuno set unchanged), the release adds the qwen4_exp (Flash-Next)
-  loading code, which does not touch the Qwen3.8 route, and llama.cpp web UI compatibility
-  (`GET /props`, optional `model`, `max_tokens: -1`).
-- The service was down for 12 s.
-- After the restart, 14/14 checks against :8010 passed: the 12 v3port.3 checks plus `GET /props`
-  and a chat request without `model` and with `max_tokens: -1`.
-
-The v3port.3 files and the supervisor configuration are archived in
-`E:\NInfer-archive\x870e-v3port.3-20260930-174505`; `rollback4.ps1` in the cutover kit restores them.
-
-The paragraphs below record the first v3 cutover.
-
-On September 28, 2026 10:02 UTC, the x870e production service on :8010 moved to release
-`2026.09.28-v3port.1` (source `e92c2078`). The cutover replaced the four executables
-(`ninfer-serve`, `ninfer-supervisor`, `ninfer`, `ninfer-launcher`) and the release manifest; every
-runtime DLL was already byte-identical. It pointed the supervisor configuration at the v3
-artifacts, and the production model is
-`E:\models\v3\Qwen3.8-27B\qwen3_8_27b_nvfp4_dflash2.ninfer`.
-- The engine starts with `CUDA sync blocking` and the unchanged production flags.
-- The service was down for 9 s.
-- After the restart, 11 checks against :8010 passed: model id `qwen3.8-27b`, chat with and without
-  thinking, an image message, a tool call, `json_object`, `json_schema`, `/v1/systemone`,
-  `/admin/vram`, `/admin/stats` and `/health`.
-- Rendered prompts on 21 request shapes are byte-identical to the previous build.
-- A 24-question System One replay is identical.
-
-The previous build and configuration are archived in
-`E:\NInfer-archive\x870e-87812bc8-20260928-100213`; the prepared rollback restores them in about a
-minute.
-
-z690 (RTX 5090) also runs `2026.09.28-v3port.1` since September 28, 2026, installed by hand from
-the same installer.
-- It serves `qwen3.8-27b` with 65,536-token context, 4 concurrent requests, vision on and a 1 GiB
-  desktop reserve.
-- Its build was confirmed over the tailnet by the v3 error signature for an unsupported reasoning
-  effort, and the same 11 checks passed.
-- On a 400-case System One comparison against x870e, the two machines made the same flag decision on
-  396 of 400 cases, with a mean |Δ| of 0.0197. That matches the pre-v3 cross-GPU gap (0.021), so the
-  difference is the GPU, not the build. Both machines serve System One in rotation.
-
-The `d44ab584` merge still needs a rollout to z690 and a System One re-check against the running
-release on both machines.

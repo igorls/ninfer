@@ -2,7 +2,7 @@
 
 These results were measured on the fork's RTX PRO 6000 Blackwell 96 GB workstation and, where a
 section says so, on Colab G4 VMs with the same GPU in its Server Edition. The first section compares
-weight profiles; the next three compare the fork line with the production build; the others are records of the fork's
+weight profiles; the next three compare the fork line with the previous release build; the others are records of the fork's
 pre-v3 engine (`research/qwen4-flash-next`), taken beside other desktop GPU work. They do not
 follow every rule of the [publication methodology](methodology.md); each section states its own
 conditions. Qwen3.8-Flash-Next records stay with that line until its port.
@@ -26,7 +26,7 @@ mean KL(BF16 || candidate) is at most 1.25 times production's, its top-1 agreeme
 most 1.0 point below production's, and its MTP acceptance is at most 2.0 points below.
 
 `ninfer-perplexity --reference` on `kld-400k-v1` (399,892 scored positions, FP8 KV,
-[method](../perplexity.md#distribution-agreement-with-a-reference-model)). The G4 and the x870e
+[method](../perplexity.md#distribution-agreement-with-a-reference-model)). The G4 and the
 workstation produce identical numbers for the same artifact.
 
 | Profile | Text weights | KL mean | KL p50 | KL p99 | Top-1 | NLL - BF16 | Gate |
@@ -57,7 +57,7 @@ two fifths of the top-1 loss, weight rounding for the rest. The calibration corp
 
 24 prompts (MATH-500 rows 0-11 and UltraChat `test_gen` rows 0-11), thinking on, temperature 0,
 512 output tokens, one request at a time, production flags with MTP5 and the proposal head. The G4
-and x870e runs of the same artifact generated identical tokens; the variants ran on x870e.
+and workstation runs of the same artifact generated identical tokens; the variants ran on the workstation.
 
 | Profile | Completion tokens | Acceptance | Tokens per round | Accepted per draft position |
 |---|---:|---:|---:|---|
@@ -107,13 +107,12 @@ Weights are the loaded weight arena (Text, MTP, Vision and proposal head).
 | G4, 5 rounds | production | 25 | 574.5 [571.4-576.7] | 226.9 [226.8-227.1] | 67.6% | 20.00 GiB | 66.84 GiB |
 | G4, 5 rounds | `nvfp4full` | 25 | 444.6 [444.2-445.1] | 248.4 [248.2-248.5] | 66.1% | 17.05 GiB | 69.79 GiB |
 | G4, 5 rounds | NVFP4 on MLP 56-63 only | 25 | 537.8 [535.4-540.0] | 233.6 [233.5-233.8] | 67.6% | 19.28 GiB | 67.56 GiB |
-| x870e, 2 rounds | production | 10 | 651.4 [642.3-660.9] | 233.9 [231.0-236.5] | 67.6% | 20.00 GiB | 12.95 GiB |
-| x870e, 2 rounds | `nvfp4full` | 10 | 483.2 [476.5-487.3] | 264.3 [263.6-269.4] | 69.1% | 17.05 GiB | 15.90 GiB |
+| Workstation, 2 rounds | production | 10 | 651.4 [642.3-660.9] | 233.9 [231.0-236.5] | 67.6% | 20.00 GiB | 12.95 GiB |
+| Workstation, 2 rounds | `nvfp4full` | 10 | 483.2 [476.5-487.3] | 264.3 [263.6-269.4] | 69.1% | 17.05 GiB | 15.90 GiB |
 
 The G4 `nvfp4full` arm used the `cometkim-v1` conversion (same weights, different activation
-divisors); the x870e arm the `broad-v1` one. The x870e rounds ran on port 8021 beside the production
-service (Windows, driver 616.92); its request log recorded no request inside their windows.
-`nvfp4full` prefills 22.6% (G4) and 25.8% (x870e) faster and decodes 9.5% and 13.0% faster, with 2.95
+divisors); the workstation arm the `broad-v1` one. The workstation rounds ran on Windows with driver 616.92.
+`nvfp4full` prefills 22.6% (G4) and 25.8% (workstation) faster and decodes 9.5% and 13.0% faster, with 2.95
 GiB more free device memory.
 
 ### RTX 5090 projection
@@ -125,7 +124,7 @@ divided by the context length; "free" is the emulated 5090's free memory after s
 
 | Profile | Context | Configuration | Weights | Automatic KV tokens | Contexts | Free |
 |---|---:|---|---:|---:|---:|---:|
-| Production | 65,536 | MTP, Vision (z690 today) | 20.00 GiB | 192,960 | 2.94 | 2.29 GiB |
+| Production | 65,536 | MTP, Vision | 20.00 GiB | 192,960 | 2.94 | 2.29 GiB |
 | Production | 65,536 | DFlash2, Vision | 21.33 GiB | 97,664 | 1.49 | 3.80 GiB |
 | Production | 131,072 | MTP, Vision | 20.00 GiB | 192,960 | 1.47 | 2.29 GiB |
 | Production | 131,072 | DFlash2, with or without Vision | - | does not start | - | - |
@@ -136,14 +135,14 @@ divided by the context length; "free" is the emulated 5090's free memory after s
 | MLP 56-63 only | 65,536 | MTP, Vision | 19.28 GiB | 215,104 | 3.28 | 2.29 GiB |
 | MLP 56-63 only | 131,072 | DFlash2, Vision | - | does not start | - | - |
 
-The production row matches the ~2.2 GB z690 reports free at 65K. The projection does not model a
+The projection does not model a
 consumer card's WDDM or CUDA-context differences.
 
-## Upstream `d44ab584` merge against the production build (2026-09-29, Colab G4)
+## Upstream `d44ab584` merge against the previous release build (2026-09-29, Colab G4)
 
 All measurements in this section ran on Colab G4 VMs (RTX PRO 6000 Blackwell Server Edition,
-Linux, CUDA 13.3), not on the workstation. Each arm is a Linux build of the fork: the deployed
-release source `28c40898` (`2026.09.29-v3port.3`), the merge `183cdca6` (upstream `d44ab584` merged
+Linux, CUDA 13.3), not on the workstation. Each arm is a Linux build of the fork: the previous
+release build, source `28c40898` (`2026.09.29-v3port.3`), the merge `183cdca6` (upstream `d44ab584` merged
 in `d29866c9`, plus the MSVC-only descriptor alignment that leaves Linux code unchanged), and
 variants built on the VM by merging an intermediate upstream commit into `28c40898` or reverting
 commits from `183cdca6`. The weights are the production artifact from
@@ -159,11 +158,11 @@ Times are the server's request-log timings; decode excludes the first token. Pro
 `--max-context 131072 --kv-capacity 524288 --max-concurrency 8 --prefill-chunk 2048 --kv-dtype fp8
 --vision --spec mtp --draft-tokens 5 --lm-head-draft --desktop-reserve-gib 6`.
 
-### Merge against the deployed build (6 rounds, 30 short and 18 long samples per arm)
+### Merge against the previous release build (6 rounds, 30 short and 18 long samples per arm)
 
 | Arm | 7,680-token prefill ms, median [min–max] | 256-token decode tok/s | MTP acceptance | 61,625-token prefill ms | 61,625-token context decode tok/s |
 |---|---:|---:|---:|---:|---:|
-| deployed `28c40898` | 585.8 [578.9–588.3] | 226.8 [226.6–227.0] | 67.6% | 7,264.8 [7,226.7–7,273.2] | 272.8 [206.8–272.9] |
+| previous release `28c40898` | 585.8 [578.9–588.3] | 226.8 [226.6–227.0] | 67.6% | 7,264.8 [7,226.7–7,273.2] | 272.8 [206.8–272.9] |
 | merge `183cdca6` | 524.9 [518.1–526.7] | 217.7 [217.4–217.9] | 69.1% | 5,834.9 [5,738.7–5,843.9] | 261.7 [191.4–261.9] |
 
 The merge prefills 10.4% faster at 7,680 tokens and 19.7% faster at 61,625 tokens, and decodes 4.0%
@@ -179,7 +178,7 @@ acceptance instead of 95–99%), so the long-context medians carry the compariso
 
 | Arm | 7,680-token prefill ms | 256-token decode tok/s |
 |---|---:|---:|
-| deployed `28c40898` | 585.7 [572.2–587.2] | 226.8 [226.5–227.0] |
+| previous release `28c40898` | 585.7 [572.2–587.2] | 226.8 [226.5–227.0] |
 | `28c40898` + upstream through `a012e2bc` (causal attention series) | 585.5 [577.7–587.2] | 230.1 [229.8–230.2] |
 | `28c40898` + upstream through `40bfe7dc` (plus the FP8 Linear series) | 518.4 [516.4–519.9] | 226.6 [226.4–226.8] |
 | merge without `84cf93e4` and `1cfdb4d6` | 525.7 [523.4–527.1] | 230.5 [230.4–230.8] |
@@ -189,7 +188,7 @@ A second VM separated the two codec commits (4 rounds, 20 samples per arm):
 
 | Arm | 7,680-token prefill ms | 256-token decode tok/s | 61,625-token prefill ms |
 |---|---:|---:|---:|
-| deployed `28c40898` | 587.9 [582.7–588.9] | 226.9 [226.4–227.1] | 7,277.8 |
+| previous release `28c40898` | 587.9 [582.7–588.9] | 226.9 [226.4–227.1] | 7,277.8 |
 | merge | 526.4 [524.8–527.3] | 217.7 [217.3–217.8] | 5,850.3 |
 | merge without `1cfdb4d6` (native NVFP4 A16 decoding) | 526.2 [524.6–527.2] | 230.9 [230.8–231.1] | 5,857.8 |
 | merge without `84cf93e4` (native FP8-to-BF16 conversion) | 526.2 [524.5–527.2] | 217.5 [217.4–217.7] | 5,854.2 |
@@ -202,23 +201,22 @@ A second VM separated the two codec commits (4 rounds, 20 samples per arm):
 - The native NVFP4 A16 decoding of `1cfdb4d6` alone costs 5.7% of decode and nothing on prefill.
   The fork line reverts it (`5482fd99`); the tip is code-identical on Linux to the "merge without
   `1cfdb4d6`" arm: **prefill −10.5% at 7,680 tokens and −19.5% at 61,625 tokens, decode +1.8%**
-  against the deployed build, and 276.2 against 272.7 tok/s at 61,625 tokens of context in
+  against the previous release build, and 276.2 against 272.7 tok/s at 61,625 tokens of context in
   matched high-acceptance samples. `84cf93e4` is neutral and stays.
 - Both codec paths are exact: System One on a build without either codec gives the same answers
-  and probabilities as the merge on all 390 questions of the Tribuno synthetic set.
+  and probabilities as the merge on all 390 questions of a synthetic System One set.
 
-### z690-like configuration (6 rounds, 30 short and 18 long samples per arm)
+### `nvfp4full` configuration (6 rounds, 30 short and 18 long samples per arm)
 
 The `nvfp4full` profile (converted on the G4 with the `workstation` recipe and the committed
 `broad-v1` calibration; 17.05 GiB of weights), NVFP4 KV, MTP3. Flags: `--max-context 65536
 --kv-capacity 262144 --kv-dtype nvfp4 --spec mtp --draft-tokens 3`, with the others as above.
-`--max-concurrency 8` and `--lm-head-draft` are assumptions (the z690 record states 4 concurrent
-requests), and the G4 is not an RTX 5090. The long-context request is 240,000 characters (56,449
+`--max-concurrency 8` and `--lm-head-draft` are assumptions, and the G4 is not an RTX 5090. The long-context request is 240,000 characters (56,449
 prompt tokens) to fit the 65,536-token context.
 
 | Arm | 7,680-token prefill ms | 256-token decode tok/s | MTP acceptance | 56,449-token prefill ms | Device free |
 |---|---:|---:|---:|---:|---:|
-| deployed `28c40898` | 456.8 [454.4–457.2] | 232.6 [232.3–233.1] | 85.9% | 6,710.1 | 69.33 GiB |
+| previous release `28c40898` | 456.8 [454.4–457.2] | 232.6 [232.3–233.1] | 85.9% | 6,710.1 | 69.33 GiB |
 | merge | 456.7 [453.4–457.2] | 232.2 [231.7–232.6] | 85.9% | 6,710.1 | 69.33 GiB |
 | merge without both codec commits | 456.8 [455.0–457.4] | 231.9 [231.6–232.1] | 85.9% | 6,709.9 | 69.33 GiB |
 
@@ -227,18 +225,18 @@ K8V4 KV only, and the codec revert changes nothing in this configuration. Device
 identical to the byte. At matched full acceptance, long-context decode is 241.1–241.6 tok/s in
 every arm.
 
-## Upstream `e31bc99b` merge against the production build (2026-09-28)
+## Upstream `e31bc99b` merge against the previous release build (2026-09-28)
 
-Measured beside the running production service on the RTX PRO 6000 Blackwell (driver 616.92), not
-in a stop window. Arms: the installed release `2026.09.28-v3port.1` (source `e92c2078`) and the
+Measured on the RTX PRO 6000 Blackwell (driver 616.92). Arms: the previous release build
+`2026.09.28-v3port.1` (source `e92c2078`) and the
 `workstation` build at `267a201a` (upstream `e31bc99b` merged, with the fork's follow-ups), both
-with the v3 production artifact and blocking CUDA sync. Each arm is a fresh `ninfer-serve` on port
-8021 with the production flags except the KV capacity: `--max-context 131072 --kv-capacity 131072
+with the v3 production artifact and blocking CUDA sync. Each arm is a fresh `ninfer-serve` with the
+production flags except the KV capacity: `--max-context 131072 --kv-capacity 131072
 --max-concurrency 8 --prefill-chunk 2048 --kv-dtype fp8 --vision --spec mtp --draft-tokens 5
 --lm-head-draft --desktop-reserve-gib 6`. The probe is the one of the next section (one warmup,
 five cold 7,680-token prefills, five greedy 256-token MTP decodes per arm and round). Three sets of
-four rounds alternate the arm order (ABBA). A round is clean when the production request log
-recorded no completed request during its window; production traffic reached six of the 24 rounds.
+four rounds alternate the arm order (ABBA). A round is clean when no other engine request
+completed on the GPU during its window; such traffic reached six of the 24 rounds.
 
 | Rounds | Arm | Rounds | 7,680-token prefill ms, median [min–max] | Decode tok/s, median [min–max] | MTP acceptance |
 |---|---|---:|---:|---:|---:|
@@ -248,8 +246,8 @@ recorded no completed request during its window; production traffic reached six 
 | Set 1 (all clean) | merged | 4 | 666.5 [651.1–694.0] | 145.7 [139.5–151.9] | 36.6–37.0% |
 | Sets 2–3, clean | release | 5 | 689.7 [673.4–710.6] | 148.7 [141.8–151.7] | 36.4–37.0% |
 | Sets 2–3, clean | merged | 5 | 663.2 [654.1–675.8] | 150.8 [148.2–152.6] | 36.5–36.9% |
-| With production traffic | release | 3 | 698.2 [681.4–703.7] | 149.5 [44.4–151.1] | 36.7–36.9% |
-| With production traffic | merged | 3 | 1042.7 [672.3–3754.1] | 149.7 [28.0–152.5] | 36.5–36.7% |
+| With other traffic | release | 3 | 698.2 [681.4–703.7] | 149.5 [44.4–151.1] | 36.7–36.9% |
+| With other traffic | merged | 3 | 1042.7 [672.3–3754.1] | 149.7 [28.0–152.5] | 36.5–36.7% |
 
 Every sample processed exactly 7,680 prompt tokens or produced 256 completion tokens. The engine's
 CPU use during decode was 0.02–0.05 core in both arms.
@@ -267,15 +265,14 @@ CPU use during decode was 0.02–0.05 core in both arms.
   family is faster, the largest being the FP8 A16 projections (the sliced-K MMA takes 3,023 ms
   against 3,098 ms for the former K-split MMA and SIMT kernels). The GDN replay kernels took 7 ms
   more (per launch, `recurrent_fold` +4% and `recurrent_record` +1%).
-- **Production traffic.** Six rounds overlapped production requests (1–4 each). They spread both
+- **Other traffic.** Six rounds overlapped other engine requests (1–4 each). They spread both
   arms' samples (prefill up to 3.75 s, decode down to 28 tok/s) and are excluded from the
   comparison above.
 
-## v3 port against the production build (2026-09-28)
+## v3 port against the previous release build (2026-09-28)
 
-Measured in a production stop window on the RTX PRO 6000 Blackwell (driver 616.92, 600 W limit,
-ECC on), with Blender and Unreal paused and idle. Each arm is a fresh `ninfer-serve` on a spare
-port with the production flags: `--max-context 131072 --kv-capacity 524288 --max-concurrency 8
+Measured on the RTX PRO 6000 Blackwell (driver 616.92, 600 W limit, ECC on), with other GPU
+applications paused and idle. Each arm is a fresh `ninfer-serve` with the production flags: `--max-context 131072 --kv-capacity 524288 --max-concurrency 8
 --prefill-chunk 2048 --kv-dtype fp8 --vision --spec mtp --draft-tokens 5 --lm-head-draft
 --desktop-reserve-gib 6`. Two rounds alternate the four arms. Per arm and round: one warmup, five
 cold 7,680-token prefills (the `long_niah_8k` fixture trimmed to exactly 7,680 prompt tokens, a
@@ -286,7 +283,7 @@ decode repetitions divided by their wall time. Values are over both rounds (ten 
 
 | Arm | Build | 7,680-token prefill ms, median [min–max] | Decode tok/s, median [min–max] | MTP acceptance | CPU cores in decode | Presence penalty |
 |---|---|---:|---:|---:|---:|---:|
-| Production | installed fork build, v2 artifact, spin | 683.6 [673.5–696.0] | 153.8 [150.7–154.8] | 36.9% | 0.96 | 0 |
+| Previous release | pre-v3 fork build, v2 artifact, spin | 683.6 [673.5–696.0] | 153.8 [150.7–154.8] | 36.9% | 0.96 | 0 |
 | Port | v3 `27426227`, v3 copy, spin (token-fast W4A4 raster) | 683.4 [664.6–698.2] | 148.4 [132.9–153.0] | 36.6% | 0.96–0.98 | 0 |
 | Port, blocking sync | same, `NINFER_CUDA_SYNC=blocking` | 681.0 [670.8–693.9] | 152.9 [149.7–154.0] | 36.8% | 0.03 | 0 |
 | Port, weight-fast raster | same, W4A4 TMA grid in weight-fast order | 678.2 [673.7–681.8] | 153.2 [151.8–154.9] | 36.8% | 0.96–0.97 | 0 |
@@ -296,10 +293,10 @@ as large as any arm difference: the production arm's prefill median moved from 6
 between rounds, and the token-fast and weight-fast ordering of prefill reversed between rounds
 (674.0 vs 677.1 ms, then 689.4 vs 678.4 ms).
 
-- **Parity.** The v3 port prefills the probe in the same time as the production build (683.4 vs
+- **Parity.** The v3 port prefills the probe in the same time as the previous release build (683.4 vs
   683.6 ms). Its decode medians are 152.9–153.2 tok/s in the blocking and weight-fast arms, whose
   decode path is the port's own (a single token tile orders identically under both rasters), against
-  153.8 for production. The token-fast spin arm's lower median comes from slow samples (132.9 tok/s
+  153.8 for the previous release build. The token-fast spin arm's lower median comes from slow samples (132.9 tok/s
   in round one, 141.6–149.9 in round two), not from a code difference.
 - **W4A4 raster (P1).** Weight-fast against the v3 default token-fast: −0.8% prefill median, inside
   the noise and with inconsistent sign across rounds. The fork's 2026-09-10 regression (741.4 to
@@ -429,7 +426,7 @@ identifiers, with prose differences; Python and mathematics hit their output bud
 establish completed-code or final-answer quality. The JSON plans are valid and relevant to the
 request. Greedy text can differ across verification widths because qualified FP8/NVFP4 arithmetic
 routes differ. This integration is not advertised as bitwise lossless, and these performance
-fixtures do not establish Tribuno legal-workflow acceptance. The real checkpoint qualification
+fixtures do not establish legal-workflow acceptance. The real checkpoint qualification
 here is NVFP4; it does not qualify every supported weight profile or production context length.
 
 Local request text, timings and counters were kept under `profiles/bench/dflash2-20260907/final-*`
@@ -465,9 +462,9 @@ Its passing tests therefore do not establish a successful production repair. The
 are too small a sample to rank model quality or attribute errors to speculation.
 
 All four modes passed ordinary Chat Completions, constrained JSON Schema,
-low-thinking output and two-request concurrency checks. Named tool calls also passed in the
-installed build, which included a separate, pending forced-tool implementation; that observation
-does not qualify forced-tool support in the standalone OrcaRouter change. The installed ordinary-decoding route
+low-thinking output and two-request concurrency checks. Named tool calls also passed in a
+build that included a separate, pending forced-tool implementation; that observation
+does not qualify forced-tool support in the standalone OrcaRouter change. The ordinary-decoding route
 also correctly read a synthetic image's counts/shapes, streamed SSE through `[DONE]`, and reused
 2764 tokens through a Responses `previous_response_id` continuation. Source-specific tokenizer
 checks cover 17 independent reference cases; BF16 Linear and LinearTopK pass their independent
