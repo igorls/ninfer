@@ -19,7 +19,9 @@ preserve model semantics and improve the workload they claim to improve.
   dashboard manage engine startup, shutdown and restart, inspect health and device-wide GPU memory,
   edit configuration, hold a desktop memory reserve, adapt KV capacity to the reservation the
   engine can get, and switch between configured model artifacts. The dashboard shows
-  request/client activity, prefix reuse, speculative acceptance and context pressure.
+  request/client activity, prefix reuse, speculative acceptance and context pressure. The
+  Supervisor also serves web frontends such as llama.cpp's web UI, each on its own local origin
+  with the engine API forwarded, so a browser chat needs no proxy setup.
 - **Native structured output.** JSON-object mode, a supported JSON Schema subset and
   `tool_choice: "required"`, constrained during generation through XGrammar, with MTP drafting kept
   under the constraint. OpenAI Chat Completions, Responses and Anthropic Messages translate their

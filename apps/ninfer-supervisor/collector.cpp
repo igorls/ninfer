@@ -7,7 +7,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #endif
-#define CPPHTTPLIB_NO_EXCEPTIONS
+
 #include <httplib.h>
 
 #include <windows.h>

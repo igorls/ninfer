@@ -13,6 +13,8 @@
 
 namespace ninfer::supervisor {
 
+class FrontendHost;
+
 // What the tray icon says at a glance. In monitor-only mode this still reflects
 // the OBSERVED health of the engine rather than a neutral "not my process":
 // EngineChild keeps st_.health current for unmanaged engines too, so the colour
@@ -43,6 +45,11 @@ public:
     void set_dashboard_listen_failed(std::function<bool()> pred) {
         dashboard_listen_failed_ = std::move(pred);
     }
+
+    // The web frontends the menu offers to open. Owned by main and alive for the tray's lifetime.
+    void set_frontends(const FrontendHost* frontends) { frontends_ = frontends; }
+    [[nodiscard]] const FrontendHost* frontends() const noexcept { return frontends_; }
+    void open_frontend(int index) const;
 
     // Repaints the tray icon when the status changes. Called on a timer; cheap
     // because it reads EngineChild's in-memory status and never polls the
@@ -112,6 +119,7 @@ private:
     EngineChild& child_;
     Collector& collector_;
     std::function<bool()> dashboard_listen_failed_;
+    const FrontendHost* frontends_ = nullptr;
     std::string dashboard_url_;
     bool manages_engine_ = true;
     std::string prefs_path_;

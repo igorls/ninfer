@@ -1,6 +1,7 @@
 #include "collector.hpp"
 #include "config.hpp"
 #include "engine_child.hpp"
+#include "frontend_server.hpp"
 #include "logic.hpp"
 #include "run_at_login.hpp"
 #include "server.hpp"
@@ -142,7 +143,11 @@ int main(int argc, char** argv) {
                 ninfer::supervisor::config_file_stamp(cfg.source_path);
         }
         if (!host_override.empty()) { cfg.host = host_override; }
-        if (port_override > 0) { cfg.port = port_override; }
+        if (port_override > 0) {
+            cfg.port = port_override;
+            ninfer::supervisor::validate_frontends(cfg.frontends, cfg.port,
+                                                   cfg.engine.engine_port);
+        }
         if (bind_any) { cfg.bind_any = true; }
         if (monitor_only) { cfg.monitor_only = true; }
         if (cfg.bind_any) {
@@ -237,15 +242,23 @@ int main(int argc, char** argv) {
         });
         collector.start_series();
         ninfer::supervisor::DashboardServer server(cfg, child, collector);
+        // The live engine connection, so a key file or port saved through the dashboard reaches
+        // the frontends' proxies without a supervisor restart.
+        ninfer::supervisor::FrontendHost frontends(cfg.frontends,
+                                                   [&child] { return child.config().engine; });
+        server.set_frontends_provider([&frontends] { return frontends.status_json(); });
         std::thread engine_thread([&] { child.run_loop(); });
         std::thread http_thread([&] { server.run(); });
+        frontends.start();
         std::cout << "ninfer-supervisor dashboard " << url << "\n";
         ninfer::supervisor::TrayIcon tray(child, collector, url,
                                           ninfer::supervisor::manages_engine_process(cfg),
                                           prefs_path, config_abs);
         tray.set_dashboard_listen_failed([&server] { return server.listen_failed(); });
+        tray.set_frontends(&frontends);
         if (announced_login_install) { tray.note_login_installed(); }
         tray.run();
+        frontends.stop();
         server.stop();
         collector.stop_series();
         child.request_quit();

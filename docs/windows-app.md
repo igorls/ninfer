@@ -76,6 +76,41 @@ For local command-line operations:
 `stop` stops the managed engine while leaving the tray/dashboard available. `start` launches the
 installed app if needed, or starts its engine. Dashboard controls provide the same engine actions.
 
+## Web frontends
+
+The Supervisor can serve static web apps, such as llama.cpp's web UI, beside the engine. Each
+frontend gets its own loopback port, and so its own browser origin, which also serves the engine's
+API. A page there needs neither `--cors` nor the engine's API key, and several frontends can run
+side by side without sharing browser storage.
+
+```json
+"frontends": [
+  {"name": "llama.cpp web UI", "dir": "C:/NInfer/frontends/llama-ui", "port": 8100}
+]
+```
+
+`dir` holds a built app with `index.html` at its root. llama.cpp publishes prebuilt web UI assets on
+Hugging Face (`ggml-org/llama-ui`), or build `tools/ui` from the llama.cpp sources. Open a frontend
+from the tray's **Open** entry or from the dashboard's **Connect an app** page.
+
+On a frontend port, the Supervisor:
+
+- serves files from `dir`, with `/` answered by `index.html`;
+- forwards `/v1/*`, `/props`, `/health`, `/systemone` and read-only `/admin/*` requests to the
+  engine, streams each answer as the engine writes it, and cancels the engine request when the
+  browser closes the stream;
+- adds the API key from `engine.api_key_file` when one is configured, replacing any key the page
+  sends;
+- answers a page navigation to any other path with `index.html`, so client-side routes reload, and
+  forwards every other request to the engine, which answers routes it does not have with 404.
+
+Frontends listen on `127.0.0.1` only, because the proxy holds the engine's key. A request whose
+`Host` is not the frontend's loopback address, or whose `Origin` is another site, is refused, and
+engine admin writes such as `POST /admin/quiesce` are not available there. The list is read at
+startup: restart the Supervisor after editing it. Ports must be distinct and differ from the
+Supervisor and engine ports, with at most 16 frontends. A missing folder or a port already in use
+is reported in the tray and the dashboard and does not stop the Supervisor.
+
 ## Request capacity
 
 Settings → Request capacity sizes three related Engine startup values:

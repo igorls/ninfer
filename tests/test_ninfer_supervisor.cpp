@@ -1,10 +1,17 @@
 #include "logic.hpp"
 #include "config.hpp"
+#include "frontend_server.hpp"
 #include "insights.hpp"
 #include "tray_prefs.hpp"
 #include "reserve_budget.hpp"
 
+#include <httplib.h>
+
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <future>
+#include <thread>
 #include <filesystem>
 #include <fstream>
 #include <cmath>
@@ -1403,6 +1410,374 @@ int test_kv_capacity_adaptation() {
     return f;
 }
 
+
+int test_frontend_config() {
+    using namespace ninfer::supervisor;
+    int f = 0;
+    const std::string base = R"({"engine":{"executable":"x.exe","engine_port":8010},
+        "supervisor":{"port":8099},)";
+    const auto cfg = load_config_json(
+        base + R"("frontends":[{"name":"llama.cpp web UI","dir":"C:/ui","port":8100},
+                               {"name":"Arcade","dir":"C:/arcade","port":8101}]})");
+    f += check(cfg.frontends.size() == 2 && cfg.frontends[0].name == "llama.cpp web UI" &&
+                   cfg.frontends[0].dir == "C:/ui" && cfg.frontends[1].port == 8101,
+               "frontends parse");
+    const auto again = load_config_json(config_to_json(cfg).dump());
+    f += check(again.frontends.size() == 2 && again.frontends[1].name == "Arcade" &&
+                   again.frontends[1].dir == "C:/arcade" && again.frontends[1].port == 8101,
+               "frontends survive a dashboard save");
+    const auto none = load_config_json(R"({"engine":{"executable":"x.exe"}})");
+    f += check(none.frontends.empty() && !config_to_json(none).contains("frontends"),
+               "a config without frontends is not rewritten with an empty list");
+    const auto rejects = [&](const std::string& frontends, const std::string& label) {
+        try {
+            (void)load_config_json(base + R"("frontends":)" + frontends + "}");
+        } catch (const std::invalid_argument&) { return 0; }
+        return fail(label);
+    };
+    f += rejects(R"([{"name":"a","dir":"d"}])", "frontend without a port loaded");
+    f += rejects(R"([{"name":"a","dir":"d","port":0}])", "frontend port 0 loaded");
+    f += rejects(R"([{"name":"a","dir":"d","port":70000}])", "frontend port above 65535 loaded");
+    f += rejects(R"([{"name":"","dir":"d","port":8100}])", "frontend without a name loaded");
+    f += rejects(R"([{"name":"a","dir":"","port":8100}])", "frontend without a dir loaded");
+    f += rejects(R"([{"name":"a","dir":"d","port":8099}])", "frontend on the supervisor port loaded");
+    f += rejects(R"([{"name":"a","dir":"d","port":8010}])", "frontend on the engine port loaded");
+    f += rejects(R"([{"name":"a","dir":"d","port":8100},{"name":"b","dir":"e","port":8100}])",
+                 "two frontends on one port loaded");
+    f += rejects(R"({"name":"a"})", "frontends that are not an array loaded");
+    std::string many = "[";
+    for (int i = 0; i <= static_cast<int>(kMaxFrontends); ++i) {
+        many += std::string(i ? "," : "") + R"({"name":"f","dir":"d","port":)" +
+                std::to_string(9000 + i) + "}";
+    }
+    f += rejects(many + "]", "more frontends than the tray can list loaded");
+    const auto open = decode_tray_command(tray_cmd_frontend(3));
+    f += check(open.action == TrayAction::OpenFrontend && open.value == 3,
+               "frontend tray id round-trips");
+    f += check(decode_tray_command(kCmdFrontendEnd).action == TrayAction::None,
+               "frontend id past the cap is not a command");
+    return f;
+}
+
+int test_frontend_routing() {
+    using namespace ninfer::supervisor;
+    int f = 0;
+    for (const char* path : {"/v1", "/v1/models", "/v1/chat/completions", "/props", "/health",
+                             "/systemone", "/admin/vram"}) {
+        f += check(is_engine_api_path(path), std::string(path) + " is an engine route");
+    }
+    for (const char* path : {"/", "/v1x", "/props2", "/chat/abc", "/slots", "/_app/a.js"}) {
+        f += check(!is_engine_api_path(path), std::string(path) + " is not an engine route");
+    }
+    f += check(is_page_navigation("GET", "text/html,application/xhtml+xml,*/*;q=0.8") &&
+                   !is_page_navigation("GET", "*/*") && !is_page_navigation("POST", "text/html"),
+               "only document loads fall back to index.html");
+    f += check(!frontend_method_allowed("POST", "/admin/quiesce") &&
+                   frontend_method_allowed("GET", "/admin/vram") &&
+                   frontend_method_allowed("POST", "/v1/chat/completions"),
+               "admin routes are read-only through a frontend");
+    f += check(frontend_origin_allowed("", 8100) &&
+                   frontend_origin_allowed("http://127.0.0.1:8100", 8100) &&
+                   frontend_origin_allowed("http://localhost:8100", 8100) &&
+                   !frontend_origin_allowed("http://127.0.0.1:8101", 8100) &&
+                   !frontend_origin_allowed("https://example.com", 8100) &&
+                   !frontend_origin_allowed("null", 8100),
+               "only the frontend's own origin may call through it");
+    f += check(!forward_request_header("Host") && !forward_request_header("COOKIE") &&
+                   !forward_request_header("Origin") && forward_request_header("Content-Type") &&
+                   forward_request_header("Accept"),
+               "request header filter");
+    f += check(frontend_replaces_credentials("authorization", true) &&
+                   frontend_replaces_credentials("X-Api-Key", true) &&
+                   !frontend_replaces_credentials("Authorization", false),
+               "the supervisor's key replaces the page's credentials only when it has one");
+    return f;
+}
+
+// A stand-in engine on an ephemeral port: echoes what the proxy forwards, streams SSE in two
+// parts with a gate between them, and records when a client disconnects mid-stream.
+struct FakeEngine {
+    httplib::Server server;
+    int port = 0;
+    std::thread thread;
+    std::promise<void> release_second;
+    std::shared_future<void> second = release_second.get_future().share();
+    std::atomic<bool> stream_cancelled{false};
+    std::atomic<int> chat_calls{0};
+    std::atomic<bool> quiesce_called{false};
+    std::atomic<bool> hang_entered{false};
+    std::atomic<bool> hang_release{false};
+
+    FakeEngine() {
+        server.Get("/v1/models", [](const httplib::Request& req, httplib::Response& res) {
+            res.set_header("x-request-id", "req-1");
+            res.set_content(nlohmann::json{{"auth", req.get_header_value("Authorization")},
+                                           {"cookie", req.has_header("Cookie")},
+                                           {"origin", req.has_header("Origin")},
+                                           {"target", req.target}}
+                                .dump(),
+                            "application/json");
+        });
+        server.Get("/v1/nope", [](const httplib::Request&, httplib::Response& res) {
+            res.status = 404;
+            res.set_content(R"({"error":{"message":"engine 404"}})", "application/json");
+        });
+        server.Get("/v1/delayed", [](const httplib::Request&, httplib::Response& res) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(600));
+            res.set_content(R"({"late":true})", "application/json");
+        });
+        // A long answer without streaming: no headers until the test lets it finish.
+        server.Get("/v1/hang", [this](const httplib::Request&, httplib::Response& res) {
+            hang_entered = true;
+            for (int i = 0; i < 300 && !hang_release.load(); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            res.set_content("{}", "application/json");
+        });
+        server.Get("/v1/empty", [](const httplib::Request&, httplib::Response& res) {
+            res.status = 404;
+            res.set_header("Access-Control-Allow-Origin", "*");
+        });
+        server.Get("/admin/vram", [](const httplib::Request&, httplib::Response& res) {
+            res.set_content(R"({"kv":{}})", "application/json");
+        });
+        server.Post("/admin/quiesce", [this](const httplib::Request&, httplib::Response& res) {
+            quiesce_called = true;
+            res.set_content("{}", "application/json");
+        });
+        server.Post("/v1/chat/completions", [this](const httplib::Request& req, httplib::Response& res) {
+            ++chat_calls;
+            const std::string body = req.body;
+            res.set_chunked_content_provider(
+                "text/event-stream",
+                [this, body, step = 0](std::size_t, httplib::DataSink& sink) mutable {
+                    if (step++ == 0) {
+                        const std::string first = "data: one " + body + "\n\n";
+                        sink.write(first.data(), first.size());
+                        return true;
+                    }
+                    // A proxy that buffers the response never delivers "one" to the client,
+                    // so the client never opens the gate and this branch writes "timeout".
+                    const bool released =
+                        second.wait_for(std::chrono::seconds(10)) == std::future_status::ready;
+                    const std::string last = released ? "data: two\n\n" : "data: timeout\n\n";
+                    sink.write(last.data(), last.size());
+                    sink.done();
+                    return true;
+                });
+        });
+        server.Get("/v1/slow", [this](const httplib::Request&, httplib::Response& res) {
+            res.set_chunked_content_provider(
+                "text/event-stream",
+                [this, start = std::chrono::steady_clock::now()](std::size_t, httplib::DataSink& sink) {
+                    if (std::chrono::steady_clock::now() - start > std::chrono::seconds(15)) {
+                        sink.done();
+                        return true;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    const std::string tick = "data: tick\n\n";
+                    if (!sink.write(tick.data(), tick.size())) {
+                        stream_cancelled = true;
+                        return false;
+                    }
+                    return true;
+                },
+                [this](bool success) {
+                    if (!success) { stream_cancelled = true; }
+                });
+        });
+        port   = server.bind_to_any_port("127.0.0.1");
+        thread = std::thread([this] { server.listen_after_bind(); });
+    }
+    ~FakeEngine() {
+        server.stop();
+        if (thread.joinable()) { thread.join(); }
+    }
+};
+
+int test_frontend_proxy() {
+    using namespace ninfer::supervisor;
+    namespace fs = std::filesystem;
+    int f = 0;
+    const fs::path dir = fs::temp_directory_path() / "ninfer_frontend_test";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+    std::ofstream(dir / "index.html", std::ios::binary) << "<html>frontend index</html>";
+    std::ofstream(dir / "app.js", std::ios::binary) << "console.log(1);";
+    std::ofstream(dir / "key.txt", std::ios::binary) << "test-key\n";
+
+    FakeEngine engine;
+    EngineSpec spec;
+    spec.engine_host  = "127.0.0.1";
+    spec.engine_port  = engine.port;
+    spec.api_key_file = (dir / "key.txt").string();
+    FrontendServer frontend(FrontendSpec{"test", dir.string(), 0}, [spec] { return spec; });
+    if (!frontend.bind()) { return fail("frontend did not bind: " + frontend.status_json().dump()); }
+    std::thread serving([&] { frontend.run(); });
+    const int port                = frontend.bound_port();
+    const std::string self_origin = "http://127.0.0.1:" + std::to_string(port);
+
+    httplib::Client client("127.0.0.1", port);
+    client.set_read_timeout(std::chrono::seconds(20));
+    const auto status_of = [](const httplib::Result& r) { return r ? r->status : -1; };
+    const auto body_of   = [](const httplib::Result& r) { return r ? r->body : std::string(); };
+
+    auto root = client.Get("/");
+    f += check(status_of(root) == 200 && body_of(root) == "<html>frontend index</html>",
+               "/ serves index.html");
+    auto script = client.Get("/app.js");
+    f += check(status_of(script) == 200 && body_of(script) == "console.log(1);" &&
+                   script->get_header_value("Content-Type").find("javascript") != std::string::npos,
+               "a static file is served with its MIME type");
+    auto route = client.Get("/chat/abc", httplib::Headers{{"Accept", "text/html"}});
+    f += check(status_of(route) == 200 && body_of(route) == "<html>frontend index</html>",
+               "a client-side route falls back to index.html");
+    auto missing = client.Get("/missing.js", httplib::Headers{{"Accept", "*/*"}});
+    f += check(status_of(missing) == 404 &&
+                   body_of(missing).find("frontend index") == std::string::npos,
+               "a missing asset is not answered with index.html");
+    auto nope = client.Get("/v1/nope", httplib::Headers{{"Accept", "text/html"}});
+    f += check(status_of(nope) == 404 && body_of(nope).find("engine 404") != std::string::npos,
+               "an unknown API path keeps the engine's JSON error");
+    auto models = client.Get("/v1/models?x=1", httplib::Headers{{"Authorization", "Bearer wrong"},
+                                                {"Cookie", "a=b"},
+                                                {"Origin", self_origin}});
+    const auto echoed = nlohmann::json::parse(body_of(models), nullptr, false);
+    f += check(status_of(models) == 200 && echoed.is_object() &&
+                   echoed.value("auth", "") == "Bearer test-key" && !echoed.value("cookie", true) &&
+                   !echoed.value("origin", true) && echoed.value("target", "") == "/v1/models?x=1" &&
+                   models->get_header_value("x-request-id") == "req-1",
+               "the proxy forwards the query, adds the key and drops page credentials: " +
+                   body_of(models));
+    auto delayed = client.Get("/v1/delayed");
+    f += check(status_of(delayed) == 200 && body_of(delayed) == R"({"late":true})",
+               "an answer whose headers take several polls still arrives");
+    auto empty = client.Get("/v1/empty");
+    f += check(status_of(empty) == 404 && body_of(empty).empty() &&
+                   !empty->has_header("Access-Control-Allow-Origin") &&
+                   !empty->has_header("Content-Type"),
+               "an empty engine answer stays empty, untyped and without CORS headers");
+    auto vram = client.Get("/admin/vram");
+    f += check(status_of(vram) == 200, "engine admin reads are forwarded");
+
+    // Streaming: the client opens the engine's gate only after it has received the first event.
+    std::string streamed;
+    bool opened = false;
+    httplib::Request chat;
+    chat.method           = "POST";
+    chat.path             = "/v1/chat/completions";
+    chat.body             = "hello";
+    chat.headers          = {{"Content-Type", "application/json"}, {"Origin", self_origin}};
+    chat.content_receiver = [&](const char* data, std::size_t size, std::size_t, std::size_t) {
+        streamed.append(data, size);
+        if (!opened && streamed.find("data: one hello") != std::string::npos) {
+            opened = true;
+            engine.release_second.set_value();
+        }
+        return true;
+    };
+    auto streamed_result = client.send(chat);
+    f += check(status_of(streamed_result) == 200 && opened &&
+                   streamed.find("data: two") != std::string::npos &&
+                   streamed.find("timeout") == std::string::npos,
+               "SSE reaches the browser as the engine writes it: " + streamed);
+    f += check(streamed_result &&
+                   streamed_result->get_header_value("Content-Type") == "text/event-stream",
+               "the engine's content type is kept");
+
+    // Cancellation: a client that leaves mid-stream ends the engine request.
+    int ticks = 0;
+    httplib::Request slow;
+    slow.method           = "GET";
+    slow.path             = "/v1/slow";
+    slow.content_receiver = [&](const char*, std::size_t, std::size_t, std::size_t) {
+        return ++ticks < 3;
+    };
+    (void)client.send(slow);
+    for (int i = 0; i < 100 && !engine.stream_cancelled.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    f += check(engine.stream_cancelled.load(), "a closed browser stream cancels the engine request");
+
+    auto rebound = client.Get("/v1/models", httplib::Headers{{"Host", "attacker.example:" + std::to_string(port)}});
+    f += check(status_of(rebound) == 403, "a rebinding Host is refused");
+    const int calls_before = engine.chat_calls.load();
+    auto foreign = client.Post("/v1/chat/completions", httplib::Headers{{"Origin", "https://example.com"}}, "x",
+                               "application/json");
+    f += check(status_of(foreign) == 403 && engine.chat_calls.load() == calls_before,
+               "another site's page cannot call the engine through the frontend");
+    auto quiesce = client.Post("/admin/quiesce", "", "application/json");
+    f += check(status_of(quiesce) == 403 && !engine.quiesce_called.load(),
+               "engine admin writes stay off the frontend port");
+
+    // A second frontend on the same port reports it instead of sharing the port.
+    FrontendServer clash(FrontendSpec{"clash", dir.string(), port}, [spec] { return spec; });
+    f += check(!clash.bind() && clash.state() == FrontendState::PortInUse,
+               "a taken port is reported, not shared");
+
+    // Quitting while a request waits for the engine's answer ends it instead of waiting.
+    std::thread reader([&] {
+        httplib::Client late("127.0.0.1", port);
+        late.set_read_timeout(std::chrono::seconds(20));
+        (void)late.Get("/v1/hang");
+    });
+    for (int i = 0; i < 100 && !engine.hang_entered.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const auto stop_start = std::chrono::steady_clock::now();
+    frontend.stop();
+    if (serving.joinable()) { serving.join(); }
+    const auto stop_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - stop_start)
+                             .count();
+    engine.hang_release = true;
+    if (reader.joinable()) { reader.join(); }
+    f += check(engine.hang_entered.load() && stop_ms < 3000,
+               "stop ends a request still waiting for the engine (" + std::to_string(stop_ms) +
+                   " ms)");
+
+    // The engine is down: the browser gets a JSON 502, not a hang.
+    // A port that was free a moment ago: bind_to_any_port also listens, so the probe has to run
+    // and stop before its socket closes.
+    EngineSpec down = spec;
+    {
+        httplib::Server probe;
+        down.engine_port = probe.bind_to_any_port("127.0.0.1");
+        std::thread probe_thread([&] { probe.listen_after_bind(); });
+        while (!probe.is_running()) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
+        probe.stop();
+        probe_thread.join();
+    }
+    FrontendServer orphan(FrontendSpec{"orphan", dir.string(), 0}, [down] { return down; });
+    if (orphan.bind()) {
+        std::thread orphan_thread([&] { orphan.run(); });
+        httplib::Client orphan_client("127.0.0.1", orphan.bound_port());
+        orphan_client.set_read_timeout(std::chrono::seconds(30));
+        auto unreachable = orphan_client.Get("/v1/models");
+        f += check(status_of(unreachable) == 502 &&
+                       body_of(unreachable).find("not reachable") != std::string::npos,
+                   "an unreachable engine is a JSON 502");
+        orphan.stop();
+        if (orphan_thread.joinable()) { orphan_thread.join(); }
+    } else {
+        f += fail("orphan frontend did not bind");
+    }
+
+    FrontendServer missing_dir(FrontendSpec{"gone", (dir / "nope").string(), 0},
+                               [spec] { return spec; });
+    f += check(!missing_dir.bind() && missing_dir.state() == FrontendState::AssetsMissing &&
+                   missing_dir.status_json().value("reason", "") == "directory not found",
+               "a missing directory is reported and does not bind");
+    fs::remove(dir / "index.html", ec);
+    FrontendServer no_index(FrontendSpec{"bare", dir.string(), 0}, [spec] { return spec; });
+    f += check(!no_index.bind() && no_index.state() == FrontendState::AssetsMissing,
+               "a directory without index.html is reported");
+    fs::remove_all(dir, ec);
+    return f;
+}
+
 int main() {
     int failures = 0;
     failures += test_kv_capacity_adaptation();
@@ -1445,6 +1820,9 @@ int main() {
     failures += test_single_instance_name();
     failures += test_run_at_login_command();
     failures += test_tray_prefs();
+    failures += test_frontend_config();
+    failures += test_frontend_routing();
+    failures += test_frontend_proxy();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }

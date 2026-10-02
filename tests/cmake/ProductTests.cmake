@@ -72,7 +72,11 @@ ninfer_add_test(ninfer_http_transport_test
 if(WIN32)
   ninfer_add_test(ninfer_supervisor_test
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_ninfer_supervisor.cpp"
+            "${PROJECT_SOURCE_DIR}/apps/ninfer-supervisor/frontend_server.cpp"
     LIBRARIES ninfer::httplib ninfer::json)
   target_include_directories(ninfer_supervisor_test PRIVATE
     ${PROJECT_SOURCE_DIR}/apps/ninfer-supervisor)
+  # Same httplib configuration as the supervisor, whose frontend server this test links.
+  target_compile_definitions(ninfer_supervisor_test PRIVATE
+    CPPHTTPLIB_NO_EXCEPTIONS WIN32_LEAN_AND_MEAN NOMINMAX)
 endif()
