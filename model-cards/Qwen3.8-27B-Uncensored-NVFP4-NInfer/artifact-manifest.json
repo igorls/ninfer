@@ -3,12 +3,13 @@
   "schema_version": 1,
   "artifact": {
     "filename": "qwen3_8_27b_orcarouter_nvfp4.ninfer",
-    "bytes": 26268462848,
-    "sha256": "003f8c65175e262e66f83a803f7b1d286f7226ede0e672d3b3e5c4b6c75f3e7f",
-    "container_version": 2,
+    "bytes": 26268683012,
+    "sha256": "50f2e407a2a6ee6b049a41de2724119cb4bbcb189ba14445babdd2ff5d56a384",
+    "container_version": 3,
     "model_id": "qwen3.8-27b-orcarouter",
     "weights_id": "nvfp4",
-    "target_key": "qwen3_8_27b"
+    "target_key": "qwen3_8_27b",
+    "artifact_id": "a962e5d5ee46488c8b760f91b7bc5ffe"
   },
   "source": {
     "base": {
@@ -25,12 +26,12 @@
   "conversion": {
     "recipe_id": "qwen3_8_27b_orcarouter_nvfp4-v1",
     "converter_repository": "https://github.com/igorls/ninfer",
-    "implementation_revision": "91ce2f2c73c27ffbff3bd7c43a319f295e9597cc",
-    "recorded_checkout_base": "6d9bb5365a637d3d9aabf6f6a4c147f3aa3a6590",
-    "note": "Converted with then-uncommitted implementation now included in implementation_revision. Checkpoint bytes unchanged for release.",
+    "implementation_revision": "6ad46d87fbeef4573e8ff7fcd59a534e5666fb0a",
+    "recorded_checkout_base": "6ad46d87fbeef4573e8ff7fcd59a534e5666fb0a",
+    "note": "Re-converted with recipe qwen3_8_27b_orcarouter_nvfp4 for NInfer v3 (upgrade_ninfer_v2_to_v3.py rejects this identity).",
     "environment": {
       "python": "3.14.5",
-      "platform": "Windows-11-10.0.29576-SP0",
+      "platform": null,
       "torch": "2.13.0+cpu",
       "torch_cuda": null,
       "resolved_device": "cpu",
@@ -41,47 +42,45 @@
       "text/token_embedding"
     ],
     "report": "qwen3_8_27b_orcarouter_nvfp4.ninfer.conversion.json",
-    "report_local_paths_redacted": true
+    "report_local_paths_redacted": true,
+    "elapsed_seconds": 111.65766969999822
   },
   "runtime": {
     "repository": "https://github.com/igorls/ninfer",
-    "minimum_revision": "91ce2f2c73c27ffbff3bd7c43a319f295e9597cc",
+    "minimum_revision": "6ad46d87fbeef4573e8ff7fcd59a534e5666fb0a",
     "cuda_architecture": "sm_120a",
     "qualified_platform": "Windows",
     "qualified_gpu": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition 96 GB",
     "ordinary_decode": true,
     "vision": true,
     "mtp": true,
-    "dflash2": true
+    "dflash2": true,
+    "container_version": 3
   },
   "inventory": {
-    "count": 1190,
-    "tensors": 1184,
+    "count": 1246,
+    "tensors": 1240,
     "resources": 6,
     "formats": {
-      "BF16": 581,
-      "FP32": 208,
-      "FP8_E4M3FN_ROW_BF16S": 144,
-      "I32": 1,
-      "NVFP4": 112,
-      "Q4G64_F16S": 55,
-      "Q5G64_F16S": 54,
-      "Q6G64_F16S": 1,
-      "W8G32_F16S": 28
+      "bf16": 581,
+      "fp32": 264,
+      "fp8_e4m3fn_row_bf16": 144,
+      "int32": 1,
+      "nvfp4": 112,
+      "q4_g64_fp16": 55,
+      "q5_g64_fp16": 54,
+      "q6_g64_fp16": 1,
+      "q8_g32_fp16": 28
     },
     "layouts": {
-      "blockscale-k16-m128x4-v1": 112,
-      "contiguous-le-v1": 790,
-      "row-scale-v1": 144,
-      "row-split-k128-v1": 138
+      "block_scale_k16_m128x4_v1": 112,
+      "contiguous_le_v1": 846,
+      "row_scale_v1": 144,
+      "row_split_k128_v1": 138
     },
-    "encodings": {
-      "raw-bytes-v1": 6
-    },
-    "tensor_bytes": 26248203552,
-    "resource_bytes": 20000488,
-    "object_bytes": 26268204040,
-    "payload_span_bytes": 26268274432,
-    "alignment_bytes": 70392
+    "bindings": 1513,
+    "uses": 844,
+    "payload_bytes": 26268289796,
+    "file_bytes": 26268683012
   }
 }
