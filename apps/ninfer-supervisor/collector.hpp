@@ -123,6 +123,8 @@ private:
     // Forgets everything derived from the request log, for a file that was replaced or removed.
     // Caller holds log_mu_.
     void reset_request_log_locked();
+    // Caller holds mu_.
+    void reset_live_request_log_locked();
     void observe_loop();
     [[nodiscard]] std::int64_t poll_request_log_mtime() const;
     void record_transitions(const Collected& snap);

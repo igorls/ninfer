@@ -275,6 +275,14 @@ int test_insights_honesty() {
     f += check(typed.at("insights").at(0).at("availability") == "unavailable",
                "type-key records do not count as request_done");
 
+    const auto malformed_done = analyze_request_log_jsonl(
+        R"({"event":"request_done","timestamp_unix_ms":1,"request":{"request_id":1},"result":{"prompt_tokens":"12"}})"
+        "\n",
+        "mem");
+    f += check(malformed_done.at("insights").at(0).at("id") == "source.request_log" &&
+                   malformed_done.at("insights").at(0).at("availability") == "unavailable",
+               "wrong-typed request_done numeric fields are skipped before aggregation");
+
     const char* jsonl =
         R"({"event":"request_start","server_instance_id":"a","timestamp_unix_ms":1000,"request":{"request_id":1,"enable_thinking":true,"tool_count":0,"requested_output_tokens":8}})"
         "\n"
@@ -1138,6 +1146,19 @@ int test_series_ring() {
     const auto e = r.events();
     f += check(e.size() == 2 && e[0].kind == "engine_down" && e[1].kind == "engine_up",
                "event ring cap");
+    return f;
+}
+
+int test_throughput_ring_reset() {
+    ninfer::supervisor::ThroughputRing ring(2);
+    int f = 0;
+    ring.push({1, 2, 3, 4});
+    ring.push({2, 3, 4, 5});
+    ring.clear();
+    f += check(ring.size() == 0 && ring.samples().empty(), "throughput reset drops old samples");
+    ring.push({3, 4, 5, 6});
+    f += check(ring.size() == 1 && ring.samples().front().t_ms == 3,
+               "throughput ring accepts samples after reset");
     return f;
 }
 
@@ -2121,6 +2142,7 @@ int main() {
     failures += test_jsonl_event_key();
     failures += test_series_persist();
     failures += test_series_ring();
+    failures += test_throughput_ring_reset();
     failures += test_health_threshold();
     failures += test_with_desktop_reserve();
     failures += test_model_reserve_budget();

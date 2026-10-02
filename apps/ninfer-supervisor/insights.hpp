@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <deque>
 #include <iomanip>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <sstream>
@@ -62,6 +63,46 @@ inline double json_f64(const nlohmann::json& j, const char* key, double fallback
     const auto& v = j.at(key);
     if (v.is_number()) { return v.get<double>(); }
     return fallback;
+}
+
+inline bool has_valid_optional_numbers(const nlohmann::json& object,
+                                       std::initializer_list<const char*> keys) {
+    if (!object.is_object()) { return false; }
+    for (const char* key : keys) {
+        if (object.contains(key) && !object.at(key).is_number()) { return false; }
+    }
+    return true;
+}
+
+inline bool request_done_numeric_fields_valid(const nlohmann::json& done) {
+    if (done.contains("timestamp_unix_ms") && !done.at("timestamp_unix_ms").is_number()) {
+        return false;
+    }
+    const auto valid_section = [&](const char* name, std::initializer_list<const char*> keys) {
+        return !done.contains(name) || has_valid_optional_numbers(done.at(name), keys);
+    };
+    if (!valid_section("request", {"request_id", "tool_count", "requested_output_tokens",
+                                   "message_count", "media_item_count"}) ||
+        !valid_section("result", {"completion_tokens", "prompt_tokens", "prefix_cache_hit_tokens",
+                                  "computed_prefill_tokens"}) ||
+        !valid_section("timings_seconds",
+                       {"total", "prepare", "prefill", "decode", "vision", "ttft"})) {
+        return false;
+    }
+    if (!done.contains("speculative") || !done.at("speculative").is_object()) { return true; }
+    const auto& speculative = done.at("speculative");
+    if (!has_valid_optional_numbers(speculative, {"draft_window", "drafted_tokens",
+                                                  "accepted_tokens", "fallback_steps", "rounds"})) {
+        return false;
+    }
+    if (speculative.contains("accepted_per_position")) {
+        const auto& positions = speculative.at("accepted_per_position");
+        if (!positions.is_array()) { return false; }
+        for (const auto& position : positions) {
+            if (!position.is_number()) { return false; }
+        }
+    }
+    return true;
 }
 
 // Insights over the engine request log (schema_version 10 and later), folded one record at a time
@@ -286,6 +327,7 @@ inline void RequestLogInsights::fold_record(const nlohmann::json& j) {
     if (ev == j.end()) { return; }
     const std::string event = ev->get<std::string>();
     if (event.empty()) { return; }
+    if (event == "request_done" && !request_done_numeric_fields_valid(j)) { return; }
     ++parsed_;
     const auto ts = json_i64(j, "timestamp_unix_ms");
     if (tmin_ == 0 || ts < tmin_) { tmin_ = ts; }
