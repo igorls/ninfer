@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -141,5 +142,15 @@ make_systemone_response_json(const SystemOneRequest& request, const std::string&
 // TypeSafe's `GET /v1/models` entries: the served id and the jev aliases a TypeSafe SDK sends.
 [[nodiscard]] nlohmann::ordered_json systemone_model_entries(std::string_view served_model_id,
                                                              std::int64_t loaded_unix_seconds);
+
+struct RequestLifetime;
+
+// One in-process System One call: answers in question order, billed usage, and the first
+// branch's lifetime so the HTTP response can outlive the handler's stack.
+struct SystemOneExecution {
+    std::vector<SystemOneAnswer> answers;
+    SystemOneUsage usage;
+    std::shared_ptr<RequestLifetime> lifetime;
+};
 
 } // namespace ninfer::serve

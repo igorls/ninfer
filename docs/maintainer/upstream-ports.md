@@ -275,6 +275,7 @@ were produced with recipe overrides and are not committed recipes.
 | `preserve_thinking` server default (`3cb5e718`) | unset, so the Qwen3.8 template keeps returned closed-turn reasoning | `false` unless a request or `--preserve-thinking` asks | Production parity (Igor, 2026-09-28). Keeping the template default is a later change to agree with bentokit |
 | Unsupported reasoning effort | passed to the chat template, whose `raise_exception` comes back as HTTP 400 `invalid_prompt` on `messages` with the interpreter's source trace | checked before rendering against the efforts observed from the loaded template at startup: HTTP 400 `reasoning_effort_not_supported` on the effort field, listing the supported efforts; template errors carry no trace | Restores the pre-v3 fork contract (`8264394c`) on Chat Completions, Responses and Anthropic Messages; the protocol vocabulary is unchanged |
 | Continued final assistant turn (`737b570a`) | rendered without a think block | rendered behind the empty think block the generation prompt carries (thinking off) | `/v1/score` text form and assistant prefill are conditioned like a generated answer |
+| `POST /v1/rerank` | no rerank route | Jina-shaped rerank scored by an in-process System One Choice; `GET /v1/models` advertises `ninfer-choice-rerank-v1`; missing or wrong API key is HTTP 401 with the OpenAI error object | Bentokit Concierge swaps backends against this contract (Igor, 2026-10-02). `return_documents` defaults to true. Choice labels stay off the public response |
 
 ## Dropped
 

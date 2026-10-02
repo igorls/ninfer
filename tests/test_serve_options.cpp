@@ -158,6 +158,13 @@ int main() {
         "server defaults unexpectedly override registered model sampling");
     failures += check(resolve_public_model_id(defaults, "artifact-model") == "artifact-model",
                       "artifact model id was not selected by default");
+    failures += check(defaults.rerank_weight_exact == kDefaultRerankWeightExact &&
+                          defaults.rerank_weight_substitute == kDefaultRerankWeightSubstitute &&
+                          defaults.rerank_weight_complement == kDefaultRerankWeightComplement &&
+                          defaults.rerank_weight_irrelevant == kDefaultRerankWeightIrrelevant &&
+                          defaults.rerank_max_documents == kDefaultRerankMaxDocuments &&
+                          defaults.rerank_model_id == kDefaultRerankModelId,
+                      "rerank option defaults changed");
 
     failures += check(defaults.desktop_reserve_bytes == ninfer::kDefaultDesktopReserveBytes &&
                           !defaults.clamp_concurrency_to_pool,
@@ -213,6 +220,36 @@ int main() {
         (void)parse({"ninfer-serve", "model.ninfer", "--model-id", ""});
     } catch (const std::invalid_argument&) { empty_model_id_rejected = true; }
     failures += check(empty_model_id_rejected, "empty --model-id was accepted");
+
+    const ServeOptions rerank = parse({"ninfer-serve", "model.ninfer", "--rerank-weight-exact", "0.5",
+                                       "--rerank-weight-substitute", "0.4", "--rerank-weight-complement",
+                                       "0.1", "--rerank-weight-irrelevant", "-0.2",
+                                       "--rerank-max-documents", "32", "--rerank-model-id",
+                                       "custom-rerank"});
+    failures += check(rerank.rerank_weight_exact == 0.5 && rerank.rerank_weight_substitute == 0.4 &&
+                          rerank.rerank_weight_complement == 0.1 &&
+                          rerank.rerank_weight_irrelevant == -0.2 &&
+                          rerank.rerank_max_documents == 32 && rerank.rerank_model_id == "custom-rerank",
+                      "rerank flags did not reach serving options");
+    failures += check(serve_usage_text("ninfer-serve").find("--rerank-model-id") != std::string::npos &&
+                          serve_usage_text("ninfer-serve").find("ninfer-choice-rerank-v1") !=
+                              std::string::npos,
+                      "serve help omits the rerank contract");
+    bool empty_rerank_id_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--rerank-model-id", ""});
+    } catch (const std::invalid_argument&) { empty_rerank_id_rejected = true; }
+    bool zero_rerank_documents_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--rerank-max-documents", "0"});
+    } catch (const std::invalid_argument&) { zero_rerank_documents_rejected = true; }
+    bool huge_rerank_documents_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--rerank-max-documents", "8193"});
+    } catch (const std::invalid_argument&) { huge_rerank_documents_rejected = true; }
+    failures += check(empty_rerank_id_rejected && zero_rerank_documents_rejected &&
+                          huge_rerank_documents_rejected,
+                      "an empty rerank model id or a document cap outside 1..8192 was accepted");
 
     const ServeOptions dflash = parse({"ninfer-serve", "model.ninfer", "--spec", "dflash",
                                        "--draft-tokens", "15", "--lm-head-draft"});

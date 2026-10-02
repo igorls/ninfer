@@ -36,6 +36,9 @@ preserve model semantics and improve the workload they claim to improve.
   decisions from next-token probabilities with Jev's request, answer and error contract, so an
   application built on the official TypeSafe SDKs switches with its base URL alone. The
   [decision arcade](docs/decision-arcade.md) exercises it interactively.
+- **Document rerank.** `POST /v1/rerank` is a Jina-shaped rerank route. It scores each document
+  with an in-process System One Choice and returns relevance scores under the stable model id
+  `ninfer-choice-rerank-v1`, which `GET /v1/models` advertises. `return_documents` defaults to true.
 - **Read-only cache participation.** `prompt_cache_read_only` lets a one-shot request start from a
   published prefix while capturing no checkpoint and publishing nothing, so bursts of classification
   requests cannot evict other conversations' cached state; such a request prefills in one pass.

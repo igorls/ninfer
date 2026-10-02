@@ -57,11 +57,12 @@ selected for this process.
 | Method and path | Behavior |
 |---|---|
 | `GET /health` | Engine readiness |
-| `GET /v1/models` | configured OpenAI model alias and effective `max_model_len` |
-| `GET /v1/models/{id}` | lookup of the configured alias and effective `max_model_len` |
+| `GET /v1/models` | configured OpenAI model alias, advertised rerank id, and effective `max_model_len` |
+| `GET /v1/models/{id}` | lookup of the configured alias or advertised rerank id, and effective `max_model_len` |
 | `GET /props` | llama.cpp-compatible server properties for llama.cpp's web UI |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
 | `POST /v1/score` | closed-set scoring of isolated questions against one shared prefix |
+| `POST /v1/rerank` | Jina-shaped document reranking scored by an in-process System One Choice |
 | `POST /v1/responses` | OpenAI Responses Core generation, state, typed Items, and SSE |
 | `POST /v1/responses/input_tokens` | Responses prompt-token count without generation |
 | `GET /v1/responses/{id}` | retrieve a locally stored terminal Response |
@@ -1156,7 +1157,9 @@ TYPESAFE_API_KEY=local-secret   # the server's --api-key; any printable value wh
 
 `GET /v1/models` answers both SDK families from one body: `data` for OpenAI clients and `models`
 (`name`, `description`, `release_date`) for TypeSafe's `models.list()`, listing the served id and
-the `jev-latest` and `jev-preview` aliases.
+the `jev-latest` and `jev-preview` aliases. `data` also lists the advertised rerank id
+(`ninfer-choice-rerank-v1` unless `--rerank-model-id` replaces it) when that id differs from the
+served model. `GET /v1/models/{id}` resolves either id.
 
 #### cURL
 
@@ -1227,6 +1230,72 @@ const response = await client.systemOne({
 console.log(response.model, response.answers.is_urgent.noul, response.answers.department.choice);
 ```
 
+## Document reranking: `POST /v1/rerank`
+
+Jina-shaped reranking. Each document is one System One Choice over the query, executed in-process
+on the loaded model. The route does not call `POST /v1/systemone`. The four Choice labels stay
+inside that scoring step; the response does not name them.
+
+```json
+{
+  "model": "ninfer-choice-rerank-v1",
+  "query": "where is the invoice?",
+  "documents": ["The invoice is in the drawer.", {"text": "The weather is clear."}],
+  "top_n": 2,
+  "return_documents": true
+}
+```
+
+`query` is a required nonempty string. `documents` is a required array of 1 to
+`--rerank-max-documents` entries (256 by default, the same cap as `POST /v1/score`). An entry is a
+string or an object with a nonempty `text` string. Other fields on a document object are ignored.
+An empty string is HTTP 400.
+
+`model` is optional. When it is present it must be a nonempty string equal to the served model id
+or the advertised rerank id (`--rerank-model-id`, `ninfer-choice-rerank-v1` by default). Either
+name runs the loaded model. An empty string is HTTP 400. Any other id is HTTP 404
+`model_not_found`.
+
+`top_n` is an optional integer. Omitted, it equals the document count. A value outside `1..N` is
+clamped into that range. Unknown top-level fields are ignored.
+
+`return_documents` defaults to true. Each result then includes `document.text`. `false` omits
+`document`.
+
+```json
+{
+  "model": "ninfer-choice-rerank-v1",
+  "results": [
+    {"index": 0, "relevance_score": 0.91, "document": {"text": "The invoice is in the drawer."}}
+  ],
+  "usage": {"total_tokens": 1842}
+}
+```
+
+`results` are best-first by `relevance_score`, descending. Equal scores keep the lower original
+`index` first. `index` is the position in the request `documents` array. `model` is always the
+advertised rerank id. `usage.total_tokens` is the billed prompt tokens of the Choice batch, counted
+the same way System One counts `input_tokens`: the first question bills its whole prompt and each
+later question bills only the tokens past the shared query.
+
+The relevance score is the expected value of the four options, in this order:
+
+| Option | Prompt criteria | Default weight |
+|---|---|---:|
+| exact | Document answers the query directly / is an exact match | `1` |
+| substitute | Document is a useful near-match or substitute answer | `0.6` |
+| complement | Document is related / complementary but not sufficient alone | `0.25` |
+| irrelevant | Document is unrelated to the query | `0` |
+
+`relevance_score = 1.0·P(exact) + 0.6·P(substitute) + 0.25·P(complement) + 0·P(irrelevant)` with
+the defaults. `--rerank-weight-exact`, `--rerank-weight-substitute`, `--rerank-weight-complement`
+and `--rerank-weight-irrelevant` replace those coefficients. Each question's instruction is exactly
+`How relevant is this document to the query?`, a blank line, `Document:`, and the document text.
+
+With `--api-key` set, a missing or wrong bearer token or `x-api-key` is HTTP 401 and the body is
+the OpenAI error object `{"error":{"message","type","param","code"}}`. A request that fails
+validation is HTTP 400 in that same object. A generation failure is HTTP 500 `internal_error`.
+
 ## Authentication and CORS
 
 Pass `--api-key VALUE` to require the same value as an OpenAI/TypeSafe bearer token or Anthropic
@@ -1252,6 +1321,12 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--api-key KEY` | required bearer or `x-api-key` value | unset |
 | `--api-key-file PATH` | read the required key from a file | unset |
 | `--model-id ID` | override the public OpenAI model alias | artifact `identity.model_id` |
+| `--rerank-model-id ID` | model id advertised for `POST /v1/rerank` and accepted beside the served id | `ninfer-choice-rerank-v1` |
+| `--rerank-max-documents N` | maximum `documents` array length for `POST /v1/rerank` | `256` |
+| `--rerank-weight-exact F` | relevance weight of the exact-match Choice option | `1` |
+| `--rerank-weight-substitute F` | relevance weight of the substitute Choice option | `0.6` |
+| `--rerank-weight-complement F` | relevance weight of the complement Choice option | `0.25` |
+| `--rerank-weight-irrelevant F` | relevance weight of the irrelevant Choice option | `0` |
 | `--max-context N` | logical context ceiling of each sequence | `8192` |
 | `--kv-capacity N\|auto` | explicit shared Main Text KV capacity, or maximize it from remaining GPU memory; omitted means `--max-context` | `8192` |
 | `--max-concurrency N` | maximum admitted requests; valid range `1..8` | `1` |
