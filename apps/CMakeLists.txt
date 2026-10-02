@@ -44,3 +44,7 @@ target_link_libraries(ninfer-perplexity PRIVATE
 add_executable(ninfer-reasoning-collect reasoning-collect/main.cpp)
 ninfer_internal_includes(ninfer-reasoning-collect)
 target_link_libraries(ninfer-reasoning-collect PRIVATE ninfer_engine ninfer::json)
+
+add_executable(ninfer-hidden-export hidden-export/main.cpp)
+ninfer_internal_includes(ninfer-hidden-export)
+target_link_libraries(ninfer-hidden-export PRIVATE ninfer_engine ninfer::json)

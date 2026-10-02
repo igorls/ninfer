@@ -389,12 +389,22 @@ CausalScores ProgramImpl::causal_score(PreparedPromptData&& prompt, std::uint32_
         if (!released) { throw std::logic_error("causal score resources could not be released"); }
     };
 
+    const auto hidden_size =
+        static_cast<std::size_t>(dimension(parameters.model.config().text.hidden_size));
     CausalScores output;
     output.target_logprobs.reserve(scored);
     output.reference_logprobs.reserve(scored * references);
     if (references != 0) {
         output.argmax_tokens.reserve(scored);
         output.argmax_logprobs.reserve(scored);
+    }
+    if (readout.capture_hidden_rows) {
+        output.hidden_size = static_cast<std::uint32_t>(hidden_size);
+        output.hidden_rows.reserve(scored * hidden_size);
+        if (!score_hidden_host) {
+            score_hidden_host.emplace(static_cast<std::size_t>(kCausalScoreTile) * hidden_size *
+                                      sizeof(std::uint16_t));
+        }
     }
     std::vector<TokenId> staged_targets;
     staged_targets.reserve(static_cast<std::size_t>(kCausalScoreTile) * rows);
@@ -437,6 +447,17 @@ CausalScores ProgramImpl::causal_score(PreparedPromptData&& prompt, std::uint32_
             auto* host = static_cast<std::byte*>(score_logprobs_host->data());
             CUDA_CHECK(cudaMemcpyAsync(host, logprobs.data, logprobs.bytes(),
                                        cudaMemcpyDeviceToHost, device.stream));
+            if (readout.capture_hidden_rows) {
+                // The leading [hidden_size, columns] window of the BF16 tile: one contiguous
+                // final-normalized row per staged column.
+                if (hidden.dtype != DType::BF16 ||
+                    hidden.bytes() != static_cast<std::size_t>(columns) * hidden_size *
+                                          sizeof(std::uint16_t)) {
+                    throw std::logic_error("causal score hidden tile has an unexpected shape");
+                }
+                CUDA_CHECK(cudaMemcpyAsync(score_hidden_host->data(), hidden.data, hidden.bytes(),
+                                           cudaMemcpyDeviceToHost, device.stream));
+            }
             if (references != 0) {
                 ops::argmax(logits, argmax_ids, valid_rows, device.stream);
                 ops::target_logprobs(logits, argmax_ids, valid_rows, argmax_logprob,
@@ -463,6 +484,12 @@ CausalScores ProgramImpl::causal_score(PreparedPromptData&& prompt, std::uint32_
                 output.argmax_tokens.insert(output.argmax_tokens.end(), ids, ids + staged_columns);
                 output.argmax_logprobs.insert(output.argmax_logprobs.end(), best,
                                               best + staged_columns);
+            }
+            if (readout.capture_hidden_rows) {
+                const auto* rows = static_cast<const std::uint16_t*>(score_hidden_host->data());
+                output.hidden_rows.insert(
+                    output.hidden_rows.end(), rows,
+                    rows + static_cast<std::size_t>(staged_columns) * hidden_size);
             }
             staged_targets.clear();
             staged_columns = 0;
@@ -527,8 +554,10 @@ CausalScores ProgramImpl::causal_score(PreparedPromptData&& prompt, std::uint32_
             }
         }
         flush();
-        if (output.target_logprobs.size() != scored || scored_cursor != scored) {
-            throw std::logic_error("causal score produced the wrong number of logprobs");
+        if (output.target_logprobs.size() != scored || scored_cursor != scored ||
+            output.hidden_rows.size() !=
+                (readout.capture_hidden_rows ? scored * hidden_size : std::size_t{0})) {
+            throw std::logic_error("causal score produced the wrong number of readouts");
         }
         cleanup();
         return output;

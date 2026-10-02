@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -101,6 +102,56 @@ int main() {
         std::cerr << "a readout with the wrong reference count was accepted\n";
         return 1;
     }
+    // Hidden row readout: the capture leaves the scores untouched, is deterministic, and row i
+    // is predictor position first_target - 1 + i.
+    const ninfer::CausalScoreReadout capture{.capture_hidden_rows = true};
+    const ninfer::CausalScores rows_all   = engine.score_tokens(tokens, 1, capture);
+    const ninfer::CausalScores rows_again = engine.score_tokens(tokens, 1, capture);
+    const ninfer::CausalScores rows_last =
+        engine.score_tokens(tokens, static_cast<std::uint32_t>(tokens.size() - 1), capture);
+    const std::size_t hidden = rows_all.hidden_size;
+    if (hidden == 0 || rows_all.hidden_rows.size() != 1536 * hidden ||
+        rows_again.hidden_size != hidden || rows_last.hidden_size != hidden ||
+        rows_last.hidden_rows.size() != hidden || !scores.hidden_rows.empty() ||
+        scores.hidden_size != 0) {
+        std::cerr << "the hidden row readout returned an invalid shape\n";
+        return 1;
+    }
+    if (rows_all.target_logprobs != all) {
+        std::cerr << "capturing hidden rows changed the target scores\n";
+        return 1;
+    }
+    if (rows_all.hidden_rows != rows_again.hidden_rows) {
+        std::cerr << "the hidden row readout is not deterministic\n";
+        return 1;
+    }
+    if (!std::equal(rows_last.hidden_rows.begin(), rows_last.hidden_rows.end(),
+                    rows_all.hidden_rows.end() - static_cast<std::ptrdiff_t>(hidden))) {
+        std::cerr << "the last hidden row does not match a single-target readout\n";
+        return 1;
+    }
+    for (const std::uint16_t word : rows_all.hidden_rows) {
+        if ((word & 0x7F80U) == 0x7F80U) {
+            std::cerr << "a hidden row holds a non-finite BF16 value\n";
+            return 1;
+        }
+    }
+    // Causal prefix consistency is reported, not asserted: a shorter window may tile attention
+    // differently and change summation order.
+    std::vector<ninfer::TokenId> prefix(tokens.begin(), tokens.begin() + 1000);
+    const ninfer::CausalScores rows_prefix = engine.score_tokens(prefix, 1, capture);
+    float prefix_difference                = 0.0F;
+    for (std::size_t i = 0; i < rows_prefix.hidden_rows.size(); ++i) {
+        const auto value = [](std::uint16_t word) {
+            float out;
+            const std::uint32_t bits = static_cast<std::uint32_t>(word) << 16U;
+            std::memcpy(&out, &bits, sizeof(out));
+            return out;
+        };
+        prefix_difference = std::max(
+            prefix_difference, std::abs(value(rows_prefix.hidden_rows[i]) - value(rows_all.hidden_rows[i])));
+    }
+    std::cout << "hidden rows: prefix window max |difference| " << prefix_difference << "\n";
     std::cout << "OK causal_score_real\n";
     return 0;
 }
