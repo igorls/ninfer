@@ -179,6 +179,30 @@ need authoring), a larger head or a reset of its scoring layers, and training th
 and engine rows jointly so it learns the drift rather than only its endpoint. Details in
 [the run directory](../../profiles/bench/jevbench-clef-20261002/README.md).
 
+### Native-route policy study (2 October 2026): the route that beats Clef
+
+With the head fine-tune short of the bar, the same corpus and Colab server were used to improve
+the native route directly (`tools/bench/jevbench/decision_policy/`, evidence in
+[the run directory](../../profiles/bench/jevbench-clef-20261002/README.md)). Public set, paired:
+
+- **Letter-rotation averaging** (a second readout with rotated option letters, same state prefix):
+  198/231, Brier 0.208, ECE 0.037; against native fixed 13, broken 4, [+0.9, +7.5] pp. No training,
+  one extra branch per question.
+- **Calibration fitted on the corpus does not transfer** to the public items (Brier worsens); the
+  raw readout is already calibrated there. Calibrators belong to the deployment's workload.
+- **Confidence-gated reasoning** (escalate the least confident or highest-entropy quarter of
+  items to a 1,024-token thinking pass, thresholds from dev quantiles at a declared budget):
+  207 to 208/231, hard 88/111, Brier 0.166 to 0.177, ECE 0.037; against native fixed 24, broken 5,
+  [+3.8, +13.2] pp; against the Clef BF16 head fixed 15, broken 8, [-1.3, +7.1] pp. Estimated
+  single-stream mean latency 0.5 to 0.7 s per decision at that budget.
+
+This reaches Clef's accuracy and Brier from the native NVFP4 route, with the latency budget as an
+explicit knob and reasoning as the capability Clef lacks. It supersedes the head as the product
+path: the proposed serving change is (1) an averaged readout option for System One and (2) an
+escalation policy with a per-request or per-server budget (`reasoning budget`, `escalate below`
+signal and threshold), both measured here with the exact request shapes. Both are serving
+changes for Igor's go; the head stays research.
+
 ## Phase 2: engine integration (product change)
 
 Ownership, following [engine architecture](../maintainer/engine-architecture.md):
