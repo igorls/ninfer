@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -25,10 +26,18 @@ const char* kClassDescriptions[kRerankClasses] = {
     "Document is unrelated to the query",
 };
 
-std::size_t clamp_top_n(int requested, std::size_t count) {
+// Any JSON integer clamps into 1..count. The comparison uses the represented 64-bit value, so an
+// integer beyond the 32-bit range clamps instead of failing a narrowing check.
+std::size_t parse_top_n(const Json& body, std::size_t count) {
+    if (!body.contains("top_n") || body.at("top_n").is_null()) { return count; }
+    const Json& value = body.at("top_n");
+    if (!value.is_number_integer()) { bad_request("top_n must be an integer", "top_n"); }
+    if (value.is_number_unsigned()) {
+        return static_cast<std::size_t>(std::clamp<std::uint64_t>(value.get<std::uint64_t>(), 1, count));
+    }
+    const std::int64_t requested = value.get<std::int64_t>();
     if (requested < 1) { return 1; }
-    const auto value = static_cast<std::size_t>(requested);
-    return value > count ? count : value;
+    return static_cast<std::size_t>(std::min<std::uint64_t>(static_cast<std::uint64_t>(requested), count));
 }
 
 std::string document_text(const Json& item, const std::string& param) {
@@ -87,8 +96,7 @@ RerankRequest parse_rerank_request(const Json& body, const RerankSettings& setti
         ++index;
     }
 
-    const std::optional<int> top_n = optional_int(body, "top_n");
-    request.top_n = top_n ? clamp_top_n(*top_n, request.documents.size()) : request.documents.size();
+    request.top_n = parse_top_n(body, request.documents.size());
     return request;
 }
 
