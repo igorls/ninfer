@@ -203,7 +203,16 @@ the native route directly (`tools/bench/jevbench/decision_policy/`, evidence in
   head fixed 15, broken 6, [-0.4, +8.0] pp overall and [+0.9, +16.2] pp on the hard tier.
 
 This reaches and, on the hard tier and Brier, exceeds the Clef reference from the native NVFP4
-route, with the latency budget as an explicit knob and reasoning as the capability Clef lacks. It supersedes the head as the product
+route, with the latency budget as an explicit knob and reasoning as the capability Clef lacks.
+
+Served implementation (`policy` request extension and `--systemone-*` defaults, see
+[serving](../serving.md#decision-policy)), measured on the serving build with the production
+artifact and MTP drafting on, same 231 items: default readout 194/231 (Brier 0.216); averaged
+203/231 (Brier 0.173, p50 92 ms, 2.7 times the input tokens); averaged with a 1,024-token
+reasoning budget 218/231, hard 98/111, Brier 0.099, ECE 0.025, 26% of items escalated, p50
+103 ms, p95 5.6 s. Against the Clef BF16 reference: fixed 19, broken 2, [+3.5, +11.2] pp overall
+and [+7.2, +22.5] pp on the hard tier. The escalated items were answered correctly 52 of 59
+times with about 730 thinking tokens each. It supersedes the head as the product
 path: the proposed serving change is (1) an averaged readout for System One (native plus
 rotated letters plus the framed rendering, three branches over one state prefix) and (2) an
 escalation policy with a per-request or per-server budget (`reasoning budget`, `escalate below`
