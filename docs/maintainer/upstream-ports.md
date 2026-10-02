@@ -275,7 +275,7 @@ were produced with recipe overrides and are not committed recipes.
 | `preserve_thinking` server default (`3cb5e718`) | unset, so the Qwen3.8 template keeps returned closed-turn reasoning | `false` unless a request or `--preserve-thinking` asks | Production parity (Igor, 2026-09-28). Keeping the template default is a later change to agree with bentokit |
 | Unsupported reasoning effort | passed to the chat template, whose `raise_exception` comes back as HTTP 400 `invalid_prompt` on `messages` with the interpreter's source trace | checked before rendering against the efforts observed from the loaded template at startup: HTTP 400 `reasoning_effort_not_supported` on the effort field, listing the supported efforts; template errors carry no trace | Restores the pre-v3 fork contract (`8264394c`) on Chat Completions, Responses and Anthropic Messages; the protocol vocabulary is unchanged |
 | Continued final assistant turn (`737b570a`) | rendered without a think block | rendered behind the empty think block the generation prompt carries (thinking off) | `/v1/score` text form and assistant prefill are conditioned like a generated answer |
-| `POST /v1/rerank` | no rerank route | Jina-shaped rerank scored by an in-process System One Choice; `GET /v1/models` advertises `ninfer-choice-rerank-v1`; missing or wrong API key is HTTP 401 with the OpenAI error object | Bentokit Concierge swaps backends against this contract (Igor, 2026-10-02). `return_documents` defaults to true. Choice labels stay off the public response |
+| `POST /v1/rerank` | no rerank route | Jina-shaped rerank scored by an in-process System One Choice; `GET /v1/models` advertises `ninfer-choice-rerank-v1`; missing or wrong API key is HTTP 401 with the OpenAI error object | A downstream client swaps rerank backends against this contract (2026-10-02). `return_documents` defaults to true. Choice labels stay off the public response |
 
 ## Dropped
 
@@ -378,13 +378,14 @@ Windows, MSVC 19.51, CUDA 13.3, `sm_120a`, RTX PRO 6000 Blackwell (driver 616.92
 
 ## Deployment
 
-Current state, October 2, 2026: the x870e production service on :8010 runs release
-`2026.10.02-v3port.5` (source `d371b767`), checked by the installed release manifest and the
-`ninfer-serve.exe` hash. z690 still runs `2026.09.29-v3port.3` (source `28c40898`) with the
-`nvfp4full` profile, NVFP4 KV and MTP3, as reported by its installing agent (not checked from
-here).
+Current state, October 2, 2026: the production service on the RTX PRO 6000 workstation runs
+release `2026.10.02-v3port.5` (source `d371b767`), checked by the installed release manifest and
+the `ninfer-serve.exe` hash. The RTX 5090 machine still runs `2026.09.29-v3port.3` (source
+`28c40898`) with the `nvfp4full` profile, NVFP4 KV and MTP3, as reported by its installing agent
+(not checked from here).
 
-On October 2, 2026 14:03 UTC, x870e moved from `2026.09.30-v3port.4` to `2026.10.02-v3port.5`.
+On October 2, 2026 14:03 UTC, the production workstation moved from `2026.09.30-v3port.4` to
+`2026.10.02-v3port.5`.
 The cutover replaced `ninfer-serve.exe`, `ninfer.exe` and the release manifest; the supervisor, the
 launcher and every runtime DLL are byte-identical between the two releases, and the supervisor
 configuration and production flags are unchanged.
@@ -399,8 +400,8 @@ configuration and production flags are unchanged.
   and the old build alone moved by up to 0.18 between its cold and warm paths. The difference is
   the prompt-cache path, not the build.
 
-The v3port.4 files and the supervisor configuration are archived in
-`E:\NInfer-archive\x870e-v3port.4-20261002-140253`; `rollback5.ps1` in the cutover kit restores them.
+The v3port.4 files and the supervisor configuration are archived locally, and the cutover kit's
+rollback script restores them.
 
 On September 30, 2026 17:45 UTC, x870e moved from `2026.09.29-v3port.3` to
 `2026.09.30-v3port.4`. The cutover replaced `ninfer-serve.exe`, `ninfer.exe` and the release
