@@ -5,6 +5,7 @@
 #include "serve/openai_responses_store.h"
 #include "serve/request_log.h"
 #include "serve/serve_options.h"
+#include "serve/typesafe_systemone.h"
 
 #include <httplib.h>
 
@@ -24,9 +25,14 @@ namespace ninfer::serve {
 void write_openai_error(httplib::Response& response, const ApiError& error);
 void write_anthropic_error(httplib::Response& response, const ApiError& error,
                            const std::string& request_id);
-class SystemOneError;
 void write_typesafe_error(httplib::Response& response, const ApiError& error);
 void write_typesafe_failure(httplib::Response& response, const SystemOneError& error);
+// Authentication failure for a route that requires --api-key. System One keeps TypeSafe's
+// detail envelope (403 when no credential header was sent, 401 when one was). Every other
+// route, including POST /v1/rerank, uses the OpenAI or Anthropic error object and HTTP 401
+// for both a missing and a wrong key. `credential_supplied` is header presence, not a match.
+void write_authentication_failure(std::string_view path, httplib::Response& response,
+                                  bool credential_supplied);
 
 // cpp-httplib invokes the error handler for every application response with status >= 400. Only
 // an empty 413 is its own pre-routing payload-limit rejection; application-authored errors must be
@@ -86,6 +92,11 @@ private:
     void handle_chat_completions(const httplib::Request& req, httplib::Response& res);
     void handle_score(const httplib::Request& req, httplib::Response& res);
     void handle_systemone(const httplib::Request& req, httplib::Response& res);
+    void handle_rerank(const httplib::Request& req, httplib::Response& res);
+    // Runs a parsed System One request on the loaded model. `endpoint` is the request-log name.
+    [[nodiscard]] SystemOneExecution execute_systemone(const SystemOneRequest& request,
+                                                       const httplib::Request& http_request,
+                                                       std::string_view endpoint);
     void handle_messages(const httplib::Request& req, httplib::Response& res);
     void handle_count_tokens(const httplib::Request& req, httplib::Response& res);
     void handle_responses(const httplib::Request& req, httplib::Response& res);

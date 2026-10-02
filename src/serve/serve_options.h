@@ -18,6 +18,14 @@ inline constexpr int kDefaultMaxTokens                    = 8192;
 inline constexpr std::size_t kDefaultMaxRequestBytes      = 384ULL << 20;
 inline constexpr std::size_t kDefaultResponseStoreRecords = 1024;
 inline constexpr std::size_t kDefaultResponseStoreBytes   = 256ULL << 20;
+// Soft expected score of the fixed Choice used by POST /v1/rerank. Order is positional:
+// exact, substitute, complement, irrelevant.
+inline constexpr double kDefaultRerankWeightExact       = 1.0;
+inline constexpr double kDefaultRerankWeightSubstitute  = 0.6;
+inline constexpr double kDefaultRerankWeightComplement  = 0.25;
+inline constexpr double kDefaultRerankWeightIrrelevant  = 0.0;
+inline constexpr std::size_t kDefaultRerankMaxDocuments = 256;
+inline constexpr char kDefaultRerankModelId[]           = "ninfer-choice-rerank-v1";
 
 struct ServeOptions {
     bool help_requested = false;
@@ -64,6 +72,14 @@ struct ServeOptions {
     SamplingOverrides sampling_overrides;
     bool greedy                 = false; // --greedy: force temperature 0 (exact argmax)
     product::LogLevel log_level = product::LogLevel::Info;
+
+    // POST /v1/rerank. The advertised id is stable and independent of the loaded artifact.
+    double rerank_weight_exact         = kDefaultRerankWeightExact;
+    double rerank_weight_substitute    = kDefaultRerankWeightSubstitute;
+    double rerank_weight_complement    = kDefaultRerankWeightComplement;
+    double rerank_weight_irrelevant    = kDefaultRerankWeightIrrelevant;
+    std::size_t rerank_max_documents   = kDefaultRerankMaxDocuments;
+    std::string rerank_model_id        = kDefaultRerankModelId;
 
     // Exact process argv for the server-start record. Secret-bearing option values are redacted
     // while parsing; this is provenance only and never affects execution.

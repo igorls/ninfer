@@ -22,6 +22,8 @@ add_library(ninfer_serve STATIC
   ninfer_score_http.cpp
   typesafe_systemone.cpp
   typesafe_systemone_http.cpp
+  ninfer_rerank.cpp
+  ninfer_rerank_http.cpp
   openai_responses_http.cpp
   serve_options.cpp
 )

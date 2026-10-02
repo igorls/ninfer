@@ -6,6 +6,7 @@
 #include "serve/llamacpp_props.h"
 #include "serve/openai_common.h"
 #include "serve/request_log.h"
+#include "serve/ninfer_rerank.h"
 #include "serve/typesafe_systemone.h"
 
 #include "core/device_memory.h"
@@ -144,6 +145,7 @@ bool report_has_activity(const ThroughputReport& report) {
 const char* endpoint_name(std::string_view path) noexcept {
     if (path == "/v1/chat/completions") { return "openai_chat_completions"; }
     if (path == "/v1/score") { return "ninfer_score"; }
+    if (path == "/v1/rerank") { return "ninfer_rerank"; }
     if (path == "/v1/systemone" || path == "/systemone") { return "typesafe_systemone"; }
     if (path == "/v1/responses") { return "openai_responses"; }
     if (path == "/v1/responses/input_tokens") { return "openai_responses_input_tokens"; }
@@ -163,6 +165,28 @@ std::string response_request_id(const httplib::Response& response) {
 void write_openai_error(httplib::Response& response, const ApiError& error) {
     response.status = error.status;
     response.set_content(make_error_body(error), "application/json");
+}
+
+void write_authentication_failure(std::string_view path, httplib::Response& response,
+                                  bool credential_supplied) {
+    if (is_systemone_path(path)) {
+        // TypeSafe answers a missing key with 403 and a wrong one with 401.
+        write_typesafe_failure(response, credential_supplied ? systemone_invalid_api_key()
+                                                            : systemone_missing_api_key());
+        return;
+    }
+    ApiError error;
+    error.status  = 401;
+    error.type    = "invalid_request_error";
+    error.code    = "invalid_api_key";
+    error.message = "missing or invalid API key";
+    // Render the 401 in the shape the target endpoint speaks. /v1/rerank uses this OpenAI
+    // object for both a missing and a wrong key.
+    if (path.rfind("/v1/messages", 0) == 0) {
+        write_anthropic_error(response, error, new_anthropic_request_id());
+    } else {
+        write_openai_error(response, error);
+    }
 }
 
 void write_anthropic_error(httplib::Response& response, const ApiError& api_error,
@@ -463,6 +487,7 @@ void HttpServer::register_routes() {
     };
     post("/v1/chat/completions", &HttpServer::handle_chat_completions);
     post("/v1/score", &HttpServer::handle_score);
+    post("/v1/rerank", &HttpServer::handle_rerank);
     post("/v1/systemone", &HttpServer::handle_systemone);
     post("/systemone", &HttpServer::handle_systemone);
     for (const char* path : {"/v1/systemone", "/systemone"}) {
@@ -516,24 +541,8 @@ bool HttpServer::reject_unauthenticated(const httplib::Request& req,
         matches_bearer_credential(req.get_header_value("Authorization"), options_.api_key);
     const bool x_api_key_ok = req.get_header_value("x-api-key") == options_.api_key;
     if (bearer_ok || x_api_key_ok) { return false; }
-    if (is_systemone_path(req.path)) {
-        // TypeSafe answers a missing key with 403 and a wrong one with 401.
-        const bool supplied = req.has_header("Authorization") || req.has_header("x-api-key");
-        write_typesafe_failure(res,
-                               supplied ? systemone_invalid_api_key() : systemone_missing_api_key());
-        return true;
-    }
-    ApiError error;
-    error.status  = 401;
-    error.type    = "invalid_request_error";
-    error.code    = "invalid_api_key";
-    error.message = "missing or invalid API key";
-    // Render the 401 in the shape the target endpoint speaks.
-    if (req.path.rfind("/v1/messages", 0) == 0) {
-        write_anthropic_error(res, error, new_anthropic_request_id());
-    } else {
-        write_openai_error(res, error);
-    }
+    const bool supplied = req.has_header("Authorization") || req.has_header("x-api-key");
+    write_authentication_failure(req.path, res, supplied);
     return true;
 }
 
@@ -858,16 +867,16 @@ void HttpServer::handle_admin_quiesce(const httplib::Request& req, httplib::Resp
 
 void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) const {
     // One body serves OpenAI clients (`data`) and TypeSafe SDKs (`models`), which both request
-    // this path and ignore the other's key.
-    nlohmann::ordered_json payload = nlohmann::ordered_json::parse(
-        make_models_list(public_model_id_, unix_time_now(), options_.max_context));
-    payload["models"] = systemone_model_entries(public_model_id_, loaded_unix_seconds_);
+    // this path and ignore the other's key. `data` also lists the advertised rerank id.
+    const nlohmann::ordered_json payload = make_service_models_list(
+        public_model_id_, options_.rerank_model_id, unix_time_now(), loaded_unix_seconds_,
+        options_.max_context);
     res.set_content(payload.dump(), "application/json");
 }
 
 void HttpServer::handle_model(const httplib::Request& req, httplib::Response& res) const {
     const std::string id = req.matches.size() > 1 ? req.matches[1].str() : std::string();
-    if (id != public_model_id_) {
+    if (id != public_model_id_ && id != options_.rerank_model_id) {
         ApiError error;
         error.status  = 404;
         error.type    = "invalid_request_error";
@@ -876,7 +885,7 @@ void HttpServer::handle_model(const httplib::Request& req, httplib::Response& re
         write_openai_error(res, error);
         return;
     }
-    res.set_content(make_model_object(public_model_id_, unix_time_now(), options_.max_context),
+    res.set_content(make_model_object(id, unix_time_now(), options_.max_context),
                     "application/json");
 }
 

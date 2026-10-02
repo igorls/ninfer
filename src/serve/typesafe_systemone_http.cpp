@@ -86,111 +86,99 @@ void write_typesafe_error(httplib::Response& response, const ApiError& error) {
     write_typesafe_failure(response, systemone_error_from(error));
 }
 
-void HttpServer::handle_systemone(const httplib::Request& req, httplib::Response& res) {
-    SystemOneRequest request;
+SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request,
+                                                    const httplib::Request& req,
+                                                    std::string_view endpoint) {
     std::vector<SystemOneBranch> branches;
-    try {
-        request = parse_systemone_request(parse_systemone_body(req.body));
-
-        // Labels are printable ASCII characters, "Yes"/"No" and digits: each one native token.
-        std::unordered_map<std::string, ninfer::TokenId> token_ids;
-        const auto token_id = [&](const std::string& text) {
-            auto found = token_ids.find(text);
-            if (found == token_ids.end()) {
-                const auto tokens = service_->tokenize_text(text);
-                if (tokens.size() != 1) {
-                    throw std::runtime_error("System One label \"" + text +
-                                             "\" is not one token");
-                }
-                found = token_ids.emplace(text, tokens.front()).first;
+    // Labels are printable ASCII characters, "Yes"/"No" and digits: each one native token.
+    std::unordered_map<std::string, ninfer::TokenId> token_ids;
+    const auto token_id = [&](const std::string& text) {
+        auto found = token_ids.find(text);
+        if (found == token_ids.end()) {
+            const auto tokens = service_->tokenize_text(text);
+            if (tokens.size() != 1) {
+                throw std::runtime_error("System One label \"" + text + "\" is not one token");
             }
-            return found->second;
-        };
+            found = token_ids.emplace(text, tokens.front()).first;
+        }
+        return found->second;
+    };
 
-        RequestLimits limits;
-        limits.default_max_tokens = options_.default_max_tokens;
-        const auto branch_request = [&](Json messages, Json candidates, bool publish) {
-            return parse_chat_completion_request(
-                Json{{"model", public_model_id_},
-                     {"messages", std::move(messages)},
-                     {"max_tokens", 1},
-                     {"temperature", 0},
-                     {"logprobs", true},
-                     {"logprob_candidates", std::move(candidates)},
-                     {"prompt_cache_read_only", !publish},
-                     {"prompt_cache_options", Json{{"mode", publish ? "explicit" : "implicit"}}},
-                     {"chat_template_kwargs", Json{{"enable_thinking", false}}}},
-                limits);
-        };
+    RequestLimits limits;
+    limits.default_max_tokens = options_.default_max_tokens;
+    const auto branch_request = [&](Json messages, Json candidates, bool publish) {
+        return parse_chat_completion_request(
+            Json{{"model", public_model_id_},
+                 {"messages", std::move(messages)},
+                 {"max_tokens", 1},
+                 {"temperature", 0},
+                 {"logprobs", true},
+                 {"logprob_candidates", std::move(candidates)},
+                 {"prompt_cache_read_only", !publish},
+                 {"prompt_cache_options", Json{{"mode", publish ? "explicit" : "implicit"}}},
+                 {"chat_template_kwargs", Json{{"enable_thinking", false}}}},
+            limits);
+    };
 
-        // Several questions about one state: the first prefill publishes the state and the rest
-        // read it. A single question never reuses its own prefix, so it publishes nothing. A
-        // two-token Choice also publishes its question, which each letter branch then extends
-        // by only the answer opener and one letter.
-        const Json base          = build_systemone_messages(request);
-        const bool publish_state = request.questions.size() > 1;
-        for (std::size_t q = 0; q < request.questions.size(); ++q) {
-            const SystemOneQuestion& question = request.questions[q];
-            const std::string prompt          = build_question_prompt(question);
-            const std::vector<std::string> first_tokens = first_token_candidates(question);
+    // Several questions about one state: the first prefill publishes the state and the rest
+    // read it. A single question never reuses its own prefix, so it publishes nothing. A
+    // two-token Choice also publishes its question, which each letter branch then extends
+    // by only the answer opener and one letter.
+    const Json base          = build_systemone_messages(request);
+    const bool publish_state = request.questions.size() > 1;
+    const std::string protocol(endpoint);
+    for (std::size_t q = 0; q < request.questions.size(); ++q) {
+        const SystemOneQuestion& question           = request.questions[q];
+        const std::string prompt                    = build_question_prompt(question);
+        const std::vector<std::string> first_tokens = first_token_candidates(question);
 
-            Json ids = Json::array();
-            for (const std::string& candidate : first_tokens) { ids.push_back(token_id(candidate)); }
-            const bool state_here = publish_state && q == 0;
-            Json messages         = state_here ? with_prefix_boundary(base) : base;
-            if (question.two_token_labels) {
-                messages.push_back(Json{
-                    {"role", "user"},
-                    {"content", Json::array({Json{{"type", "text"},
-                                                  {"text", prompt},
-                                                  {"prompt_cache_breakpoint",
-                                                   Json{{"mode", "explicit"}}}}})}});
-            } else {
-                messages.push_back(Json{{"role", "user"}, {"content", prompt}});
-            }
-            SystemOneBranch first;
-            first.question = q;
-            first.request  = branch_request(std::move(messages), std::move(ids),
-                                            state_here || question.two_token_labels);
-            branches.push_back(std::move(first));
-            if (!question.two_token_labels) { continue; }
+        Json ids = Json::array();
+        for (const std::string& candidate : first_tokens) { ids.push_back(token_id(candidate)); }
+        const bool state_here = publish_state && q == 0;
+        Json messages         = state_here ? with_prefix_boundary(base) : base;
+        if (question.two_token_labels) {
+            messages.push_back(Json{
+                {"role", "user"},
+                {"content", Json::array({Json{{"type", "text"},
+                                              {"text", prompt},
+                                              {"prompt_cache_breakpoint",
+                                               Json{{"mode", "explicit"}}}}})}});
+        } else {
+            messages.push_back(Json{{"role", "user"}, {"content", prompt}});
+        }
+        SystemOneBranch first;
+        first.question = q;
+        first.request  = branch_request(std::move(messages), std::move(ids),
+                                        state_here || question.two_token_labels);
+        branches.push_back(std::move(first));
+        if (!question.two_token_labels) { continue; }
 
-            // The pre-tokenizer must split a label into its letter and digit, or the answer
-            // distribution would sit on a merged token no branch reads.
-            for (const SystemOneChoiceOption& option : question.choice_options) {
-                const std::vector<ninfer::TokenId> expected{token_id(option.label.substr(0, 1)),
-                                                            token_id(option.label.substr(1))};
-                if (service_->tokenize_text(option.label) != expected) {
-                    throw std::runtime_error("System One label \"" + option.label +
-                                             "\" does not split into a letter and a digit");
-                }
-            }
-            for (std::size_t letter = 0; letter < first_tokens.size(); ++letter) {
-                Json continued = base;
-                continued.push_back(Json{{"role", "user"}, {"content", prompt}});
-                continued.push_back(Json{{"role", "assistant"}, {"content", first_tokens[letter]}});
-                Json digits = Json::array();
-                for (std::size_t digit = 0; digit < letter_group_size(question, letter); ++digit) {
-                    digits.push_back(token_id(std::string(1, static_cast<char>('0' + digit))));
-                }
-                SystemOneBranch branch;
-                branch.question = q;
-                branch.letter   = letter;
-                branch.request  = branch_request(std::move(continued), std::move(digits), false);
-                branch.request.generation.continuation =
-                    ninfer::PromptContinuationMode::ContinueFinalAssistant;
-                branches.push_back(std::move(branch));
+        // The pre-tokenizer must split a label into its letter and digit, or the answer
+        // distribution would sit on a merged token no branch reads.
+        for (const SystemOneChoiceOption& option : question.choice_options) {
+            const std::vector<ninfer::TokenId> expected{token_id(option.label.substr(0, 1)),
+                                                        token_id(option.label.substr(1))};
+            if (service_->tokenize_text(option.label) != expected) {
+                throw std::runtime_error("System One label \"" + option.label +
+                                         "\" does not split into a letter and a digit");
             }
         }
-    } catch (const SystemOneError& error) {
-        write_typesafe_failure(res, error);
-        return;
-    } catch (const ApiException& exception) {
-        write_typesafe_error(res, exception.error());
-        return;
-    } catch (const std::exception& exception) {
-        write_typesafe_error(res, internal_error(exception.what()));
-        return;
+        for (std::size_t letter = 0; letter < first_tokens.size(); ++letter) {
+            Json continued = base;
+            continued.push_back(Json{{"role", "user"}, {"content", prompt}});
+            continued.push_back(Json{{"role", "assistant"}, {"content", first_tokens[letter]}});
+            Json digits = Json::array();
+            for (std::size_t digit = 0; digit < letter_group_size(question, letter); ++digit) {
+                digits.push_back(token_id(std::string(1, static_cast<char>('0' + digit))));
+            }
+            SystemOneBranch branch;
+            branch.question = q;
+            branch.letter   = letter;
+            branch.request  = branch_request(std::move(continued), std::move(digits), false);
+            branch.request.generation.continuation =
+                ninfer::PromptContinuationMode::ContinueFinalAssistant;
+            branches.push_back(std::move(branch));
+        }
     }
 
     std::shared_ptr<RequestLifetime> lifetime;
@@ -207,30 +195,23 @@ void HttpServer::handle_systemone(const httplib::Request& req, httplib::Response
                                          [&req] { return client_disconnected(req); });
         } catch (const ApiException& exception) {
             record_request_rejected(make_request_rejection_log_context(
-                req_id, "typesafe_systemone", chat.generation, metadata, exception.error()));
-            write_typesafe_error(res, exception.error());
-            return;
-        } catch (const std::exception& exception) {
-            write_typesafe_error(res, internal_error(exception.what()));
-            return;
+                req_id, protocol, chat.generation, metadata, exception.error()));
+            throw;
         }
 
-        auto lifecycle =
-            begin_request(make_request_log_context(req_id, "typesafe_systemone", chat.generation,
-                                                   metadata, prepared, client_label(req)));
+        auto lifecycle = begin_request(make_request_log_context(
+            req_id, protocol, chat.generation, metadata, prepared, client_label(req)));
         try {
             branch.outcome =
                 service_->run(prepared, nullptr, [&req] { return client_disconnected(req); });
             lifecycle->done(*branch.outcome);
         } catch (const ApiException& exception) {
             lifecycle->failure(make_generation_request_failure(exception.error()));
-            write_typesafe_error(res, exception.error());
-            return;
+            throw;
         } catch (const std::exception& exception) {
             lifecycle->failure(
                 make_internal_request_failure(RequestFailurePhase::Generation, exception.what()));
-            write_typesafe_error(res, internal_error(exception.what()));
-            return;
+            throw;
         }
 
         if (!lifetime) {
@@ -241,47 +222,66 @@ void HttpServer::handle_systemone(const httplib::Request& req, httplib::Response
     }
 
     std::vector<SystemOneAnswer> answers(request.questions.size());
+    std::vector<std::vector<double>> first(request.questions.size());
+    std::vector<std::vector<std::vector<double>>> digits(request.questions.size());
+    for (std::size_t k = 0; k < branches.size(); ++k) {
+        const SystemOneBranch& branch     = branches[k];
+        const SystemOneQuestion& question = request.questions[branch.question];
+        usage.input_tokens += systemone_billed_input_tokens(
+            branch.outcome->prompt_tokens, branch.outcome->metrics.prefix_cache_hit_tokens, k == 0);
+        if (branch.letter) {
+            digits[branch.question].push_back(
+                candidate_logprobs(branch, letter_group_size(question, *branch.letter)));
+        } else {
+            first[branch.question] =
+                candidate_logprobs(branch, first_token_candidates(question).size());
+        }
+    }
+    for (std::size_t q = 0; q < request.questions.size(); ++q) {
+        const SystemOneQuestion& question = request.questions[q];
+        std::vector<double> label_logprobs;
+        if (question.two_token_labels) {
+            for (std::size_t i = 0; i < question.choice_options.size(); ++i) {
+                label_logprobs.push_back(first[q].at(i / 10) + digits[q].at(i / 10).at(i % 10));
+            }
+        } else {
+            label_logprobs = std::move(first[q]);
+        }
+        std::vector<double> probabilities =
+            softmax_probabilities(label_logprobs, request.temperature);
+        if (question.type == SystemOneQuestionType::Noul) { probabilities.resize(1); }
+        answers[q].probabilities = std::move(probabilities);
+    }
+    return SystemOneExecution{.answers = std::move(answers),
+                              .usage    = usage,
+                              .lifetime = std::move(lifetime)};
+}
+
+void HttpServer::handle_systemone(const httplib::Request& req, httplib::Response& res) {
+    SystemOneRequest request;
     try {
-        std::vector<std::vector<double>> first(request.questions.size());
-        std::vector<std::vector<std::vector<double>>> digits(request.questions.size());
-        for (std::size_t k = 0; k < branches.size(); ++k) {
-            const SystemOneBranch& branch     = branches[k];
-            const SystemOneQuestion& question = request.questions[branch.question];
-            usage.input_tokens += systemone_billed_input_tokens(
-                branch.outcome->prompt_tokens, branch.outcome->metrics.prefix_cache_hit_tokens,
-                k == 0);
-            if (branch.letter) {
-                digits[branch.question].push_back(
-                    candidate_logprobs(branch, letter_group_size(question, *branch.letter)));
-            } else {
-                first[branch.question] =
-                    candidate_logprobs(branch, first_token_candidates(question).size());
-            }
-        }
-        for (std::size_t q = 0; q < request.questions.size(); ++q) {
-            const SystemOneQuestion& question = request.questions[q];
-            std::vector<double> label_logprobs;
-            if (question.two_token_labels) {
-                for (std::size_t i = 0; i < question.choice_options.size(); ++i) {
-                    label_logprobs.push_back(first[q].at(i / 10) + digits[q].at(i / 10).at(i % 10));
-                }
-            } else {
-                label_logprobs = std::move(first[q]);
-            }
-            std::vector<double> probabilities =
-                softmax_probabilities(label_logprobs, request.temperature);
-            if (question.type == SystemOneQuestionType::Noul) { probabilities.resize(1); }
-            answers[q].probabilities = std::move(probabilities);
-        }
+        request = parse_systemone_request(parse_systemone_body(req.body));
+    } catch (const SystemOneError& error) {
+        write_typesafe_failure(res, error);
+        return;
+    }
+
+    SystemOneExecution execution;
+    try {
+        execution = execute_systemone(request, req, "typesafe_systemone");
+    } catch (const ApiException& exception) {
+        write_typesafe_error(res, exception.error());
+        return;
     } catch (const std::exception& exception) {
         write_typesafe_error(res, internal_error(exception.what()));
         return;
     }
 
     const Json payload = make_systemone_response_json(
-        request, systemone_executed_model(public_model_id_, request.temperature), answers, usage);
-    if (lifetime) {
-        set_owned_json_content(res, payload.dump(), lifetime);
+        request, systemone_executed_model(public_model_id_, request.temperature), execution.answers,
+        execution.usage);
+    if (execution.lifetime) {
+        set_owned_json_content(res, payload.dump(), execution.lifetime);
     } else {
         res.set_content(payload.dump(), "application/json");
     }

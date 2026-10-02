@@ -1,7 +1,9 @@
 #include "serve/serve_options.h"
+#include "serve/typesafe_systemone.h"
 #include "product/speculative_options.h"
 
 #include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
@@ -22,6 +24,15 @@ int parse_nonnegative_int(const char* text, const char* label) {
         throw std::invalid_argument(std::string("invalid ") + label + ": " + text);
     }
     return static_cast<int>(value);
+}
+
+double parse_finite_double(const char* text, const char* label) {
+    char* end          = nullptr;
+    const double value = std::strtod(text, &end);
+    if (end == text || *end != '\0' || !std::isfinite(value)) {
+        throw std::invalid_argument(std::string("invalid ") + label + ": " + text);
+    }
+    return value;
 }
 
 float parse_float_in(const char* text, const char* label, float lo, float hi) {
@@ -109,9 +120,13 @@ std::string serve_usage_text(const char* argv0) {
            "[--chat-template FILE] [--lm-head-draft] [--no-thinking] [--preserve-thinking] "
            "[--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
-           "[--frequency-penalty F] [--repetition-penalty F] [--seed N] [--greedy]\n"
+           "[--frequency-penalty F] [--repetition-penalty F] [--seed N] [--greedy] "
+           "[--rerank-max-documents N] [--rerank-model-id ID] "
+           "[--rerank-weight-exact F] [--rerank-weight-substitute F] "
+           "[--rerank-weight-complement F] [--rerank-weight-irrelevant F]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
-           "       serves OpenAI Responses/Chat Completions and Anthropic Messages endpoints\n"
+           "       serves OpenAI Responses/Chat Completions, Anthropic Messages, System One "
+           "and rerank endpoints\n"
            "       --default-max-tokens defaults to " +
            std::to_string(kDefaultMaxTokens) +
            " when omitted\n"
@@ -122,6 +137,9 @@ std::string serve_usage_text(const char* argv0) {
            "       --api-key-file reads the key from a file, keeping it off the command line\n"
            "       --request-log-jsonl appends full-precision server/request records\n"
            "       --model-id overrides the artifact metadata.name reported by the server\n"
+           "       --rerank-model-id defaults to ninfer-choice-rerank-v1; "
+           "--rerank-max-documents defaults to 256; relevance weights default to "
+           "1, 0.6, 0.25 and 0\n"
            "       Responses state is process-local and bounded to 1024 records / 256 MiB by "
            "default\n"
            "       --log-stats-interval-ms defaults to 5000; 0 disables periodic throughput logs\n"
@@ -373,6 +391,23 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.greedy = true;
         } else if (arg == "--log-level") {
             options.log_level = product::parse_log_level(require_value("--log-level"));
+        } else if (arg == "--rerank-weight-exact") {
+            options.rerank_weight_exact =
+                parse_finite_double(require_value("--rerank-weight-exact"), "rerank-weight-exact");
+        } else if (arg == "--rerank-weight-substitute") {
+            options.rerank_weight_substitute = parse_finite_double(
+                require_value("--rerank-weight-substitute"), "rerank-weight-substitute");
+        } else if (arg == "--rerank-weight-complement") {
+            options.rerank_weight_complement = parse_finite_double(
+                require_value("--rerank-weight-complement"), "rerank-weight-complement");
+        } else if (arg == "--rerank-weight-irrelevant") {
+            options.rerank_weight_irrelevant = parse_finite_double(
+                require_value("--rerank-weight-irrelevant"), "rerank-weight-irrelevant");
+        } else if (arg == "--rerank-max-documents") {
+            options.rerank_max_documents = static_cast<std::size_t>(parse_nonnegative_int(
+                require_value("--rerank-max-documents"), "rerank-max-documents"));
+        } else if (arg == "--rerank-model-id") {
+            options.rerank_model_id = require_value("--rerank-model-id");
         } else {
             throw std::invalid_argument("unknown argument: " + arg);
         }
@@ -414,6 +449,14 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     }
     if (options.prefill_chunk == 0 || options.prefill_chunk % 128 != 0) {
         throw std::invalid_argument("--prefill-chunk must be a positive multiple of 128");
+    }
+    if (options.rerank_model_id.empty()) {
+        throw std::invalid_argument("--rerank-model-id must not be empty");
+    }
+    if (options.rerank_max_documents == 0 ||
+        options.rerank_max_documents > kMaximumSystemOneQuestions) {
+        throw std::invalid_argument("--rerank-max-documents must be in [1," +
+                                    std::to_string(kMaximumSystemOneQuestions) + "]");
     }
     product::validate_speculative_cli_options(options.speculative);
     if (default_max_tokens_explicit) {
