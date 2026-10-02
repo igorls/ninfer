@@ -331,6 +331,9 @@ void Collector::poll_request_log(Collected& out) {
             out.requests.prefill_tok_s_total = samples.back().prefill_tok_s;
             out.requests.running_requests    = samples.back().running;
         }
+        // Aged here as well as on every poll, so the list never shows a client that left while
+        // the engine was idle and no record arrived to trigger the poll's aging.
+        age_client_window_locked();
         out.requests.clients                = summarize_clients(client_window_);
         out.requests.clients_window_minutes = static_cast<int>(kClientWindowMs / 60000);
     }
@@ -592,7 +595,6 @@ void Collector::reset_live_request_log_locked() {
 struct Collector::RequestLogSink {
     Collector& c;
     RequestLogGeneration gen;
-    bool live_folded = false;
 
     void begin(const RequestLogGeneration& g) {
         gen = g;
@@ -647,7 +649,6 @@ private:
     void fold_live(std::string_view line) {
         std::lock_guard lock(c.mu_);
         c.fold_live_line_locked(line);
-        live_folded = true;
     }
 };
 
@@ -668,7 +669,9 @@ bool Collector::poll_request_log_file() {
             ++recent_version_;
         }
     }
-    if (sink.live_folded) {
+    // Every poll, not only when a record arrived: an idle engine appends nothing, and clients
+    // that left must still age out of the window.
+    {
         std::lock_guard lock(mu_);
         age_client_window_locked();
     }
