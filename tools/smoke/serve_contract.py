@@ -369,19 +369,53 @@ def parse_responses_stream(response: Response) -> tuple[str, str, dict[str, Any]
 def exercise(base_url: str, model: str) -> dict[str, Any]:
     models = json_response(base_url, "GET", "/v1/models")
     entries = models.get("data")
+    # The resident model is first; the advertised POST /v1/rerank id follows it unless the two
+    # ids are equal.
     if (
         models.get("object") != "list"
         or not isinstance(entries, list)
-        or len(entries) != 1
+        or len(entries) not in (1, 2)
     ):
         raise ContractError("model-list response has the wrong shape")
     if entries[0].get("id") != model or entries[0].get("owned_by") != "ninfer":
         raise ContractError(
             "model-list response does not identify the configured NInfer model"
         )
-    single_model = json_response(base_url, "GET", f"/v1/models/{model}")
-    if single_model.get("id") != model:
-        raise ContractError("single-model response has the wrong id")
+    for entry in entries:
+        single_model = json_response(base_url, "GET", f"/v1/models/{entry.get('id')}")
+        if single_model.get("id") != entry.get("id") or entry.get("owned_by") != "ninfer":
+            raise ContractError("single-model response has the wrong id")
+    rerank_model = entries[-1]["id"]
+
+    documents = [
+        "Paris is the capital and largest city of France.",
+        "Photosynthesis converts light energy into chemical energy in plants.",
+    ]
+    reranked = json_response(
+        base_url,
+        "POST",
+        "/v1/rerank",
+        {"model": rerank_model, "query": "What is the capital of France?", "documents": documents},
+    )
+    results = reranked.get("results")
+    if (
+        reranked.get("model") != rerank_model
+        or not isinstance(results, list)
+        or sorted(result.get("index") for result in results) != [0, 1]
+        or any(
+            result.get("document", {}).get("text") != documents[result["index"]]
+            for result in results
+        )
+    ):
+        raise ContractError("rerank response has the wrong shape")
+    scores = [result.get("relevance_score") for result in results]
+    if not all(isinstance(score, float) for score in scores) or scores != sorted(
+        scores, reverse=True
+    ):
+        raise ContractError("rerank results are not ordered by relevance_score")
+    rerank_tokens = reranked.get("usage", {}).get("total_tokens")
+    if not isinstance(rerank_tokens, int) or rerank_tokens <= 0:
+        raise ContractError("rerank usage has no billed tokens")
 
     anthropic_prompt = {
         "model": model,
@@ -540,8 +574,11 @@ def exercise(base_url: str, model: str) -> dict[str, Any]:
         raise ContractError("Anthropic usage input_tokens differs from count_tokens")
 
     return {
-        "format": "ninfer_serve_contract_v2",
+        "format": "ninfer_serve_contract_v3",
         "model": model,
+        "rerank_model": rerank_model,
+        "rerank_top_index": results[0]["index"],
+        "rerank_total_tokens": rerank_tokens,
         "count_tokens": input_tokens,
         "openai_finish_reason": stream_finish,
         "openai_completion_tokens": stream_usage["completion_tokens"],

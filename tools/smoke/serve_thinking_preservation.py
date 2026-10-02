@@ -118,8 +118,9 @@ def require(condition: bool, message: str) -> None:
 
 def exercise(base_url: str, fixture: dict[str, Any], log_path: Path, backend: str) -> dict[str, Any]:
     models = request_json(base_url, "GET", "/v1/models")
+    # The resident model is listed first; the advertised POST /v1/rerank id may follow it.
     entries = models.get("data")
-    require(isinstance(entries, list) and len(entries) == 1, "server did not expose one model")
+    require(isinstance(entries, list) and len(entries) >= 1, "server did not list its model")
     model = entries[0].get("id")
     require(isinstance(model, str) and model, "server model id is invalid")
 

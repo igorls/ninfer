@@ -1157,9 +1157,10 @@ TYPESAFE_API_KEY=local-secret   # the server's --api-key; any printable value wh
 
 `GET /v1/models` answers both SDK families from one body: `data` for OpenAI clients and `models`
 (`name`, `description`, `release_date`) for TypeSafe's `models.list()`, listing the served id and
-the `jev-latest` and `jev-preview` aliases. `data` also lists the advertised rerank id
-(`ninfer-choice-rerank-v1` unless `--rerank-model-id` replaces it) when that id differs from the
-served model. `GET /v1/models/{id}` resolves either id.
+the `jev-latest` and `jev-preview` aliases. `data` lists the served model first and then the
+advertised rerank id (`ninfer-choice-rerank-v1` unless `--rerank-model-id` replaces it) when that
+id differs from the served model; a client that discovers the chat model reads `data[0]`.
+`GET /v1/models/{id}` resolves either id.
 
 #### cURL
 
@@ -1234,7 +1235,9 @@ console.log(response.model, response.answers.is_urgent.noul, response.answers.de
 
 Jina-shaped reranking. Each document is one System One Choice over the query, executed in-process
 on the loaded model. The route does not call `POST /v1/systemone`. The four Choice labels stay
-inside that scoring step; the response does not name them.
+inside that scoring step; the response does not name them. Like System One questions, the
+documents run as consecutive Engine requests, one per document, so latency grows with the
+document count.
 
 ```json
 {

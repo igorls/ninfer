@@ -186,7 +186,7 @@ python3 -m tools.smoke.serve_contract \
 
 This smoke check is intentionally not a CTest: it needs the real artifact, a supported GPU, and a
 server process that remains alive while the client exercises OpenAI Responses/Chat, Anthropic,
-state, streaming, and multimodal requests.
+rerank, state, streaming, and multimodal requests.
 
 The thinking-preservation fixture starts and stops its own server, submits a fixed two-step tool
 history, compares stripped and preserved closed-turn prompt lengths, and verifies compatible
