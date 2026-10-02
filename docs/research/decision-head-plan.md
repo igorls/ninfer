@@ -280,8 +280,8 @@ the bench-harness protocol for 1, 8, 50 and 300 questions per record against the
   [learned router](learned-reasoning-router.md) or by head confidence and task type with
   thresholds frozen before evaluation. Report error at fixed coverage and end-to-end compute.
 - Beyond the recovery fine-tune above: continue training the head on the public classification
-  sets from the Decision Index and on reasoning-route outputs for hard families. Sensitive
-  workloads (Tribuno, YDUQS) collect and train on site only.
+  sets from the Decision Index and on reasoning-route outputs for hard families. Private
+  workloads collect and train locally only.
 - A head for Flash-Next, trained from scratch with the same recipe, is last and optional; its
   zero-shot route already leads the 27B on JevBench hard.
 
@@ -293,7 +293,7 @@ the bench-harness protocol for 1, 8, 50 and 300 questions per record against the
 | Comparison systems | shipped Clef reference on Colab; NInfer head route on the production artifact |
 | Workloads | JevBench public (paired), the authored diagnostics, the vision probe set, multi-question records |
 | Aggregation | paired fixed/broken counts, grouped bootstrap by scenario, worst family reported |
-| Latency | the 8-rule bench-harness protocol on the production machine, no other engine running |
+| Latency | the 8-rule bench-harness protocol on the target workstation, no other engine running |
 | Official score | only Harold's sealed run; never present a public-subset number as official |
 
 ## Evidence recorded today
@@ -309,4 +309,4 @@ the bench-harness protocol for 1, 8, 50 and 300 questions per record against the
   `joint_head_config.json`.
 - Published latency (Clef median 209.3 ms, p95 238.6 ms on an H200, records with several
   questions) is not comparable with our single-question p50 of 51 to 61 ms on the shared
-  production machine.
+  RTX PRO 6000 workstation.
