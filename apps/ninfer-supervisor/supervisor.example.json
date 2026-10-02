@@ -140,11 +140,19 @@
     }
   ],
   "active_model": "qwen3.8-27b-dflash2",
+  "frontends": [
+    {
+      "name": "llama.cpp web UI",
+      "dir": "C:/NInfer/frontends/llama-ui",
+      "port": 8100
+    }
+  ],
   "_models_comment": [
     "Edit artifact paths for your machine. Presets share weights but have independent launch settings.",
     "DFlash2 needs the combined companion artifact; see docs/maintainer/qwen3.8-27b-dflash2.md.",
     "Interactive uses DFlash2 K7; concurrent uses MTP K5. Both use a shared 32K KV pool and disable vision and prefix reuse as in the speed qualification.",
     "name and description are optional display text; id selects the preset, --model-id is the client API name.",
-    "The model launcher waits for readiness and restores the previous preset on failure."
+    "The model launcher waits for readiness and restores the previous preset on failure.",
+    "Each frontend serves a built web app (index.html at the root of dir) on its own loopback port and forwards the engine API there; restart the supervisor after editing the list."
   ]
 }

@@ -1144,6 +1144,7 @@ enum class TrayAction : std::uint8_t {
     StartAtLogin,
     OpenLogs,
     CopyUrl,
+    OpenFrontend,
 };
 
 struct TrayCommand {
@@ -1158,6 +1159,10 @@ inline constexpr unsigned kCmdFixedBase   = 1;
 inline constexpr unsigned kCmdReserveBase = 100;
 inline constexpr unsigned kCmdIdleBase    = 200;
 inline constexpr unsigned kCmdEnd         = 300;
+// One "Open" item per configured web frontend; the configuration caps their number at this.
+inline constexpr std::size_t kMaxFrontends   = 16;
+inline constexpr unsigned kCmdFrontendBase   = 300;
+inline constexpr unsigned kCmdFrontendEnd    = kCmdFrontendBase + kMaxFrontends;
 
 inline constexpr unsigned kCmdOpenDashboard = kCmdFixedBase + 0;
 inline constexpr unsigned kCmdStart         = kCmdFixedBase + 1;
@@ -1173,12 +1178,16 @@ static_assert(kCmdReserveBase + kReserveChoicesGib.size() <= kCmdIdleBase,
               "reserve ids must not reach the idle range");
 static_assert(kCmdIdleBase + kIdleChoicesMinutes.size() <= kCmdEnd,
               "idle ids must not leave the dispatch range");
+static_assert(kCmdEnd <= kCmdFrontendBase, "frontend ids must not overlap the idle range");
 
 inline unsigned tray_cmd_reserve(std::size_t index) {
     return kCmdReserveBase + static_cast<unsigned>(index);
 }
 inline unsigned tray_cmd_idle(std::size_t index) {
     return kCmdIdleBase + static_cast<unsigned>(index);
+}
+inline unsigned tray_cmd_frontend(std::size_t index) {
+    return kCmdFrontendBase + static_cast<unsigned>(index);
 }
 
 inline TrayCommand decode_tray_command(unsigned cmd) {
@@ -1191,6 +1200,9 @@ inline TrayCommand decode_tray_command(unsigned cmd) {
         const std::size_t i = cmd - kCmdIdleBase;
         if (i >= kIdleChoicesMinutes.size()) { return {}; }
         return {TrayAction::Idle, kIdleChoicesMinutes[i]};
+    }
+    if (cmd >= kCmdFrontendBase && cmd < kCmdFrontendEnd) {
+        return {TrayAction::OpenFrontend, static_cast<int>(cmd - kCmdFrontendBase)};
     }
     switch (cmd) {
     case kCmdOpenDashboard: return {TrayAction::OpenDashboard, 0};

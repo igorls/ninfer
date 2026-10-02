@@ -1,5 +1,6 @@
 #pragma once
 
+#include "frontends.hpp"
 #include "logic.hpp"
 
 #include <nlohmann/json.hpp>
@@ -140,6 +141,9 @@ struct SupervisorConfig {
     // configuration, which is how every config before this worked and still does.
     std::vector<ModelEntry> models;
     std::string active_model;
+    // Static web frontends, each served with an engine API proxy on its own loopback port. Read
+    // at startup; adding or removing one takes a supervisor restart.
+    std::vector<FrontendSpec> frontends;
     // Where this config was loaded from. The dashboard writes edits back here, so
     // it must be the resolved path rather than whatever relative string the CLI
     // was given -- the supervisor's working directory is not the user's.
@@ -222,6 +226,7 @@ inline nlohmann::json config_to_json(const SupervisorConfig& cfg) {
         out["models"] = models;
         if (!cfg.active_model.empty()) { out["active_model"] = cfg.active_model; }
     }
+    if (!cfg.frontends.empty()) { out["frontends"] = frontends_to_json(cfg.frontends); }
     return out;
 }
 
@@ -341,6 +346,7 @@ inline SupervisorConfig load_config_json(const std::string& json_text,
         }
     }
     cfg.active_model = body.value("active_model", "");
+    if (body.contains("frontends")) { cfg.frontends = parse_frontends(body.at("frontends")); }
     if (body.contains("supervisor") && body.at("supervisor").is_object()) {
         const auto& s = body.at("supervisor");
         cfg.host         = s.value("host", "127.0.0.1");
@@ -366,6 +372,7 @@ inline SupervisorConfig load_config_json(const std::string& json_text,
         throw std::invalid_argument(
             "supervisor host must be loopback unless bind_any is true");
     }
+    validate_frontends(cfg.frontends, cfg.port, cfg.engine.engine_port);
     return cfg;
 }
 

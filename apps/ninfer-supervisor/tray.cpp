@@ -1,5 +1,7 @@
 #include "tray.hpp"
 
+#include "frontend_server.hpp"
+
 #include "run_at_login.hpp"
 
 #include <windows.h>
@@ -279,6 +281,22 @@ void show_menu(HWND hwnd, TrayIcon* self) {
     } else {
         AppendMenuW(menu, MF_STRING, kCmdOpenDashboard, L"Go to the dashboard");
     }
+    if (const FrontendHost* frontends = self->frontends()) {
+        for (std::size_t i = 0; i < frontends->size() && i < kMaxFrontends; ++i) {
+            const FrontendServer& frontend = frontends->at(i);
+            const std::wstring label       = L"Open " + widen(frontend.spec().name);
+            switch (frontend.state()) {
+            case FrontendState::Serving:
+                AppendMenuW(menu, MF_STRING, tray_cmd_frontend(i), label.c_str());
+                break;
+            case FrontendState::PortInUse: append_disabled(menu, 0, label, L"port in use"); break;
+            case FrontendState::AssetsMissing:
+                append_disabled(menu, 0, label, L"files not found");
+                break;
+            case FrontendState::Stopped: append_disabled(menu, 0, label, L"stopped"); break;
+            }
+        }
+    }
     AppendMenuW(menu, MF_STRING, kCmdCopyUrl, L"Copy dashboard URL");
     AppendMenuW(menu, MF_STRING, kCmdOpenLogs, L"Open logs folder");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -362,6 +380,7 @@ void show_menu(HWND hwnd, TrayIcon* self) {
     case TrayAction::Reserve: self->on_reserve_chosen(action.value); break;
     case TrayAction::Idle: self->on_idle_chosen(action.value); break;
     case TrayAction::StartAtLogin: self->on_start_at_login_toggled(); break;
+    case TrayAction::OpenFrontend: self->open_frontend(action.value); break;
     case TrayAction::None: break;
     }
 }
@@ -571,6 +590,16 @@ void TrayIcon::open_logs_folder() const {
     const auto dir = std::filesystem::absolute(child_.logs_dir(), ec);
     if (ec) { return; }
     ShellExecuteW(nullptr, L"open", dir.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+void TrayIcon::open_frontend(int index) const {
+    if (frontends_ == nullptr || index < 0 || static_cast<std::size_t>(index) >= frontends_->size()) {
+        return;
+    }
+    const FrontendServer& frontend = frontends_->at(static_cast<std::size_t>(index));
+    if (frontend.state() != FrontendState::Serving) { return; }
+    const std::string url = frontend_url(frontend.bound_port());
+    ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
 void TrayIcon::copy_dashboard_url() const {

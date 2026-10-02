@@ -108,6 +108,9 @@ svg{flex-shrink:0}
 .badge-info{background:#eaf1f5;color:#3a5c73}
 )HTML"
 R"HTML(.context-note{font-size:12px;line-height:1.65;margin-top:14px}
+.frontend-list{list-style:none;margin:14px 0 0;padding:0;display:grid;gap:8px}
+.frontend-list li{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;font-size:13px}
+.frontend-list code{font-size:11px;color:var(--text-muted);font-family:var(--font-mono)}
 /* Request readings live inside the activity card, beside the chart that shows
    them over time, rather than floating above the page as a separate strip. The
    strip repeated the generation figure the card already carried -- the same
@@ -540,6 +543,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 )HTML"
 R"HTML(      <section class="guide-step"><span class="step-number">2</span><div><h2>Add an OpenAI-compatible provider</h2><p>In your app’s model or provider settings, choose a custom OpenAI-compatible connection. Paste this as its base URL.</p><label class="field-caption" for="api-address">Configured base URL · this computer</label><div class="copy-field"><input id="api-address" readonly value="Loading…"><button class="btn" id="copy-address"><svg class="icon"><use href="#i-copy"/></svg>Copy</button></div><p id="connection-pending" class="notice warning" hidden>Connection settings were saved but may not be active yet. Restart the engine and verify readiness before using this address.</p><p class="context-note">This is the saved connection address. After changing connection settings, restart the engine before connecting. This address works on the computer running NInfer. Connecting from another device requires network configuration.</p></div></section>
       <section class="guide-step"><span class="step-number">3</span><div><h2>Choose your model and send a message</h2><p id="model-instruction">Refresh your app’s model list after connecting. Select the model served by NInfer, then send a short message.</p><div class="notice" id="auth-guidance">Loading API authentication details…</div><p>Return to Overview to see response activity. If your app cannot connect, check that the engine is ready and the base URL matches.</p></div></section>
+      <section class="guide-step" id="frontends-step" hidden><span class="step-number">4</span><div><h2>Or chat in your browser</h2><p>These web apps are served by the supervisor on this computer and talk to your engine directly, with no base URL or API key to set.</p><ul id="frontend-list" class="frontend-list"></ul><p class="context-note">Add or remove one in the <code>frontends</code> list of the supervisor configuration, then restart the supervisor.</p></div></section>
     </div><aside class="guide-aside"><h2>What is an API?</h2><p>It is the connection your app uses to talk to the engine. NInfer generates the responses; your app provides the conversation interface.</p><h3>What is a token?</h3><p>A token is a small piece of text. Average generation speed measures how many of those pieces the engine produces each second.</p><a href="#diagnostics" class="text-link">Troubleshoot a connection<svg class="icon"><use href="#i-arrow"/></svg></a></aside></div>
   </section>
   <section id="view-diagnostics" class="view" aria-labelledby="diagnostics-title" hidden>
@@ -620,7 +624,32 @@ R"HTML(      <section class="guide-step"><span class="step-number">2</span><div>
   }
 
 )HTML"
-R"HTML(  function formatUptime(seconds) {
+R"HTML(  function renderFrontends(list) {
+    const step = document.getElementById('frontends-step');
+    step.hidden = !list.length;
+    const reasons = {port_in_use: 'port in use', assets_missing: 'files not found', stopped: 'stopped'};
+    document.getElementById('frontend-list').replaceChildren(...list.map(fe => {
+      const li = document.createElement('li');
+      if (fe.state === 'serving') {
+        const link = document.createElement('a');
+        link.href = fe.url; link.target = '_blank'; link.rel = 'noopener'; link.className = 'text-link';
+        link.textContent = 'Open ' + fe.name;
+        li.append(link);
+      } else {
+        const name = document.createElement('strong');
+        name.textContent = fe.name;
+        const why = document.createElement('span');
+        const why_text = fe.reason || reasons[fe.state] || fe.state;
+        why.textContent = why_text.charAt(0).toUpperCase() + why_text.slice(1);
+        li.append(name, why);
+      }
+      const url = document.createElement('code');
+      url.textContent = fe.url;
+      li.append(url);
+      return li;
+    }));
+  }
+  function formatUptime(seconds) {
     if (seconds == null || isNaN(seconds)) return '—';
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
@@ -1371,6 +1400,7 @@ R"HTML(    if (id === 'prefix.reuse_mix') return {title:'Reusing earlier convers
   function render(s) {
     if (!s) return;
     lastState = s;
+    renderFrontends(s.frontends || []);
     renderMemoryControls(s);
 
     const eng = s.engine || {};

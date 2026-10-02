@@ -478,9 +478,10 @@ the UI inspects it to offer its thinking toggle. llama.cpp's sampling `params`, 
 `build_info` are omitted, so the UI's settings show no server defaults: NInfer's sampling defaults
 depend on whether the request thinks. A `?model=` query returns the same properties.
 
-The UI calls relative paths, so it must be served from the same origin as the API, for example by a
-reverse proxy that serves its files and forwards `/v1/*`, `/props`, `/health`, `/slots`, `/tools`,
-and `/models*` to NInfer without buffering streams. `--cors` does not affect it. Its chat requests
+The UI calls relative paths, so it must be served from the same origin as the API. On Windows the
+Supervisor serves it as a [web frontend](windows-app.md#web-frontends). Elsewhere, use a reverse
+proxy that serves its files and forwards `/v1/*`, `/props`, `/health`, `/slots`, `/tools`, and
+`/models*` to NInfer without buffering streams. `--cors` does not affect it. Its chat requests
 omit `model`, send `timings_per_token`, and put its thinking toggle in
 `chat_template_kwargs.enable_thinking`; answers stream `content` and `reasoning_content` deltas
 with the timings above. Its reasoning-effort menu sends `thinking_budget_tokens`. Every request

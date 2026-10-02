@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -24,6 +25,11 @@ public:
     // supervisor on the same port otherwise runs with no dashboard at all and
     // says nothing about it; the tray shows this as a disabled menu line.
     [[nodiscard]] bool listen_failed() const noexcept { return listen_failed_.load(); }
+
+    // The web frontends' status for /api/state. Set before run(); called from server threads.
+    void set_frontends_provider(std::function<nlohmann::json()> provider) {
+        frontends_provider_ = std::move(provider);
+    }
 
 private:
     nlohmann::json state_json();
@@ -58,6 +64,7 @@ private:
     Collector& collector_;
     std::atomic<bool> stop_{false};
     std::atomic<bool> listen_failed_{false};
+    std::function<nlohmann::json()> frontends_provider_;
     void* server_ = nullptr; // httplib::Server*
 };
 

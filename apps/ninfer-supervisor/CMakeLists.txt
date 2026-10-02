@@ -11,6 +11,7 @@ add_executable(ninfer-supervisor WIN32
   engine_child.cpp
   collector.cpp
   server.cpp
+  frontend_server.cpp
   tray.cpp)
 target_include_directories(ninfer-supervisor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ninfer-supervisor PRIVATE ninfer::httplib ninfer::json CUDA::cudart)
@@ -27,7 +28,9 @@ target_link_options(ninfer-supervisor PRIVATE
   "LINKER:/DEFAULTLIB:advapi32"
   "LINKER:/DEFAULTLIB:ws2_32"
   "LINKER:/DEFAULTLIB:crypt32")
+# One setting for every translation unit that includes the header-only httplib.
 target_compile_definitions(ninfer-supervisor PRIVATE
+  CPPHTTPLIB_NO_EXCEPTIONS
   WIN32_LEAN_AND_MEAN
   NOMINMAX
   _WIN32_WINNT=0x0A00)

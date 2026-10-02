@@ -6,7 +6,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #endif
-#define CPPHTTPLIB_NO_EXCEPTIONS
+
 #include <httplib.h>
 
 #include <chrono>
@@ -581,6 +581,7 @@ nlohmann::json DashboardServer::state_json() {
             {"series", collector_.series_json()},
             {"throughput", collector_.throughput_series_json()},
             {"health", std::move(health)},
+            {"frontends", frontends_provider_ ? frontends_provider_() : nlohmann::json::array()},
             {"log_tail", log}};
 }
 
