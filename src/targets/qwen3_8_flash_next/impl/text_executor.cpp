@@ -414,7 +414,8 @@ void FlashNextTextExecutor::execute_round_body(std::uint32_t batch_size,
                                 source_slots, destination_slots, gathered_ple, max_blocks,
                                 active_blocks, alloc_.state_view(), alloc_.workspace(),
                                 final_hidden, logits, device_.stream, sink, &hyper_hidden,
-                                aliased_recurrent_scan, has_visual ? &token_ids : nullptr);
+                                aliased_recurrent_scan, has_visual ? &token_ids : nullptr,
+                                alloc_.plan().rope);
 
     // 5. Sampler
     Tensor sampled_tokens =
@@ -724,7 +725,7 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
             first_token_index, alloc_.state_view(), alloc_.workspace(), final_hidden, logits,
             device_.stream, effective_sink, alloc_.plan().config.use_qsa_prefill_mma,
             &hyper_hidden, readout ? &*readout : nullptr,
-            visual_embeddings != nullptr ? &dev_token_ids : nullptr);
+            visual_embeddings != nullptr ? &dev_token_ids : nullptr, alloc_.plan().rope);
 
         round_in_flight_ = true;
         return PendingRound(this, prepared.transaction_id, 1, logits, final_hidden, hyper_hidden);
@@ -952,7 +953,7 @@ void FlashNextTextExecutor::execute_mtp_draft_step(std::uint32_t k, std::int32_t
         alloc_.state_view().qsa_attention_caches[kFullAttentionLayers],
         static_cast<std::int32_t>(alloc_.plan().maximum_blocks), active_blocks,
         alloc_.workspace(), draft_logits, draft_tokens_tensor, device_.stream, nullptr,
-        &carried_hidden);
+        &carried_hidden, alloc_.plan().rope);
 
     CUDA_CHECK(cudaMemcpyAsync(alloc_.round_tensors().sampled_tokens.slice(0, k, 1).data,
                                draft_tokens_tensor.data, sizeof(std::int32_t),

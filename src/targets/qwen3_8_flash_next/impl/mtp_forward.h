@@ -27,7 +27,7 @@ void flash_next_mtp_teacher_extend(const MtpModelView& mtp, const Tensor& embedd
     const Tensor& table_rows, const Tensor& source_slots, const Tensor& destination_slots,
     int table_row, int source_slot, int destination_slot, int first_token_index,
     bool prefill, bool aliased_scan, FlashNextDecodeStateView state,
-    WorkspaceArena& workspace, cudaStream_t stream);
+    WorkspaceArena& workspace, cudaStream_t stream, FlashNextRopeScaling rope = {});
 
 [[nodiscard]] std::size_t flash_next_mtp_workspace_capacity_bytes(std::int32_t maximum_blocks,
                                                                  std::int32_t batch);
@@ -41,6 +41,7 @@ void flash_next_mtp_step(const TextModelView& model, const Tensor& input_embeddi
                          WorkspaceArena& workspace,
                          Tensor& draft_logits, Tensor& draft_tokens, cudaStream_t stream,
                          const FlashNextDecodeStateSink* sink = nullptr,
-                         Tensor* out_hyper_hidden             = nullptr);
+                         Tensor* out_hyper_hidden             = nullptr,
+                         FlashNextRopeScaling rope            = {});
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

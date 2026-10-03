@@ -1,4 +1,5 @@
 #include "ninfer/ops/candidate_logprobs.h"
+#include "targets/qwen3_8_flash_next/impl/long_context.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
 #include "targets/qwen3_8_flash_next/impl/mtp_forward.h"
 
@@ -130,7 +131,7 @@ void validate_flash_next_decode_state(const FlashNextDecodeStateView& state,
 
 std::size_t flash_next_text_decode_workspace_capacity_bytes(std::int32_t maximum_blocks,
                                                             std::int32_t batch, bool mtp) {
-    if (maximum_blocks <= 0 || maximum_blocks > 65'536 || batch <= 0 || batch > 8) {
+    if (maximum_blocks <= 0 || maximum_blocks > kMaxIndexerBlocks || batch <= 0 || batch > 8) {
         throw std::invalid_argument("Flash-Next text decode received an invalid envelope");
     }
     WorkspaceLayoutBuilder layout;
@@ -167,7 +168,7 @@ std::size_t flash_next_text_decode_workspace_capacity_bytes(std::int32_t maximum
 
 std::size_t flash_next_text_prefill_workspace_capacity_bytes(std::int32_t maximum_blocks,
                                                              std::int32_t tokens, bool mtp) {
-    if (maximum_blocks <= 0 || maximum_blocks > 65'536 || tokens <= 0) {
+    if (maximum_blocks <= 0 || maximum_blocks > kMaxIndexerBlocks || tokens <= 0) {
         throw std::invalid_argument("Flash-Next text prefill received an invalid envelope");
     }
     WorkspaceLayoutBuilder layout;
@@ -222,10 +223,10 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                                  WorkspaceArena& workspace, Tensor& final_hidden, Tensor& logits,
                                  cudaStream_t stream, const FlashNextDecodeStateSink* sink,
                                  Tensor* out_hyper_hidden, bool aliased_recurrent_scan,
-                                 const Tensor* mtp_token_ids) {
+                                 const Tensor* mtp_token_ids, FlashNextRopeScaling rope) {
     const std::int32_t batch       = embedding.ne[1];
     const std::int32_t state_slots = state.ple_convolution_states.ne[2];
-    if (batch <= 0 || batch > 8 || maximum_blocks <= 0 || maximum_blocks > 65'536 ||
+    if (batch <= 0 || batch > 8 || maximum_blocks <= 0 || maximum_blocks > kMaxIndexerBlocks ||
         active_blocks < 0 || active_blocks > maximum_blocks ||
         !exact_tensor(embedding, DType::BF16, 2'560, batch) ||
         !exact_tensor(token_indices, DType::I32, batch) ||
@@ -289,12 +290,13 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                 round_ws.block_input, model.full_attention[qsa_idx], token_indices, mrope_positions,
                 table_rows, source_slots, destination_slots, state.qsa_indexer_caches[qsa_idx],
                 maximum_blocks, active_blocks, workspace, round_ws.selected_blocks,
-                round_ws.selected_counts, stream, aliased_recurrent_scan);
+                round_ws.selected_counts, stream, aliased_recurrent_scan, rope);
             emit_state(prefix + "selected_counts", round_ws.selected_counts);
             flash_next_qsa_attention_decode(
                 round_ws.block_input, model.full_attention[qsa_idx], token_indices, mrope_positions,
                 table_rows, round_ws.selected_blocks, round_ws.selected_counts,
-                state.qsa_attention_caches[qsa_idx], workspace, round_ws.block_output, stream);
+                state.qsa_attention_caches[qsa_idx], workspace, round_ws.block_output, stream,
+                rope);
         } else {
             const std::size_t gdn_idx = gdn_ordinal(layer);
             flash_next_gdn_decode(round_ws.block_input, model.gdn[gdn_idx], source_slots,
@@ -334,7 +336,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         }
         flash_next_mtp_teacher_extend(*model.mtp, mtp_embedding, round_ws.hyper_hidden,
             token_indices, mrope_positions, table_rows, source_slots, destination_slots,
-            0, 0, 0, 0, false, aliased_recurrent_scan, state, workspace, stream);
+            0, 0, 0, 0, false, aliased_recurrent_scan, state, workspace, stream, rope);
     }
 
     // 3. Final hyper mixer -> final_hidden [2560, B]
@@ -361,7 +363,7 @@ void flash_next_text_decode(const TextModelView& model, const Tensor& token_ids,
                             std::int32_t maximum_blocks, std::int32_t active_blocks,
                             FlashNextDecodeStateView state, WorkspaceArena& workspace,
                             Tensor& final_hidden, Tensor& logits, cudaStream_t stream,
-                            const FlashNextDecodeStateSink* sink) {
+                            const FlashNextDecodeStateSink* sink, FlashNextRopeScaling rope) {
     const std::int32_t batch = token_ids.ne[0];
     if (batch <= 0 || batch > 8 || !exact_tensor(token_ids, DType::I32, batch) ||
         !exact_token_embedding(model.token_embedding)) {
@@ -373,7 +375,7 @@ void flash_next_text_decode(const TextModelView& model, const Tensor& token_ids,
     flash_next_text_decode_core(model, embedding, token_indices, mrope_positions, table_rows,
                                 source_slots, destination_slots, gathered_ple_embedding,
                                 maximum_blocks, active_blocks, state, workspace, final_hidden,
-                                logits, stream, sink);
+                                logits, stream, sink, nullptr, false, nullptr, rope);
 }
 
 void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& embedding,
@@ -386,10 +388,10 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                                    cudaStream_t stream, const FlashNextDecodeStateSink* sink,
                                    bool use_qsa_prefill_mma, Tensor* out_hyper_hidden,
                                    const FlashNextPromptReadout* prompt_readout,
-                                   const Tensor* mtp_token_ids) {
+                                   const Tensor* mtp_token_ids, FlashNextRopeScaling rope) {
     const std::int32_t tokens      = embedding.ne[1];
     const std::int32_t state_slots = state.ple_convolution_states.ne[2];
-    if (tokens <= 0 || maximum_blocks <= 0 || maximum_blocks > 65'536 || first_token_index < 0 ||
+    if (tokens <= 0 || maximum_blocks <= 0 || maximum_blocks > kMaxIndexerBlocks || first_token_index < 0 ||
         table_row < 0 || source_slot < 0 || source_slot >= state_slots || destination_slot < 0 ||
         destination_slot >= state_slots ||
         !exact_tensor(embedding, DType::BF16, 2'560, tokens) ||
@@ -458,7 +460,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                 round_ws.block_input, model.full_attention[qsa_idx], token_indices,
                 mrope_positions, table_row, source_slot, destination_slot,
                 state.qsa_indexer_caches[qsa_idx], maximum_blocks, first_token_index, workspace,
-                round_ws.selected_blocks, round_ws.selected_counts, stream);
+                round_ws.selected_blocks, round_ws.selected_counts, stream, rope);
             emit_state(prefix + "selected_counts", round_ws.selected_counts);
             emit_state(prefix + "selected_blocks", round_ws.selected_blocks);
             QsaStageEmitter qsa_emit;
@@ -469,7 +471,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                 round_ws.block_input, model.full_attention[qsa_idx], token_indices,
                 mrope_positions, table_row, round_ws.selected_blocks,
                 round_ws.selected_counts, state.qsa_attention_caches[qsa_idx],
-                workspace, round_ws.block_output, stream, qsa_emit, use_qsa_prefill_mma);
+                workspace, round_ws.block_output, stream, qsa_emit, use_qsa_prefill_mma, rope);
         } else {
             const std::size_t gdn_idx = gdn_ordinal(layer);
             flash_next_gdn_prefill_chunk(round_ws.block_input, model.gdn[gdn_idx], source_slot,
@@ -513,7 +515,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
         flash_next_mtp_teacher_extend(*model.mtp, mtp_embedding, round_ws.hyper_hidden,
             token_indices, mrope_positions, Tensor{}, Tensor{}, Tensor{}, table_row,
             source_slot, destination_slot, first_token_index, true, true,
-            state, workspace, stream);
+            state, workspace, stream, rope);
     }
 
     // 2b. Prompt-position readout, before the final logits column is written.

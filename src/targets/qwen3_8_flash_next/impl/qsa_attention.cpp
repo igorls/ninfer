@@ -90,7 +90,7 @@ void flash_next_qsa_attention_decode(const Tensor& input, const AttentionWeights
                                      const Tensor& table_rows, const Tensor& selected_blocks,
                                      const Tensor& selected_counts, QsaAttentionCacheView cache,
                                      WorkspaceArena& workspace, Tensor& output,
-                                     cudaStream_t stream) {
+                                     cudaStream_t stream, FlashNextRopeScaling rope) {
     const std::int32_t batch = input.ne[1];
     const auto key_dt = cache.key_pages.dtype;
     if (!exact_tensor(input, DType::BF16, 2'560, batch) || batch < 1 || batch > 8 ||
@@ -126,7 +126,7 @@ void flash_next_qsa_attention_decode(const Tensor& input, const AttentionWeights
                 workspace, stream);
     flash_next_qsa_attention_launch(token_indices, mrope_positions, table_rows, selected_blocks,
                                     selected_counts, weights.query_norm, weights.key_norm, cache,
-                                    scratch, workspace, stream);
+                                    scratch, workspace, stream, rope);
     ops::linear(scratch.gated, weights.output, output, ops::LinearPolicy::A16Only, workspace,
                 stream);
 }
@@ -135,7 +135,8 @@ void flash_next_qsa_attention_prefill_chunk(
     const Tensor& input, const AttentionWeights& weights, const Tensor& token_indices,
     const Tensor& mrope_positions, std::int32_t table_row, const Tensor& selected_blocks,
     const Tensor& selected_counts, QsaAttentionCacheView cache, WorkspaceArena& workspace,
-    Tensor& output, cudaStream_t stream, const QsaStageEmitter& emit, bool use_mma) {
+    Tensor& output, cudaStream_t stream, const QsaStageEmitter& emit, bool use_mma,
+    FlashNextRopeScaling rope) {
     const std::int32_t tokens = input.ne[1];
     const auto key_dt = cache.key_pages.dtype;
     if (tokens <= 0 || !exact_tensor(input, DType::BF16, 2'560, tokens) ||
@@ -174,7 +175,7 @@ void flash_next_qsa_attention_prefill_chunk(
     if (emit) { emit("qsa_projected", scratch.projected); }
     flash_next_qsa_attention_prefill_launch(token_indices, mrope_positions, table_row, selected_blocks,
                                             selected_counts, weights.query_norm, weights.key_norm,
-                                            cache, scratch, stream, use_mma);
+                                            cache, scratch, stream, use_mma, rope);
     stage_ledger_record(stream, FlashNextStageId::QSA_MainAttention);
     if (emit) {
         emit("qsa_query", scratch.query);
