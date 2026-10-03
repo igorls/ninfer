@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/arena.h"
+#include "targets/qwen3_8_flash_next/impl/long_context.h"
 #include "targets/qwen3_8_flash_next/impl/model_view.h"
 
 #include <cuda_runtime.h>
@@ -38,14 +39,15 @@ void flash_next_qsa_indexer_decode(const Tensor& input, const AttentionWeights& 
                                    std::int32_t maximum_blocks, std::int32_t active_blocks,
                                    WorkspaceArena& workspace, Tensor& selected_blocks,
                                    Tensor& selected_counts, cudaStream_t stream,
-                                   bool aliased_recurrent_scan = false);
+                                   bool aliased_recurrent_scan = false,
+                                   FlashNextRopeScaling rope = {});
 
 void flash_next_qsa_indexer_prefill_chunk(
     const Tensor& input, const AttentionWeights& weights, const Tensor& token_indices,
     const Tensor& mrope_positions, std::int32_t table_row, std::int32_t source_state_slot,
     std::int32_t destination_state_slot, QsaIndexerCacheView cache, std::int32_t maximum_blocks,
     std::int32_t first_token_index, WorkspaceArena& workspace, Tensor& selected_blocks,
-    Tensor& selected_counts, cudaStream_t stream);
+    Tensor& selected_counts, cudaStream_t stream, FlashNextRopeScaling rope = {});
 // Prefill selection: identity when the chunk (or tile) max complete_blocks <= 512, otherwise
 // one DeviceSegmentedRadixSort::SortPairsDescending per tile. Decode keeps packed-key DeviceTopK.
 // first_token_index is a host scalar (token_indices[0]); the default path uses it to choose

@@ -1,3 +1,4 @@
+#include "targets/qwen3_8_flash_next/impl/long_context_device.cuh"
 #include "targets/qwen3_8_flash_next/impl/qsa_attention_kernels.h"
 
 #include "core/device.h"
@@ -90,34 +91,19 @@ constexpr int kMainKeyOffset   = 12'288;
 constexpr int kMainValueOffset = 12'800;
 constexpr int kPageTokens      = 64;
 constexpr int kSelectedBlocks  = 512;
-constexpr float kRopeTheta     = 1.0e7F;
-constexpr float kScale         = 0.0625F; // 1/sqrt(256)
-
-__device__ float rope_frequency(int pair) {
-    return expf((-2.0F * static_cast<float>(pair) / 64.0F) * logf(kRopeTheta));
-}
+constexpr float kScale = 0.0625F; // 1/sqrt(256)
 
 __device__ void store_mrope(const __nv_bfloat16* normalized, const std::int32_t* positions,
-                            __nv_bfloat16* output, int dim) {
-    if (dim < 32) {
-        const float angle = static_cast<float>(positions[dim % 3]) * rope_frequency(dim);
-        float sine        = 0.0F;
-        float cosine      = 0.0F;
-        sincosf(angle, &sine, &cosine);
-        const float first  = __bfloat162float(normalized[dim]);
-        const float second = __bfloat162float(normalized[dim + 32]);
-        output[dim]        = __float2bfloat16_rn(first * cosine - second * sine);
-        output[dim + 32]   = __float2bfloat16_rn(second * cosine + first * sine);
-    } else if (dim >= 64) {
-        output[dim] = normalized[dim];
-    }
+                            __nv_bfloat16* output, int dim, const FlashNextRopeScaling& rope) {
+    flash_next_device_store_partial_mrope(normalized, positions, output, dim, rope);
 }
 
 __global__ void prepare_query_kernel(const __nv_bfloat16* __restrict__ projected,
                                      const __nv_bfloat16* __restrict__ norm,
                                      const std::int32_t* __restrict__ positions,
                                      __nv_bfloat16* __restrict__ query,
-                                     __nv_bfloat16* __restrict__ gate, int batch_size) {
+                                     __nv_bfloat16* __restrict__ gate, int batch_size,
+                                     FlashNextRopeScaling rope) {
     __shared__ float warp_squares[8];
     __shared__ __nv_bfloat16 normalized[kHeadDim];
     const int dim   = static_cast<int>(threadIdx.x);
@@ -142,7 +128,7 @@ __global__ void prepare_query_kernel(const __nv_bfloat16* __restrict__ projected
                                        positions[2 * batch_size + batch]};
     auto* destination =
         query + static_cast<std::int64_t>(batch) * kQueryHeads * kHeadDim + head * kHeadDim;
-    store_mrope(normalized, local_positions, destination, dim);
+    store_mrope(normalized, local_positions, destination, dim, rope);
 }
 
 template <typename StorageT>
@@ -152,7 +138,7 @@ __global__ void prepare_append_kv_kernel(
     const std::int32_t* __restrict__ table_rows, const std::int32_t* __restrict__ block_tables,
     int logical_pages, StorageT* __restrict__ key_pages,
     StorageT* __restrict__ value_pages, __nv_bfloat16* __restrict__ key,
-    __nv_bfloat16* __restrict__ value, int batch_size) {
+    __nv_bfloat16* __restrict__ value, int batch_size, FlashNextRopeScaling rope) {
     __shared__ float warp_squares[8];
     __shared__ __nv_bfloat16 normalized[kHeadDim];
     const int dim                     = static_cast<int>(threadIdx.x);
@@ -178,7 +164,7 @@ __global__ void prepare_append_kv_kernel(
                                        positions[2 * batch_size + batch]};
     auto* key_destination =
         key + static_cast<std::int64_t>(batch) * kKvHeads * kHeadDim + head * kHeadDim;
-    store_mrope(normalized, local_positions, key_destination, dim);
+    store_mrope(normalized, local_positions, key_destination, dim, rope);
     __syncthreads();
 
     const int token         = token_indices[batch];
@@ -219,17 +205,17 @@ void flash_next_qsa_attention_launch(const Tensor& token_indices, const Tensor& 
                                      const Tensor& selected_counts, const Tensor& query_norm,
                                      const Tensor& key_norm, QsaAttentionCacheView cache,
                                      FlashNextQsaAttentionWorkspace& scratch, WorkspaceArena& workspace,
-                                     cudaStream_t stream) {
+                                     cudaStream_t stream, FlashNextRopeScaling rope) {
     const int batch = token_indices.ne[0];
     prepare_query_kernel<<<dim3(kQueryHeads, batch), kHeadDim, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(scratch.projected.data),
         static_cast<const __nv_bfloat16*>(query_norm.data),
         static_cast<const std::int32_t*>(mrope_positions.data),
         static_cast<__nv_bfloat16*>(scratch.query.data),
-        static_cast<__nv_bfloat16*>(scratch.gate.data), batch);
+        static_cast<__nv_bfloat16*>(scratch.gate.data), batch, rope);
     CUDA_CHECK(cudaGetLastError());
     flash_next_qsa_attention_store_launch(scratch.projected, token_indices, mrope_positions,
-        table_rows, 0, key_norm, cache, scratch.key, scratch.value, stream);
+        table_rows, 0, key_norm, cache, scratch.key, scratch.value, stream, rope);
     ops::selected_block_attention(scratch.query, token_indices, table_rows,
         selected_blocks, selected_counts, {cache.key_pages, cache.value_pages, cache.block_tables},
         workspace, scratch.attended, stream);
@@ -246,7 +232,8 @@ __global__ void qsa_prefill_prepare_query_kernel(const __nv_bfloat16* __restrict
                                                  const __nv_bfloat16* __restrict__ norm,
                                                  const std::int32_t* __restrict__ positions,
                                                  __nv_bfloat16* __restrict__ query,
-                                                 __nv_bfloat16* __restrict__ gate, int tokens) {
+                                                 __nv_bfloat16* __restrict__ gate, int tokens,
+                                                 FlashNextRopeScaling rope) {
     __shared__ float warp_squares[8];
     __shared__ __nv_bfloat16 normalized[kHeadDim];
     const int dim   = static_cast<int>(threadIdx.x);
@@ -271,7 +258,7 @@ __global__ void qsa_prefill_prepare_query_kernel(const __nv_bfloat16* __restrict
                                        positions[2 * tokens + token]};
     auto* destination =
         query + static_cast<std::int64_t>(token) * kQueryHeads * kHeadDim + head * kHeadDim;
-    store_mrope(normalized, local_positions, destination, dim);
+    store_mrope(normalized, local_positions, destination, dim, rope);
 }
 
 template <typename StorageT>
@@ -280,7 +267,8 @@ __global__ void qsa_prefill_prepare_append_kv_kernel(
     const std::int32_t* __restrict__ token_indices, const std::int32_t* __restrict__ positions,
     int table_row, const std::int32_t* __restrict__ block_tables, int logical_pages,
     StorageT* __restrict__ key_pages, StorageT* __restrict__ value_pages,
-    __nv_bfloat16* __restrict__ key, __nv_bfloat16* __restrict__ value, int tokens) {
+    __nv_bfloat16* __restrict__ key, __nv_bfloat16* __restrict__ value, int tokens,
+    FlashNextRopeScaling rope) {
     __shared__ float warp_squares[8];
     __shared__ __nv_bfloat16 normalized[kHeadDim];
     const int dim   = static_cast<int>(threadIdx.x);
@@ -306,7 +294,7 @@ __global__ void qsa_prefill_prepare_append_kv_kernel(
                                        positions[2 * tokens + token]};
     auto* key_destination =
         key + static_cast<std::int64_t>(token) * kKvHeads * kHeadDim + head * kHeadDim;
-    store_mrope(normalized, local_positions, key_destination, dim);
+    store_mrope(normalized, local_positions, key_destination, dim, rope);
     __syncthreads();
 
     const int token_idx     = token_indices[token];
@@ -832,7 +820,7 @@ void flash_next_qsa_attention_store_launch(const Tensor& projected, const Tensor
                                            const Tensor& mrope_positions, const Tensor& table_rows,
                                            int table_row, const Tensor& key_norm,
                                            QsaAttentionCacheView cache, Tensor& key, Tensor& value,
-                                           cudaStream_t stream) {
+                                           cudaStream_t stream, FlashNextRopeScaling rope) {
     const int tokens = token_indices.ne[0];
     const int batch  = tokens;
     if (table_rows.data != nullptr) {
@@ -847,7 +835,7 @@ void flash_next_qsa_attention_store_launch(const Tensor& projected, const Tensor
                 static_cast<__nv_fp8_e4m3*>(cache.key_pages.data),
                 static_cast<__nv_fp8_e4m3*>(cache.value_pages.data),
                 static_cast<__nv_bfloat16*>(key.data), static_cast<__nv_bfloat16*>(value.data),
-                batch);
+                batch, rope);
             CUDA_CHECK(cudaGetLastError());
         } else {
             prepare_append_kv_kernel<__nv_bfloat16><<<dim3(kKvHeads, batch), kHeadDim, 0, stream>>>(
@@ -860,7 +848,7 @@ void flash_next_qsa_attention_store_launch(const Tensor& projected, const Tensor
                 static_cast<__nv_bfloat16*>(cache.key_pages.data),
                 static_cast<__nv_bfloat16*>(cache.value_pages.data),
                 static_cast<__nv_bfloat16*>(key.data), static_cast<__nv_bfloat16*>(value.data),
-                batch);
+                batch, rope);
             CUDA_CHECK(cudaGetLastError());
         }
     } else {
@@ -875,7 +863,7 @@ void flash_next_qsa_attention_store_launch(const Tensor& projected, const Tensor
                     cache.block_tables.ne[0], static_cast<__nv_fp8_e4m3*>(cache.key_pages.data),
                     static_cast<__nv_fp8_e4m3*>(cache.value_pages.data),
                     static_cast<__nv_bfloat16*>(key.data), static_cast<__nv_bfloat16*>(value.data),
-                    tokens);
+                    tokens, rope);
             CUDA_CHECK(cudaGetLastError());
         } else {
             qsa_prefill_prepare_append_kv_kernel<__nv_bfloat16>
@@ -888,7 +876,7 @@ void flash_next_qsa_attention_store_launch(const Tensor& projected, const Tensor
                     cache.block_tables.ne[0], static_cast<__nv_bfloat16*>(cache.key_pages.data),
                     static_cast<__nv_bfloat16*>(cache.value_pages.data),
                     static_cast<__nv_bfloat16*>(key.data), static_cast<__nv_bfloat16*>(value.data),
-                    tokens);
+                    tokens, rope);
             CUDA_CHECK(cudaGetLastError());
         }
     }
@@ -898,17 +886,17 @@ void flash_next_qsa_attention_prefill_launch(
     const Tensor& token_indices, const Tensor& mrope_positions, std::int32_t table_row,
     const Tensor& selected_blocks, const Tensor& selected_counts, const Tensor& query_norm,
     const Tensor& key_norm, QsaAttentionCacheView cache, FlashNextQsaAttentionWorkspace& scratch,
-    cudaStream_t stream, bool use_mma) {
+    cudaStream_t stream, bool use_mma, FlashNextRopeScaling rope) {
     const int tokens = token_indices.ne[0];
     qsa_prefill_prepare_query_kernel<<<dim3(kQueryHeads, tokens), kHeadDim, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(scratch.projected.data),
         static_cast<const __nv_bfloat16*>(query_norm.data),
         static_cast<const std::int32_t*>(mrope_positions.data),
         static_cast<__nv_bfloat16*>(scratch.query.data),
-        static_cast<__nv_bfloat16*>(scratch.gate.data), tokens);
+        static_cast<__nv_bfloat16*>(scratch.gate.data), tokens, rope);
     CUDA_CHECK(cudaGetLastError());
     flash_next_qsa_attention_store_launch(scratch.projected, token_indices, mrope_positions,
-        Tensor{}, table_row, key_norm, cache, scratch.key, scratch.value, stream);
+        Tensor{}, table_row, key_norm, cache, scratch.key, scratch.value, stream, rope);
     const bool is_fp8 = (cache.key_pages.dtype == DType::FP8_E4M3FN);
     if (is_fp8) {
         if (use_mma) {

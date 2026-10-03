@@ -225,6 +225,18 @@ target_link_libraries(ninfer_qwen3_6_35b_a3b_dflash_load_plan_test PRIVATE CUDA:
 set_tests_properties(ninfer_qwen3_6_35b_a3b_dflash_load_plan_test
   PROPERTIES SKIP_RETURN_CODE 77)
 
+# Host-only: the planner's CUDA scratch query is covered by the foundation test.
+add_executable(ninfer_qwen3_8_flash_next_long_context_test
+  targets/qwen3_8_flash_next/test_long_context.cpp)
+target_include_directories(ninfer_qwen3_8_flash_next_long_context_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/include)
+add_test(NAME ninfer_qwen3_8_flash_next_long_context_test
+  COMMAND ninfer_qwen3_8_flash_next_long_context_test)
+add_test(NAME ninfer_qwen3_8_flash_next_yarn_rope_py
+  COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/targets/qwen3_8_flash_next/test_yarn_rope.py)
+
 ninfer_add_test(ninfer_qwen3_8_flash_next_load_plan_test
   SOURCES targets/qwen3_8_flash_next/test_load_plan.cpp
   LIBRARIES ninfer_qwen3_8_flash_next ninfer_engine)

@@ -112,7 +112,7 @@ void print_reference_tool_usage(std::string_view prog) {
         << "  --thinking-budget <N>      Thinking token budget forcing (not supported)\n"
         << "  --reasoning-effort <effort> Reasoning effort: 'low', 'medium' (default), 'high', 'none'\n"
         << "  --max-context <tokens>     Maximum context length in tokens (default: 4096, max: "
-           "262144)\n"
+           "1000000; YaRN factor 4 above 262144)\n"
         << "  --max-concurrency <B>      Maximum concurrent decode requests (default: 1, range: "
            "[1, 8])\n"
         << "  --page-groups <N>          Exact physical page group count (default: 0 = max for "
@@ -288,8 +288,8 @@ ReferenceToolOptions parse_reference_tool_options(std::span<const std::string_vi
     if (opts.max_concurrency < 1 || opts.max_concurrency > 8) {
         throw std::invalid_argument("--max-concurrency must be between 1 and 8");
     }
-    if (opts.max_context < 1 || opts.max_context > 262'144) {
-        throw std::invalid_argument("--max-context must be between 1 and 262144");
+    if (opts.max_context < 1 || opts.max_context > 1'000'000) {
+        throw std::invalid_argument("--max-context must be between 1 and 1000000");
     }
     if (opts.state_slots != 0 &&
         (opts.state_slots < 2U * opts.max_concurrency || opts.state_slots > 64)) {

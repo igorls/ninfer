@@ -10,6 +10,7 @@
 
 #include <cuda_runtime.h>
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
@@ -227,6 +228,10 @@ int test_decode_graph_buckets() {
                   << plan256k.cuda_graph_allowance_bytes << "\n";
         return 1;
     }
+    if (plan256k.rope.yarn != 0 || plan256k.rope.attention_factor != 1.0F) {
+        std::cerr << "FAIL: 256k plan must stay on default RoPE\n";
+        return 1;
+    }
     if (plan256k.state_slots != 2) {
         std::cerr << "FAIL: 256k state_slots expected 2 got " << plan256k.state_slots << "\n";
         return 1;
@@ -314,8 +319,47 @@ int test_capacity_curve_and_finalize() {
     if (plan_max.main_page_groups != 1024 || plan_max.attention_physical_pages != 4096 ||
         plan_max.indexer_physical_pages != 1024 || plan_max.attention_logical_pages != 4096 ||
         plan_max.indexer_logical_pages != 1024 || plan_max.maximum_blocks != 65'536 ||
-        plan_max.resolved_tokens != 262'144) {
+        plan_max.resolved_tokens != 262'144 || plan_max.rope.yarn != 0) {
         std::cerr << "plan_max (context 262144) mismatch\n";
+        return 1;
+    }
+
+    FlashNextRuntimeConfig cfg_1m{
+        .max_concurrency = 1,
+        .max_context     = 1'000'000,
+        .prefill_chunk   = 2048,
+        .use_cuda_graph  = true,
+    };
+    auto curve_1m = flash_next_capacity_curve(cfg_1m);
+    if (curve_1m.minimum_main_page_groups != 3907 || curve_1m.maximum_main_page_groups != 3907) {
+        std::cerr << "curve_1m groups mismatch\n";
+        return 1;
+    }
+    auto plan_1m = finalize_flash_next_runtime_plan(cfg_1m, curve_1m.minimum_main_page_groups);
+    const auto buckets_1m = flash_next_decode_graph_buckets(plan_1m.maximum_blocks);
+    if (plan_1m.maximum_blocks != 250'000 || plan_1m.main_page_groups != 3907 ||
+        plan_1m.attention_logical_pages != 15'625 || plan_1m.indexer_logical_pages != 3907 ||
+        plan_1m.resolved_tokens != 3907U * 256U || buckets_1m.count != 4 ||
+        buckets_1m.blocks[0] != 512 || buckets_1m.blocks[1] != 2048 ||
+        buckets_1m.blocks[2] != 8192 || buckets_1m.blocks[3] != 250'000 ||
+        plan_1m.cuda_graph_allowance_bytes != 4ULL * 24ULL * 1024ULL * 1024ULL ||
+        plan_1m.rope.yarn != 1 ||
+        std::fabs(plan_1m.rope.attention_factor - 1.1386294364929199F) > 1.0e-6F) {
+        std::cerr << "plan_1m mismatch blocks=" << plan_1m.maximum_blocks
+                  << " groups=" << plan_1m.main_page_groups
+                  << " yarn=" << plan_1m.rope.yarn << "\n";
+        return 1;
+    }
+    FlashNextRuntimeConfig cfg_over_native{
+        .max_concurrency = 1,
+        .max_context     = 262'145,
+        .prefill_chunk   = 128,
+    };
+    auto plan_over = finalize_flash_next_runtime_plan(
+        cfg_over_native, flash_next_capacity_curve(cfg_over_native).minimum_main_page_groups);
+    if (plan_over.maximum_blocks != 65'537 || plan_over.rope.yarn != 1 ||
+        plan_over.main_page_groups != 1025) {
+        std::cerr << "262145 plan did not index the first block past the old 65536 cap\n";
         return 1;
     }
 
@@ -369,8 +413,27 @@ int test_capacity_curve_and_finalize() {
         std::cerr << "Failed to reject max_context = 0\n";
         return 1;
     }
-    if (!reject_curve({.max_concurrency = 1, .max_context = 262'145, .state_slot_capacity = 0, .prefill_chunk = 128})) {
-        std::cerr << "Failed to reject max_context > 262144\n";
+    if (!reject_curve({.max_concurrency = 1, .max_context = 1'000'001, .state_slot_capacity = 0, .prefill_chunk = 128})) {
+        std::cerr << "Failed to reject max_context > 1000000\n";
+        return 1;
+    }
+    if (!reject_curve({.max_concurrency = 1, .max_context = 1'500'000, .state_slot_capacity = 0, .prefill_chunk = 128})) {
+        std::cerr << "Failed to reject max_context 1500000\n";
+        return 1;
+    }
+    if (!reject_curve({.max_concurrency = 1, .max_context = 1'000'000, .state_slot_capacity = 0, .prefill_chunk = 262'272})) {
+        std::cerr << "Failed to reject prefill_chunk above the 262144 per-call limit\n";
+        return 1;
+    }
+    try {
+        FlashNextRuntimeConfig legal_chunk{
+            .max_concurrency = 1,
+            .max_context     = 1'000'000,
+            .prefill_chunk   = 262'144,
+        };
+        (void)flash_next_capacity_curve(legal_chunk);
+    } catch (const std::invalid_argument&) {
+        std::cerr << "Rejected a 262144 prefill chunk under a 1M plan\n";
         return 1;
     }
     if (!reject_curve({.max_concurrency = 4, .max_context = 256, .state_slot_capacity = 7, .continuation_capacity = 0, .prefill_chunk = 128})) {

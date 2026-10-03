@@ -31,7 +31,7 @@ semantics.
 | GDN key heads x width | 16 x 128 = 2048 |
 | GDN value heads x width | 48 x 128 = 6144 |
 | GDN convolution channels / taps | 10240 / 4 |
-| maximum positions / RoPE theta | 262144 / 10000000 |
+| native positions / YaRN ceiling / RoPE theta | 262144 / 1000000 / 10000000 |
 | PLE injection layer | decoder layer 1 (the second layer) |
 | PLE n-gram order / heads per order | bigram and trigram / 8 |
 | PLE row width / logical rows | 160 / 320001536 stored rows |
@@ -41,6 +41,37 @@ semantics.
 Text embeddings are repeated four times to form the initial `[4,2560]` hyper state. After the 48
 decoder layers, the final hyper mixer reduces those streams to one 2560-wide state before the
 independent output head.
+
+### 1.1 Context window
+
+The published checkpoint `config.json` sets `max_position_embeddings` to 262144 and
+`rope_parameters.rope_type` to `default`. It stores no `rope_scaling` block. The model card treats
+262144 as the native window and 1000000 as a deployment-time static YaRN extension: factor 4.0,
+`original_max_position_embeddings` 262144, the same interleaved MRoPE sections `[11,11,10]`,
+`rope_theta` 10000000, and `partial_rotary_factor` 0.25. Omitted YaRN fields stay at the
+Transformers defaults: `beta_fast` 32, `beta_slow` 1, `truncate` true, and
+`attention_factor = 0.1 * ln(4) + 1` (about 1.138629).
+
+`max_context` must be in `[1, 1000000]`. 1000001 and 1500000 are rejected. A request at or below
+262144 keeps today's default RoPE: the device frequency is still
+`expf((-2 * pair / 64) * logf(1e7))`, and cos/sin are not scaled. A request in `(262144, 1000000]`
+installs one factor-4 table for every position in that plan, including positions inside the native
+window. That is what static YaRN does. The correction ramp leaves pairs 0–14 unchanged, blends
+pairs 15–21, and divides pairs 22–31 by 4. The attention factor then scales both sine and cosine,
+so position 0 itself changes: a vector `(1, 0.5)` on pair 0 becomes about `(1.138629, 0.569315)`
+instead of staying `(1, 0.5)`. No logit delta against a loaded model has been measured. The factor
+is not retuned; Qwen's suggestion to use factor 2.0 around 524288 tokens is not implemented.
+
+The indexer addresses the whole request. Blocks are `ceil(max_context / 4)` with no 65536 clamp,
+so 262144 is 65536 blocks, 262145 is 65537, and 1000000 is 250000. One prefill call still accepts
+at most 262144 query tokens, because that is the selected-block attention limit. A 1M prompt is
+chunked. Decode graph buckets stay four slots, `{512, 2048, 8192, maximum_blocks}`.
+
+This target is the research engine's Flash-Next package. The workstation default branch does not
+execute Flash-Next yet. A GPU still has to show a prefill whose positions pass 262144, indexer
+hits past block 65536, and logits matching a YaRN reference, including that a 32K or 256K plan
+matches the default-RoPE path. The earlier KV malloc sketch (about 13.18 GiB at 1M for FP8+MTP)
+was not remeasured here and did not include graphs or activations.
 
 ## 2. Normalization and hyper-connections
 
@@ -96,7 +127,9 @@ the 6144-to-2560 output projection.
 The QSA indexer projects four 128-wide queries and one raw 128-wide key per token. For every visible
 prefix, it partitions the complete visible tokens into consecutive four-token blocks and leaves an
 incomplete tail uncompressed. Each complete block key is the FP32 mean of its four raw keys,
-one-centered RMS-normalized, and rotated at the block's first position. The score for a block is:
+one-centered RMS-normalized, and rotated at the block's first position. Attention and the indexer
+share the 64-wide interleaved MRoPE table. When the plan's `max_context` is above 262144, both use
+the factor-4 YaRN table from section 1.1; the indexer rotary width stays 64. The score for a block is:
 
 ```text
 score = sum_head(relu(q_head dot pooled_block_key)) / sqrt(128)
@@ -241,4 +274,5 @@ resident. Keeping reasoning preserves that prefix when the client replays it con
 Vision is the checkpoint's 27-block 1152-wide tower: 3D patch projection, learned position
 embedding, non-causal 16-head attention, GELU MLP, and a 2x2 patch merger from 4608 to Text width
 2560. Text uses interleaved three-axis MRoPE with sections `[11,11,10]`; the QSA indexer additionally
-retains full positions for cached raw keys.
+retains full positions for cached raw keys. YaRN, when the runtime plan enables it, changes the
+64 frequencies and the sine/cosine magnitude. It does not change the axis assignment.

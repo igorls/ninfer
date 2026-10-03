@@ -1,3 +1,4 @@
+#include "targets/qwen3_8_flash_next/impl/long_context.h"
 #include "targets/qwen3_8_flash_next/impl/qsa_indexer.h"
 
 #include "ninfer/ops/linear.h"
@@ -37,7 +38,7 @@ bool exact_bf16_weight(const Weight& weight, std::int32_t rows, std::int32_t col
 
 std::size_t flash_next_qsa_indexer_workspace_capacity_bytes(std::int32_t maximum_blocks,
                                                             std::int32_t batch) {
-    if (maximum_blocks <= 0 || maximum_blocks > 65'536 || batch <= 0 || batch > 8) {
+    if (maximum_blocks <= 0 || maximum_blocks > kMaxIndexerBlocks || batch <= 0 || batch > 8) {
         throw std::invalid_argument("Flash-Next QSA indexer received an invalid envelope");
     }
     const std::size_t sort_temp = flash_next_qsa_indexer_sort_temp_bytes(maximum_blocks, batch);
@@ -53,10 +54,10 @@ void flash_next_qsa_indexer_decode(const Tensor& input, const AttentionWeights& 
                                    std::int32_t maximum_blocks, std::int32_t active_blocks,
                                     WorkspaceArena& workspace, Tensor& selected_blocks,
                                     Tensor& selected_counts, cudaStream_t stream,
-                                    bool aliased_recurrent_scan) {
+                                    bool aliased_recurrent_scan, FlashNextRopeScaling rope) {
     const std::int32_t batch         = input.ne[1];
     const std::int32_t logical_pages = cache.block_tables.ne[0];
-    if (maximum_blocks <= 0 || maximum_blocks > 65'536 || active_blocks < 0 ||
+    if (maximum_blocks <= 0 || maximum_blocks > kMaxIndexerBlocks || active_blocks < 0 ||
         active_blocks > maximum_blocks || logical_pages < (maximum_blocks + 63) / 64 ||
         !exact_tensor(input, DType::BF16, 2'560, batch) || batch < 1 || batch > 8 ||
         !exact_bf16_weight(weights.indexer_query_key, 640, 2'560) ||
@@ -93,7 +94,8 @@ void flash_next_qsa_indexer_decode(const Tensor& input, const AttentionWeights& 
     flash_next_qsa_indexer_launch(token_indices, mrope_positions, table_rows, source_state_slots,
                                   destination_state_slots, weights.indexer_query_norm,
                                   weights.indexer_key_norm, cache, scratch, active_blocks,
-                                  selected_blocks, selected_counts, stream, aliased_recurrent_scan);
+                                  selected_blocks, selected_counts, stream, aliased_recurrent_scan,
+                                  rope);
 }
 
 void flash_next_qsa_indexer_prefill_chunk(
@@ -101,10 +103,10 @@ void flash_next_qsa_indexer_prefill_chunk(
     const Tensor& mrope_positions, std::int32_t table_row, std::int32_t source_state_slot,
     std::int32_t destination_state_slot, QsaIndexerCacheView cache, std::int32_t maximum_blocks,
     std::int32_t first_token_index, WorkspaceArena& workspace, Tensor& selected_blocks,
-    Tensor& selected_counts, cudaStream_t stream) {
+    Tensor& selected_counts, cudaStream_t stream, FlashNextRopeScaling rope) {
     const std::int32_t tokens        = input.ne[1];
     const std::int32_t logical_pages = cache.block_tables.ne[0];
-    if (maximum_blocks <= 0 || maximum_blocks > 65'536 ||
+    if (maximum_blocks <= 0 || maximum_blocks > kMaxIndexerBlocks ||
         logical_pages < (maximum_blocks + 63) / 64 ||
         !exact_tensor(input, DType::BF16, 2'560, tokens) || tokens <= 0 ||
         !exact_bf16_weight(weights.indexer_query_key, 640, 2'560) ||
@@ -145,7 +147,7 @@ void flash_next_qsa_indexer_prefill_chunk(
     flash_next_qsa_indexer_prefill_launch(
         token_indices, mrope_positions, table_row, source_state_slot, destination_state_slot,
         weights.indexer_query_norm, weights.indexer_key_norm, cache, scratch, maximum_blocks,
-        first_token_index, selected_blocks, selected_counts, stream);
+        first_token_index, selected_blocks, selected_counts, stream, rope);
     stage_ledger_record(stream, FlashNextStageId::QSA_IndexerScoreSelect);
 }
 

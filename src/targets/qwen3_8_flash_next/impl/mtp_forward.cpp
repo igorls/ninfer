@@ -92,7 +92,7 @@ void flash_next_mtp_teacher_extend(const MtpModelView& mtp, const Tensor& embedd
     const Tensor& table_rows, const Tensor& source_slots, const Tensor& destination_slots,
     int table_row, int source_slot, int destination_slot, int first_token_index,
     bool prefill, bool aliased_scan, FlashNextDecodeStateView state,
-    WorkspaceArena& workspace, cudaStream_t stream) {
+    WorkspaceArena& workspace, cudaStream_t stream, FlashNextRopeScaling rope) {
     const auto scope = workspace.scope();
     const int offset = prefill && first_token_index == 0 ? 1 : 0;
     const int tokens = embedding.ne[1] - offset;
@@ -116,17 +116,17 @@ void flash_next_mtp_teacher_extend(const MtpModelView& mtp, const Tensor& embedd
         if (prefill) {
             flash_next_qsa_indexer_store_prefill_launch(indexer_projected, ws.indices,
                 ws.positions, table_row, source_slot, destination_slot,
-                mtp.attention.indexer_key_norm, indexer, stream);
+                mtp.attention.indexer_key_norm, indexer, stream, rope);
         } else {
             flash_next_qsa_indexer_store_launch(indexer_projected, ws.indices, ws.positions,
                 table_rows, source_slots, destination_slots, mtp.attention.indexer_key_norm,
-                indexer, stream, aliased_scan);
+                indexer, stream, aliased_scan, rope);
         }
         ops::linear(ws.attention_input, mtp.attention.query_gate_key_value, attention_projected,
                     ops::LinearPolicy::A16Only, workspace, stream);
         flash_next_qsa_attention_store_launch(attention_projected, ws.indices, ws.positions,
             table_rows, table_row, mtp.attention.key_norm,
-            state.qsa_attention_caches[kFullAttentionLayers], key, value, stream);
+            state.qsa_attention_caches[kFullAttentionLayers], key, value, stream, rope);
     }
     flash_next_mtp_save_target_launch(target_hidden, positions, destination_slots,
         destination_slot, state.mtp_backbone_hidden, state.mtp_backbone_positions, stream);
@@ -193,7 +193,8 @@ void flash_next_mtp_step(const TextModelView& model, const Tensor& input_embeddi
                          std::int32_t maximum_blocks, std::int32_t active_blocks,
                          WorkspaceArena& workspace,
                          Tensor& draft_logits, Tensor& draft_tokens, cudaStream_t stream,
-                         const FlashNextDecodeStateSink* sink, Tensor* out_hyper_hidden) {
+                         const FlashNextDecodeStateSink* sink, Tensor* out_hyper_hidden,
+                         FlashNextRopeScaling rope) {
     if (!model.mtp.has_value()) {
         throw std::invalid_argument("Flash-Next MTP step called but MTP weights are not materialized");
     }
@@ -242,14 +243,14 @@ void flash_next_mtp_step(const TextModelView& model, const Tensor& input_embeddi
     flash_next_qsa_indexer_decode(attn_in, mtp.attention, token_indices, mrope_positions,
                                   table_rows, source_slots, destination_slots, indexer_cache,
                                   maximum_blocks, active_blocks, workspace, selected_blocks,
-                                  selected_counts, stream);
+                                  selected_counts, stream, false, rope);
     emit_state("mtp_selected_blocks", selected_blocks);
     emit_state("mtp_selected_counts", selected_counts);
 
     // 5. QSA Attention decode
     flash_next_qsa_attention_decode(attn_in, mtp.attention, token_indices, mrope_positions,
                                     table_rows, selected_blocks, selected_counts, mtp_cache,
-                                    workspace, attn_out, stream);
+                                    workspace, attn_out, stream, rope);
     emit_state("mtp_attn_block_output", attn_out);
 
     // 6. Attention hyper inject

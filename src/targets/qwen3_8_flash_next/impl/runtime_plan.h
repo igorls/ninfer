@@ -4,6 +4,7 @@
 #include "ninfer/ops/sampling.h"
 #include "ninfer/types.h"
 #include "runtime/contract/types.h"
+#include "targets/qwen3_8_flash_next/impl/long_context.h"
 #include "targets/qwen3_8_flash_next/impl/model_view.h"
 
 #include <algorithm>
@@ -107,6 +108,9 @@ flash_next_recurrent_state_bytes_per_slot(GdnStateStorage storage) noexcept {
 
 inline constexpr std::uint32_t kPrefillChunkAlignment = 128;
 
+static_assert(kBlockTokens == kIndexerBlockTokens);
+static_assert(kPrefillChunkAlignment == 128);
+
 // Decode CUDA-graph context buckets. Token envelopes 2048 / 8192 / 32768 plus the
 // startup-fixed max_context slot. Candidates at or above maximum_blocks are dropped
 // except the final slot, so max_context=8192 dedups to {512, 2048} blocks.
@@ -190,7 +194,7 @@ struct FlashNextMtpDraftIngress {
 
 struct FlashNextRuntimeConfig {
     std::uint32_t max_concurrency          = 1;    // 1..8
-    std::uint32_t max_context              = 4096; // in tokens: 1..262144
+    std::uint32_t max_context              = 4096; // in tokens: 1..1000000
     std::uint32_t state_slot_capacity      = 0;    // 0 -> default (slots_per_lane * max_concurrency + continuation_capacity)
     std::uint32_t continuation_capacity    = 0;  // Checkpoint cache slot capacity
     std::uint32_t prefill_chunk            = 1024; // nonzero multiple of 128, <= max_context
@@ -216,7 +220,11 @@ struct FlashNextRuntimePlan {
     std::uint32_t indexer_logical_pages    = 0; // ceil(max_context / 256)
     std::uint32_t state_slots              = 0;
     std::uint32_t continuation_slots       = 0;
-    std::uint32_t maximum_blocks           = 0; // ceil(max_context / 4)
+    std::uint32_t maximum_blocks           = 0; // ceil(max_context / 4), up to 250000
+    // yarn == 0 at max_context <= 262144. Above that, the same factor-4 table
+    // is used at every position in the plan, including positions inside the
+    // native window.
+    FlashNextRopeScaling rope{};
 
     [[nodiscard]] std::size_t qsa_cache_layers() const noexcept {
         return kFullAttentionLayers + (config.speculative_draft_tokens > 0 ? 1U : 0U);

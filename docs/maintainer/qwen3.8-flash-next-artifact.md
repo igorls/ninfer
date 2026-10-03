@@ -117,3 +117,11 @@ image preprocessor configuration, and video preprocessor configuration.
 The active binder lives under `src/targets/qwen3_8_flash_next`; it checks every name, shape, format,
 layout, and placement and fails if any artifact directory object is missing, extra, or consumed
 twice. The registered Flash-Next Program executes this contract through the public Engine.
+
+## Runtime context
+
+Do not reconvert this artifact to embed YaRN. The checkpoint and the stored weights keep
+`rope_type: default` and no `rope_scaling` block. When a Flash-Next runtime plan asks for
+`max_context` above the native 262144 window, and at most 1000000, the engine applies the model
+card's static YaRN factor 4 at execution time. Plans at or below 262144 stay on default RoPE.
+The workstation default branch does not execute this target yet; that landing is a separate port.

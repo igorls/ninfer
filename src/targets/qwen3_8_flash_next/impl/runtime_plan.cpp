@@ -44,15 +44,17 @@ void validate_config_invariants(const FlashNextRuntimeConfig& config,
         throw std::invalid_argument(
             "Flash-Next max_concurrency must be in [1, 8] (CUDA graphs decode hard limit)");
     }
-    if (config.max_context < 1 || config.max_context > 262'144) {
-        throw std::invalid_argument("Flash-Next max_context must be in [1, 262144]");
+    if (!flash_next_context_allowed(config.max_context)) {
+        throw std::invalid_argument("Flash-Next max_context must be in [1, 1000000]");
     }
     if (config.prefill_chunk == 0 || config.prefill_chunk % kPrefillChunkAlignment != 0 ||
-        config.prefill_chunk > config.max_context) {
+        config.prefill_chunk > config.max_context ||
+        config.prefill_chunk > kMaxPrefillCallTokens) {
         throw std::invalid_argument(
             "Flash-Next prefill_chunk must be a nonzero multiple of " +
-            std::to_string(kPrefillChunkAlignment) + " and <= max_context (" +
-            std::to_string(config.max_context) + ")");
+            std::to_string(kPrefillChunkAlignment) + ", <= max_context (" +
+            std::to_string(config.max_context) +
+            "), and <= 262144 (selected-block attention accepts at most 262144 query tokens per call)");
     }
     if (config.speculative_draft_tokens > 4) {
         throw std::invalid_argument("Flash-Next speculative_draft_tokens must be in [0, 4]");
@@ -221,8 +223,7 @@ flash_next_capacity_curve(const FlashNextRuntimeConfig& config) {
         (config.max_context + kPageTokens - 1U) / kPageTokens;
     const std::uint32_t indexer_logical_pages =
         (config.max_context + kIndexerPageTokens - 1U) / kIndexerPageTokens;
-    const std::uint32_t maximum_blocks =
-        std::min<std::uint32_t>(65'536U, (config.max_context + kBlockTokens - 1U) / kBlockTokens);
+    const std::uint32_t maximum_blocks = flash_next_indexer_blocks(config.max_context);
 
     std::size_t block_tables_bytes    = 0;
     std::size_t recurrent_state_bytes = 0;
@@ -297,8 +298,8 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
         (config.max_context + kIndexerPageTokens - 1U) / kIndexerPageTokens;
     plan.state_slots = resolved_state_slots;
     plan.continuation_slots = config.continuation_capacity;
-    plan.maximum_blocks =
-        std::min<std::uint32_t>(65'536U, (config.max_context + kBlockTokens - 1U) / kBlockTokens);
+    plan.maximum_blocks = flash_next_indexer_blocks(config.max_context);
+    plan.rope           = flash_next_rope_scaling(config.max_context);
 
     const std::size_t kv_element_bytes =
         (config.kv_cache == KvCacheStorage::Fp8E4M3Row256) ? 1ULL : sizeof(std::uint16_t);
