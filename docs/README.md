@@ -66,5 +66,6 @@ Artifact and model references:
 - [Qwen3.8-27B DFlash2 execution and state contract](maintainer/qwen3.8-27b-dflash2.md)
 - [Qwen3.8-Flash-Next model semantics](maintainer/qwen3.8-flash-next-model.md)
 - [Qwen3.8-Flash-Next mixed NVFP4/FP8/INT4 artifact contract](maintainer/qwen3.8-flash-next-artifact.md)
+- [Qwen3.8-Flash-Next single-GPU expert cache](maintainer/qwen3.8-flash-next-expert-cache.md)
 - [Qwen3.6-35B-A3B model semantics](maintainer/qwen3.6-35b-a3b-model.md)
 - [Qwen3.6-35B-A3B artifact contracts](maintainer/qwen3.6-35b-a3b-artifact.md)

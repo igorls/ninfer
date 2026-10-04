@@ -20,7 +20,12 @@ FlashNextPreflightReport preflight_text_artifact(const artifact::Reader& reader,
     validate_identity(reader.identity());
 
     artifact::Binder binder(reader);
-    const auto load_plan = bind_artifact(binder, LoadFeatures{.vision = false, .mtp = false});
+    const auto load_plan = bind_artifact(
+        binder, LoadFeatures{
+                    .vision                     = false,
+                    .mtp                        = false,
+                    .expert_cache_budget_bytes  = config.expert_cache_budget_bytes,
+                });
 
     const auto curve = flash_next_capacity_curve(config);
     const std::uint32_t resolved_groups =
@@ -39,11 +44,14 @@ FlashNextPreflightReport preflight_text_artifact(const artifact::Reader& reader,
     return FlashNextPreflightReport{
         .identity                         = reader.identity(),
         .file_bytes                       = reader.file_bytes(),
-        .planned_device_weights_bytes     = load_plan.materialization.device_capacity_bytes,
+        .planned_device_weights_bytes =
+            load_plan.materialization.device_capacity_bytes +
+            load_plan.bindings.expert_cache.device_cache_bytes,
         .planned_device_tensors_count     = load_plan.materialization.device_objects.size(),
         .planned_retained_resources_count = load_plan.materialization.host_objects.size(),
         .planned_mapped_tensors_count     = load_plan.materialization.mapped_tensor_objects.size(),
         .runtime_plan                     = std::move(runtime_plan),
+        .expert_cache                     = load_plan.bindings.expert_cache,
     };
 }
 

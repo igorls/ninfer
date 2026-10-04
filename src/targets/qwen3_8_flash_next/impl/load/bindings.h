@@ -2,6 +2,7 @@
 
 #include "artifact/binder.h"
 #include "ninfer/types.h"
+#include "targets/qwen3_8_flash_next/impl/expert_cache.h"
 #include <ninfer/targets/qwen3_6/frontend_resources.h>
 
 #include <array>
@@ -24,6 +25,9 @@ struct LoadFeatures {
     // cost 608 MiB of VRAM rather than saving it (bench/d17 server logs, 2026-09-05).
     bool quantize_output_head_fp8          = false;
     bool quantize_token_embedding_fp8      = false;
+    // Zero keeps every text routed expert in the artifact device arena.
+    // flash_next_pro6000_expert_cache_budget_bytes() is the single-GPU PRO 6000 budget.
+    std::uint64_t expert_cache_budget_bytes = 0;
 };
 
 struct HyperConnectionPlan {
@@ -47,7 +51,8 @@ struct MoePlan {
     artifact::ObjectHandle shared_gate_weight;
     artifact::ObjectHandle expert_gate_up;
     artifact::ObjectHandle expert_down;
-    bool experts_nvfp4 = true;
+    bool experts_nvfp4          = true;
+    bool routed_experts_cached  = false;
 };
 
 struct GdnPlan {
@@ -134,6 +139,7 @@ struct VisionPlan {
 
 struct BindingPlan {
     LoadFeatures features;
+    ExpertCachePlan expert_cache;
     qwen3_6::FrontendResourcePlan frontend;
     artifact::ObjectHandle token_embedding;
     std::array<TextLayerPlan, kTextLayers> text_layers;

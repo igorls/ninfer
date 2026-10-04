@@ -127,16 +127,19 @@ HyperMixerWeights load_mixer(const HyperMixerPlan& plan,
 }
 
 MoeWeights load_moe(const MoePlan& plan, const artifact::MaterializedArtifact& backing) {
+    const auto bank = [&](artifact::ObjectHandle handle, std::int32_t rows, std::int32_t columns) {
+        return plan.routed_experts_cached
+                   ? mapped_nvfp4_expert_bank_view(backing, handle, 512, rows, columns)
+                   : materialized_nvfp4_expert_bank_view(backing, handle, 512, rows, columns);
+    };
     return {
         .router             = bf16_weight(backing, plan.router, 512, 2'560),
         .shared_down        = bf16_weight(backing, plan.shared_down, 2'560, 640),
         .shared_gate        = bf16_weight(backing, plan.shared_gate, 640, 2'560),
         .shared_up          = bf16_weight(backing, plan.shared_up, 640, 2'560),
         .shared_gate_weight = bf16_weight(backing, plan.shared_gate_weight, 1, 2'560),
-        .expert_gate_up =
-            materialized_nvfp4_expert_bank_view(backing, plan.expert_gate_up, 512, 1'280, 2'560),
-        .expert_down =
-            materialized_nvfp4_expert_bank_view(backing, plan.expert_down, 512, 2'560, 640),
+        .expert_gate_up     = bank(plan.expert_gate_up, 1'280, 2'560),
+        .expert_down        = bank(plan.expert_down, 2'560, 640),
     };
 }
 
@@ -312,6 +315,26 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
     }
     if (full_index != text.full_attention.size() || gdn_index != text.gdn.size()) {
         throw std::logic_error("Flash-Next Text topology materialization is incomplete");
+    }
+    text.expert_cache_plan = plan.expert_cache;
+    if (plan.expert_cache.enabled) {
+        expert_cache_device.emplace(plan.expert_cache);
+        text.expert_cache = &*expert_cache_device;
+        for (std::size_t layer = 0; layer < text.layers.size(); ++layer) {
+            if (!plan.text_layers[layer].moe.routed_experts_cached) { continue; }
+            ExpertLayerCache& cached = expert_layers[layer];
+            cached.layer             = static_cast<std::uint32_t>(layer);
+            cached.gate_up           = text.layers[layer].moe.expert_gate_up;
+            cached.down              = text.layers[layer].moe.expert_down;
+            text.layers[layer].moe.routed_expert_cache = &cached;
+        }
+        std::fprintf(stderr,
+                     "flash_next expert_cache slots=%llu device_bytes=%llu released_bytes=%llu "
+                     "pinned_staging_bytes=%llu\n",
+                     static_cast<unsigned long long>(plan.expert_cache.resident_slots),
+                     static_cast<unsigned long long>(plan.expert_cache.device_cache_bytes),
+                     static_cast<unsigned long long>(plan.expert_cache.released_bytes),
+                     static_cast<unsigned long long>(plan.expert_cache.pinned_staging_bytes));
     }
     text.ple = load_ple(plan.ple, backing);
 

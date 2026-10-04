@@ -3,6 +3,7 @@
 #include "artifact/materializer.h"
 #include "core/arena.h"
 #include "core/tensor.h"
+#include "targets/qwen3_8_flash_next/impl/expert_cache_device.h"
 #include "targets/qwen3_8_flash_next/impl/load/bindings.h"
 #include "targets/qwen3_8_flash_next/impl/model_view.h"
 
@@ -35,6 +36,8 @@ public:
     qwen3_6::FrontendResources frontend;
     TextModelView text;
     std::optional<VisionModelView> vision;
+    std::array<ExpertLayerCache, 48> expert_layers{};
+    std::optional<ExpertCacheDevice> expert_cache_device;
 };
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

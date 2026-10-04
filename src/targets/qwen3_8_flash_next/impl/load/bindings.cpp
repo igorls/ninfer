@@ -133,9 +133,11 @@ MoePlan bind_moe(artifact::Binder& binder, const std::string& prefix, NumericFor
         .shared_gate        = bf16("shared_expert/gate", {640, 2'560}),
         .shared_up          = bf16("shared_expert/up", {640, 2'560}),
         .shared_gate_weight = bf16("shared_expert_gate", {1, 2'560}),
-        .expert_gate_up     = bind_expert("experts/gate_up", {512, 1'280, 2'560}),
-        .expert_down        = bind_expert("experts/down", {512, 2'560, 640}),
-        .experts_nvfp4      = (expert_format == NumericFormat::NVFP4),
+        .expert_gate_up        = bind_expert("experts/gate_up", {512, 1'280, 2'560}),
+        .expert_down           = bind_expert("experts/down", {512, 2'560, 640}),
+        .experts_nvfp4         = (expert_format == NumericFormat::NVFP4),
+        .routed_experts_cached = retain_experts_on_host && enabled &&
+                                 expert_format == NumericFormat::NVFP4,
     };
 }
 
@@ -286,6 +288,7 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, LoadFeatures features) 
     ArtifactLoadPlan out;
     BindingPlan& plan    = out.bindings;
     plan.features        = features;
+    plan.expert_cache    = flash_next_plan_expert_cache(features.expert_cache_budget_bytes);
     plan.frontend        = qwen3_6::bind_frontend_resources(binder);
     // FP8 at load: keep the BF16 payload in the file mapping (retain_mapped_tensor adds zero
     // device bytes) and let LoadedModelData quantize from the host span. Uploading it first would
@@ -301,7 +304,10 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, LoadFeatures features) 
         const std::string prefix = "text/layers/" + std::to_string(layer) + "/";
         TextLayerPlan& target    = plan.text_layers[layer];
         target.attention_hyper   = bind_hyper(binder, prefix + "attention/hyper_connection/");
-        target.moe               = bind_moe(binder, prefix + "mlp/", NumericFormat::NVFP4);
+        // Router and shared expert stay on device. Only the two routed banks move
+        // to the file mapping, and only when the cache budget is below full residency.
+        target.moe = bind_moe(binder, prefix + "mlp/", NumericFormat::NVFP4, true,
+                              plan.expert_cache.enabled);
         target.mlp_hyper         = bind_hyper(binder, prefix + "mlp/hyper_connection/");
         target.is_full_attention = layer >= 3 && (layer - 3) % 4 == 0;
         if (target.is_full_attention) {

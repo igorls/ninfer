@@ -341,6 +341,10 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
             qwen3_vision::Encoder::plan_workspace(merged, general_workspace, 2560);
     }
 
+    plan.expert_cache = flash_next_plan_expert_cache(config.expert_cache_budget_bytes);
+    plan.pro6000_expert_cache =
+        flash_next_plan_expert_cache(flash_next_pro6000_expert_cache_budget_bytes());
+
     return plan;
 }
 

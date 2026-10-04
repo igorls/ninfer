@@ -59,6 +59,15 @@ std::size_t flash_next_moe_workspace_capacity_bytes(std::int32_t min_tokens,
 
 void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& output,
                     WorkspaceArena& workspace, cudaStream_t stream) {
+    if (weights.routed_expert_cache != nullptr) {
+        // The banks on this layer are file-mapped. Launching the contiguous-bank
+        // kernels would capture host addresses and would not follow later admissions.
+        // ExpertCacheDevice::prepare publishes a stable pointer table; the execution
+        // Program has to gather through that table before this launch.
+        throw std::invalid_argument(
+            "Flash-Next MoE routed experts are cache-resident; publish the expert pointer "
+            "table with ExpertCacheDevice::prepare and gather by that table");
+    }
     const std::int32_t tokens = input.ne[1];
     if (input.dtype != DType::BF16 || output.dtype != DType::BF16 || input.ne[0] != 2'560 ||
         output.ne[0] != 2'560 || tokens < 1 || output.ne[1] != tokens ||

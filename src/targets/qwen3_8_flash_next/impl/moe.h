@@ -15,6 +15,8 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 
 // Exact Qwen4-exp 512-expert/top-10 MoE leaf with top-10 renormalized probabilities
 // (norm_topk_prob=true per transformers Qwen4ExpTextTopKRouter); the independent shared expert is sigmoid-gated.
+// A layer with routed_expert_cache set is refused: those kernels address a contiguous
+// device bank, and a CUDA graph must not capture that bank once the resident set can move.
 void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& output,
                     WorkspaceArena& workspace, cudaStream_t stream);
 

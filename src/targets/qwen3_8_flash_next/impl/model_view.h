@@ -2,6 +2,7 @@
 
 #include "core/tensor.h"
 #include "targets/qwen3_8_flash_next/impl/expert_bank.h"
+#include "targets/qwen3_8_flash_next/impl/expert_cache.h"
 #include "targets/qwen3_8_flash_next/impl/ple_table.h"
 
 #include <array>
@@ -13,6 +14,8 @@ class DeviceArena;
 }
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
+
+class ExpertCacheDevice;
 
 inline constexpr std::size_t kFullAttentionLayers = 12;
 inline constexpr std::size_t kGdnLayers           = 36;
@@ -38,6 +41,10 @@ struct MoeWeights {
     Weight shared_gate_weight;
     Nvfp4ExpertBankView expert_gate_up;
     Nvfp4ExpertBankView expert_down;
+    // Non-null when this layer's routed banks are file-mapped and the device
+    // cache owns the bytes the kernel must load. Router and shared expert stay
+    // in the Weight fields above either way.
+    const ExpertLayerCache* routed_expert_cache = nullptr;
 };
 
 struct MoeBf16Weights {
@@ -114,6 +121,9 @@ struct TextModelView {
     HyperMixerWeights final_mixer;
     std::optional<MtpModelView> mtp;
     std::optional<OptimizedProposalWeights> proposal;
+    ExpertCachePlan expert_cache_plan{};
+    // Non-owning. Null when routed experts are fully device-resident.
+    ExpertCacheDevice* expert_cache = nullptr;
 };
 
 struct VisionLayerWeights {
