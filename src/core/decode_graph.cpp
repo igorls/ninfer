@@ -148,7 +148,7 @@ void DecodeGraphExecutable::upload(cudaStream_t stream) {
     CUDA_CHECK(cudaGraphUpload(exec_, stream));
 }
 
-void DecodeGraphExecutable::launch(cudaStream_t stream) {
+void DecodeGraphExecutable::launch(cudaStream_t stream) const {
     // This range executes for every replay; ranges in the captured body execute only at capture.
     nvtx::ScopedRange launch_range(nvtx::Name::CudaGraphLaunch, nvtx::Category::Graph);
     if (!ready()) { throw std::logic_error("cannot launch an empty CUDA Graph executable"); }
