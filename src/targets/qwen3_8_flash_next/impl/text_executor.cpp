@@ -1,5 +1,7 @@
 #include "targets/qwen3_8_flash_next/impl/text_executor.h"
 
+#include "targets/qwen3_8_flash_next/impl/expert_gather.h"
+#include "targets/qwen3_8_flash_next/impl/moe.h"
 #include "targets/qwen3_8_flash_next/impl/mtp_forward.h"
 #include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
@@ -323,9 +325,98 @@ FlashNextTextExecutor::find_topology(std::uint32_t batch_size,
     return nullptr;
 }
 
+bool FlashNextTextExecutor::launch_installed_topology(const DecodeGraphTopology& topology) {
+    if (!topology.expert_cache_segments.empty()) {
+        replay_expert_cache_graph(topology);
+        return true;
+    }
+    if (topology.executable.ready()) {
+        topology.executable.launch(device_.stream);
+        return true;
+    }
+    return false;
+}
+
+void FlashNextTextExecutor::replay_expert_cache_graph(const DecodeGraphTopology& topology) {
+    if (model_.expert_cache == nullptr || topology.routed_ids == nullptr ||
+        topology.routed_id_count <= 0 ||
+        topology.expert_cache_segments.size() != kExpertCacheDecodeSegments) {
+        throw std::logic_error("Flash-Next expert cache replay is missing its captured segments");
+    }
+    // Segment i ends at the route of layer i. Publishing layer i then launches
+    // segment i+1, whose first expert kernels consume that layer's launch bank.
+    // The last segment is the final layer's kernels through the sampler.
+    for (std::size_t segment = 0; segment < topology.expert_cache_segments.size(); ++segment) {
+        topology.expert_cache_segments[segment].launch(device_.stream);
+        if (segment + 1 == topology.expert_cache_segments.size()) { break; }
+        const ExpertLayerCache* layer = model_.layers[segment].moe.routed_expert_cache;
+        if (layer == nullptr || layer->device != model_.expert_cache || layer->layer != segment) {
+            throw std::logic_error("Flash-Next expert cache replay lost a text layer");
+        }
+        flash_next_publish_cached_layer(*layer, topology.routed_ids, topology.routed_id_count,
+                                        device_.stream);
+    }
+}
+
+bool FlashNextTextExecutor::install_expert_cache_graph(std::uint32_t batch_size,
+                                                       std::uint32_t bucket_index,
+                                                       std::int32_t bucket_blocks,
+                                                       bool speculative) {
+    auto& family = speculative ? speculative_graphs_ : decode_graphs_;
+    std::vector<DecodeGraphDefinition> definitions;
+    definitions.reserve(kExpertCacheDecodeSegments);
+    const std::int32_t* routed_ids = nullptr;
+    std::int32_t routed_id_count   = 0;
+    {
+        ExpertGatherCapture capture(device_.stream, &definitions);
+        capture.begin();
+        execute_round_body(batch_size, bucket_blocks, nullptr, speculative);
+        capture.finish();
+        routed_ids      = capture.routed_ids();
+        routed_id_count = capture.routed_id_count();
+    }
+    if (definitions.size() != kExpertCacheDecodeSegments || routed_ids == nullptr ||
+        routed_id_count <= 0) {
+        throw std::runtime_error(
+            "Flash-Next expert cache capture did not split once per text layer");
+    }
+
+    DecodeGraphProfile profile;
+    profile.batch_size             = batch_size;
+    profile.bucket_index           = bucket_index;
+    profile.bucket_blocks          = static_cast<std::uint32_t>(bucket_blocks);
+    profile.min_execution_frontier = 0;
+    profile.max_execution_frontier = static_cast<std::uint32_t>(bucket_blocks);
+    profile.topology_class = flash_next_decode_graph_topology_class(batch_size, bucket_index);
+
+    DecodeGraphTopology topology;
+    topology.topology_class   = profile.topology_class;
+    topology.batch_size       = batch_size;
+    topology.bucket_index     = bucket_index;
+    topology.routed_ids       = routed_ids;
+    topology.routed_id_count  = routed_id_count;
+    topology.expert_cache_segments.reserve(definitions.size());
+    for (const DecodeGraphDefinition& definition : definitions) {
+        if (!definition.ready()) {
+            throw std::runtime_error("Flash-Next expert cache captured an empty decode segment");
+        }
+        DecodeGraphExecutable executable;
+        executable.instantiate(definition);
+        executable.upload(device_.stream);
+        topology.expert_cache_segments.push_back(std::move(executable));
+    }
+    family.profiles.push_back(std::move(profile));
+    topology.installed_profile = family.profiles.size() - 1;
+    family.topologies.push_back(std::move(topology));
+    return true;
+}
+
 bool FlashNextTextExecutor::install_captured_graph(std::uint32_t batch_size,
                                                    std::uint32_t bucket_index,
                                                    std::int32_t bucket_blocks, bool speculative) {
+    if (model_.expert_cache != nullptr) {
+        return install_expert_cache_graph(batch_size, bucket_index, bucket_blocks, speculative);
+    }
     auto& family = speculative ? speculative_graphs_ : decode_graphs_;
     DecodeGraphProfile profile;
     profile.batch_size             = batch_size;
@@ -541,8 +632,7 @@ PendingRound FlashNextTextExecutor::finish_prepared_round(
             model_.token_embedding.payload != nullptr && decode_graphs_.buckets.count > 0 &&
             !graph_pinned_eager_[batch_size - 1][bucket_index]) {
             if (auto* topology = find_topology(batch_size, bucket_index);
-                topology != nullptr && topology->executable.ready()) {
-                topology->executable.launch(device_.stream);
+                topology != nullptr && launch_installed_topology(*topology)) {
                 ran = true;
             }
         }
@@ -817,11 +907,9 @@ PendingRound FlashNextTextExecutor::execute_speculative_verify_round(
         const auto bucket_blocks = static_cast<std::int32_t>(decode_graphs_.buckets.blocks[bucket_index]);
         pending_custom_embeddings_.clear();
         auto* topology = find_topology(num_tokens, bucket_index, num_tokens > 1);
-        if (use_cuda_graph_ && topology != nullptr && topology->executable.ready()) {
-            topology->executable.launch(device_.stream);
-        } else {
-            execute_round_body(num_tokens, bucket_blocks, nullptr, true);
-        }
+        const bool replayed =
+            use_cuda_graph_ && topology != nullptr && launch_installed_topology(*topology);
+        if (!replayed) { execute_round_body(num_tokens, bucket_blocks, nullptr, true); }
         Tensor final_hidden = alloc_.round_tensors().final_hidden.slice(1, 0, num_tokens);
         Tensor hyper_hidden = alloc_.round_tensors().hyper_hidden.slice(1, 0, num_tokens);
         Tensor logits = alloc_.round_tensors().logits.slice(1, 0, num_tokens);

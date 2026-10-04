@@ -239,6 +239,14 @@ ninfer_add_test(ninfer_qwen3_8_flash_next_ple_table_test
 ninfer_add_test(ninfer_qwen3_8_flash_next_expert_bank_test
   SOURCES targets/qwen3_8_flash_next/test_expert_bank.cpp
   LIBRARIES ninfer_qwen3_8_flash_next)
+# Host policy only: this executable does not link the CUDA archive.
+add_executable(ninfer_qwen3_8_flash_next_expert_cache_test
+  targets/qwen3_8_flash_next/test_expert_cache.cpp
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_8_flash_next/impl/expert_cache.cpp)
+target_include_directories(ninfer_qwen3_8_flash_next_expert_cache_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME ninfer_qwen3_8_flash_next_expert_cache_test
+  COMMAND ninfer_qwen3_8_flash_next_expert_cache_test)
 ninfer_add_test(ninfer_qwen3_8_flash_next_ple_pipeline_test
   SOURCES targets/qwen3_8_flash_next/test_ple_pipeline.cpp
   LIBRARIES ninfer_qwen3_8_flash_next)

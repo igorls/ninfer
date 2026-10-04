@@ -80,6 +80,17 @@ void DecodeGraphDefinition::capture(cudaStream_t stream, const std::function<voi
     graph_ = graph;
 }
 
+void DecodeGraphDefinition::finish_capture(cudaStream_t stream) {
+    reset();
+    cudaGraph_t graph     = nullptr;
+    const cudaError_t err = cudaStreamEndCapture(stream, &graph);
+    if (err != cudaSuccess) {
+        destroy_graph(graph);
+        CUDA_CHECK(err);
+    }
+    graph_ = graph;
+}
+
 bool DecodeGraphDefinition::ready() const noexcept { return graph_ != nullptr; }
 
 void DecodeGraphDefinition::reset() noexcept { destroy_graph(graph_); }
@@ -137,7 +148,7 @@ void DecodeGraphExecutable::upload(cudaStream_t stream) {
     CUDA_CHECK(cudaGraphUpload(exec_, stream));
 }
 
-void DecodeGraphExecutable::launch(cudaStream_t stream) {
+void DecodeGraphExecutable::launch(cudaStream_t stream) const {
     // This range executes for every replay; ranges in the captured body execute only at capture.
     nvtx::ScopedRange launch_range(nvtx::Name::CudaGraphLaunch, nvtx::Category::Graph);
     if (!ready()) { throw std::logic_error("cannot launch an empty CUDA Graph executable"); }

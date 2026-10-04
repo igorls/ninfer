@@ -41,6 +41,9 @@ struct FlashNextPreflightReport {
     std::size_t planned_retained_resources_count = 0;
     std::size_t planned_mapped_tensors_count     = 0;
     FlashNextRuntimePlan runtime_plan;
+    // Active text-expert cache. planned_device_weights_bytes includes its device
+    // arena and excludes the packed banks that moved to the file mapping.
+    ExpertCachePlan expert_cache;
 };
 
 // Inspects artifact without allocating device memory for weights.

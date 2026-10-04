@@ -1,6 +1,8 @@
 #include "targets/qwen3_8_flash_next/impl/moe.h"
 
 #include "core/layout.h"
+#include "targets/qwen3_8_flash_next/impl/expert_cache_device.h"
+#include "targets/qwen3_8_flash_next/impl/expert_gather.h"
 #include "targets/qwen3_8_flash_next/impl/moe_kernels.h"
 #include "targets/qwen3_8_flash_next/impl/moe_route.h"
 #include "targets/qwen3_8_flash_next/impl/moe_workspace.h"
@@ -47,6 +49,22 @@ bool exact_bf16_expert_bank(const Bf16ExpertBankView& bank, std::int32_t rows, s
 
 } // namespace
 
+void flash_next_publish_cached_layer(const ExpertLayerCache& layer, const std::int32_t* device_ids,
+                                     std::int32_t id_count, cudaStream_t stream) {
+    if (layer.device == nullptr || device_ids == nullptr || id_count <= 0 || stream == nullptr) {
+        throw std::invalid_argument("Flash-Next cached MoE publish received an empty routing set");
+    }
+    std::vector<std::int32_t> host(static_cast<std::size_t>(id_count));
+    // The compute stream is non-blocking, so a legacy cudaMemcpy would not wait
+    // for the route kernel that just wrote these ids.
+    CUDA_CHECK(cudaMemcpyAsync(host.data(), device_ids, host.size() * sizeof(std::int32_t),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    const std::vector<std::int32_t> unique = flash_next_unique_routed_experts(host);
+    layer.device->prepare(layer.layer, unique, layer.gate_up, layer.down, stream);
+    layer.device->gather_selected(layer.layer, unique, stream);
+}
+
 std::size_t flash_next_moe_workspace_capacity_bytes(std::int32_t min_tokens,
                                                     std::int32_t max_tokens) {
     if (min_tokens <= 0 || max_tokens < min_tokens) {
@@ -78,7 +96,29 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
     flash_next_route(input, weights.router, weights.shared_gate_weight, scratch.scores, scratch.ids,
                      scratch.alpha, scratch.shared_scale, stream);
     stage_ledger_record(stream, FlashNextStageId::MoE_Router);
-    flash_next_moe_kernels_launch(input, weights, scratch, output, stream);
+    MoeWeights launched = weights;
+    if (weights.routed_expert_cache != nullptr) {
+        if (weights.routed_expert_cache->device == nullptr) {
+            throw std::logic_error("Flash-Next cached MoE layer has no expert cache device");
+        }
+        if (ExpertGatherCapture* capture = ExpertGatherCapture::current(); capture != nullptr) {
+            capture->split(scratch.ids);
+        } else {
+            cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
+            CUDA_CHECK(cudaStreamGetCaptureInfo(stream, &status, nullptr));
+            if (status == cudaStreamCaptureStatusActive) {
+                throw std::logic_error(
+                    "Flash-Next cached MoE was entered from a capture that does not split at the route");
+            }
+            flash_next_publish_cached_layer(*weights.routed_expert_cache,
+                                            static_cast<const std::int32_t*>(scratch.ids.data),
+                                            static_cast<std::int32_t>(scratch.ids.numel()), stream);
+        }
+        launched.expert_gate_up        = weights.routed_expert_cache->device->launch_gate_bank();
+        launched.expert_down           = weights.routed_expert_cache->device->launch_down_bank();
+        launched.routed_expert_cache   = nullptr;
+    }
+    flash_next_moe_kernels_launch(input, launched, scratch, output, stream);
 
     // Diagnostic NINFER_FLASH_NEXT_TRACE_ROUTING only; not on the default prefill chunk path.
     static const char* trace_routing_env = std::getenv("NINFER_FLASH_NEXT_TRACE_ROUTING");

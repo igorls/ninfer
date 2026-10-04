@@ -145,6 +145,13 @@ moe(x) = routed(x) + shared(x)
 The production expert-bank kernel may group tokens and use native NVFP4 W4A4, but expert selection,
 probability multiplication, and the FP32 softmax remain part of the semantic contract.
 
+The 48 text routed banks may be served from a bounded device cache instead of full residency.
+Router, shared expert, and every non-expert weight stay on device. A miss copies the same NVFP4
+words from the artifact file mapping. The cache budget, miss path, and the single-GPU PRO 6000
+KV plan are defined by
+[qwen3.8-flash-next-expert-cache.md](qwen3.8-flash-next-expert-cache.md). That residency choice
+does not change this mathematical contract and is not a second architecture.
+
 ## 6. Per-Layer Embedding
 
 PLE has eight bigram and eight trigram heads. The table is 128 physical shards of 2500012 rows;

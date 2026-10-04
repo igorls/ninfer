@@ -45,8 +45,12 @@ The artifact contains 1566 objects: six raw frontend resources and 1560 tensors.
 | `U4Z8G16_F16S` | `packed-u4-g16-v1` | 128 | mapped host PLE |
 | resource | `raw-bytes-v1` | 6 | retained host bytes |
 
-With Text, MTP, and Vision enabled and default BF16 token embedding/output head, the exact binder
-consumes every object and plans 1427 device objects, 133 mapped tensors, and six host resources.
+With Text, MTP, and Vision enabled, default BF16 token embedding/output head, and the expert
+cache left off, the exact binder consumes every object and plans 1427 device objects, 133 mapped
+tensors, and six host resources. Setting the expert-cache budget below the packed text banks
+moves the 96 text `experts/gate_up` and `experts/down` tensors to the file mapping and allocates
+a separate device slot arena; router and shared-expert tensors stay on device. See
+[qwen3.8-flash-next-expert-cache.md](qwen3.8-flash-next-expert-cache.md).
 Device-bound artifact tensor payload is 76251938528 bytes (71.02 GiB), excluding padding and the
 1415581696-byte NVFP4 MTP device buffers created by the loader. These figures exclude runtime
 workspaces, graphs, recurrent state and KV caches; they are not total VRAM requirements. The mapped

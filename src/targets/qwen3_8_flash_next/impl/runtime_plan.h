@@ -4,6 +4,7 @@
 #include "ninfer/ops/sampling.h"
 #include "ninfer/types.h"
 #include "runtime/contract/types.h"
+#include "targets/qwen3_8_flash_next/impl/expert_cache.h"
 #include "targets/qwen3_8_flash_next/impl/model_view.h"
 
 #include <algorithm>
@@ -204,6 +205,9 @@ struct FlashNextRuntimeConfig {
     bool use_qsa_prefill_mma               = true;
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     GdnStateStorage gdn_state_storage      = GdnStateStorage::FP32;
+    // Zero keeps packed text routed experts in the artifact device arena.
+    // The package copies NINFER_FLASH_NEXT_EXPERT_CACHE* into this field.
+    std::uint64_t expert_cache_budget_bytes = 0;
 };
 
 struct FlashNextRuntimePlan {
@@ -234,6 +238,11 @@ struct FlashNextRuntimePlan {
 
     std::optional<qwen3_vision::WorkspacePlan> vision_workspace;
     ninfer::runtime::SequenceCapacityCurve capacity_curve;
+    // Active residency. Disabled unless expert_cache_budget_bytes asks for a cache.
+    ExpertCachePlan expert_cache;
+    // Always the single-GPU PRO 6000 budget (full text banks minus 10 GiB), whether
+    // or not this process enabled the cache.
+    ExpertCachePlan pro6000_expert_cache;
 };
 
 [[nodiscard]] ninfer::runtime::SequenceCapacityCurve

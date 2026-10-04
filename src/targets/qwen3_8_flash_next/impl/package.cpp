@@ -7,6 +7,7 @@
 #include "targets/qwen3_8_flash_next/impl/load/bindings.h"
 #include "targets/qwen3_8_flash_next/impl/load/loader.h"
 #include "targets/qwen3_8_flash_next/impl/load/materialized.h"
+#include "targets/qwen3_8_flash_next/impl/expert_cache.h"
 #include "targets/qwen3_8_flash_next/impl/program_impl.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
 
@@ -111,6 +112,9 @@ Package::LoadPlan Package::plan_load(artifact::Binder& binder, const EngineOptio
     }
     // The quantize flags have to reach the binder, not just the materializer: they decide whether
     // the BF16 head/embedding is uploaded into the artifact arena or left in the file mapping.
+    // Expert-cache residency is the same kind of binding decision. Unset stays fully resident
+    // so the current contiguous-bank Program keeps running; pro6000 opts into the cache.
+    const std::uint64_t expert_cache_budget = detail::flash_next_expert_cache_budget_from_environment();
     auto target_plan = detail::bind_artifact(
         binder, detail::LoadFeatures{
                     .vision                       = options.enable_vision,
@@ -119,6 +123,7 @@ Package::LoadPlan Package::plan_load(artifact::Binder& binder, const EngineOptio
                     .draft_head_rows              = draft_rows,
                     .quantize_output_head_fp8     = options.quantize_output_head_fp8,
                     .quantize_token_embedding_fp8 = options.quantize_token_embedding_fp8,
+                    .expert_cache_budget_bytes    = expert_cache_budget,
                 });
     return LoadPlan(std::make_unique<LoadPlan::Impl>(
         weights_profile, std::move(target_plan), options.quantize_output_head_fp8,
@@ -202,6 +207,7 @@ Package::SequencePlanner Package::make_sequence_planner(DeviceContext& device,
         .use_qsa_prefill_mma      = options.use_qsa_prefill_mma, // G18 serve flag; dropped by the upstream merge e650ee62, restored after window 6
         .kv_cache                 = options.kv_cache,
         .gdn_state_storage        = options.gdn_state_storage,
+        .expert_cache_budget_bytes = detail::flash_next_expert_cache_budget_from_environment(),
     };
     return SequencePlanner(std::make_unique<detail::SequencePlannerImpl>(config));
 }
