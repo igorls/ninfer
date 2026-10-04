@@ -40,6 +40,12 @@ struct DecodeGraphTopology {
     std::uint32_t batch_size     = 0;
     std::uint32_t bucket_index   = 0; // explicit integer field
     DecodeGraphExecutable executable;
+    // Cache-on decode: one executable per MoE split. Empty means the single
+    // `executable` above is the whole round. `routed_ids` is the device buffer
+    // every text layer's route writes; replay reads it between segments.
+    std::vector<DecodeGraphExecutable> expert_cache_segments;
+    const std::int32_t* routed_ids = nullptr;
+    std::int32_t routed_id_count   = 0;
     std::optional<std::size_t> installed_profile;
 };
 
@@ -264,6 +270,12 @@ private:
                                                            std::uint32_t bucket_index, bool speculative = false) const noexcept;
     bool install_captured_graph(std::uint32_t batch_size, std::uint32_t bucket_index,
                                 std::int32_t bucket_blocks, bool speculative = false);
+    bool install_expert_cache_graph(std::uint32_t batch_size, std::uint32_t bucket_index,
+                                    std::int32_t bucket_blocks, bool speculative);
+    void replay_expert_cache_graph(const DecodeGraphTopology& topology);
+    // Launches a segmented expert-cache graph or the single full-round graph.
+    // Returns false when this topology has neither.
+    bool launch_installed_topology(const DecodeGraphTopology& topology);
     [[nodiscard]] PendingRound
     finish_prepared_round(std::span<const LaneStepRequest> requests,
                           FlashNextLaneLedger::PreparedRound prepared,

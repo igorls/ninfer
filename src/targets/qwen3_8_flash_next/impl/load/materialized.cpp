@@ -326,15 +326,17 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
             cached.layer             = static_cast<std::uint32_t>(layer);
             cached.gate_up           = text.layers[layer].moe.expert_gate_up;
             cached.down              = text.layers[layer].moe.expert_down;
+            cached.device            = text.expert_cache;
             text.layers[layer].moe.routed_expert_cache = &cached;
         }
         std::fprintf(stderr,
                      "flash_next expert_cache slots=%llu device_bytes=%llu released_bytes=%llu "
-                     "pinned_staging_bytes=%llu\n",
+                     "pinned_staging_bytes=%llu gather_bank_bytes=%llu\n",
                      static_cast<unsigned long long>(plan.expert_cache.resident_slots),
                      static_cast<unsigned long long>(plan.expert_cache.device_cache_bytes),
                      static_cast<unsigned long long>(plan.expert_cache.released_bytes),
-                     static_cast<unsigned long long>(plan.expert_cache.pinned_staging_bytes));
+                     static_cast<unsigned long long>(plan.expert_cache.pinned_staging_bytes),
+                     static_cast<unsigned long long>(kExpertCacheGeometry.layer_bank_bytes));
     }
     text.ple = load_ple(plan.ple, backing);
 

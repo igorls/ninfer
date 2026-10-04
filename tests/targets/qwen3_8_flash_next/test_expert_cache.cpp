@@ -17,8 +17,12 @@ using ninfer::targets::qwen3_8_flash_next::detail::flash_next_expert_cache_paylo
 using ninfer::targets::qwen3_8_flash_next::detail::flash_next_expert_id;
 using ninfer::targets::qwen3_8_flash_next::detail::flash_next_expert_index;
 using ninfer::targets::qwen3_8_flash_next::detail::flash_next_expert_layer;
+using ninfer::targets::qwen3_8_flash_next::detail::flash_next_expert_launch_placement;
 using ninfer::targets::qwen3_8_flash_next::detail::flash_next_plan_expert_cache;
 using ninfer::targets::qwen3_8_flash_next::detail::flash_next_pro6000_expert_cache_budget_bytes;
+using ninfer::targets::qwen3_8_flash_next::detail::flash_next_unique_routed_experts;
+using ninfer::targets::qwen3_8_flash_next::detail::expert_cache_slot_planes;
+using ninfer::targets::qwen3_8_flash_next::detail::kExpertCacheDecodeSegments;
 using ninfer::targets::qwen3_8_flash_next::detail::kColabG4TotalBytes;
 using ninfer::targets::qwen3_8_flash_next::detail::kExpertCacheGeometry;
 using ninfer::targets::qwen3_8_flash_next::detail::kExpertCachePlanes;
@@ -90,7 +94,12 @@ void test_budget() {
 
     const auto eight = flash_next_expert_cache_payload_fit(pro, 8, kColabG4TotalBytes);
     expect(eight.kv_fits, "PRO 6000 cache payload fits 8 KV planes on a G4");
-    expect(eight.headroom_bytes >= (4ULL << 30), "payload headroom is at least 4 GiB");
+    expect(eight.gather_bank_bytes == kExpertCacheGeometry.layer_bank_bytes,
+           "enabled cache counts the one-layer launch bank");
+    expect(eight.headroom_bytes > (3ULL << 30),
+           "headroom after the launch bank stays above 3 GiB");
+    expect(eight.headroom_bytes + eight.gather_bank_bytes >= (4ULL << 30),
+           "headroom before the launch bank is at least 4 GiB");
     expect(eight.non_expert_device_bytes + eight.mtp_expert_device_bytes +
                    kExpertCacheGeometry.text_bank_bytes >
                eight.non_expert_device_bytes + eight.mtp_expert_device_bytes +
@@ -98,6 +107,7 @@ void test_budget() {
            "the cache is smaller than full expert residency");
 
     const auto full_eight = flash_next_expert_cache_payload_fit(full, 8, kColabG4TotalBytes);
+    expect(full_eight.gather_bank_bytes == 0, "full residency allocates no launch bank");
     expect(!full_eight.kv_fits, "full residency payload does not fit 8 KV planes");
     const auto full_six = flash_next_expert_cache_payload_fit(full, 6, kColabG4TotalBytes);
     expect(full_six.kv_fits, "full residency payload fits 6 KV planes");
@@ -213,6 +223,76 @@ void test_pack_preserves_words() {
            "pointer-table plane count covers both matrices");
 }
 
+void test_launch_placement_and_unique_ids() {
+    expect(kExpertCacheDecodeSegments == 49, "a decode capture splits once per text layer");
+    const auto& geo = kExpertCacheGeometry;
+    const auto gate = flash_next_expert_launch_placement(true, 7);
+    const auto down = flash_next_expert_launch_placement(false, 7);
+    expect(gate.code_offset == 7 * geo.gate_code_bytes, "gate codes use the contiguous-bank stride");
+    expect(gate.scale_offset == flash_next_expert_launch_placement(true, 0).scale_offset +
+                                    7 * geo.gate_scale_bytes,
+           "gate scales sit in the scale plane at the expert stride");
+    expect(down.code_offset == 7 * geo.down_code_bytes, "down codes use the contiguous-bank stride");
+    expect(down.divisor_offset == flash_next_expert_launch_placement(false, 0).divisor_offset +
+                                      7 * sizeof(float),
+           "down divisors are one float per expert");
+    expect(gate.code_offset != geo.gate_code_offset,
+           "expert 7's launch-bank codes are not at the slot origin");
+
+    constexpr int kExperts = 8;
+    std::vector<std::byte> gate_codes(static_cast<std::size_t>(kExperts) * geo.gate_code_bytes);
+    std::vector<std::byte> gate_scales(static_cast<std::size_t>(kExperts) * geo.gate_scale_bytes);
+    std::vector<float> gate_divisors(kExperts, 3.25F);
+    std::vector<std::byte> down_codes(static_cast<std::size_t>(kExperts) * geo.down_code_bytes);
+    std::vector<std::byte> down_scales(static_cast<std::size_t>(kExperts) * geo.down_scale_bytes);
+    std::vector<float> down_divisors(kExperts, 8.5F);
+    const auto mark = std::byte{0x5A};
+    std::memset(gate_codes.data() + 7 * geo.gate_code_bytes, std::to_integer<int>(mark),
+                geo.gate_code_bytes);
+    std::memset(gate_scales.data() + 7 * geo.gate_scale_bytes, 0x5B, geo.gate_scale_bytes);
+    std::memset(down_codes.data() + 7 * geo.down_code_bytes, 0x5C, geo.down_code_bytes);
+    std::memset(down_scales.data() + 7 * geo.down_scale_bytes, 0x5D, geo.down_scale_bytes);
+    gate_divisors[7] = 1.25F;
+    down_divisors[7] = 9.25F;
+    Nvfp4ExpertBankView gate_bank{};
+    gate_bank.codes                 = gate_codes.data();
+    gate_bank.scales                = gate_scales.data();
+    gate_bank.weight_scale_divisors = gate_divisors.data();
+    gate_bank.code_bytes_per_expert = geo.gate_code_bytes;
+    gate_bank.scale_bytes_per_expert = geo.gate_scale_bytes;
+    Nvfp4ExpertBankView down_bank{};
+    down_bank.codes                 = down_codes.data();
+    down_bank.scales                = down_scales.data();
+    down_bank.weight_scale_divisors = down_divisors.data();
+    down_bank.code_bytes_per_expert = geo.down_code_bytes;
+    down_bank.scale_bytes_per_expert = geo.down_scale_bytes;
+    std::vector<std::byte> slot(static_cast<std::size_t>(geo.slot_bytes));
+    pack_expert_slot(geo, gate_bank, down_bank, 7, slot);
+    const auto planes = expert_cache_slot_planes(slot.data(), geo);
+    expect(std::memcmp(planes.gate_codes, gate_codes.data() + gate.code_offset, gate.code_bytes) == 0,
+           "slot gate codes match the launch-bank stride for that expert");
+    expect(std::memcmp(planes.gate_scales, gate_scales.data() + 7 * geo.gate_scale_bytes,
+                       gate.scale_bytes) == 0,
+           "slot gate scales match the launch-bank scale words");
+    expect(std::memcmp(planes.down_codes, down_codes.data() + down.code_offset, down.code_bytes) == 0,
+           "slot down codes match the launch-bank stride for that expert");
+    float packed_divisor = 0;
+    std::memcpy(&packed_divisor, planes.down_divisor, sizeof(float));
+    expect(packed_divisor == 9.25F, "slot down divisor matches the launch-bank word");
+
+    const std::vector<std::int32_t> routed = {4, 1, 4, 9, 1, 0};
+    const auto unique                      = flash_next_unique_routed_experts(routed);
+    expect(unique.size() == 4 && unique[0] == 4 && unique[1] == 1 && unique[2] == 9 &&
+               unique[3] == 0,
+           "duplicate routed ids keep first-seen order");
+    const std::vector<std::int32_t> rejected = {1, 512};
+    bool threw = false;
+    try {
+        (void)flash_next_unique_routed_experts(rejected);
+    } catch (const std::invalid_argument&) { threw = true; }
+    expect(threw, "an expert id of 512 is rejected");
+}
+
 void test_environment() {
     const char* saved_budget = std::getenv("NINFER_FLASH_NEXT_EXPERT_CACHE_BUDGET_BYTES");
     const char* saved_mode   = std::getenv("NINFER_FLASH_NEXT_EXPERT_CACHE");
@@ -246,6 +326,7 @@ int main() {
     test_budget();
     test_directory();
     test_pack_preserves_words();
+    test_launch_placement_and_unique_ids();
     test_environment();
     if (failures != 0) {
         std::cerr << failures << " expert-cache checks failed\n";

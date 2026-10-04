@@ -6,6 +6,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string_view>
+#include <vector>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 namespace {
@@ -182,6 +183,22 @@ ExpertCacheTouch ExpertCacheDirectory::touch(std::uint32_t id) {
     result.admitted = true;
     result.slot     = slot;
     return result;
+}
+
+std::vector<std::int32_t>
+flash_next_unique_routed_experts(std::span<const std::int32_t> routed_ids) {
+    std::vector<std::int32_t> unique;
+    unique.reserve(routed_ids.size());
+    std::vector<std::uint8_t> seen(kExpertCacheExpertsPerLayer, 0);
+    for (const std::int32_t id : routed_ids) {
+        if (id < 0 || static_cast<std::uint32_t>(id) >= kExpertCacheExpertsPerLayer) {
+            throw std::invalid_argument("Flash-Next routed expert id is outside the layer");
+        }
+        if (seen[static_cast<std::size_t>(id)] != 0) { continue; }
+        seen[static_cast<std::size_t>(id)] = 1;
+        unique.push_back(id);
+    }
+    return unique;
 }
 
 std::int32_t ExpertCacheDirectory::slot_of(std::uint32_t id) const {

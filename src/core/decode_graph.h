@@ -17,6 +17,9 @@ public:
     DecodeGraphDefinition& operator=(DecodeGraphDefinition&& other) noexcept;
 
     void capture(cudaStream_t stream, const std::function<void()>& body);
+    // Ends a capture begun with cudaStreamBeginCapture on `stream` and stores it.
+    // The capture is no longer active when this returns, including when it fails.
+    void finish_capture(cudaStream_t stream);
     [[nodiscard]] bool ready() const noexcept;
     void reset() noexcept;
     // Characterization/tests: inspect captured nodes (grid/block/func). Not a product API.

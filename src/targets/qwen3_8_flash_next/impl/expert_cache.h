@@ -89,15 +89,18 @@ struct ExpertCachePlan {
 
 // Payload-level fit on a Colab G4. CUDA context, graph arenas, and activation
 // workspaces are not included; a malloc on that card is still required.
+// `gather_bank_bytes` is the one-layer device bank the existing MoE kernels
+// read after the pointer-table gather. Full residency does not allocate it.
 struct ExpertCachePayloadFit {
-    std::uint64_t non_expert_device_bytes  = 0;
-    std::uint64_t mtp_expert_device_bytes  = 0;
+    std::uint64_t non_expert_device_bytes    = 0;
+    std::uint64_t mtp_expert_device_bytes    = 0;
     std::uint64_t routed_expert_device_bytes = 0;
-    std::uint64_t kv_bytes                 = 0;
-    std::uint64_t device_total_bytes       = 0;
-    std::uint64_t used_bytes               = 0;
-    std::uint64_t headroom_bytes           = 0;
-    bool kv_fits                           = false;
+    std::uint64_t gather_bank_bytes          = 0;
+    std::uint64_t kv_bytes                   = 0;
+    std::uint64_t device_total_bytes         = 0;
+    std::uint64_t used_bytes                 = 0;
+    std::uint64_t headroom_bytes             = 0;
+    bool kv_fits                             = false;
 };
 
 struct ExpertCacheTouch {
@@ -109,10 +112,15 @@ struct ExpertCacheTouch {
     std::uint32_t evicted_id  = 0;
 };
 
+class ExpertCacheDevice;
+
 struct ExpertLayerCache {
     std::uint32_t layer = 0;
     Nvfp4ExpertBankView gate_up{};
     Nvfp4ExpertBankView down{};
+    // Device cache that owns this layer's slots, pointer table, and launch bank.
+    // Null when the routed experts are an ordinary device-resident bank.
+    ExpertCacheDevice* device = nullptr;
 };
 
 [[nodiscard]] constexpr std::uint64_t expert_cache_align_up(std::uint64_t value,
@@ -174,6 +182,51 @@ static_assert(kExpertCacheGeometry.text_bank_bytes == 67'947'921'408ULL);
 static_assert(kExpertCacheGeometry.slot_bytes == 2'765'312ULL);
 static_assert(kFlashNextReleasedDevicePayloadBytes > kExpertCacheGeometry.text_bank_bytes);
 
+// One decode capture is split once per text layer: the segment ends after that
+// layer's route and the next segment begins at its expert kernels. 48 splits
+// produce 49 segments.
+inline constexpr std::uint32_t kExpertCacheDecodeSegments = kExpertCacheLayers + 1;
+
+// Where one expert's planes sit inside a contiguous NVFP4 bank of 512 experts.
+// This is the layout `make_nvfp4_expert_bank_view` and the MoE kernels index
+// (`base + expert * stride`), not the packed slot layout.
+struct ExpertLaunchPlacement {
+    std::uint64_t code_offset     = 0;
+    std::uint64_t scale_offset    = 0;
+    std::uint64_t divisor_offset  = 0;
+    std::uint64_t code_bytes      = 0;
+    std::uint64_t scale_bytes     = 0;
+};
+
+[[nodiscard]] constexpr ExpertLaunchPlacement
+flash_next_expert_launch_placement(bool gate_up, std::uint32_t expert) noexcept {
+    const std::uint64_t code_bytes =
+        gate_up ? kExpertCacheGeometry.gate_code_bytes : kExpertCacheGeometry.down_code_bytes;
+    const std::uint64_t scale_bytes =
+        gate_up ? kExpertCacheGeometry.gate_scale_bytes : kExpertCacheGeometry.down_scale_bytes;
+    const std::uint64_t scale_plane = expert_cache_align_up(
+        static_cast<std::uint64_t>(kExpertCacheExpertsPerLayer) * code_bytes, kExpertCacheDeviceAlign);
+    const std::uint64_t divisor_plane =
+        scale_plane + static_cast<std::uint64_t>(kExpertCacheExpertsPerLayer) * scale_bytes;
+    const std::uint64_t index = expert;
+    return {
+        .code_offset    = index * code_bytes,
+        .scale_offset   = scale_plane + index * scale_bytes,
+        .divisor_offset = divisor_plane + index * sizeof(float),
+        .code_bytes     = code_bytes,
+        .scale_bytes    = scale_bytes,
+    };
+}
+
+static_assert(flash_next_expert_launch_placement(true, 0).code_offset == 0);
+static_assert(flash_next_expert_launch_placement(true, 1).code_offset ==
+              kExpertCacheGeometry.gate_code_bytes);
+static_assert(flash_next_expert_launch_placement(true, 511).divisor_offset + sizeof(float) ==
+              kExpertCacheGeometry.gate_bank_bytes);
+static_assert(flash_next_expert_launch_placement(false, 511).divisor_offset + sizeof(float) ==
+              kExpertCacheGeometry.down_bank_bytes);
+static_assert(kExpertCacheDecodeSegments == 49);
+
 // Stable across admission and eviction. Layer is the high part, local expert the low part.
 [[nodiscard]] constexpr std::uint32_t flash_next_expert_id(std::uint32_t layer,
                                                           std::uint32_t expert) noexcept {
@@ -234,10 +287,12 @@ flash_next_expert_cache_payload_fit(const ExpertCachePlan& cache,
     fit.mtp_expert_device_bytes = kExpertCacheGeometry.layer_bank_bytes;
     fit.routed_expert_device_bytes =
         cache.enabled ? cache.device_cache_bytes : kExpertCacheGeometry.text_bank_bytes;
+    fit.gather_bank_bytes =
+        cache.enabled ? kExpertCacheGeometry.layer_bank_bytes : 0;
     fit.kv_bytes           = static_cast<std::uint64_t>(kv_planes) * kFlashNextFp8MtpKvPlaneBytes;
     fit.device_total_bytes = device_total_bytes;
     fit.used_bytes = fit.non_expert_device_bytes + fit.mtp_expert_device_bytes +
-                     fit.routed_expert_device_bytes + fit.kv_bytes;
+                     fit.routed_expert_device_bytes + fit.gather_bank_bytes + fit.kv_bytes;
     fit.kv_fits = fit.used_bytes <= device_total_bytes;
     fit.headroom_bytes = fit.kv_fits ? device_total_bytes - fit.used_bytes : 0;
     return fit;
@@ -256,6 +311,10 @@ flash_next_expert_cache_payload_fit(const ExpertCachePlan& cache,
 void pack_expert_slot(const ExpertCacheGeometry& geometry, const Nvfp4ExpertBankView& gate_up,
                       const Nvfp4ExpertBankView& down, std::int32_t expert,
                       std::span<std::byte> slot);
+
+// First-seen order, duplicates removed. An id outside 0..511 is rejected.
+[[nodiscard]] std::vector<std::int32_t>
+flash_next_unique_routed_experts(std::span<const std::int32_t> routed_ids);
 
 // LRU directory. Expert ids are stable; only the slot assignment moves.
 // A hit refreshes recency. A miss admits into a free slot or evicts the oldest

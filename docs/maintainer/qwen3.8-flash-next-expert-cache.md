@@ -71,8 +71,8 @@ request to free 12 GiB.
 - Vision, when the load asked for it.
 - MTP, including its NVFP4 expert banks (or the loader's BF16-to-NVFP4 buffers). MTP is
   one layer and is not part of the 63.28 GiB text cache.
-- The expert-cache slot arena, when the cache is on.
-- KV, graphs, and workspaces, unchanged by this plan.
+- The expert-cache slot arena and the one-layer gather bank, when the cache is on.
+- KV, graphs, and workspaces. The decode graph is split at each text MoE when the cache is on; full residency keeps one graph.
 
 ## Miss path
 
@@ -85,7 +85,9 @@ not read from an SSD cache. The operating system can reclaim the pages.
 - the device slot arena;
 - a pinned staging window of at most 16 slots (44,244,992 bytes at the production slot
   size);
-- a pointer table, 48 layers × 6 planes × 512 device pointers.
+- a pointer table, 48 layers × 6 planes × 512 device pointers;
+- one contiguous gate bank and one contiguous down bank, together
+  `layer_bank_bytes`, filled by the gather kernel from that table.
 
 `prepare(layer, local_expert_ids, host_banks, stream)` is the miss path:
 
@@ -103,35 +105,66 @@ not read from an SSD cache. The operating system can reclaim the pages.
 Eviction is least-recently-used. A hit moves the id to the newest end. Capacity zero
 records a miss and admits nothing.
 
+## Gather
+
+The MoE math kernels still address a contiguous 512-expert bank
+(`codes + expert * stride`). They are not retargeted. When a layer's
+`routed_expert_cache` is set, `flash_next_moe` does not launch them on the
+file-mapped banks.
+
+`prepare` admits the routed ids and publishes `plane_table(layer, plane)[expert]`.
+A gather kernel then loads those pointers and copies each selected expert's code,
+scale, and divisor words into a one-layer device bank owned by `ExpertCacheDevice`.
+The math kernels run on that bank. Full residency never allocates it and never
+enters this path. The bank is `layer_bank_bytes` (1,415,581,696). On the G4
+8-plane payload that leaves 3,968,008,480 bytes (3.70 GiB) before CUDA context,
+graphs, and activation workspace. The same fit without the launch bank was
+5,383,590,176 bytes (5.01 GiB).
+
+Eager prefill and eager decode publish and gather on the calling stream before
+the math kernels. That publish synchronizes the stream so the host can read the
+route ids. It must not run while the stream is capturing.
+
 ## CUDA graphs
 
-The pointer-table allocation is stable for the life of the cache. Replay must load
-`plane_table(layer, plane)[expert]` rather than `bank_base + expert * stride`. Updating
-the table before replay changes the resident set without recapture and without baking a
-payload address into the graph.
+A captured full-model graph does not execute its route kernels, so the host
+cannot see those ids until a segment returns. Decode capture therefore splits
+on the text-MoE boundary. `ExpertGatherCapture` records 49 segments
+(`kExpertCacheDecodeSegments`): segment `i` ends at the route of layer `i`, and
+segment `i + 1` begins with that layer's expert kernels. Replay launches segment
+`i`, copies the shared routing-id buffer back, calls `prepare` and the gather,
+then launches segment `i + 1`. The math kernels capture the launch-bank
+addresses, which do not change when the resident set does. The pointer table is
+what moves.
 
-This change does not rewrite `moe_kernels.cu` or the decode graph in `text_executor`.
-`flash_next_moe` refuses a layer whose `routed_expert_cache` is set, so a cache-enabled
-load cannot silently run the contiguous kernels. The execution Program, when it lands,
-calls `prepare` for the ids it is about to consume and gathers through the table.
-Ids produced inside a captured full-model graph are not visible to the host until the
-graph returns; the Program has to publish the table for those ids before replay, or
-split the capture at the MoE boundary. That Program work is not in this change.
+Every text layer's route writes the same device id buffer: the MoE workspace is
+scoped inside `flash_next_moe` and the surrounding round allocations rewind
+before the next layer. Capture rejects a round where those addresses differ.
+MTP's expert banks stay device-resident, so its captured draft steps are not
+split.
 
-## What a Colab G4 still has to prove
+Unset `NINFER_FLASH_NEXT_EXPERT_CACHE` keeps the single full-round graph.
 
-No GPU and no Flash-Next artifact were available for this change. The host test checks
-the budget clamp, LRU hit/miss, stable ids, and byte-identical slot packing. It does
-not measure:
+## What a Colab G4 serve must show
 
-- the hit rate of this LRU (or of a later routing profile) at the PRO 6000 slot count;
-- the PCIe cost of a miss, which moves 2,765,312 bytes per expert and up to 10 experts
-  per layer per token;
-- that eight 256K FP8+MTP KV planes plus the reduced weight footprint, the slot arena,
-  and the graph/activation workspace actually malloc on a 101,974,081,536-byte G4.
+Cache off at `1ad843e` already served: full residency,
+`host_to_device_bytes=75172939520`, listen on `127.0.0.1:8010`, and
+"Reply with exactly: pong" returned "pong" (17 prompt + 2 completion, TTFT
+28.7 ms).
 
-Payload arithmetic says that configuration fits with at least 4 GiB left before context
-and allocator overhead. The malloc is the proof.
+Cache on (`NINFER_FLASH_NEXT_EXPERT_CACHE=pro6000`) must now get past startup
+and answer that same prompt. The serve log should show:
+
+- `flash_next expert_cache slots=20688 device_bytes=57208774656 released_bytes=10739146752 pinned_staging_bytes=44244992 gather_bank_bytes=1415581696`
+- no `capture failed` line and no refusal that the routed experts are cache-resident
+- `ninfer-serve` reaches listen
+- the same prompt returns a completion. The text to compare with cache off is `pong`. A different completion means the gather did not feed the math kernels the routed NVFP4 words
+- weight `host_to_device_bytes` stays near the non-expert upload (`7225018112` on the previous cache-on attempt). The slot arena and the launch bank are separate device allocations, not part of that weight upload
+
+Startup still runs the eager warmup forward before capture, so the first routing
+set is admitted before the server listens. A short generate then pays a host
+sync and any misses at every text layer (48) on prefill and on each decode
+token. This machine has no GPU, so none of that serve path was executed here.
 
 ## Cherry-pick onto workstation
 
@@ -146,6 +179,8 @@ New files, no existing-history conflict:
 - `src/targets/qwen3_8_flash_next/impl/expert_cache.cpp`
 - `src/targets/qwen3_8_flash_next/impl/expert_cache_device.h`
 - `src/targets/qwen3_8_flash_next/impl/expert_cache_device.cu`
+- `src/targets/qwen3_8_flash_next/impl/expert_gather.h`
+- `src/targets/qwen3_8_flash_next/impl/expert_gather.cpp`
 - `tests/targets/qwen3_8_flash_next/test_expert_cache.cpp`
 - `docs/maintainer/qwen3.8-flash-next-expert-cache.md`
 
@@ -165,19 +200,22 @@ Integration hunks, likely to collide with the execution port:
 - `src/targets/qwen3_8_flash_next/impl/package.cpp`
 - `src/targets/qwen3_8_flash_next/impl/moe.h`
 - `src/targets/qwen3_8_flash_next/impl/moe.cpp`
+- `src/targets/qwen3_8_flash_next/impl/text_executor.h`
+- `src/targets/qwen3_8_flash_next/impl/text_executor.cpp`
+- `src/core/decode_graph.h`
+- `src/core/decode_graph.cpp`
 - `src/targets/qwen3_8_flash_next/CMakeLists.txt`
 - `tests/CMakeLists.txt`
 - `docs/maintainer/qwen3.8-flash-next-model.md`
 - `docs/maintainer/qwen3.8-flash-next-artifact.md`
 - `docs/README.md`
 
-The execution port is also likely to edit these, which this change does not touch.
-Rebase against them rather than assuming they stayed still:
+The math kernels are unchanged. The execution port is also likely to edit these,
+which this change does not touch. Rebase against them rather than assuming they
+stayed still:
 
 - `src/targets/qwen3_8_flash_next/impl/program.cpp`
 - `src/targets/qwen3_8_flash_next/impl/program_impl.h`
-- `src/targets/qwen3_8_flash_next/impl/text_executor.cpp`
-- `src/targets/qwen3_8_flash_next/impl/text_executor.h`
 - `src/targets/qwen3_8_flash_next/impl/text_decode.cpp`
 - `src/targets/qwen3_8_flash_next/impl/text_decode.h`
 - `src/targets/qwen3_8_flash_next/impl/text_decode_kernels.cu`

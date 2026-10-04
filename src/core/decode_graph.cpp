@@ -80,6 +80,17 @@ void DecodeGraphDefinition::capture(cudaStream_t stream, const std::function<voi
     graph_ = graph;
 }
 
+void DecodeGraphDefinition::finish_capture(cudaStream_t stream) {
+    reset();
+    cudaGraph_t graph     = nullptr;
+    const cudaError_t err = cudaStreamEndCapture(stream, &graph);
+    if (err != cudaSuccess) {
+        destroy_graph(graph);
+        CUDA_CHECK(err);
+    }
+    graph_ = graph;
+}
+
 bool DecodeGraphDefinition::ready() const noexcept { return graph_ != nullptr; }
 
 void DecodeGraphDefinition::reset() noexcept { destroy_graph(graph_); }
