@@ -29,7 +29,7 @@ constructor seam, registered Op geometries and finite kernel routes.
 | Dimension | Current evidence / status |
 |---|---|
 | Text behavior | Native prefill/decode, CUDA Graphs, prefix reuse/catalog turnover, logprobs, structured output, causal scoring and final 2560-wide hidden export implemented. Focused real-artifact Engine checks pass. |
-| Numerical semantics | Changed Ops use independent FP64/codec oracles and real shapes. Scoring versus prompt readout max absolute difference 9.53674e-07 nats, below unchanged 0.05. Text B=2/4/8 passes unchanged 0.05-nat near-tie criterion. Changing future tokens at fixed extents 64/1024/2200 leaves predictor prefixes exactly equal, including beyond QSA's sparse boundary. The saved-v2 comparison below fails the greedy-gap and prompt-logprob criteria; numerical acceptance remains open. |
+| Numerical semantics | Changed Ops use independent FP64/codec oracles and real shapes. Scoring versus prompt readout max absolute difference 9.53674e-07 nats, below unchanged 0.05. Text B=2/4/8 passes unchanged 0.05-nat near-tie criterion. Changing future tokens at fixed extents 64/1024/2200 leaves predictor prefixes exactly equal, including beyond QSA's sparse boundary. The saved-v2 comparison below fails the greedy-gap and prompt-logprob criteria. The independent-oracle gate that replaced it passes four of five metrics. It fails mean chosen-token difference (0.270212 v3 against an allowed 0.261764), entirely on `book-18k`'s long-prompt readouts. Numerical acceptance remains open. |
 | MTP | Full-head K=1..5, target verification width K+1, recursive drafts, teacher extension, GDN accepted-prefix fold and private QSA/PLE snapshots implemented. K=1/3/5 graph/eager equality, ragged budgets, eight distinct active requests, context-tail limits, FP8 KV at the 2048-token QSA selection boundary, seeded stochastic penalties and constrained output pass. |
 | Continuation state | MTP owns a separate indexer and KV frontier E-1 at target frontier E. Host pressure transfers state and both KV families; plain and MTP resumes match device-only tokens exactly. State-image clone/reset/isolation and incompatible host geometry tests pass. |
 | Vision | Shared 27-layer encoder, 2560 merger, bounded startup workspace/handoff, chunked media scatter and three-axis continuation positions implemented. Red/blue image discrimination, prefix reuse and ordered red-then-blue video pass with ordinary and MTP generation. BF16 4304-wide partial-K projection tails pass the independent oracle. |
@@ -166,6 +166,77 @@ transformers `qwen4_exp` reference, with v2 measured the same way as the compari
   and the result is reported with the positions responsible.
 - **Not covered.** This gate replaces only the full-model numerical comparison. The Op oracles,
   Engine cases, MTP equality and Windows GPU qualification are separate and still required.
+
+### Oracle gate result (2026-10-05): fails on mean chosen-token difference
+
+`tools/bench/flash_next/oracle.py` ran on a Colab G4 (RTX PRO 6000 Blackwell Server) with
+transformers 5.18.0 and PyTorch 2.11.0+cu130, FP32 with TF32 off and SDPA attention, over the
+saved v2 records and the current candidate's records (50 each). Sources:
+`primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8@a4e813ed` without `ple-bf16-*` and
+`primitive-ai/Qwen3.8-Flash-Next-PLE-quant@da8b3958` `ples_int4`. The 100 teacher-forced
+forwards took about 15 minutes; the longest (21,141 tokens) took 77-91 s.
+
+All 27 prompts reproduce `prompt_tokens` once tools are rendered the way the OpenAI route serves
+them (`render_tool_definition`: name, parameters, `strict: false`, then description). Rendering
+the client's tool object instead is 6 tokens shorter (296/297 versus 302/303). The first pass
+used that rendering and excluded both tool records; it gave the same verdict (mean 0.243654 v2,
+0.276054 v3, allowed 0.268019).
+
+| Metric | v2 | v3 | Allowed for v3 | Status |
+|---|---:|---:|---:|---|
+| Chosen-token difference, mean | 0.237967 | 0.270212 | 0.261764 | **Fails** |
+| Chosen-token difference, maximum | 16.913912 | 16.433323 | 18.605303 | Passes |
+| Top-1 agreement (generated positions) | 0.976981 | 0.976558 | 0.879283 | Passes |
+| KL mean (generated positions) | 0.089672 | 0.089330 | 0.098639 | Passes |
+| KL p99 (generated positions) | 2.581029 | 2.594268 | 2.839132 | Passes |
+
+Pooled positions: 4,865 for v2 and 4,803 for v3, none excluded.
+
+**Positions responsible.** The `book-18k` prompt readouts (256 positions sampled across its 21,013
+prompt tokens) account for all of the excess. v3's mean difference there is 1.8702 nats against
+v2's 1.2398, which is +161.4 nats summed. Over every other record v3 sums 21 nats *less* than v2.
+Without these 256 positions the means would be 0.1801 for v3 and 0.1823 for v2. That figure only
+attributes the failure; it is not a revised gate.
+
+| Records | Kind | v2 mean / max | v3 mean / max | Oracle draw-to-draw mean / max |
+|---|---|---:|---:|---:|
+| short (16) | prompt | 0.139 / 1.63 | 0.121 / 0.99 | 0.000 / 0.00 |
+| thinking (4) | prompt | 0.183 / 2.01 | 0.182 / 1.61 | 0.000 / 0.00 |
+| code-4k | prompt | 1.523 / 16.91 | 1.508 / 16.43 | 0.013 / 0.26 |
+| wiki-18k | prompt | 1.159 / 10.29 | 1.109 / 8.74 | 0.216 / 7.45 |
+| book-18k | prompt | 1.240 / 14.71 | 1.870 / 13.24 | 0.324 / 11.13 |
+| book-18k | generated | 0.038 / 0.36, KL 0.0080 | 0.041 / 0.41, KL 0.0081 | — |
+
+**What the diagnosis established.**
+
+- The oracle is exact below the QSA budget. Prompts shorter than 2,048 tokens give bit-identical
+  oracle readouts in the v2 and v3 forwards.
+- Past the budget, the reference is itself route-chaotic. Its two forwards over the identical
+  `book-18k` prompt differ only by the generated tokens appended after the readouts, which
+  changes the reduction shapes. They still disagree by up to 11.13 nats at one position.
+- Oracle-draw noise does not explain v3's `book-18k` offset. Scored against the v2 forward's
+  oracle readouts, v3 is still at 1.950 mean.
+- The offset is a whole-document bias, not a causality leak. v3 is more confident than the
+  oracle in the true next token by 1.54 nats on average: 98 positions are more than 2 nats above
+  it and 6 more than 2 nats below. The bias is flat across QSA block offsets: +1.41, +1.92,
+  +1.56 and +1.67 nats for `p mod 4` = 0 to 3, past position 2,048.
+- A block-granular leak of future tokens would be absent at offset 3, where the next token sits
+  in the following block.
+- The sign is not consistent across documents. Past position 2,048 v3 is −0.36 on `wiki-18k` and
+  −0.54 on `code-4k`. v2 is +0.47 and +0.63 on wiki and book, and −0.41 on code.
+- Generated positions decoded after the same 21K prefill agree with the oracle as well for v3 as
+  for v2.
+
+**Open.** These records cannot tell whether v3's per-document long-context offset is a v3 defect
+or the long-context route sensitivity both engines show. The evidence for route sensitivity is
+the same in each case:
+
+- v2's MMA and non-MMA routes differ by 0.797127 mean prompt nats;
+- both engines deviate from the oracle by 1.1-1.9 nats per long-document prompt position;
+- v2 and v3 differ from each other there by 1.4-1.8 nats.
+
+Separating the two needs more long documents per engine. The pre-registered gate itself stays
+failed.
 
 ## 1. Measured G4 facts (session of 2026-09-29, 19:42-20:08 UTC)
 
