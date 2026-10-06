@@ -166,6 +166,7 @@ void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& requ
         .draft_window          = draft_window,
         .accepted_per_position = std::vector<std::uint64_t>(draft_window, 0),
     };
+    request.draft_estimate = {};
     const bool penalties = request.sampling_host.presence_penalty != 0.0F ||
                            request.sampling_host.frequency_penalty != 0.0F ||
                            request.sampling_host.repetition_penalty != 1.0F;

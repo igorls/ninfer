@@ -301,6 +301,7 @@ std::string usage_text(std::string_view program) {
         << "  --kv-dtype <bf16|int8|fp8|nvfp4|k8v4>  KV cache storage (default: bf16)\n"
         << "  --spec <mtp|dflash|dflash2> speculative backend (default: none)\n"
         << "  --draft-tokens <n>         MTP 1..5; DFlash/DFlash2 1..15\n"
+        << "  --draft-policy <fixed|adaptive>  MTP: draft K every round, or K as a maximum chosen per round\n"
         << "  --lm-head-draft             use the optimized proposal head; requires a speculative "
            "backend\n"
         << "  --device <id>               CUDA device ordinal (default: 0)\n"
@@ -357,6 +358,8 @@ BenchOptions parse_args(int argc, char** argv) {
             options.speculative.backend = product::parse_speculative_backend(value("--spec"));
         } else if (arg == "--draft-tokens") {
             options.speculative.draft_tokens = parse_u32(value("--draft-tokens"), "draft-tokens");
+        } else if (arg == "--draft-policy") {
+            options.speculative.draft_policy = product::parse_draft_policy(value("--draft-policy"));
         } else if (arg == "--lm-head-draft") {
             options.speculative.proposal_head = ProposalHead::Optimized;
         } else if (arg == "--device") {
@@ -716,6 +719,8 @@ std::string format_json(const BenchEnvironment& env, const std::string& command,
         << "    \"speculative_backend\": \""
         << product::speculative_backend_name(env.speculative.backend) << "\",\n"
         << "    \"draft_tokens\": " << env.speculative.draft_tokens << ",\n"
+        << "    \"draft_policy\": \"" << product::draft_policy_name(env.speculative.draft_policy)
+        << "\",\n"
         << "    \"proposal_head\": \"" << proposal_head_name(env.speculative.proposal_head)
         << "\",\n"
         << "    \"use_cuda_graph\": " << (env.use_cuda_graph ? "true" : "false") << ",\n"

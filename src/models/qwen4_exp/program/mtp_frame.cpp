@@ -63,14 +63,25 @@ MtpFrame::MtpFrame(DeviceSpan backing, const MtpFrameLayout& l)
 #undef BIND
 }
 
-MtpFrame MtpFrame::batch(std::int32_t count) const {
+MtpFrame MtpFrame::round(std::int32_t count, std::int32_t round_width) const {
     if (count < 1 || count > batch_capacity) { throw std::invalid_argument("MTP active batch"); }
-    MtpFrame f = *this;
-    for (Tensor* t : {&f.hidden, &f.logits, &f.previous, &f.teacher_output}) {
-        *t = t->slice(2, 0, count);
+    if (round_width < 2 || round_width > width) {
+        throw std::invalid_argument("MTP round width is outside the planned width");
     }
-    for (Tensor* t : {&f.argmax, &f.drafts, &f.licensed, &f.teacher_positions, &f.ar_hidden,
-                      &f.next_hidden, &f.proposal_logits}) {
+    const auto w = round_width;
+    MtpFrame f   = *this;
+    f.width      = w;
+    // Width-shaped tensors are repacked densely for this round's width and batch.
+    f.hidden            = Tensor(hidden.data, DType::BF16, {hidden.ne[0], w, count});
+    f.logits            = Tensor(logits.data, DType::BF16, {logits.ne[0], w, count});
+    f.argmax            = Tensor(argmax.data, DType::I32, {w, count});
+    f.drafts            = Tensor(drafts.data, DType::I32, {w - 1, count});
+    f.licensed          = Tensor(licensed.data, DType::I32, {w, count});
+    f.previous          = Tensor(previous.data, DType::BF16, {previous.ne[0], w, count});
+    f.teacher_output    = Tensor(teacher_output.data, DType::BF16, {teacher_output.ne[0], w, count});
+    f.teacher_positions = Tensor(teacher_positions.data, DType::I32, {w, count});
+    f.records           = records.narrowed(w);
+    for (Tensor* t : {&f.ar_hidden, &f.next_hidden, &f.proposal_logits}) {
         *t = t->slice(1, 0, count);
     }
     for (Tensor* t :
@@ -78,9 +89,9 @@ MtpFrame MtpFrame::batch(std::int32_t count) const {
         *t = t->slice(0, 0, count);
     }
     // Planar controls are repacked for the current B, with a fixed maximum backing.
-    f.teacher_rope  = Tensor(teacher_rope.data, DType::I32, {width * count, 3});
+    f.teacher_rope  = Tensor(teacher_rope.data, DType::I32, {w * count, 3});
     f.proposal_rope = Tensor(proposal_rope.data, DType::I32, {count, 3});
-    f.embedding     = Tensor(embedding.data, DType::BF16, {embedding.ne[0], width * count});
+    f.embedding     = Tensor(embedding.data, DType::BF16, {embedding.ne[0], w * count});
     return f;
 }
 

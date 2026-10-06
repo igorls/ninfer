@@ -1,5 +1,6 @@
 #pragma once
 #include "models/qwen4_exp/program/internal.h"
+#include "models/qwen4_exp/program/mtp_draft_policy.h"
 
 #include "core/arena.h"
 #include "core/host_kv_arena.h"
@@ -277,6 +278,8 @@ struct PendingCandidate {
     std::uint32_t base_S        = 0;
     std::uint32_t prompt_tokens = 0;
     std::uint32_t produced      = 0;
+    // Verification width of the pending speculative round; every row of a round shares it.
+    std::uint32_t width = 0;
 };
 
 enum class Lifecycle : std::uint8_t {
@@ -416,6 +419,8 @@ struct RequestControl {
     std::vector<float> reasoning_features;
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
+    // Adaptive draft policy evidence; reset with the request's speculative statistics.
+    MtpDraftEstimate draft_estimate;
     detail::PhysicalResources active_resources;
     detail::PhysicalResources optional_resources;
     bool publish_continuation = true;
@@ -578,7 +583,10 @@ public:
     const std::uint32_t continuation_capacity;
     const std::uint32_t shared_prefix_capacity;
     const std::uint32_t prefill_chunk;
+    // MTP: the startup maximum drafts per round. Fixed rounds always propose it; adaptive rounds
+    // choose each request's count in [1, draft_window] from its observed acceptance.
     const std::uint32_t draft_window;
+    const DraftPolicy draft_policy;
     const SpeculativeBackend speculative_backend;
     const KvCacheStorage kv_storage;
     const bool vision_enabled;
@@ -606,7 +614,8 @@ public:
     std::unique_ptr<execution::PleGather> ple_gather;
     qwen4_exp::RoundState io;
     std::optional<MtpFrame> mtp_frame;
-    std::optional<ops::GdnReplayFoldPlan> mtp_fold;
+    // One fold plan per round width, indexed by width - 2.
+    std::vector<ops::GdnReplayFoldPlan> mtp_folds;
     std::optional<PinnedHostBuffer> mtp_host;
     MtpIngress* mtp_ingress = nullptr;
     MtpEgress* mtp_egress = nullptr;
@@ -635,7 +644,10 @@ public:
     std::array<std::uint64_t, kMaximumConcurrency> lane_epochs{};
 
     DecodeGraphFamily ordinary_graphs;
-    DecodeGraphFamily mtp_proposal_graphs, mtp_verify_graphs;
+    DecodeGraphFamily mtp_proposal_graphs;
+    // Verification graphs per round width, indexed by width - 2. Fixed rounds capture only the
+    // startup width; adaptive rounds capture every width from 2 to draft_window + 1.
+    std::vector<DecodeGraphFamily> mtp_verify_graphs;
 
     std::optional<PinnedHostBuffer> round_host;
     std::optional<PinnedHostBuffer> score_logprobs_host;
@@ -1151,7 +1163,11 @@ private:
     void prepare_graphs();
     void prepare_mtp_graphs();
     void mtp_proposal_body(std::int32_t batch, ops::QsaIndexerSelectEnvelope envelope);
-    void mtp_verify_body(std::int32_t batch, ops::QsaIndexerSelectEnvelope envelope);
+    void mtp_verify_body(std::int32_t batch, std::int32_t width,
+                         ops::QsaIndexerSelectEnvelope envelope);
+    [[nodiscard]] std::int32_t mtp_minimum_round_width() const noexcept {
+        return draft_policy == DraftPolicy::Adaptive ? 2 : static_cast<std::int32_t>(draft_window + 1);
+    }
     void install_sampling(SequenceState& sequence, RequestControl& request,
                           const ops::SamplingConfig& config, std::span<const TokenId> prompt);
     // Uploads one verification column's grammar mask for a lane; returns its device address.

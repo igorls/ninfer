@@ -192,7 +192,7 @@ scoring and reasoning-feature export expose this final hidden representation.
 Select BF16 KV (`--kv-dtype bf16`) or row-256 FP8 KV (`--kv-dtype fp8`). Generation supports
 one to eight requests, startup-fixed CUDA Graphs, context reuse and the common sampling,
 structured-output and logprob contracts. `--spec mtp --draft-tokens 3` selects the stored MTP
-component; the supported draft interval is 1 through 5, with the full output head. Requests
+component; the supported draft interval is 1 through 5, with the full output head. `--draft-policy adaptive` treats K as a maximum: each round drafts, per request, the count that maximizes expected committed tokens per unit of round cost under that request's decayed acceptance, and verifies only as wide as its widest row. Verification graphs are captured for every width from 2 to K+1. Requests
 needing host top-logprob readout use target-only steps, as on the other architecture.
 `--vision` selects the Vision component and the common image/video frontend.
 

@@ -686,6 +686,17 @@ bool mtp_generation_and_reuse() {
     });
 }
 
+// MTP arms: fixed K, plus the adaptive policy, whose rounds choose their width in [2, K+1].
+struct MtpArm {
+    std::uint32_t drafts;
+    ninfer::DraftPolicy policy;
+    const char* label;
+};
+constexpr MtpArm kMtpArms[]{{1, ninfer::DraftPolicy::Fixed, "K=1"},
+                            {3, ninfer::DraftPolicy::Fixed, "K=3"},
+                            {5, ninfer::DraftPolicy::Fixed, "K=5"},
+                            {5, ninfer::DraftPolicy::Adaptive, "adaptive K<=5"}};
+
 bool mtp_batch_target_parity() {
     auto options = base_options();
     options.max_context = 512;
@@ -705,9 +716,10 @@ bool mtp_batch_target_parity() {
         return true;
     })) return false;
     bool ok = true;
-    for (const auto drafts : {1U, 3U, 5U}) {
+    for (const auto& arm : kMtpArms) {
         options.speculative.backend = ninfer::SpeculativeBackend::Mtp;
-        options.speculative.draft_tokens = drafts;
+        options.speculative.draft_tokens = arm.drafts;
+        options.speculative.draft_policy = arm.policy;
         ok = with_engine(options, [&](ninfer::Engine& engine) {
             std::vector<ninfer::PreparedPrompt> prepared;
             for (const auto& text : prompts()) prepared.push_back(engine.prepare(user_prompt(text)));
@@ -725,7 +737,7 @@ bool mtp_batch_target_parity() {
                     if (result.generated_token_ids[i] == reference[row].generated_token_ids[i]) continue;
                     const auto& top = reference[row].token_logprobs[i].top;
                     const auto gap = top[0].raw_logprob - top[1].raw_logprob;
-                    std::cout << "MTP K=" << drafts << " target row=" << row
+                    std::cout << "MTP " << arm.label << " target row=" << row
                               << " first divergence=" << i << " reference gap=" << gap << '\n';
                     if (gap > 0.05F)
                         matched = fail("MTP verification changes a target decision away from a tie") && matched;
@@ -739,7 +751,7 @@ bool mtp_batch_target_parity() {
 }
 
 bool mtp_graphs_and_ragged_batches() {
-    for (const auto drafts : {1U, 3U, 5U}) {
+    for (const auto& arm : kMtpArms) {
         std::vector<ninfer::TokenId> eager;
         for (const bool graphs : {false, true}) {
             auto options            = base_options();
@@ -750,13 +762,14 @@ bool mtp_graphs_and_ragged_batches() {
             options.prefill_chunk            = 128;
             options.context_cache.enabled    = false;
             options.speculative.backend      = ninfer::SpeculativeBackend::Mtp;
-            options.speculative.draft_tokens = drafts;
+            options.speculative.draft_tokens = arm.drafts;
+            options.speculative.draft_policy = arm.policy;
             options.use_cuda_graph           = graphs;
             const bool ok                    = with_engine(options, [&](ninfer::Engine& engine) {
                 const auto input =
                     user_prompt("Count from one to twenty, separating the numbers with commas.");
                 const auto result = engine.generate(engine.prepare(input), greedy(40, false));
-                std::cout << "MTP K=" << drafts << " graphs=" << graphs
+                std::cout << "MTP " << arm.label << " graphs=" << graphs
                           << " accepted=" << result.speculative.accepted_tokens << std::endl;
                 if (!graphs) {
                     eager = result.generated_token_ids;

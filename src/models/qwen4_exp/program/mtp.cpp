@@ -9,6 +9,7 @@
 #include "ninfer/ops/speculative_round.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <optional>
@@ -103,8 +104,9 @@ void ProgramImpl::mtp_proposal_body(std::int32_t batch, ops::QsaIndexerSelectEnv
     copy(frame.proposal_sources, proposal.state_destination_slots, device.stream);
 }
 
-void ProgramImpl::mtp_verify_body(std::int32_t batch, ops::QsaIndexerSelectEnvelope envelope) {
-    auto frame  = mtp_frame->batch(batch);
+void ProgramImpl::mtp_verify_body(std::int32_t batch, std::int32_t width,
+                                  ops::QsaIndexerSelectEnvelope envelope) {
+    auto frame  = mtp_frame->round(batch, width);
     auto inputs = mtp_verify_inputs(frame, batch, envelope);
     auto hidden = frame.hidden.view({frame.hidden.ne[0], frame.width * batch});
     auto logits = frame.logits.view({frame.logits.ne[0], frame.width * batch});
@@ -118,16 +120,37 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                               std::span<const runtime::RoundBudget> budgets,
                               runtime::ExecutionTiming* failed_timing) {
     runtime::ExecutionTimingRecorder timing(runtime::ExecutionTimingPhase::Submit, failed_timing);
-    if (!mtp_frame || !mtp_fold || !parameters.mtp || lanes.empty() ||
+    if (!mtp_frame || mtp_folds.empty() || !parameters.mtp || lanes.empty() ||
         lanes.size() > max_concurrency || budgets.size() != lanes.size()) {
         throw std::logic_error("MTP batch has no prepared frame or invalid membership");
     }
     const auto started    = Clock::now();
     nvtx::ScopedRange round_range(nvtx::Name::DecodeMtpRound, nvtx::Category::Mtp, lanes.size());
     const auto batch      = static_cast<std::int32_t>(lanes.size());
-    const auto width      = static_cast<std::int32_t>(draft_window + 1);
-    const auto columns    = width * batch;
-    auto frame            = mtp_frame->batch(batch);
+    // Drafts per row: the policy's count, bounded by the output budget and the context. Logprob
+    // requests that read a full column on the host do not draft.
+    std::array<std::uint32_t, kMaximumConcurrency> extents{};
+    std::uint32_t widest = 0;
+    for (std::int32_t row = 0; row < batch; ++row) {
+        if (lanes[row] >= max_concurrency) { throw std::invalid_argument("MTP invalid lane"); }
+        auto& sequence     = active_sequence(lanes[row]);
+        auto& request      = requests[lanes[row]];
+        const auto drafts  = draft_policy == DraftPolicy::Adaptive
+                                 ? choose_mtp_drafts(request.draft_estimate, draft_window)
+                                 : draft_window;
+        const auto room    = sequence.execution_frontier < capacity
+                                 ? capacity - sequence.execution_frontier - 1
+                                 : 0U;
+        const auto budget  = budgets[row].generated_tokens_remaining;
+        extents[row]       = request.logprobs.enabled && !request.logprobs_device_readout
+                                 ? 0U
+                                 : std::min({drafts, budget > 0 ? budget - 1 : 0U, room});
+        widest             = std::max(widest, extents[row]);
+    }
+    // Fixed rounds keep the startup width; adaptive rounds verify only as wide as the widest row.
+    const auto width   = std::max(mtp_minimum_round_width(), static_cast<std::int32_t>(widest + 1));
+    const auto columns = width * batch;
+    auto frame         = mtp_frame->round(batch, width);
     auto& host            = *mtp_ingress;
     *mtp_egress           = {};
     host                  = {};
@@ -148,11 +171,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             budgets[row].generated_tokens_remaining == 0) {
             throw std::logic_error("MTP sequence is not at a committed decode frontier");
         }
-        const auto extent =
-            request.logprobs.enabled && !request.logprobs_device_readout
-                ? 0U
-                : std::min({draft_window, budgets[row].generated_tokens_remaining - 1,
-                            capacity - frontier - 1});
+        const auto extent           = extents[row];
         host.extents[row]           = static_cast<std::int32_t>(extent);
         host.valid[row]             = static_cast<std::int32_t>(extent + 1);
         host.frontiers[row]         = static_cast<std::int32_t>(frontier);
@@ -186,7 +205,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
     DecodeGraphExecutable* verify_graph   = nullptr;
     if (use_cuda_graph) {
         proposal_graph = &mtp_graph_for(mtp_proposal_graphs, batch, maximum);
-        verify_graph   = &mtp_graph_for(mtp_verify_graphs, batch, maximum);
+        verify_graph   = &mtp_graph_for(mtp_verify_graphs[width - 2], batch, maximum);
     }
     const auto input = [&](std::size_t offset, std::int32_t count) {
         return frame.i32(offset, count);
@@ -290,7 +309,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
     if (verify_graph != nullptr) {
         verify_graph->launch(device.stream);
     } else {
-        mtp_verify_body(batch, envelope);
+        mtp_verify_body(batch, width, envelope);
     }
     // Teacher MTP keys at position p use target streams at p and token embedding at p+1.
     // The first preceding stream/position comes from the saved continuation, including MRoPE.
@@ -385,11 +404,14 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             stats.drafted_tokens += host.extents[row];
             stats.accepted_tokens += accepted;
             for (std::int32_t i = 0; i < accepted; ++i) { ++stats.accepted_per_position[i]; }
+            observe_mtp_round(request.draft_estimate, static_cast<std::uint32_t>(host.extents[row]),
+                              static_cast<std::uint32_t>(accepted));
         }
         request.pending   = {.kind     = PendingKind::Speculative,
                              .base_E   = sequence.execution_frontier,
                              .base_S   = sequence.ledger_frontier,
-                             .produced = static_cast<std::uint32_t>(count)};
+                             .produced = static_cast<std::uint32_t>(count),
+                             .width    = static_cast<std::uint32_t>(width)};
         request.lifecycle = Lifecycle::Pending;
         request.timings.decode_seconds +=
             std::chrono::duration<double>(Clock::now() - started).count();
@@ -406,9 +428,13 @@ runtime::ExecutionTiming ProgramImpl::resolve_mtp_pending(
     std::span<const std::optional<std::uint32_t>> prefix_execution_splits,
     runtime::ExecutionTiming* failed_timing) {
     runtime::ExecutionTimingRecorder timing(runtime::ExecutionTimingPhase::Submit, failed_timing);
-    const auto width = static_cast<std::int32_t>(draft_window + 1);
     const auto batch = static_cast<std::int32_t>(lanes.size());
-    auto frame       = mtp_frame->batch(batch);
+    if (lanes.empty()) { throw std::logic_error("MTP commit has no lanes"); }
+    const auto width = static_cast<std::int32_t>(requests[lanes[0]].pending.width);
+    if (width < 2 || width > mtp_frame->width) {
+        throw std::logic_error("MTP pending round has no valid verification width");
+    }
+    auto frame = mtp_frame->round(batch, width);
     std::array<ops::GdnReplayFoldRow, kMaximumConcurrency> rows{};
     for (std::int32_t row = 0; row < batch; ++row) {
         auto& sequence       = active_sequence(lanes[row]);
@@ -419,7 +445,8 @@ runtime::ExecutionTiming ProgramImpl::resolve_mtp_pending(
             sequence.execution_frontier != request.pending.base_E ||
             sequence.ledger.size() != request.pending.base_S ||
             selectors.source != mtp_ingress->sources[row] ||
-            selectors.destination != mtp_ingress->destinations[row]) {
+            selectors.destination != mtp_ingress->destinations[row] ||
+            request.pending.width != static_cast<std::uint32_t>(width)) {
             throw std::logic_error("MTP pending state changed before commit");
         }
         const auto count = static_cast<std::int32_t>(accepted_tokens[row]);
@@ -443,7 +470,8 @@ runtime::ExecutionTiming ProgramImpl::resolve_mtp_pending(
                                        device.stream));
         }
     }
-    mtp_fold->execute({rows.data(), lanes.size()}, device.stream);
+    mtp_folds[static_cast<std::size_t>(width - 2)].execute({rows.data(), lanes.size()},
+                                                          device.stream);
     timing.begin_wait();
     device.synchronize();
     timing.end_wait();

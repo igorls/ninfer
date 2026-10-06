@@ -47,7 +47,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       continuation_capacity(normalized_private_capacity(plan.context_cache)),
       shared_prefix_capacity(plan.context_cache.max_shared_prefixes.value_or(0)),
       prefill_chunk(plan.prefill_chunk), draft_window(plan.draft_window),
-      speculative_backend(plan.speculative_backend), kv_storage(plan.kv_storage),
+      draft_policy(plan.draft_policy), speculative_backend(plan.speculative_backend), kv_storage(plan.kv_storage),
       vision_enabled(plan.features.vision),
       use_cuda_graph(plan.use_cuda_graph), causal_scoring(plan.causal_scoring),
       kv_payload_bytes(plan.persistent.kv_payload_bytes),
@@ -201,7 +201,10 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
 
     if (plan.persistent.mtp) {
         mtp_frame.emplace(plan.persistent.mtp_storage->bind(backing), *plan.persistent.mtp);
-        mtp_fold.emplace(mtp_frame->records, state_images->linear().all_layers_view());
+        for (std::int32_t width = 2; width <= mtp_frame->width; ++width) {
+            mtp_folds.emplace_back(mtp_frame->records.narrowed(width),
+                                   state_images->linear().all_layers_view());
+        }
         mtp_host.emplace(sizeof(MtpIngress) + sizeof(MtpEgress));
         mtp_ingress = static_cast<MtpIngress*>(mtp_host->data());
         mtp_egress = reinterpret_cast<MtpEgress*>(static_cast<std::byte*>(mtp_host->data()) + sizeof(MtpIngress));

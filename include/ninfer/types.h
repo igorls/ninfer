@@ -75,6 +75,13 @@ enum class ProposalHead : std::uint8_t {
     Optimized,
 };
 
+// How many drafts an MTP round proposes. Fixed always proposes draft_tokens; Adaptive treats
+// draft_tokens as the maximum and chooses each request's count per round from its acceptance.
+enum class DraftPolicy : std::uint8_t {
+    Fixed,
+    Adaptive,
+};
+
 enum class SpeculativeBackend : std::uint8_t {
     None,
     Mtp,
@@ -87,6 +94,7 @@ struct SpeculativeOptions {
     // Startup-fixed K: MTP 1..5; DFlash and DFlash2 1..15 (query width K+1).
     std::uint32_t draft_tokens = 0;
     ProposalHead proposal_head = ProposalHead::Full;
+    DraftPolicy draft_policy   = DraftPolicy::Fixed;
 };
 
 enum class StartupPhase : std::uint8_t {

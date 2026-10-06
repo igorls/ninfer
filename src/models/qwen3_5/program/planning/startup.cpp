@@ -802,6 +802,9 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
     default:
         throw std::invalid_argument("unknown kv_capacity policy");
     }
+    if (options.speculative.draft_policy != DraftPolicy::Fixed) {
+        throw std::invalid_argument("this target supports only the fixed draft policy");
+    }
     switch (options.speculative.backend) {
     case SpeculativeBackend::None:
         if (options.speculative.draft_tokens != 0 ||

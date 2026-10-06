@@ -480,6 +480,8 @@ std::string format_server_start_json(
              {"speculative_backend",
               product::speculative_backend_name(engine_options.speculative.backend)},
              {"speculative_draft_window", engine_options.speculative.draft_tokens},
+             {"speculative_draft_policy",
+              product::draft_policy_name(engine_options.speculative.draft_policy)},
              {"proposal_head", proposal_head_name(engine_options.speculative.proposal_head)},
              {"context_cost", Json{{"transfer_source", ninfer::context_cost_preset_source_name(
                                                            context_cost.transfer_source)},

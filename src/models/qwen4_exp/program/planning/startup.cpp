@@ -465,6 +465,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->max_concurrency     = inputs.max_concurrency;
     impl->prefill_chunk       = inputs.prefill_chunk;
     impl->draft_window        = inputs.draft_window;
+    impl->draft_policy        = inputs.draft_policy;
     impl->speculative_backend = inputs.speculative_backend;
     impl->features            = inputs.features;
     impl->use_cuda_graph      = inputs.use_cuda_graph;
@@ -484,10 +485,14 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
         for (const GraphExecutionProfile& profile : profiles) {
             topologies = std::max(topologies, profile.topology_class + 1U);
         }
+        // MTP adds one proposal family and one verification family per round width.
+        const std::uint32_t verify_widths =
+            impl->draft_policy == DraftPolicy::Adaptive ? impl->draft_window : 1U;
+        const std::uint32_t families =
+            impl->speculative_backend == SpeculativeBackend::Mtp ? 1U + verify_widths : 1U;
         impl->graph_allowance_bytes =
             checked_mul(checked_mul(kGraphTopologyAllowance, topologies, "graph allowance"),
-                        impl->max_concurrency * (impl->speculative_backend == SpeculativeBackend::Mtp ? 2U : 1U),
-                        "decode exact-b graph allowance");
+                        impl->max_concurrency * families, "decode exact-b graph allowance");
     }
     impl->device_reservation_bytes = checked_add(
         checked_add(impl->persistent.bytes, impl->workspace.capacity, "sequence memory plan"),
@@ -507,9 +512,12 @@ void require_supported_engine_options(const EngineOptions& options) {
         (options.speculative.backend == SpeculativeBackend::None && options.speculative.draft_tokens != 0) ||
         (options.speculative.backend == SpeculativeBackend::Mtp &&
          (options.speculative.draft_tokens < 1 || options.speculative.draft_tokens > kMtpMaximumDrafts)) ||
-        options.speculative.proposal_head != ProposalHead::Full) {
+        options.speculative.proposal_head != ProposalHead::Full ||
+        (options.speculative.draft_policy == DraftPolicy::Adaptive &&
+         options.speculative.backend != SpeculativeBackend::Mtp)) {
         throw std::invalid_argument(
-            "Qwen3.8-Flash-Next supports MTP with 1..5 greedy drafts and the full proposal head");
+            "Qwen3.8-Flash-Next supports MTP with 1..5 greedy drafts, fixed or adaptive, and the "
+            "full proposal head");
     }
     if (options.kv_cache != KvCacheStorage::BFloat16 &&
         options.kv_cache != KvCacheStorage::Fp8E4M3Row256) {
@@ -532,6 +540,7 @@ std::unique_ptr<SequencePlannerImpl> make_sequence_planner_impl(const execution:
         .max_concurrency     = options.max_concurrency,
         .prefill_chunk       = std::min(options.prefill_chunk, options.max_context),
         .draft_window        = options.speculative.draft_tokens,
+        .draft_policy        = options.speculative.draft_policy,
         .speculative_backend = options.speculative.backend,
         .kv_storage          = options.kv_cache,
         .features            = models::load_options(options),

@@ -69,3 +69,52 @@ the result is reported as measured and `fixed` stays the default.
 **Costs reported with the result:**
 - extra graph memory (device memory after startup, adaptive against fixed K=5);
 - extra startup time for capturing per-width verification graphs.
+
+## Result (2026-10-06)
+
+The run used one Colab G4 with base `d43eec52` plus the adaptive implementation.
+
+**Correctness.**
+- The host policy test and the GDN replay-fold test pass.
+- The real-artifact Engine suite passes, 17 of 17 cases. The adaptive K≤5 arm is included in
+  `mtp graphs and ragged batches` and `mtp batch target parity`, with eager and graph output
+  identical.
+- The workload identity check (item 3) is **incomplete**. The adaptive server died on the check
+  request with a pre-existing defect, described below. Adaptive outputs match K=0 as often as
+  fixed K does (code 1/8, chat 8/8, docs 1/5), but the tie gap at the adaptive divergence was not
+  measured.
+
+**Performance**, median decode tok/s at concurrency 1:
+
+| Workload | Adaptive K≤5 | Best fixed K | Adaptive / best | Fixed K=3 | vs K=3 |
+|---|---:|---:|---:|---:|---:|
+| code editing | 277.4 | 278.8 (K=5) | 99.5% | 258.1 | +7.5% |
+| short chat | 192.6 | 196.3 (K=2) | 98.1% | 192.4 | +0.1% |
+| long-document summaries | 155.7 | 160.1 (K=2) | 97.3% | 149.6 | +4.1% |
+
+**Criteria.**
+- **A fails:** summaries reach 97.3%, below the 98% bound.
+- **B passes:** +7.5% and +4.1% over K=3 on two workloads; +0.1% on the third.
+- **C was not measured.** Every concurrency-4 arm, fixed and adaptive, ended in a fatal engine
+  failure (below).
+
+`fixed` therefore stays the default. The adaptive policy remains an opt-in.
+
+**Cost.**
+- Device memory after startup is 79,151 MiB, against 79,131 for fixed K=5 (+20 MiB) at
+  concurrency 1, and +82 MiB at concurrency 4.
+- Startup to ready takes 11.9 s against 11.6 s at concurrency 1, and 12.7 s against 11.9 s at
+  concurrency 4.
+
+**Pre-existing defects found.** All of them reproduce on the pre-change build `7053c7af`:
+
+| Scenario | Fatal engine failure |
+|---|---|
+| Concurrency 4, two 20K summaries and two code requests at once, no MTP | `selected pressure target could not be sealed` |
+| The same scenario with MTP (fixed K=2/3/5 and adaptive) | `candidate token ledger does not match prompt length` |
+| Concurrency 1, MTP K=5: the workloads, then a request reusing the first code turn's prefix after a 128K-token request | `KV committed frontier is invalid` |
+
+The K=0 server ran that last sequence without failing.
+
+The existing Engine cases did not catch these: their concurrency cases use prompts under 512
+tokens.

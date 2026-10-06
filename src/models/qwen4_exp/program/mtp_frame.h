@@ -47,8 +47,10 @@ struct MtpFrameLayout {
 
 MtpFrameLayout plan_mtp_frame(const TextConfig& config, std::int32_t width, std::int32_t batch);
 
-// One startup-fixed verification width. Per-row valid extents bound mutations; records and
-// token-mixer snapshots remain live until the whole pending round is committed or cancelled.
+// Planned for the startup maximum verification width. A round may use any narrower width: its
+// width-shaped tensors and replay records are repacked densely from the same bases. Per-row valid
+// extents bound mutations; records and token-mixer snapshots remain live until the whole pending
+// round is committed or cancelled.
 struct MtpFrame {
     DeviceSpan ingress;
     Tensor hidden, logits, argmax, drafts, licensed, counts, accepted;
@@ -58,7 +60,8 @@ struct MtpFrame {
     GdnReplayRecords records;
     std::int32_t width = 0, batch_capacity = 0;
     MtpFrame(DeviceSpan backing, const MtpFrameLayout& layout);
-    [[nodiscard]] MtpFrame batch(std::int32_t count) const;
+    [[nodiscard]] MtpFrame batch(std::int32_t count) const { return round(count, width); }
+    [[nodiscard]] MtpFrame round(std::int32_t count, std::int32_t round_width) const;
     [[nodiscard]] Tensor i32(std::size_t offset, std::int32_t count) const;
     [[nodiscard]] const ops::SamplingConfig* sampling() const;
 };

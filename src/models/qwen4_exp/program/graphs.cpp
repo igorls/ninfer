@@ -225,7 +225,7 @@ void ProgramImpl::prepare_graphs() {
 
 void ProgramImpl::prepare_mtp_graphs() {
     const auto& config = parameters.model.config().text;
-    const auto width = static_cast<std::int32_t>(draft_window + 1);
+    const auto maximum_width = static_cast<std::int32_t>(draft_window + 1);
     std::array<StateImageHandle, kMaximumConcurrency> states{};
     std::vector<KVAddressSpaceHandle> text_addresses, mtp_addresses;
     for (std::uint32_t row = 0; row < max_concurrency; ++row) {
@@ -245,9 +245,9 @@ void ProgramImpl::prepare_mtp_graphs() {
             cache.page_pool().zero_pages(std::span<const DeviceKVPageHandle>(&page, 1), device.stream);
         }
     }
-    const auto prepare = [&](std::uint32_t frontier, std::uint32_t batch_u) {
+    const auto prepare = [&](std::uint32_t frontier, std::uint32_t batch_u, std::int32_t width) {
         const auto batch = static_cast<std::int32_t>(batch_u);
-        auto frame = mtp_frame->batch(batch);
+        auto frame = mtp_frame->round(batch, width);
         *mtp_ingress = {};
         for (std::int32_t row = 0; row < batch; ++row) {
             const auto slot = state_store->physical_slot(states[row]);
@@ -275,14 +275,14 @@ void ProgramImpl::prepare_mtp_graphs() {
     };
     const auto profiles = ordinary_graph_profiles(capacity, config.indexer.compress_ratio,
                                                    config.indexer.budget / config.indexer.compress_ratio);
-    for (const bool proposal : {true, false}) {
-        auto& family = proposal ? mtp_proposal_graphs : mtp_verify_graphs;
-        const auto body = [&](std::int32_t batch, ops::QsaIndexerSelectEnvelope envelope) {
-            if (proposal) { mtp_proposal_body(batch, envelope); }
-            else { mtp_verify_body(batch, envelope); }
+    const auto capture = [&](DecodeGraphFamily& family, const char* label, std::int32_t width,
+                             const auto& body) {
+        const auto prepare_family = [&](std::uint32_t frontier, std::uint32_t batch) {
+            prepare(frontier, batch, width);
         };
-        prepare(0, 1);
-        body(1, {indexer_envelope_blocks(profiles.front().max, config.indexer.compress_ratio)});
+        prepare_family(0, 1);
+        body(1, ops::QsaIndexerSelectEnvelope{
+                    indexer_envelope_blocks(profiles.front().max, config.indexer.compress_ratio)});
         device.synchronize();
         family.profiles.reserve(profiles.size() * max_concurrency);
         for (std::uint32_t batch = 1; batch <= max_concurrency; ++batch) {
@@ -296,11 +296,26 @@ void ProgramImpl::prepare_mtp_graphs() {
                 work.reset();
                 profile.definition.capture(device.stream, [&] {
                     body(static_cast<std::int32_t>(batch),
-                        {indexer_envelope_blocks(planned.max, config.indexer.compress_ratio)});
+                        ops::QsaIndexerSelectEnvelope{
+                            indexer_envelope_blocks(planned.max, config.indexer.compress_ratio)});
                 });
             }
         }
-        instantiate_graph_family(family, proposal ? "MTP proposal" : "MTP target", device, prepare);
+        instantiate_graph_family(family, label, device, prepare_family);
+    };
+    // Proposal graphs are width-independent. Verification graphs are captured for every round
+    // width the draft policy can choose: only the startup width for fixed rounds.
+    capture(mtp_proposal_graphs, "MTP proposal", maximum_width,
+            [&](std::int32_t batch, ops::QsaIndexerSelectEnvelope envelope) {
+                mtp_proposal_body(batch, envelope);
+            });
+    mtp_verify_graphs.clear();
+    mtp_verify_graphs.resize(static_cast<std::size_t>(maximum_width - 1));
+    for (std::int32_t width = mtp_minimum_round_width(); width <= maximum_width; ++width) {
+        capture(mtp_verify_graphs[width - 2], "MTP target", width,
+                [&](std::int32_t batch, ops::QsaIndexerSelectEnvelope envelope) {
+                    mtp_verify_body(batch, width, envelope);
+                });
     }
     state_images->zero_all(device.stream);
     device.synchronize();

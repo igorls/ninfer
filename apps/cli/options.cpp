@@ -86,7 +86,7 @@ std::string usage_text(const char* argv0) {
            "       [--device N] [--desktop-reserve-gib N] [--desktop-reserve-mib N]\n"
            "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens "
            "N]\n"
-           "       [--lm-head-draft]\n"
+           "       [--draft-policy fixed|adaptive] [--lm-head-draft]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
            "       [--presence-penalty F] [--frequency-penalty F] [--repetition-penalty F]\n"
            "       [--seed N] [--greedy]\n"
@@ -154,6 +154,8 @@ Options parse_options(int argc, char** argv) {
             options.speculative.backend = product::parse_speculative_backend(value(arg));
         } else if (arg == "--draft-tokens") {
             options.speculative.draft_tokens = parse_u32(value(arg), "draft-tokens");
+        } else if (arg == "--draft-policy") {
+            options.speculative.draft_policy = product::parse_draft_policy(value(arg));
         } else if (arg == "--lm-head-draft") {
             options.speculative.proposal_head = ProposalHead::Optimized;
         } else if (arg == "--raw-output") {

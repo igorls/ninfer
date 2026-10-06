@@ -29,7 +29,21 @@ namespace ninfer::product {
     return "unknown";
 }
 
+[[nodiscard]] inline DraftPolicy parse_draft_policy(std::string_view value) {
+    if (value == "fixed") { return DraftPolicy::Fixed; }
+    if (value == "adaptive") { return DraftPolicy::Adaptive; }
+    throw std::invalid_argument("invalid draft policy: " + std::string(value));
+}
+
+[[nodiscard]] inline const char* draft_policy_name(DraftPolicy policy) noexcept {
+    return policy == DraftPolicy::Adaptive ? "adaptive" : "fixed";
+}
+
 inline void validate_speculative_cli_options(const SpeculativeOptions& options) {
+    if (options.draft_policy == DraftPolicy::Adaptive &&
+        options.backend != SpeculativeBackend::Mtp) {
+        throw std::invalid_argument("--draft-policy adaptive requires --spec mtp");
+    }
     switch (options.backend) {
     case SpeculativeBackend::None:
         if (options.draft_tokens != 0 || options.proposal_head != ProposalHead::Full) {
