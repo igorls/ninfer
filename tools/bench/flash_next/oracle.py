@@ -187,6 +187,14 @@ def _build(model_dir: str, ple_dir: str, device: str, attn: str):
 # ---------------------------------------------------------------- run
 
 
+def _prompt_ids(tokenizer, item: dict) -> list[int]:
+    extra = {"tools": _served_tools(item["extra"]["tools"])} if "tools" in item.get("extra", {}) else {}
+    prompt = tokenizer.apply_chat_template(item["messages"], add_generation_prompt=True, tokenize=True,
+                                           enable_thinking=item["thinking"], **extra)
+    prompt = prompt["input_ids"] if hasattr(prompt, "keys") else prompt  # BatchEncoding in transformers 5
+    return [int(t) for t in (prompt[0] if prompt and isinstance(prompt[0], list) else prompt)]
+
+
 def run(args: argparse.Namespace) -> None:
     import torch
     from transformers import AutoTokenizer
@@ -212,11 +220,7 @@ def run(args: argparse.Namespace) -> None:
         for item_id, item in items.items():
             if only and item_id not in only:
                 continue
-            extra = {"tools": _served_tools(item["extra"]["tools"])} if "tools" in item.get("extra", {}) else {}
-            prompt = tokenizer.apply_chat_template(item["messages"], add_generation_prompt=True, tokenize=True,
-                                                   enable_thinking=item["thinking"], **extra)
-            prompt = prompt["input_ids"] if hasattr(prompt, "keys") else prompt  # BatchEncoding in transformers 5
-            prompt = [int(t) for t in (prompt[0] if prompt and isinstance(prompt[0], list) else prompt)]
+            prompt = _prompt_ids(tokenizer, item)
             for label, records in sets:
                 gen = records.get((item_id, "generated"))
                 pro = records.get((item_id, "prompt"))
@@ -324,6 +328,127 @@ def gate(args: argparse.Namespace) -> None:
         Path(args.out).write_text(json.dumps(report, indent=1) + "\n", encoding="utf-8")
 
 
+# ---------------------------------------------------------------- long-context study
+
+QSA_BUDGET = 2048  # indexer_budget: below it QSA keeps every block and the oracle is reproducible
+
+
+def prompts(args: argparse.Namespace) -> None:
+    """Oracle readout of every prompt position of a request set. Draw k appends k copies of a fixed
+    suffix after the prompt: causally invisible to the readouts, it changes only the reduction
+    shapes, so the draws measure the reference's own variation at identical contexts."""
+    import torch
+    from transformers import AutoTokenizer
+    from tools.bench.flash_next import parity
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
+    suffix = tokenizer.encode(" The text describes", add_special_tokens=False)
+    model, head = _build(args.model_dir, args.ple_dir, args.device, args.attn)
+    out_path = Path(args.out)
+    done = set()
+    if out_path.exists():
+        done = {(r["id"], r["draw"]) for r in map(json.loads, out_path.read_text(encoding="utf-8").splitlines())}
+    with out_path.open("a", encoding="utf-8") as out:
+        for item in parity.SETS[args.set]():
+            prompt = _prompt_ids(tokenizer, item)
+            for draw in range(args.draws):
+                if (item["id"], draw) in done:
+                    continue
+                t0 = time.time()
+                ids = prompt + suffix * draw
+                chosen = []
+                with torch.no_grad():
+                    hidden = model(input_ids=torch.tensor([ids], device=args.device), use_cache=False).last_hidden_state[0]
+                    following = torch.tensor(prompt[1:], device=args.device)
+                    for start in range(0, len(prompt) - 1, 1024):
+                        stop = min(len(prompt) - 1, start + 1024)
+                        logp = torch.log_softmax(torch.nn.functional.linear(hidden[start:stop], head), dim=-1)
+                        chosen += logp[torch.arange(stop - start, device=args.device), following[start:stop]].tolist()
+                del hidden
+                out.write(json.dumps({"id": item["id"], "kind": "prompt-all", "draw": draw, "prompt": prompt,
+                                      "chosen": chosen}) + "\n")
+                out.flush()
+                if args.device.startswith("cuda"):
+                    torch.cuda.empty_cache()
+                print(f"{item['id']} draw {draw}: {len(ids)} tokens in {time.time() - t0:.1f} s", flush=True)
+
+
+def _long_scores(oracle: dict, records: dict, item_id: str) -> dict | None:
+    """Mean |engine - oracle| and mean signed difference over the record's positions past the
+    QSA budget, or None when the record is missing or misaligned with the oracle's prompt."""
+    from tools.bench.flash_next import parity
+
+    o, r = oracle.get((item_id, 0)), records.get((item_id, "prompt"))
+    if o is None or r is None:
+        return None
+    prompt = o["prompt"]
+    if r["positions"] != parity.prompt_positions(len(prompt)) or r["tokens"] != [prompt[p + 1] for p in r["positions"]]:
+        return None
+    pairs = [(e, o["chosen"][p]) for p, e in zip(r["positions"], r["raw"]) if p >= QSA_BUDGET]
+    return {"n": len(pairs), "abs": statistics.fmean(abs(e - x) for e, x in pairs),
+            "signed": statistics.fmean(e - x for e, x in pairs),
+            "values": {p: e for p, e in zip(r["positions"], r["raw"]) if p >= QSA_BUDGET}}
+
+
+def long_study(args: argparse.Namespace) -> None:
+    """The pre-registered long-context reading (docs/research/flash-next-v3-port-2026-09-29.md,
+    "Long-context follow-up"): per document, D = mean|v3 - oracle| - mean|v2 - oracle| past the QSA
+    budget; a 95% document bootstrap of mean D against a margin of 10% of v2's mean."""
+    import random
+
+    oracle = {}
+    for line in Path(args.oracle).read_text(encoding="utf-8").splitlines():
+        r = json.loads(line)
+        oracle[(r["id"], r["draw"])] = r
+    labelled = [_load_records(spec) for spec in [args.reference, args.candidate] + (args.route or [])]
+    (ref_label, ref), (cand_label, cand) = labelled[0], labelled[1]
+    rows, excluded = [], []
+    for item_id in sorted({i for i, _ in oracle}):
+        scores = {label: _long_scores(oracle, records, item_id) for label, records in labelled}
+        if scores[ref_label] is None or scores[cand_label] is None:
+            excluded.append(item_id)
+            continue
+        row = {"id": item_id, "prompt_tokens": len(oracle[(item_id, 0)]["prompt"]), "positions": scores[ref_label]["n"]}
+        for label, s in scores.items():
+            if s is not None:
+                row[label] = s["abs"]
+                row[label + "_signed"] = s["signed"]
+        row["D"] = row[cand_label] - row[ref_label]
+        positions = sorted(scores[ref_label]["values"])
+        if (item_id, 1) in oracle:
+            o0, o1 = oracle[(item_id, 0)]["chosen"], oracle[(item_id, 1)]["chosen"]
+            row["oracle_draws"] = statistics.fmean(abs(o0[p] - o1[p]) for p in positions)
+        for label, s in scores.items():
+            if s is not None and label not in (ref_label, cand_label):
+                base = scores[ref_label] if label.startswith(ref_label) else scores[cand_label]
+                row[label + "_route"] = statistics.fmean(abs(s["values"][p] - base["values"][p]) for p in positions)
+        rows.append(row)
+    d = [row["D"] for row in rows]
+    rng = random.Random(0)
+    means = sorted(statistics.fmean(rng.choices(d, k=len(d))) for _ in range(10000))
+    low, high = means[249], means[9749]
+    margin = 0.10 * statistics.fmean(row[ref_label] for row in rows)
+    mean_d = statistics.fmean(d)
+    if low > 0 and mean_d > margin:
+        reading = "v3 regression on long context"
+    elif high <= margin:
+        reading = "no v3 regression on long context"
+    else:
+        reading = "inconclusive"
+    for row in rows:
+        extra = "  ".join(f"{k} {v:.3f}" for k, v in row.items() if k.endswith("_route") or k == "oracle_draws")
+        print(f"{row['id']:15s} P {row['prompt_tokens']:6d} n {row['positions']:3d}  {ref_label} {row[ref_label]:.3f} "
+              f"({row[ref_label + '_signed']:+.2f})  {cand_label} {row[cand_label]:.3f} ({row[cand_label + '_signed']:+.2f})  "
+              f"D {row['D']:+.3f}  {extra}")
+    summary = {"documents": len(rows), "excluded": excluded, "mean_D": mean_d, "ci95": [low, high], "margin": margin,
+               "candidate_worse": sum(x > 0 for x in d), "reading": reading,
+               ref_label + "_mean": statistics.fmean(row[ref_label] for row in rows),
+               cand_label + "_mean": statistics.fmean(row[cand_label] for row in rows)}
+    print(json.dumps(summary, indent=1))
+    if args.out:
+        Path(args.out).write_text(json.dumps({"summary": summary, "documents": rows}, indent=1) + "\n", encoding="utf-8")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -340,8 +465,22 @@ def main() -> None:
     g.add_argument("--reference", required=True, help="label=path (v2)")
     g.add_argument("--candidate", required=True, help="label=path (v3)")
     g.add_argument("--out")
+    p = sub.add_parser("prompts")
+    p.add_argument("--model-dir", required=True)
+    p.add_argument("--ple-dir", required=True)
+    p.add_argument("--set", default="long")
+    p.add_argument("--draws", type=int, default=2)
+    p.add_argument("--out", required=True)
+    p.add_argument("--device", default="cuda")
+    p.add_argument("--attn", default="sdpa", choices=("sdpa", "eager"))
+    s = sub.add_parser("long")
+    s.add_argument("--oracle", required=True, help="output of `prompts`")
+    s.add_argument("--reference", required=True, help="label=path (v2, primary route)")
+    s.add_argument("--candidate", required=True, help="label=path (v3, primary route)")
+    s.add_argument("--route", action="append", help="label=path of a second route; the label starts with its engine's label")
+    s.add_argument("--out")
     args = parser.parse_args()
-    run(args) if args.command == "run" else gate(args)
+    {"run": run, "gate": gate, "prompts": prompts, "long": long_study}[args.command](args)
 
 
 if __name__ == "__main__":

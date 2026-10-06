@@ -238,6 +238,40 @@ the same in each case:
 Separating the two needs more long documents per engine. The pre-registered gate itself stays
 failed.
 
+### Long-context follow-up (decided 2026-10-05, before any result)
+
+This follow-up asks one question: is v3's `book-18k` offset a v3 long-context defect, or the
+route sensitivity both engines show? It adds evidence and changes nothing about the gate above,
+which stays failed. Accepting v3 remains the maintainer's decision.
+
+- **Documents.** `parity.py --set long`, 27 documents:
+  - 24 new documents from corpus files the gate set does not use. Each of pg19, wikitext,
+    ninfer and zhwiki contributes files 01-03, in two consecutive windows of 80,000, 80,000,
+    64,000 and 28,000 characters respectively.
+  - The gate set's `code-4k`, `wiki-18k` and `book-18k`, as run-to-run controls.
+- **Engines.** v2 `87812bc8` on its published artifact and the v3 candidate on the artifact
+  derived from it. Server settings are the gate's: BF16 KV, context 131072, KV capacity 262144,
+  concurrency 8. Each engine runs twice, at prefill chunk 8192 (the primary route) and 2048 (a
+  second route). Prompt readouts use the gate's 256 evenly spaced positions.
+- **Oracle.** `oracle.py prompts`, two draws per document. Draw 1 appends a fixed suffix after
+  the prompt, which leaves every readout's context unchanged.
+- **Statistic.** Per document, the mean |engine − oracle draw 0| over readouts at positions
+  ≥ 2,048 (the QSA budget). D = v3 − v2 on the primary route.
+- **Reading.** The margin is 10% of v2's mean over documents.
+  - *Regression* if the 95% document-bootstrap interval of mean D lies above 0 and mean D
+    exceeds the margin.
+  - *No regression* if the interval's upper end is at or below the margin.
+  - *Inconclusive* otherwise.
+- **Reported with the reading:**
+  - the per-document table and the number of documents where v3 is worse;
+  - signed differences;
+  - each engine's chunk-2048 route variation;
+  - the oracle's draw-to-draw variation;
+  - the controls against the gate records.
+- **What follows.** A regression leads to a layer-by-layer trace of v3 against the oracle on the
+  worst document. Either other reading is reported as it stands. No gate criterion or tolerance
+  changes in any case.
+
 ## 1. Measured G4 facts (session of 2026-09-29, 19:42-20:08 UTC)
 
 | Item | Measured |

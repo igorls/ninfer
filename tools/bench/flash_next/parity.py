@@ -5,7 +5,7 @@ eval/corpora/perplexity-1m streams). Every request is greedy with thinking as li
 
     collect  run the set against a running server and write one JSON record per request:
              python -m tools.bench.flash_next.parity collect --port 18090 --out v2.jsonl
-               [--concurrency 2] [--prompt-positions]
+               [--concurrency 2] [--prompt-positions] [--set gate|long]
     compare  compare a candidate against a reference, against a noise floor measured on the
              reference engine itself (a second run with a different but equally valid route):
              python -m tools.bench.flash_next.parity compare --reference v2.jsonl
@@ -96,6 +96,36 @@ def _document(domain: str, characters: int) -> str:
     return (CORPUS / domain / "00.txt").read_text(encoding="utf-8")[:characters]
 
 
+# The long-context set: 24 documents from corpus files the gate set does not use (two consecutive
+# windows of files 01-03 in four domains), sized to roughly 19-21K prompt tokens each, plus the
+# gate set's three long documents again as a run-to-run control. Only the prompt readouts matter;
+# the generated tail is kept short.
+LONG_WINDOWS = {"pg19": 80000, "wikitext": 80000, "ninfer": 64000, "zhwiki": 28000}
+
+
+def long_set() -> list[dict]:
+    gate = {item["id"]: item for item in request_set()}
+    out = [dict(gate[tag], max_tokens=16) for tag in ("code-4k", "wiki-18k", "book-18k")]
+    for domain, characters in LONG_WINDOWS.items():
+        for index in (1, 2, 3):
+            text = (CORPUS / domain / f"{index:02d}.txt").read_text(encoding="utf-8")
+            for window in (0, 1):
+                out.append({"id": f"{domain}-{index:02d}-{window}", "messages": [{"role": "user", "content":
+                            "Read the text and summarize it in three sentences.\n\n"
+                            + text[window * characters:(window + 1) * characters]}],
+                            "max_tokens": 16, "thinking": False})
+    return out
+
+
+SETS = {"gate": lambda: request_set(), "long": lambda: long_set()}
+
+
+def prompt_positions(prompt_tokens: int) -> list[int]:
+    """The prompt positions read out for a prompt of this length: up to 256, evenly spaced."""
+    count = min(256, prompt_tokens - 1)
+    return sorted({round(i * (prompt_tokens - 2) / max(1, count - 1)) for i in range(count)})
+
+
 def request_set() -> list[dict]:
     """Deterministic list of {id, messages, max_tokens, thinking, extra}."""
     out = []
@@ -153,8 +183,7 @@ def _generated(port: int, model: str, item: dict) -> dict:
 
 
 def _prompt_positions(port: int, model: str, item: dict, prompt_tokens: int) -> dict:
-    count = min(256, prompt_tokens - 1)
-    positions = sorted({round(i * (prompt_tokens - 2) / max(1, count - 1)) for i in range(count)})
+    positions = prompt_positions(prompt_tokens)
     body = {"model": model, "messages": item["messages"], "max_tokens": 1, "temperature": 0,
             "logprobs": True, "top_logprobs": 0, "logprob_prompt_positions": positions,
             "chat_template_kwargs": {"enable_thinking": item["thinking"]},
@@ -167,7 +196,7 @@ def _prompt_positions(port: int, model: str, item: dict, prompt_tokens: int) -> 
 
 def collect(args: argparse.Namespace) -> None:
     model = _model(args.port)
-    items = request_set()
+    items = SETS[args.set]()
     out = Path(args.out)
     done = set()
     if out.exists():
@@ -282,6 +311,7 @@ def main() -> None:
     c.add_argument("--out", required=True)
     c.add_argument("--concurrency", type=int, default=1)
     c.add_argument("--prompt-positions", action="store_true")
+    c.add_argument("--set", default="gate", choices=sorted(SETS))
     d = sub.add_parser("compare")
     d.add_argument("--reference", required=True)
     d.add_argument("--candidate", required=True)
