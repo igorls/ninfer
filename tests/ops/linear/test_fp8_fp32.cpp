@@ -11,6 +11,7 @@
 #include <cstring>
 #include <exception>
 #include <iostream>
+#include <utility>
 #include <vector>
 
 // Row-scaled FP8 with FP32 row multipliers (FP8_E4M3FN_ROW_FP32): the registered Flash-Next
@@ -109,6 +110,49 @@ int prepared_native_weight() {
     return failures;
 }
 
+// Chunk invariance: above the small-T routes (T > 288), an A8 column's output must not depend on
+// how many columns share the launch, whether through the tile choice or a split of the final
+// wave, so one prompt yields the same projections under every prefill chunking. The input is a
+// sequential stream, so each wider case extends the previous one; comparing their whole shared
+// prefix also covers the previous launch's final-wave tiles.
+int a8_column_invariance() {
+    int failures = 0;
+    for (const auto& [n, k] : {std::pair{13312, 2560}, std::pair{16384, 2560}, std::pair{2560, 6144}}) {
+        const auto packed = make_fp8_fp32_weight(n, k, 941U);
+        DeviceBuffer payload(packed.payload.size());
+        payload.copy_from_host(packed.payload.data(), payload.bytes);
+        const Weight weight = packed.device_weight(payload.p);
+        std::vector<std::uint16_t> previous;
+        for (const std::int32_t tokens : {289, 385, 513, 769, 2048, 4096, 8192}) {
+            // Uniform values make the FP32 accumulation round, so a different K order shows.
+            std::vector<float> values(static_cast<std::size_t>(k) * tokens);
+            fill_uniform(values, 0x5eedU, -1.0F, 1.0F);
+            std::vector<std::uint16_t> bits(values.size());
+            for (std::size_t i = 0; i < bits.size(); ++i) bits[i] = f32_to_bf16(values[i]);
+            DeviceBuffer x_buffer(bits.size() * 2);
+            x_buffer.copy_from_host(bits.data(), x_buffer.bytes);
+            DeviceBuffer out(static_cast<std::size_t>(n) * tokens * 2);
+            Tensor x(x_buffer.p, DType::BF16, {k, tokens});
+            Tensor y(out.p, DType::BF16, {n, tokens});
+            DeviceArena workspace(std::max<std::size_t>(
+                ops::linear_workspace_capacity_bytes(QType::FP8_E4M3FN_ROW_FP32, n, k,
+                                                     ops::LinearPolicy::AllowA8, tokens, tokens),
+                256));
+            ops::linear(x, weight, y, ops::LinearPolicy::AllowA8, workspace, nullptr);
+            cuda_synchronize();
+            std::vector<std::uint16_t> current(static_cast<std::size_t>(n) * tokens);
+            out.copy_to_host(current.data(), current.size() * 2);
+            if (!previous.empty() && !std::equal(previous.begin(), previous.end(), current.begin())) {
+                std::cerr << "FP8 FP32 A8 [" << n << ',' << k << "]: shared columns change at T="
+                          << tokens << '\n';
+                ++failures;
+            }
+            previous = std::move(current);
+        }
+    }
+    return failures;
+}
+
 int run_fp8_fp32() {
     int failures = 0;
     struct Problem {
@@ -180,6 +224,7 @@ int run_fp8_fp32() {
     } catch (const std::invalid_argument&) {}
 
     failures += prepared_native_weight();
+    failures += a8_column_invariance();
     return failures;
 }
 

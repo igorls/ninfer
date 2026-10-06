@@ -48,12 +48,12 @@ constexpr std::array<RouteSpec, 5> k35Routes{{
     {{4097, kAnyCols}, Bf16GdnGatingScheduleId::MmaUnsplit},
 }};
 
-// Qwen3.8-Flash-Next [48,2560]: forty K tiles; split-K keeps the small-T grid busy.
-constexpr std::array<RouteSpec, 4> kFlashNextRoutes{{
-    {{1, 1024}, Bf16GdnGatingScheduleId::MmaCooperativeSplit8},
-    {{1025, 2048}, Bf16GdnGatingScheduleId::MmaCooperativeSplit4},
-    {{2049, 4096}, Bf16GdnGatingScheduleId::MmaCooperativeSplit2},
-    {{4097, kAnyCols}, Bf16GdnGatingScheduleId::MmaUnsplit},
+// Qwen3.8-Flash-Next [48,2560]: forty K tiles; split-K keeps the small-T grid busy. One split
+// for every column count keeps each token's FP32 reduction order independent of how many tokens
+// share the launch, so a prompt's g/beta do not depend on its prefill chunking. Large launches
+// are already sliced to the cooperative residency, which does not change that order.
+constexpr std::array<RouteSpec, 1> kFlashNextRoutes{{
+    {{1, kAnyCols}, Bf16GdnGatingScheduleId::MmaCooperativeSplit8},
 }};
 
 template <std::size_t N>

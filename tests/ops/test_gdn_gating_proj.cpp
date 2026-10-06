@@ -234,7 +234,8 @@ int verify_inputs_unchanged(const std::string& label, const DeviceBuffer& device
 }
 
 int run_projection_case(const Geometry& geometry, std::int32_t tokens, std::uint32_t seed,
-                        DeviceExecutionView execution) {
+                        DeviceExecutionView execution, std::vector<double>* g_out = nullptr,
+                        std::vector<double>* beta_out = nullptr) {
     std::vector<float> x(static_cast<std::size_t>(geometry.hidden) * tokens);
     std::vector<float> a_weight(static_cast<std::size_t>(geometry.heads) * geometry.hidden);
     std::vector<float> b_weight(static_cast<std::size_t>(geometry.heads) * geometry.hidden);
@@ -313,6 +314,8 @@ int run_projection_case(const Geometry& geometry, std::int32_t tokens, std::uint
 
     const std::vector<double> full_g    = read_fp32(device_g.data(), output_elements);
     const std::vector<double> full_beta = read_fp32(device_beta.data(), output_elements);
+    if (g_out != nullptr) { *g_out = full_g; }
+    if (beta_out != nullptr) { *beta_out = full_beta; }
     const std::string label =
         std::string("gdn_gating_proj ") + geometry.label + " T=" + std::to_string(tokens);
     int failures = 0;
@@ -588,6 +591,27 @@ int main() {
          {1, 2, 8, 9, 63, 64, 65, 512, 1024, 1025, 2048, 2049, 4096, 4097, 8192}) {
         failures += run_projection_case(kFlashNextParent, tokens,
                                         0x2800u + static_cast<std::uint32_t>(tokens), execution);
+    }
+    // Chunk invariance: a column's g/beta must not depend on how many columns share the launch,
+    // so one prompt yields the same controls under every prefill chunking. The inputs are a
+    // sequential stream, so each wider case extends the same leading columns.
+    {
+        constexpr std::int32_t kReference = 64;
+        std::vector<double> reference_g, reference_beta;
+        failures += run_projection_case(kFlashNextParent, kReference, 0x2900u, execution,
+                                        &reference_g, &reference_beta);
+        for (const std::int32_t tokens : {1, 9, 1025, 2049, 4097, 8192}) {
+            std::vector<double> g, beta;
+            failures += run_projection_case(kFlashNextParent, tokens, 0x2900u, execution, &g, &beta);
+            const auto shared = static_cast<std::ptrdiff_t>(std::min(tokens, kReference)) *
+                                kFlashNextParent.heads;
+            if (!std::equal(g.begin(), g.begin() + shared, reference_g.begin()) ||
+                !std::equal(beta.begin(), beta.begin() + shared, reference_beta.begin())) {
+                std::cerr << "gdn_gating_proj Flash-Next: leading columns change at T=" << tokens
+                          << '\n';
+                ++failures;
+            }
+        }
     }
     // Every registered 35B projection route and its contiguous-parent storage contract.
     for (const std::int32_t tokens : {1, 127, 128, 1024, 1025, 2049, 4097}) {

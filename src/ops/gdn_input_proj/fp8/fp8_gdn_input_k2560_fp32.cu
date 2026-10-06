@@ -22,8 +22,10 @@ using Sliced16 =
     Fp8A16SlicedKMmaSchedule<4, 16, 7, Cache::ca, Cache::cg, Fp8ActivationStage::PaddedZero, 1>;
 using Tma64x128  = Fp8A8TmaMmaSchedule<64, 128, 128, 2, 4, 2, 1>;
 using Tma192x128 = Fp8A8TmaMmaSchedule<192, 128, 128, 3, 4, 2, 1>;
-using MidBulk = Fp8A8TmaSplitKSchedule<Fp8A8TmaMmaSchedule<128, 128, 128, 2, 4, 2, 1>, 170, 4, 8>;
-using Bulk    = Fp8A8TmaSplitKSchedule<Fp8A8TmaMmaSchedule<128, 256, 128, 2, 4, 2, 1>, 170, 4, 8>;
+// No tail split-K: which tiles form the final wave depends on the token count, so splitting it
+// would make a token's K reduction order depend on how the prompt is chunked for prefill.
+using MidBulk = Fp8A8TmaMmaSchedule<128, 128, 128, 2, 4, 2, 1>;
+using Bulk    = Fp8A8TmaMmaSchedule<128, 256, 128, 2, 4, 2, 1>;
 
 Fp8GdnInputOutput gdn_output(Tensor& qkv, Tensor& z) {
     return {static_cast<__nv_bfloat16*>(qkv.data), static_cast<__nv_bfloat16*>(z.data)};
@@ -79,14 +81,12 @@ void launch_a8(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
     if (x.ne[1] <= 64) return launch.template operator()<Fp8A8T64R128K256>();
     if (x.ne[1] <= 128) return launch.template operator()<Tma64x128>();
     if (x.ne[1] <= 192) return launch.template operator()<Tma192x128>();
-    // Smaller output tiles leave only two full-K tiles to split near the 512-token anchor.
+    // The narrower row tile stays at the 512-token anchor, where it fills more of the GPU.
     if (x.ne[1] > 384 && x.ne[1] <= 512) return launch.template operator()<MidBulk>();
     launch.template operator()<Bulk>();
 }
 
-std::size_t partial_capacity_bytes(std::int32_t max_tokens) {
-    return max_tokens > 256 ? Bulk::kPartialBytes : 0;
-}
+std::size_t partial_capacity_bytes(std::int32_t) { return 0; }
 
 void snapshot_fused(const Tensor& x, const Weight& weight, const Tensor& conv_weight,
                     Tensor& conv_states, const Tensor& valid_columns, const Tensor& initial_slot,

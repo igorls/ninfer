@@ -22,7 +22,8 @@
 // Qwen4Exp (Qwen3.8-Flash-Next) execution through the public Engine on the real artifact:
 // option admission, CUDA Graph replay against eager execution, batched decode against
 // one-request decode, prefix reuse including a Host round trip of the complete continuation
-// state, catalog turnover, token logprobs, structured output and causal scoring.
+// state, catalog turnover, token logprobs, structured output, causal scoring and prefill-chunk
+// invariance.
 namespace {
 
 const char* g_artifact = nullptr;
@@ -457,6 +458,56 @@ bool causal_prefix_independence() {
     });
 }
 
+// The prefill chunk is a scheduling choice: the same tokens must score bit-identically whether
+// they are prefilled in one chunk or several, including past QSA's sparse boundary. Every chunk
+// here, the final one included, stays above the small-chunk routes (the A16 MoE below 256
+// tokens and the small-T projection tiles through 288), which a short final chunk may still take.
+bool prefill_chunk_invariance() {
+    static const std::vector<std::string> sentences{
+        "The telescope records distant galaxies across the southern sky.",
+        "A library stores books, letters and historical maps of the harbor.",
+        "Engineers measured the bridge after the winter storms had passed.",
+        "The recipe calls for flour, two eggs and a pinch of salt.",
+        "Migrating birds follow the coastline before crossing the strait."};
+    std::vector<ninfer::TokenId> tokens;
+    std::vector<float> reference;
+    bool passed = true;
+    for (const std::uint32_t chunk : {4096U, 1024U, 1536U}) {
+        auto options          = base_options();
+        options.purpose       = ninfer::EnginePurpose::CausalScoring;
+        options.prefill_chunk = chunk;
+        passed = with_engine(options, [&](ninfer::Engine& engine) {
+            if (tokens.empty()) {
+                std::string text;
+                for (int i = 0; tokens.size() < 3600; ++i) {
+                    text += "Entry " + std::to_string((i * 7919) % 10007) + ": " +
+                            sentences[static_cast<std::size_t>(i) % sentences.size()] + ' ';
+                    if (i % 16 == 15) { tokens = engine.tokenize_text(text); }
+                }
+                tokens.resize(3600);
+            }
+            const auto scores = engine.score_tokens(tokens, 1);
+            if (scores.size() != tokens.size() - 1) { return fail("chunked score count is invalid"); }
+            if (reference.empty()) {
+                reference.assign(scores.begin(), scores.end());
+                return true;
+            }
+            std::size_t differing = 0;
+            double worst          = 0.0;
+            for (std::size_t i = 0; i < scores.size(); ++i) {
+                if (scores[i] != reference[i]) {
+                    ++differing;
+                    worst = std::max(worst, std::abs(static_cast<double>(scores[i]) - reference[i]));
+                }
+            }
+            std::cout << "prefill chunk " << chunk << " vs 4096: " << differing << " of "
+                      << scores.size() << " scores differ, max |dlogprob| = " << worst << '\n';
+            return differing == 0 ? true : fail("prefill chunking changes the scores");
+        }) && passed;
+    }
+    return passed;
+}
+
 bool causal_hidden_readout() {
     ninfer::EngineOptions options = base_options();
     options.purpose               = ninfer::EnginePurpose::CausalScoring;
@@ -847,6 +898,7 @@ int main() {
              [] { return logprobs_and_structured_output(true); }},
             {"causal score", causal_score_matches_prompt_readout},
             {"causal prefix independence", causal_prefix_independence},
+            {"prefill chunk invariance", prefill_chunk_invariance},
             {"causal hidden readout", causal_hidden_readout},
             {"vision generation and reuse", vision_generation_and_reuse},
             {"mtp generation and reuse", mtp_generation_and_reuse},

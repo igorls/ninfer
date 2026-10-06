@@ -213,10 +213,11 @@ establish confidence intervals or task quality. Initial MTP runs failed before l
 the benchmark forced an optimized draft head. Both runners now accept `--proposal-head full`,
 verify the actual head and prevent incompatible serial resume; these results use the full head.
 
-The current source still has an unresolved end-to-end v2 numerical qualification gap: its
-27-request comparison fails the registered greedy-gap and prompt-logprob criteria. See the
+The saved-v2 27-request comparison still fails its registered greedy-gap and prompt-logprob
+criteria; see the
 [active comparison record](research/flash-next-v3-port-2026-09-29.md#saved-v2-comparison-acceptance-gap).
-Neither current nor historical timings establish accepted v2 parity.
+Numerical acceptance moved to an independent transformers oracle and was granted on
+October 6, 2026. Neither current nor historical timings establish v2 parity.
 
 The initial per-row correction cost 3.9%, 6.9% and 11.6%, respectively. A fused Tensor Core
 alternative passed the local Op oracle but still failed the unchanged Engine criterion at a
@@ -232,3 +233,39 @@ python3.11 tools/bench/run_serve_concurrency.py \
   --prefill-chunk 1024 --kv-dtype bf16 --output results/flash-next-c8
 # Repeat with --mode mtp3/mtp5 --proposal-head full and distinct output directories.
 ```
+
+### Prefill chunk invariance (2026-10-06)
+
+Removing M-dependent split-K (GDN control projection) and final-wave split-K (Flash-Next FP8
+projections) makes prefill bit-identical across chunk sizes; see the
+[active plan](research/flash-next-v3-port-2026-09-29.md#prefill-chunk-invariance-restored-2026-10-06).
+The `[2560,6144]` FP8 projection then underfilled the GPU at mid-size launches. Its table now uses
+64x128 tiles through T=640 and 128x128 tiles through T=1536. The tile shape does not change a
+column's K order.
+
+`ninfer_bench` measured prefill only (`-pg P,1`, one warmup, five measured repetitions, BF16 KV,
+max context 16,384) on one G4 allocation. Two interleaved rounds ran per chunk size, in the order
+base, fix, retuned, alternative. The table gives each arm's change against the base run of the
+same round, for 512 / 1,024 / 2,048 / 8,192-token prompts:
+
+| Chunk | Round | Base prefill tok/s | Invariance fix only | Fix + retuned table (selected) | Fix + retuned + `[13312,2560]` 64x256 (rejected) |
+|---:|---:|---|---|---|---|
+| 1024 | 1 | 7,261 / 9,215 / 8,987 / 8,500 | -0.34 / -0.58 / +0.46 / +1.17% | +1.62 / +3.27 / +3.23 / +3.01% | +2.79 / +3.09 / +3.18 / +3.05% |
+| 1024 | 2 | 7,410 / 9,458 / 9,219 / 8,688 | -0.27 / -1.05 / -1.10 / -0.86% | +0.54 / +0.69 / +0.63 / +0.80% | +0.46 / +0.79 / +0.59 / +0.96% |
+| 8192 | 1 | 7,403 / 9,464 / 10,927 / 10,480 | -0.29 / -1.10 / +0.07 / -0.06% | +0.75 / +0.80 / +0.08 / -0.04% | +0.73 / +0.70 / -0.09 / -0.06% |
+| 8192 | 2 | 7,411 / 9,465 / 10,929 / 10,483 | -0.36 / -1.18 / +0.08 / -0.12% | +0.35 / +0.63 / +0.06 / -0.13% | +0.62 / +0.69 / -0.11 / -0.09% |
+
+Round 1 at chunk 1024 is confounded by warm-up drift. The base itself moved +2% between rounds,
+and the later arms in that round inherit the rise. Rounds at chunk 8192 agree within 0.4%.
+
+Read from the consistent rounds:
+- The invariance fix alone costs up to 1.2% prefill on short and mid prompts.
+- The retuned table recovers that cost and gains 0.4-0.8% at 512-1,024-token prompts. The removed
+  splits were tuned for 170 SMs, so they did not fit this 188-SM device.
+- At 2,048-8,192-token prompts with chunk 8192, the retuned table is within ±0.13% of base.
+- The `[13312,2560]` alternative shows no consistent further gain and was not adopted.
+
+**Decode and memory.** An earlier `pp+tg128` run of the fix-only build left decode unchanged,
+for example 135.87 against 135.84 tok/s. The retuned table does not touch the decode routes.
+Peak Engine workspace at chunk 1024 drops from 135.2 to 122.7 MiB. At chunk 8192 it is 981.8 MiB
+in both builds.

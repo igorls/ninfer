@@ -203,6 +203,18 @@ extension rebuilds the MTP forming-block state from target hidden rows; speculat
 state never becomes a resident checkpoint. Saved continuation positions preserve all three
 MRoPE axes for media continuations.
 
+Prefill chunking is a scheduling choice and does not change results. A token's logits and
+continuation state are bit-identical however the prompt is chunked, as long as every chunk stays
+above the small-chunk routes: the A16 MoE below 256 tokens and the small-T projection tiles
+through 288 tokens. A short final chunk may still take those routes.
+
+Flash-Next's registered routes therefore keep each column's reduction order independent of the
+launch's token count:
+- the GDN control projection uses one split for every column count;
+- its FP8 projections do not split an underfilled final wave.
+
+The real-artifact Engine case `prefill chunk invariance` checks this property end to end.
+
 Vision uses the common 27-layer encoder with explicit Vision weights/configuration and a
 2560-wide merger. Its handoff and transient workspace are bounded at startup, and media
 embeddings are scattered into text before hyper-stream expansion. There is no runtime weight

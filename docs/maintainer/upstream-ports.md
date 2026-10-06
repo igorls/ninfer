@@ -309,13 +309,29 @@ End-to-end v2 parity is **not accepted**: the 27-request BF16 comparison has 8 i
 trajectories, a 9.625-nat first-divergence gap on one tool prompt, and mean/maximum absolute prompt
 logprob differences of 0.948762/16.452988 nats. The shared-prefix top-20 proxy meets its mean/p99 bounds;
 the greedy-gap and prompt-logprob criteria fail. Causal-prefix independence passes exactly.
-The active plan preserves the criteria, reference route variation and ongoing attribution.
+
+Numerical acceptance moved to an independent transformers oracle. That gate fails one of five
+metrics, mean chosen-token difference, entirely on one long document.
+
+A pre-registered 27-document long-context follow-up finds no v3 regression against v2. The
+maintainer accepted v3 numerically on October 6, 2026, with the gate's failure kept on record.
+
+The same study found v3 was not prefill-chunk invariant, while v2 was. The cause was M-dependent
+split-K in the GDN control projection and final-wave split-K in the FP8 projections.
+
+Both are now removed. Prompt readouts and generated tokens are bit-identical across chunk sizes,
+except inside a final chunk shorter than 256 tokens, as with v2. The real-artifact Engine case
+`prefill chunk invariance` checks this.
+
+The [active plan](../research/flash-next-v3-port-2026-09-29.md) records the criteria, results and
+attribution.
 
 The strengthened MTP target comparison initially failed beyond its 0.05-nat tie bound.
 Corrections preserve ordinary decode projection arithmetic across speculative widths and fix
 QSA's batch-dependent FP16 probability partitioning. The K=1/3/5 eight-prompt comparison now
 matches all 96 generated tokens per request. All 16 focused Engine cases pass after correcting
 case-sensitive image/video assertions; current ordinary/MTP timings include the correction costs.
+With the chunk-invariance case added, all 17 pass on the G4 as of October 6.
 
 MSVC 19.51 and CUDA 13.3 compile and link the native Windows Engine test, CLI, server and Supervisor. Build outputs
 were redirected after the original build volume exhausted disk space; the link reports a CRT
@@ -324,7 +340,8 @@ not used. Current and earlier G4 performance/resource results and their costs ar
 [performance](../performance.md#flash-next-v3-on-colab-g4-2026-10-04); the
 [active plan](../research/flash-next-v3-port-2026-09-29.md) distinguishes this implementation
 from the wider historical M3 qualification criteria. The Supervisor accepts K=1..5 and rejects an optimized draft head for Flash-Next; its native
-CPU test passes. This source integration is uncommitted.
+CPU test passes. This source integration is committed on `m3/5-workstation` and not yet merged
+into `workstation`.
 
 DFlash/DFlash2, v2-only draft-head shortlists and alternate GDN-state/attention modes are not
 part of this architecture's v3 contract. MTP uses the full stored output head; BF16 and FP8

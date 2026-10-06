@@ -334,6 +334,62 @@ regression on either route. The gate's failure is attributable to v3's chunk-rou
 landing unfavorably on one document. Accepting v3 is the maintainer's decision. Still open: v3
 has lost v2's chunk-size invariance.
 
+**Decision (maintainer, 2026-10-06).** v3 is accepted numerically on this evidence, with the
+oracle gate's failure kept on record. Chunk-size invariance is to be restored before landing.
+
+### Prefill chunk invariance restored (2026-10-06)
+
+**Cause.** Two Flash-Next routes changed a token's FP32 reduction order with the launch's token
+count:
+- The GDN control projection chose split 8/4/2/1 by column count.
+- The FP8 projections (`[13312,2560]`, `[16384,2560]` including the fused GDN input,
+  `[2560,6144]`) split the K loop of an underfilled final wave. Which tiles form that wave
+  depends on the token count.
+
+NVFP4 activation quantization above 256 prefill tokens amplifies those rounding-level
+differences. Every activation quantizer is per-row, and no other prefill route on the large-chunk
+path changes per-column order.
+
+**Change.**
+- The control projection uses split 8 for every column count. That is its existing decode route,
+  and it already slices large launches to cooperative residency.
+- The three FP8 shapes use the same tiles without the final-wave split.
+- `[2560,6144]` takes 64x128 tiles through T=640 and 128x128 through T=1536. Tile shape does not
+  change a column's K order.
+
+**Verification** (Colab G4, base `9b662909` against the patched tree):
+
+| Check | Base kernels | Patched |
+|---|---|---|
+| Op test, control projection: leading columns at T=1/9/1025/2049/4097/8192 vs T=64 | Changes from T=1025 | Bit-identical |
+| Op test, FP8 A8 (all three shapes): shared columns of consecutive T=289...8192, uniform inputs | Changes at 4-7 of the T values per shape | Bit-identical |
+| New Engine case `prefill chunk invariance` (3,599 scores, chunk 1024 and 1536 vs 4096) | 3,596 and 3,595 differ, max 4.59 / 7.68 nats | 0 differ |
+| Long set (27 documents), chunk 8192 vs 2048: prompt readouts and generated tokens | Not invariant (see above) | 27/27 bit-identical |
+| Retuned table at chunk 1024 vs the fix build at chunk 8192 | — | 23/27 bit-identical |
+
+The four documents that differ in the last row each end in a final 1024-chunk shorter than 256
+tokens (19, 166, 233, 236 tokens), which takes the A16 MoE route. Each first difference lies
+inside that chunk. Final chunks of 274 and 283 tokens stayed identical.
+
+The full real-artifact Engine suite passes on the patched tree: 17 of 17 cases, including the new
+one. The touched targets compile and link with MSVC 19.51 and CUDA 13.3 on Windows.
+
+**Numerics after the change.** The pre-registered long-context reading against the same oracle
+draws stays "no regression":
+
+| Chunk | v3 mean | v2 mean | Mean D | 95% interval | v3 worse on |
+|---:|---:|---:|---:|---:|---:|
+| 8192 | 1.2869 | 1.4748 | −0.1879 | [−0.3491, −0.0307] | 10 / 27 |
+| 2048 | 1.2869 | 1.4753 | −0.1884 | [−0.3494, −0.0314] | 10 / 27 |
+
+Both chunk sizes give the same v3 mean because the result is now chunk-invariant. This is a
+different draw of the long-context route, so it does not show that the change improved accuracy.
+
+**Performance** is recorded in [performance](../performance.md#prefill-chunk-invariance-2026-10-06).
+The invariance fix alone cost up to 1.2% prefill. The selected table recovers it, gains 0.4-0.8%
+at 512-1,024-token prompts and stays within ±0.13% at longer ones. Decode is unchanged, and the
+chunk-1024 workspace drops by 12.5 MiB.
+
 ## 1. Measured G4 facts (session of 2026-09-29, 19:42-20:08 UTC)
 
 | Item | Measured |
