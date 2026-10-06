@@ -29,7 +29,7 @@ constructor seam, registered Op geometries and finite kernel routes.
 | Dimension | Current evidence / status |
 |---|---|
 | Text behavior | Native prefill/decode, CUDA Graphs, prefix reuse/catalog turnover, logprobs, structured output, causal scoring and final 2560-wide hidden export implemented. Focused real-artifact Engine checks pass. |
-| Numerical semantics | Changed Ops use independent FP64/codec oracles and real shapes. Scoring versus prompt readout max absolute difference 9.53674e-07 nats, below unchanged 0.05. Text B=2/4/8 passes unchanged 0.05-nat near-tie criterion. Changing future tokens at fixed extents 64/1024/2200 leaves predictor prefixes exactly equal, including beyond QSA's sparse boundary. The saved-v2 comparison below fails the greedy-gap and prompt-logprob criteria. The independent-oracle gate that replaced it passes four of five metrics. It fails mean chosen-token difference (0.270212 v3 against an allowed 0.261764), entirely on `book-18k`'s long-prompt readouts. Numerical acceptance remains open. |
+| Numerical semantics | Changed Ops use independent FP64/codec oracles and real shapes. Scoring versus prompt readout max absolute difference 9.53674e-07 nats, below unchanged 0.05. Text B=2/4/8 passes unchanged 0.05-nat near-tie criterion. Changing future tokens at fixed extents 64/1024/2200 leaves predictor prefixes exactly equal, including beyond QSA's sparse boundary. The saved-v2 comparison below fails the greedy-gap and prompt-logprob criteria. The independent-oracle gate that replaced it passes four of five metrics. It fails mean chosen-token difference (0.270212 v3 against an allowed 0.261764), entirely on `book-18k`'s long-prompt readouts. A pre-registered 27-document long-context follow-up finds no v3 regression at either chunk size. `book-18k`'s offset follows v3's chunk size, and unlike v2, v3 is not chunk-invariant. Numerical acceptance remains open. |
 | MTP | Full-head K=1..5, target verification width K+1, recursive drafts, teacher extension, GDN accepted-prefix fold and private QSA/PLE snapshots implemented. K=1/3/5 graph/eager equality, ragged budgets, eight distinct active requests, context-tail limits, FP8 KV at the 2048-token QSA selection boundary, seeded stochastic penalties and constrained output pass. |
 | Continuation state | MTP owns a separate indexer and KV frontier E-1 at target frontier E. Host pressure transfers state and both KV families; plain and MTP resumes match device-only tokens exactly. State-image clone/reset/isolation and incompatible host geometry tests pass. |
 | Vision | Shared 27-layer encoder, 2560 merger, bounded startup workspace/handoff, chunked media scatter and three-axis continuation positions implemented. Red/blue image discrimination, prefix reuse and ordered red-then-blue video pass with ordinary and MTP generation. BF16 4304-wide partial-K projection tails pass the independent oracle. |
@@ -271,6 +271,68 @@ which stays failed. Accepting v3 remains the maintainer's decision.
 - **What follows.** A regression leads to a layer-by-layer trace of v3 against the oracle on the
   worst document. Either other reading is reported as it stands. No gate criterion or tolerance
   changes in any case.
+
+### Long-context follow-up result (2026-10-06): no v3 regression; `book-18k` was v3's chunk route
+
+**Setup.**
+- Engines ran on one Colab G4: v2 `87812bc8` on the published artifact, then the v3 candidate.
+  Its engine source is unchanged from the gate's; only tooling and docs differ. It ran on the
+  derived artifact, which has the same artifact id as the gate's (`1e7e026e…`).
+- The oracle ran on two G4 sessions with two shards each. A first oracle session was lost after
+  about 46 of its 54 draws, before any download, and was rerun from the start. Nothing from the
+  lost run is used.
+- Every engine record aligned with the oracle's tokenization; no record was excluded.
+
+**Controls.** Against the gate's records, v3 reproduces all 768 control readouts bit-identically.
+v2 reproduces 764. The other 4 are on `wiki-18k`, with a maximum of 0.374786 nats, the same value
+as v2's recorded route variation.
+
+**Pre-registered reading.** Mean |engine − oracle| over readouts at positions ≥ 2,048, 27
+documents:
+
+| Route | v2 mean | v3 mean | Mean D (v3 − v2) | 95% document bootstrap | Margin | v3 worse on | Reading |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Chunk 8192 (primary) | 1.4748 | 1.3974 | −0.0774 | [−0.2332, +0.0636] | 0.1475 | 11 / 27 | No regression |
+| Chunk 2048 | 1.4753 | 1.3864 | −0.0889 | [−0.2337, +0.0497] | 0.1475 | 14 / 27 | No regression |
+
+**Spread of D.** D varies by document with a standard deviation of 0.403. The oracle's own
+draw-to-draw variation averages 0.185.
+
+| Extremes of D at chunk 8192 | Document | D |
+|---|---|---:|
+| Worst for v3 | `book-18k` | +0.831 |
+| | `pg19-02-1` | +0.588 |
+| Worst for v2 | `pg19-01-1` | −1.368 |
+| | `wikitext-02-0` | −0.914 |
+
+**`book-18k` moves with v3's chunk size.** v3 scores 2.038 at chunk 8192 and 1.237 at chunk 2048.
+v2 scores 1.207 at both. The positions that failed the gate are therefore one draw of v3's
+chunk-dependent route; at the other chunk size v3 matches v2 on that document.
+
+**v3 is not chunk-invariant; v2 is.** The two chunk sizes change readouts by different amounts:
+
+| Engine | Change between chunk 8192 and 2048 |
+|---|---|
+| v2 | Bit-identical on 24 of 27 documents; 0.0024 mean |
+| v3 | 1.56 nats per readout past position 2,048; per-document scores change by 0.28 mean, 0.80 max |
+
+The v3 dependence begins inside the first chunk. Readouts below position 1,024 differ by 1.00 on
+average, and only position 0 matches. Those tokens and their position in the chunk are identical
+in both runs; only the chunk's token count differs.
+
+The earlier fixed-extent test shows that the *contents* of later tokens do not affect earlier
+positions. So the dependence is on the launch's token count, not a leak of future tokens.
+
+A code reading found every activation quantizer to be per-row. It also found several Ops whose
+reduction order or tile shape depends on the token count. The first candidate is the GDN gating
+projection route table, which chooses split-K by column count and touches every row of every GDN
+layer. NVFP4 activation quantization above 256 prefill tokens can amplify such rounding-level
+differences. This cause is not yet verified by an experiment.
+
+**Disposition.** The oracle gate stays failed as recorded. The follow-up finds no long-context
+regression on either route. The gate's failure is attributable to v3's chunk-route variation
+landing unfavorably on one document. Accepting v3 is the maintainer's decision. Still open: v3
+has lost v2's chunk-size invariance.
 
 ## 1. Measured G4 facts (session of 2026-09-29, 19:42-20:08 UTC)
 
