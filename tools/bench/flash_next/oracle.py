@@ -348,8 +348,11 @@ def prompts(args: argparse.Namespace) -> None:
     done = set()
     if out_path.exists():
         done = {(r["id"], r["draw"]) for r in map(json.loads, out_path.read_text(encoding="utf-8").splitlines())}
+    shard, shards = (int(x) for x in args.shard.split("/"))
     with out_path.open("a", encoding="utf-8") as out:
-        for item in parity.SETS[args.set]():
+        for index, item in enumerate(parity.SETS[args.set]()):
+            if index % shards != shard:
+                continue
             prompt = _prompt_ids(tokenizer, item)
             for draw in range(args.draws):
                 if (item["id"], draw) in done:
@@ -470,6 +473,7 @@ def main() -> None:
     p.add_argument("--ple-dir", required=True)
     p.add_argument("--set", default="long")
     p.add_argument("--draws", type=int, default=2)
+    p.add_argument("--shard", default="0/1", help="K/N: only documents whose set index is K modulo N")
     p.add_argument("--out", required=True)
     p.add_argument("--device", default="cuda")
     p.add_argument("--attn", default="sdpa", choices=("sdpa", "eager"))
