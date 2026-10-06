@@ -141,6 +141,32 @@ attention defect or explain the full-model discrepancy. The legacy and current M
 to A4 at 256 prefill tokens and quantize input and routed intermediate activations, so a newly
 enabled A4 policy does not explain the long-prompt concentration. The comparison remains open.
 
+### Acceptance by independent oracle (decided 2026-10-05, before any oracle result)
+
+The saved-v2 comparison above stays on record unchanged, but it is no longer the acceptance gate:
+v2 is not a stable yardstick, because its own MMA and non-MMA QSA routes differ by 0.797127 mean
+and 15.005175 maximum prompt nats. Following the qualification contract (production routes are
+judged against an independent oracle, not another kernel), v3 is accepted against the
+transformers `qwen4_exp` reference, with v2 measured the same way as the comparison point.
+
+- **Oracle.** transformers' `Qwen4ExpText*` modules with the pinned checkpoint's weights decoded
+  independently (NVFP4 experts through the FP4 table and their stored scales, the u4 PLE table
+  with its scales), as in the research line's `tools/reference/qwen3_8_flash_next/oracle`, in
+  FP32. Its transformers version is recorded with the results.
+- **Inputs.** The same 50 records as the saved comparison (27 greedy trajectories, 23 prompt
+  readouts). Each engine's own tokens are teacher-forced through the oracle, so every engine
+  distribution is compared with the oracle's at an identical context. Tokenization must
+  reproduce each record's `prompt_tokens`.
+- **Metrics, per engine against the oracle.** Mean and maximum absolute difference of the
+  chosen token's logprob; top-1 agreement; KL(oracle || engine) over the union of both top-20
+  lists, renormalized, mean and p99. Positions are pooled over all records.
+- **Criteria.** v3 passes if, on every metric, it is no worse than v2 by more than the larger of
+  10% of v2's value or the v2 reference route variation already measured (0.000567 mean and
+  0.374786 maximum chosen-token difference). If v3 is worse on any metric, the gate fails,
+  and the result is reported with the positions responsible.
+- **Not covered.** This gate replaces only the full-model numerical comparison. The Op oracles,
+  Engine cases, MTP equality and Windows GPU qualification are separate and still required.
+
 ## 1. Measured G4 facts (session of 2026-09-29, 19:42-20:08 UTC)
 
 | Item | Measured |
