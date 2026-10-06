@@ -116,6 +116,30 @@ void require_snapshot_operands(const Tensor& conv_weight, const Tensor& conv_sta
     }
 }
 
+bool is_fp8_row_parent(QType qtype) {
+    return qtype == QType::FP8_E4M3FN_ROW_BF16 || qtype == QType::FP8_E4M3FN_ROW_FP32;
+}
+
+// Validates a row-scaled FP8 parent and returns its registered profile.
+const detail::Fp8GdnInputProfile& require_fp8_profile(const Weight& weight, const char* operation) {
+    detail::validate_fp8_row_weight(weight, operation);
+    const auto* profile = detail::find_fp8_gdn_input_profile(weight.qtype, weight.n, weight.k);
+    if (profile == nullptr) {
+        throw std::invalid_argument(std::string(operation) + ": unsupported weight shape");
+    }
+    return *profile;
+}
+
+const detail::Fp8GdnInputProfile& require_fp8_profile(QType qtype, std::int32_t parent_rows,
+                                                      std::int32_t input_rows,
+                                                      const char* operation) {
+    const auto* profile = detail::find_fp8_gdn_input_profile(qtype, parent_rows, input_rows);
+    if (profile == nullptr) {
+        throw std::invalid_argument(std::string(operation) + ": unsupported FP8 profile");
+    }
+    return *profile;
+}
+
 Tensor flatten_columns(const Tensor& tensor, std::int32_t rows, ConvGeometry geometry) {
     return Tensor(tensor.data, tensor.dtype, {rows, geometry.aggregate_columns});
 }
@@ -310,20 +334,15 @@ void dispatch_single_parent(const Tensor& x, const Weight& weight, Tensor& qkv, 
         return;
     }
 
-    if (weight.qtype == QType::FP8_E4M3FN_ROW_BF16) {
-        constexpr std::int32_t kHidden  = 5120;
+    if (is_fp8_row_parent(weight.qtype)) {
         constexpr std::int32_t kQkvRows = 10240;
         constexpr std::int32_t kZRows   = 6144;
-        constexpr std::int32_t kRows    = kQkvRows + kZRows;
-        require_matrix(x, kHidden, cols, "x");
+        const auto& profile             = require_fp8_profile(weight, "fp8 gdn_input_proj");
+        require_matrix(x, profile.input_rows, cols, "x");
         require_matrix(qkv, kQkvRows, cols, "qkv");
         require_matrix(z, kZRows, cols, "z");
         require_single_parent_nonoverlap(x, qkv, z);
-        detail::validate_fp8_weight(weight, "fp8 gdn_input_proj");
-        if (weight.n != kRows || weight.k != kHidden) {
-            throw std::invalid_argument("fp8 gdn_input_proj: unsupported weight shape");
-        }
-        detail::fp8_gdn_input_dispatch(x, weight, qkv, z, policy, workspace, stream);
+        detail::fp8_gdn_input_dispatch(profile, x, weight, qkv, z, policy, workspace, stream);
         return;
     }
 
@@ -460,20 +479,14 @@ void dispatch_single_parent_snapshot(const Tensor& x, const Weight& weight,
         return;
     }
 
-    if (weight.qtype == QType::FP8_E4M3FN_ROW_BF16) {
-        constexpr std::int32_t kHidden     = 5120;
-        constexpr std::int32_t kQueryRows  = 2048;
-        constexpr std::int32_t kKeyRows    = 2048;
-        constexpr std::int32_t kValueRows  = 6144;
-        constexpr std::int32_t kZRows      = 6144;
-        constexpr std::int32_t kChannels   = kQueryRows + kKeyRows + kValueRows;
-        constexpr std::int32_t kParentRows = kChannels + kZRows;
-        const ConvGeometry geometry        = require_snapshot_input(x, kHidden);
-        detail::validate_fp8_weight(weight, "fp8 gdn_input_proj_conv_snapshot");
-        if (weight.n != kParentRows || weight.k != kHidden) {
-            throw std::invalid_argument(
-                "fp8 gdn_input_proj_conv_snapshot: unsupported weight shape");
-        }
+    if (is_fp8_row_parent(weight.qtype)) {
+        constexpr std::int32_t kQueryRows = 2048;
+        constexpr std::int32_t kKeyRows   = 2048;
+        constexpr std::int32_t kValueRows = 6144;
+        constexpr std::int32_t kZRows     = 6144;
+        constexpr std::int32_t kChannels  = kQueryRows + kKeyRows + kValueRows;
+        const auto& profile = require_fp8_profile(weight, "fp8 gdn_input_proj_conv_snapshot");
+        const ConvGeometry geometry = require_snapshot_input(x, profile.input_rows);
         require_snapshot_operands(conv_weight, conv_states, valid_columns, initial_state_slots,
                                   snapshot_base_slots, kChannels, geometry);
         require_conv_tensor(query, kQueryRows, geometry.width, geometry.batch,
@@ -497,9 +510,9 @@ void dispatch_single_parent_snapshot(const Tensor& x, const Weight& weight,
                                                     &value,
                                                     &z};
         require_parent_nonoverlap(weight, tensors, workspace, "fp8 gdn_input_proj_conv_snapshot");
-        detail::fp8_gdn_snapshot_dispatch(x, weight, conv_weight, conv_states, valid_columns,
-                                          initial_state_slots, snapshot_base_slots, query, key,
-                                          value, z, policy, workspace, stream);
+        detail::fp8_gdn_snapshot_dispatch(profile, x, weight, conv_weight, conv_states,
+                                          valid_columns, initial_state_slots, snapshot_base_slots,
+                                          query, key, value, z, policy, workspace, stream);
         return;
     }
 
@@ -615,19 +628,14 @@ void dispatch_single_parent_record(const Tensor& x, const Weight& weight, const 
         return;
     }
 
-    if (weight.qtype == QType::FP8_E4M3FN_ROW_BF16) {
-        constexpr std::int32_t kHidden     = 5120;
-        constexpr std::int32_t kQueryRows  = 2048;
-        constexpr std::int32_t kKeyRows    = 2048;
-        constexpr std::int32_t kValueRows  = 6144;
-        constexpr std::int32_t kZRows      = 6144;
-        constexpr std::int32_t kChannels   = kQueryRows + kKeyRows + kValueRows;
-        constexpr std::int32_t kParentRows = kChannels + kZRows;
-        const ConvGeometry geometry        = require_record_input(x, kHidden);
-        detail::validate_fp8_weight(weight, "fp8 gdn_input_proj_conv_record");
-        if (weight.n != kParentRows || weight.k != kHidden) {
-            throw std::invalid_argument("fp8 gdn_input_proj_conv_record: unsupported weight shape");
-        }
+    if (is_fp8_row_parent(weight.qtype)) {
+        constexpr std::int32_t kQueryRows = 2048;
+        constexpr std::int32_t kKeyRows   = 2048;
+        constexpr std::int32_t kValueRows = 6144;
+        constexpr std::int32_t kZRows     = 6144;
+        constexpr std::int32_t kChannels  = kQueryRows + kKeyRows + kValueRows;
+        const auto& profile = require_fp8_profile(weight, "fp8 gdn_input_proj_conv_record");
+        const ConvGeometry geometry = require_record_input(x, profile.input_rows);
         require_record_operands(conv_weight, conv_states, valid_columns, initial_state_slots,
                                 kChannels, geometry);
         require_conv_tensor(conv_record, kChannels, geometry.width, geometry.batch,
@@ -646,9 +654,9 @@ void dispatch_single_parent_record(const Tensor& x, const Weight& weight, const 
             &x,           &conv_weight, &conv_states, &valid_columns, &initial_state_slots,
             &conv_record, &query,       &key,         &value,         &z};
         require_parent_nonoverlap(weight, tensors, workspace, "fp8 gdn_input_proj_conv_record");
-        detail::fp8_gdn_record_dispatch(x, weight, conv_weight, conv_states, valid_columns,
-                                        initial_state_slots, conv_record, query, key, value, z,
-                                        policy, workspace, stream);
+        detail::fp8_gdn_record_dispatch(profile, x, weight, conv_weight, conv_states,
+                                        valid_columns, initial_state_slots, conv_record, query,
+                                        key, value, z, policy, workspace, stream);
         return;
     }
 
@@ -728,12 +736,10 @@ std::size_t gdn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::int
         }
         return detail::nvfp4_gdn_input_workspace_capacity_bytes(policy, min_tokens, max_tokens);
     }
-    if (parent_qtype == QType::FP8_E4M3FN_ROW_BF16) {
-        if (parent_rows != detail::Fp8N16384K5120::kOutputRows ||
-            input_rows != detail::Fp8N16384K5120::kInputRows) {
-            throw std::invalid_argument("gdn_input_proj workspace: unsupported FP8 profile");
-        }
-        return detail::fp8_gdn_input_workspace_capacity_bytes(policy, min_tokens, max_tokens);
+    if (is_fp8_row_parent(parent_qtype)) {
+        return detail::fp8_gdn_input_workspace_capacity_bytes(
+            require_fp8_profile(parent_qtype, parent_rows, input_rows, "gdn_input_proj workspace"),
+            policy, min_tokens, max_tokens);
     }
     if (parent_qtype == QType::Q8_G32_FP16 && parent_rows == 12288 && input_rows == 2048) {
         (void)detail::q8_gdn_input_resolve_plan(
@@ -802,11 +808,11 @@ std::size_t gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
     std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width) {
     validate_policy(policy);
     require_snapshot_capacity_domain(batch_size, min_width, max_width);
-    if (parent_qtype == QType::FP8_E4M3FN_ROW_BF16 &&
-        parent_rows == detail::Fp8N16384K5120::kOutputRows &&
-        input_rows == detail::Fp8N16384K5120::kInputRows) {
-        return detail::fp8_gdn_snapshot_workspace_capacity_bytes(policy, batch_size, min_width,
-                                                                 max_width);
+    if (is_fp8_row_parent(parent_qtype)) {
+        return detail::fp8_gdn_snapshot_workspace_capacity_bytes(
+            require_fp8_profile(parent_qtype, parent_rows, input_rows,
+                                "gdn_input_proj_conv_snapshot workspace"),
+            policy, batch_size, min_width, max_width);
     }
     if (parent_qtype != QType::NVFP4 || parent_rows != detail::Nvfp4N16384K5120::kOutputRows ||
         input_rows != detail::Nvfp4N16384K5120::kInputRows) {
@@ -851,11 +857,11 @@ std::size_t gdn_input_proj_conv_record_workspace_capacity_bytes(
     std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width) {
     validate_policy(policy);
     require_record_capacity_domain(batch_size, min_width, max_width);
-    if (parent_qtype == QType::FP8_E4M3FN_ROW_BF16 &&
-        parent_rows == detail::Fp8N16384K5120::kOutputRows &&
-        input_rows == detail::Fp8N16384K5120::kInputRows) {
-        return detail::fp8_gdn_record_workspace_capacity_bytes(policy, batch_size, min_width,
-                                                               max_width);
+    if (is_fp8_row_parent(parent_qtype)) {
+        return detail::fp8_gdn_record_workspace_capacity_bytes(
+            require_fp8_profile(parent_qtype, parent_rows, input_rows,
+                                "gdn_input_proj_conv_record workspace"),
+            policy, batch_size, min_width, max_width);
     }
     if (parent_qtype != QType::NVFP4 || parent_rows != detail::Nvfp4N16384K5120::kOutputRows ||
         input_rows != detail::Nvfp4N16384K5120::kInputRows) {

@@ -44,7 +44,7 @@ struct NoHistoryPublish {
 // Device-side implementation detail shared by exact packed projection kernels. Projection
 // accumulators stay in the route's existing private precision; Publish changes only the side
 // effect after the convolution has consumed that accumulator.
-template <class Publish>
+template <class Publish, bool RoundHistory = false>
 struct GdnConvEpilogue {
     const __nv_bfloat16* conv_weight;
     const __nv_bfloat16* state_read;
@@ -113,7 +113,10 @@ struct GdnConvEpilogue {
             publish.publish(token, batch_row, row, s1, s2, p);
             s0 = s1;
             s1 = s2;
-            s2 = p;
+            // A fused sequence may model repeated one-column state transitions. Match the
+            // BF16 history that a following invocation would read without rounding the
+            // current column's private projection before convolution.
+            s2 = RoundHistory ? __bfloat162float(__float2bfloat16_rn(p)) : p;
         }
     }
 };

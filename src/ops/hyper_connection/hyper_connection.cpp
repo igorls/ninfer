@@ -61,8 +61,7 @@ void require_disjoint_output(const Tensor& output, const Tensor& hidden,
                  weight_bytes(weights.input_mix_down)) ||
         overlaps(output.data, bytes, weights.input_mix_up.qdata,
                  weight_bytes(weights.input_mix_up)) ||
-        (inject != nullptr &&
-         overlaps(output.data, bytes, inject->qdata, weight_bytes(*inject)))) {
+        (inject != nullptr && overlaps(output.data, bytes, inject->qdata, weight_bytes(*inject)))) {
         fail(operation, label);
     }
 }
@@ -87,15 +86,16 @@ detail::HyperScratch allocate_scratch(Arena& arena, std::int32_t tokens) {
         scratch.partial_bytes = static_cast<std::size_t>(detail::kHyperDownSplits) * kLowRank *
                                 static_cast<std::size_t>(tokens) * sizeof(float);
         scratch.partials = static_cast<float*>(arena.alloc_bytes(scratch.partial_bytes).data);
-        scratch.up = arena.alloc_bytes(static_cast<std::size_t>(kConcat) * tokens * 2).data;
+        scratch.up       = static_cast<float*>(
+            arena.alloc_bytes(static_cast<std::size_t>(kConcat) * tokens * sizeof(float)).data);
     }
     return scratch;
 }
 
 void run(const Tensor& hidden, const HyperConnectionWeights& weights, const Weight* inject,
          Tensor& block_input, Tensor* injection, WorkspaceArena& workspace, cudaStream_t stream) {
-    const auto scope    = workspace.scope();
-    const auto scratch  = allocate_scratch(workspace, hidden.ne[1]);
+    const auto scope   = workspace.scope();
+    const auto scratch = allocate_scratch(workspace, hidden.ne[1]);
     detail::hyper_mix_launch(hidden.data, weights.norm.data, weights.input_mix_down.qdata,
                              weights.input_mix_up.qdata,
                              inject != nullptr ? inject->qdata : nullptr, block_input.data,
@@ -153,6 +153,16 @@ void hyper_connection_inject(const Tensor& block_output, const Tensor& injection
     }
     detail::hyper_inject_launch(block_output.data, static_cast<const float*>(injection.data),
                                 hidden.data, tokens, stream);
+}
+
+void hyper_connection_expand(const Tensor& x, Tensor& hidden, cudaStream_t stream) {
+    constexpr const char* op  = "hyper_connection_expand";
+    const std::int32_t tokens = x.ne[1];
+    if (tokens <= 0) fail(op, "token extent");
+    require_matrix(x, DType::BF16, kHidden, tokens, op, "x");
+    require_matrix(hidden, DType::BF16, kConcat, tokens, op, "hidden");
+    if (overlaps(x.data, x.bytes(), hidden.data, hidden.bytes())) fail(op, "alias");
+    detail::hyper_expand_launch(x.data, hidden.data, tokens, stream);
 }
 
 } // namespace ninfer::ops

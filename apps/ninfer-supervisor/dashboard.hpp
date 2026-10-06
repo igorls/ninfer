@@ -1986,7 +1986,7 @@ R"HTML(  function fieldRow(spec, value) {
     const backend = Object.prototype.hasOwnProperty.call(cfgEdits.params, 'spec')
       ? cfgEdits.params.spec : (cfgData.params || {}).spec;
     if (spec.key === 'draft_tokens') {
-      spec.max = backend === 'mtp' ? (cfgData.model_identity === 'qwen3.8-flash-next' ? 4 : 5) : 15;
+      spec.max = backend === 'mtp' ? 5 : 15;
     }
     const original = value;
     if (Object.prototype.hasOwnProperty.call(cfgEdits.params, spec.key)) value = String(cfgEdits.params[spec.key]);
@@ -2045,7 +2045,7 @@ R"HTML(  function fieldRow(spec, value) {
             cfgEdit('params', 'draft_tokens', '', (cfgData.params || {}).draft_tokens || '');
             cfgEdit('params', 'lm_head_draft', false, (cfgData.params || {}).lm_head_draft === 'true');
           } else {
-            const limit = input.value === 'mtp' ? (cfgData.model_identity === 'qwen3.8-flash-next' ? 4 : 5) : 15;
+            const limit = input.value === 'mtp' ? 5 : 15;
             const draft = Object.prototype.hasOwnProperty.call(cfgEdits.params, 'draft_tokens')
               ? cfgEdits.params.draft_tokens : (cfgData.params || {}).draft_tokens;
             if (!draft || Number(draft) > limit) {

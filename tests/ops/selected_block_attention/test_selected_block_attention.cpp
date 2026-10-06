@@ -404,6 +404,30 @@ int run_batched(Profile profile, int batch, int context, int mode, float magnitu
                                       workspace, out_t, nullptr);
         cuda_synchronize();
         verify(columns, base);
+        const auto batched = from_device_bf16(out.data(), q.size());
+        DeviceBuffer single_position_device = to_device(std::vector<std::int32_t>{0});
+        DeviceBuffer single_row_device = to_device(std::vector<std::int32_t>{0});
+        DeviceBuffer single_count_device = to_device(std::vector<std::int32_t>{0});
+        const Tensor single_position(single_position_device.p, DType::I32, {1});
+        const Tensor single_row(single_row_device.p, DType::I32, {1});
+        const Tensor single_count(single_count_device.p, DType::I32, {1});
+        for (int column = 0; column < batch; ++column) {
+            single_position_device.copy_from_host(&positions[column], sizeof(std::int32_t));
+            single_row_device.copy_from_host(&rows[column], sizeof(std::int32_t));
+            single_count_device.copy_from_host(&counts[column], sizeof(std::int32_t));
+            Tensor single_out = out_t.slice(2, column, 1);
+            ops::selected_block_attention(
+                q_t.slice(2, column, 1), single_position, single_row,
+                selections_t.slice(1, column, 1), single_count, view, workspace,
+                single_out, nullptr);
+        }
+        cuda_synchronize();
+        if (from_device_bf16(out.data(), q.size()) != batched) {
+            std::cerr << base << ": batch membership changes an independent query\n";
+            ++failures;
+        }
+        failures += out.verify_guards(base + " single-query out guards");
+        failures += workspace_storage.verify_guards(base + " single-query workspace guards");
         return failures;
     }
     cudaStream_t stream = nullptr;
@@ -502,6 +526,8 @@ int main() {
         failures += run_batched(profile, 5, 8'192, 0, 4.0F, 14, false);
         failures += run_batched(profile, 8, 9'000, 1, 1.0F, 15, false);
         failures += run_batched(profile, 8, 4'100, 0, 6.0F, 16, true);
+        failures += run_batched(profile, 12, 2'051, 1, 2.0F, 17, false);
+        failures += run_batched(profile, 48, 4'100, 0, 3.0F, 18, true);
         // Shared-row tensor-core route: single column, tile boundaries, empty rows, long prefix.
         failures += run_shared_row(profile, 1, 0, 0, 1.0F, 21, false);
         failures += run_shared_row(profile, 1, 2'047, 0, 3.0F, 22, false);

@@ -11,6 +11,9 @@
 namespace ninfer::models::qwen4_exp {
 namespace {
 
+// text_config.eos_token_id of the pinned Qwen/Qwen3.8-Flash-Next source config.
+constexpr std::int32_t kPleBoundaryToken = 248044;
+
 using artifact::ArtifactError;
 using artifact::Json;
 using artifact::require_members;
@@ -203,6 +206,13 @@ TextConfig text(const Json& value) {
                dimension(value, "split_ngram_parts")};
     if (out.ple.ngram_size < 2 || out.ple.embed_dim % out.ple.heads()) {
         throw ArtifactError("PLE heads must be n-grams of two or more tokens dividing its width");
+    }
+    // The normalized text config does not carry eos_token_id; the PLE segment boundary is the
+    // pinned source config's text_config.eos_token_id (tools/convert/qwen4_exp/source_config.json).
+    out.ple.boundary_token = kPleBoundaryToken;
+    if (out.ple.boundary_token < 0 ||
+        static_cast<std::uint32_t>(out.ple.boundary_token) >= out.vocab_size) {
+        throw ArtifactError("PLE boundary token is outside the vocabulary");
     }
     return out;
 }

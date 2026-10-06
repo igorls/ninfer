@@ -26,12 +26,12 @@ using namespace ninfer::test::linear;
 std::vector<Invocation> a16_calls() {
     std::vector<Invocation> calls;
     for (int t = 1; t <= 16; ++t) calls.push_back({t});
-    for (int t : {17, 24, 25, 32, 33, 63, 64, 65, 95, 96, 97, 127, 128, 129, 512, 1024})
+    for (int t : {17, 24, 25, 32, 33, 47, 48, 49, 63, 64, 65, 95, 96, 97, 127, 128, 129, 512, 1024})
         calls.push_back({t});
     // Permissive policies keep the A16 route below the A8 boundary.
     for (int t : {1, 2, 4, 8, 16}) calls.push_back({t, CallForm::Policy, ops::LinearPolicy::AllowA8});
     calls.push_back({1, CallForm::A16Convenience});
-    for (int t : {1, 3, 16, 33, 129})
+    for (int t : {1, 3, 16, 33, 48, 49, 129})
         calls.push_back({t, CallForm::Policy, ops::LinearPolicy::A16Only, true});
     return calls;
 }

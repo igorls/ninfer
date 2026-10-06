@@ -2,6 +2,7 @@
 #include "core/device.h"
 #include "core/decode_graph.h"
 #include "ninfer/ops/gdn_input_proj.h"
+#include "ninfer/ops/weight_input.h"
 
 #include "ops/input_projection_test_common.h"
 
@@ -11,6 +12,8 @@
 #include <cstdint>
 #include <iostream>
 #include <string>
+#include <utility>
+#include <variant>
 #include <vector>
 
 using namespace ninfer;
@@ -317,9 +320,19 @@ int run_nvfp4() {
     return failures;
 }
 
-int run_fp8_case(DevicePackedWeight& parent, std::int32_t tokens, ops::LinearPolicy policy,
-                 bool convenience = false, bool replay = false) {
-    constexpr std::int32_t kHidden  = 5120;
+// The registered row-scaled FP8 [16384,K] parents share the route frontier and criteria.
+struct Fp8Parent {
+    QType qtype;
+    std::int32_t hidden;
+    const char* label;
+};
+
+constexpr Fp8Parent kFp8Bf16K5120{QType::FP8_E4M3FN_ROW_BF16, 5120, "FP8"};
+constexpr Fp8Parent kFp8Fp32K2560{QType::FP8_E4M3FN_ROW_FP32, 2560, "FP8-FP32 K2560"};
+
+int run_fp8_case(const Fp8Parent& profile, DevicePackedWeight& parent, std::int32_t tokens,
+                 ops::LinearPolicy policy, bool convenience = false, bool replay = false) {
+    const std::int32_t kHidden      = profile.hidden;
     constexpr std::int32_t kQkvRows = 10240;
     constexpr std::int32_t kZRows   = 6144;
     constexpr std::int32_t kRows    = kQkvRows + kZRows;
@@ -333,7 +346,7 @@ int run_fp8_case(DevicePackedWeight& parent, std::int32_t tokens, ops::LinearPol
     Tensor qkv_output          = qkv.tensor();
     Tensor z_output            = z.tensor();
     const std::size_t capacity = ops::gdn_input_proj_workspace_capacity_bytes(
-        QType::FP8_E4M3FN_ROW_BF16, kRows, kHidden, policy, tokens, tokens);
+        profile.qtype, kRows, kHidden, policy, tokens, tokens);
     GuardedDeviceBuffer scratch(std::max<std::size_t>(capacity, 256));
     WorkspaceArena workspace(DeviceSpan{scratch.data(), std::max<std::size_t>(capacity, 256)});
     DeviceContext context;
@@ -375,8 +388,8 @@ int run_fp8_case(DevicePackedWeight& parent, std::int32_t tokens, ops::LinearPol
         const ReductionCriterion& criterion =
             a8 ? kFp8GdnInputProjA8Tolerance : kFp8GdnInputProjA16Tolerance;
         const std::int32_t sample_count = a8 ? kA8SampleRows : 7;
-        const std::string suffix =
-            std::string(" FP8 ") + (a8 ? "A8" : "A16") + " T=" + std::to_string(tokens);
+        const std::string suffix = std::string(" ") + profile.label + (a8 ? " A8" : " A16") +
+                                   " T=" + std::to_string(tokens);
         failures += qkv.verify_guards("gdn qkv" + suffix);
         failures += z.verify_guards("gdn z" + suffix);
         failures += qkv.verify_fully_written("gdn qkv" + suffix);
@@ -407,12 +420,13 @@ int run_fp8_case(DevicePackedWeight& parent, std::int32_t tokens, ops::LinearPol
 int run_fp8() {
     constexpr std::int32_t kHidden = 5120;
     constexpr std::int32_t kRows   = 16384;
+    const Fp8Parent& profile       = kFp8Bf16K5120;
     DevicePackedWeight parent(
         quantized_weight::make_patterned_weight(QType::FP8_E4M3FN_ROW_BF16, kRows, kHidden, 613U));
 
     int failures = 0;
     for (int columns : {5, 8, 16, 24, 32, 33, 64, 65, 96, 97, 128, 129}) {
-        failures += run_fp8_case(parent, columns, ops::LinearPolicy::A16Only);
+        failures += run_fp8_case(profile, parent, columns, ops::LinearPolicy::A16Only);
     }
     const std::size_t one = ops::gdn_input_proj_workspace_capacity_bytes(
         QType::FP8_E4M3FN_ROW_BF16, kRows, kHidden, ops::LinearPolicy::AllowA8, 1, 1);
@@ -434,16 +448,98 @@ int run_fp8() {
         ++failures;
     }
 
-    failures += run_fp8_case(parent, 1, ops::LinearPolicy::A16Only, true);
-    failures += run_fp8_case(parent, 2, ops::LinearPolicy::A16Only);
+    failures += run_fp8_case(profile, parent, 1, ops::LinearPolicy::A16Only, true);
+    failures += run_fp8_case(profile, parent, 2, ops::LinearPolicy::A16Only);
     for (const std::int32_t tokens :
          {1,   2,   4,   8,   16,  17,  18,  32,  33,  48,  64,  65,  127,  128, 129,
           191, 192, 193, 255, 256, 257, 383, 384, 385, 511, 512, 513, 1024, 1025}) {
-        failures += run_fp8_case(
-            parent, tokens, tokens == 17 ? ops::LinearPolicy::AllowA4 : ops::LinearPolicy::AllowA8);
+        failures += run_fp8_case(profile, parent, tokens,
+                                 tokens == 17 ? ops::LinearPolicy::AllowA4
+                                              : ops::LinearPolicy::AllowA8);
     }
     for (int tokens : {4, 17, 128, 385, 512, 1025})
-        failures += run_fp8_case(parent, tokens, ops::LinearPolicy::AllowA8, false, true);
+        failures += run_fp8_case(profile, parent, tokens, ops::LinearPolicy::AllowA8, false, true);
+    return failures;
+}
+
+// The Flash-Next q/k/value/z rows of one complete RowScaleFp32 parent resolve through the public
+// weight-input entry to the parent's own native operand.
+int run_fp8_flash_next_prepared(const DevicePackedWeight& parent) {
+    constexpr std::uint64_t kHidden = 2560;
+    const std::vector<std::uint64_t> parent_shape{16384, kHidden};
+    WeightParent weight_parent;
+    weight_parent.geometry =
+        weight_geometry(QType::FP8_E4M3FN_ROW_FP32, QuantLayout::RowScaleFp32, parent_shape);
+    weight_parent.data = static_cast<const std::byte*>(parent.device.p);
+    const auto region  = [&](std::uint64_t row_begin, std::uint64_t rows) {
+        return WeightView{{rows, kHidden},
+                          {WeightRegion{&weight_parent, row_begin * kHidden,
+                                        (row_begin + rows) * kHidden}}};
+    };
+    const WeightView query = region(0, 2048);
+    const WeightView key   = region(2048, 2048);
+    const WeightView value = region(4096, 6144);
+    const WeightView z     = region(10240, 6144);
+    const auto prepared    = ops::prepare_gdn_input_proj_weights(
+        {query, ops::LinearPolicy::AllowA8}, {key, ops::LinearPolicy::AllowA8},
+        {value, ops::LinearPolicy::AllowA8}, {z, ops::LinearPolicy::AllowA8});
+    const auto* single = std::get_if<ops::SingleProjectionWeight>(&prepared);
+    const Weight expected = parent.view();
+    if (single == nullptr || single->policy != ops::LinearPolicy::AllowA8 ||
+        single->weight.qtype != expected.qtype || single->weight.layout != expected.layout ||
+        single->weight.scale_dtype != expected.scale_dtype || single->weight.n != expected.n ||
+        single->weight.k != expected.k || single->weight.qdata != expected.qdata ||
+        single->weight.scales != expected.scales) {
+        std::cerr << "FP8-FP32 K2560 GDN parent did not prepare to its native operand\n";
+        return 1;
+    }
+    return 0;
+}
+
+int run_fp8_flash_next() {
+    constexpr std::int32_t kHidden = 2560;
+    constexpr std::int32_t kRows   = 16384;
+    const Fp8Parent& profile       = kFp8Fp32K2560;
+    DevicePackedWeight parent(
+        quantized_weight::make_patterned_weight(QType::FP8_E4M3FN_ROW_FP32, kRows, kHidden, 619U));
+
+    int failures = run_fp8_flash_next_prepared(parent);
+    const auto capacity = [&](ops::LinearPolicy policy, std::int32_t first, std::int32_t last) {
+        return ops::gdn_input_proj_workspace_capacity_bytes(profile.qtype, kRows, kHidden, policy,
+                                                            first, last);
+    };
+    const std::size_t a8_17   = capacity(ops::LinearPolicy::AllowA8, 17, 17);
+    const std::size_t a8_257  = capacity(ops::LinearPolicy::AllowA8, 257, 257);
+    const std::size_t a8_8192 = capacity(ops::LinearPolicy::AllowA8, 8192, 8192);
+    if (capacity(ops::LinearPolicy::AllowA8, 1, 16) != 0 || a8_17 == 0 ||
+        capacity(ops::LinearPolicy::AllowA8, 1, 17) != a8_17 || a8_257 <= a8_17 ||
+        capacity(ops::LinearPolicy::AllowA8, 1, 8192) != a8_8192 ||
+        capacity(ops::LinearPolicy::A16Only, 1, 8192) != 0) {
+        std::cerr << "FP8-FP32 K2560 gdn input workspace interval contract mismatch\n";
+        ++failures;
+    }
+    // A FP32-scale parent is registered only at K=2560 and the BF16-scale one only at K=5120.
+    for (const auto [qtype, hidden] : {std::pair{QType::FP8_E4M3FN_ROW_FP32, 5120},
+                                       std::pair{QType::FP8_E4M3FN_ROW_BF16, 2560}}) {
+        try {
+            (void)ops::gdn_input_proj_workspace_capacity_bytes(
+                qtype, kRows, hidden, ops::LinearPolicy::A16Only, 1, 1);
+            std::cerr << "unregistered FP8 gdn input parent accepted\n";
+            ++failures;
+        } catch (const std::invalid_argument&) {}
+    }
+
+    failures += run_fp8_case(profile, parent, 1, ops::LinearPolicy::A16Only, true);
+    // A16 contraction boundaries, then the A8 frontier and its tile, TMA and split-K boundaries.
+    for (const std::int32_t tokens : {1, 2, 8, 16, 17, 24, 25, 32, 33, 64, 65, 96, 97, 512, 8192})
+        failures += run_fp8_case(profile, parent, tokens, ops::LinearPolicy::A16Only);
+    for (const std::int32_t tokens : {1,   2,   8,   16,  17,  32,  33,  64,  65,  128,  129,
+                                      192, 193, 256, 257, 384, 385, 512, 513, 1024, 8192})
+        failures += run_fp8_case(profile, parent, tokens,
+                                 tokens == 17 ? ops::LinearPolicy::AllowA4
+                                              : ops::LinearPolicy::AllowA8);
+    for (int tokens : {1, 17, 512})
+        failures += run_fp8_case(profile, parent, tokens, ops::LinearPolicy::AllowA8, false, true);
     return failures;
 }
 
@@ -460,6 +556,7 @@ int main() {
     failures += run_q8();
     failures += run_nvfp4();
     failures += run_fp8();
+    failures += run_fp8_flash_next();
     std::cout << (failures == 0 ? "OK" : "FAIL") << " gdn_input_proj\n";
     return failures == 0 ? 0 : 1;
 }

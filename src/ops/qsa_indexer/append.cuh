@@ -105,6 +105,7 @@ __global__ __launch_bounds__(kQsaHeadDim) void qsa_append_snapshot_kernel(
     const std::int32_t* __restrict__ rope_positions, const std::int32_t* __restrict__ table_rows,
     const std::int32_t* __restrict__ initial_slots,
     const std::int32_t* __restrict__ snapshot_base_slots,
+    const std::int32_t* __restrict__ valid_columns,
     const __nv_bfloat16* __restrict__ key_norm, __nv_bfloat16* raw_keys,
     std::int32_t* raw_positions, const std::int32_t* __restrict__ tables, int logical_pages,
     __nv_bfloat16* __restrict__ block_keys, int width, int batch) {
@@ -126,7 +127,7 @@ __global__ __launch_bounds__(kQsaHeadDim) void qsa_append_snapshot_kernel(
     }
     if (dim < 12) { forming_positions[dim / 3][dim % 3] = raw_positions[initial * 12 + dim]; }
     __syncthreads();
-    for (int w = 0; w < width; ++w) {
+    for (int w = 0; w < (valid_columns ? valid_columns[row] : width); ++w) {
         const int column = w + width * row;
         const int entry  = positions[column] & 3;
         forming[entry][dim] = __bfloat162float(

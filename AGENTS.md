@@ -90,7 +90,8 @@ applies with these additions, which take precedence where they differ:
   must leave the desktop usable (memory reserve, no whole-GPU assumptions).
 - The fork carries the supervisor app, serving extensions (structured output, token logprobs and
   `/v1/score`, System One, admin/telemetry endpoints) and the OrcaRouter checkpoint on v3;
-  Qwen3.8-Flash-Next is still to be ported as a second architecture package.
+  Qwen3.8-Flash-Next has a second native architecture package for text, MTP and Vision;
+  qualification is recorded separately from source integration.
   [Upstream ports](docs/maintainer/upstream-ports.md) records what was carried, dropped and
   deferred, the fork's deliberate divergences and qualification.
 - Upstream sync merges `origin/master` into the fork line and reverts rejected commits, so the

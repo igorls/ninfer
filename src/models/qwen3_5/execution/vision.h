@@ -30,7 +30,8 @@ struct VisionItemView {
 
 class VisionContext {
 public:
-    VisionContext(DeviceContext& device, const execution::Parameters& parameters);
+    VisionContext(DeviceContext& device, const VisionConfig& config,
+                  const VisionParameters& parameters);
 
     [[nodiscard]] static std::size_t workspace_bytes(const VisionConfig& config,
                                                      const VisionParameters& parameters,
@@ -62,7 +63,8 @@ struct VisionChunk {
 
 class VisionPrefillSession {
 public:
-    VisionPrefillSession(DeviceContext& device, const execution::Parameters& parameters,
+    VisionPrefillSession(DeviceContext& device, const VisionConfig& config,
+                         const VisionParameters& parameters,
                          DeviceSpan workspace, const VisionWorkspacePlan& workspace_plan,
                          qwen3_5::PreparedPromptData& prompt, const VisionPrefillPlan& plan,
                          std::size_t& handoff_peak_bytes);

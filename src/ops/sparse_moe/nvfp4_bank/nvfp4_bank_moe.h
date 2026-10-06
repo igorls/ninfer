@@ -21,10 +21,11 @@ inline constexpr std::int32_t kNvfp4MoeTopK         = 10;
 inline constexpr std::int32_t kNvfp4MoePaths        = kNvfp4MoeTopK + 1; // ten routed + shared
 inline constexpr std::int32_t kNvfp4MoeIntermediate = 640;
 
-// Private route boundaries. Decode keeps one fused router launch and warp-per-row expert kernels;
-// grouped prefill loads each active expert once per call. The A4 Tensor Core arm replaces the SIMT
-// arm from the extent where activation quantization is repaid.
-inline constexpr std::int32_t kNvfp4MoeDecodeMaxTokens = 8;
+// Private route boundaries. Decode keeps one score-projection launch, selection inside the
+// gate/up kernel and warp-per-row expert kernels; grouped prefill loads each active expert once
+// per call. The A4 Tensor Core arm replaces the SIMT arm from the extent where activation
+// quantization is repaid.
+inline constexpr std::int32_t kNvfp4MoeDecodeMaxTokens = 48;
 inline constexpr std::int32_t kNvfp4MoeA4MinTokens     = 256;
 
 enum class Nvfp4MoeRoute : std::uint8_t { Decode, GroupedA16, GroupedA4 };
@@ -37,7 +38,6 @@ struct Nvfp4MoeWorkspace {
     Tensor weights;      // FP32 [10,T] renormalized route weights
     Tensor shared_scale; // FP32 [T]
     Tensor activations;  // BF16 [640,11,T]: ten routed paths then the shared path
-    Tensor arrivals;     // I32 [4]: decode router completion counter
     // Grouped routes.
     Tensor expert_counts;  // I32 [512]
     Tensor expert_offsets; // I32 [513]
@@ -46,7 +46,8 @@ struct Nvfp4MoeWorkspace {
     Tensor grouped_tokens; // I32 [10T]
     Tensor grouped_paths;  // I32 [10T]
     Tensor token_to_pos;   // I32 [10T]
-    Tensor shared_gemm;    // BF16 [640,2T]: shared gate then shared up / product
+    Tensor shared_gemm;    // FP32 [640,2T]: private shared gate and up projections
+    Tensor shared_product; // BF16 [640,T]: SwiGLU product
     // GroupedA16.
     Tensor down_partials; // FP32 [10,2560,T]
     // GroupedA4.
@@ -66,7 +67,6 @@ Nvfp4MoeWorkspace allocate_nvfp4_moe_workspace(Arena& arena, std::int32_t tokens
     out.weights      = arena.alloc(DType::FP32, {kNvfp4MoeTopK, tokens});
     out.shared_scale = arena.alloc(DType::FP32, {tokens});
     out.activations  = arena.alloc(DType::BF16, {kNvfp4MoeIntermediate, kNvfp4MoePaths, tokens});
-    out.arrivals     = arena.alloc(DType::I32, {4});
     if (route == Nvfp4MoeRoute::Decode) { return out; }
 
     const std::int32_t items = kNvfp4MoeTopK * tokens;
@@ -77,11 +77,12 @@ Nvfp4MoeWorkspace allocate_nvfp4_moe_workspace(Arena& arena, std::int32_t tokens
     out.grouped_tokens       = arena.alloc(DType::I32, {items});
     out.grouped_paths        = arena.alloc(DType::I32, {items});
     out.token_to_pos         = arena.alloc(DType::I32, {items});
-    out.shared_gemm          = arena.alloc(DType::BF16, {kNvfp4MoeIntermediate, 2 * tokens});
+    out.shared_gemm          = arena.alloc(DType::FP32, {kNvfp4MoeIntermediate, 2 * tokens});
     if (route == Nvfp4MoeRoute::GroupedA16) {
         out.down_partials = arena.alloc(DType::FP32, {kNvfp4MoeTopK, kNvfp4MoeHidden, tokens});
         return out;
     }
+    out.shared_product = arena.alloc(DType::BF16, {kNvfp4MoeIntermediate, tokens});
     out.input_codes  = arena.alloc(DType::U8, {kNvfp4MoeHidden / 2, tokens});
     out.input_scales = arena.alloc(DType::U8, {kNvfp4MoeHidden / 16, tokens});
     out.product_codes =
@@ -94,7 +95,8 @@ Nvfp4MoeWorkspace allocate_nvfp4_moe_workspace(Arena& arena, std::int32_t tokens
 
 [[nodiscard]] std::size_t nvfp4_moe_workspace_bytes(std::int32_t tokens, Nvfp4MoeRoute route);
 
-// Router projection, top-10 selection, renormalization and shared-expert gate.
+// Router score projection; grouped routes also select (top-10, renormalized weights, shared
+// scale). The decode route selects inside nvfp4_moe_decode.
 void nvfp4_moe_route(const Tensor& x, const SparseMoeNvfp4BankWeights& weights,
                      const Nvfp4MoeWorkspace& workspace, cudaStream_t stream);
 

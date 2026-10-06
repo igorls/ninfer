@@ -34,7 +34,7 @@ void launch_fp8_a16_simt(const Fp8A16OperandsT<Scale>& p, Output output, Epilogu
         throw std::invalid_argument(
             "FP8 SIMT requires complete row/K tiles and matching token capacity");
     if constexpr (requires { Epilogue::kRowTokens; }) {
-        if (p.tokens != Epilogue::kRowTokens)
+        if (p.tokens % Epilogue::kRowTokens != 0)
             throw std::invalid_argument("FP8 row epilogue requires its complete token interval");
     }
     const int capacity = Schedule::kTokenCapacity ? Schedule::kTokenCapacity : p.tokens;

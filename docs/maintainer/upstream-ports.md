@@ -278,21 +278,60 @@ Approved by Igor, 2026-09-27 and 2026-09-28.
 `tools/freq_corpus/fixtures/ranking/*.i64` are upstream's own files (the default ranking of the
 27B proposal head) and stay.
 
+## Flash-Next v3
+
+**Source integrated in the working tree, October 4, 2026; qualification below.**
+The `workstation` working tree carries the text port from
+`m3/4-text@577a1bcd` over its `6ad46d87` base, with native MTP and Vision added on the current
+workstation Engine contract. The original architecture source remains the pre-v3
+`research/qwen4-flash-next` line. No generic model base class or alternate inference route was
+introduced.
+
+The package now includes text prefill/decode, QSA/GDN/PLE continuation state, causal scoring and
+hidden-row readout, CUDA Graphs, prefix reuse, constrained output, recursive MTP drafting with
+accepted-prefix replay, and the shared Vision encoder through explicit Vision parameters.
+MTP keeps its own QSA forming-block state and KV frontier; verification snapshots are disjoint
+from resident checkpoints. Vision BF16 projection shapes include the 4304-wide partial-K tail.
+A disjoint MoE workspace fixes operand overlap in the recovered text port. Keeping the wide
+hyper-connection up projection in FP32 fixes a scoring/readout discrepancy. Batched GDN
+projection/convolution retains FP32 and the single-row accumulation order to prevent an
+away-from-tie trajectory divergence.
+
+Qualification uses a Colab G4 RTX PRO 6000 Blackwell Server Edition, CUDA 13.3 and GCC 13.3.
+Focused checks pass for text graph/eager parity, strict B=2/4/8 comparison (remaining differences
+at exact ties), scoring/readout, MTP K=1/3/5 graph replay and eight heterogeneous requests,
+ragged budgets, context limits, FP8 KV across QSA selection, seeded sampling with penalties,
+constrained JSON, image reuse and ordered video frames. Host pressure demonstrably transfers
+both recurrent state and KV, including MTP KV; resumed tokens exactly match device-only resume.
+Changed math passes independent FP64/codec oracles at the affected production shapes.
+
+End-to-end v2 parity is **not accepted**: the 27-request BF16 comparison has 8 identical
+trajectories, a 9.625-nat first-divergence gap on one tool prompt, and mean/maximum absolute prompt
+logprob differences of 0.948762/16.452988 nats. The shared-prefix top-20 proxy meets its mean/p99 bounds;
+the greedy-gap and prompt-logprob criteria fail. Causal-prefix independence passes exactly.
+The active plan preserves the criteria, reference route variation and ongoing attribution.
+
+The strengthened MTP target comparison initially failed beyond its 0.05-nat tie bound.
+Corrections preserve ordinary decode projection arithmetic across speculative widths and fix
+QSA's batch-dependent FP16 probability partitioning. The K=1/3/5 eight-prompt comparison now
+matches all 96 generated tokens per request. All 16 focused Engine cases pass after correcting
+case-sensitive image/video assertions; current ordinary/MTP timings include the correction costs.
+
+MSVC 19.51 and CUDA 13.3 compile and link the native Windows Engine test, CLI, server and Supervisor. Build outputs
+were redirected after the original build volume exhausted disk space; the link reports a CRT
+library conflict warning. Windows GPU runtime qualification remains open. The desktop GPU was
+not used. Current and earlier G4 performance/resource results and their costs are in
+[performance](../performance.md#flash-next-v3-on-colab-g4-2026-10-04); the
+[active plan](../research/flash-next-v3-port-2026-09-29.md) distinguishes this implementation
+from the wider historical M3 qualification criteria. The Supervisor accepts K=1..5 and rejects an optimized draft head for Flash-Next; its native
+CPU test passes. This source integration is uncommitted.
+
+DFlash/DFlash2, v2-only draft-head shortlists and alternate GDN-state/attention modes are not
+part of this architecture's v3 contract. MTP uses the full stored output head; BF16 and FP8
+row-256 KV are the supported cache representations.
+
 ## Deferred
 
-- **Qwen3.8-Flash-Next (M3), waiting for Igor's go-ahead.** Its source is the 140 Flash-Next commits
-  of `research/qwen4-flash-next` (`6314ab02` to `4cd6b5f4`, interleaved with other work); the
-  per-commit notes are in git
-  history (`git show 27426227:docs/research/upstream-v3-port-2026-09-27.md`). It becomes a second
-  architecture package beside `src/models/qwen3_5` with its own v3 converter recipe and artifact.
-  Pieces outside the Flash-Next directories are easy to miss: the v2 artifact formats and mapped
-  payloads (`6314ab02`, `8a824a23`, `e52495e4`, `b8619496`), Flash-Next Ops under `src/ops`
-  (FP8 projections, QSA, PLE, hyper-connections, MoE, BF16 vision shapes), the shared vision
-  encoder refactor (`f362fd0f`), Engine and serve options (FP8 head and embedding, BF16 GDN state,
-  QSA MMA prefill, draft floor), the shrinkable device buffer (`00ad2b86`), selected-block split
-  attention (`bb7b7305`), `841f8361`, the draft-head shortlists (`shortlist_32k.i32`,
-  `shortlist_65k.i32`), `tools/reference/qwen3_8_flash_next`, its model card and performance
-  records.
 - **Matched Flash-Next versus Qwen3.8-27B prefill study.** Resume with M3: same workstation,
   matched application texts and supported contexts, verified cold and 90%-cached ratios, TTFT,
   uncached prefill and complete request latency reported separately.

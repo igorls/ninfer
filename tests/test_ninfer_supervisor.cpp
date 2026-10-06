@@ -1614,8 +1614,12 @@ int test_engine_param_validation() {
                 "qwen3.8-27b-orcarouter").empty(), "OrcaRouter MTP rejects six drafts");
     f += check(!validate_engine_param_combination({{"spec", "mtp"}, {"draft_tokens", "6"}},
                 "qwen3.8-27b").empty(), "MTP rejects six drafts");
-    f += check(!validate_engine_param_combination({{"spec", "mtp"}, {"draft_tokens", "5"}},
-                "qwen3.8-flash-next").empty(), "Flash MTP rejects five drafts");
+    f += check(validate_engine_param_combination({{"spec", "mtp"}, {"draft_tokens", "5"}},
+                "qwen3.8-flash-next").empty(), "Flash MTP permits five drafts");
+    f += check(!validate_engine_param_combination({{"spec", "mtp"}, {"draft_tokens", "6"}},
+                "qwen3.8-flash-next").empty(), "Flash MTP rejects six drafts");
+    f += check(!validate_engine_param_combination({{"spec", "mtp"}, {"lm_head_draft", "true"}},
+                "qwen3.8-flash-next").empty(), "Flash MTP requires its full output head");
     f += check(!validate_engine_param_combination({{"spec", "dflash2"}},
                 "qwen3.8-flash-next").empty(), "Flash rejects DFlash2");
     f += check(!validate_engine_param_combination({{"lm_head_draft", "true"}}).empty(),

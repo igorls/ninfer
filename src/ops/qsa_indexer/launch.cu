@@ -51,6 +51,7 @@ void qsa_append_shared_row_launch(const Tensor& projected, const Tensor& positio
 void qsa_append_snapshot_launch(const Tensor& projected, const Tensor& positions,
                                 const Tensor& rope_positions, const Tensor& table_rows,
                                 const Tensor& initial_slots, const Tensor& snapshot_base_slots,
+                        const Tensor& valid_columns,
                                 const Tensor& key_norm, const Tensor& raw_keys,
                                 const Tensor& raw_positions, QsaTableView table,
                                 const Tensor& block_keys, std::int32_t width, std::int32_t batch,
@@ -58,7 +59,7 @@ void qsa_append_snapshot_launch(const Tensor& projected, const Tensor& positions
     qsa_append_snapshot_kernel<<<batch, kQsaHeadDim, 0, stream>>>(
         as<__nv_bfloat16>(projected), as<std::int32_t>(positions), as<std::int32_t>(rope_positions),
         as<std::int32_t>(table_rows), as<std::int32_t>(initial_slots),
-        as<std::int32_t>(snapshot_base_slots), as<__nv_bfloat16>(key_norm),
+        as<std::int32_t>(snapshot_base_slots), as<std::int32_t>(valid_columns), as<__nv_bfloat16>(key_norm),
         as_mutable<__nv_bfloat16>(raw_keys), as_mutable<std::int32_t>(raw_positions), table.tables,
         table.logical_pages, as_mutable<__nv_bfloat16>(block_keys), width, batch);
     CUDA_CHECK(cudaGetLastError());

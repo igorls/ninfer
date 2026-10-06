@@ -508,20 +508,26 @@ int main() {
     // Public extents only: T = 1, a small decode batch, its end, the first grouped extents, the
     // grouped interior, the prefill anchor and a full 8192-token chunk. A16Only keeps every
     // routed product on represented BF16 activations at every T.
-    static constexpr std::array<Case, 9> kA16Cases{{{1, false},
+    static constexpr std::array<Case, 12> kA16Cases{{{1, false},
                                                     {1, true},
                                                     {2, false},
                                                     {8, false},
                                                     {9, false},
+                                                    {47, false},
+                                                    {48, true},
+                                                    {49, false},
                                                     {64, true},
                                                     {255, false},
                                                     {256, false},
                                                     {1000, false}}};
-    static constexpr std::array<Case, 12> kA4Cases{{{1, false},
+    static constexpr std::array<Case, 15> kA4Cases{{{1, false},
                                                     {7, false},
                                                     {8, true},
                                                     {9, false},
                                                     {10, false},
+                                                    {47, false},
+                                                    {48, true},
+                                                    {49, false},
                                                     {255, false},
                                                     {256, false},
                                                     {257, false},

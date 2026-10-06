@@ -914,9 +914,11 @@ inline std::vector<std::string> validate_engine_param_combination(
     if (head != nullptr && *head == "true" && spec_backend == nullptr) {
         errors.emplace_back("Optimized draft head requires a speculative backend");
     }
+    if (model_identity == "qwen3.8-flash-next" && head != nullptr && *head == "true") {
+        errors.emplace_back("Flash-Next MTP requires the full output head");
+    }
     if (spec_backend != nullptr) {
-        const bool flash = model_identity == "qwen3.8-flash-next";
-        const int limit = *spec_backend == "mtp" ? (flash ? 4 : 5) : 15;
+        const int limit = *spec_backend == "mtp" ? 5 : 15;
         long long count = 0;
         if (draft_tokens && parse_long_long(*draft_tokens, count) && (count < 1 || count > limit)) {
             errors.emplace_back("Draft tokens must be between 1 and " + std::to_string(limit) +

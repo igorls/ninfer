@@ -975,10 +975,20 @@ int run_nvfp4() {
     return failures;
 }
 
-int run_fp8_case(DevicePackedWeight& parent, std::int32_t tokens, ops::LinearPolicy policy,
-                 std::int32_t initial_slot, bool convenience = false,
+// The registered row-scaled FP8 [16384,K] parents share the route frontier and criteria.
+struct Fp8Parent {
+    QType qtype;
+    std::int32_t hidden;
+    const char* label;
+};
+
+constexpr Fp8Parent kFp8Bf16K5120{QType::FP8_E4M3FN_ROW_BF16, 5120, "FP8"};
+constexpr Fp8Parent kFp8Fp32K2560{QType::FP8_E4M3FN_ROW_FP32, 2560, "FP8-FP32 K2560"};
+
+int run_fp8_case(const Fp8Parent& profile, DevicePackedWeight& parent, std::int32_t tokens,
+                 ops::LinearPolicy policy, std::int32_t initial_slot, bool convenience = false,
                  bool shared_state_selectors = false) {
-    constexpr std::int32_t kHidden               = 5120;
+    const std::int32_t kHidden                   = profile.hidden;
     constexpr std::int32_t kValueRows            = 6144;
     constexpr std::int32_t kZRows                = 6144;
     constexpr std::int32_t kChannels             = 10240;
@@ -1018,7 +1028,7 @@ int run_fp8_case(DevicePackedWeight& parent, std::int32_t tokens, ops::LinearPol
     Tensor v                          = value.tensor();
     Tensor z_output                   = z.tensor();
     const std::size_t workspace_bytes = ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
-        QType::FP8_E4M3FN_ROW_BF16, kRows, kHidden, policy, 1, tokens, tokens);
+        profile.qtype, kRows, kHidden, policy, 1, tokens, tokens);
     WorkspaceArena workspace(std::max<std::size_t>(256, workspace_bytes));
 
     if (convenience) {
@@ -1044,7 +1054,8 @@ int run_fp8_case(DevicePackedWeight& parent, std::int32_t tokens, ops::LinearPol
     const ReductionCriterion& criterion = uses_a8 ? kFp8GdnInputProjConvSnapshotA8Tolerance
                                                   : kFp8GdnInputProjConvSnapshotA16Tolerance;
     const std::string suffix =
-        std::string(" FP8 ") + (uses_a8 ? "A8" : "A16") + " T=" + std::to_string(tokens) +
+        std::string(" ") + profile.label + (uses_a8 ? " A8" : " A16") +
+        " T=" + std::to_string(tokens) +
         " initial=" + std::to_string(initial_slot) + " base=" + std::to_string(snapshot_base_slot);
     const std::vector<std::uint16_t> state_after = state.bits();
     int failures =
@@ -1078,66 +1089,106 @@ int run_fp8_case(DevicePackedWeight& parent, std::int32_t tokens, ops::LinearPol
     return failures;
 }
 
-int run_fp8() {
-    constexpr std::int32_t kHidden    = 5120;
+// Batched AllowA8 snapshot of one FP8 profile through the shared batched-case harness.
+int run_fp8_batched(const Fp8Parent& profile, DevicePackedWeight& parent, std::int32_t width,
+                    std::int32_t batch, std::vector<std::int32_t> valid_columns,
+                    std::uint32_t seed, ops::LinearPolicy policy = ops::LinearPolicy::AllowA8) {
+    const std::int32_t kHidden        = profile.hidden;
     constexpr std::int32_t kValueRows = 6144;
     constexpr std::int32_t kZRows     = 6144;
     constexpr std::int32_t kChannels  = 10240;
     constexpr std::int32_t kRows      = kChannels + kZRows;
+    const std::vector<float> conv_weight = make_conv_weight(kChannels, seed);
+    const bool uses_a8 = policy != ops::LinearPolicy::A16Only && width * batch >= 17;
+    const std::size_t workspace_bytes = ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
+        profile.qtype, kRows, kHidden, policy, batch, width, width);
+    return run_batched_case(
+        std::string(profile.label) +
+            (policy == ops::LinearPolicy::A16Only ? " A16Only" : " AllowA8") +
+            " B=" + std::to_string(batch) + " W=" + std::to_string(width),
+        kHidden,
+        kValueRows, kZRows, width, batch, std::move(valid_columns), conv_weight, workspace_bytes,
+        uses_a8 ? kFp8GdnInputProjConvSnapshotA8Tolerance
+                : kFp8GdnInputProjConvSnapshotA16Tolerance,
+        [&](std::int32_t row, std::int32_t flat_column, const std::vector<float>& activation) {
+            return quantized_weight::dot_fp64(
+                parent.host, row,
+                activation.data() + static_cast<std::size_t>(flat_column) * kHidden, kHidden);
+        },
+        [&](std::int32_t row, std::int32_t flat_column, const std::vector<float>& activation) {
+            return quantized_weight::dot_fp64(
+                parent.host, kChannels + row,
+                activation.data() + static_cast<std::size_t>(flat_column) * kHidden, kHidden);
+        },
+        [&](const Tensor& x, const Tensor& conv, Tensor& state, const Tensor& valid,
+            const Tensor& initial, const Tensor& snapshot_base, Tensor& q, Tensor& k, Tensor& v,
+            Tensor& z, WorkspaceArena& workspace) {
+            ops::gdn_input_proj_conv_snapshot(x, parent.view(), conv, state, valid, initial,
+                                              snapshot_base, q, k, v, z, policy, workspace,
+                                              nullptr);
+        });
+}
+
+int run_fp8() {
+    constexpr std::int32_t kHidden    = 5120;
+    constexpr std::int32_t kZRows     = 6144;
+    constexpr std::int32_t kChannels  = 10240;
+    constexpr std::int32_t kRows      = kChannels + kZRows;
+    const Fp8Parent& profile          = kFp8Bf16K5120;
     DevicePackedWeight parent(
         quantized_weight::make_patterned_weight(QType::FP8_E4M3FN_ROW_BF16, kRows, kHidden, 929U));
 
     int failures = 0;
-    failures += run_fp8_case(parent, 1, ops::LinearPolicy::A16Only, 2, true, true);
-    failures += run_fp8_case(parent, 3, ops::LinearPolicy::A16Only, 4);
-    failures += run_fp8_case(parent, 4, ops::LinearPolicy::A16Only, 5);
-    failures += run_fp8_case(parent, 6, ops::LinearPolicy::A16Only, 7);
-    failures += run_fp8_case(parent, 7, ops::LinearPolicy::A16Only, 8);
-    failures += run_fp8_case(parent, 9, ops::LinearPolicy::AllowA8, 10);
-    failures += run_fp8_case(parent, 10, ops::LinearPolicy::AllowA8, 11);
-    failures += run_fp8_case(parent, 10, ops::LinearPolicy::A16Only, 11);
-    failures += run_fp8_case(parent, 11, ops::LinearPolicy::A16Only, 12);
-    failures += run_fp8_case(parent, 16, ops::LinearPolicy::AllowA8, 17);
-    failures += run_fp8_case(parent, 17, ops::LinearPolicy::AllowA8, 1);
-    failures += run_fp8_case(parent, 257, ops::LinearPolicy::AllowA8, 258);
-    failures += run_fp8_case(parent, 512, ops::LinearPolicy::AllowA8, 513);
-    failures += run_fp8_case(parent, 1025, ops::LinearPolicy::AllowA8, 1026);
+    failures += run_fp8_case(profile, parent, 1, ops::LinearPolicy::A16Only, 2, true, true);
+    failures += run_fp8_case(profile, parent, 3, ops::LinearPolicy::A16Only, 4);
+    failures += run_fp8_case(profile, parent, 4, ops::LinearPolicy::A16Only, 5);
+    failures += run_fp8_case(profile, parent, 6, ops::LinearPolicy::A16Only, 7);
+    failures += run_fp8_case(profile, parent, 7, ops::LinearPolicy::A16Only, 8);
+    failures += run_fp8_case(profile, parent, 9, ops::LinearPolicy::AllowA8, 10);
+    failures += run_fp8_case(profile, parent, 10, ops::LinearPolicy::AllowA8, 11);
+    failures += run_fp8_case(profile, parent, 10, ops::LinearPolicy::A16Only, 11);
+    failures += run_fp8_case(profile, parent, 11, ops::LinearPolicy::A16Only, 12);
+    failures += run_fp8_case(profile, parent, 16, ops::LinearPolicy::AllowA8, 17);
+    failures += run_fp8_case(profile, parent, 17, ops::LinearPolicy::AllowA8, 1);
+    failures += run_fp8_case(profile, parent, 257, ops::LinearPolicy::AllowA8, 258);
+    failures += run_fp8_case(profile, parent, 512, ops::LinearPolicy::AllowA8, 513);
+    failures += run_fp8_case(profile, parent, 1025, ops::LinearPolicy::AllowA8, 1026);
 
-    const auto run_batched = [&](std::int32_t width, std::int32_t batch,
-                                 std::vector<std::int32_t> valid_columns, std::uint32_t seed) {
-        const std::vector<float> conv_weight = make_conv_weight(kChannels, seed);
-        const bool uses_a8                   = width * batch >= 17;
-        const std::size_t workspace_bytes =
-            ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
-                QType::FP8_E4M3FN_ROW_BF16, kRows, kHidden, ops::LinearPolicy::AllowA8, batch,
-                width, width);
-        return run_batched_case(
-            "FP8 AllowA8 B=" + std::to_string(batch) + " W=" + std::to_string(width), kHidden,
-            kValueRows, kZRows, width, batch, std::move(valid_columns), conv_weight,
-            workspace_bytes,
-            uses_a8 ? kFp8GdnInputProjConvSnapshotA8Tolerance
-                    : kFp8GdnInputProjConvSnapshotA16Tolerance,
-            [&](std::int32_t row, std::int32_t flat_column, const std::vector<float>& activation) {
-                return quantized_weight::dot_fp64(
-                    parent.host, row,
-                    activation.data() + static_cast<std::size_t>(flat_column) * kHidden, kHidden);
-            },
-            [&](std::int32_t row, std::int32_t flat_column, const std::vector<float>& activation) {
-                return quantized_weight::dot_fp64(
-                    parent.host, kChannels + row,
-                    activation.data() + static_cast<std::size_t>(flat_column) * kHidden, kHidden);
-            },
-            [&](const Tensor& x, const Tensor& conv, Tensor& state, const Tensor& valid,
-                const Tensor& initial, const Tensor& snapshot_base, Tensor& q, Tensor& k, Tensor& v,
-                Tensor& z, WorkspaceArena& workspace) {
-                ops::gdn_input_proj_conv_snapshot(x, parent.view(), conv, state, valid, initial,
-                                                  snapshot_base, q, k, v, z,
-                                                  ops::LinearPolicy::AllowA8, workspace, nullptr);
-            });
-    };
-    failures += run_batched(4, 2, {4, 2}, 937U);
-    failures += run_batched(16, 8, {16, 13, 11, 7, 5, 3, 2, 1}, 941U);
+    failures += run_fp8_batched(profile, parent, 4, 2, {4, 2}, 937U);
+    failures += run_fp8_batched(profile, parent, 16, 8, {16, 13, 11, 7, 5, 3, 2, 1}, 941U);
     failures += parent.verify_preserved("batched FP8 parent weight");
+    return failures;
+}
+
+// Flash-Next FP32-scale [16384,2560] parent: B=1 decode and prefill route boundaries (fused
+// W=1..6, materialized W>=7, A8 from W=17) and the batched decode domain B=2..8.
+int run_fp8_flash_next() {
+    constexpr std::int32_t kHidden   = 2560;
+    constexpr std::int32_t kZRows    = 6144;
+    constexpr std::int32_t kChannels = 10240;
+    constexpr std::int32_t kRows     = kChannels + kZRows;
+    const Fp8Parent& profile         = kFp8Fp32K2560;
+    DevicePackedWeight parent(
+        quantized_weight::make_patterned_weight(QType::FP8_E4M3FN_ROW_FP32, kRows, kHidden, 947U));
+
+    int failures = 0;
+    failures += run_fp8_case(profile, parent, 1, ops::LinearPolicy::A16Only, 2, true, true);
+    for (const auto policy : {ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA8}) {
+        for (const std::int32_t tokens : {1, 2, 3, 4, 5, 6, 7, 8, 16, 17, 64, 512}) {
+            failures += run_fp8_case(profile, parent, tokens, policy, tokens + 1);
+        }
+    }
+    failures += run_fp8_case(profile, parent, 1025, ops::LinearPolicy::AllowA8, 1026);
+
+    for (const auto policy : {ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA8}) {
+        for (std::int32_t batch = 2; batch <= 8; ++batch) {
+            failures += run_fp8_batched(profile, parent, 1, batch, {}, 951U + batch, policy);
+        }
+    }
+    failures += run_fp8_batched(profile, parent, 1, 8, {1, 0, 1, 1, 0, 1, 1, 1}, 961U);
+    failures += run_fp8_batched(profile, parent, 4, 8, {4, 3, 2, 1, 4, 4, 2, 1}, 967U);
+    failures += run_fp8_batched(profile, parent, 6, 8, {6, 0, 5, 4, 3, 2, 1, 6}, 971U);
+    failures += parent.verify_preserved("Flash-Next FP8 parent weight");
     return failures;
 }
 
@@ -1185,13 +1236,25 @@ int main() {
         return ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
             QType::FP8_E4M3FN_ROW_BF16, 16384, 5120, policy, batch, min_width, max_width);
     };
+    const auto fp8_fp32_snapshot_capacity = [](ops::LinearPolicy policy, std::int32_t batch,
+                                               std::int32_t min_width, std::int32_t max_width) {
+        return ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
+            QType::FP8_E4M3FN_ROW_FP32, 16384, 2560, policy, batch, min_width, max_width);
+    };
     for (auto policy : {ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA8}) {
         for (int batch : {1, 2, 8}) {
-            std::size_t peak = 0;
+            std::size_t peak      = 0;
+            std::size_t fp32_peak = 0;
             for (int width = 1; width <= 16; ++width) {
                 peak = std::max(peak, fp8_snapshot_capacity(policy, batch, width, width));
                 if (fp8_snapshot_capacity(policy, batch, 1, width) != peak) {
                     std::cerr << "FP8 snapshot interval misses an execution capacity\n";
+                    ++failures;
+                }
+                fp32_peak =
+                    std::max(fp32_peak, fp8_fp32_snapshot_capacity(policy, batch, width, width));
+                if (fp8_fp32_snapshot_capacity(policy, batch, 1, width) != fp32_peak) {
+                    std::cerr << "FP8-FP32 K2560 snapshot interval misses an execution capacity\n";
                     ++failures;
                 }
             }
@@ -1201,6 +1264,7 @@ int main() {
     failures += run_q8();
     failures += run_nvfp4();
     failures += run_fp8();
+    failures += run_fp8_flash_next();
     std::cout << (failures == 0 ? "OK" : "FAIL") << " gdn_input_proj_conv_snapshot\n";
     return failures == 0 ? 0 : 1;
 }

@@ -9,6 +9,138 @@ text `model_type = qwen4_exp_text`) becomes a second v3 architecture package bes
 `src/models/qwen3_5`, with a v3 artifact. All development and qualification runs on Colab G4. The
 on-site RTX PRO 6000 Workstation Edition only receives the finished build and artifact.
 
+## Current workstation implementation (2026-10-04)
+
+The current user deliverable is the native v3 Flash-Next package on `workstation`, including
+**text, MTP and Vision in this pass**, with GPU validation only on Colab G4. No local GPU use,
+commit, release or deployment is part of this pass. The current base is `2969beee`; text was
+recovered from `m3/4-text@577a1bcd` relative to `6ad46d87`, then adapted to the current Engine.
+MTP and Vision were implemented here. Earlier measurements and criteria below remain historical
+evidence; they are not silently replaced by the current checks.
+
+The selected implementation has package-owned Parameters, Program, StateImage, planning and
+transactions, a closed Engine variant, and the shared frontend/Vision encoder through explicit
+Vision parameters. Model code composes Ops and owns continuation semantics. Ops retain math;
+there is no alternate inference route, runtime repacking, family base class or DFlash placeholder.
+The package carries its explicit scheduling code; keeping it aligned with future Engine contract
+changes is a maintenance cost. Shared-source changes include the Engine dispatch, Vision
+constructor seam, registered Op geometries and finite kernel routes.
+
+| Dimension | Current evidence / status |
+|---|---|
+| Text behavior | Native prefill/decode, CUDA Graphs, prefix reuse/catalog turnover, logprobs, structured output, causal scoring and final 2560-wide hidden export implemented. Focused real-artifact Engine checks pass. |
+| Numerical semantics | Changed Ops use independent FP64/codec oracles and real shapes. Scoring versus prompt readout max absolute difference 9.53674e-07 nats, below unchanged 0.05. Text B=2/4/8 passes unchanged 0.05-nat near-tie criterion. Changing future tokens at fixed extents 64/1024/2200 leaves predictor prefixes exactly equal, including beyond QSA's sparse boundary. The saved-v2 comparison below fails the greedy-gap and prompt-logprob criteria; numerical acceptance remains open. |
+| MTP | Full-head K=1..5, target verification width K+1, recursive drafts, teacher extension, GDN accepted-prefix fold and private QSA/PLE snapshots implemented. K=1/3/5 graph/eager equality, ragged budgets, eight distinct active requests, context-tail limits, FP8 KV at the 2048-token QSA selection boundary, seeded stochastic penalties and constrained output pass. |
+| Continuation state | MTP owns a separate indexer and KV frontier E-1 at target frontier E. Host pressure transfers state and both KV families; plain and MTP resumes match device-only tokens exactly. State-image clone/reset/isolation and incompatible host geometry tests pass. |
+| Vision | Shared 27-layer encoder, 2560 merger, bounded startup workspace/handoff, chunked media scatter and three-axis continuation positions implemented. Red/blue image discrimination, prefix reuse and ordered red-then-blue video pass with ordinary and MTP generation. BF16 4304-wide partial-K projection tails pass the independent oracle. |
+| Interfaces | Public Engine, CLI/serve and CausalScoring dispatch to the package. BF16/FP8 KV and full MTP head are supported; DFlash, DFlash2 and optimized draft shortlists are rejected before loading. Python conversion checks: 3 passed on Python 3.11.17. |
+| Performance/resources | Current same-allocation G4 MTP0/3/5 corpus measurements, concurrency 2/4/8 ordinary serving and C=8 MTP3/5, numerical-fix costs and resource accounting are recorded in [performance](../performance.md#flash-next-v3-on-colab-g4-2026-10-04). MTP5 loses 23.7% decode throughput on the short B=1 input; at C=8 MTP3/5 lose 8.5%/25.0% versus ordinary decode. Longer B=1 continuations improve. These are workload-specific results. |
+| Platform | Linux Release CUDA 13.3/GCC 13.3 built and ran on G4. Native MSVC 19.51/CUDA 13.3 builds compile and link the Engine test, CLI, server and Supervisor. Outputs were redirected after the original build volume exhausted space; the linker reports LNK4098 (CRT-library conflict). Windows GPU execution and release packaging remain unverified. No local GPU was used. |
+
+Failures found and disposition:
+
+- The recovered MoE route could overlap operands with the root scratch arena. A disjoint
+  subarena fixes ownership; the original oracle tolerances were retained.
+- The wide hyper up projection rounded before sigmoid and produced a 0.109504-nat scoring
+  discrepancy. Keeping that private result in FP32 fixes it without relaxing the 0.05 criterion.
+- Batched GDN rounded before convolution and diverged at a 0.125-nat reference gap. Retaining
+  FP32 with the B=1 reduction order fixes it. A Tensor Core alternative passed its local FP64
+  oracle but still failed the Engine criterion and was rejected. Performance costs of the
+  initial per-row route and the selected shared-weight route remain reported.
+- Initial host pressure fixtures selected device state, so they did not demonstrate host
+  restore. The corrected fixture forces state and KV transfers and compares exact output.
+  An older catalog test forced post-EOS output that could not be re-rendered; turnover now uses
+  normal EOS behavior while the separate raw-token identity test keeps forced output.
+- A stronger eight-request MTP target comparison failed on four rows, with a worst reference
+  gap of 2.75 nats against the unchanged 0.05 bound. Verification's aggregate width had
+  accidentally enabled prefill A8 projection. Enforcing decode A16 removes three failures;
+  one 0.125-nat divergence remained. Fused recurrent projection windows pass the original
+  comparison against the target-only MTP fallback. The strengthened comparison against
+  ordinary decoding still fails at K=1/3/5 (0.125-nat gaps). Rounding intra-window history
+  to its persistent BF16 form did not resolve it and exposed a 1.75-nat worst gap. Earlier
+  graph equality, budget and first-token checks did not test this property. Subsequent
+  short-width FP8, hyper and MoE route harmonization passed their independent Op oracles but
+  did not close the Engine gap (worst intermediate gap 3.375 nats). The shared MoE projection
+  now keeps private gate/up accumulators in FP32 before SwiGLU, increasing workspace by
+  2,560 bytes per token for A16 and 3,840 for A4. Aggregate correction costs are measured below;
+  the contribution of this individual change is not isolated.
+- A stage trace found QSA changed softmax partitions from 32 to 16 at batch width four.
+  Because probabilities are stored in FP16 relative to each partition maximum, that changed
+  represented values even with identical Q/K/V and block selections. Fixed partitioning passes
+  the FP64 oracle and makes the first verified token identical through all 48 model layers.
+  That candidate still failed the full K=1/3/5 comparison (worst 1.0-nat gap).
+  The next trace isolated a further batch-dependent difference in the layer-1 PLE injection:
+  BF16 key/value projections switched reduction algorithms with column count. Aligning those
+  short projections and the vocabulary readout with the ordinary reduction closes the full
+  K=1/3/5, eight-prompt, 96-token comparison with no token divergences. BF16 projection FP64
+  tests and QSA independent-query batch invariance both pass. All 16 real-artifact Engine cases
+  pass after the final fixture correction below. Restoring the faster grouped MoE route above
+  eight columns reintroduces 0.125-nat failures at all three draft lengths, so it was rejected.
+- Two Vision assertions initially failed because the valid video response capitalized "Blue".
+  Color checks now normalize case, also require red/blue discrimination for cold and reused
+  images, and pass for ordinary and MTP image/video execution. The serving benchmark initially
+  selected an unsupported optimized proposal head; an explicit full/optimized option now
+  reaches both runners, is verified against server telemetry, and is checked during resume.
+  Sixteen focused Python 3.11 harness tests pass; both concurrent MTP runs then complete.
+- Missing replay geometry and unimplemented Vision/backend paths in intermediate candidates
+  failed and were completed. A remote rebuild briefly retained stale instrumented objects due
+  to tar timestamps; those Engine results were invalidated, sources touched and checks rerun.
+
+This is source integration with focused G4 qualification, not closure of every historical M3
+acceptance item. The original v2 greedy/logprob/MTP/Vision comparison criteria in §5 are preserved;
+current results must be reported separately from those older baselines. Full v2/v3 same-session
+performance, the full saturated-pool scenario campaign, large-media performance and Windows GPU
+qualification are not established by these tests. Stable implementation contracts now live in
+[the artifact/execution guide](../maintainer/qwen3.8-flash-next-artifact.md#7-execution) and
+[upstream port status](../maintainer/upstream-ports.md#flash-next-v3).
+
+### Saved-v2 comparison: acceptance gap
+
+The unchanged September 30 M3.4 comparison uses v2 `87812bc8`, BF16 KV, context 131072,
+KV capacity 262144, concurrency 8 and prefill chunk 8192. Its 27 greedy requests cover 16 short,
+four thinking, two tool, two schema and three long-document prompts. Prompt readouts sample
+1,433 aligned positions from the 23 requests without tools/schema. The reference's second run
+uses chunk 2048 and collection concurrency 2 to measure its route variation. The current G4
+candidate uses the original reference settings. No comparison tolerance was relaxed.
+
+| Criterion | Reference route variation | Current candidate versus reference | Status |
+|---|---:|---:|---|
+| Maximum reference gap at first greedy divergence | 0.25 nats | 9.625 nats (`tool-1`, position 0) | Fails 0.50 bound |
+| Shared-prefix top-20 KL proxy, mean / p99 | 0.000774 / 0.009950 | 0.002521 / 0.021637 | Within 0.01 / 0.10 bounds |
+| Prompt absolute logprob difference, mean / maximum | 0.000567 / 0.374786 | 0.948762 / 16.452988 nats | Fails 0.03 / 1.124359 bounds |
+
+Only 8/27 complete generated token sequences are identical (reference variation: 11/27).
+The candidate's 98.8869% agreement is restricted to shared prefixes plus the first divergence,
+with 1,688 shared positions; it is **not** teacher-forced agreement over every generated token.
+The clipped top-20 statistic is a truncated proxy, not full-distribution KL; its maximum is
+1.599525. There are no prefix-only length mismatches in the final comparison. Current schema
+behavior has separate passing checks; that does not make its reference trajectory identical.
+
+Before the final MTP arithmetic corrections, the same comparison had a 6.0-nat worst greedy
+gap and 0.943660/18.951420 mean/maximum prompt difference, with proxy mean/p99/max
+0.001742/0.027043/0.183858. Thus the final candidate improves some maxima but worsens the
+greedy gap, mean prompt difference and maximum proxy; it does not close this gate.
+
+That earlier candidate's 390 short, 275 thinking and 768 long sampled prompt positions had mean NLL changes of
++0.028182, -0.077530 and -0.631041 nats, respectively. These mixed outcomes do not replace the
+failed absolute-difference criteria and are not a full perplexity or model-quality evaluation.
+
+Diagnosis has ruled out the new FP32 hyper up projection as the sole cause: a temporary ablation
+still gives 0.925685 mean and 20.28947 maximum prompt difference. The saved v2 MMA/non-MMA QSA
+routes themselves differ by 0.797127 mean and 15.005175 maximum prompt nats, with a 9.625-nat
+greedy divergence. v2 stages probabilities in BF16; the v3 attention Op stages them in FP16.
+This is a material arithmetic difference, not proof that it accounts for the entire mismatch.
+A live v2 rebuild on the current G4 reproduces the short-prompt and tool-prompt baseline tokens
+and raw logprobs exactly. A 23-token stage trace starts with exact hyper initialization, then
+relative L2 differences of 0.000731 at the first attention input and 0.015470 at its output.
+Differences accumulate to 0.104884 after the final layer; no single catastrophic transition
+has been established. An additional FP64 causal-attention calculation over the saved v2
+53-token QSA operands gives relative L2 errors of approximately 0.0016–0.0018 across its 12
+attention layers, consistent with BF16 output rounding; it does not establish a gross legacy
+attention defect or explain the full-model discrepancy. The legacy and current MoE both switch
+to A4 at 256 prefill tokens and quantize input and routed intermediate activations, so a newly
+enabled A4 policy does not explain the long-prompt concentration. The comparison remains open.
+
 ## 1. Measured G4 facts (session of 2026-09-29, 19:42-20:08 UTC)
 
 | Item | Measured |

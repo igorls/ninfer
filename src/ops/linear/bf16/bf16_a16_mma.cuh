@@ -50,9 +50,16 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void bf16_a16_m
             const int row = item / (BK / 8);
             const int k8  = item - row * (BK / 8);
             const int kk  = k8 * 8;
-            cp_async<16, Schedule::kWeightCache>(
-                &a_stage[row * BK + bf16_mma_shared_col<Schedule>(row, kk)],
-                &weight[static_cast<std::int64_t>(m0 + row) * K + k0 + kk]);
+            auto* dst = &a_stage[row * BK + bf16_mma_shared_col<Schedule>(row, kk)];
+            if constexpr (Schedule::kStaticK != 0 && Schedule::kStaticK % (BK * Splits) != 0) {
+                const bool valid = k_tile * BK + kk < split_k;
+                cp_async_zfill<16, Schedule::kWeightCache>(dst,
+                    &weight[static_cast<std::int64_t>(m0 + row) * K + (valid ? k0 + kk : 0)],
+                    valid ? 16 : 0);
+            } else {
+                cp_async<16, Schedule::kWeightCache>(dst,
+                    &weight[static_cast<std::int64_t>(m0 + row) * K + k0 + kk]);
+            }
         }
 
 #pragma unroll 1
@@ -62,7 +69,12 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void bf16_a16_m
             const int kk    = k8 * 8;
             auto* dst       = &b_stage[col * BK + bf16_mma_shared_col<Schedule>(col, kk)];
             const int token = n0 + col;
-            if constexpr (FullTokens) {
+            if constexpr (Schedule::kStaticK != 0 && Schedule::kStaticK % (BK * Splits) != 0) {
+                const bool valid = token < tokens && k_tile * BK + kk < split_k;
+                cp_async_zfill<16, Schedule::kActivationCache>(dst,
+                    &x[static_cast<std::int64_t>(valid ? token : 0) * K + (valid ? k0 + kk : 0)],
+                    valid ? 16 : 0);
+            } else if constexpr (FullTokens) {
                 cp_async<16, Schedule::kActivationCache>(
                     dst, &x[static_cast<std::int64_t>(token) * K + k0 + kk]);
             } else {
@@ -74,7 +86,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void bf16_a16_m
         }
     };
 
-    const int kTiles = split_k / BK;
+    const int kTiles = (split_k + BK - 1) / BK;
 #pragma unroll
     for (int stage = 0; stage < S; ++stage) {
         if (stage < kTiles) {

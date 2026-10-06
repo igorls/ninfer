@@ -151,13 +151,15 @@ Run commands with a selected Python 3.11 interpreter, as in the model-page repro
 Both serving runners accept `--kv-dtype bf16|int8|fp8|nvfp4|k8v4` (default: `int8`).
 Specify it explicitly when recording a new campaign; the Qwen3.8 performance profile uses
 `--kv-dtype fp8`. The runner verifies the loaded KV representation and records the selection in
-its results. A serial run cannot resume records collected with a different KV dtype.
+its results. Both accept `--proposal-head full|optimized` (default: `optimized` for
+speculative decoding). Flash-Next MTP requires `--proposal-head full`. The loaded head is
+verified, and serial resume rejects a different KV dtype or proposal head.
 
 The serial runner writes `run.jsonl`, `summary.csv`, `summary.md`, and per-server logs under
 `server/`. JSONL contains the completed requests and responses; CSV/Markdown contain fixture and
 category summaries. The output directory is supplied explicitly with `--output`.
 
-Its schema-v8 result and flattened summaries retain the KV dtype, actual `prefill_signature`, request Host
+Its schema-v9 result records the proposal head; results and flattened summaries retain the KV dtype, actual `prefill_signature`, request Host
 exposure, and decode Host/Device-wait time per round received from the schema-v21 serving records.
 Request exposure is a latency distribution value and is never summed across concurrent requests;
 worker aggregation uses the serving `throughput.host_work` interval deltas. The stochastic route pins its complete
@@ -172,6 +174,8 @@ Their distinct time boundaries and workload dispatch are defined in the
 Repeat `--concurrency` to select C points; each point starts a fresh server. The point report
 records the actual Engine configuration, automatic KV capacity, shuffle seed where applicable,
 dispatch method, and per-request positions.
+Use `--mode mtp0`, `--mode mtp3`, or `--mode mtp5` for ordinary decode or three/five MTP drafts;
+repeat `--mode` to compare them. The selected model must support that draft width.
 
 Schema-v4 outputs include `points/*.json`, `server/*.jsonl`, and combined `summary.json`, `summary.csv`, and
 `summary.md`. C=1 corpus runs also write complete responses in `corpus/<point>/results.jsonl` and

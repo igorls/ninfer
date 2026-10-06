@@ -49,13 +49,16 @@ void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& valu
  * - Q8_G32_FP16 RowSplit [12288,2048], with stored row counts [2048,2048,4096,4096];
  * - NVFP4 BlockScaleK16M128x4 [16384,5120], with stored row counts [2048,2048,6144,6144].
  * - FP8_E4M3FN_ROW_BF16 RowScale [16384,5120], with stored row counts
- *   [2048,2048,6144,6144].
+ *   [2048,2048,6144,6144];
+ * - FP8_E4M3FN_ROW_FP32 RowScaleFp32 [16384,2560] (FP32 row multipliers), with stored row counts
+ *   [2048,2048,6144,6144] and x [2560,T].
  *
  * The first three ranges are written contiguously to qkv and the final range is written to z.
  * Q8 uses A16 under every policy. NVFP4 uses A16 under A16Only/AllowA8; AllowA4 permits
- * private activation quantization at every positive T. FP8 accepts all policies; AllowA8/AllowA4
- * selects A16 through T=7 and private activation quantization followed by A8 Tensor Core
- * contraction at every T>=8. Every route writes the two independent final allocations directly.
+ * private activation quantization at every positive T. Both FP8 forms accept all policies;
+ * AllowA8/AllowA4 selects A16 through T=16 and private activation quantization followed by A8
+ * Tensor Core contraction at every T>=17. Every route writes the two independent final
+ * allocations directly.
  * The complete projection is evaluated against the same exact-decode/naive-FP64 oracle;
  * activation quantization and the production reduction profile are private effects covered by the
  * selected criterion. x, both persistent weight planes, qkv, z, and the live workspace must be
@@ -91,8 +94,8 @@ void gdn_input_proj(const Tensor& x, const Weight& query_key_value_z_weight, Ten
     std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width);
 
 /**
- * Returns the transient capacity for a registered [16384,5120] NVFP4 or row-scaled FP8 snapshot
- * profile. `batch_size` is exact and the query covers every W in the inclusive width interval.
+ * Returns the transient capacity for a registered NVFP4 [16384,5120] or row-scaled FP8
+ * ([16384,5120] BF16-scale, [16384,2560] FP32-scale) snapshot profile. `batch_size` is exact and the query covers every W in the inclusive width interval.
  * B=1 preserves the format-specific fused/materialized resolver; B=2..8 covers its aggregate
  * projection mechanism plus any projected BF16 plane selected by the complete-Op plan.
  */
@@ -144,10 +147,11 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& qk_weight,
 
 /**
  * Single-parent form of gdn_input_proj_conv_snapshot. Registered parents are Q8_G32_FP16 RowSplit
- * [12288,2048], NVFP4 BlockScaleK16M128x4 [16384,5120], and FP8_E4M3FN_ROW_BF16 RowScale
- * [16384,5120], all in q/k/value/z row order. All policies permit Q8 A16. NVFP4 uses A16
- * under A16Only/AllowA8; AllowA4 may use A4. FP8 may use A8 under AllowA8/AllowA4. B=1 accepts
- * every positive W for FP8; the batched domain is B=2..8 and W=1..16. Tensor operands, the complete
+ * [12288,2048], NVFP4 BlockScaleK16M128x4 [16384,5120], FP8_E4M3FN_ROW_BF16 RowScale
+ * [16384,5120], and FP8_E4M3FN_ROW_FP32 RowScaleFp32 [16384,2560] (x [2560,W,B]), all in
+ * q/k/value/z row order. All policies permit Q8 A16. NVFP4 uses A16 under A16Only/AllowA8;
+ * AllowA4 may use A4. Both FP8 forms may use A8 under AllowA8/AllowA4. B=1 accepts every positive
+ * W for FP8; the batched domain is B=2..8 and W=1..16. Tensor operands, the complete
  * FP8 parent, and live workspace must be mutually non-overlapping, except that the read-only
  * initial_state_slots and snapshot_base_slots selectors may alias each other; same-row state-slot
  * overlap remains governed by the snapshot state contract.
@@ -181,8 +185,8 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& query_key_value
     std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width);
 
 /**
- * Returns the transient capacity for a registered [16384,5120] NVFP4 or row-scaled FP8
- * record-producing profile. Fused and materialized A16 routes require no storage. AllowA4/AllowA8
+ * Returns the transient capacity for a registered NVFP4 [16384,5120] or row-scaled FP8
+ * ([16384,5120] BF16-scale, [16384,2560] FP32-scale) record-producing profile. Fused and materialized A16 routes require no storage. AllowA4/AllowA8
  * returns only the activation-quantization workspace selected by this complete-Op route;
  * conv_record is caller-owned.
  */
@@ -218,9 +222,9 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& qk_weight,
 
 /**
  * Single-parent record-producing form. Registered parents are Q8_G32_FP16 [12288,2048], NVFP4
- * [16384,5120], and FP8_E4M3FN_ROW_BF16 [16384,5120]. All policies permit Q8 A16; NVFP4
- * uses A16 under A16Only/AllowA8 and may use A4 under AllowA4. FP8 may use A8 under
- * AllowA8/AllowA4. Record and snapshot share arithmetic route selection. Every tensor operand, the
+ * [16384,5120], FP8_E4M3FN_ROW_BF16 [16384,5120], and FP8_E4M3FN_ROW_FP32 [16384,2560]. All
+ * policies permit Q8 A16; NVFP4 uses A16 under A16Only/AllowA8 and may use A4 under AllowA4.
+ * Both FP8 forms may use A8 under AllowA8/AllowA4. Record and snapshot share arithmetic route selection. Every tensor operand, the
  * complete FP8 parent, and live workspace must be mutually non-overlapping.
  */
 void gdn_input_proj_conv_record(const Tensor& x, const Weight& query_key_value_z_weight,

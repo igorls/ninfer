@@ -1,6 +1,6 @@
 # Single-GPU serving performance
 
-Published measurements use one NVIDIA GeForce RTX 5090 through NInfer's public HTTP serving route.
+The upstream measurements use one NVIDIA GeForce RTX 5090 through NInfer's public HTTP serving route.
 Choose a model below for its detailed results, run conditions, output limitations, and reproduction
 commands. These are recorded measurements; a model/backend being supported does not
 mean every workload or concurrency has a published measurement.
@@ -54,3 +54,181 @@ and [Qwen3.8 completion outcomes](performance/qwen3.8-27b.md#completion-outcomes
 
 Model pages are the detailed result authority. README and model-card performance tables are
 excerpts linked to those pages; update them together when replacing an applicable measurement.
+
+## Flash-Next v3 on Colab G4 (2026-10-04)
+
+Current measurements include the MTP batch-arithmetic corrections. Earlier candidates and
+rejected alternatives remain labeled below so their gains and regressions are visible.
+
+These are qualification measurements of the `workstation` candidate based on `2969beee`, with
+text, MTP and Vision source integration. They establish performance on the RTX PRO 6000
+Blackwell **Server Edition** (97,887 MiB), driver 580.82.07, CUDA 13.3.73, GCC 13.3, Release
+`sm_120a`. All arms ran sequentially on one G4 allocation with an exclusive GPU. They do not
+establish workstation Windows performance or improvement over the v2 engine.
+
+The mixed v3 artifact was derived from
+`igorls/Qwen3.8-Flash-Next-mixed-NInfer@5f0ee7e2`, using BF16, FP32-row-scaled FP8 and NVFP4
+expert banks. MTP uses the full stored output head and the offline-converted NVFP4 MTP banks.
+The PLE table remains mapped in host memory.
+
+### Single-request Engine benchmark
+
+`ninfer_bench` uses the public Engine with `bench/fixtures/bench_corpus.ids`, prefix cache
+disabled, BF16 KV, max context and KV capacity 16,384, prefill chunk 1024 and CUDA Graphs.
+Each point has one warmup and three measured repetitions. It forces 129 output tokens:
+the first is produced by prefill, leaving 128 in the timed decode phase. Values below are
+arithmetic means of per-repetition rates; total time is mean request time, excluding load.
+The fixed corpus and forced output count can produce easy or repetitive continuations;
+these figures do not measure general task quality or representative chat MTP acceptance.
+
+| Prompt tokens | Draft K | Prefill tok/s | Decode tok/s, mean ± sample SD | Total seconds | Accepted / drafted |
+|---:|---:|---:|---:|---:|---:|
+| 512 | 0 | 7,360 | 133.392 ± 0.679 | 1.02981 | — |
+| 512 | 3 | 7,344 | 132.777 ± 0.017 | 1.05122 | 32.29% |
+| 512 | 5 | 7,343 | 101.817 ± 0.026 | 1.34417 | 21.45% |
+| 2,048 | 0 | 9,257 | 136.224 ± 0.131 | 1.16151 | — |
+| 2,048 | 3 | 9,191 | 263.027 ± 0.021 | 0.71861 | 96.94% |
+| 2,048 | 5 | 9,187 | 265.348 ± 0.078 | 0.71226 | 88.89% |
+| 8,192 | 0 | 8,691 | 135.538 ± 0.023 | 1.88765 | — |
+| 8,192 | 3 | 8,631 | 262.233 ± 0.301 | 1.44629 | 98.96% |
+| 8,192 | 5 | 8,634 | 286.900 ± 0.038 | 1.40160 | 97.25% |
+
+MTP3 decode changes versus ordinary are -0.46%, +93.08% and +93.47%; MTP5 changes are
+-23.67%, +94.79% and +111.67%, respectively. At 512 tokens the total request is 2.08% slower
+with K=3 and 30.53% slower with K=5. At 2,048/8,192 tokens total latency falls by
+38.13%/23.38% for K=3 and 38.68%/25.75% for K=5. MTP prefill is 0.21–0.75% slower at every
+point. Teacher extension, full-head drafting and host PLE gathering remain measured costs.
+
+Before the stronger MTP target-equivalence fixes, the same methodology measured:
+
+| Prompt tokens | K | Earlier prefill tok/s | Earlier decode tok/s, mean ± SD | Earlier total seconds | Earlier acceptance |
+|---:|---:|---:|---:|---:|---:|
+| 512 | 0 | 7,139 | 131.271 ± 0.019 | 1.04754 | — |
+| 512 | 3 | 7,336 | 138.630 ± 0.030 | 1.01051 | 30.81% |
+| 512 | 5 | 7,344 | 136.966 ± 0.017 | 1.01847 | 29.07% |
+| 2,048 | 0 | 9,022 | 133.909 ± 0.081 | 1.18352 | — |
+| 2,048 | 3 | 9,204 | 278.155 ± 0.052 | 0.69178 | 96.94% |
+| 2,048 | 5 | 9,189 | 300.316 ± 0.135 | 0.65602 | 88.14% |
+| 8,192 | 0 | 8,688 | 134.937 ± 1.164 | 1.89225 | — |
+| 8,192 | 3 | 8,651 | 277.121 ± 0.051 | 1.41794 | 98.96% |
+| 8,192 | 5 | 8,637 | 324.917 ± 0.074 | 1.34890 | 97.25% |
+
+Current MTP decode rates are lower than those earlier rates at all six points, worst -25.66%
+for K=5 at 512 tokens. That case also changes acceptance and trajectory; the difference cannot
+be attributed entirely to kernel cost. These sequential, non-interleaved measurements do not
+establish a noise bound. The earlier candidate fails the strengthened target-equivalence check.
+
+Reproduce from a configured build and an explicitly selected v3 artifact:
+
+```sh
+build/bench/ninfer_bench --weights "$ARTIFACT" \
+  --corpus bench/fixtures/bench_corpus.ids -pg '512,128;2048,128;8192,128' \
+  -r 3 --warmup 1 --max-ctx 16384 --prefill-chunk 1024 --kv-dtype bf16 \
+  -o json --output-file ordinary.json
+# Repeat with --spec mtp --draft-tokens 3, then 5, in separate runs.
+```
+
+### Resource cost and numerical fixes
+
+At the benchmark's B=1, chunk 1024 and 16K BF16 KV capacity:
+
+| Selection | Device weights GiB | Sequence MiB | Workspace MiB | CUDA Graph allowance MiB | KV payload MiB |
+|---|---:|---:|---:|---:|---:|
+| Text | 70.01 | 510.38 | 135.23 | 32 | 396 |
+| Text + MTP3 | 71.50 | 552.08 | 153.88 | 64 | 429 |
+| Text + MTP5 | 71.50 | 556.15 | 153.88 | 64 | 429 |
+
+KV payload is included in sequence resources, not an additional sum. MTP adds about 1.49 GiB
+of device weights, one KV/indexer layer, transient verification/replay state and two graph
+families. These text benchmark figures exclude Vision weights and workspace. Image/video
+functional tests separately check startup-bounded Vision workspace, but Vision throughput and
+large-media peak memory are not measured here. Current page-cache-warm load took 11.07–11.19
+seconds, including 7.87–7.98 seconds of weight upload; earlier runs took 9.86–10.03 seconds and
+6.85–7.04 seconds respectively. The observed increase was not isolated to an individual source
+change. Neither measurement represents cold-storage startup.
+
+Two precision corrections were required without changing acceptance thresholds. The wide
+hyper-connection up projection now retains FP32 through sigmoid; prompt scoring versus prompt
+logprob readout improved from maximum absolute error 0.109504 to 0.00000858307 nats, under the
+unchanged 0.05 criterion. Its private up plane grows by 20,480 bytes per prefill token (20 MiB
+at chunk 1024), but the whole Program workspace peak remains 135.23 MiB in the text benchmark
+because another phase determines the peak.
+
+An ordinary-decode A/B with that correction disabled measured prefill 7,162 / 9,056 / 8,715
+tok/s and decode 131.558 / 133.698 / 135.411 tok/s for the same 512 / 2,048 / 8,192 inputs.
+With the correction, prefill changes are -0.31% / -0.37% / -0.31%, decode changes -0.22% /
++0.16% / -0.35%, and total time changes +0.23% / -0.07% / +0.33%. This three-repeat,
+non-interleaved comparison records the observed cost; it does not establish statistical
+insignificance or a speed gain.
+
+The later shared MoE gate/up correction adds 2,560 bytes per token for A16 or 3,840 for A4
+to that Op's private workspace. The B=1 Program workspace capacities above remain measured
+at 135.23/153.88 MiB because another phase sets their peak. Aligning short projection/MoE
+reductions and QSA probability partitions across widths closes the ordinary-versus-MTP target
+comparison. Re-enabling the faster grouped MoE route above eight columns reintroduces
+0.125-nat divergences at K=1/3/5, beyond the unchanged 0.05 bound, and was rejected.
+
+Batched GDN projection originally rounded its private output to BF16 before convolution,
+while B=1 retained FP32. This caused a real-model batch divergence at a 0.125-nat reference
+top-two gap, above the unchanged 0.05 threshold. The corrected fused projection/convolution
+retains FP32 and is qualified against the FP64 Op oracle and the same batch criterion.
+
+### Concurrent decode and correction costs
+
+The HTTP `decode-saturation` fixture is `long_decode_aime26_15`: 335 prompt tokens per request,
+512 output tokens, greedy, BF16 KV, max context 2048, KV capacity 2048 × C, prefill chunk 1024,
+CUDA Graphs and prefix cache disabled. One simultaneous wave per concurrency is measured.
+The rate counts committed tokens only in complete telemetry intervals at exactly C decode rows;
+the corresponding per-row rate is aggregate / C. All requests reached the 512-token limit.
+This is a saturation workload, not evidence that the mathematical task was completed.
+
+| C | Before numerical fixes, aggregate tok/s | Initial per-row FP32 correction | Earlier shared-weight FP32 correction | Earlier per row tok/s | Earlier full-batch measured seconds | Earlier wave seconds | Earlier vs before |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 241.3 | 232.0 | 234.7 | 117.3 | 3.00 | 4.480 | -2.8% |
+| 4 | 379.0 | 352.8 | 368.0 | 92.0 | 4.00 | 5.804 | -2.9% |
+| 8 | 562.7 | 497.1 | 510.9 | 63.9 | 7.00 | 8.520 | -9.2% |
+
+The before arm has the original BF16 GDN intermediate and fails the strict batch criterion.
+The shared-weight arm retains FP32 and the single-request reduction order, sharing weight reads across
+finite 2/4/8-column tiles. It passes both the independent FP64 Op oracle and the real-model
+batch criterion. The throughput cost remains a regression relative to the numerically rejected
+arm; these single waves do not support a confidence interval or a claim that the cost is noise.
+They also do not compare v3 against v2.
+
+After all MTP equivalence corrections, the same one-wave HTTP workload measures:
+
+| C | K | Aggregate tok/s | Per row tok/s | Full-batch seconds | Wave seconds | Acceptance |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 0 | 226.667 | 113.333 | 3.00 | 4.644 | — |
+| 4 | 0 | 351.998 | 87.999 | 5.00 | 6.055 | — |
+| 8 | 0 | 457.000 | 57.125 | 8.00 | 9.458 | — |
+| 8 | 3 | 418.000 | 52.250 | 9.00 | 10.463 | 64.42% |
+| 8 | 5 | 342.909 | 42.864 | 11.00 | 12.588 | 51.54% |
+
+Current ordinary rates are 3.4%, 4.3% and 10.5% below the earlier shared-weight arm.
+At C=8, MTP3/5 reduce throughput by 8.5%/25.0% versus current ordinary decode and increase
+wave latency by 10.6%/33.1%. All requests reach the fixed output limit. These single-wave
+measurements show that fewer target rounds do not guarantee a throughput gain; they do not
+establish confidence intervals or task quality. Initial MTP runs failed before loading because
+the benchmark forced an optimized draft head. Both runners now accept `--proposal-head full`,
+verify the actual head and prevent incompatible serial resume; these results use the full head.
+
+The current source still has an unresolved end-to-end v2 numerical qualification gap: its
+27-request comparison fails the registered greedy-gap and prompt-logprob criteria. See the
+[active comparison record](research/flash-next-v3-port-2026-09-29.md#saved-v2-comparison-acceptance-gap).
+Neither current nor historical timings establish accepted v2 parity.
+
+The initial per-row correction cost 3.9%, 6.9% and 11.6%, respectively. A fused Tensor Core
+alternative passed the local Op oracle but still failed the unchanged Engine criterion at a
+0.125-nat gap and was rejected. A single eight-column shared-weight tile passed correctness but
+measured only 224.0 / 352.0 / 509.7 tok/s at C=2/4/8; matching tile size to active concurrency
+recovered the smaller-batch loss. All approaches and adverse results remain visible here.
+
+```sh
+python3.11 tools/bench/run_serve_concurrency.py \
+  --serve build/apps/ninfer-serve --artifact flash-next="$ARTIFACT" \
+  --mode mtp0 --sampling greedy --suite decode-saturation --concurrency 8 \
+  --decode-tokens 512 --max-context 2048 --kv-capacity 16384 \
+  --prefill-chunk 1024 --kv-dtype bf16 --output results/flash-next-c8
+# Repeat with --mode mtp3/mtp5 --proposal-head full and distinct output directories.
+```

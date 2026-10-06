@@ -5,8 +5,11 @@
 This is [igorls/ninfer](https://github.com/igorls/ninfer), a fork of
 [Neroued/ninfer](https://github.com/Neroued/ninfer). It builds on upstream's from-scratch C++/CUDA
 engine and `.ninfer` v3 artifacts, and focuses on native Windows operation, the NVIDIA RTX PRO 6000
-Blackwell workstation, and application serving. Qwen3.8-Flash-Next is not yet ported to the v3
-engine; it runs on the fork's `research/qwen4-flash-next` line.
+Blackwell workstation, and application serving. Qwen3.8-Flash-Next now has a native v3 architecture
+package for text, MTP and Vision; focused Colab G4 tests pass, but full numerical qualification
+remains incomplete. See the
+[artifact and execution guide](docs/maintainer/qwen3.8-flash-next-artifact.md) for supported options
+and the [port status](docs/maintainer/upstream-ports.md#flash-next-v3) for remaining acceptance work.
 
 The intended product is a dependable local inference service: efficient prefill and decode,
 correct continuation reuse across long agent sessions, constrained JSON responses for applications,

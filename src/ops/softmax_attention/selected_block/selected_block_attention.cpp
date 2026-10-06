@@ -17,7 +17,7 @@ constexpr std::int32_t kHeadDim        = 256;
 constexpr std::int32_t kQueryHeads     = 24;
 constexpr std::int32_t kKvHeads        = 2;
 constexpr std::int32_t kMaxSelected    = 512;
-constexpr std::int32_t kMaxBatch       = 8;
+constexpr std::int32_t kMaxColumns     = 48;
 constexpr std::int32_t kMaxSharedRow   = 262'144;
 
 [[noreturn]] void fail(const std::string& message) {
@@ -115,7 +115,7 @@ float* allocate_partial(Arena& arena, std::int32_t columns) {
 
 std::size_t selected_block_attention_workspace_capacity_bytes(std::int32_t min_columns,
                                                               std::int32_t max_columns) {
-    if (min_columns < 1 || max_columns < min_columns || max_columns > kMaxBatch) {
+    if (min_columns < 1 || max_columns < min_columns || max_columns > kMaxColumns) {
         fail("invalid column interval");
     }
     // The partition count depends on C, so the requirement is the largest over the interval.
@@ -133,7 +133,7 @@ void selected_block_attention(const Tensor& q, const Tensor& positions, const Te
                               const PagedKVBatchLayerView& cache, WorkspaceArena& workspace,
                               Tensor& out, cudaStream_t stream) {
     const std::int32_t columns = q.ne[2];
-    if (columns < 1 || columns > kMaxBatch) { fail("batched C must be 1..8"); }
+    if (columns < 1 || columns > kMaxColumns) { fail("batched C must be 1..48"); }
     require_columns(q, positions, selections, counts, out, columns);
     require(table_rows, DType::I32, {columns}, "table rows");
     const ResolvedCache resolved =

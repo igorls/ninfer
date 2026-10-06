@@ -82,7 +82,9 @@ enum class LinearPolicy : std::uint8_t {
  * registers `[5120,25600]` at every positive T. BF16 registers `[14336,5120]`,
  * `[5120,6144]`, `[256,5120]`, the full vocabulary head `[248320,5120]`, `[640,2560]`,
  * `[2560,2560]`, `[10240,2560]`, `[13312,2560]`, `[2560,6144]`, and the vocabulary head
- * `[248320,2560]` at every positive T. Text and MTP packed-weight problems accept
+ * `[248320,2560]` at every positive T. BF16 Vision also registers `[1152,1536]`,
+ * `[3456,1152]`, `[1152,1152]`, `[4304,1152]`, `[1152,4304]`, `[4608,4608]`, and
+ * `[2560,4608]` at every positive T. Text and MTP packed-weight problems accept
  * every positive column extent T. Registered Vision problems accept raw-patch P in
  * `{4,8,...,131072}` or merged-token V in `[1,32768]`; a matrix column does not inherently
  * represent a text token. FP32 is unsupported.

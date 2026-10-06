@@ -1,6 +1,6 @@
 #pragma once
 
-// Four-stream hyper-connection kernels. The decode chain (T <= 8) is CUDA-core: a group norm
+// Four-stream hyper-connection kernels. The short chain (T <= 48) is CUDA-core: a group norm
 // over (stream, token) CTAs, one CTA per low-rank/injection row, and one CTA per hidden column
 // applying its four up rows to every token. The tensor-core route reuses the BF16 Linear MMA
 // contraction for the down and up projections (launch.cu).
@@ -122,8 +122,13 @@ __global__ void __launch_bounds__(128)
     hyper_mix_up_decode_kernel(const __nv_bfloat16* __restrict__ normalized,
                                const __nv_bfloat16* __restrict__ low_rank,
                                const __nv_bfloat16* __restrict__ up,
-                               __nv_bfloat16* __restrict__ block_input) {
+                               __nv_bfloat16* __restrict__ block_input, int live_tokens) {
     __shared__ float contribution[Tokens][kHyperStreams];
+    const int token_begin = static_cast<int>(blockIdx.y) * Tokens;
+    const int active = min(Tokens, live_tokens - token_begin);
+    normalized += static_cast<std::int64_t>(token_begin) * kHyperConcat;
+    low_rank += static_cast<std::int64_t>(token_begin) * kHyperLowRank;
+    block_input += static_cast<std::int64_t>(token_begin) * kHyperHidden;
     const int column = static_cast<int>(blockIdx.x);
     const int tid    = static_cast<int>(threadIdx.x);
     const int stream = tid >> 5;
@@ -140,6 +145,7 @@ __global__ void __launch_bounds__(128)
     float sums[Tokens];
 #pragma unroll
     for (int t = 0; t < Tokens; ++t) {
+        if (t >= active) { continue; }
         const auto* l       = low_rank + static_cast<std::int64_t>(t) * kHyperLowRank;
         const auto x_lo_raw = *reinterpret_cast<const ulonglong2*>(l + lane * 8);
         const auto x_hi_raw = *reinterpret_cast<const std::uint32_t*>(l + 256 + lane * 2);
@@ -156,6 +162,7 @@ __global__ void __launch_bounds__(128)
     }
 #pragma unroll
     for (int t = 0; t < Tokens; ++t) {
+        if (t >= active) { continue; }
         const float total = warp_reduce_sum(sums[t]);
         if (lane == 0) {
             contribution[t][stream] =
@@ -164,7 +171,7 @@ __global__ void __launch_bounds__(128)
         }
     }
     __syncthreads();
-    if (tid < Tokens) {
+    if (tid < active) {
         const float mean = (contribution[tid][0] + contribution[tid][1] + contribution[tid][2] +
                             contribution[tid][3]) *
                            0.25F;
@@ -246,7 +253,7 @@ __global__ void __launch_bounds__(128)
 
 // Grid T, 256 threads: block_input = mean over streams of sigmoid(up) * normalized.
 __global__ void __launch_bounds__(256)
-    hyper_mix_reduce_wide_kernel(const __nv_bfloat16* __restrict__ up,
+    hyper_mix_reduce_wide_kernel(const float* __restrict__ up,
                                  const __nv_bfloat16* __restrict__ normalized,
                                  __nv_bfloat16* __restrict__ block_input) {
     const int token   = static_cast<int>(blockIdx.x);
@@ -257,15 +264,13 @@ __global__ void __launch_bounds__(256)
         float mean[8]    = {};
 #pragma unroll
         for (int s = 0; s < kHyperStreams; ++s) {
-            const auto z_raw =
-                *reinterpret_cast<const ulonglong2*>(up + offset + s * kHyperHidden + column);
+            const float* z = up + offset + s * kHyperHidden + column;
             const auto n_raw = *reinterpret_cast<const ulonglong2*>(normalized + offset +
                                                                      s * kHyperHidden + column);
-            const auto* z    = reinterpret_cast<const __nv_bfloat16*>(&z_raw);
             const auto* n    = reinterpret_cast<const __nv_bfloat16*>(&n_raw);
 #pragma unroll
             for (int i = 0; i < 8; ++i) {
-                mean[i] += sigmoid(__bfloat162float(z[i])) * __bfloat162float(n[i]);
+                mean[i] += sigmoid(z[i]) * __bfloat162float(n[i]);
             }
         }
         ulonglong2 raw_out;
@@ -275,6 +280,27 @@ __global__ void __launch_bounds__(256)
         *reinterpret_cast<ulonglong2*>(block_input +
                                        static_cast<std::int64_t>(token) * kHyperHidden + column) =
             raw_out;
+    }
+}
+
+inline constexpr int kHyperExpandThreads = 256;
+inline constexpr int kHyperHiddenChunks  = kHyperHidden / 8;
+
+// Grid ceil(320*T / 256), 256 threads: each thread copies one 16-byte chunk of x into the four
+// streams of its token.
+__global__ void __launch_bounds__(kHyperExpandThreads)
+    hyper_expand_kernel(const ulonglong2* __restrict__ x, ulonglong2* __restrict__ hidden,
+                        std::int64_t chunks) {
+    const std::int64_t index =
+        static_cast<std::int64_t>(blockIdx.x) * kHyperExpandThreads + threadIdx.x;
+    if (index >= chunks) return;
+    const std::int64_t token = index / kHyperHiddenChunks;
+    const std::int64_t chunk = index - token * kHyperHiddenChunks;
+    const ulonglong2 value   = x[index];
+    ulonglong2* destination  = hidden + token * (kHyperStreams * kHyperHiddenChunks) + chunk;
+#pragma unroll
+    for (int stream = 0; stream < kHyperStreams; ++stream) {
+        destination[stream * kHyperHiddenChunks] = value;
     }
 }
 

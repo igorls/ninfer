@@ -13,6 +13,9 @@ benchmark-report, and external protocol behavior. Repository verification princi
   components, resources, proposals and numerical conversion methods;
 - `models/qwen3_5/` — config/binding, frontend, state/context stores, workspace, MTP alignment and
   opt-in real Engine integration;
+- `models/qwen4_exp/` — Flash-Next binding, complete continuation-state round trips, and real
+  Engine text/MTP/image/video, graph, batch, cache, scoring, causal-prefix independence and
+  constrained-output checks;
 - `ops/` — semantic Op qualification with independent mathematical or state-transition oracles;
   Linear and fused Linear suites are separated by their supported weight/activation paths;
 - root C++ tests — core storage, runtime admission/resource policy, public API, serving protocols,
@@ -21,8 +24,8 @@ benchmark-report, and external protocol behavior. Repository verification princi
   consumer.
 
 Tests are grouped by observable risk, not by mirroring every source file or class.
-`CMakeLists.txt` includes explicit registrations from `cmake/`, `artifact/`, `models/qwen3_5/`
-and `ops/`. Registration helpers live in `cmake/NinferTests.cmake`; included manifests keep
+`CMakeLists.txt` includes explicit registrations from `cmake/`, `artifact/`, `models/qwen3_5/`,
+`models/qwen4_exp/` and `ops/`. Registration helpers live in `cmake/NinferTests.cmake`; included manifests keep
 executables and CTest working directories under `build/tests/`.
 `ops/op_tester.h` and `ops/op_check.h` own only reusable device/guard and comparison mechanics.
 Concrete numerical criteria remain named by the semantic Op suite; there are no cross-Op tolerance
@@ -144,10 +147,26 @@ NINFER_TEST_ARTIFACT=$PWD/out/qwen3_6_35b_a3b.ninfer \
   ctest --test-dir build -R ninfer_qwen3_5_moe_real_test --output-on-failure
 ```
 
+Run Flash-Next with its derived v3 artifact, including Vision and MTP components:
+
+```bash
+NINFER_TEST_ARTIFACT=/path/to/qwen3_8_flash_next_mixed.ninfer \
+  ctest --test-dir build -R '^ninfer_qwen4_exp_' --output-on-failure
+```
+
+`NINFER_TEST_CASE` selects a case-name substring for the Flash-Next Engine executable, for example
+`mtp graphs`, `mtp batch target parity`, `host round trip`, `causal score` or `vision generation`.
+The target-parity case compares eight 96-token requests at K=1/3/5 against ordinary decoding;
+a first divergence is allowed only at a reference top-two gap of at most 0.05 nat. This protects
+speculative target semantics; independent FP64 Op tests qualify the underlying mathematics.
+The default runs every case and reports each failure. The small video fixture is synthetic; its generation command is
+in `models/qwen4_exp/fixtures/README.md`.
+
 Without `NINFER_TEST_ARTIFACT`, CTest marks these real Engine tests as skipped. Run GPU integration
 tests serially. `NINFER_PREFIX_REAL_SCENARIO` selects a focused prefix scenario such as `vision`,
-`pressure-resume` or `concurrent`; the default is `all`. These integration checks
-use behavior and state accounting rather than another numerical path's generated tokens as a golden.
+`pressure-resume` or `concurrent`; the default is `all`. Integration checks compare observable
+behavior, continuation state and execution-route equivalence; numerical Op tests use independent
+mathematical oracles.
 
 The `attention` scenario checks the selected KV type, chunked prefill, concurrent Graph decode
 across a resource tier, prefix continuation, and workspace bounds:

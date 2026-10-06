@@ -180,3 +180,34 @@ unbound. Residency follows the role:
 `ops::prepare_nvfp4_expert_bank_weight` admits a complete bank with its `AllowA4` Use and rejects a
 stored activation divisor, because the A4 route quantizes activations dynamically. The shard height
 (2,500,012 rows) is read from the stored shape, not from the config.
+
+
+## 7. Execution
+
+The public Engine selects `qwen4_exp` from the text architecture/config pair. CLI, serving and
+causal scoring use that same Program. Text uses four hyper-connection streams, 36 GDN layers,
+12 QSA layers and the mapped PLE table. Final readout mixes the four streams into 2560 values;
+scoring and reasoning-feature export expose this final hidden representation.
+
+Select BF16 KV (`--kv-dtype bf16`) or row-256 FP8 KV (`--kv-dtype fp8`). Generation supports
+one to eight requests, startup-fixed CUDA Graphs, context reuse and the common sampling,
+structured-output and logprob contracts. `--spec mtp --draft-tokens 3` selects the stored MTP
+component; the supported draft interval is 1 through 5, with the full output head. Requests
+needing host top-logprob readout use target-only steps, as on the other architecture.
+`--vision` selects the Vision component and the common image/video frontend.
+
+MTP verification records GDN updates and snapshots QSA/PLE state for each physical column. Only
+the accepted prefix is folded into the continuation. At target frontier E, the MTP KV frontier
+is E-1: its key at p combines target streams at p with the token embedding at p+1. Teacher
+extension rebuilds the MTP forming-block state from target hidden rows; speculative proposal
+state never becomes a resident checkpoint. Saved continuation positions preserve all three
+MRoPE axes for media continuations.
+
+Vision uses the common 27-layer encoder with explicit Vision weights/configuration and a
+2560-wide merger. Its handoff and transient workspace are bounded at startup, and media
+embeddings are scattered into text before hyper-stream expansion. There is no runtime weight
+repacking or additional model-inference path.
+
+Source integration and hardware qualification are separate. See the
+[current port status](upstream-ports.md#flash-next-v3) and
+[performance results](../performance.md) before drawing numerical or speed conclusions.

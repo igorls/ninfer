@@ -15,6 +15,8 @@ constexpr std::int32_t kHeadDim       = 128;
 constexpr std::int32_t kKVHeads       = 8;
 constexpr std::int32_t kFullHeadDim   = 256;
 constexpr const char* kAppendOp       = "kv_cache_append";
+constexpr std::int32_t kMaximumBatch  = 8;
+constexpr std::int32_t kMaximumWidth  = 16;
 constexpr const char* kPrefixAppendOp = "kv_cache_append_prefix";
 
 void require_shape(const Tensor& tensor, std::int32_t n0, std::int32_t n1, std::int32_t n2,
@@ -84,6 +86,68 @@ std::uint32_t validate_full_cache(const PagedKVLayerView& cache, std::int32_t kv
     validate_scale(cache.k_scale_pages, layout.key, "cache k scale pages");
     validate_scale(cache.v_scale_pages, layout.value, "cache v scale pages");
     return static_cast<std::uint32_t>(capacity);
+}
+
+// Batched D256 cache: the single-sequence plane contract over one shared page pool, with one
+// block-table row per table selector.
+std::uint32_t validate_full_batch_cache(const PagedKVBatchLayerView& cache, std::int32_t kv_heads,
+                                        std::int32_t batch) {
+    PagedKVStorageLayout layout{};
+    try {
+        layout = paged_kv_storage_layout(cache.storage, kFullHeadDim);
+    } catch (const std::invalid_argument&) {
+        throw std::invalid_argument("kv_cache_append: invalid cache geometry or storage");
+    }
+    if (cache.num_kv_heads != kv_heads || cache.head_dim != kFullHeadDim) {
+        throw std::invalid_argument("kv_cache_append: invalid cache geometry or storage");
+    }
+
+    const std::int32_t physical_pages = cache.k_pages.ne[3];
+    const std::int32_t logical_pages  = cache.block_tables.ne[0];
+    const std::int32_t table_rows     = cache.block_tables.ne[1];
+    const std::int64_t capacity       = static_cast<std::int64_t>(logical_pages) * kPagedKVPageSize;
+    if (physical_pages <= 0 || logical_pages <= 0 || table_rows < batch ||
+        capacity > std::numeric_limits<std::int32_t>::max()) {
+        throw std::invalid_argument("kv_cache_append: invalid cache capacity or table rows");
+    }
+    if (cache.k_pages.dtype != layout.key.data_dtype ||
+        cache.v_pages.dtype != layout.value.data_dtype) {
+        throw std::invalid_argument("kv_cache_append: invalid cache data dtype");
+    }
+    require_shape(cache.k_pages, layout.key.data_leading_extent, kPagedKVPageSize, kv_heads,
+                  physical_pages, kAppendOp, "cache k pages");
+    require_shape(cache.v_pages, layout.value.data_leading_extent, kPagedKVPageSize, kv_heads,
+                  physical_pages, kAppendOp, "cache v pages");
+    require_contiguous_nonnull(cache.k_pages, kAppendOp, "cache k pages");
+    require_contiguous_nonnull(cache.v_pages, kAppendOp, "cache v pages");
+    if (cache.block_tables.dtype != DType::I32) {
+        throw std::invalid_argument("kv_cache_append: block tables must be I32");
+    }
+    require_shape(cache.block_tables, logical_pages, table_rows, 1, 1, kAppendOp, "block tables");
+    require_contiguous_nonnull(cache.block_tables, kAppendOp, "block tables");
+
+    const auto validate_scale = [&](const Tensor& tensor, const PagedKVVectorLayout& vector,
+                                    const char* name) {
+        if (!vector.has_scale()) {
+            if (tensor.data != nullptr) {
+                throw std::invalid_argument("kv_cache_append: unscaled cache must not have scales");
+            }
+            return;
+        }
+        if (tensor.dtype != vector.scale_dtype) {
+            throw std::invalid_argument("kv_cache_append: invalid cache scale dtype");
+        }
+        require_shape(tensor, vector.scale_leading_extent, kPagedKVPageSize, kv_heads,
+                      physical_pages, kAppendOp, name);
+        require_contiguous_nonnull(tensor, kAppendOp, name);
+    };
+    validate_scale(cache.k_scale_pages, layout.key, "cache k scale pages");
+    validate_scale(cache.v_scale_pages, layout.value, "cache v scale pages");
+    return static_cast<std::uint32_t>(capacity);
+}
+
+bool aligned16(const Tensor& tensor) {
+    return (reinterpret_cast<std::uintptr_t>(tensor.data) & 15u) == 0u;
 }
 
 void require_vector_aligned(const Tensor& tensor, const char* name) {
@@ -205,6 +269,46 @@ void kv_cache_append(const Tensor& k, const Tensor& v, const Tensor& positions,
     } else {
         detail::kv_cache_append_launch(k, v, positions, cache, stream);
     }
+}
+
+void kv_cache_append(const Tensor& k, const Tensor& v, const Tensor& positions,
+                     const Tensor& valid_columns, const Tensor& table_rows,
+                     PagedKVBatchLayerView cache, cudaStream_t stream) {
+    if (k.dtype != DType::BF16 || v.dtype != DType::BF16) {
+        throw std::invalid_argument("kv_cache_append: k/v must be BF16");
+    }
+    const bool masked = valid_columns.data != nullptr;
+    if (positions.dtype != DType::I32 || table_rows.dtype != DType::I32 ||
+        (masked && valid_columns.dtype != DType::I32)) {
+        throw std::invalid_argument("kv_cache_append: batch metadata must be I32");
+    }
+    const std::int32_t kv_heads = k.ne[1];
+    if (kv_heads != 4 && kv_heads != 2) {
+        throw std::invalid_argument("kv_cache_append: unsupported KV head geometry");
+    }
+    const std::int32_t width = k.ne[2];
+    const std::int32_t batch = k.ne[3];
+    if (width < 1 || width > kMaximumWidth || batch < 1 || batch > kMaximumBatch) {
+        throw std::invalid_argument("kv_cache_append: unsupported B/W domain");
+    }
+    require_shape(k, kFullHeadDim, kv_heads, width, batch, kAppendOp, "k");
+    require_shape(v, kFullHeadDim, kv_heads, width, batch, kAppendOp, "v");
+    require_shape(positions, width, batch, 1, 1, kAppendOp, "positions");
+    require_shape(table_rows, batch, 1, 1, 1, kAppendOp, "table rows");
+    if (masked) require_shape(valid_columns, batch, 1, 1, 1, kAppendOp, "valid columns");
+    require_contiguous_nonnull(k, kAppendOp, "k");
+    require_contiguous_nonnull(v, kAppendOp, "v");
+    require_contiguous_nonnull(positions, kAppendOp, "positions");
+    require_contiguous_nonnull(table_rows, kAppendOp, "table rows");
+    if (masked) require_contiguous_nonnull(valid_columns, kAppendOp, "valid columns");
+    if (!aligned16(k) || !aligned16(v)) {
+        throw std::invalid_argument("kv_cache_append: k/v must be 16-byte aligned");
+    }
+    const std::uint32_t capacity = validate_full_batch_cache(cache, kv_heads, batch);
+    if (static_cast<std::uint32_t>(width) > capacity) {
+        throw std::invalid_argument("kv_cache_append: W exceeds cache capacity");
+    }
+    detail::kv_cache_append_batch_launch(k, v, positions, valid_columns, table_rows, cache, stream);
 }
 
 void kv_cache_append_prefix(const Tensor& k, const Tensor& v, const Tensor& positions,

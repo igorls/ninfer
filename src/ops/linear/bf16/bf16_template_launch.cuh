@@ -68,8 +68,10 @@ void launch_bf16_mma_partitions(const Bf16A16Operands& p, Output output, Epilogu
     static_assert(Schedule::kThreads == Schedule::kWarpsRows * Schedule::kWarpsTokens * 32,
                   "cp.async MMA schedules must not reserve TMA producer warps");
     validate_bf16_operands<Schedule>(p);
-    if (p.rows % Schedule::kBlockRows || p.k % (Schedule::kBlockK * Splits))
-        throw std::invalid_argument("BF16 MMA requires complete row/K tiles in every split");
+    constexpr bool partial_k = Schedule::kStaticK != 0 &&
+                               Schedule::kStaticK % (Schedule::kBlockK * Splits) != 0;
+    if (p.rows % Schedule::kBlockRows || p.k % ((partial_k ? 8 : Schedule::kBlockK) * Splits))
+        throw std::invalid_argument("BF16 MMA requires complete row tiles and aligned K partitions");
     for_each_token_slice(p.tokens, Schedule::kBlockTokens, [&](int offset, int count) {
         const auto blocks = static_cast<std::int64_t>(p.rows / Schedule::kBlockRows) *
                             div_up(count, Schedule::kBlockTokens);

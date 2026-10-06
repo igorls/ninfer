@@ -19,9 +19,9 @@ inline constexpr std::int32_t kGdnParentRows = kGdnChannels + kGdnZRows;
 // Format-neutral output policy for a single-parent [query,key,value,z] contraction. The
 // contraction owns the represented projected values; this adapter owns only the final GDN
 // convolution/state semantics and the physical split between Q/K/V and Z.
-template <int Tokens, class Publish>
+template <int Tokens, class Publish, bool RoundHistory = false>
 struct GdnConvOutput {
-    GdnConvEpilogue<Publish> conv;
+    GdnConvEpilogue<Publish, RoundHistory> conv;
     __nv_bfloat16* z;
 
     __device__ __forceinline__ void store_row(std::int32_t parent_row,
@@ -46,8 +46,8 @@ struct GdnConvOutput {
     }
 };
 
-template <int Tokens, class Publish>
-GdnConvOutput<Tokens, Publish>
+template <int Tokens, bool RoundHistory = false, class Publish>
+GdnConvOutput<Tokens, Publish, RoundHistory>
 make_gdn_conv_output(const Tensor& conv_weight, const Tensor& conv_states,
                      const Tensor& valid_columns, const Tensor& initial_slot, Tensor& query,
                      Tensor& key, Tensor& value, Tensor& z, Publish publish) {

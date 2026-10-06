@@ -25,6 +25,7 @@ MANIFEST_PATH = REPO_ROOT / "examples/cli/manifest.json"
 SPECULATIVE_MODES = {
     "mtp0": ("none", 0),
     "mtp3": ("mtp", 3),
+    "mtp5": ("mtp", 5),
     "dflash7": ("dflash", 7),
     "dflash2_7": ("dflash2", 7),
 }
@@ -84,7 +85,7 @@ SCENARIO_FIXTURES = {
 
 WARMUP_FIXTURE = "text_smoke_zh"
 RUN_ARTIFACT_TYPE = "ninfer_serve_corpus_result"
-RUN_SCHEMA_VERSION = 8
+RUN_SCHEMA_VERSION = 9
 SERVER_LOG_ARTIFACT_TYPE = "ninfer_serve_request_log"
 SERVER_LOG_SCHEMA_VERSION = 21
 STARTUP_TIMEOUT_SECONDS = 1800.0
@@ -112,6 +113,7 @@ class RunSpec:
     draft_tokens: int
     sampling_mode: str
     kv_dtype: str
+    proposal_head: str
     fixture: Fixture
     seed: int
 
@@ -301,6 +303,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8080, help="loopback serving port")
     parser.add_argument("--device", type=int, default=0, help="CUDA device index")
     parser.add_argument("--kv-dtype", choices=tuple(KV_CACHE_NAMES), default="int8")
+    parser.add_argument("--proposal-head", choices=("full", "optimized"), default="optimized")
     return parser.parse_args(argv)
 
 
@@ -386,6 +389,7 @@ def build_specs(
     mode_names: Sequence[str],
     sampling_mode: str,
     kv_dtype: str,
+    proposal_head: str,
 ) -> list[RunSpec]:
     specs: list[RunSpec] = []
     for target, artifact in artifacts:
@@ -403,6 +407,7 @@ def build_specs(
                             draft_tokens=draft_tokens,
                             sampling_mode=sampling_mode,
                             kv_dtype=kv_dtype,
+                            proposal_head=proposal_head if draft_tokens else "full",
                             fixture=fixtures[fixture_name],
                             seed=seed,
                         )
@@ -498,7 +503,7 @@ def validate_server_start(event: dict[str, Any], spec: RunSpec, device: int) -> 
         "prefix_reuse": False,
         "speculative_backend": spec.speculative_backend,
         "speculative_draft_window": spec.draft_tokens,
-        "proposal_head": "optimized" if spec.draft_tokens else "full",
+        "proposal_head": spec.proposal_head,
     }
     if actual != expected:
         raise CampaignError(f"server_start Engine configuration mismatch: {actual!r}")
@@ -672,6 +677,7 @@ def build_result_record(
         "draft_tokens": spec.draft_tokens,
         "sampling_mode": spec.sampling_mode,
         "kv_dtype": spec.kv_dtype,
+        "proposal_head": spec.proposal_head,
         "request": payload,
         "response": response,
         "server_event": server_event,
@@ -720,6 +726,10 @@ def load_existing_records(
                 if record.get("kv_dtype") != spec.kv_dtype:
                     raise CampaignError(
                         f"{path}:{line_number}: KV dtype differs from the current command"
+                    )
+                if record.get("proposal_head") != spec.proposal_head:
+                    raise CampaignError(
+                        f"{path}:{line_number}: proposal head differs from the current command"
                     )
                 if Path(record.get("artifact_path", "")).resolve() != spec.artifact:
                     raise CampaignError(
@@ -776,9 +786,10 @@ def server_command(
                 spec.speculative_backend,
                 "--draft-tokens",
                 str(spec.draft_tokens),
-                "--lm-head-draft",
             ]
         )
+        if spec.proposal_head == "optimized":
+            command.append("--lm-head-draft")
     if spec.sampling_mode == "greedy":
         command.append("--greedy")
     else:
@@ -1259,7 +1270,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if len(mode_names) != len(set(mode_names)):
         raise CampaignError("duplicate --mode value")
     fixtures = load_fixtures()
-    specs = build_specs(artifacts, fixtures, mode_names, args.sampling, args.kv_dtype)
+    specs = build_specs(
+        artifacts, fixtures, mode_names, args.sampling, args.kv_dtype, args.proposal_head
+    )
     expected_specs = {spec.key: spec for spec in specs}
     total = len(expected_specs)
 

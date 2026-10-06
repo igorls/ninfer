@@ -295,6 +295,7 @@ bool launch_bf16_prefill_mma(Bf16GdnGatingTokenVariant variant, const Tensor& x,
                              const Weight& a_weight, const Weight& b_weight, const Tensor& A_log,
                              const Tensor& dt_bias, void* workspace, Tensor& g, Tensor& beta,
                              cudaStream_t stream, std::int32_t multiprocessor_count = 0) {
+    using Control            = typename Geometry::Control;
     constexpr int kBlockN    = Geometry::kBlockN;
     constexpr int kSmemBytes = kBf16GdnSmemBytes<kBlockN>;
     const dim3 block(Warps * 32);
@@ -334,8 +335,9 @@ bool launch_bf16_prefill_mma(Bf16GdnGatingTokenVariant variant, const Tensor& x,
                         : static_cast<__nv_bfloat16*>(nullptr),
                     norm_eps, static_cast<const __nv_bfloat16*>(a_weight.qdata),
                     static_cast<const __nv_bfloat16*>(b_weight.qdata),
-                    static_cast<const float*>(A_log.data), static_cast<const float*>(dt_bias.data),
-                    static_cast<float*>(workspace), static_cast<float*>(launch_g.data),
+                    static_cast<const Control*>(A_log.data),
+                    static_cast<const Control*>(dt_bias.data), static_cast<float*>(workspace),
+                    static_cast<float*>(launch_g.data),
                     static_cast<float*>(launch_beta.data), launch_t));
             } else {
                 bf16_gdn_gating_proj_gemm_mma_kernel<Geometry, SplitK, FullTokens, Warps,
@@ -350,8 +352,8 @@ bool launch_bf16_prefill_mma(Bf16GdnGatingTokenVariant variant, const Tensor& x,
                             : static_cast<__nv_bfloat16*>(nullptr),
                         norm_eps, static_cast<const __nv_bfloat16*>(a_weight.qdata),
                         static_cast<const __nv_bfloat16*>(b_weight.qdata),
-                        static_cast<const float*>(A_log.data),
-                        static_cast<const float*>(dt_bias.data), static_cast<float*>(workspace),
+                        static_cast<const Control*>(A_log.data),
+                        static_cast<const Control*>(dt_bias.data), static_cast<float*>(workspace),
                         static_cast<float*>(launch_g.data), static_cast<float*>(launch_beta.data),
                         launch_t);
             }

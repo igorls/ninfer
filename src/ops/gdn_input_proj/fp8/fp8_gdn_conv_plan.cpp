@@ -5,7 +5,6 @@
 #include "ops/gdn_input_proj/fp8/fp8_gdn_input_plan.h"
 #include "ops/gdn_input_proj/gdn_projected_conv.h"
 #include "ops/linear/fp8/fp8_a8_plan.h"
-#include "ops/linear/fp8/fp8_geometry.h"
 
 #include <cstdint>
 #include <stdexcept>
@@ -47,44 +46,46 @@ Fp8GdnConvPlan b1_a16_plan(std::int32_t width) {
     return {fused ? Fp8GdnConvScheduleId::FusedA16 : Fp8GdnConvScheduleId::MaterializedA16};
 }
 
-std::size_t snapshot_capacity(Fp8GdnConvPlan maximum_plan, std::int32_t materialized_columns,
-                              std::int32_t maximum_columns) {
+std::size_t snapshot_capacity(const Fp8GdnInputProfile& profile, Fp8GdnConvPlan maximum_plan,
+                              std::int32_t materialized_columns, std::int32_t maximum_columns) {
     if (materialized_columns == 0) { return 0; }
     WorkspaceLayoutBuilder layout;
     (void)allocate_projected(layout, materialized_columns);
     if (maximum_plan.schedule == Fp8GdnConvScheduleId::MaterializedA8) {
-        (void)allocate_fp8_a8_workspace(layout, maximum_columns, Fp8N16384K5120::kInputRows,
-                                        fp8_gdn_input_partial_capacity_bytes(maximum_columns));
+        (void)allocate_fp8_a8_workspace(layout, maximum_columns, profile.input_rows,
+                                        profile.a8_partial_bytes(maximum_columns));
     }
     return layout.peak_bytes(1);
 }
 
-std::size_t record_capacity(Fp8GdnConvPlan plan, std::int32_t aggregate_columns) {
+std::size_t record_capacity(const Fp8GdnInputProfile& profile, Fp8GdnConvPlan plan,
+                            std::int32_t aggregate_columns) {
     if (plan.schedule != Fp8GdnConvScheduleId::MaterializedA8) { return 0; }
-    return fp8_a8_workspace_capacity_bytes(aggregate_columns, Fp8N16384K5120::kInputRows,
-                                           fp8_gdn_input_partial_capacity_bytes(aggregate_columns));
+    return fp8_a8_workspace_capacity_bytes(aggregate_columns, profile.input_rows,
+                                           profile.a8_partial_bytes(aggregate_columns));
 }
 
-void launch_projection(const Tensor& x, const Weight& weight, Tensor& projected, Tensor& z,
-                       Fp8GdnConvScheduleId schedule, WorkspaceArena& workspace,
-                       cudaStream_t stream) {
+void launch_projection(const Fp8GdnInputProfile& profile, const Tensor& x, const Weight& weight,
+                       Tensor& projected, Tensor& z, Fp8GdnConvScheduleId schedule,
+                       WorkspaceArena& workspace, cudaStream_t stream) {
     if (schedule == Fp8GdnConvScheduleId::MaterializedA16) {
-        fp8_gdn_input_a16_dispatch(x, weight, projected, z, stream);
+        profile.a16(x, weight, projected, z, stream);
         return;
     }
     if (schedule == Fp8GdnConvScheduleId::MaterializedA8) {
-        fp8_gdn_input_a8_dispatch(x, weight, projected, z, workspace, stream);
+        fp8_gdn_input_a8_dispatch(profile, x, weight, projected, z, workspace, stream);
         return;
     }
     throw std::logic_error("fp8 GDN materialized projection received a fused plan");
 }
 
-Fp8GdnConvPlan fp8_gdn_snapshot_resolve_plan(LinearPolicy policy, std::int32_t width,
-                                             std::int32_t batch_size) {
+Fp8GdnConvPlan fp8_gdn_snapshot_resolve_plan(const Fp8GdnInputProfile& profile, LinearPolicy policy,
+                                             std::int32_t width, std::int32_t batch_size) {
     require_policy(policy, "fp8 GDN snapshot");
     if (width <= 0 || batch_size <= 0 || batch_size > 8 || (batch_size > 1 && width > 16)) {
         throw std::invalid_argument("fp8 GDN snapshot: invalid B/W domain");
     }
+    if (profile.input_rows == 2560 && width <= 6) { return {Fp8GdnConvScheduleId::FusedA16}; }
     if (batch_size == 1) {
         if (allows_a8(policy) && width >= 17) { return {Fp8GdnConvScheduleId::MaterializedA8}; }
         return b1_a16_plan(width);
@@ -95,53 +96,58 @@ Fp8GdnConvPlan fp8_gdn_snapshot_resolve_plan(LinearPolicy policy, std::int32_t w
     return {Fp8GdnConvScheduleId::MaterializedA16};
 }
 
-Fp8GdnConvPlan fp8_gdn_record_resolve_plan(LinearPolicy policy, std::int32_t width,
-                                           std::int32_t batch_size) {
+Fp8GdnConvPlan fp8_gdn_record_resolve_plan(const Fp8GdnInputProfile& profile, LinearPolicy policy,
+                                           std::int32_t width, std::int32_t batch_size) {
     require_policy(policy, "fp8 GDN record");
     if (width < 2 || width > 16 || batch_size <= 0 || batch_size > 8) {
         throw std::invalid_argument("fp8 GDN record: invalid B/W domain");
     }
     // Record and snapshot must choose the same arithmetic for the same physical block.
-    return fp8_gdn_snapshot_resolve_plan(policy, width, batch_size);
+    return fp8_gdn_snapshot_resolve_plan(profile, policy, width, batch_size);
 }
 
 } // namespace
 
-std::size_t fp8_gdn_snapshot_workspace_capacity_bytes(LinearPolicy policy, std::int32_t batch_size,
+std::size_t fp8_gdn_snapshot_workspace_capacity_bytes(const Fp8GdnInputProfile& profile,
+                                                      LinearPolicy policy, std::int32_t batch_size,
                                                       std::int32_t min_width,
                                                       std::int32_t max_width) {
     if (min_width <= 0 || max_width < min_width) {
         throw std::invalid_argument("fp8 GDN snapshot workspace: invalid width interval");
     }
-    (void)fp8_gdn_snapshot_resolve_plan(policy, min_width, batch_size);
-    const Fp8GdnConvPlan maximum = fp8_gdn_snapshot_resolve_plan(policy, max_width, batch_size);
-    const std::int32_t largest_materialized_width = batch_size > 1 || max_width > 3 ? max_width : 0;
-    return snapshot_capacity(maximum, batch_size * largest_materialized_width,
+    (void)fp8_gdn_snapshot_resolve_plan(profile, policy, min_width, batch_size);
+    const Fp8GdnConvPlan maximum =
+        fp8_gdn_snapshot_resolve_plan(profile, policy, max_width, batch_size);
+    const std::int32_t largest_materialized_width =
+        maximum.schedule == Fp8GdnConvScheduleId::FusedA16 ? 0 : max_width;
+    return snapshot_capacity(profile, maximum, batch_size * largest_materialized_width,
                              batch_size * max_width);
 }
 
-std::size_t fp8_gdn_record_workspace_capacity_bytes(LinearPolicy policy, std::int32_t batch_size,
+std::size_t fp8_gdn_record_workspace_capacity_bytes(const Fp8GdnInputProfile& profile,
+                                                    LinearPolicy policy, std::int32_t batch_size,
                                                     std::int32_t min_width,
                                                     std::int32_t max_width) {
     if (min_width < 2 || max_width < min_width) {
         throw std::invalid_argument("fp8 GDN record workspace: invalid width interval");
     }
-    (void)fp8_gdn_record_resolve_plan(policy, min_width, batch_size);
-    const Fp8GdnConvPlan maximum = fp8_gdn_record_resolve_plan(policy, max_width, batch_size);
-    return record_capacity(maximum, batch_size * max_width);
+    (void)fp8_gdn_record_resolve_plan(profile, policy, min_width, batch_size);
+    const Fp8GdnConvPlan maximum =
+        fp8_gdn_record_resolve_plan(profile, policy, max_width, batch_size);
+    return record_capacity(profile, maximum, batch_size * max_width);
 }
 
 namespace {
 
-void launch_snapshot_plan(const Tensor& x, const Weight& weight, const Tensor& conv_weight,
-                          Tensor& conv_states, const Tensor& valid_columns,
-                          const Tensor& initial_slot, const Tensor& snapshot_base_slot,
-                          Tensor& query, Tensor& key, Tensor& value, Tensor& z, Fp8GdnConvPlan plan,
-                          WorkspaceArena& workspace, cudaStream_t stream) {
+void launch_snapshot_plan(const Fp8GdnInputProfile& profile, const Tensor& x, const Weight& weight,
+                          const Tensor& conv_weight, Tensor& conv_states,
+                          const Tensor& valid_columns, const Tensor& initial_slot,
+                          const Tensor& snapshot_base_slot, Tensor& query, Tensor& key,
+                          Tensor& value, Tensor& z, Fp8GdnConvPlan plan, WorkspaceArena& workspace,
+                          cudaStream_t stream) {
     if (plan.schedule == Fp8GdnConvScheduleId::FusedA16) {
-        fp8_gdn_snapshot_fused_launch(x, weight, conv_weight, conv_states, valid_columns,
-                                      initial_slot, snapshot_base_slot, query, key, value, z,
-                                      stream);
+        profile.snapshot_fused(x, weight, conv_weight, conv_states, valid_columns, initial_slot,
+                               snapshot_base_slot, query, key, value, z, stream);
         return;
     }
 
@@ -150,23 +156,24 @@ void launch_snapshot_plan(const Tensor& x, const Weight& weight, const Tensor& c
     const std::int32_t aggregate_columns = width * batch;
     auto scope                           = workspace.scope();
     Fp8GdnProjectedWorkspace scratch     = allocate_projected(workspace, aggregate_columns);
-    Tensor x_flat(x.data, DType::BF16, {Fp8N16384K5120::kInputRows, aggregate_columns});
+    Tensor x_flat(x.data, DType::BF16, {profile.input_rows, aggregate_columns});
     Tensor z_flat(z.data, DType::BF16, {kZRows, aggregate_columns});
-    launch_projection(x_flat, weight, scratch.projected, z_flat, plan.schedule, workspace, stream);
+    launch_projection(profile, x_flat, weight, scratch.projected, z_flat, plan.schedule, workspace,
+                      stream);
 
     Tensor projected(scratch.projected.data, DType::BF16, {kChannels, width, batch});
     gdn_projected_conv_snapshot_launch(projected, conv_weight, conv_states, valid_columns,
                                        initial_slot, snapshot_base_slot, query, key, value, stream);
 }
 
-void launch_record_plan(const Tensor& x, const Weight& weight, const Tensor& conv_weight,
-                        const Tensor& conv_states, const Tensor& valid_columns,
-                        const Tensor& initial_slot, Tensor& conv_record, Tensor& query, Tensor& key,
-                        Tensor& value, Tensor& z, Fp8GdnConvPlan plan, WorkspaceArena& workspace,
-                        cudaStream_t stream) {
+void launch_record_plan(const Fp8GdnInputProfile& profile, const Tensor& x, const Weight& weight,
+                        const Tensor& conv_weight, const Tensor& conv_states,
+                        const Tensor& valid_columns, const Tensor& initial_slot,
+                        Tensor& conv_record, Tensor& query, Tensor& key, Tensor& value, Tensor& z,
+                        Fp8GdnConvPlan plan, WorkspaceArena& workspace, cudaStream_t stream) {
     if (plan.schedule == Fp8GdnConvScheduleId::FusedA16) {
-        fp8_gdn_record_fused_launch(x, weight, conv_weight, conv_states, valid_columns,
-                                    initial_slot, conv_record, query, key, value, z, stream);
+        profile.record_fused(x, weight, conv_weight, conv_states, valid_columns, initial_slot,
+                             conv_record, query, key, value, z, stream);
         return;
     }
 
@@ -174,35 +181,39 @@ void launch_record_plan(const Tensor& x, const Weight& weight, const Tensor& con
     const std::int32_t batch             = x.ne[2];
     const std::int32_t aggregate_columns = width * batch;
     auto scope                           = workspace.scope();
-    Tensor x_flat(x.data, DType::BF16, {Fp8N16384K5120::kInputRows, aggregate_columns});
+    Tensor x_flat(x.data, DType::BF16, {profile.input_rows, aggregate_columns});
     Tensor record_flat(conv_record.data, DType::BF16, {kChannels, aggregate_columns});
     Tensor z_flat(z.data, DType::BF16, {kZRows, aggregate_columns});
-    launch_projection(x_flat, weight, record_flat, z_flat, plan.schedule, workspace, stream);
+    launch_projection(profile, x_flat, weight, record_flat, z_flat, plan.schedule, workspace,
+                      stream);
     gdn_projected_conv_record_launch(conv_record, conv_weight, conv_states, valid_columns,
                                      initial_slot, query, key, value, stream);
 }
 
 } // namespace
 
-void fp8_gdn_snapshot_dispatch(const Tensor& x, const Weight& weight, const Tensor& conv_weight,
-                               Tensor& conv_states, const Tensor& valid_columns,
-                               const Tensor& initial_slot, const Tensor& snapshot_base_slot,
-                               Tensor& query, Tensor& key, Tensor& value, Tensor& z,
-                               LinearPolicy policy, WorkspaceArena& workspace,
-                               cudaStream_t stream) {
-    launch_snapshot_plan(
-        x, weight, conv_weight, conv_states, valid_columns, initial_slot, snapshot_base_slot, query,
-        key, value, z, fp8_gdn_snapshot_resolve_plan(policy, x.ne[1], x.ne[2]), workspace, stream);
+void fp8_gdn_snapshot_dispatch(const Fp8GdnInputProfile& profile, const Tensor& x,
+                               const Weight& weight, const Tensor& conv_weight, Tensor& conv_states,
+                               const Tensor& valid_columns, const Tensor& initial_slot,
+                               const Tensor& snapshot_base_slot, Tensor& query, Tensor& key,
+                               Tensor& value, Tensor& z, LinearPolicy policy,
+                               WorkspaceArena& workspace, cudaStream_t stream) {
+    launch_snapshot_plan(profile, x, weight, conv_weight, conv_states, valid_columns, initial_slot,
+                         snapshot_base_slot, query, key, value, z,
+                         fp8_gdn_snapshot_resolve_plan(profile, policy, x.ne[1], x.ne[2]),
+                         workspace, stream);
 }
 
-void fp8_gdn_record_dispatch(const Tensor& x, const Weight& weight, const Tensor& conv_weight,
+void fp8_gdn_record_dispatch(const Fp8GdnInputProfile& profile, const Tensor& x,
+                             const Weight& weight, const Tensor& conv_weight,
                              const Tensor& conv_states, const Tensor& valid_columns,
                              const Tensor& initial_slot, Tensor& conv_record, Tensor& query,
                              Tensor& key, Tensor& value, Tensor& z, LinearPolicy policy,
                              WorkspaceArena& workspace, cudaStream_t stream) {
-    launch_record_plan(x, weight, conv_weight, conv_states, valid_columns, initial_slot,
+    launch_record_plan(profile, x, weight, conv_weight, conv_states, valid_columns, initial_slot,
                        conv_record, query, key, value, z,
-                       fp8_gdn_record_resolve_plan(policy, x.ne[1], x.ne[2]), workspace, stream);
+                       fp8_gdn_record_resolve_plan(profile, policy, x.ne[1], x.ne[2]), workspace,
+                       stream);
 }
 
 } // namespace ninfer::ops::detail

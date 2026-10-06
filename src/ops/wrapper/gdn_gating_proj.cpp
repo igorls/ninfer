@@ -46,20 +46,22 @@ Weight bf16_row_view(const Weight& parent, std::int32_t row_begin, std::int32_t 
 struct GdnControlParentGeometry {
     std::int32_t input_rows;
     std::int32_t heads;
+    DType control; // stored dtype of A_log and dt_bias
 };
 
+// Registered contiguous parents. The Flash-Next parent's A_log/dt_bias are BF16 as stored.
 GdnControlParentGeometry require_bf16_parent(const Weight& parent) {
     if (parent.n == 96 && parent.k == 5120) {
         require_bf16_weight(parent, 96, 5120, "ab_weight");
-        return {.input_rows = 5120, .heads = 48};
+        return {.input_rows = 5120, .heads = 48, .control = DType::FP32};
     }
     if (parent.n == 96 && parent.k == 2560) {
         require_bf16_weight(parent, 96, 2560, "ab_weight");
-        return {.input_rows = 2560, .heads = 48};
+        return {.input_rows = 2560, .heads = 48, .control = DType::BF16};
     }
     if (parent.n == 64 && parent.k == 2048) {
         require_bf16_weight(parent, 64, 2048, "ab_weight");
-        return {.input_rows = 2048, .heads = 32};
+        return {.input_rows = 2048, .heads = 32, .control = DType::FP32};
     }
     throw std::invalid_argument("gdn_gating_proj: unsupported ab_weight geometry");
 }
@@ -100,6 +102,9 @@ std::size_t gdn_norm_gating_proj_workspace_capacity_bytes(std::int32_t heads,
                                                           std::int32_t input_rows,
                                                           std::int32_t min_tokens,
                                                           std::int32_t max_tokens) {
+    if (heads == 48 && input_rows == 2560) {
+        throw std::invalid_argument("gdn_norm_gating_proj workspace: unsupported profile");
+    }
     return detail::bf16_gdn_norm_gating_capacity_workspace_bytes(heads, input_rows, min_tokens,
                                                                  max_tokens);
 }
@@ -128,8 +133,8 @@ void gdn_gating_proj(const Tensor& x, const Weight& ab_weight, const Tensor& A_l
     const std::int32_t tokens               = x.ne[1];
     const GdnControlParentGeometry geometry = require_bf16_parent(ab_weight);
     require_sequence_tensor(x, DType::BF16, geometry.input_rows, tokens, op, "x");
-    require_vector_tensor(A_log, DType::FP32, geometry.heads, op, "A_log");
-    require_vector_tensor(dt_bias, DType::FP32, geometry.heads, op, "dt_bias");
+    require_vector_tensor(A_log, geometry.control, geometry.heads, op, "A_log");
+    require_vector_tensor(dt_bias, geometry.control, geometry.heads, op, "dt_bias");
     require_sequence_tensor(g, DType::FP32, geometry.heads, tokens, op, "g");
     require_sequence_tensor(beta, DType::FP32, geometry.heads, tokens, op, "beta");
     require_execution(execution, op);
@@ -173,6 +178,10 @@ void gdn_norm_gating_proj(const Tensor& x, const Tensor& norm_weight, float eps,
         throw std::invalid_argument("gdn_norm_gating_proj: eps must be positive and finite");
     }
     const GdnControlParentGeometry geometry = require_bf16_parent(ab_weight);
+    // The input-norm form registers only the Qwen3.8-27B and Qwen3.6-35B-A3B parents.
+    if (geometry.input_rows == 2560) {
+        throw std::invalid_argument("gdn_norm_gating_proj: unsupported ab_weight geometry");
+    }
     require_sequence_tensor(x, DType::BF16, geometry.input_rows, tokens, op, "x");
     require_vector_tensor(norm_weight, DType::BF16, geometry.input_rows, op, "norm_weight");
     require_sequence_tensor(h, DType::BF16, geometry.input_rows, tokens, op, "h");

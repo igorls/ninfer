@@ -9,10 +9,10 @@
 namespace ninfer::ops::detail {
 namespace {
 
-// Batched route partitions: enough CTAs to cover the device at B=1 (a visible set holds at most
-// 2051 tokens, so 32 partitions leave about one 64-token tile each) and two tiles per partition
-// from four columns up.
-int decode_partitions(int columns) { return columns < 4 ? kSelectedMaxPartitions : 16; }
+// Keep each query's softmax partitioning independent of its batch/window width. Probabilities
+// are staged as FP16 relative to each partition's maximum, so changing the partition boundaries
+// changes their represented values, not just the final FP32 reduction order.
+int decode_partitions(int) { return kSelectedMaxPartitions; }
 
 template <SelectedKvProfile Profile>
 void launch_decode(const Tensor& q, const Tensor& positions, const Tensor& table_rows,

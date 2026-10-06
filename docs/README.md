@@ -52,7 +52,7 @@ other references own narrower contracts:
 | [Artifact container](maintainer/artifact-container.md) | v3 directory, objects, logical bindings, Uses, resources and file framing/sharding |
 | [Numeric formats](maintainer/tensor-formats.md) | represented values, codes/scales, conversion arithmetic and numerical interpretation |
 | [Storage layouts](maintainer/storage-layouts.md) | packing, plane offsets, padding, encoded sizes and view addressing |
-| [Qwen3.8-Flash-Next artifact](maintainer/qwen3.8-flash-next-artifact.md) | v3 artifact derived from the published v2 file: inventory, baked MTP banks, bindings and Uses |
+| [Qwen3.8-Flash-Next artifact](maintainer/qwen3.8-flash-next-artifact.md) | v3 artifact derived from the published v2 file: inventory, baked MTP banks, bindings, native text/MTP/Vision execution |
 | [Qwen3.5 model](maintainer/qwen3_5-model.md) | Dense/MoE mathematics, instance config, logical parameters, MTP, Vision and state semantics |
 | [DFlash and DFlash2](maintainer/dflash.md) | conditioning, masked draft computation, proposal distributions and backend state |
 | [Resource scheduling and context cache](maintainer/resource-scheduling-and-context-cache.md) | candidate selection, retention, materialization and Device/Host checkpoint policy |

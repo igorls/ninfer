@@ -40,7 +40,7 @@ inline std::string engine_connect_host(const EngineSpec& spec) {
 // One servable model. `args` is everything the engine needs BESIDES the artifact
 // path, because switching models is not a path swap: the 27B wants
 // --kv-dtype int8 --spec mtp --draft-tokens 4, Flash-Next wants
-// --kv-dtype fp8 --gdn-state-dtype bf16 and a different --kv-capacity. A catalog
+// --kv-dtype fp8 and a different --kv-capacity. A catalog
 // that carried only paths would produce a configuration that does not start.
 struct ModelEntry {
     std::string id;

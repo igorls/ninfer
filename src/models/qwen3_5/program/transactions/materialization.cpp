@@ -345,7 +345,7 @@ ProgramImpl::reserve_materialization(AdmissionCandidate&& plan, PreparedPromptDa
                 throw std::logic_error("Vision prefill has no startup workspace plan");
             }
             request.prefill->vision = std::make_unique<execution::VisionPrefillSession>(
-                device, parameters,
+                device, *parameters.model.config().vision, *parameters.vision,
                 DeviceSpan{workspace_storage.base(), workspace_storage.capacity()},
                 *workspace_plan.vision, request.prefill->prompt, *request.prefill->vision_plan,
                 vision_handoff_peak_bytes);

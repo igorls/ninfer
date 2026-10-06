@@ -118,15 +118,16 @@ __global__ void __launch_bounds__(kExperts)
 }
 
 // ---------------------------------------------------------------------------------------------
-// Shared expert gate/up with BF16 Tensor Cores into [640,T] gate and [640,T] up planes, then the
-// SwiGLU product into both the up plane (A4 shared down input) and path 10 of the activations.
+// Shared expert gate/up with BF16 Tensor Core operands and private FP32 results. Apply SwiGLU
+// before its BF16 product store, matching the decode route's nonlinear boundary.
 // ---------------------------------------------------------------------------------------------
 using SharedMmaSchedule =
     Bf16A16MmaSchedule<64, 128, 64, 32, 32, 2, 2, Cache::cg, Cache::cg,
                        Bf16MmaFragmentPipeline::PingPong, Bf16MmaRaster::TokenFast>;
 
-__global__ void nvfp4_moe_shared_product_kernel(const __nv_bfloat16* __restrict__ gate,
-                                                __nv_bfloat16* __restrict__ up,
+__global__ void nvfp4_moe_shared_product_kernel(const float* __restrict__ gate,
+                                                const float* __restrict__ up,
+                                                __nv_bfloat16* __restrict__ product,
                                                 __nv_bfloat16* __restrict__ activations,
                                                 int tokens) {
     const int index = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
@@ -134,8 +135,8 @@ __global__ void nvfp4_moe_shared_product_kernel(const __nv_bfloat16* __restrict_
     const int token = index / kIntermediate;
     const int row   = index - token * kIntermediate;
     const auto value =
-        __float2bfloat16_rn(silu(__bfloat162float(gate[index])) * __bfloat162float(up[index]));
-    up[index]                                                                              = value;
+        __float2bfloat16_rn(silu(gate[index]) * up[index]);
+    if (product != nullptr) { product[index] = value; }
     activations[(static_cast<std::int64_t>(token) * kPaths + kTopK) * kIntermediate + row] = value;
 }
 
@@ -762,22 +763,31 @@ void launch_grouping(const Nvfp4MoeWorkspace& w, int tokens, cudaStream_t stream
     CUDA_CHECK(cudaGetLastError());
 }
 
+struct SharedFloatOutput {
+    float* data;
+
+    __device__ __forceinline__ void store(int row, int token, float value) const {
+        data[static_cast<std::int64_t>(token) * kIntermediate + row] = value;
+    }
+};
+
 void launch_shared_gate_up(const Tensor& x, const SparseMoeNvfp4BankWeights& weights,
                            const Nvfp4MoeWorkspace& w, int tokens, cudaStream_t stream) {
     const auto* input = static_cast<const __nv_bfloat16*>(x.data);
-    auto* gate        = static_cast<__nv_bfloat16*>(w.shared_gemm.data);
+    auto* gate        = static_cast<float*>(w.shared_gemm.data);
     auto* up          = gate + static_cast<std::int64_t>(kIntermediate) * tokens;
     launch_bf16_a16_mma<SharedMmaSchedule>(
         Bf16A16Operands{input, static_cast<const __nv_bfloat16*>(weights.shared_gate.qdata),
                         kIntermediate, kHidden, tokens},
-        LinearBf16Output{gate, kIntermediate}, LinearIdentityEpilogue{}, stream);
+        SharedFloatOutput{gate}, LinearIdentityEpilogue{}, stream);
     launch_bf16_a16_mma<SharedMmaSchedule>(
         Bf16A16Operands{input, static_cast<const __nv_bfloat16*>(weights.shared_up.qdata),
                         kIntermediate, kHidden, tokens},
-        LinearBf16Output{up, kIntermediate}, LinearIdentityEpilogue{}, stream);
+        SharedFloatOutput{up}, LinearIdentityEpilogue{}, stream);
     const int elements = tokens * kIntermediate;
     nvfp4_moe_shared_product_kernel<<<(elements + 255) / 256, 256, 0, stream>>>(
-        gate, up, static_cast<__nv_bfloat16*>(w.activations.data), tokens);
+        gate, up, static_cast<__nv_bfloat16*>(w.shared_product.data),
+        static_cast<__nv_bfloat16*>(w.activations.data), tokens);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -852,8 +862,7 @@ void nvfp4_moe_grouped(const Tensor& x, const SparseMoeNvfp4BankWeights& weights
                      1.0F);
     CUDA_CHECK(cudaGetLastError());
 
-    const auto* shared_product = static_cast<const __nv_bfloat16*>(w.shared_gemm.data) +
-                                 static_cast<std::int64_t>(kIntermediate) * tokens;
+    const auto* shared_product = static_cast<const __nv_bfloat16*>(w.shared_product.data);
     launch_bf16_a16_mma<SharedMmaSchedule>(
         Bf16A16Operands{shared_product, shared_down, kHidden, kIntermediate, tokens},
         ScaledSharedOutput{output, static_cast<const float*>(w.shared_scale.data)},

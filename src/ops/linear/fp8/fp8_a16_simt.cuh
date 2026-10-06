@@ -182,7 +182,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_a16_si
             const float scale    = fp8_row_scale(row_scales + parent_row);
             float projected[Schedule::kBlockTokens];
 #pragma unroll
-            for (int local_token = 0; local_token < live_tokens; ++local_token) {
+            for (int local_token = 0; local_token < Schedule::kBlockTokens; ++local_token) {
                 float total = 0.0F;
 #pragma unroll
                 for (int chain = 0; chain < Schedule::kAccumulatorChains; ++chain) {
@@ -192,7 +192,8 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_a16_si
                 if (lane == 0) { projected[local_token] = total * scale; }
             }
             if (lane == 0) {
-                linear_finish_row(destination, epilogue, parent_row, 0, projected, live_tokens);
+                linear_finish_row(destination, epilogue, parent_row, token0, projected,
+                                  Schedule::kBlockTokens);
             }
         }
     } else if constexpr (PairRows) {

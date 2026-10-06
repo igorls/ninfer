@@ -51,8 +51,10 @@ inactive cache 的保留而丢失完成能力。
 模型代码拥有数学公式、调用顺序、组件交接和状态转移。Config 提供层数、维度、Attention/GDN
 分布和 expert 几何等实例参数。当前标准架构入口是 `Qwen3_5ForCausalLM` 与
 `Qwen3_5MoeForCausalLM`；训练实例和物理权重分配作为数据进入对应实现。
-`Qwen4ExpForCausalLM`（Qwen3.8-Flash-Next，`src/models/qwen4_exp`）目前只有加载实现：artifact
-能完整加载，但该包还没有执行 Program，Engine 在加载完成后拒绝构造（见 3.4）。
+`Qwen4ExpForCausalLM`（Qwen3.8-Flash-Next，`src/models/qwen4_exp`）拥有独立的 Parameters、
+Program、StateImage 和图调度，实现文本、MTP、Vision 与 CausalScoring。它复用通用 Ops、
+Frontend 和显式 Vision 参数接口，不继承 Qwen3.5 Program。资格验证状态见
+[移植记录](upstream-ports.md#flash-next-v3)。
 
 V3 artifact 保存配置、物理对象、逻辑参数的 Binding、使用位置的 Use，以及 Frontend 资源。
 Converter 负责源映射、量化或保值导入、融合存储、packing 和 layout 转换；loader 根据实际绑定
@@ -220,10 +222,9 @@ GenerationCore 或 CausalScoreCore 在实例准备完成后使用它。
 
 构造先从 text component config 的架构对解析出模型包，再调用该包的加载与规划；每个包拥有自己
 的 config、绑定和只读 Model，Frontend 通过 `FrontendGeometry` 只读取词表行数、Vision patch
-几何和 DFlash2 selector 这几项事实。Qwen4Exp 包解析全部 Binding 与 Use、上传 Device 权重、
-映射并预热 PLE 表、构建 Frontend，随后在 `TargetFinalize` 阶段以显式错误结束构造：没有
-Program 就不产生一个看似可以服务的 Engine。它的 Program 加入后，`Engine::Impl` 才持有按架构
-区分的 core。
+几何和 DFlash2 selector 这几项事实。Qwen4Exp 包解析所选 Binding 与 Use、上传 Device 权重、
+映射并预热 PLE 表、构建 Frontend 与启动固定的 Program。`Engine::Impl` 按模型架构保存
+GenerationCore 或 CausalScoreCore 的显式 variant，公开 Engine 接口保持一致。
 
 模型配置、绑定和权重地址在实例存活期间固定；每个 Program 独占自己的可变 State/KV、
 workspace 和 Graph。销毁时先结束 Engine core 和未决设备工作，再销毁实例的 Program、

@@ -149,6 +149,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--prefill-chunk", type=int, default=1024)
     parser.add_argument("--kv-dtype", choices=tuple(corpus.KV_CACHE_NAMES), default="int8")
+    parser.add_argument("--proposal-head", choices=("full", "optimized"), default="optimized")
     parser.add_argument("--output", type=Path, required=True, help="benchmark output directory")
     parser.add_argument("--port", type=int, default=8080, help="loopback serving port")
     parser.add_argument("--device", type=int, default=0, help="CUDA device index")
@@ -318,9 +319,10 @@ def server_command(
                 point.speculative_backend,
                 "--draft-tokens",
                 str(point.draft_tokens),
-                "--lm-head-draft",
             ]
         )
+        if args.proposal_head == "optimized":
+            command.append("--lm-head-draft")
     if point.sampling_mode == "greedy":
         command.append("--greedy")
     else:
@@ -363,7 +365,7 @@ def validate_server_start(
         "prefix_reuse": False,
         "speculative_backend": point.speculative_backend,
         "speculative_draft_window": point.draft_tokens,
-        "proposal_head": "optimized" if point.draft_tokens else "full",
+        "proposal_head": args.proposal_head if point.draft_tokens else "full",
     }
     actual = {name: engine.get(name) for name in expected}
     if actual != expected:
@@ -805,6 +807,7 @@ def run_point(
                         draft_tokens=point.draft_tokens,
                         sampling_mode=point.sampling_mode,
                         kv_dtype=point.kv_dtype,
+                        proposal_head=args.proposal_head if point.draft_tokens else "full",
                         fixture=job.fixture,
                         seed=job.seed,
                     )

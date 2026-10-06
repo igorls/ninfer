@@ -165,6 +165,7 @@ void qsa_indexer_append(const Tensor& projected, const Tensor& positions,
 void qsa_indexer_append(const Tensor& projected, const Tensor& positions,
                         const Tensor& rope_positions, const Tensor& table_rows,
                         const Tensor& initial_slots, const Tensor& snapshot_base_slots,
+                        const Tensor& valid_columns,
                         const Tensor& key_norm, const QsaIndexerKeyState& state,
                         const QsaIndexerBlockKeys& blocks, cudaStream_t stream) {
     const std::int32_t width = projected.ne[1];
@@ -178,15 +179,16 @@ void qsa_indexer_append(const Tensor& projected, const Tensor& positions,
     require(kAppend, table_rows, DType::I32, {batch}, "table rows");
     require(kAppend, initial_slots, DType::I32, {batch}, "initial slots");
     require(kAppend, snapshot_base_slots, DType::I32, {batch}, "snapshot base slots");
+    if (valid_columns.data) { require(kAppend, valid_columns, DType::I32, {batch}, "valid columns"); }
     require(kAppend, key_norm, DType::BF16, {kHeadDim}, "key norm");
     require_state(kAppend, state);
     const detail::QsaTableView table = require_blocks(kAppend, blocks, false);
     require_disjoint(kAppend, {&state.raw_keys, &state.raw_positions, &blocks.keys},
                      {&state.raw_keys, &state.raw_positions, &blocks.keys, &projected, &positions,
-                      &rope_positions, &table_rows, &initial_slots, &snapshot_base_slots,
+                      &rope_positions, &table_rows, &initial_slots, &snapshot_base_slots, &valid_columns,
                       &key_norm, &blocks.block_tables});
     detail::qsa_append_snapshot_launch(projected, positions, rope_positions, table_rows,
-                                       initial_slots, snapshot_base_slots, key_norm, state.raw_keys,
+                                       initial_slots, snapshot_base_slots, valid_columns, key_norm, state.raw_keys,
                                        state.raw_positions, table, blocks.keys, width, batch,
                                        stream);
 }

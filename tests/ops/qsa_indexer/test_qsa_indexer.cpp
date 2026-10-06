@@ -234,7 +234,7 @@ int run_append_shared(int first_position, int tokens, bool same_slot, std::uint3
 }
 
 // ---------------------------------------------------------------- append, snapshots
-int run_append_snapshot(int width, const std::vector<int>& first_positions, std::uint32_t seed, bool graph) {
+int run_append_snapshot(int width, const std::vector<int>& first_positions, std::uint32_t seed, bool graph, bool ragged = false) {
     std::mt19937 rng(seed);
     const int batch = static_cast<int>(first_positions.size());
     const int slots = 2 + batch * (width + 1);
@@ -249,15 +249,16 @@ int run_append_snapshot(int width, const std::vector<int>& first_positions, std:
     const auto norm      = random_bf16(kDim, rng, -0.7F, 0.7F);
     std::vector<std::int32_t> positions(static_cast<std::size_t>(columns)), rope(static_cast<std::size_t>(columns) * 3),
         table_rows(static_cast<std::size_t>(batch)), initial(static_cast<std::size_t>(batch)),
-        base(static_cast<std::size_t>(batch));
+        base(static_cast<std::size_t>(batch)), valid(static_cast<std::size_t>(batch), width);
     for (int b = 0; b < batch; ++b) {
+        valid[b] = ragged ? 1 + b % width : width;
         table_rows[static_cast<std::size_t>(b)] = batch - 1 - b;
         base[static_cast<std::size_t>(b)]       = 1 + b * (width + 1);
         // Row 0's initial slot lies inside its own snapshot interval.
         initial[static_cast<std::size_t>(b)] = b == 0 ? base[0] : base[static_cast<std::size_t>(b)] + width;
         for (int w = 0; w < width; ++w) {
             const int c = w + width * b;
-            positions[static_cast<std::size_t>(c)] = first_positions[static_cast<std::size_t>(b)] + w;
+            positions[static_cast<std::size_t>(c)] = w < valid[b] ? first_positions[static_cast<std::size_t>(b)] + w : -1001;
             for (int a = 0; a < 3; ++a)
                 rope[static_cast<std::size_t>(a) * columns + c] = positions[static_cast<std::size_t>(c)] * (a + 1) + 7;
         }
@@ -277,7 +278,7 @@ int run_append_snapshot(int width, const std::vector<int>& first_positions, std:
             for (int d = 0; d < kDim; ++d) forming[r][d] = raw_keys[(static_cast<std::size_t>(init) * 4 + r) * kDim + d];
             for (int a = 0; a < 3; ++a) forming_pos[r][a] = raw_positions[(static_cast<std::size_t>(init) * 4 + r) * 3 + a];
         }
-        for (int w = 0; w < width; ++w) {
+        for (int w = 0; w < valid[b]; ++w) {
             const int c = w + width * b;
             const int p = positions[static_cast<std::size_t>(c)];
             const int e = p & 3;
@@ -305,7 +306,7 @@ int run_append_snapshot(int width, const std::vector<int>& first_positions, std:
                  raw_d = to_device(raw_keys), rawpos_d = to_device(raw_positions),
                  proj_d = to_device(projected), pos_d = to_device(positions), rope_d = to_device(rope),
                  norm_d = to_device(norm), rows_d = to_device(table_rows), init_d = to_device(initial),
-                 base_d = to_device(base);
+                 base_d = to_device(base), valid_d = to_device(valid);
     ops::QsaIndexerKeyState state{Tensor(raw_d.p, DType::BF16, {kDim, 4, slots}),
                                   Tensor(rawpos_d.p, DType::I32, {3, 4, slots})};
     ops::QsaIndexerBlockKeys blocks{plane_tensor(keys_d, plane),
@@ -315,7 +316,8 @@ int run_append_snapshot(int width, const std::vector<int>& first_positions, std:
                                 Tensor(pos_d.p, DType::I32, {width, batch}),
                                 Tensor(rope_d.p, DType::I32, {columns, 3}),
                                 Tensor(rows_d.p, DType::I32, {batch}), Tensor(init_d.p, DType::I32, {batch}),
-                                Tensor(base_d.p, DType::I32, {batch}), Tensor(norm_d.p, DType::BF16, {kDim}),
+                                Tensor(base_d.p, DType::I32, {batch}),
+                                ragged ? Tensor(valid_d.p, DType::I32, {batch}) : Tensor{}, Tensor(norm_d.p, DType::BF16, {kDim}),
                                 state, blocks, stream);
     };
     if (graph) {
@@ -335,7 +337,7 @@ int run_append_snapshot(int width, const std::vector<int>& first_positions, std:
         cuda_synchronize();
     }
     const std::string label = "qsa_indexer_append snapshot W=" + std::to_string(width) +
-                              " B=" + std::to_string(batch) + " graph=" + std::to_string(graph);
+                              " B=" + std::to_string(batch) + " ragged=" + std::to_string(ragged) + " graph=" + std::to_string(graph);
     int failures        = 0;
     const auto got_raw    = from_device<std::uint16_t>(raw_d, raw_keys.size());
     const auto got_rawpos = from_device<std::int32_t>(rawpos_d, raw_positions.size());
@@ -576,6 +578,10 @@ int main() {
     failures += run_append_snapshot(1, {0, 3, 6, 7'501, 29'999}, 31U, false);
     failures += run_append_snapshot(4, {2, 5, 8'190}, 32U, false);
     failures += run_append_snapshot(4, {1, 2, 3, 4, 5, 6, 7, 30'001}, 33U, true);
+    for (int residue = 0; residue < 4; ++residue) {
+        failures += run_append_snapshot(6, {residue, residue + 4, residue + 8, residue + 12,
+            residue + 16, residue + 20, residue + 24, residue + 28}, 34U + residue, residue % 2 != 0, true);
+    }
     // Select: identity envelope, batched rows at ~30K context, shared-row chunks incl. tiling.
     failures += run_select({1, 5, 0, 400, true, false}, 41U);
     failures += run_select({1, 8, 0, 7'500, true, false}, 42U);

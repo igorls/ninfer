@@ -6,9 +6,19 @@
 
 #include <cuda_runtime.h>
 
+#include <cstdint>
+
 namespace ninfer::ops::detail {
 
-void rmsnorm_launch(const Tensor& x, const Tensor& weight, float eps, bool unit_offset,
+// Weight offset and gate of one RMSNorm contract; the gated forms read z.
+enum class RmsNormForm : std::uint8_t {
+    Plain,
+    UnitOffset,
+    SiluGated,
+    SigmoidGated,
+};
+
+void rmsnorm_launch(const Tensor& x, const Tensor& weight, float eps, RmsNormForm form,
                     const Tensor* z, Tensor& out, cudaStream_t stream);
 
 } // namespace ninfer::ops::detail

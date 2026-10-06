@@ -128,6 +128,19 @@ int run_bf16_linear_case(DeviceWeight& weight, std::int32_t tokens, bool replay 
     int failures             = guarded_output.verify_guards("BF16_A16 Linear output" + suffix);
     const std::vector<std::uint16_t> output_bits =
         from_device<std::uint16_t>(guarded_output.data(), static_cast<std::size_t>(rows) * tokens);
+    if (hidden == 2560 && rows >= 2560 && tokens > 1 && tokens <= 48) {
+        for (const int column : {0, tokens - 1}) {
+            Tensor single_output = output.slice(1, column, 1);
+            ops::linear(x.slice(1, column, 1), weight.view(), single_output,
+                        ops::LinearPolicy::A16Only, workspace, nullptr);
+        }
+        cuda_synchronize();
+        if (from_device<std::uint16_t>(guarded_output.data(), output_bits.size()) != output_bits) {
+            std::cerr << "BF16_A16 Linear" << suffix
+                      << " changes a decode column with batch membership\n";
+            ++failures;
+        }
+    }
     for (std::size_t index = 0; index < output_bits.size(); ++index) {
         const std::uint16_t bits = output_bits[index];
         if (!std::isfinite(bf16_to_f32(bits))) {
@@ -257,6 +270,21 @@ int run_selector_linear() {
     return failures;
 }
 
+int run_vision_linear() {
+    int failures = 0;
+    for (const auto [n, k] : {std::pair{1152, 1536}, std::pair{3456, 1152},
+            std::pair{1152, 1152}, std::pair{4304, 1152}, std::pair{1152, 4304},
+            std::pair{4608, 4608}, std::pair{2560, 4608}}) {
+        DeviceWeight weight(make_patterned(n, k, 467U));
+        for (int t : {1, 4, 16, 31, 32, 33, 63, 64, 65, 256, 1024, 4096, 16384, 65536}) {
+            failures += run_bf16_linear_case(weight, t);
+        }
+        for (int t : {1, 4, 32, 33, 65}) { failures += run_bf16_linear_case(weight, t, true); }
+        failures += weight.verify_preserved("BF16 Vision weight");
+    }
+    return failures;
+}
+
 int run_bf16_linear() {
     int failures = 0;
     DeviceWeight attention_weight(make_patterned(14336, 5120, 401U));
@@ -289,12 +317,12 @@ int run_bf16_linear() {
                                        FlashNextShape{248320, 2560, 457U},
                                        FlashNextShape{2560, 6144, 461U}}) {
         DeviceWeight weight(make_patterned(shape.n, shape.k, shape.seed));
-        for (int tokens : {1,  2,  3,  4,  5,   8,   15,  16,  17,  31,  32,  33,  63,  64,  65, 95,
+        for (int tokens : {1,  2,  3,  4,  5,   8,   15,  16,  17,  31,  32,  33, 47, 48, 49, 63,  64,  65, 95,
                            96, 97, 127, 128, 129, 191, 192, 193, 511, 512, 513, 640, 641,
                            1024, 1536, 2048, 2049}) {
             failures += run_bf16_linear_case(weight, tokens);
         }
-        for (int tokens : {1, 4, 5, 17, 33, 65, 129, 513}) {
+        for (int tokens : {1, 4, 5, 17, 33, 48, 49, 65, 129, 513}) {
             failures += run_bf16_linear_case(weight, tokens, true);
         }
     }
@@ -310,7 +338,7 @@ int main() {
     }
 
     try {
-        const int failures = run_bf16_linear();
+        const int failures = run_bf16_linear() + run_vision_linear();
         std::cout << (failures == 0 ? "OK" : "FAIL") << " BF16_A16 Linear\n";
         return failures == 0 ? 0 : 1;
     } catch (const std::exception& error) {

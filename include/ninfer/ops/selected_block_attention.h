@@ -35,7 +35,7 @@ namespace ninfer::ops {
  * Logical shapes:
  *   q/out BF16 [256,24,C]; positions I32 [C]; selections I32 [512,C]; counts I32 [C]. The batched
  *   form adds table_rows I32 [C] selecting a row of cache.block_tables per column, with C in
- *   [1,8]. The shared-row form uses one host table row for all C in [1,262144] columns.
+ *   [1,48] (up to six verification columns in each of eight sequences). The shared-row form uses one host table row for all C in [1,262144] columns.
  *
  * Supported domain:
  *   Head dimension 256, 24 query heads, 2 KV heads, page-major paged KV exactly as
@@ -78,7 +78,7 @@ void selected_block_attention(const Tensor& q, const Tensor& positions, const Te
 
 /**
  * Minimum transient capacity of the batched form for every column count C in
- * [min_columns,max_columns] (1 <= min_columns <= max_columns <= 8). Invalid intervals throw.
+ * [min_columns,max_columns] (1 <= min_columns <= max_columns <= 48). Invalid intervals throw.
  */
 [[nodiscard]] std::size_t selected_block_attention_workspace_capacity_bytes(
     std::int32_t min_columns, std::int32_t max_columns);

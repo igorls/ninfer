@@ -222,9 +222,9 @@ void copy_host(const void* src, Tensor& dst, cudaStream_t stream) {
 
 } // namespace
 
-VisionContext::VisionContext(DeviceContext& ctx, const Parameters& parameters)
-    : ctx_(ctx), config_(parameters.model.config().vision.value()),
-      parameters_(parameters.vision.value()) {}
+VisionContext::VisionContext(DeviceContext& ctx, const VisionConfig& config,
+                             const VisionParameters& parameters)
+    : ctx_(ctx), config_(config), parameters_(parameters) {}
 
 std::size_t VisionContext::workspace_bytes(const VisionConfig& config,
                                            const VisionParameters& parameters, std::size_t patches,
@@ -421,11 +421,12 @@ void VisionContext::encode(const VisionItemView& item, Tensor& output, DeviceSpa
 }
 
 VisionPrefillSession::VisionPrefillSession(
-    DeviceContext& device, const execution::Parameters& parameters, DeviceSpan workspace,
+    DeviceContext& device, const VisionConfig& config, const VisionParameters& parameters,
+    DeviceSpan workspace,
     const VisionWorkspacePlan& workspace_plan, qwen3_5::PreparedPromptData& prompt,
     const VisionPrefillPlan& plan, std::size_t& handoff_peak_bytes)
     : device_(device), workspace_(workspace), workspace_plan_(workspace_plan), prompt_(prompt),
-      plan_(plan), handoff_peak_bytes_(handoff_peak_bytes), context_(device, parameters) {
+      plan_(plan), handoff_peak_bytes_(handoff_peak_bytes), context_(device, config, parameters) {
     if (plan_.control == nullptr || plan_.control->items.empty() || plan_.uses.empty()) {
         throw std::invalid_argument("Vision prefill plan has no suffix item spans");
     }

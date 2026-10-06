@@ -10,14 +10,14 @@
 namespace ninfer::ops::detail {
 
 // T <= kHyperDecodeTokens takes the CUDA-core decode chain; wider T the tensor-core route.
-inline constexpr std::int32_t kHyperDecodeTokens = 8;
+inline constexpr std::int32_t kHyperDecodeTokens = 48;
 inline constexpr int kHyperDownSplits            = 4;
 
 struct HyperScratch {
     void* normalized = nullptr; // BF16 [10240,T]
     void* low_rank   = nullptr; // BF16 [320,T]
     float* partials  = nullptr; // FP32 [kHyperDownSplits,320,T] (tensor-core route)
-    void* up         = nullptr; // BF16 [10240,T] (tensor-core route)
+    float* up        = nullptr; // FP32 [10240,T] (tensor-core route)
     std::size_t partial_bytes = 0;
 };
 
@@ -28,5 +28,7 @@ void hyper_mix_launch(const void* hidden, const void* norm, const void* down, co
 
 void hyper_inject_launch(const void* block_output, const float* injection, void* hidden,
                          std::int32_t tokens, cudaStream_t stream);
+
+void hyper_expand_launch(const void* x, void* hidden, std::int32_t tokens, cudaStream_t stream);
 
 } // namespace ninfer::ops::detail

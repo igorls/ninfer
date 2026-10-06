@@ -75,7 +75,9 @@ struct QsaIndexerBlockKeys {
  *   column w its forming state is written to slot snapshot_base_slots[b] + w and every block
  *   completed at column w is published. The caller reserves each row's [base, base+W) interval,
  *   the intervals of different rows are disjoint and do not contain another row's initial slot;
- *   a row's own initial slot may lie inside its interval.
+ *   a row's own initial slot may lie inside its interval. Optional valid_columns I32 [B]
+ *   bounds each row to [1,W] columns; omitted means W. Invalid suffixes neither publish keys
+ *   nor write state snapshots and may contain arbitrary data.
  *
  * Supported domain: key_norm BF16 [128]; state and plane tensors as described above; all tensors
  *   contiguous and 16-byte aligned; every published block's page must be materialized.
@@ -100,6 +102,7 @@ void qsa_indexer_append(const Tensor& projected, const Tensor& positions,
 void qsa_indexer_append(const Tensor& projected, const Tensor& positions,
                         const Tensor& rope_positions, const Tensor& table_rows,
                         const Tensor& initial_slots, const Tensor& snapshot_base_slots,
+                        const Tensor& valid_columns,
                         const Tensor& key_norm, const QsaIndexerKeyState& state,
                         const QsaIndexerBlockKeys& blocks, cudaStream_t stream);
 

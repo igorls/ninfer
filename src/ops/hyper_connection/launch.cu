@@ -23,6 +23,14 @@ using UpSchedule = Bf16ScheduleInstance<
                        Bf16MmaFragmentPipeline::PingPong, Bf16MmaRaster::TokenFast>,
     kHyperLowRank>;
 
+// The sigmoid consumes the complete FP32 up-projection, matching the decode route.
+struct HyperFloatOutput {
+    float* data;
+    __device__ __forceinline__ void store(int row, int token, float value) const {
+        data[static_cast<std::int64_t>(token) * kHyperConcat + row] = value;
+    }
+};
+
 struct HyperLowRankEpilogue {
     __device__ __forceinline__ float apply(int, int, float value) const {
         return silu(value * 0.25F);
@@ -46,8 +54,9 @@ void launch_decode(const void* hidden, const void* norm, const void* down, const
         bf16(scratch.normalized), bf16(down), bf16(inject), bf16(scratch.low_rank), injection);
     CUDA_CHECK(cudaGetLastError());
     const auto mix = [&]<int Tokens>() {
-        hyper_mix_up_decode_kernel<Tokens><<<kHyperHidden, 128, 0, stream>>>(
-            bf16(scratch.normalized), bf16(scratch.low_rank), bf16(up), bf16(block_input));
+        const dim3 grid(kHyperHidden, (tokens + Tokens - 1) / Tokens);
+        hyper_mix_up_decode_kernel<Tokens><<<grid, 128, 0, stream>>>(
+            bf16(scratch.normalized), bf16(scratch.low_rank), bf16(up), bf16(block_input), tokens);
     };
     switch (tokens) {
     case 1: mix.template operator()<1>(); break;
@@ -58,7 +67,7 @@ void launch_decode(const void* hidden, const void* norm, const void* down, const
     case 6: mix.template operator()<6>(); break;
     case 7: mix.template operator()<7>(); break;
     case 8: mix.template operator()<8>(); break;
-    default: throw std::logic_error("hyper_connection: decode chain expects 1..8 tokens");
+    default: mix.template operator()<8>(); break;
     }
     CUDA_CHECK(cudaGetLastError());
 }
@@ -80,9 +89,9 @@ void launch_wide(const void* hidden, const void* norm, const void* down, const v
     }
     launch_bf16_a16_mma<UpSchedule>(
         Bf16A16Operands{bf16(scratch.low_rank), bf16(up), kHyperConcat, kHyperLowRank, tokens},
-        LinearBf16Output{bf16(scratch.up), kHyperConcat}, LinearIdentityEpilogue{}, stream);
+        HyperFloatOutput{scratch.up}, LinearIdentityEpilogue{}, stream);
     hyper_mix_reduce_wide_kernel<<<tokens, 256, 0, stream>>>(
-        bf16(scratch.up), bf16(scratch.normalized), bf16(block_input));
+        scratch.up, bf16(scratch.normalized), bf16(block_input));
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -105,6 +114,15 @@ void hyper_inject_launch(const void* block_output, const float* injection, void*
     hyper_inject_kernel<<<static_cast<unsigned>(tokens) * kHyperInjectBlocksPerToken, 256, 0,
                           stream>>>(
         bf16(block_output), injection, bf16(hidden));
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void hyper_expand_launch(const void* x, void* hidden, std::int32_t tokens, cudaStream_t stream) {
+    const std::int64_t chunks = static_cast<std::int64_t>(tokens) * kHyperHiddenChunks;
+    const auto blocks =
+        static_cast<unsigned>((chunks + kHyperExpandThreads - 1) / kHyperExpandThreads);
+    hyper_expand_kernel<<<blocks, kHyperExpandThreads, 0, stream>>>(
+        static_cast<const ulonglong2*>(x), static_cast<ulonglong2*>(hidden), chunks);
     CUDA_CHECK(cudaGetLastError());
 }
 

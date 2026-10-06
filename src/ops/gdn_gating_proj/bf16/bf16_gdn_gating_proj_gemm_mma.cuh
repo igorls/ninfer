@@ -36,24 +36,33 @@ inline constexpr int kBf16GdnSmemElements =
 template <int BlockN>
 inline constexpr int kBf16GdnSmemBytes = kBf16GdnSmemElements<BlockN> * sizeof(__nv_bfloat16);
 
+// Control is the stored word of A_log and dt_bias, read directly by the epilogue.
 struct Bf16Gdn27Geometry {
     static constexpr int kHeads  = 48;
     static constexpr int kHidden = 5120;
     static constexpr int kBlockN = 128;
+    using Control                = float;
 };
 
 struct Bf16Gdn35Geometry {
     static constexpr int kHeads  = 32;
     static constexpr int kHidden = 2048;
     static constexpr int kBlockN = 64;
+    using Control                = float;
 };
 
-// Qwen3.8-Flash-Next: the 27B head count over a 2560-wide input.
+// Qwen3.8-Flash-Next: the 27B head count over a 2560-wide input, with BF16 A_log/dt_bias.
 struct Bf16GdnFlashNextGeometry {
     static constexpr int kHeads  = 48;
     static constexpr int kHidden = 2560;
     static constexpr int kBlockN = 64;
+    using Control                = __nv_bfloat16;
 };
+
+__device__ __forceinline__ float bf16_gdn_control(float value) { return value; }
+__device__ __forceinline__ float bf16_gdn_control(__nv_bfloat16 value) {
+    return __bfloat162float(value);
+}
 
 static_assert(Bf16Gdn27Geometry::kHidden % kBf16GdnBlockK == 0);
 static_assert(Bf16GdnFlashNextGeometry::kHidden % kBf16GdnBlockK == 0);
@@ -69,7 +78,8 @@ __global__ __launch_bounds__(Warps * 32, 1) void bf16_gdn_gating_proj_gemm_mma_k
     const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ norm_weight,
     __nv_bfloat16* __restrict__ normalized_x, float norm_eps,
     const __nv_bfloat16* __restrict__ a_weight, const __nv_bfloat16* __restrict__ b_weight,
-    const float* __restrict__ A_log, const float* __restrict__ dt_bias, float* __restrict__ partial,
+    const typename Geometry::Control* __restrict__ A_log,
+    const typename Geometry::Control* __restrict__ dt_bias, float* __restrict__ partial,
     float* __restrict__ g, float* __restrict__ beta, std::int32_t t) {
     constexpr int kBf16GdnHeads       = Geometry::kHeads;
     constexpr int kBf16GdnHidden      = Geometry::kHidden;
@@ -273,7 +283,8 @@ __global__ __launch_bounds__(Warps * 32, 1) void bf16_gdn_gating_proj_gemm_mma_k
                 if constexpr (SplitK == 1) {
                     const std::int64_t out_i =
                         static_cast<std::int64_t>(token) * kBf16GdnHeads + row;
-                    g[out_i]    = -expf(A_log[row]) * softplus(av + dt_bias[row]);
+                    g[out_i]    = -expf(bf16_gdn_control(A_log[row])) *
+                               softplus(av + bf16_gdn_control(dt_bias[row]));
                     beta[out_i] = sigmoid(bv);
                 } else {
                     const std::int64_t base =
@@ -351,7 +362,8 @@ __global__ __launch_bounds__(Warps * 32, 1) void bf16_gdn_gating_proj_gemm_mma_k
                 av *= inv;
                 bv *= inv;
             }
-            g[i]    = -expf(A_log[row]) * softplus(av + dt_bias[row]);
+            g[i]    = -expf(bf16_gdn_control(A_log[row])) *
+                   softplus(av + bf16_gdn_control(dt_bias[row]));
             beta[i] = sigmoid(bv);
         }
     }

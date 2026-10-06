@@ -24,6 +24,7 @@ void qsa_append_shared_row_launch(const Tensor& projected, const Tensor& positio
 void qsa_append_snapshot_launch(const Tensor& projected, const Tensor& positions,
                                 const Tensor& rope_positions, const Tensor& table_rows,
                                 const Tensor& initial_slots, const Tensor& snapshot_base_slots,
+                        const Tensor& valid_columns,
                                 const Tensor& key_norm, const Tensor& raw_keys,
                                 const Tensor& raw_positions, QsaTableView table,
                                 const Tensor& block_keys, std::int32_t width, std::int32_t batch,

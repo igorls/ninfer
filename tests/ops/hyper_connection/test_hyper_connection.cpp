@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <iostream>
@@ -280,20 +281,71 @@ int run_inject_case(std::int32_t tokens, bool graph) {
     return failures;
 }
 
+// expand is an exact index mapping: every stream of every token must carry the bit pattern of x.
+int run_expand_case(std::int32_t tokens, bool graph) {
+    const std::string label = "hyper expand T=" + std::to_string(tokens) + (graph ? " graph" : "");
+    auto x = random_bf16(static_cast<std::size_t>(kHidden) * tokens, 4000U + tokens, 1.0F);
+    DeviceBuffer x_d = to_device(x.bits);
+    GuardedDeviceBuffer h_d(static_cast<std::size_t>(kConcat) * tokens * 2);
+    Tensor input(x_d.p, DType::BF16, {kHidden, tokens});
+    Tensor hidden(h_d.data(), DType::BF16, {kConcat, tokens});
+    DeviceContext context;
+    h_d.fill(0xff);
+    cuda_synchronize();
+    if (graph) {
+        // Capture on a different input, then replay on the tested one.
+        const auto other = random_bf16(x.bits.size(), 91U, 1.0F);
+        x_d.copy_from_host(other.bits.data(), x_d.bytes);
+        cuda_synchronize();
+        DecodeGraphDefinition definition;
+        DecodeGraphExecutable executable;
+        definition.capture(context.stream,
+                           [&] { ops::hyper_connection_expand(input, hidden, context.stream); });
+        executable.instantiate(definition);
+        executable.launch(context.stream);
+        cuda_synchronize(context.stream);
+        x_d.copy_from_host(x.bits.data(), x_d.bytes);
+        h_d.fill(0xff);
+        cuda_synchronize();
+        executable.launch(context.stream);
+    } else {
+        ops::hyper_connection_expand(input, hidden, context.stream);
+    }
+    cuda_synchronize(context.stream);
+    int failures = h_d.verify_guards(label);
+    std::vector<std::uint16_t> expected(static_cast<std::size_t>(kConcat) * tokens);
+    for (std::int32_t t = 0; t < tokens; ++t)
+        for (int s = 0; s < kStreams; ++s)
+            std::copy_n(x.bits.begin() + static_cast<std::ptrdiff_t>(t) * kHidden, kHidden,
+                        expected.begin() + static_cast<std::ptrdiff_t>(t) * kConcat +
+                            static_cast<std::ptrdiff_t>(s) * kHidden);
+    if (from_device<std::uint16_t>(h_d.data(), expected.size()) != expected) {
+        std::cerr << label << ": hidden is not four exact copies of x\n";
+        ++failures;
+    }
+    if (from_device<std::uint16_t>(x_d, x.bits.size()) != x.bits) {
+        std::cerr << label << ": x was modified\n";
+        ++failures;
+    }
+    return failures;
+}
+
 int run_hyper_connection() {
     int failures = 0;
     const Fixture fixture(11U);
-    for (std::int32_t tokens : {1, 2, 3, 4, 5, 6, 7, 8, 9, 16, 31, 32, 33, 63, 64, 65, 256, 512,
+    for (std::int32_t tokens : {1, 2, 3, 4, 5, 6, 7, 8, 9, 16, 31, 32, 33, 47, 48, 49, 63, 64, 65, 256, 512,
                                 8192}) {
         failures += run_mix_case(fixture, tokens, true, false);
         failures += run_mix_case(fixture, tokens, false, false);
     }
-    for (std::int32_t tokens : {1, 8, 9, 65}) {
+    for (std::int32_t tokens : {1, 8, 9, 48, 49, 65}) {
         failures += run_mix_case(fixture, tokens, true, true);
         failures += run_mix_case(fixture, tokens, false, true);
     }
     for (std::int32_t tokens : {1, 7, 9, 300, 8192, 65537}) failures += run_inject_case(tokens, false);
     failures += run_inject_case(4, true);
+    for (std::int32_t tokens : {1, 2, 7, 9, 513, 8192, 65537}) failures += run_expand_case(tokens, false);
+    failures += run_expand_case(4, true);
 
     // The capacity of an interval covers every point in it.
     const auto interval = ops::hyper_connection_workspace_capacity_bytes(1, 512);

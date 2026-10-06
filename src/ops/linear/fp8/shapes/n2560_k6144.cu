@@ -14,12 +14,11 @@ using Bulk      = Fp8A8TmaSplitKSchedule<Fp8A8TmaMmaSchedule<128, 256, 128, 2, 4
 void launch_a16(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
     const int tokens = x.ne[1];
     if (tokens == 1) return fp8_linear_a16_gemv<Geometry, Gemv, Scale>(x, weight, out, stream);
-    if (tokens <= 16)
-        return fp8_linear_a16_sliced_k<Geometry, Fp8SlicedInstance<16, 8, 2>, Scale>(x, weight, out,
-                                                                              stream);
-    if (tokens <= 32)
-        return fp8_linear_a16_sliced_k<Geometry, Fp8SlicedInstance<16, 4, 2>, Scale>(x, weight, out,
-                                                                              stream);
+    if (tokens <= 48) {
+        using Tile = Fp8A16SimtSchedule<4, 2, 8, 8, 4, Fp8SimtActivationAccess::SharedPhase,
+            Fp8CodeCache::Default, 2, Fp8SimtBlockOrder::RowsContiguous, 2>;
+        return fp8_linear_a16_simt<Geometry, 0, Tile, false, Scale>(x, weight, out, stream);
+    }
     if (tokens <= 64)
         return fp8_linear_a16_sliced_k<Geometry, Fp8SlicedInstance<32, 4, 1>, Scale>(x, weight, out,
                                                                               stream);
