@@ -3,6 +3,7 @@
 #include "models/qwen4_exp/program/context.h"
 #include "models/qwen4_exp/program/planning/graph_profiles.h"
 #include "core/device.h"
+#include "core/nvtx.h"
 #include "ninfer/ops/argmax.h"
 #include "ninfer/ops/embedding.h"
 #include "ninfer/ops/speculative_round.h"
@@ -10,6 +11,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 
 namespace ninfer::models::qwen4_exp::detail {
@@ -121,6 +123,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         throw std::logic_error("MTP batch has no prepared frame or invalid membership");
     }
     const auto started    = Clock::now();
+    nvtx::ScopedRange round_range(nvtx::Name::DecodeMtpRound, nvtx::Category::Mtp, lanes.size());
     const auto batch      = static_cast<std::int32_t>(lanes.size());
     const auto width      = static_cast<std::int32_t>(draft_window + 1);
     const auto columns    = width * batch;
@@ -198,6 +201,9 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
     mark_workspace_usage(workspace_plan.mtp_round);
     // Each recursive proposal writes a private forming-block slot. Canonical MTP state remains
     // untouched until teacher extension has rebuilt every accepted target prefix.
+    std::optional<nvtx::ScopedRange> phase_range;
+    phase_range.emplace(nvtx::Name::DecodeMtpDraft, nvtx::Category::Mtp,
+                        static_cast<std::uint64_t>(width - 1));
     for (std::int32_t step = 0; step < width - 1; ++step) {
         copy(frame.proposal_positions,
              input(offsetof(MtpIngress, proposal_positions), (width - 1) * batch)
@@ -234,6 +240,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
     timing.begin_wait();
     device.synchronize();
     timing.end_wait();
+    phase_range.reset();
     timing.resume_submit();
     // PLE's large stored table is host mapped. Gather exactly the rows addressed by the proposed
     // ledger, and preview grammar transitions before verification mutates any canonical state.
@@ -276,6 +283,8 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
     }
     CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, &host, sizeof(host), cudaMemcpyHostToDevice,
                                device.stream));
+    phase_range.emplace(nvtx::Name::DecodeMtpTarget, nvtx::Category::Mtp,
+                        static_cast<std::uint64_t>(columns));
     auto verify = mtp_verify_inputs(frame, batch, envelope);
     auto logits = frame.logits.view({frame.logits.ne[0], columns});
     if (verify_graph != nullptr) {
@@ -317,8 +326,12 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
     teacher_inputs.sequence_rows = input(offsetof(MtpIngress, mtp_sequence_rows), batch);
     auto previous                = frame.previous.view({frame.previous.ne[0], columns});
     auto teacher_out             = frame.teacher_output.view({frame.teacher_output.ne[0], columns});
-    card.mtp_forward(frame.embedding, previous, frame.teacher_positions.view({columns}),
-                     frame.teacher_rope, teacher_out, nullptr, &teacher_inputs, true);
+    {
+        nvtx::ScopedRange teacher_range(nvtx::Name::MtpForward, nvtx::Category::Mtp,
+                                        static_cast<std::uint64_t>(columns));
+        card.mtp_forward(frame.embedding, previous, frame.teacher_positions.view({columns}),
+                         frame.teacher_rope, teacher_out, nullptr, &teacher_inputs, true);
+    }
     auto argmax = frame.argmax.view({columns});
     ops::argmax(logits, argmax, dimension(parameters.model.resources().public_token_count),
                 device.stream);
@@ -347,6 +360,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
     timing.begin_wait();
     device.synchronize();
     timing.end_wait();
+    phase_range.reset();
     for (std::int32_t row = 0; row < batch; ++row) {
         auto& sequence      = active_sequence(lanes[row]);
         auto& request       = requests[lanes[row]];
