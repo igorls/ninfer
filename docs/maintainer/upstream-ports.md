@@ -335,8 +335,23 @@ With the chunk-invariance case added, all 17 pass on the G4 as of October 6.
 
 MSVC 19.51 and CUDA 13.3 compile and link the native Windows Engine test, CLI, server and Supervisor. Build outputs
 were redirected after the original build volume exhausted disk space; the link reports a CRT
-library conflict warning. Windows GPU runtime qualification remains open. The desktop GPU was
-not used. Current and earlier G4 performance/resource results and their costs are in
+library conflict warning.
+
+Windows GPU runtime qualification (October 6-7, 2026) ran on an RTX PRO 6000 Blackwell
+Workstation Edition beside the desktop: the 14 Flash-Next Op tests, the qwen4_exp loading test
+and all 17 real-artifact Engine cases pass, and `ninfer_bench` matches the G4. The serving
+configuration the G4 used (context 131072, KV capacity 262144, concurrency 8) does not fit beside
+the desktop: startup correctly refuses a 9.8 GB runtime reservation with 7.5 GB available. The
+Windows serving check with a smaller KV capacity remains open.
+
+Three fatal engine failures block landing; all of them reproduce without later changes
+([adaptive MTP note](../research/flash-next-mtp-adaptive-2026-10-06.md), on its branch):
+- concurrency 4 with long prompts fails with `selected pressure target could not be sealed`
+  without MTP;
+- the same workload fails with `candidate token ledger does not match prompt length` under MTP;
+- MTP prefix reuse after a long request fails with `KV committed frontier is invalid`.
+
+Current and earlier G4 performance/resource results and their costs are in
 [performance](../performance.md#flash-next-v3-on-colab-g4-2026-10-04); the
 [active plan](../research/flash-next-v3-port-2026-09-29.md) distinguishes this implementation
 from the wider historical M3 qualification criteria. The Supervisor accepts K=1..5 and rejects an optimized draft head for Flash-Next; its native

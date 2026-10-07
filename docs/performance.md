@@ -234,6 +234,26 @@ python3.11 tools/bench/run_serve_concurrency.py \
 # Repeat with --mode mtp3/mtp5 --proposal-head full and distinct output directories.
 ```
 
+### Windows, RTX PRO 6000 Workstation Edition (2026-10-07)
+
+The `30d07ae8` build was measured beside the desktop with the same `ninfer_bench` method as
+above: chunk 1024, BF16 KV, max context 16,384, one warmup and three repetitions. MSVC 19.51 and
+CUDA 13.3 were used.
+
+| Prompt tokens | Draft K | Prefill tok/s | Decode tok/s | Acceptance |
+|---:|---:|---:|---:|---:|
+| 512 | 0 | 7,451 | 138.2 | — |
+| 2,048 | 0 | 9,601 | 137.6 | — |
+| 8,192 | 0 | 9,077 | 137.4 | — |
+| 512 | 3 | 7,463 | 135.9 | 32.5% |
+| 2,048 | 3 | 9,396 | 260.1 | 96.0% |
+| 8,192 | 3 | 8,874 | 259.2 | 99.0% |
+
+At chunk 8192 the plain-decode rows are 7,598 / 11,475 / 10,922 tok/s prefill and
+141.7 / 139.1 / 137.1 tok/s decode. These are on par with, or slightly above, the G4 Server
+Edition figures above. The fixed corpus makes the MTP acceptance unrepresentative, as noted for
+the G4.
+
 ### Prefill chunk invariance (2026-10-06)
 
 Removing M-dependent split-K (GDN control projection) and final-wave split-K (Flash-Next FP8
