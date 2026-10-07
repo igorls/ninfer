@@ -358,8 +358,7 @@ Current and earlier G4 performance/resource results and their costs are in
 [performance](../performance.md#flash-next-v3-on-colab-g4-2026-10-04); the
 [active plan](../research/flash-next-v3-port-2026-09-29.md) distinguishes this implementation
 from the wider historical M3 qualification criteria. The Supervisor accepts K=1..5 and rejects an optimized draft head for Flash-Next; its native
-CPU test passes. This source integration is committed on `m3/5-workstation` and not yet merged
-into `workstation`.
+CPU test passes. This source integration is on `workstation`.
 
 DFlash/DFlash2, v2-only draft-head shortlists and alternate GDN-state/attention modes are not
 part of this architecture's v3 contract. MTP uses the full stored output head; BF16 and FP8
