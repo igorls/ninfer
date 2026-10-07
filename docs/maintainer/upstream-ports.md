@@ -16,7 +16,7 @@ workstation.
 | Fork line | `workstation` (named `port/upstream-v3` until September 28, 2026), based on upstream [`bace20dc`](https://github.com/Neroued/ninfer/commit/bace20dc70249eed6402b66d4852c6c3f9612905) (September 24, 2026) and merged with upstream `e31bc99b` in `e2a149f1` and `d44ab584` in `d29866c9` |
 | Last reviewed upstream commit | [`d44ab584`](https://github.com/Neroued/ninfer/commit/d44ab58408aa389728cd8b1ee50179527e1f3e0d) (September 29, 2026), the merge-base |
 | Pre-v3 fork line | `research/qwen4-flash-next` at `87812bc8` (September 26); the source for Flash-Next |
-| Not yet reviewed | Nothing: upstream `master` was at `d44ab584` on September 29, 2026 |
+| Not yet reviewed | `d44ab584..68c54356`: 11 upstream commits as of October 7, 2026, including the context-cache replacement `b9114396` |
 
 The fork syncs by merging `origin/master` into the fork line, never by rebasing or cherry-picking
 upstream work. Each merge records every upstream change it brings in here as integrated, deferred
@@ -256,6 +256,7 @@ were produced with recipe overrides and are not committed recipes.
 | `preserve_thinking` server default (`3cb5e718`) | unset, so the Qwen3.8 template keeps returned closed-turn reasoning | `false` unless a request or `--preserve-thinking` asks | Parity with the pre-v3 fork (Igor, 2026-09-28) |
 | Unsupported reasoning effort | passed to the chat template, whose `raise_exception` comes back as HTTP 400 `invalid_prompt` on `messages` with the interpreter's source trace | checked before rendering against the efforts observed from the loaded template at startup: HTTP 400 `reasoning_effort_not_supported` on the effort field, listing the supported efforts; template errors carry no trace | Restores the pre-v3 fork contract (`8264394c`) on Chat Completions, Responses and Anthropic Messages; the protocol vocabulary is unchanged |
 | Continued final assistant turn (`737b570a`) | rendered without a think block | rendered behind the empty think block the generation prompt carries (thinking off) | `/v1/score` text form and assistant prefill are conditioned like a generated answer |
+| Admission planned while an active lane's StateImage Fork is unsettled (both models) | at `d44ab584`: a pressure target is Feasible without the seal's Fork check, so a burst of admissions with prefix reuse ends in the fatal `selected pressure target could not be sealed` | the target is deferred, and EngineCore retries a deferred admission once after the next execution unit | Reproduced on the 27B at concurrency 4 (October 7, 2026, [evidence](../research/flash-next-v3-port-2026-09-29.md#fatal-engine-failures-found-2026-10-06-fixed-2026-10-07)). Upstream `b9114396` (not yet reviewed) replaces this planner; the next sync reconciles the fix with it |
 | `POST /v1/rerank` | no rerank route | Jina-shaped rerank scored by an in-process System One Choice; `GET /v1/models` advertises `ninfer-choice-rerank-v1`; missing or wrong API key is HTTP 401 with the OpenAI error object | Added 2026-10-02. `return_documents` defaults to true. Choice labels stay off the public response |
 
 ## Dropped
@@ -344,12 +345,14 @@ configuration the G4 used (context 131072, KV capacity 262144, concurrency 8) do
 the desktop: startup correctly refuses a 9.8 GB runtime reservation with 7.5 GB available. The
 Windows serving check with a smaller KV capacity remains open.
 
-Three fatal engine failures block landing; all of them reproduce on this line
-([active plan](../research/flash-next-v3-port-2026-09-29.md#open-fatal-engine-failures-2026-10-06)):
-- concurrency 4 with long prompts fails with `selected pressure target could not be sealed`
-  without MTP;
-- the same workload fails with `candidate token ledger does not match prompt length` under MTP;
-- MTP prefix reuse after a long request fails with `KV committed frontier is invalid`.
+Three fatal engine failures found on October 6 are fixed
+([causes and evidence](../research/flash-next-v3-port-2026-09-29.md#fatal-engine-failures-found-2026-10-06-fixed-2026-10-07)):
+- `selected pressure target could not be sealed`: a burst of admissions planned while an earlier
+  admission's StateImage Fork was unsettled. It also affects the 27B; see the divergence above;
+- `candidate token ledger does not match prompt length`: the Flash-Next MTP round borrowed a staged
+  materialization's prompt ledger as scratch;
+- `KV committed frontier is invalid`: after a capture, a Flash-Next request with MTP re-mapped only
+  its Text KV.
 
 Current and earlier G4 performance/resource results and their costs are in
 [performance](../performance.md#flash-next-v3-on-colab-g4-2026-10-04); the

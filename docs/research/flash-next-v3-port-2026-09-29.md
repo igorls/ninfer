@@ -1088,18 +1088,47 @@ alternating rounds of 200 samples.
 5. **Upstream conflict surface of §3.1 accepted.**
 6. **PLE residency for M3:** mapped page cache (v2 behaviour).
 
-### Open: fatal engine failures (2026-10-06)
+### Fatal engine failures (found 2026-10-06, fixed 2026-10-07)
 
-A Colab G4 evaluation of MTP draft policies exercised workloads the Engine cases do not cover:
-long prompts at concurrency, and prefix reuse after a long request. It found three fatal engine
-failures, all reproduced on `7053c7af` (this line plus NVTX ranges only).
+A Colab G4 evaluation of MTP draft policies exercised workloads the Engine cases did not cover:
+long prompts at concurrency with the context cache on, and prefix reuse after a long request. It
+found three fatal engine failures, all reproduced on `7053c7af`. Temporary diagnostics located
+each one; they are not part of the line.
 
-| Workload | Fatal engine failure |
-|---|---|
-| concurrency 4: two 20K-token summaries and two code requests submitted together, no MTP | `selected pressure target could not be sealed` |
-| the same workload with MTP K=2, 3 or 5 | `candidate token ledger does not match prompt length` |
-| concurrency 1, MTP K=5: a 128K-token request, then a request reusing an earlier conversation's prefix | `KV committed frontier is invalid` |
+| Fatal engine failure | Workload | Cause | Fix |
+|---|---|---|---|
+| `selected pressure target could not be sealed` | concurrency 4: two code requests and two 20K-token summaries submitted together twice, with or without MTP. The 27B fails the same way | The second round's admissions are planned in one burst. While an earlier admission still holds an unsettled StateImage Fork (its first write has not run yet), `revalidate_materialization` refuses every seal. The pressure assessment had marked composed targets Feasible without that condition, and the planner treats a failed seal of a Feasible target as fatal | A target is Feasible only when the Program could seal it now, so the admission is deferred. Settling a Fork is not an admission event, so EngineCore retries a deferred admission once after the next execution unit. Both models; the planning code is duplicated |
+| `candidate token ledger does not match prompt length` | the same workload with MTP | The MTP round built each row's proposed ledger in `materialization_ledger_`. A staged materialization keeps its prompt ledger in that buffer until `begin` moves it into the new sequence, so another lane's round replaced it (612 tokens of another lane's ledger and drafts instead of a 17,699-token prompt) | The round assembles the PLE history before its frontier, the anchor and the drafts in its own reserved buffer. Row selection is unchanged, and the round no longer copies the whole ledger |
+| `KV committed frontier is invalid` | concurrency 1, MTP: after a 128K-token request, a request whose first chunk captures its system prompt as a shared prefix | After publishing a capture, the request re-mapped the rest of its prompt in the Text KV only. Its MTP KV kept just the captured pages, so the next chunk's MTP commit ran past them (frontier 87, one mapped page) | Map the MTP KV again as `begin` does; the qwen3_5 capture already did |
 
-The same reuse sequence without MTP completes. The Engine cases' concurrency coverage uses prompts
-under 512 tokens, which is why they pass. These failures block landing on `workstation`. Each fix
-should add an Engine case with long prompts at concurrency.
+The earlier note attributed the passing Engine cases to short prompts. The actual gaps were these:
+every concurrency case disabled the context cache, none exercised a shared-prefix capture under
+MTP, and preparing each prompt just before its `submit` spaced arrivals far enough apart that
+earlier Forks settled before the next admission.
+
+A first version of the seal fix deferred admissions without the retry. The serving workload then
+had no fatal failures, but round two's documents waited for the running code requests to finish:
+18.9 s on Flash-Next without MTP, 11.5 s with K=3, 11.3 s on the 27B with K=3, and on the 27B
+without MTP a document exceeded the 30 s queue timeout (HTTP 503). Diagnostics showed the Fork
+settled after two assessments; nothing planned the documents again until a lane finished.
+
+Verification on the Colab G4 (RTX PRO 6000 Blackwell Server Edition, driver 580.82.07), on
+`d48774b2` with the fixes:
+
+- `mtp staged materialization ledger` and `mtp shared prefix promotion` fail on the unfixed code
+  with the original messages and pass with the fixes.
+- `long concurrent reuse` and `mtp long concurrent reuse`, and the 27B `concurrent-long-reuse`
+  scenario, pass. They require round-two documents to be admitted beside the running code requests
+  (measured waits 0.12-0.20 s beside 10-31 s code requests). On the unfixed code they do not
+  reproduce the burst seal failure: submissions from one thread leave no Fork unsettled at the next
+  planning, as concurrent HTTP clients did. The serving workload below is the before/after
+  evidence for that failure.
+- All 21 Flash-Next Engine cases pass, and the 27B `concurrent` scenario passes.
+- `ninfer-serve` at concurrency 4 (context 32768, KV capacity 131072, chunk 8192), with the mixed
+  workload run three times: Flash-Next with K=0 and K=3 and the 27B with K=0 and K=3 complete all
+  12 requests without a failure, and repeated documents wait 76-292 ms. At concurrency 1 with MTP
+  K=5, the sequence through the 128K-token request and the system-prompt request completes (14 of
+  14). Before the fixes, each of these workloads ended in its fatal failure.
+- The 27B `all` prefix scenario fails on this G4 with and without the fixes (`Complete MTP
+  checkpoint was not materialized from Host`, with no State restore counted). This is the Host
+  restore exception the fork-line qualification already records on Windows; it remains open.
