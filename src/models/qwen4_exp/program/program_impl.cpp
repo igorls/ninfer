@@ -250,6 +250,8 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     materialization_ledger_.reserve(static_cast<std::size_t>(capacity) + 1ULL);
     materialization_identity_.reserve(static_cast<std::size_t>(capacity) + 1ULL);
     materialization_prefix_digests_.reserve(static_cast<std::size_t>(capacity) + 1ULL);
+    mtp_proposal_ledger_.reserve(static_cast<std::size_t>(ple_gather->history_tokens()) +
+                                 draft_window + 1U);
 
     host_tokens = round_host ? static_cast<TokenId*>(round_host->data()) : nullptr;
     if (ordinary_host) {

@@ -849,6 +849,10 @@ private:
     std::vector<TokenId> materialization_ledger_;
     qwen4_exp::detail::ResidentPrefixIdentity materialization_identity_;
     qwen4_exp::detail::PrefixShortlistDigests materialization_prefix_digests_;
+    // Tail of one MTP row's proposed ledger: the PLE history before its frontier, the anchor and
+    // the drafts. A materialization keeps its staged ledger above across decode rounds, so the
+    // round never borrows it.
+    std::vector<TokenId> mtp_proposal_ledger_;
 
     struct ActiveCaptureTransaction {
         std::uint64_t id         = 0;

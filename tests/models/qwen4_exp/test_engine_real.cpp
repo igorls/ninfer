@@ -826,6 +826,57 @@ bool mtp_graphs_and_ragged_batches() {
     return true;
 }
 
+// MTP rounds of admitted lanes run while a later request's materialization is staged; the staged
+// prompt ledger must reach the new sequence intact. Without a system prompt, no request captures
+// a shared prefix.
+bool mtp_staged_materialization_ledger() {
+    auto options                     = base_options();
+    options.max_context              = 8192;
+    options.max_concurrency          = 4;
+    options.kv_capacity              = ninfer::KvCapacityPolicy::explicit_capacity(16384);
+    options.prefill_chunk            = 2048;
+    options.speculative.backend      = ninfer::SpeculativeBackend::Mtp;
+    options.speculative.draft_tokens = 3;
+    static const std::vector<std::string> sentences{
+        "The harbor master logged every ship that crossed the breakwater before dawn.",
+        "A survey team mapped the river delta after the spring floods receded.",
+        "The orchestra rehearsed the second movement until the tempo settled.",
+        "Archivists sorted the letters by sender, date and the port they came from.",
+        "The observatory recorded a faint comet low on the western horizon."};
+    return with_engine(options, [&](ninfer::Engine& engine) {
+        const auto document = [&](int seed) {
+            std::string text = "Read the text and summarize it in three sentences.\n\n";
+            for (int i = 0; i < 360; ++i) {
+                text += "Entry " + std::to_string((i * 7919 + seed * 104729) % 10007) + ": " +
+                        sentences[static_cast<std::size_t>(i + seed) % sentences.size()] + ' ';
+            }
+            return text;
+        };
+        const std::vector<std::pair<std::string, std::uint32_t>> jobs{
+            {document(1), 96},
+            {document(2), 96},
+            {"Write a Python module implementing a binary heap with push, pop and heapify, with "
+             "docstrings and tests.",
+             640},
+            {"Write a single-file HTML page with a canvas animation of a bouncing ball and a speed "
+             "slider.",
+             640},
+        };
+        for (int round = 0; round < 2; ++round) {
+            std::vector<ninfer::GenerationHandle> handles;
+            for (const auto& [text, outputs] : jobs) {
+                handles.push_back(engine.submit(engine.prepare(user_prompt(text)), greedy(outputs)));
+            }
+            for (std::size_t row = 0; row < handles.size(); ++row) {
+                if (handles[row].wait().generated_token_ids.size() != jobs[row].second) {
+                    return fail("an MTP request beside a staged materialization missed its budget");
+                }
+            }
+        }
+        return true;
+    });
+}
+
 // A conversation under a system prompt, then a new request repeating its first turn: the new
 // request resumes from the system-prompt boundary and promotes it to a shared prefix before its
 // first prefill chunk. The promotion rebinds the request's KV, and the MTP KV must stay mapped
@@ -943,6 +994,7 @@ int main() {
             {"mtp batch target parity", mtp_batch_target_parity},
             {"mtp long fp8", mtp_long_fp8},
             {"mtp shared prefix promotion", mtp_shared_prefix_promotion},
+            {"mtp staged materialization ledger", mtp_staged_materialization_ledger},
         };
         bool passed         = true;
         const char* filter  = std::getenv("NINFER_TEST_CASE");

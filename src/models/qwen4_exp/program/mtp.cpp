@@ -253,12 +253,17 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             host.extents[row] = admissible;
             host.valid[row]   = admissible + 1;
         }
-        materialization_ledger_.assign(sequence.ledger.begin(), sequence.ledger.end());
-        materialization_ledger_.insert(materialization_ledger_.end(), drafts, drafts + width - 1);
+        // Starting at the PLE history keeps every selected position at or beyond history_tokens(),
+        // so the tail selects the same rows as the whole proposed ledger would.
+        const std::uint32_t frontier = sequence.execution_frontier;
+        const std::uint32_t tail_begin =
+            frontier - std::min(frontier, ple_gather->history_tokens());
+        mtp_proposal_ledger_.assign(sequence.ledger.begin() + tail_begin, sequence.ledger.end());
+        mtp_proposal_ledger_.insert(mtp_proposal_ledger_.end(), drafts, drafts + width - 1);
         for (std::int32_t w = 0; w < width; ++w) {
             const auto column      = row * width + w;
             const auto local       = std::min(w, host.extents[row]);
-            host.ids[column]       = materialization_ledger_[sequence.execution_frontier + local];
+            host.ids[column]       = mtp_proposal_ledger_[frontier - tail_begin + local];
             host.positions[column] = host.frontiers[row] + local;
             host.teacher_positions[column] = host.positions[column] - 1;
             host.rows[column]              = host.sequence_rows[row];
@@ -267,7 +272,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                 host.rope[axis * columns + column] = host.positions[column] + sequence.rope_delta;
             }
             ple_gather->gather_position(
-                materialization_ledger_, host.positions[column],
+                mtp_proposal_ledger_, host.positions[column] - tail_begin,
                 {reinterpret_cast<std::byte*>(host.codes.data()) +
                      column * kPleHeads * kPleCodeRowBytes,
                  reinterpret_cast<std::byte*>(host.scales.data() +

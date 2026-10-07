@@ -30,6 +30,9 @@ public:
 
     [[nodiscard]] std::uint32_t heads() const noexcept { return heads_; }
 
+    // Ledger positions before `position` that select() can read.
+    [[nodiscard]] std::uint32_t history_tokens() const noexcept { return orders_; }
+
     // Writes heads() global rows for ledger position `position` into `rows`.
     void select(std::span<const TokenId> ledger, std::uint32_t position,
                 std::span<std::int64_t> rows) const;
@@ -62,6 +65,10 @@ public:
     PleGather& operator=(const PleGather&) = delete;
 
     [[nodiscard]] std::uint32_t heads() const noexcept { return selector_.heads(); }
+
+    [[nodiscard]] std::uint32_t history_tokens() const noexcept {
+        return selector_.history_tokens();
+    }
 
     [[nodiscard]] std::size_t code_row_bytes() const noexcept { return code_row_bytes_; }
 
