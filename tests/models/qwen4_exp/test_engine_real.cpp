@@ -826,6 +826,43 @@ bool mtp_graphs_and_ragged_batches() {
     return true;
 }
 
+// A conversation under a system prompt, then a new request repeating its first turn: the new
+// request resumes from the system-prompt boundary and promotes it to a shared prefix before its
+// first prefill chunk. The promotion rebinds the request's KV, and the MTP KV must stay mapped
+// for the rest of the prompt.
+bool mtp_shared_prefix_promotion() {
+    auto options                     = base_options();
+    options.speculative.backend      = ninfer::SpeculativeBackend::Mtp;
+    options.speculative.draft_tokens = 5;
+    return with_engine(options, [&](ninfer::Engine& engine) {
+        ninfer::PromptInput first;
+        first.messages.push_back(message(
+            ninfer::ChatRole::System,
+            "You are a senior front-end engineer. Every reply is the complete, updated single-file "
+            "HTML document, followed by at most three sentences on what changed."));
+        first.messages.push_back(message(
+            ninfer::ChatRole::User,
+            "Write a single-file HTML5 canvas game where a pelican rides a bicycle along a road."));
+        first.options.enable_thinking = false;
+        const auto reply              = engine.generate(engine.prepare(first), greedy(64));
+        const auto second             = engine.generate(
+            engine.prepare(continued(first, reply, "Add obstacles and a score.")), greedy(64));
+        const auto repeated = engine.generate(engine.prepare(first), greedy(64));
+        std::cout << "MTP shared promotion: second reused " << second.reused_prompt_tokens
+                  << ", repeated first turn reused " << repeated.reused_prompt_tokens << " of "
+                  << repeated.prompt.prompt_tokens << std::endl;
+        if (second.generated_token_ids.size() != 64 || repeated.generated_token_ids.size() != 64) {
+            return fail("a request after the shared-prefix promotion missed its token budget");
+        }
+        if (repeated.reused_prompt_tokens == 0) {
+            return fail("the repeated first turn did not resume from the system prompt");
+        }
+        return repeated.generated_token_ids.front() == reply.generated_token_ids.front()
+                   ? true
+                   : fail("the repeated first turn changed its first token");
+    });
+}
+
 bool mtp_long_fp8() {
     std::vector<ninfer::TokenId> eager;
     for (const bool graphs : {false, true}) {
@@ -905,6 +942,7 @@ int main() {
             {"mtp graphs and ragged batches", mtp_graphs_and_ragged_batches},
             {"mtp batch target parity", mtp_batch_target_parity},
             {"mtp long fp8", mtp_long_fp8},
+            {"mtp shared prefix promotion", mtp_shared_prefix_promotion},
         };
         bool passed         = true;
         const char* filter  = std::getenv("NINFER_TEST_CASE");

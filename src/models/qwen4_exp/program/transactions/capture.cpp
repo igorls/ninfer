@@ -844,7 +844,11 @@ ActiveCaptureResult ProgramImpl::publish_active_capture(ActiveCaptureTransaction
         }
         sequence.kv = active_bundle;
         bind_sequence_kv(sequence);
-        ensure_sequence_kv_mapped(sequence, prefill.prompt_tokens, 0);
+        // The snapshot destinations hold only the captured pages; map the rest of the prompt
+        // again, the MTP KV included, exactly as begin did.
+        ensure_sequence_kv_mapped(
+            sequence, prefill.prompt_tokens,
+            speculative_backend == SpeculativeBackend::Mtp ? prefill.prompt_tokens - 1U : 0U);
     }
 
     detail::PhysicalResources removed = transaction.capacity_preparation_removed;
