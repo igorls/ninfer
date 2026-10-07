@@ -155,7 +155,8 @@ NINFER_TEST_ARTIFACT=/path/to/qwen3_8_flash_next_mixed.ninfer \
 ```
 
 `NINFER_TEST_CASE` selects a case-name substring for the Flash-Next Engine executable, for example
-`mtp graphs`, `mtp batch target parity`, `host round trip`, `causal score` or `vision generation`.
+`mtp graphs`, `mtp batch target parity`, `host round trip`, `causal score`, `vision generation` or
+`long concurrent reuse`.
 The target-parity case compares eight 96-token requests at K=1/3/5 against ordinary decoding;
 a first divergence is allowed only at a reference top-two gap of at most 0.05 nat. This protects
 speculative target semantics; independent FP64 Op tests qualify the underlying mathematics.
@@ -164,7 +165,8 @@ in `models/qwen4_exp/fixtures/README.md`.
 
 Without `NINFER_TEST_ARTIFACT`, CTest marks these real Engine tests as skipped. Run GPU integration
 tests serially. `NINFER_PREFIX_REAL_SCENARIO` selects a focused prefix scenario such as `vision`,
-`pressure-resume` or `concurrent`; the default is `all`. Integration checks compare observable
+`pressure-resume`, `concurrent` or `concurrent-long-reuse` (a serving-scale burst of reused long
+prompts at concurrency 4, with and without MTP); the default is `all`. Integration checks compare observable
 behavior, continuation state and execution-route equivalence; numerical Op tests use independent
 mathematical oracles.
 

@@ -204,7 +204,9 @@ Device/Host bytes、page refcount 或 allocator free space 的镜像。
 Program 中的真实 stores 与 allocators 是物理事实的唯一权威。Program：
 
 - 从完整候选终态计算占用、共享、回收和阶段峰值；
-- seal 与当前 `resource_revision` 绑定的 opaque `ResourcePlan`；
+- seal 与当前 `resource_revision` 绑定的 opaque `ResourcePlan`；活动 lane 仍持有未 settle 的
+  StateImage Fork 时不 seal 任何 admission，这只推迟 admission，不是物理不可行；Fork 的 settle
+  不是 admission 事件，EngineCore 因此在下一个 execution unit 之后重试一次被推迟的 admission；
 - 执行唯一的物理 transition；
 - 返回足以让 ResourceManager 更新逻辑 catalog 的完整结果。
 

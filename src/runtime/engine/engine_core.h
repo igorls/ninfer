@@ -721,6 +721,12 @@ private:
         ControlProgress,
     };
 
+    // The one exception to the rule below: an admission deferred by an unsettled StateImage Fork is
+    // retried once after the next unit, because settling the Fork is not an admission event.
+    void retry_deferred_admission() noexcept {
+        if (std::exchange(retry_admission_after_unit_, false)) { request_admission_check(); }
+    }
+
     // Coalesces admission-visible queue/resource changes. Ordinary prefill/decode progress does not
     // re-arm a temporarily blocked inspection.
     void request_admission_check() noexcept {
@@ -1935,6 +1941,9 @@ private:
                 }
                 throw std::logic_error("isolated-feasible request is blocked in an idle Engine");
             }
+            // An unsettled StateImage Fork defers planning only until the next execution unit
+            // settles it, and that settlement is not an admission event of its own.
+            retry_admission_after_unit_ = instance_.program->has_unsettled_state_fork();
             if (!scheduler_.protect_blocked_head(head->id, active.span(),
                                                  instance_.program->resource_revision())) {
                 return control_progress ? AdmissionProgress::ControlProgress
@@ -2238,6 +2247,7 @@ private:
                     finish_engine_phase(boundary, EngineHostPhase::Boundary);
                     run_control_batch(control_membership);
                     previous_unit_was_decode = true;
+                    retry_deferred_admission();
                     continue;
                 }
                 membership = scheduler_.build_round_membership(slots_, max_concurrency_);
@@ -2256,6 +2266,7 @@ private:
                     finish_engine_phase(boundary, EngineHostPhase::Boundary);
                     run_prefill_step(cancelled_at_unit_start);
                     previous_unit_was_decode = false;
+                    retry_deferred_admission();
                     continue;
                 }
                 if (action == ExecutionAction::Decode) {
@@ -2263,6 +2274,7 @@ private:
                     finish_engine_phase(boundary, EngineHostPhase::Boundary);
                     run_decode_round(membership, cancelled_at_unit_start);
                     previous_unit_was_decode = true;
+                    retry_deferred_admission();
                     continue;
                 }
                 set_host_work_class(HostWorkClass::Control);
@@ -2342,6 +2354,8 @@ private:
     // Requests for which an idle cache flush was already tried; a second failure is fatal.
     std::unordered_set<std::uint64_t> idle_flush_attempted_;
     std::atomic<bool> admission_check_pending_{false};
+    // Worker-owned: the last admission attempt was deferred by an unsettled StateImage Fork.
+    bool retry_admission_after_unit_ = false;
     std::uint64_t worker_accounted_elapsed_ns_ = 0;
     HostWorkClass current_host_work_class_     = HostWorkClass::Control;
     std::array<std::uint32_t, kMaximumConcurrency> current_decode_lanes_{};

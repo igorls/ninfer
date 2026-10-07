@@ -826,6 +826,105 @@ bool mtp_graphs_and_ragged_batches() {
     return true;
 }
 
+// Long prompts at concurrency with the context cache on, at serving scale: two code requests with
+// long outputs and two 20K-token documents are submitted together twice. The second round's
+// admissions are planned in one burst while earlier admissions of the burst may still hold
+// unsettled StateImage Forks: every plan must seal or wait, and a deferred document must be
+// admitted beside the running code requests rather than after them.
+bool concurrent_long_prompts_with_reuse(bool mtp) {
+    static const std::vector<std::string> sentences{
+        "The harbor master logged every ship that crossed the breakwater before dawn.",
+        "A survey team mapped the river delta after the spring floods receded.",
+        "The orchestra rehearsed the second movement until the tempo settled.",
+        "Archivists sorted the letters by sender, date and the port they came from.",
+        "The observatory recorded a faint comet low on the western horizon."};
+    auto options            = base_options();
+    options.max_context     = 32768;
+    options.max_concurrency = 4;
+    options.kv_capacity     = ninfer::KvCapacityPolicy::explicit_capacity(131072);
+    options.prefill_chunk   = 8192;
+    if (mtp) {
+        options.speculative.backend      = ninfer::SpeculativeBackend::Mtp;
+        options.speculative.draft_tokens = 3;
+    }
+    return with_engine(options, [&](ninfer::Engine& engine) {
+        const auto document = [&](int seed) {
+            std::string text = "Read the text and summarize it in five sentences.\n\n";
+            for (int i = 0; i < 1200; ++i) {
+                text += "Entry " + std::to_string((i * 7919 + seed * 104729) % 10007) + ": " +
+                        sentences[static_cast<std::size_t>(i + seed) % sentences.size()] + ' ';
+            }
+            return text;
+        };
+        ninfer::PromptInput game;
+        game.messages.push_back(message(
+            ninfer::ChatRole::System,
+            "You are a senior front-end engineer. Every reply is the complete, updated single-file "
+            "HTML document, followed by at most three sentences on what changed."));
+        game.messages.push_back(message(
+            ninfer::ChatRole::User,
+            "Write a single-file HTML5 canvas game where a pelican rides a bicycle along a road."));
+        game.options.enable_thinking = false;
+        const std::vector<std::pair<ninfer::PromptInput, std::uint32_t>> jobs{
+            {game, 2000},
+            {user_prompt("Write a complete Python implementation of a red-black tree with insert, "
+                         "delete and an in-order iterator, with docstrings and tests."),
+             2000},
+            {user_prompt(document(1)), 400},
+            {user_prompt(document(2)), 400},
+        };
+        std::vector<std::vector<ninfer::TokenId>> first_round;
+        for (int round = 0; round < 2; ++round) {
+            // Prepare first so the four requests arrive together, as concurrent clients do.
+            std::vector<ninfer::PreparedPrompt> prepared;
+            for (const auto& job : jobs) { prepared.push_back(engine.prepare(job.first)); }
+            std::vector<ninfer::GenerationHandle> handles;
+            for (std::size_t row = 0; row < jobs.size(); ++row) {
+                // Model stops apply as for a served chat request; the documents end at EOS.
+                auto request                        = greedy(jobs[row].second);
+                request.stop.include_model_defaults = true;
+                handles.push_back(engine.submit(std::move(prepared[row]), request));
+            }
+            std::uint32_t reused = 0;
+            std::vector<ninfer::GenerationResult> results;
+            for (std::size_t row = 0; row < handles.size(); ++row) {
+                results.push_back(handles[row].wait());
+                const auto& result = results.back();
+                const std::size_t outputs = result.generated_token_ids.size();
+                if (outputs == 0 || outputs > jobs[row].second) {
+                    return fail("a long concurrent request missed its token budget");
+                }
+                std::cout << "  row " << row << ": reused " << result.reused_prompt_tokens
+                          << " of " << result.prompt.prompt_tokens << " via path "
+                          << static_cast<int>(result.prefix_reuse_path) << ", " << outputs
+                          << " outputs" << std::endl;
+                reused += result.reused_prompt_tokens != 0 ? 1U : 0U;
+                if (round == 0) {
+                    first_round.push_back(result.generated_token_ids);
+                } else if (result.generated_token_ids.front() != first_round[row].front()) {
+                    return fail("a repeated long request changed its first token");
+                }
+            }
+            // The documents are admitted beside the running code requests, not after them.
+            const double code_seconds =
+                std::min(results[0].timings.total_seconds, results[1].timings.total_seconds);
+            const double document_wait = std::max(results[2].engine_timing.queue_wait_seconds,
+                                                  results[3].engine_timing.queue_wait_seconds);
+            std::cout << (mtp ? "MTP " : "") << "long concurrent round " << round << ": "
+                      << reused << " of " << handles.size() << " reused a prefix; documents "
+                      << "waited " << document_wait << " s beside " << code_seconds
+                      << " s code requests" << std::endl;
+            if (round == 1 && reused == 0) {
+                return fail("no repeated long request reused its retained prefix");
+            }
+            if (document_wait > 0.5 * code_seconds) {
+                return fail("long documents waited for the running code requests to finish");
+            }
+        }
+        return true;
+    });
+}
+
 // MTP rounds of admitted lanes run while a later request's materialization is staged; the staged
 // prompt ledger must reach the new sequence intact. Without a system prompt, no request captures
 // a shared prefix.
@@ -993,6 +1092,9 @@ int main() {
             {"mtp graphs and ragged batches", mtp_graphs_and_ragged_batches},
             {"mtp batch target parity", mtp_batch_target_parity},
             {"mtp long fp8", mtp_long_fp8},
+            {"long concurrent reuse", [] { return concurrent_long_prompts_with_reuse(false); }},
+            {"mtp long concurrent reuse",
+             [] { return concurrent_long_prompts_with_reuse(true); }},
             {"mtp shared prefix promotion", mtp_shared_prefix_promotion},
             {"mtp staged materialization ledger", mtp_staged_materialization_ledger},
         };

@@ -966,7 +966,11 @@ PressurePlanningSessionImpl::assess(qwen4_exp::PressureTargetHandle target) {
         }
         if (composed || composed_capture) {
             status = runtime::MaterializationPhysicalStatus::Infeasible;
+            // Feasible means sealable now. An admission seals through revalidate_materialization,
+            // which refuses while an active lane's StateImage Fork is unsettled; the admission
+            // then waits for the unit that settles the Fork instead of failing its seal.
             if (projected->blocked_host_allocation_bytes == 0 &&
+                (composed_capture || !program->has_unsettled_state_fork()) &&
                 program->physical_peak_fits(projected->demand.physical_peak_additional)) {
                 status = runtime::MaterializationPhysicalStatus::Feasible;
             }

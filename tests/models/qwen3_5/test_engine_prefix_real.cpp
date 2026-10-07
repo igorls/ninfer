@@ -1,6 +1,7 @@
 #include "ninfer/engine.h"
 #include "kv_cache_storage.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -2042,6 +2043,114 @@ int exercise_concurrent_resource_settlement(const char* artifact) {
     return 0;
 }
 
+// At serving scale, two code requests with long outputs and two 20K-token documents are submitted
+// together twice. The second round's admissions are planned in one burst while earlier admissions
+// of the burst may still hold unsettled StateImage Forks: every plan must seal or wait, and a
+// deferred document must be admitted beside the running code requests rather than after them.
+int exercise_concurrent_long_reuse(const char* artifact, bool mtp) {
+    ninfer::EngineOptions options;
+    options.artifact_path        = artifact;
+    options.max_context          = 32768;
+    options.kv_capacity          = ninfer::KvCapacityPolicy::explicit_capacity(131072);
+    options.prefill_chunk        = 8192;
+    options.max_concurrency      = 4;
+    options.max_pending_requests = 4;
+    if (mtp) {
+        options.speculative.backend       = ninfer::SpeculativeBackend::Mtp;
+        options.speculative.draft_tokens  = 3;
+        options.speculative.proposal_head = ninfer::ProposalHead::Optimized;
+    }
+    ninfer::Engine engine(std::move(options));
+
+    static const std::vector<std::string> sentences{
+        "The harbor master logged every ship that crossed the breakwater before dawn.",
+        "A survey team mapped the river delta after the spring floods receded.",
+        "The orchestra rehearsed the second movement until the tempo settled.",
+        "Archivists sorted the letters by sender, date and the port they came from.",
+        "The observatory recorded a faint comet low on the western horizon."};
+    const auto document = [&](int seed) {
+        std::string text = "Read the text and summarize it in five sentences.\n\n";
+        for (int i = 0; i < 1200; ++i) {
+            text += "Entry " + std::to_string((i * 7919 + seed * 104729) % 10007) + ": " +
+                    sentences[static_cast<std::size_t>(i + seed) % sentences.size()] + ' ';
+        }
+        return text;
+    };
+    const auto turn = [](std::string text) {
+        return pressure_turn(std::move(text), "", ninfer::CacheRetentionHint::Default);
+    };
+    ninfer::PromptInput game = turn(
+        "Write a single-file HTML5 canvas game where a pelican rides a bicycle along a road.");
+    ninfer::ChatMessage system;
+    system.role = ninfer::ChatRole::System;
+    system.parts.push_back(ninfer::MessagePart{
+        .kind  = ninfer::MessagePartKind::Text,
+        .text  = "You are a senior front-end engineer. Every reply is the complete, updated "
+                 "single-file HTML document, followed by at most three sentences on what changed.",
+        .media = {}});
+    game.messages.insert(game.messages.begin(), std::move(system));
+    const std::vector<std::pair<ninfer::PromptInput, std::uint32_t>> jobs{
+        {game, 2000},
+        {turn("Write a complete Python implementation of a red-black tree with insert, delete and "
+              "an in-order iterator, with docstrings and tests."),
+         2000},
+        {turn(document(1)), 400},
+        {turn(document(2)), 400},
+    };
+    std::vector<ninfer::TokenId> first_tokens;
+    for (int round = 0; round < 2; ++round) {
+        // Prepare first so the four requests arrive together, as concurrent clients do.
+        std::vector<ninfer::PreparedPrompt> prepared;
+        for (const auto& job : jobs) { prepared.push_back(engine.prepare(job.first)); }
+        std::vector<ninfer::GenerationHandle> handles;
+        for (std::size_t row = 0; row < jobs.size(); ++row) {
+            // Model stops apply as for a served chat request; the documents end at EOS.
+            ninfer::RequestOptions request      = fixed_output(jobs[row].second);
+            request.stop.include_model_defaults = true;
+            handles.push_back(engine.submit(std::move(prepared[row]), request));
+        }
+        std::uint32_t reused = 0;
+        std::vector<ninfer::GenerationResult> results;
+        for (std::size_t row = 0; row < handles.size(); ++row) {
+            results.push_back(handles[row].wait());
+            const ninfer::GenerationResult& result = results.back();
+            const std::size_t outputs              = result.generated_token_ids.size();
+            if (outputs == 0 || outputs > jobs[row].second) {
+                std::cerr << "long concurrent request " << row << " missed its token budget\n";
+                return 1;
+            }
+            std::cout << "  row " << row << ": reused " << result.reused_prompt_tokens << " of "
+                      << result.prompt.prompt_tokens << " via path "
+                      << static_cast<int>(result.prefix_reuse_path) << ", " << outputs
+                      << " outputs\n";
+            reused += result.reused_prompt_tokens != 0 ? 1U : 0U;
+            if (round == 0) {
+                first_tokens.push_back(result.generated_token_ids.front());
+            } else if (result.generated_token_ids.front() != first_tokens[row]) {
+                std::cerr << "repeated long request " << row << " changed its first token\n";
+                return 1;
+            }
+        }
+        // The documents are admitted beside the running code requests, not after them.
+        const double code_seconds =
+            std::min(results[0].timings.total_seconds, results[1].timings.total_seconds);
+        const double document_wait = std::max(results[2].engine_timing.queue_wait_seconds,
+                                              results[3].engine_timing.queue_wait_seconds);
+        std::cout << (mtp ? "MTP " : "") << "long concurrent round " << round << ": " << reused
+                  << " of " << handles.size() << " reused a prefix; documents waited "
+                  << document_wait << " s beside " << code_seconds << " s code requests\n";
+        if (round == 1 && reused == 0) {
+            std::cerr << "no repeated long request reused its retained prefix\n";
+            return 1;
+        }
+        if (document_wait > 0.5 * code_seconds) {
+            std::cerr << "long documents waited for the running code requests to finish\n";
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int verify_loaded_product(const ninfer::Engine& engine) {
     const ninfer::LoadSummary load = engine.load_summary();
     if (load.architecture != "Qwen3_5ForCausalLM" || load.model_name.empty() ||
@@ -2259,6 +2368,9 @@ int main() {
         result = exercise_artifact(artifact);
     } else if (scenario == "concurrent") {
         result = exercise_concurrent_resource_settlement(artifact);
+    } else if (scenario == "concurrent-long-reuse") {
+        result = exercise_concurrent_long_reuse(artifact, false);
+        if (result == 0) { result = exercise_concurrent_long_reuse(artifact, true); }
     } else if (scenario == "anthropic-prefix-regression") {
         result = exercise_anthropic_prefix_regression(artifact);
     } else if (scenario == "shared-rewrite-materialization") {
