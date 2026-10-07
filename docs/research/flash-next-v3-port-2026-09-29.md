@@ -1087,3 +1087,19 @@ alternating rounds of 200 samples.
    `python -m tools.convert.qwen4_exp.derive`, fully automatic and resumable.
 5. **Upstream conflict surface of §3.1 accepted.**
 6. **PLE residency for M3:** mapped page cache (v2 behaviour).
+
+### Open: fatal engine failures (2026-10-06)
+
+A Colab G4 evaluation of MTP draft policies exercised workloads the Engine cases do not cover:
+long prompts at concurrency, and prefix reuse after a long request. It found three fatal engine
+failures, all reproduced on `7053c7af` (this line plus NVTX ranges only).
+
+| Workload | Fatal engine failure |
+|---|---|
+| concurrency 4: two 20K-token summaries and two code requests submitted together, no MTP | `selected pressure target could not be sealed` |
+| the same workload with MTP K=2, 3 or 5 | `candidate token ledger does not match prompt length` |
+| concurrency 1, MTP K=5: a 128K-token request, then a request reusing an earlier conversation's prefix | `KV committed frontier is invalid` |
+
+The same reuse sequence without MTP completes. The Engine cases' concurrency coverage uses prompts
+under 512 tokens, which is why they pass. These failures block landing on `workstation`. Each fix
+should add an Engine case with long prompts at concurrency.

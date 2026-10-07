@@ -344,8 +344,8 @@ configuration the G4 used (context 131072, KV capacity 262144, concurrency 8) do
 the desktop: startup correctly refuses a 9.8 GB runtime reservation with 7.5 GB available. The
 Windows serving check with a smaller KV capacity remains open.
 
-Three fatal engine failures block landing; all of them reproduce without later changes
-([adaptive MTP note](../research/flash-next-mtp-adaptive-2026-10-06.md), on its branch):
+Three fatal engine failures block landing; all of them reproduce on this line
+([active plan](../research/flash-next-v3-port-2026-09-29.md#open-fatal-engine-failures-2026-10-06)):
 - concurrency 4 with long prompts fails with `selected pressure target could not be sealed`
   without MTP;
 - the same workload fails with `candidate token ledger does not match prompt length` under MTP;
