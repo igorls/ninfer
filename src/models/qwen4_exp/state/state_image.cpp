@@ -115,11 +115,11 @@ StateImageHostLayout plan_host_state_image(const StateImageSpec& spec) {
                     kStateImageAlignment, "StateImage host indexer positions");
     host.ple_history =
         builder.add(ple_slot.bytes(), kStateImageAlignment, "StateImage host PLE history");
-    host.continuation_hidden = builder.add(hidden_slot.bytes(), kStateImageAlignment,
-                                           "StateImage host continuation hidden");
+    host.continuation_hidden    = builder.add(hidden_slot.bytes(), kStateImageAlignment,
+                                              "StateImage host continuation hidden");
     host.continuation_positions = builder.add(3 * sizeof(std::int32_t), kStateImageAlignment,
-                                               "StateImage host continuation positions");
-    host.image_bytes = builder.finish(kStateImageAlignment, "StateImage host image");
+                                              "StateImage host continuation positions");
+    host.image_bytes            = builder.finish(kStateImageAlignment, "StateImage host image");
     return host;
 }
 
@@ -154,21 +154,26 @@ StateImageDeviceLayout plan_state_image_device_pool(LayoutBuilder& builder,
     out.indexer_keys.reserve(mixer.indexer_layers);
     out.indexer_positions.reserve(mixer.indexer_layers);
     for (std::uint32_t layer = 0; layer < mixer.indexer_layers; ++layer) {
-        out.indexer_keys.push_back(builder.add_tensor(
-            DType::BF16, {mixer.indexer_dim, mixer.indexer_block, spec.linear.slot_count + mixer.transient_slots},
-            kStateImageAlignment, "StateImage indexer forming keys"));
+        out.indexer_keys.push_back(
+            builder.add_tensor(DType::BF16,
+                               {mixer.indexer_dim, mixer.indexer_block,
+                                spec.linear.slot_count + mixer.transient_slots},
+                               kStateImageAlignment, "StateImage indexer forming keys"));
         out.indexer_positions.push_back(builder.add_tensor(
-            DType::I32, {kMropeAxes, mixer.indexer_block, spec.linear.slot_count + mixer.transient_slots},
+            DType::I32,
+            {kMropeAxes, mixer.indexer_block, spec.linear.slot_count + mixer.transient_slots},
             kStateImageAlignment, "StateImage indexer forming positions"));
     }
     out.ple_history = builder.add_tensor(
-        DType::BF16, {mixer.ple_channels, mixer.ple_history, spec.linear.slot_count + mixer.transient_slots},
+        DType::BF16,
+        {mixer.ple_channels, mixer.ple_history, spec.linear.slot_count + mixer.transient_slots},
         kStateImageAlignment, "StateImage PLE history");
     out.continuation_hidden =
         builder.add_tensor(DType::BF16, {spec.hidden, spec.linear.slot_count}, kStateImageAlignment,
                            "StateImage continuation hidden");
-    out.continuation_positions = builder.add_tensor(DType::I32, {3, spec.linear.slot_count},
-        kStateImageAlignment, "StateImage continuation positions");
+    out.continuation_positions =
+        builder.add_tensor(DType::I32, {3, spec.linear.slot_count}, kStateImageAlignment,
+                           "StateImage continuation positions");
     out.host = plan_host_state_image(spec);
     return out;
 }
@@ -176,16 +181,18 @@ StateImageDeviceLayout plan_state_image_device_pool(LayoutBuilder& builder,
 TransferWork state_image_transfer_work(const StateImageHostLayout& layout) {
     std::size_t payload = checked_add(layout.linear_conv.bytes, layout.linear_recurrent.bytes,
                                       "StateImage transfer payload overflow");
-    payload = checked_add(payload, layout.indexer_keys.bytes, "StateImage transfer payload overflow");
+    payload =
+        checked_add(payload, layout.indexer_keys.bytes, "StateImage transfer payload overflow");
     payload = checked_add(payload, layout.indexer_positions.bytes,
                           "StateImage transfer payload overflow");
-    payload = checked_add(payload, layout.ple_history.bytes, "StateImage transfer payload overflow");
+    payload =
+        checked_add(payload, layout.ple_history.bytes, "StateImage transfer payload overflow");
     payload = checked_add(payload, layout.continuation_hidden.bytes,
                           "StateImage transfer payload overflow");
     payload = checked_add(payload, layout.continuation_positions.bytes,
                           "StateImage transfer payload overflow");
-    const std::uint64_t operations = 2ULL * layout.spec.linear.layers +
-                                     2ULL * layout.spec.token_mixer.indexer_layers + 3ULL;
+    const std::uint64_t operations =
+        2ULL * layout.spec.linear.layers + 2ULL * layout.spec.token_mixer.indexer_layers + 3ULL;
     if (operations > std::numeric_limits<std::uint32_t>::max()) {
         throw std::overflow_error("StateImage transfer operation count exceeds uint32");
     }
@@ -193,14 +200,22 @@ TransferWork state_image_transfer_work(const StateImageHostLayout& layout) {
                         .copy_operations = static_cast<std::uint32_t>(operations)};
 }
 
-HostStatePool::HostStatePool(StateImageHostLayout layout, std::uint32_t capacity)
-    : layout_(std::move(layout)), slots_(capacity), free_slots_(capacity), free_count_(capacity) {
+HostStatePool::HostStatePool(HostContextArena& arena, StateImageHostLayout layout)
+    : layout_(std::move(layout)), arena_(&arena) {
     if (!same_host_layout(layout_, plan_host_state_image(layout_.spec))) {
         throw std::invalid_argument("HostStatePool image layout is invalid");
     }
-    const std::size_t bytes =
-        checked_mul(layout_.image_bytes, capacity, "HostStatePool backing size overflow");
-    if (bytes != 0) { backing_.emplace(bytes); }
+    if (layout_.image_bytes < arena_->minimum_allocation_bytes()) {
+        throw std::invalid_argument("Host state geometry is below the shared arena minimum");
+    }
+    const std::size_t maximum_slots = arena_->capacity_bytes() / layout_.image_bytes;
+    if (maximum_slots > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::overflow_error("Host state descriptor capacity exceeds uint32");
+    }
+    const auto capacity = static_cast<std::uint32_t>(maximum_slots);
+    slots_.resize(capacity);
+    free_slots_.resize(capacity);
+    free_count_ = capacity;
     for (std::uint32_t index = 0; index < capacity; ++index) {
         free_slots_[index] = capacity - 1U - index;
     }
@@ -208,17 +223,29 @@ HostStatePool::HostStatePool(StateImageHostLayout layout, std::uint32_t capacity
 
 std::optional<HostStateSlotHandle> HostStatePool::allocate() noexcept {
     if (free_count_ == 0) { return std::nullopt; }
+    auto storage = arena_->allocate(layout_.image_bytes);
+    if (!storage) { return std::nullopt; }
     const std::uint32_t index = free_slots_[--free_count_];
     Slot& slot                = slots_[index];
-    slot.occupied             = true;
+    slot.storage              = std::move(*storage);
     ++occupied_;
-    return HostStateSlotHandle{.index = index, .generation = slot.generation};
+    return HostStateSlotHandle{.index = index, .generation = slot.generation, .owner = this};
+}
+
+bool HostStatePool::can_allocate() const noexcept {
+    return free_count_ != 0 && arena_->can_allocate(layout_.image_bytes);
+}
+
+bool HostStatePool::publish(HostStateSlotHandle handle) noexcept {
+    if (!valid(handle)) { return false; }
+    slots_[handle.index].storage.publish();
+    return true;
 }
 
 bool HostStatePool::release(HostStateSlotHandle handle) noexcept {
     if (!valid(handle)) { return false; }
-    Slot& slot    = slots_[handle.index];
-    slot.occupied = false;
+    Slot& slot = slots_[handle.index];
+    (void)slot.storage.release();
     if (++slot.generation == 0) { ++slot.generation; }
     free_slots_[free_count_++] = handle.index;
     --occupied_;
@@ -240,19 +267,20 @@ std::uint32_t HostStatePool::capacity() const noexcept {
 }
 
 bool HostStatePool::valid(HostStateSlotHandle handle) const noexcept {
-    return handle.index < slots_.size() && slots_[handle.index].occupied &&
+    return handle.owner == this && handle.index < slots_.size() &&
+           slots_[handle.index].storage.valid() &&
            slots_[handle.index].generation == handle.generation;
 }
 
 std::byte* HostStatePool::slot_data(std::uint32_t index) const noexcept {
-    return static_cast<std::byte*>(backing_->data()) +
-           static_cast<std::size_t>(index) * layout_.image_bytes;
+    return slots_[index].storage.data();
 }
 
 StateImageDevicePool::StateImageDevicePool(DeviceSpan backing, const StateImageDeviceLayout& layout)
     : linear_(backing, layout.linear), ple_history_(layout.ple_history.bind(backing)),
       continuation_hidden_(layout.continuation_hidden.bind(backing)),
-      continuation_positions_(layout.continuation_positions.bind(backing)), host_layout_(layout.host) {
+      continuation_positions_(layout.continuation_positions.bind(backing)),
+      host_layout_(layout.host) {
     const StateImageSpec& spec = host_layout_.spec;
     if (layout.indexer_keys.size() != spec.token_mixer.indexer_layers ||
         layout.indexer_positions.size() != spec.token_mixer.indexer_layers) {
@@ -264,7 +292,8 @@ StateImageDevicePool::StateImageDevicePool(DeviceSpan backing, const StateImageD
         indexer_keys_.push_back(layout.indexer_keys[layer].bind(backing));
         indexer_positions_.push_back(layout.indexer_positions[layer].bind(backing));
         if (indexer_keys_.back().ne[2] != linear_.slot_count() + spec.token_mixer.transient_slots ||
-            indexer_positions_.back().ne[2] != linear_.slot_count() + spec.token_mixer.transient_slots) {
+            indexer_positions_.back().ne[2] !=
+                linear_.slot_count() + spec.token_mixer.transient_slots) {
             throw std::invalid_argument("StateImage components do not share one slot geometry");
         }
     }
@@ -347,7 +376,8 @@ void StateImageDevicePool::zero_all(cudaStream_t stream) {
     }
     CUDA_CHECK(cudaMemsetAsync(ple_history_.data, 0, ple_history_.bytes(), stream));
     CUDA_CHECK(cudaMemsetAsync(continuation_hidden_.data, 0, continuation_hidden_.bytes(), stream));
-    CUDA_CHECK(cudaMemsetAsync(continuation_positions_.data, 0, continuation_positions_.bytes(), stream));
+    CUDA_CHECK(
+        cudaMemsetAsync(continuation_positions_.data, 0, continuation_positions_.bytes(), stream));
 }
 
 void StateImageDevicePool::copy_slot(std::int32_t source, std::int32_t destination,
@@ -364,7 +394,8 @@ void StateImageDevicePool::copy_slot(std::int32_t source, std::int32_t destinati
     }
     copy_device(ple_history_slot(destination), ple_history_slot(source), stream);
     copy_device(continuation_hidden_slot(destination), continuation_hidden_slot(source), stream);
-    copy_device(continuation_positions_slot(destination), continuation_positions_slot(source), stream);
+    copy_device(continuation_positions_slot(destination), continuation_positions_slot(source),
+                stream);
 }
 
 void StateImageDevicePool::validate_host_layout(const StateImageHostLayout* layout,

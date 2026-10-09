@@ -43,9 +43,7 @@ struct PersistentLayout {
     std::optional<TensorLayout> score_hidden;
     std::optional<TensorLayout> token_counts;
     std::optional<TensorLayout> sampling_config;
-    // Structured-output token masks [words, draft_window + 1, lanes]: verification column j holds
-    // the grammar state after drafts[0..j-1].
-    std::optional<TensorLayout> constraint_masks;
+    std::optional<TensorLayout> grammar_masks;
     // Prompt-membership bitsets [words, lanes] for the repetition penalty.
     std::optional<TensorLayout> prompt_presence;
     // Token logprob device readout: candidate ids, per-round columns, and prompt positions.
@@ -64,7 +62,7 @@ struct WorkspacePlan {
     std::size_t mtp_round        = 0;
     std::size_t general_capacity = 0;
     std::optional<qwen3_5::detail::VisionWorkspacePlan> vision;
-    std::size_t capacity         = 0;
+    std::size_t capacity = 0;
 };
 
 struct SequencePlanningInputs {
@@ -76,15 +74,12 @@ struct SequencePlanningInputs {
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
     models::LoadOptions features;
-    bool use_cuda_graph = true;
-    bool causal_scoring = false;
-    int device          = 0;
+    bool use_cuda_graph               = true;
+    bool causal_scoring               = false;
+    int device                        = 0;
+    std::int32_t multiprocessor_count = 0;
     ContextCacheOptions context_cache;
 };
-
-} // namespace ninfer::models::qwen4_exp::detail
-
-namespace ninfer::models::qwen4_exp::detail {
 
 struct SequencePlanImpl {
     const execution::Parameters* parameters = nullptr;
@@ -97,9 +92,10 @@ struct SequencePlanImpl {
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
     models::LoadOptions features;
-    bool use_cuda_graph = true;
-    bool causal_scoring = false;
-    int device          = 0;
+    bool use_cuda_graph               = true;
+    bool causal_scoring               = false;
+    int device                        = 0;
+    std::int32_t multiprocessor_count = 0;
     ContextCacheOptions context_cache;
     PersistentLayout persistent;
     WorkspacePlan workspace;
@@ -112,11 +108,6 @@ struct SequencePlannerImpl {
     runtime::SequenceCapacityCurve curve;
     std::unique_ptr<SequencePlanImpl> minimum;
 };
-
-} // namespace ninfer::models::qwen4_exp::detail
-
-namespace ninfer::models::qwen4_exp::detail {
-
 
 [[nodiscard]] std::unique_ptr<qwen4_exp::detail::SequencePlannerImpl>
 make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContext& device,

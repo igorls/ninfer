@@ -28,8 +28,9 @@ __launch_bounds__(kSamplerBlock) __global__
     if (!(cfg.temperature > 0.0f)) {
         float bv             = -CUDART_INF_F;
         int bi               = INT_MAX;
-        const bool penalties = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f || cfg.repetition_penalty != 1.0f || cfg.allowed_tokens != nullptr;
-        if (!penalties) {
+        const bool penalties = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f ||
+                               cfg.repetition_penalty != 1.0f;
+        if (!penalties && cfg.mask.words == nullptr) {
             for (int v = tid; v < token_domain; v += blockDim.x) {
                 const float x = __bfloat162float(logits[base + v]);
                 if (sampling_better(x, v, bv, bi)) {
@@ -58,8 +59,11 @@ __launch_bounds__(kSamplerBlock) __global__
             __syncthreads();
         }
         if (tid == 0) {
+            if (cfg.mask.words && !isfinite(red_val[0])) { asm volatile("trap;"); }
             out[row] = red_idx[0];
-            if (cfg.token_counts != nullptr && cfg.commit_token_counts) { atomicAdd(&cfg.token_counts[red_idx[0]], 1); }
+            if (cfg.token_counts != nullptr && cfg.commit_token_counts) {
+                atomicAdd(&cfg.token_counts[red_idx[0]], 1);
+            }
         }
         return;
     }
@@ -100,7 +104,9 @@ __launch_bounds__(kSamplerBlock) __global__
         }
     }
     out[row] = picked;
-    if (cfg.token_counts != nullptr && cfg.commit_token_counts) { atomicAdd(&cfg.token_counts[picked], 1); }
+    if (cfg.token_counts != nullptr && cfg.commit_token_counts) {
+        atomicAdd(&cfg.token_counts[picked], 1);
+    }
 }
 
 __launch_bounds__(kSamplerBlock) __global__
@@ -116,8 +122,9 @@ __launch_bounds__(kSamplerBlock) __global__
     __shared__ unsigned long long greedy_warp_keys[kSamplerBlock / 32];
     unsigned long long keys[kSamplerItemsPerThread];
 
-    const bool greedy       = !(cfg.temperature > 0.0f);
-    const bool penalties    = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f || cfg.repetition_penalty != 1.0f || cfg.allowed_tokens != nullptr;
+    const bool greedy    = !(cfg.temperature > 0.0f);
+    const bool penalties = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f ||
+                           cfg.repetition_penalty != 1.0f || cfg.mask.words != nullptr;
     const int cap           = greedy ? 1 : sampling_candidate_cap(cfg, token_domain);
     const std::int64_t base = static_cast<std::int64_t>(col) * physical_rows;
     const int tile_start    = partial * kSamplerPartialTileItems;
@@ -126,8 +133,9 @@ __launch_bounds__(kSamplerBlock) __global__
         const int v = tile_start + item * blockDim.x + threadIdx.x;
         if (v < token_domain) {
             const float raw = __bfloat162float(logits[base + v]);
-            const float x   = penalties ? sampling_adjusted_logit(raw, v, cfg) : raw;
-            keys[item]      = sampling_sort_key(x, v);
+            const float x =
+                (penalties || cfg.mask.words) ? sampling_adjusted_logit(raw, v, cfg) : raw;
+            keys[item] = sampling_sort_key(x, v);
         } else {
             keys[item] = 0ull;
         }
@@ -208,9 +216,12 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void sampling_group_finalize_sa
         }
         best = sampling_block_max_key(best, greedy_warp_keys);
         if (tid == 0) {
+            if (cfg.mask.words && !isfinite(sampling_key_float(best))) { asm volatile("trap;"); }
             const int picked = sampling_key_index(best);
             out[col]         = picked;
-            if (cfg.token_counts != nullptr && cfg.commit_token_counts) { atomicAdd(&cfg.token_counts[picked], 1); }
+            if (cfg.token_counts != nullptr && cfg.commit_token_counts) {
+                atomicAdd(&cfg.token_counts[picked], 1);
+            }
             workspace.group_done[col] = 0;
         }
         return;
@@ -289,7 +300,9 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void sampling_group_finalize_sa
             }
         }
         out[col] = picked;
-        if (cfg.token_counts != nullptr && cfg.commit_token_counts) { atomicAdd(&cfg.token_counts[picked], 1); }
+        if (cfg.token_counts != nullptr && cfg.commit_token_counts) {
+            atomicAdd(&cfg.token_counts[picked], 1);
+        }
         workspace.group_done[col] = 0;
     }
 }

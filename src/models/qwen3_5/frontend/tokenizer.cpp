@@ -10,7 +10,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
-#include <queue>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -597,6 +596,12 @@ struct LaterBpeCandidate {
     }
 };
 
+// One encode call owns this scratch; words and ordinary-text segments reuse its capacity.
+struct BpeScratch {
+    std::vector<BpeNode> nodes;
+    std::vector<BpeCandidate> candidates;
+};
+
 std::array<int, 256> load_byte_token_ids(const std::unordered_map<std::string, int>& token_to_id) {
     static const std::array<std::string, 256> byte_encoder = build_byte_level_encoder();
     std::array<int, 256> ids;
@@ -612,15 +617,17 @@ bool append_normalized_bpe_ids(std::vector<int>& ids, std::string_view normalize
                                const BpeMergeTable& merge_rules,
                                const std::array<int, 256>& byte_token_ids, std::size_t max_tokens,
                                bool marks_as_letters,
-                               std::vector<std::size_t>* token_ends = nullptr,
-                               std::vector<BpeWordEnd>* word_ends   = nullptr) {
+                               BpeScratch& scratch, std::vector<std::size_t>* token_ends = nullptr,
+                               std::vector<BpeWordEnd>* word_ends = nullptr) {
     if (normalized.empty()) { return true; }
     if (ids.size() == max_tokens) { return false; }
 
     for (std::size_t begin = 0; begin < normalized.size();) {
         const std::size_t end = qwen_word_end(normalized, begin, marks_as_letters);
         const std::string_view word(normalized.data() + begin, end - begin);
-        std::vector<BpeNode> nodes(word.size());
+        auto& nodes = scratch.nodes;
+        nodes.clear();
+        nodes.reserve(word.size());
         for (std::size_t index = 0; index < word.size(); ++index) {
             const unsigned char byte = static_cast<unsigned char>(word[index]);
             const int symbol         = byte_token_ids[byte];
@@ -628,15 +635,16 @@ bool append_normalized_bpe_ids(std::vector<int>& ids, std::string_view normalize
                 throw std::invalid_argument(
                     "Tokenizer::encode produced byte symbol outside vocabulary");
             }
-            nodes[index] =
+            nodes.push_back(
                 BpeNode{.symbol   = symbol,
                         .previous = index == 0 ? -1 : static_cast<int>(index - 1),
                         .next     = index + 1 == word.size() ? -1 : static_cast<int>(index + 1),
-                        .end      = index + 1};
+                        .end      = index + 1});
         }
 
-        std::priority_queue<BpeCandidate, std::vector<BpeCandidate>, LaterBpeCandidate> queue;
-        const auto push_candidate = [&](int left) {
+        auto& queue = scratch.candidates;
+        queue.clear();
+        const auto push_candidate = [&](int left, bool heap_ready) {
             if (left < 0 || !nodes[static_cast<std::size_t>(left)].live) { return; }
             const int right = nodes[static_cast<std::size_t>(left)].next;
             if (right < 0) { return; }
@@ -644,7 +652,7 @@ bool append_normalized_bpe_ids(std::vector<int>& ids, std::string_view normalize
                 merge_rules.find(merge_pair_key(nodes[static_cast<std::size_t>(left)].symbol,
                                                 nodes[static_cast<std::size_t>(right)].symbol));
             if (rule == nullptr) { return; }
-            queue.push(BpeCandidate{
+            queue.push_back(BpeCandidate{
                 .rank             = rule->rank,
                 .left             = left,
                 .right            = right,
@@ -652,13 +660,16 @@ bool append_normalized_bpe_ids(std::vector<int>& ids, std::string_view normalize
                 .left_generation  = nodes[static_cast<std::size_t>(left)].generation,
                 .right_generation = nodes[static_cast<std::size_t>(right)].generation,
             });
+            if (heap_ready) { std::push_heap(queue.begin(), queue.end(), LaterBpeCandidate{}); }
         };
         for (std::size_t index = 0; index + 1 < nodes.size(); ++index) {
-            push_candidate(static_cast<int>(index));
+            push_candidate(static_cast<int>(index), false);
         }
+        std::make_heap(queue.begin(), queue.end(), LaterBpeCandidate{});
         while (!queue.empty()) {
-            const BpeCandidate candidate = queue.top();
-            queue.pop();
+            std::pop_heap(queue.begin(), queue.end(), LaterBpeCandidate{});
+            const BpeCandidate candidate = queue.back();
+            queue.pop_back();
             BpeNode& left  = nodes[static_cast<std::size_t>(candidate.left)];
             BpeNode& right = nodes[static_cast<std::size_t>(candidate.right)];
             if (!left.live || !right.live || left.next != candidate.right ||
@@ -675,8 +686,8 @@ bool append_normalized_bpe_ids(std::vector<int>& ids, std::string_view normalize
             if (left.next >= 0) {
                 nodes[static_cast<std::size_t>(left.next)].previous = candidate.left;
             }
-            push_candidate(left.previous);
-            push_candidate(candidate.left);
+            push_candidate(left.previous, true);
+            push_candidate(candidate.left, true);
         }
         for (int node = nodes.empty() ? -1 : 0; node >= 0;
              node     = nodes[static_cast<std::size_t>(node)].next) {
@@ -704,7 +715,8 @@ bool append_ordinary_text(BoundaryEncodedText& encoded, std::string_view text,
                           std::size_t text_offset, std::span<const IndexedByteBoundary> boundaries,
                           const BpeMergeTable& merge_rules,
                           const std::array<int, 256>& byte_token_ids, std::size_t max_tokens,
-                          bool marks_as_letters) {
+                          bool marks_as_letters,
+                          BpeScratch& scratch) {
     const std::size_t token_base = encoded.input_ids.size();
     if (text.empty()) {
         for (const IndexedByteBoundary boundary : boundaries) {
@@ -724,7 +736,7 @@ bool append_ordinary_text(BoundaryEncodedText& encoded, std::string_view text,
     std::vector<BpeWordEnd> word_ends;
     if (has_internal_boundary) { token_ends.reserve(normalized.size()); }
     if (!append_normalized_bpe_ids(encoded.input_ids, normalized, merge_rules, byte_token_ids,
-                                   max_tokens, marks_as_letters,
+                                   max_tokens, marks_as_letters, scratch,
                                    has_internal_boundary ? &token_ends : nullptr,
                                    has_internal_boundary ? &word_ends : nullptr)) {
         return false;
@@ -882,6 +894,7 @@ BoundaryEncodedText Tokenizer::encode_with_boundaries(
         [](IndexedByteBoundary lhs, IndexedByteBoundary rhs) { return lhs.offset < rhs.offset; });
     if (options.max_tokens == 0) { return encoded; }
 
+    BpeScratch scratch;
     std::size_t boundary_cursor     = 0;
     const auto boundary_end_through = [&](std::size_t offset) {
         std::size_t end = boundary_cursor;
@@ -894,8 +907,7 @@ BoundaryEncodedText Tokenizer::encode_with_boundaries(
             append_ordinary_text(encoded, text.substr(begin, end - begin), begin,
                                  std::span<const IndexedByteBoundary>(boundaries)
                                      .subspan(boundary_cursor, request_end - boundary_cursor),
-                                 bpe_merge_rules_, byte_token_ids_, options.max_tokens,
-                                 marks_as_letters_);
+                                 bpe_merge_rules_, byte_token_ids_, options.max_tokens, marks_as_letters_, scratch);
         boundary_cursor = request_end;
         return complete;
     };

@@ -72,8 +72,9 @@ device-gated with measurements.
 
 The engine remains specialized: one GPU and one resident model per Engine, with one to eight active
 requests configured at startup and bounded FIFO admission. Supervisor model switching replaces the
-resident engine; it does not provide simultaneous model residency. Multi-GPU/distributed serving and
-request preemption are outside the current implementation.
+resident engine; it does not provide simultaneous model residency. Resource pressure can pause
+requests and restore them from a snapshot or token replay. Multi-GPU/distributed serving and
+priority scheduling are outside the current implementation.
 
 The build targets **`sm_120a` only**. This fork's primary workstation is the **RTX PRO 6000
 Blackwell 96 GB**. Upstream's published measurements below use the **RTX 5090**; they are not
@@ -184,8 +185,7 @@ hf download neroued/Qwen3.8-27B-nvfp4-NInfer \
   --local-dir models
 ```
 
-Start a long-running text/agent server with two active-request lanes and explicit Device/Host
-checkpoint capacity:
+Start a long-running text/agent server with two execution lanes and prefix caching:
 
 ```bash
 ./build/apps/ninfer-serve models/qwen3_8_27b_nvfp4.ninfer \
@@ -194,17 +194,16 @@ checkpoint capacity:
   --max-concurrency 2 \
   --kv-dtype fp8 \
   --device-state-slots 2 \
-  --host-state-slots 8 \
-  --host-kv-mib 8192 \
   --spec mtp --draft-tokens 3 \
   --lm-head-draft \
   --preserve-thinking
 ```
 
 Each request has a 240,000-token logical ceiling. A shared 240,000-token Device KV pool serves
-admitted requests; two requests run concurrently when their combined reservations fit. The cache
-tiers provide two Device checkpoint slots, eight pinned Host State slots, and 8 GiB of pinned Host
-KV beyond the two active StateImages.
+resident requests and retained prefixes. Requests acquire KV pages as execution advances; under
+pressure, the scheduler can pause a request and resume it later. The profile provides two extra
+Device StateImages and the default shared pinned Host budget: 8 GiB plus eight model StateImages,
+used for retained state, KV and pause snapshots.
 
 Send an OpenAI-style request:
 
@@ -241,10 +240,11 @@ diagnostics. Use `--messages FILE` and `--vision` for structured image/video inp
 
 ## Resource-aware long-context reuse
 
-A reusable prefix checkpoint contains KV and the complete continuation state for its exact prompt
-frontier. A Device-resident checkpoint resumes directly. Under pressure, the planner weighs Device
-retention, pinned Host State/KV, and eviction by immediate restore work and later reuse cost. Active
-requests retain their completion reservations.
+A reusable checkpoint combines KV with the complete continuation state at an exact token frontier.
+The engine retains completed conversation endpoints and stable input boundaries for multi-turn and
+agent reuse. Inactive checkpoints share Device and pinned Host capacity; pressure reclaims retained
+resources before pausing resident requests. Paused requests resume from a snapshot or rebuild their
+state by replaying already committed tokens.
 
 See [Resource scheduling and context cache](docs/maintainer/resource-scheduling-and-context-cache.md)
 for the algorithm and [Serve TTFT benchmark](tools/bench/ttft/) for public-HTTP coverage of hot
@@ -346,8 +346,6 @@ docker run --rm \
   --max-concurrency 2 \
   --kv-dtype fp8 \
   --device-state-slots 2 \
-  --host-state-slots 8 \
-  --host-kv-mib 8192 \
   --spec mtp --draft-tokens 3 \
   --lm-head-draft \
   --preserve-thinking
@@ -376,9 +374,9 @@ and either full or optimized proposal heads.
 The product boundary remains intentionally small:
 
 - one `sm_120a` GPU and one resident model per Engine;
-- a startup-fixed capacity of one to eight active requests with bounded FIFO ingress;
-- no request preemption, priority/QoS, active-request swapping, weight offload, multi-GPU, or
-  distributed serving;
+- one to eight resident execution lanes with bounded FIFO ingress;
+- resource-pressure preemption with snapshot or token-replay recovery;
+- no priority/QoS, weight offload, multi-GPU, or distributed serving;
 - one shared startup-fixed KV pool across active requests and retained prefixes;
 - model architectures and format/shape combinations use explicitly implemented native paths;
 - parsed tool calls are returned to the client; NInfer does not execute tools;

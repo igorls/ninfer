@@ -143,7 +143,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_a8_tma
 #pragma unroll
         for (int stage = 0; stage < S; ++stage) {
             cta_mbarrier_init(full + stage, 1);
-            cta_mbarrier_init(empty + stage, Schedule::kConsumerWarps);
+            cta_mbarrier_init(empty + stage, Schedule::kConsumerWarps * 32);
         }
         cta_mbarrier_fence_init();
     }
@@ -185,9 +185,10 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_a8_tma
         cta_mbarrier_wait(full + stage, (kt / S) & 1U);
         fp8_mma_compute_stage<Schedule>(activation + stage * BT * BK, weight + stage * BR * BK,
                                         accumulators, warp, lane);
-        // Release only after every lane in this consumer warp has finished its shared reads.
+        // Each shared-memory reader releases its own accesses before the producer can reuse
+        // this stage. A representative lane's arrival does not supply that per-reader edge.
         __syncwarp();
-        if (lane == 0) cta_mbarrier_arrive(empty + stage);
+        cta_mbarrier_arrive(empty + stage);
     }
     if constexpr (SplitK) {
         if (partial >= 0) {

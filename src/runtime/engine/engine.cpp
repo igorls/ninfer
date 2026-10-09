@@ -37,10 +37,10 @@ runtime::ResolvedRequestOptions resolve_request_options(const ModelSamplingDefau
     runtime::ResolvedRequestOptions resolved;
     resolved.execution.sampling =
         runtime::resolve_sampling(defaults, mode, options.execution.sampling);
-    resolved.execution.requested_output_tokens = options.execution.requested_output_tokens;
-    resolved.execution.allow_prefix_reuse      = options.execution.allow_prefix_reuse;
+    resolved.execution.requested_output_tokens  = options.execution.requested_output_tokens;
+    resolved.execution.allow_prefix_reuse       = options.execution.allow_prefix_reuse;
     resolved.execution.allow_prefix_publication = options.execution.allow_prefix_publication;
-    resolved.execution.thinking                = options.execution.thinking;
+    resolved.execution.thinking                 = options.execution.thinking;
     TokenLogprobOptions& logprobs               = options.execution.logprobs;
     if (!logprobs.enabled && (logprobs.top != 0 || !logprobs.candidates.empty())) {
         throw std::invalid_argument("token logprob alternatives require logprobs to be enabled");
@@ -64,9 +64,11 @@ runtime::ResolvedRequestOptions resolve_request_options(const ModelSamplingDefau
             }
         }
     }
-    resolved.execution.logprobs                = std::move(logprobs);
-    resolved.stop                              = std::move(options.stop);
-    resolved.output                            = options.output;
+    resolved.execution.logprobs = std::move(logprobs);
+    resolved.stop               = std::move(options.stop);
+    resolved.output             = options.output;
+    resolved.constraint         = options.constraint;
+    resolved.tool_choice        = std::move(options.tool_choice);
     return resolved;
 }
 
@@ -193,11 +195,11 @@ GenerationResult GenerationHandle::wait(OutputSink* sink, const CancellationView
 
 class Engine::Impl {
 public:
-    using Core = std::variant<std::monostate,
-                              std::unique_ptr<runtime::EngineCore<runtime::Qwen3_5Instance>>,
-                              std::unique_ptr<runtime::CausalScoreCore<runtime::Qwen3_5Instance>>,
-                              std::unique_ptr<runtime::EngineCore<runtime::Qwen4ExpInstance>>,
-                              std::unique_ptr<runtime::CausalScoreCore<runtime::Qwen4ExpInstance>>>;
+    using Core =
+        std::variant<std::monostate, std::unique_ptr<runtime::EngineCore<runtime::Qwen3_5Instance>>,
+                     std::unique_ptr<runtime::CausalScoreCore<runtime::Qwen3_5Instance>>,
+                     std::unique_ptr<runtime::EngineCore<runtime::Qwen4ExpInstance>>,
+                     std::unique_ptr<runtime::CausalScoreCore<runtime::Qwen4ExpInstance>>>;
 
     explicit Impl(EngineOptions engine_options)
         : options(runtime::normalize_engine_options(std::move(engine_options))),
@@ -280,8 +282,7 @@ PreparedPrompt Engine::prepare_tokens(std::vector<TokenId> token_ids,
         throw RequestError(RequestErrorKind::ContextLengthExceeded,
                            context_capacity_error(token_ids.size(), impl_->capacity));
     }
-    auto prepared =
-        impl_->frontend->prepare_tokens(std::move(token_ids), allow_prefix_identity);
+    auto prepared = impl_->frontend->prepare_tokens(std::move(token_ids), allow_prefix_identity);
     PromptSummary info = prepared.summary();
     if (info.prompt_tokens > impl_->capacity) {
         throw std::logic_error("target Frontend admitted prompt tokens beyond capacity");
@@ -391,19 +392,6 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
         throw std::invalid_argument("live generation observations require a Streaming consumer");
     }
 
-    const StructuredOutputOptions structured_output    = options.execution.structured_output;
-    const std::vector<std::string> required_tool_names = options.execution.required_tool_names;
-    if (!required_tool_names.empty() &&
-        (!options.stop.strings.empty() || !options.stop.token_ids.empty() || options.output.raw)) {
-        throw std::invalid_argument(
-            "required tool calls cannot be combined with custom stops or raw output");
-    }
-    if (structured_output.kind != StructuredOutputKind::Text &&
-        (!options.stop.strings.empty() || !options.stop.token_ids.empty() || options.output.raw ||
-         options.output.preserve_special_tokens)) {
-        throw std::invalid_argument(
-            "structured output cannot be combined with custom stops or raw/special-token output");
-    }
     const bool capture_features = options.execution.capture_reasoning_features;
     if (capture_features) {
         const PromptSummary& summary = prompt.impl_->summary;
@@ -424,8 +412,6 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
             *prompt.impl_->summary.reasoning_frontier - 1U;
     }
     const ResolvedSamplingParameters resolved_sampling = resolved_options.execution.sampling;
-    resolved_options.execution.output_constraint =
-        impl_->frontend->compile_output_constraint(structured_output, required_tool_names);
 
     const PromptSummary prompt_summary = prompt.impl_->summary;
     // Validated here, before the request reaches a Program: inside admission an invalid
@@ -474,9 +460,10 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
             if constexpr (!CoreKind<CoreState>::generation) {
                 throw std::logic_error("Engine generation core is unavailable");
             } else {
-                auto submission = core->submit(std::move(prompt.impl_->value), prompt_summary,
-                                               prepare_seconds, std::move(resolved_options),
-                                               consumer_mode, observation, pending_deadline);
+                auto submission =
+                    core->submit(std::move(prompt.impl_->value), prompt_summary, prepare_seconds,
+                                 std::move(resolved_options), consumer_mode, std::move(observation),
+                                 pending_deadline);
                 return GenerationHandle(std::make_unique<GenerationHandle::Impl>(
                     impl_, std::move(submission), resolved_sampling));
             }

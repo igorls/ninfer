@@ -411,6 +411,35 @@ int run_fp8_case(const Fp8Parent& profile, DevicePackedWeight& parent, std::int3
             ++failures;
         }
         failures += verify_preserved("gdn x" + suffix, device_activation, activation_bits);
+        if (!replay && !convenience && profile.qtype == QType::FP8_E4M3FN_ROW_BF16 &&
+            tokens == 128 && policy == ops::LinearPolicy::AllowA8) {
+            // Keep both identical weights resident but alternate their addresses. Reusing one
+            // hot weight hid intermittent first-token corruption during real-model prefill.
+            // Check every represented output, including both sides of the token-tile boundary.
+            DeviceBuffer alternate(parent.host.payload.size());
+            alternate.copy_from_host(parent.host.payload.data(), parent.host.payload.size());
+            const auto alternate_weight = parent.host.device_weight(alternate.p);
+            const auto expected_qkv     = qkv.bits();
+            const auto expected_z       = z.bits();
+            for (int iteration = 0; iteration < 4096; ++iteration) {
+                const auto weight = iteration % 2 ? parent.view() : alternate_weight;
+                ops::gdn_input_proj(x, weight, qkv_output, z_output, policy, workspace,
+                                    context.stream);
+                cuda_synchronize(context.stream);
+                if (qkv.bits() != expected_qkv || z.bits() != expected_z) {
+                    std::cerr << "gdn FP8 repeated weight switch changed the result at iteration "
+                              << iteration << '\n';
+                    ++failures;
+                    break;
+                }
+            }
+            std::vector<std::uint8_t> after(parent.host.payload.size());
+            alternate.copy_to_host(after.data(), after.size());
+            if (after != parent.host.payload) {
+                std::cerr << "gdn alternate weight" << suffix << ": packed weight was modified\n";
+                ++failures;
+            }
+        }
         failures += parent.verify_preserved("gdn parent weight" + suffix);
         failures += scratch.verify_guards(suffix);
     }

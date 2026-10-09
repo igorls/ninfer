@@ -108,7 +108,7 @@ std::uint32_t reconcile_concurrency(const EngineOptions& options,
     } else if (coverage < 1.0) {
         std::fprintf(stderr,
                      "[kv-sizer] KV pool backs %.1f%% of %u full-context sequences; concurrent "
-                     "long requests beyond it wait for admission\n",
+                     "long requests may pause and replay under pressure\n",
                      coverage * 100.0, options.max_concurrency);
     }
     return effective;
@@ -156,11 +156,12 @@ EngineOptions normalize_engine_options(EngineOptions options) {
         options.max_pending_requests = 1;
         // The prefill chunk is kept as given: a training readout must decompose the prompt the
         // way the serving configuration it stands in for does.
-        options.kv_capacity          = KvCapacityPolicy::explicit_capacity(options.max_context);
-        options.speculative          = {};
-        options.enable_vision        = false;
-        options.use_cuda_graph       = false;
-        options.context_cache        = ContextCacheOptions{.enabled = false};
+        options.kv_capacity    = KvCapacityPolicy::explicit_capacity(options.max_context);
+        options.speculative    = {};
+        options.enable_vision  = false;
+        options.use_cuda_graph = false;
+        options.context_cache  = ContextCacheOptions{
+             .enabled = false, .device_state_slots = 0, .host_capacity_bytes = 0};
         break;
     default:
         throw std::invalid_argument("Engine purpose is invalid");
@@ -171,49 +172,11 @@ EngineOptions normalize_engine_options(EngineOptions options) {
 
     ContextCacheOptions& cache      = options.context_cache;
     const std::uint32_t concurrency = options.max_concurrency;
-    if (!cache.enabled) {
-        if ((cache.device_state_slots && *cache.device_state_slots != 0) ||
-            (cache.max_private_continuations && *cache.max_private_continuations != concurrency) ||
-            (cache.max_shared_prefixes && *cache.max_shared_prefixes != 0) ||
-            (cache.max_long_anchors_per_continuation &&
-             *cache.max_long_anchors_per_continuation != 0)) {
-            throw std::invalid_argument("disabled context cache accepts only root-only capacities");
-        }
-        cache.device_state_slots                = 0;
-        cache.host_state_slots                  = 0;
-        cache.host_kv_capacity_bytes            = 0;
-        cache.max_private_continuations         = concurrency;
-        cache.max_shared_prefixes               = 0;
-        cache.max_long_anchors_per_continuation = 0;
-        return options;
-    }
-
-    cache.device_state_slots            = cache.device_state_slots.value_or(concurrency);
-    const std::uint64_t default_private = 2ULL * concurrency;
-    cache.max_private_continuations =
-        cache.max_private_continuations.value_or(static_cast<std::uint32_t>(default_private));
-    cache.max_shared_prefixes = cache.max_shared_prefixes.value_or(
-        std::max(concurrency, static_cast<std::uint32_t>(kMaximumExplicitPromptCacheMarkers)));
-    cache.max_long_anchors_per_continuation = cache.max_long_anchors_per_continuation.value_or(2U);
-
-    if (*cache.max_private_continuations < concurrency) {
-        throw std::invalid_argument(
-            "context cache max_private_continuations must cover every active request");
-    }
+    cache.device_state_slots        = cache.device_state_slots.value_or(concurrency);
     const std::uint64_t total_device_state_slots =
         static_cast<std::uint64_t>(concurrency) + *cache.device_state_slots;
     if (total_device_state_slots > std::numeric_limits<std::uint32_t>::max()) {
         throw std::overflow_error("context cache Device state capacity exceeds uint32");
-    }
-    const std::uint64_t address_spaces =
-        static_cast<std::uint64_t>(*cache.max_private_continuations) + *cache.max_shared_prefixes;
-    if (address_spaces > std::numeric_limits<std::uint32_t>::max()) {
-        throw std::overflow_error("context cache address-space capacity exceeds uint32");
-    }
-    if (*cache.max_long_anchors_per_continuation != 0 &&
-        *cache.max_private_continuations >
-            std::numeric_limits<std::size_t>::max() / *cache.max_long_anchors_per_continuation) {
-        throw std::overflow_error("context cache long-anchor capacity exceeds size_t");
     }
     return options;
 }
@@ -224,6 +187,7 @@ Qwen3_5Instance::ModelInstanceOf(std::unique_ptr<models::qwen3_5::Model> source,
     : model(std::move(source)), parameters(*model),
       frontend(models::qwen3_5::make_frontend(
           model->resources(), {.chat_template_path       = options.chat_template_path,
+                               .grammar_cache_bytes      = options.grammar_cache_bytes,
                                .architecture             = model->config().text.architecture,
                                .vision_enabled           = options.enable_vision,
                                .max_context              = options.max_context,
@@ -312,8 +276,8 @@ auto make_planner(const models::qwen3_5::execution::Parameters& parameters, Devi
     return models::qwen3_5::make_sequence_planner(parameters, device, options);
 }
 
-auto make_planner(const models::qwen4_exp::execution::Parameters& parameters,
-                  DeviceContext& device, const EngineOptions& options) {
+auto make_planner(const models::qwen4_exp::execution::Parameters& parameters, DeviceContext& device,
+                  const EngineOptions& options) {
     return models::qwen4_exp::make_sequence_planner(parameters, device, options);
 }
 
@@ -354,7 +318,7 @@ ConstructedModel construct_package(Package package, const artifact::Reader& read
                 context_cost_hardware_class(device.props.name, device.props.major, device.props.minor),
             .prefill_signature = signature},
         options.context_cost.preset_path);
-    auto planner = make_planner(instance->parameters, device, options);
+    auto planner                      = make_planner(instance->parameters, device, options);
     const SequenceCapacityCurve curve = planner.capacity_curve();
     auto resolution                   = resolve_kv_capacity(
         options.kv_capacity, curve,
@@ -371,7 +335,8 @@ ConstructedModel construct_package(Package package, const artifact::Reader& read
         sequence.kv_capacity() != resolution.resolved_tokens) {
         throw std::logic_error("resolved KV capacity does not match the finalized Program plan");
     }
-    instance->kv_capacity_resolution = resolution;
+    options.context_cache.host_capacity_bytes = sequence.host_capacity_bytes();
+    instance->kv_capacity_resolution          = resolution;
     planning.complete();
     StartupPhaseScope program(options.startup_observer, StartupPhase::ProgramInitialize);
     const std::size_t available_before_program = query_device_memory(device.device).free_bytes;
@@ -404,8 +369,7 @@ ConstructedModel construct_package(Package package, const artifact::Reader& read
     summary.device_object_count  = stats.device_object_count;
     summary.host_object_count    = stats.host_object_count;
     summary.context_cost         = std::move(context_cost.summary);
-    return {ModelInstance(std::move(instance)), std::move(summary),
-            std::move(context_cost.model)};
+    return {ModelInstance(std::move(instance)), std::move(summary), std::move(context_cost.model)};
 }
 
 } // namespace

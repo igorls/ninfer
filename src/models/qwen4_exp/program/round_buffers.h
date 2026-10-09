@@ -14,15 +14,20 @@ namespace ninfer::models::qwen4_exp {
 
 // Gathered per-layer n-gram embedding rows of one token: 16 heads of 160 u4 codes (80 bytes) and
 // ten FP16 scales each.
-inline constexpr std::size_t kPleHeads          = 16;
-inline constexpr std::size_t kPleCodeRowBytes   = 80;
-inline constexpr std::size_t kPleScaleRowWords  = 10;
+inline constexpr std::size_t kPleHeads         = 16;
+inline constexpr std::size_t kPleCodeRowBytes  = 80;
+inline constexpr std::size_t kPleScaleRowWords = 10;
 
 struct RoundStateSpec {
     std::int32_t stream_hidden   = 0;
     std::int32_t output_rows     = 0;
     std::uint32_t batch_capacity = 1;
     bool causal_scoring          = false;
+};
+
+struct PrefillRoundHost {
+    TokenId sampled_token = 0;
+    ops::SamplingConfig sampling;
 };
 
 // Stable pinned/device transfer format for ordinary decode. The full fixed-size object is copied

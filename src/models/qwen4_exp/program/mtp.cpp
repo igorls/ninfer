@@ -111,10 +111,9 @@ void ProgramImpl::mtp_verify_body(std::int32_t batch, ops::QsaIndexerSelectEnvel
     card.verify_batch(inputs, hidden, logits);
 }
 
-runtime::BatchedGeneratedRound
-ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
-                              std::span<const runtime::RoundBudget> budgets,
-                              runtime::ExecutionTiming* failed_timing) {
+runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
+    std::span<const std::uint32_t> lanes, std::span<const runtime::RoundBudget> budgets,
+    runtime::ExecutionTiming* failed_timing, runtime::TokenMaskProvider* masks) {
     runtime::ExecutionTimingRecorder timing(runtime::ExecutionTimingPhase::Submit, failed_timing);
     if (!mtp_frame || !mtp_fold || !parameters.mtp || lanes.empty() ||
         lanes.size() > max_concurrency || budgets.size() != lanes.size()) {
@@ -242,17 +241,9 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         auto& sequence     = active_sequence(lane);
         auto& request      = requests[lane];
         const auto* drafts = mtp_egress->drafts.data() + row * (width - 1);
-        if (request.output_constraint) {
-            upload_constraint_mask(lane, 0, request.output_constraint->next_mask());
-            auto preview            = request.output_constraint->fork();
-            std::int32_t admissible = 0;
-            for (; admissible < host.extents[row]; ++admissible) {
-                if (!preview.try_accept(drafts[admissible]) || preview.terminated()) { break; }
-                upload_constraint_mask(lane, admissible + 1, preview.next_mask());
-            }
-            host.extents[row] = admissible;
-            host.valid[row]   = admissible + 1;
-        }
+        host.sampling[row].mask =
+            fill_grammar_mask(masks, row, {drafts, static_cast<std::size_t>(host.extents[row])});
+        request.sampling_host.mask = host.sampling[row].mask;
         // Starting at the PLE history keeps every selected position at or beyond history_tokens(),
         // so the tail selects the same rows as the whole proposed ledger would.
         const std::uint32_t frontier = sequence.execution_frontier;
@@ -261,10 +252,10 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         mtp_proposal_ledger_.assign(sequence.ledger.begin() + tail_begin, sequence.ledger.end());
         mtp_proposal_ledger_.insert(mtp_proposal_ledger_.end(), drafts, drafts + width - 1);
         for (std::int32_t w = 0; w < width; ++w) {
-            const auto column      = row * width + w;
-            const auto local       = std::min(w, host.extents[row]);
-            host.ids[column]       = mtp_proposal_ledger_[frontier - tail_begin + local];
-            host.positions[column] = host.frontiers[row] + local;
+            const auto column              = row * width + w;
+            const auto local               = std::min(w, host.extents[row]);
+            host.ids[column]               = mtp_proposal_ledger_[frontier - tail_begin + local];
+            host.positions[column]         = host.frontiers[row] + local;
             host.teacher_positions[column] = host.positions[column] - 1;
             host.rows[column]              = host.sequence_rows[row];
             host.mtp_rows[column]          = host.mtp_sequence_rows[row];
@@ -338,9 +329,11 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
     for (std::int32_t row = 0; row < batch; ++row) {
         auto& request = requests[lanes[row]];
         if (request.logprobs_device_readout) {
+            const auto columns = host.valid[row];
             enqueue_round_logprobs(active_sequence(lanes[row]), request,
-                                   frame.logits.slice(2, row, 1), frame.licensed.slice(1, row, 1),
-                                   width);
+                                   frame.logits.slice(2, row, 1).slice(1, 0, columns),
+                                   frame.licensed.slice(1, row, 1).slice(0, 0, columns),
+                                   static_cast<std::uint32_t>(columns));
         }
     }
     CUDA_CHECK(cudaMemcpyAsync(mtp_egress->licensed.data(), frame.licensed.data,
@@ -442,9 +435,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_mtp_pending(
         auto& sequence = active_sequence(lanes[row]);
         auto& request  = requests[lanes[row]];
         if (cancelled[row]) {
-            if (!clear_lane_strict(sequence, request)) {
-                throw std::logic_error("MTP cancelled lane cannot be released");
-            }
+            clear_lane(sequence, request);
             continue;
         }
         const auto count   = accepted_tokens[row];
@@ -452,10 +443,8 @@ runtime::ExecutionTiming ProgramImpl::resolve_mtp_pending(
         const std::span<const TokenId> tokens(mtp_egress->licensed.data() + row * width, count);
         settle_state_fork(sequence);
         sequence.ledger.insert(sequence.ledger.end(), tokens.begin(), tokens.end());
-        if (request.output_constraint) { request.output_constraint->accept(tokens); }
         commit_generated_prefix_identity(sequence, pending.base_S, tokens,
                                          prefix_execution_splits[row]);
-        advance_rebuild_work(sequence, pending.base_E + count, prefill_chunk);
         sequence.execution_frontier = pending.base_E + count;
         sequence.ledger_frontier    = pending.base_S + count;
         sequence.text_kv_valid      = sequence.execution_frontier;

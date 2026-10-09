@@ -48,15 +48,16 @@ std::vector<double> gated_rmsnorm_oracle(const std::vector<float>& input,
     return output;
 }
 
-int run_case(const char* label, const Shape& shape, std::uint32_t seed, float input_scale = 4.0F,
-             bool bf16x2_unaligned = false, bool graph = false, Gate kind = Gate::Silu) {
+int run_case(DeviceExecutionView execution, const char* label, const Shape& shape,
+             std::uint32_t seed, float input_scale = 4.0F, bool bf16x2_unaligned = false,
+             bool graph = false, Gate kind = Gate::Silu) {
     const std::size_t count = shape.elements();
     std::vector<float> input(count), weight(shape.d), gate(count);
     fill_uniform(input, seed, -input_scale, input_scale);
     fill_uniform(weight, seed + 1U, 0.25F, 1.75F);
     fill_uniform(gate, seed + 2U, -5.0F, 5.0F);
     gate.front() = 0.0F;
-    gate.back() = -0.0F;
+    gate.back()  = -0.0F;
     round_to_bf16(input);
     round_to_bf16(weight);
     round_to_bf16(gate);
@@ -77,10 +78,10 @@ int run_case(const char* label, const Shape& shape, std::uint32_t seed, float in
     const auto launch = [&](cudaStream_t stream) {
         if (kind == Gate::Silu)
             ops::gated_rmsnorm(input_tensor, weight_tensor, gate_tensor, kEps, output_tensor,
-                               stream);
+                               execution.on_stream(stream));
         else
             ops::gated_rmsnorm_sigmoid(input_tensor, weight_tensor, gate_tensor, kEps,
-                                       output_tensor, stream);
+                                       output_tensor, execution.on_stream(stream));
     };
     launch(nullptr);
     cuda_synchronize();
@@ -97,11 +98,11 @@ int run_case(const char* label, const Shape& shape, std::uint32_t seed, float in
         CUDA_CHECK(cudaGraphLaunch(executable, stream));
         CUDA_CHECK(cudaStreamSynchronize(stream));
         for (std::size_t i = 0; i < gate.size(); ++i) {
-            gate[i] = -gate[i];
+            gate[i]                                                   = -gate[i];
             device_gate.expected[i + leading / sizeof(std::uint16_t)] = f32_to_bf16(gate[i]);
         }
         CUDA_CHECK(cudaMemcpyAsync(device_gate.storage.p, device_gate.expected.data(),
-            device_gate.storage.bytes, cudaMemcpyHostToDevice, stream));
+                                   device_gate.storage.bytes, cudaMemcpyHostToDevice, stream));
         CUDA_CHECK(cudaGraphLaunch(executable, stream));
         CUDA_CHECK(cudaStreamSynchronize(stream));
         CUDA_CHECK(cudaGraphExecDestroy(executable));
@@ -127,29 +128,32 @@ int main() {
         return 77;
     }
 
-    int failures = 0;
-    failures += run_case("gated_rmsnorm [128,48,1]", {128, 48}, 1401U);
+    DeviceContext device;
+    // Fixture initialization uses the default stream; keep the eager call ordered with it.
+    const auto execution = device.execution_view().on_stream(nullptr);
+    int failures         = 0;
+    failures += run_case(execution, "gated_rmsnorm [128,48,1]", {128, 48}, 1401U);
     for (int columns : {2, 7, 16, 48, 56, 57, 64, 96, 128}) {
         const std::string label = "gated_rmsnorm target [128,48," + std::to_string(columns) + "]";
-        failures += run_case(label.c_str(), {128, 48, columns}, 1420U + columns,
-                             4.0F, false, columns == 56 || columns == 57 || columns == 128);
+        failures += run_case(execution, label.c_str(), {128, 48, columns}, 1420U + columns, 4.0F,
+                             false, columns == 56 || columns == 57 || columns == 128);
     }
-    failures += run_case("gated_rmsnorm [128,32,7]", {128, 32, 7}, 1402U);
-    failures += run_case("gated_rmsnorm [128,32,128]", {128, 32, 128}, 1403U);
-    failures += run_case("gated_rmsnorm near-zero [128,32]", {128, 32}, 1404U, 1.0e-5F);
-    failures += run_case("gated_rmsnorm unaligned [128,48]", {128, 48}, 1405U, 4.0F, true);
+    failures += run_case(execution, "gated_rmsnorm [128,32,7]", {128, 32, 7}, 1402U);
+    failures += run_case(execution, "gated_rmsnorm [128,32,128]", {128, 32, 128}, 1403U);
+    failures += run_case(execution, "gated_rmsnorm near-zero [128,32]", {128, 32}, 1404U, 1.0e-5F);
+    failures += run_case(execution, "gated_rmsnorm unaligned [128,48]", {128, 48}, 1405U, 4.0F, true);
 
     // Sigmoid-gated form at the GDN output geometry [128,48,T]; T=56/57 straddle the prefetch
     // grid boundary of the warp-per-row route.
     for (int columns : {1, 2, 8, 56, 57, 512, 8192}) {
         const std::string label =
             "gated_rmsnorm_sigmoid [128,48," + std::to_string(columns) + "]";
-        failures += run_case(label.c_str(), {128, 48, columns}, 1500U + columns, 4.0F, false,
+        failures += run_case(execution, label.c_str(), {128, 48, columns}, 1500U + columns, 4.0F, false,
                              columns == 8 || columns == 57, Gate::Sigmoid);
     }
-    failures += run_case("gated_rmsnorm_sigmoid near-zero [128,48]", {128, 48}, 1501U, 1.0e-5F,
+    failures += run_case(execution, "gated_rmsnorm_sigmoid near-zero [128,48]", {128, 48}, 1501U, 1.0e-5F,
                          false, false, Gate::Sigmoid);
-    failures += run_case("gated_rmsnorm_sigmoid unaligned [128,48]", {128, 48}, 1502U, 4.0F, true,
+    failures += run_case(execution, "gated_rmsnorm_sigmoid unaligned [128,48]", {128, 48}, 1502U, 4.0F, true,
                          false, Gate::Sigmoid);
     std::cout << (failures ? "FAIL" : "OK") << " gated_rmsnorm\n";
     return failures ? 1 : 0;

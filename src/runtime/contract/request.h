@@ -8,8 +8,6 @@
 
 namespace ninfer::runtime {
 
-class CompiledOutputConstraint;
-
 // Engine has already selected the model/mode preset, applied every explicit override,
 // and validated these values before constructing the runtime request.
 struct ResolvedExecutionOptions {
@@ -18,15 +16,14 @@ struct ResolvedExecutionOptions {
     bool allow_prefix_reuse               = true;
     bool allow_prefix_publication         = true;
     ThinkingControlOptions thinking;
-    // Compiled by the model frontend from structured_output/required_tool_names; null when the
-    // request is unconstrained.
-    std::shared_ptr<const CompiledOutputConstraint> output_constraint;
     TokenLogprobOptions logprobs;
     // Prompt position whose final-normalized hidden row the Program copies out during prefill.
     std::optional<std::uint32_t> reasoning_feature_position;
 };
 
 struct ResolvedRequestOptions {
+    std::optional<OutputConstraint> constraint;
+    ToolChoice tool_choice;
     ResolvedExecutionOptions execution;
     StopPolicy stop;
     OutputOptions output;
@@ -61,12 +58,9 @@ struct CancellationFlagView {
 
 struct RequestPlanSummary {
     std::uint32_t prompt_tokens           = 0;
-    std::uint32_t reusable_prompt_tokens  = 0;
     std::uint32_t requested_output_tokens = 0;
     std::uint32_t effective_output_tokens = 0;
     FinishReason effective_limit_reason   = FinishReason::None;
-    PrefixReusePath prefix_reuse_path     = PrefixReusePath::Root;
-    std::uint64_t service_work_quanta     = 0;
     bool publish_continuation             = true;
 };
 

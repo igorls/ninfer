@@ -69,7 +69,10 @@ void candidate_logprobs(const Tensor& logits, std::int32_t valid_rows, const Ten
         if (allowed->ne[0] <= 0 || static_cast<std::int64_t>(allowed->ne[0]) * 32 < valid_rows) {
             fail("allowed must cover every valid row");
         }
-        require_shape(*allowed, allowed->ne[0], 1, 1, "allowed");
+        if (allowed->ne[1] != 1 && allowed->ne[1] != columns) {
+            fail("allowed must have one mask or one mask per column");
+        }
+        require_shape(*allowed, allowed->ne[0], allowed->ne[1], 1, "allowed");
     }
 
     (void)logits.bytes();

@@ -10,8 +10,9 @@
 namespace ninfer::ops {
 
 struct SpeculativeAcceptExecutionEnvelope {
-    // Execution promise: every row has temperature<=0, both penalties disabled, and no
-    // allowed_tokens mask. When false, the general route supports mixed greedy/stochastic rows.
+    // Execution promise: every row has temperature<=0, both penalties disabled and no token mask.
+    // When false, the general route remains valid for any supported mixture of greedy and
+    // stochastic rows.
     bool all_rows_greedy_without_penalties = false;
 };
 
@@ -62,9 +63,9 @@ void speculative_prepare_verify_ids(const Tensor& anchors, const Tensor& drafts,
  * Algorithm:
  *   Independently for each row b, greedy mode accepts the longest available draft prefix matching
  *   the per-column penalty-adjusted argmax and commits that argmax at the first mismatch (or the
- *   bonus column). With both penalties disabled and no allowed_tokens mask, target_tokens is
+ *   bonus column). With both penalties disabled and no mask.words mask, target_tokens is
  *   the exact raw-logit fast path. A mask constrains every valid column before selection; column j
- *   reads allowed_tokens + j*allowed_tokens_column_stride (sampling.h), so a structured-output
+ *   reads mask.words + j*mask.stride (sampling.h), so a structured-output
  *   caller can give each verification column the grammar state after drafts[0..j-1].
  *   Sampling mode applies configs[b] to each valid verification column, accepts draft i with
  *   target probability p_i(draft_i), samples from the residual distribution on first rejection,
@@ -116,7 +117,7 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
  *   This is the variable-K, 16-candidate form of speculative rejection sampling.
  *   For row b, let P=clamp(current_extents[b],0,K). Only target columns 0..P are live.
  *   Greedy rows accept the longest prefix matching the mask- and penalty-adjusted target argmax
- *   (column j's mask is allowed_tokens + j*allowed_tokens_column_stride),
+ *   (column j's mask is mask.words + j*mask.stride),
  *   then emit that argmax as correction/bonus. Positive-temperature rows construct p
  *   using sampling.h masks, penalties, and filters. A live draft d is accepted with probability
  *   min(1,p(d)/q(d)); first rejection samples normalized max(p-q,0). After accepting all
@@ -130,8 +131,8 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
  *   The registered domain is token_domain=248077, K=1..15, B=1..8. Each live draft
  *   position has distinct global candidate ids in [0,token_domain). proposal_q is the
  *   normalized FP32 distribution used to draw that draft; the draft occurs with positive q.
- *   For greedy rows without penalties or an allowed_tokens mask, live target_tokens are the raw target argmax
- *   over the valid token domain, with lower ids breaking ties.
+ *   For greedy rows without penalties or an mask.words mask, live target_tokens are the raw target
+ * argmax over the valid token domain, with lower ids breaking ties.
  *
  * Numeric:
  *   proposal_q is consumed directly; it is not reconstructed from selector scores or expanded to
@@ -151,7 +152,7 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
  *
  * Execution:
  *   all_rows_greedy_without_penalties=true promises the matching device configs and enables the
- *   raw target_tokens route and requires every allowed_tokens pointer to be null. A false flag
+ *   raw target_tokens route and requires every mask.words pointer to be null. A false flag
  *   selects the general route and supports mixed rows, including masked P=0 rows.
  *
  * Workspace:

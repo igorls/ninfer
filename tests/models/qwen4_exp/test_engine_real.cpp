@@ -60,10 +60,7 @@ ninfer::PromptInput user_prompt(std::string text, std::string session = {}) {
     ninfer::PromptInput input;
     input.messages.push_back(message(ninfer::ChatRole::User, std::move(text)));
     input.options.enable_thinking = false;
-    if (!session.empty()) {
-        input.context_cache.session_key = std::move(session);
-        input.context_cache.retention   = ninfer::CacheRetentionHint::LiveSession;
-    }
+    if (!session.empty()) { input.context_cache.session_key = std::move(session); }
     return input;
 }
 
@@ -266,23 +263,18 @@ bool host_round_trip_is_exact(bool mtp = false) {
             return true;
         });
     };
-    ninfer::EngineOptions host                           = base_options();
-    host.context_cache.device_state_slots                = 0;
-    host.context_cache.host_state_slots                  = 4;
-    host.context_cache.host_kv_capacity_bytes            = 1ULL << 30U;
-    host.context_cache.max_private_continuations         = 2;
-    host.context_cache.max_shared_prefixes               = 0;
-    host.context_cache.max_long_anchors_per_continuation = 0;
+    ninfer::EngineOptions host             = base_options();
+    host.context_cache.device_state_slots  = 0;
+    host.context_cache.host_capacity_bytes = 1ULL << 30U;
     if (mtp) {
         host.speculative.backend      = ninfer::SpeculativeBackend::Mtp;
         host.speculative.draft_tokens = 3;
     }
-    ninfer::EngineOptions device                = host;
-    device.context_cache.device_state_slots     = 4;
-    device.max_context                          = 8192;
-    device.kv_capacity                          = ninfer::KvCapacityPolicy::explicit_capacity(8192);
-    device.context_cache.host_state_slots       = 0;
-    device.context_cache.host_kv_capacity_bytes = 0;
+    ninfer::EngineOptions device             = host;
+    device.context_cache.device_state_slots  = 4;
+    device.max_context                       = 8192;
+    device.kv_capacity                       = ninfer::KvCapacityPolicy::explicit_capacity(8192);
+    device.context_cache.host_capacity_bytes = 0;
     std::vector<ninfer::TokenId> through_host;
     std::vector<ninfer::TokenId> resident;
     if (!scenario(host, true, through_host) || !scenario(device, false, resident)) { return false; }
@@ -295,13 +287,9 @@ bool host_round_trip_is_exact(bool mtp = false) {
 // Endpoint, exact-hit and turn-closure reuse, and reuse that keeps working after the bounded
 // private catalog has turned over many times.
 bool reuse_survives_catalog_turnover() {
-    ninfer::EngineOptions options                           = base_options();
-    options.context_cache.device_state_slots                = 2;
-    options.context_cache.host_state_slots                  = 0;
-    options.context_cache.host_kv_capacity_bytes            = 0;
-    options.context_cache.max_private_continuations         = 2;
-    options.context_cache.max_shared_prefixes               = 0;
-    options.context_cache.max_long_anchors_per_continuation = 0;
+    ninfer::EngineOptions options             = base_options();
+    options.context_cache.device_state_slots  = 2;
+    options.context_cache.host_capacity_bytes = 0;
     return with_engine(options, [&](ninfer::Engine& engine) {
         // Exact-hit: the whole prompt is resident, so the first token comes from the stored
         // continuation hidden.
@@ -366,13 +354,12 @@ bool logprobs_and_structured_output(bool mtp = false) {
             }
         }
 
-        ninfer::RequestOptions structured             = greedy(96);
-        structured.stop.include_model_defaults        = true;
-        structured.execution.structured_output.kind   = ninfer::StructuredOutputKind::JsonSchema;
-        structured.execution.structured_output.schema = R"({"type":"object",
+        ninfer::RequestOptions structured      = greedy(96);
+        structured.stop.include_model_defaults = true;
+        structured.constraint = ninfer::OutputConstraint::json_schema(R"({"type":"object",
             "properties":{"city":{"type":"string"},"population":{"type":"integer"}},
-            "required":["city","population"],"additionalProperties":false})";
-        const auto json                               = engine.generate(
+            "required":["city","population"],"additionalProperties":false})");
+        const auto json       = engine.generate(
             engine.prepare(user_prompt("Name a large city and its population as JSON.")),
             structured);
         try {
@@ -429,8 +416,8 @@ bool causal_score_matches_prompt_readout() {
 // extent fixed so this checks causality, including QSA's sparse boundary, without changing
 // the permitted activation-quantization route at a GEMM shape boundary.
 bool causal_prefix_independence() {
-    auto options = base_options();
-    options.purpose = ninfer::EnginePurpose::CausalScoring;
+    auto options          = base_options();
+    options.purpose       = ninfer::EnginePurpose::CausalScoring;
     options.prefill_chunk = 4096;
     return with_engine(options, [&](ninfer::Engine& engine) {
         const auto vocabulary = engine.tokenize_text(
@@ -440,9 +427,8 @@ bool causal_prefix_independence() {
              {std::pair{64U, 31U}, std::pair{1024U, 257U}, std::pair{2200U, 2053U}}) {
             std::vector<ninfer::TokenId> first(extent), second(extent);
             for (std::uint32_t i = 0; i < extent; ++i) {
-                first[i] = vocabulary[i % vocabulary.size()];
-                second[i] = i < prefix ? first[i]
-                                       : vocabulary[(i + 7) % vocabulary.size()];
+                first[i]  = vocabulary[i % vocabulary.size()];
+                second[i] = i < prefix ? first[i] : vocabulary[(i + 7) % vocabulary.size()];
             }
             const auto a = engine.score_tokens(first, 1);
             const auto b = engine.score_tokens(second, 1);
@@ -476,34 +462,42 @@ bool prefill_chunk_invariance() {
         auto options          = base_options();
         options.purpose       = ninfer::EnginePurpose::CausalScoring;
         options.prefill_chunk = chunk;
-        passed = with_engine(options, [&](ninfer::Engine& engine) {
-            if (tokens.empty()) {
-                std::string text;
-                for (int i = 0; tokens.size() < 3600; ++i) {
-                    text += "Entry " + std::to_string((i * 7919) % 10007) + ": " +
-                            sentences[static_cast<std::size_t>(i) % sentences.size()] + ' ';
-                    if (i % 16 == 15) { tokens = engine.tokenize_text(text); }
-                }
-                tokens.resize(3600);
-            }
-            const auto scores = engine.score_tokens(tokens, 1);
-            if (scores.size() != tokens.size() - 1) { return fail("chunked score count is invalid"); }
-            if (reference.empty()) {
-                reference.assign(scores.begin(), scores.end());
-                return true;
-            }
-            std::size_t differing = 0;
-            double worst          = 0.0;
-            for (std::size_t i = 0; i < scores.size(); ++i) {
-                if (scores[i] != reference[i]) {
-                    ++differing;
-                    worst = std::max(worst, std::abs(static_cast<double>(scores[i]) - reference[i]));
-                }
-            }
-            std::cout << "prefill chunk " << chunk << " vs 4096: " << differing << " of "
-                      << scores.size() << " scores differ, max |dlogprob| = " << worst << '\n';
-            return differing == 0 ? true : fail("prefill chunking changes the scores");
-        }) && passed;
+        passed =
+            with_engine(
+                options,
+                [&](ninfer::Engine& engine) {
+                    if (tokens.empty()) {
+                        std::string text;
+                        for (int i = 0; tokens.size() < 3600; ++i) {
+                            text += "Entry " + std::to_string((i * 7919) % 10007) + ": " +
+                                    sentences[static_cast<std::size_t>(i) % sentences.size()] + ' ';
+                            if (i % 16 == 15) { tokens = engine.tokenize_text(text); }
+                        }
+                        tokens.resize(3600);
+                    }
+                    const auto scores = engine.score_tokens(tokens, 1);
+                    if (scores.size() != tokens.size() - 1) {
+                        return fail("chunked score count is invalid");
+                    }
+                    if (reference.empty()) {
+                        reference.assign(scores.begin(), scores.end());
+                        return true;
+                    }
+                    std::size_t differing = 0;
+                    double worst          = 0.0;
+                    for (std::size_t i = 0; i < scores.size(); ++i) {
+                        if (scores[i] != reference[i]) {
+                            ++differing;
+                            worst = std::max(
+                                worst, std::abs(static_cast<double>(scores[i]) - reference[i]));
+                        }
+                    }
+                    std::cout << "prefill chunk " << chunk << " vs 4096: " << differing << " of "
+                              << scores.size() << " scores differ, max |dlogprob| = " << worst
+                              << '\n';
+                    return differing == 0 ? true : fail("prefill chunking changes the scores");
+                }) &&
+            passed;
     }
     return passed;
 }
@@ -564,6 +558,13 @@ std::string color_readout(std::string content) {
     return content;
 }
 
+bool represents_color(const std::string& content, bool blue) {
+    const auto normalized = color_readout(content);
+    // A color name and its exact RGB hex code represent the same fixture pixel.
+    return normalized.find(blue ? "blue" : "red") != std::string::npos ||
+           normalized.find(blue ? "#0000ff" : "#ff0000") != std::string::npos;
+}
+
 bool video_color_sequence(ninfer::Engine& engine) {
     const auto path = std::filesystem::path(__FILE__).parent_path() / "fixtures/red-blue.mp4";
     std::ifstream stream(path, std::ios::binary);
@@ -620,9 +621,9 @@ bool vision_generation_and_reuse() {
         const auto cold                      = engine.generate(engine.prepare(followup), request);
         std::cout << "Vision red=" << first.content << " blue=" << reused.content
                   << " reused=" << reused.reused_prompt_tokens << '\n';
-        if (color_readout(first.content).find("red") == std::string::npos ||
-            color_readout(reused.content).find("blue") == std::string::npos ||
-            color_readout(cold.content).find("blue") == std::string::npos) {
+        if (!represents_color(first.content, false) ||
+            !represents_color(reused.content, true) ||
+            !represents_color(cold.content, true)) {
             return fail("Vision image colors differ from their represented input");
         }
         if (reused.reused_prompt_tokens == 0 || !reused.prompt.has_media ||
@@ -677,7 +678,8 @@ bool mtp_generation_and_reuse() {
                                              image_part(false));
         const auto image = engine.generate(engine.prepare(visual), request);
         std::cout << "MTP Vision result=" << image.content << std::endl;
-        if (color_readout(image.content).find("red") == std::string::npos || !image.prompt.has_media) {
+        if (!represents_color(image.content, false) ||
+            !image.prompt.has_media) {
             return fail("MTP Vision execution failed its represented color input");
         }
         const auto memory = engine.memory_summary();
@@ -687,53 +689,85 @@ bool mtp_generation_and_reuse() {
 }
 
 bool mtp_batch_target_parity() {
-    auto options = base_options();
-    options.max_context = 512;
-    options.max_concurrency = 8;
-    options.prefill_chunk = 128;
+    auto options                  = base_options();
+    options.max_context           = 512;
+    options.max_concurrency       = 8;
+    options.prefill_chunk         = 128;
     options.context_cache.enabled = false;
     std::vector<ninfer::GenerationResult> reference;
     // The oracle here is the ordinary target route, not MTP with zero accepted drafts.
     // Keep only one resident model; each Engine is destroyed before the next is loaded.
     if (!with_engine(options, [&](ninfer::Engine& engine) {
-        for (const auto& text : prompts()) {
-            auto request = greedy(96, false);
-            request.execution.logprobs.enabled = true;
-            request.execution.logprobs.top = 2;
-            reference.push_back(engine.generate(engine.prepare(user_prompt(text)), request));
-        }
-        return true;
-    })) return false;
-    bool ok = true;
-    for (const auto drafts : {1U, 3U, 5U}) {
-        options.speculative.backend = ninfer::SpeculativeBackend::Mtp;
-        options.speculative.draft_tokens = drafts;
-        ok = with_engine(options, [&](ninfer::Engine& engine) {
-            std::vector<ninfer::PreparedPrompt> prepared;
-            for (const auto& text : prompts()) prepared.push_back(engine.prepare(user_prompt(text)));
-            std::vector<ninfer::GenerationHandle> handles;
-            for (auto& prompt : prepared)
-                handles.push_back(engine.submit(std::move(prompt), greedy(96, false)));
-            bool matched = true;
-            for (std::size_t row = 0; row < handles.size(); ++row) {
-                const auto result = handles[row].wait();
-                if (result.speculative.rounds == 0 || result.generated_token_ids.size() != 96) {
-                    matched = fail("MTP batch target comparison did not execute speculation") && matched;
-                    continue;
-                }
+            for (const auto& text : prompts()) {
+                auto request                       = greedy(96, false);
+                request.execution.logprobs.enabled = true;
+                request.execution.logprobs.top     = 2;
+                reference.push_back(engine.generate(engine.prepare(user_prompt(text)), request));
+            }
+            // Diagnostic control: ordinary B=8 isolates batching from speculation.
+            std::vector<ninfer::GenerationHandle> controls;
+            for (const auto& text : prompts()) {
+                controls.push_back(engine.submit(engine.prepare(user_prompt(text)),
+                                                  greedy(96, false)));
+            }
+            for (std::size_t row = 0; row < controls.size(); ++row) {
+                const auto result = controls[row].wait();
                 for (std::size_t i = 0; i < result.generated_token_ids.size(); ++i) {
-                    if (result.generated_token_ids[i] == reference[row].generated_token_ids[i]) continue;
+                    if (result.generated_token_ids[i] == reference[row].generated_token_ids[i])
+                        continue;
                     const auto& top = reference[row].token_logprobs[i].top;
-                    const auto gap = top[0].raw_logprob - top[1].raw_logprob;
-                    std::cout << "MTP K=" << drafts << " target row=" << row
-                              << " first divergence=" << i << " reference gap=" << gap << '\n';
-                    if (gap > 0.05F)
-                        matched = fail("MTP verification changes a target decision away from a tie") && matched;
+                    std::cout << "ordinary B=8 control row=" << row << " first divergence=" << i
+                              << " reference gap=" << top[0].raw_logprob - top[1].raw_logprob
+                              << " batched=" << result.generated_token_ids[i]
+                              << " single=" << reference[row].generated_token_ids[i] << std::endl;
                     break;
                 }
             }
-            return matched;
-        }) && ok;
+            return true;
+        }))
+        return false;
+    bool ok = true;
+    for (const auto drafts : {1U, 3U, 5U}) {
+        options.speculative.backend      = ninfer::SpeculativeBackend::Mtp;
+        options.speculative.draft_tokens = drafts;
+        ok                               = with_engine(
+                 options,
+                 [&](ninfer::Engine& engine) {
+                     std::vector<ninfer::PreparedPrompt> prepared;
+                     for (const auto& text : prompts())
+                         prepared.push_back(engine.prepare(user_prompt(text)));
+                     std::vector<ninfer::GenerationHandle> handles;
+                     for (auto& prompt : prepared)
+                         handles.push_back(engine.submit(std::move(prompt), greedy(96, false)));
+                     bool matched = true;
+                     for (std::size_t row = 0; row < handles.size(); ++row) {
+                         const auto result = handles[row].wait();
+                         if (result.speculative.rounds == 0 ||
+                             result.generated_token_ids.size() != 96) {
+                             matched =
+                                 fail("MTP batch target comparison did not execute speculation") &&
+                                 matched;
+                             continue;
+                         }
+                         for (std::size_t i = 0; i < result.generated_token_ids.size(); ++i) {
+                             if (result.generated_token_ids[i] ==
+                                 reference[row].generated_token_ids[i])
+                                 continue;
+                             const auto& top = reference[row].token_logprobs[i].top;
+                             const auto gap  = top[0].raw_logprob - top[1].raw_logprob;
+                             std::cout << "MTP K=" << drafts << " target row=" << row
+                                       << " first divergence=" << i << " reference gap=" << gap
+                                       << '\n';
+                             if (gap > 0.05F)
+                                 matched = fail("MTP verification changes a target decision away "
+                                                                                                            "from a tie") &&
+                                           matched;
+                             break;
+                         }
+                     }
+                     return matched;
+                 }) &&
+             ok;
     }
     return ok;
 }
@@ -889,13 +923,13 @@ bool concurrent_long_prompts_with_reuse(bool mtp) {
             std::vector<ninfer::GenerationResult> results;
             for (std::size_t row = 0; row < handles.size(); ++row) {
                 results.push_back(handles[row].wait());
-                const auto& result = results.back();
+                const auto& result        = results.back();
                 const std::size_t outputs = result.generated_token_ids.size();
                 if (outputs == 0 || outputs > jobs[row].second) {
                     return fail("a long concurrent request missed its token budget");
                 }
-                std::cout << "  row " << row << ": reused " << result.reused_prompt_tokens
-                          << " of " << result.prompt.prompt_tokens << " via path "
+                std::cout << "  row " << row << ": reused " << result.reused_prompt_tokens << " of "
+                          << result.prompt.prompt_tokens << " via path "
                           << static_cast<int>(result.prefix_reuse_path) << ", " << outputs
                           << " outputs" << std::endl;
                 reused += result.reused_prompt_tokens != 0 ? 1U : 0U;
@@ -910,8 +944,8 @@ bool concurrent_long_prompts_with_reuse(bool mtp) {
                 std::min(results[0].timings.total_seconds, results[1].timings.total_seconds);
             const double document_wait = std::max(results[2].engine_timing.queue_wait_seconds,
                                                   results[3].engine_timing.queue_wait_seconds);
-            std::cout << (mtp ? "MTP " : "") << "long concurrent round " << round << ": "
-                      << reused << " of " << handles.size() << " reused a prefix; documents "
+            std::cout << (mtp ? "MTP " : "") << "long concurrent round " << round << ": " << reused
+                      << " of " << handles.size() << " reused a prefix; documents "
                       << "waited " << document_wait << " s beside " << code_seconds
                       << " s code requests" << std::endl;
             if (round == 1 && reused == 0) {
@@ -964,7 +998,8 @@ bool mtp_staged_materialization_ledger() {
         for (int round = 0; round < 2; ++round) {
             std::vector<ninfer::GenerationHandle> handles;
             for (const auto& [text, outputs] : jobs) {
-                handles.push_back(engine.submit(engine.prepare(user_prompt(text)), greedy(outputs)));
+                handles.push_back(
+                    engine.submit(engine.prepare(user_prompt(text)), greedy(outputs)));
             }
             for (std::size_t row = 0; row < handles.size(); ++row) {
                 if (handles[row].wait().generated_token_ids.size() != jobs[row].second) {
@@ -1093,8 +1128,7 @@ int main() {
             {"mtp batch target parity", mtp_batch_target_parity},
             {"mtp long fp8", mtp_long_fp8},
             {"long concurrent reuse", [] { return concurrent_long_prompts_with_reuse(false); }},
-            {"mtp long concurrent reuse",
-             [] { return concurrent_long_prompts_with_reuse(true); }},
+            {"mtp long concurrent reuse", [] { return concurrent_long_prompts_with_reuse(true); }},
             {"mtp shared prefix promotion", mtp_shared_prefix_promotion},
             {"mtp staged materialization ledger", mtp_staged_materialization_ledger},
         };

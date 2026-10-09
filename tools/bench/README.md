@@ -126,7 +126,7 @@ Use `--resume` to skip completed JSON reports in an existing `--output-dir`, and
 for a minimal script/runner check. `--no-build` uses the binary supplied by `--bench` without
 building it.
 
-Each raw report must be `ninfer_bench_report` schema v15. The flattened summary and schema-v4 matrix
+Each raw report must be `ninfer_bench_report` schema v17. The flattened summary and schema-v4 matrix
 manifest carry native facts from the report: architecture, public name, actual formats, prefill signature, artifact,
 load/read/upload/staging values, Engine memory arenas including the non-additive Vision layout
 inside the unified workspace and CUDA Graph allowance, per-test planned logical and
@@ -160,7 +160,7 @@ The serial runner writes `run.jsonl`, `summary.csv`, `summary.md`, and per-serve
 category summaries. The output directory is supplied explicitly with `--output`.
 
 Its schema-v9 result records the proposal head; results and flattened summaries retain the KV dtype, actual `prefill_signature`, request Host
-exposure, and decode Host/Device-wait time per round received from the schema-v21 serving records.
+exposure, and decode Host/Device-wait time per round received from the schema-v24 serving records.
 Request exposure is a latency distribution value and is never summed across concurrent requests;
 worker aggregation uses the serving `throughput.host_work` interval deltas. The stochastic route pins its complete
 temperature/top-p/top-k/min-p/presence/frequency profile explicitly, so model-default changes do
@@ -176,6 +176,7 @@ records the actual Engine configuration, automatic KV capacity, shuffle seed whe
 dispatch method, and per-request positions.
 Use `--mode mtp0`, `--mode mtp3`, or `--mode mtp5` for ordinary decode or three/five MTP drafts;
 repeat `--mode` to compare them. The selected model must support that draft width.
+Both serving runners disable prefix reuse and set extra Device state and Host context capacity to zero.
 
 Schema-v4 outputs include `points/*.json`, `server/*.jsonl`, and combined `summary.json`, `summary.csv`, and
 `summary.md`. C=1 corpus runs also write complete responses in `corpus/<point>/results.jsonl` and

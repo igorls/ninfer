@@ -31,6 +31,7 @@ struct Case {
     std::vector<std::uint16_t> logits;
     std::vector<std::int32_t> sampled;
     std::vector<std::int32_t> candidates;
+    bool per_column_mask = false;
     std::vector<std::int32_t> allowed; // empty: unconstrained
 };
 
@@ -53,9 +54,11 @@ std::vector<std::uint16_t> make_logits(std::int32_t physical_rows, std::int32_t 
     return logits;
 }
 
-bool allowed_row(const std::vector<std::int32_t>& allowed, std::int32_t row) {
+bool allowed_row(const Case& c, std::int32_t column, std::int32_t row) {
+    const auto& allowed = c.allowed;
     if (allowed.empty()) { return true; }
-    return ((static_cast<std::uint32_t>(allowed[static_cast<std::size_t>(row) / 32U]) >>
+    const std::size_t offset = c.per_column_mask ? column * ((c.valid_rows + 31) / 32) : 0;
+    return ((static_cast<std::uint32_t>(allowed[offset + static_cast<std::size_t>(row) / 32U]) >>
              (static_cast<std::uint32_t>(row) % 32U)) &
             1U) != 0U;
 }
@@ -68,17 +71,17 @@ void oracle(const Case& c, std::int32_t column, std::int32_t id, double& raw, do
     for (std::int32_t row = 0; row < c.valid_rows; ++row) {
         const double value = bf16_to_f32(c.logits[base + row]);
         raw_max            = std::max(raw_max, value);
-        if (allowed_row(c.allowed, row)) { masked_max = std::max(masked_max, value); }
+        if (allowed_row(c, column, row)) { masked_max = std::max(masked_max, value); }
     }
     double raw_sum = 0.0, masked_sum = 0.0;
     for (std::int32_t row = 0; row < c.valid_rows; ++row) {
         const double value = bf16_to_f32(c.logits[base + row]);
         raw_sum += std::exp(value - raw_max);
-        if (allowed_row(c.allowed, row)) { masked_sum += std::exp(value - masked_max); }
+        if (allowed_row(c, column, row)) { masked_sum += std::exp(value - masked_max); }
     }
     const double value = bf16_to_f32(c.logits[base + id]);
     raw                = value - raw_max - std::log(raw_sum);
-    masked             = allowed_row(c.allowed, id) ? value - masked_max - std::log(masked_sum)
+    masked             = allowed_row(c, column, id) ? value - masked_max - std::log(masked_sum)
                                                     : -std::numeric_limits<double>::infinity();
 }
 
@@ -160,9 +163,15 @@ int run_case(const Case& c) {
                                    c.columns, static_cast<std::int32_t>(candidates), 2});
     }
     if (!c.allowed.empty()) {
-        allowed.emplace(
-            device_allowed.data(), DType::I32,
-            std::initializer_list<std::int32_t>{static_cast<std::int32_t>(c.allowed.size())});
+        if (c.per_column_mask) {
+            allowed.emplace(
+                device_allowed.data(), DType::I32,
+                std::initializer_list<std::int32_t>{(c.valid_rows + 31) / 32, c.columns});
+        } else {
+            allowed.emplace(
+                device_allowed.data(), DType::I32,
+                std::initializer_list<std::int32_t>{static_cast<std::int32_t>(c.allowed.size())});
+        }
     }
     ops::candidate_logprobs(logits, c.valid_rows, sampled,
                             candidate_ids ? &*candidate_ids : nullptr,
@@ -282,6 +291,19 @@ int main() try {
     failures += run_case(make_case("sampled only", 1024, 1000, 5, 0, true, 3));
     failures += run_case(make_case("vocabulary unconstrained", 248320, 248077, 2, 77, false, 4));
     failures += run_case(make_case("vocabulary masked", 248320, 248077, 6, 20, true, 5));
+    for (const auto rows : {50, 248077}) {
+        Case c            = make_case("per-column grammar", rows + 7, rows, 6, 20, false, 17);
+        c.per_column_mask = true;
+        const auto words  = (rows + 31) / 32;
+        c.allowed.assign(words * c.columns, 0);
+        for (int column = 0; column < c.columns; ++column) {
+            for (int token = column; token < rows; token += 7) {
+                c.allowed[column * words + token / 32] |=
+                    static_cast<std::int32_t>(1U << (token % 32));
+            }
+        }
+        failures += run_case(c);
+    }
     failures += run_validation_cases();
     if (failures != 0) {
         std::cerr << "candidate_logprobs: " << failures << " failure(s)\n";

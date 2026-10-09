@@ -289,3 +289,35 @@ Read from the consistent rounds:
 for example 135.87 against 135.84 tok/s. The retuned table does not touch the decode routes.
 Peak Engine workspace at chunk 1024 drops from 135.2 to 122.7 MiB. At chunk 8192 it is 981.8 MiB
 in both builds.
+
+## FP8 TMA staged-input handoff (2026-10-08)
+
+Upstream-sync qualification exposed intermittent first-token corruption in the existing FP8 TMA
+pipeline. Changing each staged-input release from one representative lane per warp to every
+consumer thread removes the alternating-weight reproducer. The separate
+[integration record](maintainer/upstream-ports.md) covers the failure, mathematical checks and
+real-model recovery qualification.
+
+These focused Op timings use the same Colab G4 RTX PRO 6000 Blackwell Server Edition, driver
+580.82.07, CUDA 13.3.73, GCC 13.3 and Release `sm_120a`. The public GDN-input Op uses
+`FP8_E4M3FN_ROW_BF16`, N=16,384, K=5,120, T=128, `AllowA8`, and the existing seeded synthetic
+BF16 activation and independently decoded packed-weight fixture. CUDA events enclose 512
+complete Op launches per sample, including activation quantization. There are five successive
+samples per arm; the table gives their individual means in microseconds, without dropping any.
+The one-buffer case reuses a hot weight. The two-buffer case alternates identical 84-MB payloads
+to exercise changing weight addresses and a larger cache footprint. GPU jobs run serially.
+
+| Handoff | One weight: five sample means, microseconds | Alternating weights: five sample means, microseconds |
+|---|---|---|
+| Original representative arrivals, numerically unsafe | 52.63 / 52.78 / 52.72 / 51.44 / 47.10 | 69.65 / 69.59 / 69.61 / 69.60 / 69.42 |
+| All-consumer CTA barrier, rejected as unnecessary synchronization | 53.14 / 53.08 / 50.86 / 47.34 / 47.11 | 69.68 / 69.60 / 69.37 / 69.22 / 69.31 |
+| Every reader arrives, selected | 55.12 / 53.76 / 50.22 / 49.23 / 49.27 | 69.66 / 69.36 / 68.39 / 67.21 / 67.17 |
+
+The selected arm's medians are 50.22 and 68.39 microseconds; the original arm's are 52.63 and
+69.60. The warm distributions also contain slower selected samples: its range is 49.23–55.12
+against 47.10–52.78. These short, non-interleaved runs show substantial within-run drift; they
+do not establish a stable gain or regression. Selection follows the direct per-reader memory
+ordering contract and correctness reproducer, not the timing median. Whole-inference speed,
+Windows GPU performance and desktop coexistence on the merged revision remain unmeasured.
+The handoff adds no production allocation or shared-memory storage; the regression test alone
+allocates a second weight and performs its bounded repeat check.

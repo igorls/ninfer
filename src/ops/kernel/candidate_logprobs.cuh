@@ -29,10 +29,12 @@ __launch_bounds__(BlockSize) __global__
     void candidate_logprobs_kernel(const __nv_bfloat16* logits, std::int32_t valid_rows,
                                    std::int32_t physical_rows, const std::int32_t* sampled_ids,
                                    const std::int32_t* candidate_ids, std::int32_t candidates,
-                                   const std::int32_t* allowed, float* sampled_out,
-                                   float* candidates_out, std::int32_t columns) {
+                                   const std::int32_t* allowed, std::int32_t allowed_stride,
+                                   float* sampled_out, float* candidates_out,
+                                   std::int32_t columns) {
     const std::int32_t column = static_cast<std::int32_t>(blockIdx.x);
-    const std::int64_t base   = static_cast<std::int64_t>(column) * physical_rows;
+    if (allowed) { allowed += column * allowed_stride; }
+    const std::int64_t base = static_cast<std::int64_t>(column) * physical_rows;
 
     float raw_max    = -CUDART_INF_F;
     float masked_max = -CUDART_INF_F;

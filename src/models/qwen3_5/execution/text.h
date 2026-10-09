@@ -122,6 +122,8 @@ public:
         proposal_head_n_   = count;
     }
 
+    void set_rope_delta(std::int32_t delta) noexcept { rope_delta_ = delta; }
+
     void set_sampling(const ops::SamplingConfig* config) noexcept { sampling_config_ = config; }
 
     // Pinned host destination for the final prompt position's full target logits, or null. The
@@ -135,6 +137,7 @@ public:
     }
 
     void set_prompt_readout(const PromptReadout* readout) noexcept { prompt_readout_ = readout; }
+    void set_prefill_gpu_timer(CudaEventTimer* timer) noexcept { prefill_gpu_timer_ = timer; }
 
     void set_prefill_split_frontier(std::int64_t position) noexcept {
         prefill_split_frontier_ = position;
@@ -267,6 +270,8 @@ private:
     LinearAttentionStatePool& state_;
     qwen3_5::RoundState& io_;
     Tensor& prefill_hidden_;
+    // Borrowed from Program; every measured chunk retires before this pair is reused.
+    CudaEventTimer* prefill_gpu_timer_ = nullptr;
     std::uint32_t prefill_chunk_;
     std::uint32_t text_kv_base_;
     const Tensor* active_cache_positions_                                          = nullptr;

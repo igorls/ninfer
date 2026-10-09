@@ -246,14 +246,14 @@ __device__ __forceinline__ int sampling_dist_offset(int col, int j) {
 // only runs when penalties are active, so it is free on the no-penalty path.
 __device__ __forceinline__ float sampling_adjusted_logit(float raw, int v, const SamplingConfig& c,
                                                          const std::int32_t* overlay = nullptr,
-                                                         int overlay_len             = 0,
-                                                         int column                  = 0) {
-    float x = raw;
-    if (c.allowed_tokens != nullptr) {
-        const std::int32_t* mask = c.allowed_tokens + column * c.allowed_tokens_column_stride;
-        if (!(static_cast<unsigned int>(mask[v / 32]) & (1U << (v % 32)))) { return -CUDART_INF_F; }
+                                                         int overlay_len             = 0) {
+    if (c.mask.words && !(c.mask.words[overlay_len * c.mask.stride + v / 32] & (1u << (v % 32)))) {
+        return -CUDART_INF_F;
     }
-    if (c.presence_penalty == 0.0f && c.frequency_penalty == 0.0f && c.repetition_penalty == 1.0f) { return x; }
+    float x = raw;
+    if (c.presence_penalty == 0.0f && c.frequency_penalty == 0.0f && c.repetition_penalty == 1.0f) {
+        return x;
+    }
     int cnt = c.token_counts != nullptr ? c.token_counts[v] : 0;
     for (int j = 0; j < c.history_overlay_size; ++j) {
         if (c.history_overlay[j] == v) { ++cnt; }
@@ -262,7 +262,8 @@ __device__ __forceinline__ float sampling_adjusted_logit(float raw, int v, const
         if (overlay[j] == v) { ++cnt; }
     }
     if (c.repetition_penalty != 1.0f) {
-        const bool in_prompt = c.prompt_presence != nullptr &&
+        const bool in_prompt =
+            c.prompt_presence != nullptr &&
             (static_cast<unsigned int>(c.prompt_presence[v / 32]) & (1U << (v % 32)));
         if (in_prompt || cnt > 0) {
             x = x < 0.0f ? x * c.repetition_penalty : x / c.repetition_penalty;
@@ -317,32 +318,39 @@ __device__ inline void sampling_normalize_support(const SamplingConfig& cfg, flo
                                                   int n) {
     const int tid = threadIdx.x;
     if (tid == 0) {
-        const float inv_temp = 1.0f / cfg.temperature;
-        const float m        = cand_val[0] * inv_temp;
-        float sum            = 0.0f;
-        for (int j = 0; j < n; ++j) {
-            const float e = __expf(cand_val[j] * inv_temp - m);
-            prob[j]       = e;
-            sum += e;
+        while (n > 0 && !isfinite(cand_val[n - 1])) { --n; }
+        if (n == 0 || !isfinite(cand_val[0])) {
+            // The caller provides nonempty masks. Missing finite support is a model execution
+            // failure, not a distribution from which a placeholder token can be published.
+            asm volatile("trap;");
+        } else {
+            const float inv_temp = 1.0f / cfg.temperature;
+            const float m        = cand_val[0] * inv_temp;
+            float sum            = 0.0f;
+            for (int j = 0; j < n; ++j) {
+                const float e = __expf(cand_val[j] * inv_temp - m);
+                prob[j]       = e;
+                sum += e;
+            }
+            const float e0           = prob[0];
+            const float min_p_thresh = (cfg.min_p > 0.0f) ? cfg.min_p * e0 : -1.0f;
+            const bool top_p_active  = (cfg.top_p < 1.0f);
+            const float top_p_target = cfg.top_p * sum;
+            float cum                = 0.0f;
+            int support              = 0;
+            for (int j = 0; j < n; ++j) {
+                if (min_p_thresh >= 0.0f && prob[j] < min_p_thresh) { break; }
+                cum += prob[j];
+                support = j + 1;
+                if (top_p_active && cum >= top_p_target) { break; }
+            }
+            if (support < 1) { support = 1; }
+            float ssum = 0.0f;
+            for (int j = 0; j < support; ++j) { ssum += prob[j]; }
+            const float inv = 1.0f / ssum;
+            for (int j = 0; j < support; ++j) { prob[j] *= inv; }
+            *n_support = support;
         }
-        const float e0           = prob[0];
-        const float min_p_thresh = (cfg.min_p > 0.0f) ? cfg.min_p * e0 : -1.0f;
-        const bool top_p_active  = (cfg.top_p < 1.0f);
-        const float top_p_target = cfg.top_p * sum;
-        float cum                = 0.0f;
-        int support              = 0;
-        for (int j = 0; j < n; ++j) {
-            if (min_p_thresh >= 0.0f && prob[j] < min_p_thresh) { break; }
-            cum += prob[j];
-            support = j + 1;
-            if (top_p_active && cum >= top_p_target) { break; }
-        }
-        if (support < 1) { support = 1; }
-        float ssum = 0.0f;
-        for (int j = 0; j < support; ++j) { ssum += prob[j]; }
-        const float inv = 1.0f / ssum;
-        for (int j = 0; j < support; ++j) { prob[j] *= inv; }
-        *n_support = support;
     }
     __syncthreads();
 }
@@ -354,14 +362,13 @@ __device__ inline void
 sampling_build_truncated_small(const __nv_bfloat16* logits, std::int64_t base, std::int32_t vocab,
                                const SamplingConfig& cfg, float* tile_val, int* tile_idx,
                                float* cand_val, int* cand_idx, float* prob, int* n_support,
-                               const std::int32_t* overlay = nullptr, int overlay_len = 0,
-                               int column = 0) {
+                               const std::int32_t* overlay = nullptr, int overlay_len = 0) {
     const int tid = threadIdx.x;
     const int cap = sampling_candidate_cap(cfg, vocab);
     if (tid < kSamplerTileItems) {
         if (tid < vocab) {
             const float x = sampling_adjusted_logit(__bfloat162float(logits[base + tid]), tid, cfg,
-                                                    overlay, overlay_len, column);
+                                                    overlay, overlay_len);
             tile_val[tid] = x;
             tile_idx[tid] = tid;
         } else {
@@ -385,7 +392,7 @@ sampling_build_truncated_small(const __nv_bfloat16* logits, std::int64_t base, s
 __device__ inline void sampling_build_truncated_block_fast(
     const __nv_bfloat16* logits, std::int64_t base, std::int32_t vocab, const SamplingConfig& cfg,
     float* merge_val, int* merge_idx, float* cand_val, int* cand_idx, float* prob, int* n_support,
-    const std::int32_t* overlay = nullptr, int overlay_len = 0, int column = 0) {
+    const std::int32_t* overlay = nullptr, int overlay_len = 0) {
     const int tid = threadIdx.x;
     const int cap = sampling_candidate_cap(cfg, vocab); // always <= kSamplerFastCandidates
 
@@ -400,7 +407,7 @@ __device__ inline void sampling_build_truncated_block_fast(
     const int fast_cap = cap;
     for (int v = tid; v < vocab; v += blockDim.x) {
         const float x = sampling_adjusted_logit(__bfloat162float(logits[base + v]), v, cfg, overlay,
-                                                overlay_len, column);
+                                                overlay_len);
         sampling_insert_candidate(local_val, local_idx, fast_cap, x, v);
     }
 

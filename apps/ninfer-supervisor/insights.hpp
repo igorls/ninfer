@@ -22,7 +22,7 @@
 namespace ninfer::supervisor {
 
 inline nlohmann::json insight_unavailable(std::string id, std::string title, std::string statement,
-                                          nlohmann::json evidence = nlohmann::json::object(),
+                                          nlohmann::json evidence      = nlohmann::json::object(),
                                           nlohmann::json measured_over = {{"requests", 0}}) {
     return {{"id", std::move(id)},
             {"severity", "notice"},
@@ -174,10 +174,12 @@ private:
         std::uint64_t accepted = 0;
         std::uint64_t rounds   = 0;
     };
+
     struct SpecSteps {
-        std::uint64_t steps    = 0;  // draft rounds plus fallback steps
+        std::uint64_t steps    = 0; // draft rounds plus fallback steps
         std::uint64_t fallback = 0;
     };
+
     struct Spec {
         std::string backend;
         int draft_window              = 0;
@@ -201,27 +203,28 @@ private:
         std::int64_t tmax = 0;
     };
 
-    // Reuse collapse: a Host State pool that stays full while every later multi-turn request falls
-    // to root with no cache hit. A whole-file pass walks both series backwards from the end; this
-    // keeps the trailing run of saturated throughput samples and the multi-turn root misses that
-    // count toward the streak. The streak only counts requests stamped at or after the run's first
-    // sample, which needs the engine's timestamps to rise in file order; it stamps a record just
-    // before appending it, so concurrent requests can invert by a few milliseconds, which only
+    // Reuse collapse: a Host context arena that stays full while every later multi-turn request
+    // falls to root with no cache hit. A whole-file pass walks both series backwards from the end;
+    // this keeps the trailing run of saturated throughput samples and the multi-turn root misses
+    // that count toward the streak. The streak only counts requests stamped at or after the run's
+    // first sample, which needs the engine's timestamps to rise in file order; it stamps a record
+    // just before appending it, so concurrent requests can invert by a few milliseconds, which only
     // matters for a request that lands on the run's first sample.
     struct Miss {
-        std::int64_t ts     = 0;
+        std::int64_t ts      = 0;
         std::uint64_t refill = 0;
-        std::int64_t id     = 0;
+        std::int64_t id      = 0;
     };
+
     struct Collapse {
-        std::uint32_t capacity    = 0;  // host_state_slots of the instance; 0 when not reported
-        std::size_t run_samples   = 0;  // trailing saturated throughput samples
-        std::int64_t run_since    = 0;
-        std::int64_t run_until    = 0;
+        std::uint64_t capacity  = 0; // host_capacity_bytes of the instance; 0 when not reported
+        std::size_t run_samples = 0; // trailing saturated throughput samples
+        std::int64_t run_since  = 0;
+        std::int64_t run_until  = 0;
         // While a run is active: misses stamped at or after run_since since the last cache hit.
-        std::size_t streak        = 0;
+        std::size_t streak          = 0;
         std::uint64_t streak_refill = 0;
-        std::deque<std::int64_t> streak_ids;  // newest last, at most kSamples
+        std::deque<std::int64_t> streak_ids; // newest last, at most kSamples
         // While no run is active: misses since the last cache hit, not older than the latest
         // throughput sample, in case the next sample starts a run they belong to.
         std::deque<Miss> waiting;
@@ -232,30 +235,27 @@ private:
         std::uint64_t dones      = 0;
         std::int64_t max_context = 0;
         Spec spec;
-        std::map<std::int64_t, std::uint64_t> prompts;  // prompt tokens -> request_done count
-        std::vector<Largest> largest;                   // at most kSamples, largest total first
-        int near_limit                    = 0;
-        std::size_t occupancy_samples     = 0;
-        std::int64_t kv_now               = 0;
-        std::int64_t kv_high              = 0;
-        std::int64_t peak_running         = 0;
-        std::int64_t peak_waiting         = 0;
-        std::int64_t checkpoints_dropped  = 0;
-        std::int64_t private_evicted      = 0;
-        std::int64_t shared_evicted       = 0;
-        std::int64_t spill_pages          = 0;
-        std::int64_t search_exhaustions   = 0;
-        int admission_expired             = 0;
+        std::map<std::int64_t, std::uint64_t> prompts; // prompt tokens -> request_done count
+        std::vector<Largest> largest;                  // at most kSamples, largest total first
+        int near_limit                = 0;
+        std::size_t occupancy_samples = 0;
+        std::int64_t kv_now           = 0;
+        std::int64_t kv_high          = 0;
+        std::int64_t peak_running     = 0;
+        std::int64_t peak_waiting     = 0;
+        std::int64_t preemptions      = 0;
+        std::int64_t spill_pages      = 0;
+        int admission_expired         = 0;
         std::vector<std::int64_t> admission_expired_ids;
         Collapse collapse;
     };
 
     struct Bucket {
-        int queued   = 0;
-        int prefill  = 0;
-        int decode   = 0;
-        int mixed    = 0;
-        int unpaired = 0;
+        int queued            = 0;
+        int prefill           = 0;
+        int decode            = 0;
+        int mixed             = 0;
+        int unpaired          = 0;
         double queue_wait_sum = 0;
         double prepare_sum    = 0;
         double prefill_sum    = 0;
@@ -276,12 +276,15 @@ private:
     void fold_done(const nlohmann::json& done, std::int64_t ts);
     void fold_throughput(const nlohmann::json& tp, std::int64_t ts);
     void fold_error(const nlohmann::json& err);
+
     [[nodiscard]] bool in_scope(const nlohmann::json& j) const {
         return latest_instance_.empty() || j.value("server_instance_id", "") == latest_instance_;
     }
+
     [[nodiscard]] bool is_latest_instance(const nlohmann::json& j) const {
         return !latest_instance_.empty() && j.value("server_instance_id", "") == latest_instance_;
     }
+
     static std::string start_key(const nlohmann::json& j, std::int64_t request_id) {
         return j.value("server_instance_id", "") + ":" + std::to_string(request_id);
     }
@@ -292,12 +295,12 @@ private:
     std::int64_t tmax_   = 0;
 
     std::string latest_instance_;
-    std::int64_t latest_start_ = 0;
+    std::int64_t latest_start_    = 0;
     nlohmann::json latest_engine_ = nlohmann::json::object();
     Scope scope_;
 
     std::uint64_t starts_ = 0;
-    std::unordered_map<std::string, std::int64_t> open_starts_;  // instance:request_id -> start ms
+    std::unordered_map<std::string, std::int64_t> open_starts_; // instance:request_id -> start ms
     std::uint64_t dones_       = 0;
     std::uint64_t throughputs_ = 0;
     int max_waiting_           = 0;
@@ -309,14 +312,12 @@ private:
     int output_limit_hit_cap_  = 0;
     int thinking_requests_     = 0;
     int tools_declared_        = 0;
-    std::vector<std::int64_t> output_limit_ids_;  // the first kSamples
+    std::vector<std::int64_t> output_limit_ids_; // the first kSamples
     std::int64_t output_limit_cap_sum_ = 0;
-    int reuse_reset_single_ = 0;
-    int reuse_reset_multi_  = 0;
-    int reuse_restore_      = 0;
-    int reuse_seed_         = 0;
-    int reuse_append_       = 0;
-    int reuse_other_        = 0;
+    int reuse_root_single_             = 0;
+    int reuse_root_multi_              = 0;
+    int reuse_checkpoint_              = 0;
+    int reuse_other_                   = 0;
     std::uint64_t multi_prompt_tokens_ = 0;
     std::uint64_t multi_hit_tokens_    = 0;
     std::vector<nlohmann::json> reset_multi_samples_;
@@ -342,7 +343,8 @@ inline void RequestLogInsights::fold_record(const nlohmann::json& j) {
         // claimed. Drop those of earlier instances first; they can no longer finish.
         if (open_starts_.size() > kMaxOpenStarts) {
             const std::string prefix = latest_instance_ + ":";
-            std::erase_if(open_starts_, [&](const auto& kv) { return kv.first.rfind(prefix, 0) != 0; });
+            std::erase_if(open_starts_,
+                          [&](const auto& kv) { return kv.first.rfind(prefix, 0) != 0; });
             if (open_starts_.size() > kMaxOpenStarts) { open_starts_.clear(); }
         }
     } else if (event == "request_done") {
@@ -362,38 +364,35 @@ inline void RequestLogInsights::fold_server_start(const nlohmann::json& j, std::
             latest_instance_ = instance;
             scope_           = Scope{};
         }
-        latest_start_       = ts;
-        latest_engine_      = engine;
-        scope_.max_context  = json_i64(latest_engine_, "max_context");
+        latest_start_      = ts;
+        latest_engine_     = engine;
+        scope_.max_context = json_i64(latest_engine_, "max_context");
     }
     if (!instance.empty() && instance == latest_instance_ && engine.contains("context_cache")) {
-        const auto capacity = json_i64(engine.at("context_cache"), "host_state_slots");
-        if (capacity > 0 &&
-            capacity <= static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max())) {
-            scope_.collapse.capacity = static_cast<std::uint32_t>(capacity);
-        }
+        const auto capacity = json_i64(engine.at("context_cache"), "host_capacity_bytes");
+        if (capacity > 0) { scope_.collapse.capacity = static_cast<std::uint64_t>(capacity); }
     }
 }
 
 inline void RequestLogInsights::fold_done(const nlohmann::json& done, std::int64_t ts) {
     // value() throws on a field of the wrong type, so every such field is read before anything
     // changes and a malformed record leaves no partial trace.
-    const auto& req = done.contains("request") ? done.at("request") : nlohmann::json::object();
-    const auto id   = json_i64(req, "request_id");
+    const auto& req     = done.contains("request") ? done.at("request") : nlohmann::json::object();
+    const auto id       = json_i64(req, "request_id");
     const bool thinking = req.value("enable_thinking", false);
     const auto tool_count = json_i64(req, "tool_count");
-    const auto& result = done.contains("result") ? done.at("result") : nlohmann::json::object();
+    const auto& result    = done.contains("result") ? done.at("result") : nlohmann::json::object();
     const std::string finish = result.value("finish_reason", "");
     const int cap            = static_cast<int>(json_i64(req, "requested_output_tokens"));
     const int completion     = static_cast<int>(json_i64(result, "completion_tokens"));
     const int messages       = static_cast<int>(json_i64(req, "message_count"));
     const std::string reuse  = result.value("prefix_reuse_path", "");
     const auto prompt_tokens = static_cast<std::uint64_t>(json_i64(result, "prompt_tokens"));
-    const auto hit_tokens    = static_cast<std::uint64_t>(json_i64(result, "prefix_cache_hit_tokens"));
-    const bool multiturn     = messages >= 2;
-    const std::string join   = start_key(done, id);
-    const bool scoped        = in_scope(done);
-    const bool latest        = is_latest_instance(done);
+    const auto hit_tokens = static_cast<std::uint64_t>(json_i64(result, "prefix_cache_hit_tokens"));
+    const bool multiturn  = messages >= 2;
+    const std::string join = start_key(done, id);
+    const bool scoped      = in_scope(done);
+    const bool latest      = is_latest_instance(done);
     const auto& timings =
         done.contains("timings_seconds") ? done.at("timings_seconds") : nlohmann::json::object();
     const double total   = json_f64(timings, "total");
@@ -426,9 +425,9 @@ inline void RequestLogInsights::fold_done(const nlohmann::json& done, std::int64
         multi_prompt_tokens_ += prompt_tokens;
         multi_hit_tokens_ += hit_tokens;
     }
-    if (reuse == "full_reset") {
+    if (reuse == "root") {
         if (multiturn) {
-            ++reuse_reset_multi_;
+            ++reuse_root_multi_;
             if (reset_multi_samples_.size() < kSamples) {
                 reset_multi_samples_.push_back({{"request_id", id},
                                                 {"message_count", messages},
@@ -436,14 +435,10 @@ inline void RequestLogInsights::fold_done(const nlohmann::json& done, std::int64
                                                 {"prefix_cache_hit_tokens", hit_tokens}});
             }
         } else {
-            ++reuse_reset_single_;
+            ++reuse_root_single_;
         }
-    } else if (reuse.find("restore") != std::string::npos) {
-        ++reuse_restore_;
-    } else if (reuse.find("seed") != std::string::npos) {
-        ++reuse_seed_;
-    } else if (reuse.find("append") != std::string::npos) {
-        ++reuse_append_;
+    } else if (reuse == "checkpoint") {
+        ++reuse_checkpoint_;
     } else if (!reuse.empty()) {
         ++reuse_other_;
     }
@@ -464,7 +459,8 @@ inline void RequestLogInsights::fold_done(const nlohmann::json& done, std::int64
                 spec.draft_window = std::max(spec.draft_window, sp_window);
                 ++spec.windows_seen[sp_window];
                 auto count = [&](const char* key) {
-                    return static_cast<std::uint64_t>(std::max<std::int64_t>(0, json_i64(*sp, key)));
+                    return static_cast<std::uint64_t>(
+                        std::max<std::int64_t>(0, json_i64(*sp, key)));
                 };
                 const auto drafted      = count("drafted_tokens");
                 const auto accepted     = count("accepted_tokens");
@@ -472,21 +468,24 @@ inline void RequestLogInsights::fold_done(const nlohmann::json& done, std::int64
                 const auto rounds       = count("rounds");
                 const auto full_windows = (drafted + static_cast<std::uint64_t>(sp_window) - 1) /
                                           static_cast<std::uint64_t>(sp_window);
-                const auto draft_rounds =
-                    std::max(rounds > fallback ? rounds - fallback : std::uint64_t{0}, full_windows);
+                const auto draft_rounds = std::max(
+                    rounds > fallback ? rounds - fallback : std::uint64_t{0}, full_windows);
                 spec.rounds_reported += rounds;
                 spec.draft_rounds += draft_rounds;
                 spec.drafted += drafted;
                 spec.accepted += accepted;
                 spec.fallback += fallback;
                 half = {draft_rounds + fallback, fallback};
-                if (sp->contains("accepted_per_position") && sp->at("accepted_per_position").is_array()) {
+                if (sp->contains("accepted_per_position") &&
+                    sp->at("accepted_per_position").is_array()) {
                     const auto& pos = sp->at("accepted_per_position");
                     if (spec.positions.size() < pos.size()) { spec.positions.resize(pos.size()); }
                     for (std::size_t p = 0; p < pos.size(); ++p) {
                         if (!pos.at(p).is_number()) { continue; }
                         spec.positions[p].accepted += pos.at(p).get<std::uint64_t>();
-                        if (static_cast<int>(p) < sp_window) { spec.positions[p].rounds += draft_rounds; }
+                        if (static_cast<int>(p) < sp_window) {
+                            spec.positions[p].rounds += draft_rounds;
+                        }
                     }
                 }
                 if (fallback >= 8 && fallback * 2 >= draft_rounds + fallback &&
@@ -503,8 +502,10 @@ inline void RequestLogInsights::fold_done(const nlohmann::json& done, std::int64
                 if (drafted > 0) {
                     ++spec.requests_with_drafts;
                     if (spec.sample_ids.size() < kSamples) { spec.sample_ids.push_back(id); }
-                    const double ratio = static_cast<double>(accepted) / static_cast<double>(drafted);
-                    if (draft_rounds >= 8 && ratio < 0.25 && spec.low_acceptance_samples.size() < kSamples) {
+                    const double ratio =
+                        static_cast<double>(accepted) / static_cast<double>(drafted);
+                    if (draft_rounds >= 8 && ratio < 0.25 &&
+                        spec.low_acceptance_samples.size() < kSamples) {
                         spec.low_acceptance_samples.push_back({{"request_id", id},
                                                                {"drafted_tokens", drafted},
                                                                {"accepted_tokens", accepted},
@@ -538,7 +539,7 @@ inline void RequestLogInsights::fold_done(const nlohmann::json& done, std::int64
 
     // Reuse collapse: multi-turn requests of the latest instance only.
     if (latest && json_i64(req, "message_count") >= 2) {
-        auto& c = scope_.collapse;
+        auto& c         = scope_.collapse;
         const bool miss = reuse == "root" && json_i64(result, "prefix_cache_hit_tokens", -1) == 0;
         if (c.run_samples > 0 && ts < c.run_since) {
             // Stamped before the run began: outside the streak whether it hit or missed.
@@ -612,6 +613,9 @@ inline void RequestLogInsights::fold_throughput(const nlohmann::json& tp, std::i
         s.peak_running  = std::max(s.peak_running, json_i64(sch, "running"));
         s.peak_waiting  = std::max(s.peak_waiting, json_i64(sch, "waiting"));
     }
+    if (tp.contains("scheduling") && tp.at("scheduling").is_object()) {
+        s.preemptions += json_i64(tp.at("scheduling"), "preemptions");
+    }
     const bool has_cache = tp.contains("context_cache") && tp.at("context_cache").is_object();
     const auto& cache    = has_cache ? tp.at("context_cache") : nlohmann::json::object();
     if (has_cache) {
@@ -627,18 +631,17 @@ inline void RequestLogInsights::fold_throughput(const nlohmann::json& tp, std::i
         if (cache.contains("pressure") && cache.at("pressure").is_object()) {
             // Throughput records carry per-interval deltas, so sums are window totals.
             const auto& pr = cache.at("pressure");
-            s.checkpoints_dropped += json_i64(pr, "checkpoints_dropped");
-            s.private_evicted += json_i64(pr, "private_owners_evicted");
-            s.shared_evicted += json_i64(pr, "shared_owners_evicted");
             s.spill_pages += json_i64(pr, "spill_pages");
-            s.search_exhaustions += json_i64(pr, "search_budget_exhaustions");
         }
     }
 
     auto& c = s.collapse;
     if (!latest || c.capacity == 0) { return; }
-    const auto& occupancy = cache.contains("occupancy") ? cache.at("occupancy") : nlohmann::json::object();
-    if (json_i64(occupancy, "host_state_slots", -1) == static_cast<std::int64_t>(c.capacity)) {
+    const auto& occupancy =
+        cache.contains("occupancy") ? cache.at("occupancy") : nlohmann::json::object();
+    const auto occupied = json_i64(occupancy, "host_context_occupied_bytes", -1);
+    // Occupied already includes in-flight reserved destinations.
+    if (occupied == static_cast<std::int64_t>(c.capacity)) {
         if (c.run_samples == 0) {
             // A run starts: the misses waiting since the last hit join the streak if they were
             // stamped at or after this sample.
@@ -691,32 +694,32 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
         {"source", {{"request_log", bytes_ == 0 ? "empty" : "ok"}, {"path", std::string(path)}}},
         {"insights", nlohmann::json::array()},
     };
-    auto& insights = report["insights"];
+    auto& insights        = report["insights"];
     const double window_s = (tmax_ > tmin_) ? static_cast<double>(tmax_ - tmin_) / 1000.0 : 0.0;
 
     if (parsed_ == 0) {
-        insights.push_back(insight_unavailable(
-            "source.request_log", "Request log has no usable records",
-            "no request_done records in window",
-            {{"path", std::string(path)}, {"parsed_events", 0}}));
+        insights.push_back(
+            insight_unavailable("source.request_log", "Request log has no usable records",
+                                "no request_done records in window",
+                                {{"path", std::string(path)}, {"parsed_events", 0}}));
         report["generated_note"] = "unavailable is not a clean zero";
         return report;
     }
 
     if (dones_ == 0) {
-        insights.push_back(insight_unavailable(
-            "source.request_done", "No completed requests in window",
-            "no request_done records in window",
-            {{"parsed_events", parsed_}, {"request_start", starts_}},
-            {{"requests", 0}, {"parsed_events", parsed_}}));
+        insights.push_back(
+            insight_unavailable("source.request_done", "No completed requests in window",
+                                "no request_done records in window",
+                                {{"parsed_events", parsed_}, {"request_start", starts_}},
+                                {{"requests", 0}, {"parsed_events", parsed_}}));
         return report;
     }
 
-    const Scope& s           = scope_;
-    const Spec& spec         = s.spec;
-    const auto spec_scope_dones = s.dones;
+    const Scope& s                     = scope_;
+    const Spec& spec                   = s.spec;
+    const auto spec_scope_dones        = s.dones;
     const std::uint64_t other_instance = latest_instance_.empty() ? 0 : dones_ - s.dones;
-    const int paired = static_cast<int>(dones_) - b_.unpaired;
+    const int paired                   = static_cast<int>(dones_) - b_.unpaired;
 
     const auto over = nlohmann::json{{"requests", dones_},
                                      {"paired_requests", paired},
@@ -724,15 +727,15 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
                                      {"window_s", window_s},
                                      {"throughput_events", throughputs_}};
 
-    // A full Host State pool is not itself a fault: pressure can legitimately fill it briefly.
+    // A full Host context arena is not itself a fault: pressure can legitimately fill it briefly.
     // The production failure in #15 is the conjunction of a pool that remains full and later
     // multi-turn requests that all fall to Root with no cache hit. Keep the two signals joined so
     // ordinary first-turn Root selections never become a false alarm.
-    if (const auto& c = s.collapse;
-        c.capacity > 0 && c.run_samples >= 3 && c.run_until - c.run_since >= 60'000 && c.streak >= 3) {
+    if (const auto& c = s.collapse; c.capacity > 0 && c.run_samples >= 3 &&
+                                    c.run_until - c.run_since >= 60'000 && c.streak >= 3) {
         std::vector<std::int64_t> sample_ids(c.streak_ids.rbegin(), c.streak_ids.rend());
         std::ostringstream statement;
-        statement << "Host State occupancy remained at " << c.capacity << "/" << c.capacity
+        statement << "Host context occupancy remained at " << c.capacity << "/" << c.capacity
                   << " for " << c.run_samples << " consecutive throughput samples over "
                   << static_cast<double>(c.run_until - c.run_since) / 1000.0
                   << " s, while the latest " << c.streak
@@ -740,14 +743,14 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
         insights.push_back(insight_available(
             "prefix.reuse_collapsed", "warning", "Prefix reuse has collapsed", statement.str(),
             {{"server_instance_id", latest_instance_},
-             {"host_state_slots", c.capacity},
+             {"host_capacity_bytes", c.capacity},
              {"saturated_samples", c.run_samples},
              {"saturated_since_unix_ms", c.run_since},
              {"saturated_until_unix_ms", c.run_until},
              {"consecutive_multiturn_root_misses", c.streak},
              {"recomputed_prefill_tokens", c.streak_refill},
              {"sample_request_ids", sample_ids}},
-            "Restart restores reuse temporarily. Preserve the log and investigate Host State "
+            "Restart restores reuse temporarily. Preserve the log and investigate Host context "
             "checkpoint ownership before the pool saturates again.",
             "measured",
             {{"requests", c.streak},
@@ -759,9 +762,9 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
     const double mean_queue   = paired > 0 ? b_.queue_wait_sum / paired : 0.0;
     const double mean_prefill = b_.prefill_sum / n_done;
     const double mean_decode  = b_.decode_sum / n_done;
-    const int cause_max = std::max({b_.queued, b_.prefill, b_.decode, b_.mixed});
-    std::string cause   = "mixed";
-    std::string cause_id = "latency.mixed";
+    const int cause_max       = std::max({b_.queued, b_.prefill, b_.decode, b_.mixed});
+    std::string cause         = "mixed";
+    std::string cause_id      = "latency.mixed";
     std::vector<std::int64_t> cause_ids;
     if (cause_max == b_.queued && b_.queued > 0) {
         cause     = "queued behind concurrency";
@@ -811,11 +814,13 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
     std::string ttft_cause    = "mixed";
     std::string ttft_id       = "latency.ttft_mixed";
     std::string ttft_rec;
-    if (mean_prefill >= mean_prepare && mean_prefill >= mean_vision && mean_prefill >= 0.4 * std::max(ttft_body, mean_ttft)) {
+    if (mean_prefill >= mean_prepare && mean_prefill >= mean_vision &&
+        mean_prefill >= 0.4 * std::max(ttft_body, mean_ttft)) {
         ttft_cause = "prefill";
         ttft_id    = "latency.ttft_prefill_dominated";
         ttft_rec   = "TTFT is prefill-dominated. --prefill-chunk is the lever, not decode kernels.";
-    } else if (mean_prepare >= mean_prefill && mean_prepare >= 0.4 * std::max(ttft_body, mean_ttft)) {
+    } else if (mean_prepare >= mean_prefill &&
+               mean_prepare >= 0.4 * std::max(ttft_body, mean_ttft)) {
         ttft_cause = "prepare";
         ttft_id    = "latency.ttft_prepare_dominated";
         ttft_rec   = "TTFT is prepare-dominated (tokenize/media), not GPU decode.";
@@ -830,51 +835,47 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
               << (mean_prefill * 1000.0) << " ms, vision " << (mean_vision * 1000.0)
               << " ms (decode " << (mean_decode * 1000.0)
               << " ms is after first token). Dominant TTFT component: " << ttft_cause << ".";
-    insights.push_back(insight_available(
-        ttft_id, "info", "TTFT decomposition", ttft_stmt.str(),
-        {{"mean_ttft_s", mean_ttft},
-         {"mean_prepare_s", mean_prepare},
-         {"mean_prefill_s", mean_prefill},
-         {"mean_vision_s", mean_vision},
-         {"mean_decode_s", mean_decode},
-         {"dominant", ttft_cause}},
-        ttft_rec, "measured", over));
+    insights.push_back(insight_available(ttft_id, "info", "TTFT decomposition", ttft_stmt.str(),
+                                         {{"mean_ttft_s", mean_ttft},
+                                          {"mean_prepare_s", mean_prepare},
+                                          {"mean_prefill_s", mean_prefill},
+                                          {"mean_vision_s", mean_vision},
+                                          {"mean_decode_s", mean_decode},
+                                          {"dominant", ttft_cause}},
+                                         ttft_rec, "measured", over));
 
     const double multi_hit_ratio =
         multi_prompt_tokens_ == 0
             ? 0.0
             : static_cast<double>(multi_hit_tokens_) / static_cast<double>(multi_prompt_tokens_);
     std::ostringstream reuse_stmt;
-    reuse_stmt << "Reuse mix over " << dones_ << " request_done: full_reset single-turn "
-               << reuse_reset_single_ << " (expected), full_reset multi-turn " << reuse_reset_multi_
-               << ", restore " << reuse_restore_ << ", seed " << reuse_seed_ << ", append "
-               << reuse_append_ << ", other " << reuse_other_ << ". Multi-turn prefix-hit ratio "
-               << (multi_hit_ratio * 100.0) << "% (" << multi_hit_tokens_ << "/"
-               << multi_prompt_tokens_ << " tokens).";
-    insights.push_back(insight_available(
-        "prefix.reuse_mix", reuse_reset_multi_ > 0 ? "notice" : "info", "Prefix-cache reuse mix",
-        reuse_stmt.str(),
-        {{"full_reset_single_turn", reuse_reset_single_},
-         {"full_reset_multi_turn", reuse_reset_multi_},
-         {"restore", reuse_restore_},
-         {"seed", reuse_seed_},
-         {"append", reuse_append_},
-         {"other", reuse_other_},
-         {"multi_turn_prompt_tokens", multi_prompt_tokens_},
-         {"multi_turn_hit_tokens", multi_hit_tokens_},
-         {"multi_turn_hit_ratio", multi_hit_ratio}},
-        "", "measured", over));
-    if (reuse_reset_multi_ > 0) {
+    reuse_stmt << "Reuse mix over " << dones_ << " request_done: root single-turn "
+               << reuse_root_single_ << " (expected), root multi-turn " << reuse_root_multi_
+               << ", checkpoint " << reuse_checkpoint_ << ", other " << reuse_other_
+               << ". Multi-turn prefix-hit ratio " << (multi_hit_ratio * 100.0) << "% ("
+               << multi_hit_tokens_ << "/" << multi_prompt_tokens_ << " tokens).";
+    insights.push_back(insight_available("prefix.reuse_mix",
+                                         reuse_root_multi_ > 0 ? "notice" : "info",
+                                         "Prefix-cache reuse mix", reuse_stmt.str(),
+                                         {{"root_single_turn", reuse_root_single_},
+                                          {"root_multi_turn", reuse_root_multi_},
+                                          {"checkpoint", reuse_checkpoint_},
+                                          {"other", reuse_other_},
+                                          {"multi_turn_prompt_tokens", multi_prompt_tokens_},
+                                          {"multi_turn_hit_tokens", multi_hit_tokens_},
+                                          {"multi_turn_hit_ratio", multi_hit_ratio}},
+                                         "", "measured", over));
+    if (reuse_root_multi_ > 0) {
         std::ostringstream miss;
-        miss << reuse_reset_multi_ << " of " << dones_
-             << " request_done were multi-turn (message_count>=2) on full_reset with "
-             << "prefix_cache_hit_tokens often 0. A single-message full_reset is expected; "
-             << "a multi-turn full_reset is a miss that should have been restore or seed.";
+        miss << reuse_root_multi_ << " of " << dones_
+             << " request_done were multi-turn (message_count>=2) on root with "
+             << "prefix_cache_hit_tokens often 0. A single-message root is expected; "
+             << "a multi-turn root may indicate a missing or evicted checkpoint.";
         insights.push_back(insight_available(
-            "prefix.multiturn_full_reset", "warning", "Multi-turn conversations resetting the prefix",
+            "prefix.multiturn_root", "warning", "Multi-turn conversations resetting the prefix",
             miss.str(),
-            {{"full_reset_multi_turn", reuse_reset_multi_},
-             {"full_reset_single_turn", reuse_reset_single_},
+            {{"root_multi_turn", reuse_root_multi_},
+             {"root_single_turn", reuse_root_single_},
              {"samples", reset_multi_samples_}},
             "Check seed store / turn checkpoints. restore_turn_checkpoint or seed_prefix "
             "should fire when message_count>=2.",
@@ -884,30 +885,31 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
     // Speculative decoding: the counters are measured; any draft-window advice is inferred from
     // the position curve and says so. No telemetry or no drafts is unavailable, never 0%.
     {
-        constexpr double kMinUsefulPositionRate = 0.20;
+        constexpr double kMinUsefulPositionRate          = 0.20;
         constexpr std::uint64_t kMinDraftRoundsForAdvice = 50;
-        auto pct = [](double ratio) {
+        auto pct                                         = [](double ratio) {
             std::ostringstream o;
             o << std::fixed << std::setprecision(1) << (ratio * 100.0) << "%";
             return o.str();
         };
-        const auto spec_over = nlohmann::json{{"requests", spec.requests_with_drafts},
-                                              {"requests_with_telemetry", spec.requests_with_telemetry},
-                                              {"examined_requests", spec_scope_dones},
-                                              {"other_instance_requests", other_instance},
-                                              {"server_instance_id", latest_instance_},
-                                              {"draft_rounds", spec.draft_rounds},
-                                              {"window_s", spec.tmax > spec.tmin
-                                                               ? static_cast<double>(spec.tmax - spec.tmin) / 1000.0
-                                                               : 0.0}};
+        const auto spec_over = nlohmann::json{
+            {"requests", spec.requests_with_drafts},
+            {"requests_with_telemetry", spec.requests_with_telemetry},
+            {"examined_requests", spec_scope_dones},
+            {"other_instance_requests", other_instance},
+            {"server_instance_id", latest_instance_},
+            {"draft_rounds", spec.draft_rounds},
+            {"window_s",
+             spec.tmax > spec.tmin ? static_cast<double>(spec.tmax - spec.tmin) / 1000.0 : 0.0}};
         if (spec.requests_with_telemetry == 0) {
             std::ostringstream stmt;
             stmt << "no request_done of the latest server instance carries speculative telemetry "
                  << "with a configured backend; " << spec.requests_backend_none << " of "
-                 << spec_scope_dones << " report backend none and the rest have no speculative object";
+                 << spec_scope_dones
+                 << " report backend none and the rest have no speculative object";
             insights.push_back(insight_unavailable(
-                "speculative.draft_acceptance", "Speculative decoding telemetry is not in the window",
-                stmt.str(),
+                "speculative.draft_acceptance",
+                "Speculative decoding telemetry is not in the window", stmt.str(),
                 {{"requests_backend_none", spec.requests_backend_none},
                  {"requests", spec_scope_dones},
                  {"server_instance_id", latest_instance_}},
@@ -918,17 +920,18 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
             std::ostringstream stmt;
             stmt << "backend " << spec.backend << " with draft window " << spec.draft_window
                  << " is configured, but the " << spec.requests_with_telemetry
-                 << " request_done with telemetry recorded 0 drafted tokens ("
-                 << spec.fallback << " fallback steps); acceptance cannot be measured from zero drafts";
-            insights.push_back(insight_unavailable(
-                "speculative.draft_acceptance", "Speculative decoding has not drafted yet", stmt.str(),
-                {{"backend", spec.backend},
-                 {"draft_window", spec.draft_window},
-                 {"drafted_tokens", 0},
-                 {"fallback_steps", spec.fallback},
-                 {"requests_with_telemetry", spec.requests_with_telemetry},
-                 {"server_instance_id", latest_instance_}},
-                spec_over));
+                 << " request_done with telemetry recorded 0 drafted tokens (" << spec.fallback
+                 << " fallback steps); acceptance cannot be measured from zero drafts";
+            insights.push_back(
+                insight_unavailable("speculative.draft_acceptance",
+                                    "Speculative decoding has not drafted yet", stmt.str(),
+                                    {{"backend", spec.backend},
+                                     {"draft_window", spec.draft_window},
+                                     {"drafted_tokens", 0},
+                                     {"fallback_steps", spec.fallback},
+                                     {"requests_with_telemetry", spec.requests_with_telemetry},
+                                     {"server_instance_id", latest_instance_}},
+                                    spec_over));
         } else {
             std::uint64_t first_half_steps     = 0;
             std::uint64_t first_half_fallback  = 0;
@@ -937,7 +940,8 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
             for (std::size_t i = 0; i < spec.steps.size(); ++i) {
                 const bool second_half = i * 2 >= spec_scope_dones;
                 (second_half ? second_half_steps : first_half_steps) += spec.steps[i].steps;
-                (second_half ? second_half_fallback : first_half_fallback) += spec.steps[i].fallback;
+                (second_half ? second_half_fallback : first_half_fallback) +=
+                    spec.steps[i].fallback;
             }
             nlohmann::json per_position_accepted = nlohmann::json::array();
             nlohmann::json per_position_rate     = nlohmann::json::array();
@@ -962,15 +966,15 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
             const double acceptance =
                 static_cast<double>(spec.accepted) / static_cast<double>(spec.drafted);
             const std::uint64_t steps = spec.draft_rounds + spec.fallback;
-            auto share = [](std::uint64_t part, std::uint64_t whole) {
+            auto share                = [](std::uint64_t part, std::uint64_t whole) {
                 return whole > 0 ? static_cast<double>(part) / static_cast<double>(whole) : 0.0;
             };
             const double fallback_share = share(spec.fallback, steps);
             const double first_share    = share(first_half_fallback, first_half_steps);
             const double second_share   = share(second_half_fallback, second_half_steps);
             const bool fallback_high    = spec.fallback >= 10 && fallback_share >= 0.20;
-            const bool fallback_rising  = second_half_fallback >= 10 &&
-                                         second_share >= first_share + 0.10;
+            const bool fallback_rising =
+                second_half_fallback >= 10 && second_share >= first_share + 0.10;
             const bool advise_window = spec.draft_rounds >= kMinDraftRoundsForAdvice &&
                                        effective_window >= 1 &&
                                        effective_window < spec.draft_window;
@@ -997,23 +1001,27 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
                     rec << ", rising from " << pct(first_share) << " to " << pct(second_share)
                         << " across the window";
                 }
-                rec << ". The log records that those steps ran on the ordinary decode path, not why. "
+                rec << ". The log records that those steps ran on the ordinary decode path, not "
+                       "why. "
                        "Inferred: compare the high_fallback_samples (media, thinking, message "
                        "count) with requests that drafted normally, and check the engine log "
                        "around them, before changing the draft window. ";
             }
             if (advise_window) {
                 rec << "Inferred, not measured: draft positions " << (effective_window + 1) << ".."
-                    << spec.draft_window << " are accepted in under "
-                    << pct(kMinUsefulPositionRate) << " of draft rounds, so a draft window of "
-                    << effective_window << " would drop mostly rejected work. Verify with "
+                    << spec.draft_window << " are accepted in under " << pct(kMinUsefulPositionRate)
+                    << " of draft rounds, so a draft window of " << effective_window
+                    << " would drop mostly rejected work. Verify with "
                     << "--draft-tokens " << effective_window
                     << " and compare decode tok/s before keeping it.";
             }
             std::string recommendation = rec.str();
-            while (!recommendation.empty() && recommendation.back() == ' ') { recommendation.pop_back(); }
+            while (!recommendation.empty() && recommendation.back() == ' ') {
+                recommendation.pop_back();
+            }
             insights.push_back(insight_available(
-                "speculative.draft_acceptance", (fallback_high || fallback_rising) ? "warning" : "info",
+                "speculative.draft_acceptance",
+                (fallback_high || fallback_rising) ? "warning" : "info",
                 "Speculative draft acceptance", stmt.str(),
                 {{"backend", spec.backend},
                  {"server_instance_id", latest_instance_},
@@ -1050,7 +1058,7 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
     {
         constexpr double kNearContextRatio = 0.90;
         constexpr double kHighKvRatio      = 0.90;
-        auto pct = [](double ratio) {
+        auto pct                           = [](double ratio) {
             std::ostringstream o;
             o << std::fixed << std::setprecision(1) << (ratio * 100.0) << "%";
             return o.str();
@@ -1065,7 +1073,7 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
 
         // The k-th smallest prompt (0-based) from the histogram.
         const std::uint64_t n_req = s.dones;
-        auto nth_prompt = [&](std::uint64_t k) {
+        auto nth_prompt           = [&](std::uint64_t k) {
             std::uint64_t seen = 0;
             for (const auto& [tokens, count] : s.prompts) {
                 seen += count;
@@ -1074,16 +1082,19 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
             return std::int64_t{0};
         };
         const std::int64_t prompt_median = n_req ? nth_prompt((n_req - 1) / 2) : 0;
-        const std::int64_t prompt_p90 = n_req ? nth_prompt(std::min(n_req - 1, (n_req * 9) / 10)) : 0;
-        const std::int64_t prompt_max = n_req ? s.prompts.rbegin()->first : 0;
+        const std::int64_t prompt_p90 =
+            n_req ? nth_prompt(std::min(n_req - 1, (n_req * 9) / 10)) : 0;
+        const std::int64_t prompt_max    = n_req ? s.prompts.rbegin()->first : 0;
         const std::int64_t largest_total = s.largest.empty() ? 0 : s.largest.front().total;
         const double largest_ratio =
-            max_context > 0 ? static_cast<double>(largest_total) / static_cast<double>(max_context) : 0.0;
-        const int near_limit = s.near_limit;
+            max_context > 0 ? static_cast<double>(largest_total) / static_cast<double>(max_context)
+                            : 0.0;
+        const int near_limit           = s.near_limit;
         nlohmann::json largest_samples = nlohmann::json::array();
         for (const auto& l : s.largest) {
             const double ratio =
-                max_context > 0 ? static_cast<double>(l.total) / static_cast<double>(max_context) : 0.0;
+                max_context > 0 ? static_cast<double>(l.total) / static_cast<double>(max_context)
+                                : 0.0;
             largest_samples.push_back({{"request_id", l.id},
                                        {"prompt_tokens", l.prompt},
                                        {"completion_tokens", l.completion},
@@ -1092,58 +1103,54 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
                                        {"finish_reason", l.finish}});
         }
 
-        const std::size_t occupancy_samples   = s.occupancy_samples;
-        const std::int64_t kv_now             = s.kv_now;
-        const std::int64_t kv_high            = s.kv_high;
-        const std::int64_t peak_running       = s.peak_running;
-        const std::int64_t peak_waiting       = s.peak_waiting;
-        const std::int64_t checkpoints_dropped = s.checkpoints_dropped;
-        const std::int64_t private_evicted    = s.private_evicted;
-        const std::int64_t shared_evicted     = s.shared_evicted;
-        const std::int64_t spill_pages        = s.spill_pages;
-        const std::int64_t search_exhaustions = s.search_exhaustions;
-        const int admission_expired           = s.admission_expired;
+        const std::size_t occupancy_samples        = s.occupancy_samples;
+        const std::int64_t kv_now                  = s.kv_now;
+        const std::int64_t kv_high                 = s.kv_high;
+        const std::int64_t peak_running            = s.peak_running;
+        const std::int64_t peak_waiting            = s.peak_waiting;
+        const std::int64_t spill_pages             = s.spill_pages;
+        const int admission_expired                = s.admission_expired;
         const nlohmann::json admission_expired_ids = s.admission_expired_ids;
         const double kv_now_ratio =
-            kv_page_groups > 0 ? static_cast<double>(kv_now) / static_cast<double>(kv_page_groups) : 0.0;
+            kv_page_groups > 0 ? static_cast<double>(kv_now) / static_cast<double>(kv_page_groups)
+                               : 0.0;
         const double kv_high_ratio =
-            kv_page_groups > 0 ? static_cast<double>(kv_high) / static_cast<double>(kv_page_groups) : 0.0;
-        const std::int64_t pressure_events =
-            private_evicted + shared_evicted + spill_pages + search_exhaustions;
+            kv_page_groups > 0 ? static_cast<double>(kv_high) / static_cast<double>(kv_page_groups)
+                               : 0.0;
+        const std::int64_t pressure_events = s.preemptions + spill_pages;
 
-        nlohmann::json config = {{"max_context", max_context},
-                                 {"max_concurrency", max_concurrency},
-                                 {"kv_capacity_tokens", kv_tokens},
-                                 {"kv_page_groups", kv_page_groups},
-                                 {"tokens_per_page_group",
-                                  kv_page_groups > 0 ? kv_tokens / kv_page_groups : 0},
-                                 {"prefix_reuse", prefix_reuse}};
+        nlohmann::json config = {
+            {"max_context", max_context},
+            {"max_concurrency", max_concurrency},
+            {"kv_capacity_tokens", kv_tokens},
+            {"kv_page_groups", kv_page_groups},
+            {"tokens_per_page_group", kv_page_groups > 0 ? kv_tokens / kv_page_groups : 0},
+            {"prefix_reuse", prefix_reuse}};
         nlohmann::json requests_evidence = {
             {"count", n_req},
-            {"prompt_tokens", {{"median", prompt_median}, {"p90", prompt_p90}, {"max", prompt_max}}},
+            {"prompt_tokens",
+             {{"median", prompt_median}, {"p90", prompt_p90}, {"max", prompt_max}}},
             {"largest_total_tokens", largest_total},
             {"largest_context_ratio", largest_ratio},
             {"near_limit_count", near_limit},
             {"near_limit_ratio", kNearContextRatio}};
-        nlohmann::json kv_evidence = {{"pages_now", kv_now},
-                                      {"pages_high_water", kv_high},
-                                      {"pages_capacity", kv_page_groups},
-                                      {"utilization_now", kv_now_ratio},
-                                      {"utilization_high_water", kv_high_ratio},
-                                      {"samples", occupancy_samples},
-                                      {"includes_retained_checkpoints", prefix_reuse}};
-        nlohmann::json scheduler_evidence = {{"peak_running", peak_running},
-                                             {"peak_waiting", peak_waiting},
-                                             {"admission_expired", admission_expired},
-                                             {"admission_expired_request_ids", admission_expired_ids}};
-        nlohmann::json pressure_evidence = {{"checkpoints_dropped", checkpoints_dropped},
-                                            {"private_owners_evicted", private_evicted},
-                                            {"shared_owners_evicted", shared_evicted},
-                                            {"spill_pages", spill_pages},
-                                            {"search_budget_exhaustions", search_exhaustions}};
-        const auto cap_over = nlohmann::json{{"requests", n_req},
-                                             {"throughput_events", occupancy_samples},
-                                             {"server_instance_id", latest_instance_}};
+        nlohmann::json kv_evidence        = {{"pages_now", kv_now},
+                                             {"pages_high_water", kv_high},
+                                             {"pages_capacity", kv_page_groups},
+                                             {"utilization_now", kv_now_ratio},
+                                             {"utilization_high_water", kv_high_ratio},
+                                             {"samples", occupancy_samples},
+                                             {"includes_retained_checkpoints", prefix_reuse}};
+        nlohmann::json scheduler_evidence = {
+            {"peak_running", peak_running},
+            {"peak_waiting", peak_waiting},
+            {"admission_expired", admission_expired},
+            {"admission_expired_request_ids", admission_expired_ids}};
+        nlohmann::json pressure_evidence = {{"preemptions", s.preemptions},
+                                            {"spill_pages", spill_pages}};
+        const auto cap_over              = nlohmann::json{{"requests", n_req},
+                                                          {"throughput_events", occupancy_samples},
+                                                          {"server_instance_id", latest_instance_}};
 
         if (!have_config) {
             insights.push_back(insight_unavailable(
@@ -1167,55 +1174,68 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
                  {"largest_requests", largest_samples}},
                 cap_over));
         } else {
-            std::string kind = "comfortable";
+            std::string kind     = "comfortable";
             std::string severity = "info";
             std::ostringstream rec;
-            if (near_limit > 0) {
+            if (s.preemptions > 0) {
+                kind     = "preempted";
+                severity = "notice";
+                rec << "Measured: " << s.preemptions << " pauses made room, with " << spill_pages
+                    << " KV pages spilled. Inferred: raise --kv-capacity if VRAM "
+                       "allows, or reduce concurrent demand to reduce recovery work.";
+            } else if (near_limit > 0) {
                 kind     = "large_prompt";
                 severity = "warning";
                 rec << "Measured: " << near_limit << " request(s) used at least "
                     << pct(kNearContextRatio) << " of max_context " << max_context
-                    << "; the largest reached " << largest_total << " tokens. Inferred: raise "
+                    << "; the largest reached " << largest_total
+                    << " tokens. Inferred: raise "
                        "--max-context (and --kv-capacity to hold it) if VRAM allows, or shorten "
                        "those conversations; a request over the limit is rejected at admission.";
-            } else if ((peak_waiting > 0 || admission_expired > 0) &&
-                       max_concurrency > 0 && peak_running >= max_concurrency) {
+            } else if ((peak_waiting > 0 || admission_expired > 0) && max_concurrency > 0 &&
+                       peak_running >= max_concurrency) {
                 // Every lane was busy while requests waited: the concurrency cap, not the pool.
                 kind     = "lanes_full";
                 severity = admission_expired > 0 ? "warning" : "notice";
                 rec << "Measured: requests waited (peak " << peak_waiting << " waiting, "
                     << admission_expired << " expired before admission) while all "
                     << max_concurrency << " lanes were running; KV occupancy peaked at "
-                    << pct(kv_high_ratio) << ". Inferred: the concurrency limit is what queued "
+                    << pct(kv_high_ratio)
+                    << ". Inferred: the concurrency limit is what queued "
                        "them; raise --max-concurrency only if KV capacity and VRAM leave room "
                        "for another request's context.";
-            } else if ((peak_waiting > 0 || admission_expired > 0) && kv_high_ratio >= kHighKvRatio) {
+            } else if ((peak_waiting > 0 || admission_expired > 0) &&
+                       kv_high_ratio >= kHighKvRatio) {
                 // Lanes were free but requests still waited: the pool could not admit them.
                 kind     = "kv_admission";
                 severity = "warning";
                 rec << "Measured: requests waited (peak " << peak_waiting << " waiting, "
-                    << admission_expired << " expired before admission) with only "
-                    << peak_running << " of " << max_concurrency << " lanes running and KV "
-                       "occupancy at " << pct(kv_high_ratio) << ", while the largest single "
-                       "request used " << pct(largest_ratio) << " of max_context. Inferred: "
+                    << admission_expired << " expired before admission) with only " << peak_running
+                    << " of " << max_concurrency
+                    << " lanes running and KV "
+                       "occupancy at "
+                    << pct(kv_high_ratio)
+                    << ", while the largest single "
+                       "request used "
+                    << pct(largest_ratio)
+                    << " of max_context. Inferred: "
                        "concurrent requests exhausted the KV pool; raise --kv-capacity if VRAM "
-                       "allows, otherwise lower --max-context so each request reserves less.";
+                       "allows, otherwise lower --max-context to bound each request's KV growth.";
             } else if (kv_high_ratio >= kHighKvRatio && pressure_events > 0) {
-                // No queueing: the engine made room by evicting retained state. Follow-ups on
-                // the evicted conversations re-prefill; nothing failed.
+                // No queueing: the engine made room by spilling KV to host.
                 kind     = "cache_churn";
                 severity = "notice";
-                rec << "Measured: KV occupancy peaked at " << pct(kv_high_ratio) << " and the "
-                       "engine evicted " << (private_evicted + shared_evicted)
-                    << " retained conversation states (" << checkpoints_dropped
-                    << " checkpoints dropped) with no request waiting. Follow-ups on evicted "
-                       "conversations re-prefill instead of reusing. Inferred: raise "
-                       "--kv-capacity if VRAM allows; lowering --max-concurrency does not "
-                       "help this.";
+                rec << "Measured: KV occupancy peaked at " << pct(kv_high_ratio)
+                    << " and the "
+                       "engine spilled "
+                    << spill_pages
+                    << " KV pages with no request waiting. "
+                       "Host transfers add recovery work. Inferred: raise --kv-capacity if VRAM "
+                       "allows; this alone does not establish a concurrency problem.";
             } else if (kv_high_ratio >= kHighKvRatio) {
                 kind = "retained_cache";
                 rec << "Measured: KV occupancy peaked at " << pct(kv_high_ratio)
-                    << " without evictions, spills or queueing. With prefix reuse "
+                    << " without preemptions, spills or queueing. With prefix reuse "
                     << (prefix_reuse ? "on" : "off")
                     << " the pool holds retained checkpoints, so a full pool alone is not "
                        "pressure. Nothing to change from this window.";
@@ -1224,8 +1244,9 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
             std::ostringstream stmt;
             stmt << "Configured max_context " << max_context << " tokens, KV capacity " << kv_tokens
                  << " tokens (" << kv_page_groups << " page groups), max concurrency "
-                 << max_concurrency << ", prefix reuse " << (prefix_reuse ? "on" : "off") << ". Over "
-                 << n_req << " request_done on the latest server instance: prompt tokens median "
+                 << max_concurrency << ", prefix reuse " << (prefix_reuse ? "on" : "off")
+                 << ". Over " << n_req
+                 << " request_done on the latest server instance: prompt tokens median "
                  << prompt_median << ", p90 " << prompt_p90 << ", max " << prompt_max
                  << "; largest request " << largest_total << " tokens = " << pct(largest_ratio)
                  << " of max_context, " << near_limit << " within " << pct(kNearContextRatio)
@@ -1235,25 +1256,22 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
                  << (prefix_reuse ? ", including retained checkpoints" : "")
                  << ". Scheduler peak running " << peak_running << " of " << max_concurrency
                  << ", waiting " << peak_waiting << ", " << admission_expired
-                 << " expired before admission. Pressure over the window: checkpoints dropped "
-                 << checkpoints_dropped << ", owners evicted " << private_evicted << " private / "
-                 << shared_evicted << " shared, spill pages " << spill_pages
-                 << ", search budget exhaustions " << search_exhaustions << ". Verdict: " << kind
+                 << " expired before admission. Pressure over the window: preemptions "
+                 << s.preemptions << ", spill pages " << spill_pages << ". Verdict: " << kind
                  << ".";
 
-            insights.push_back(insight_available(
-                "capacity.context_kv_pressure", severity, "Context and KV capacity pressure",
-                stmt.str(),
-                {{"server_instance_id", latest_instance_},
-                 {"kind", kind},
-                 {"config", config},
-                 {"requests", requests_evidence},
-                 {"largest_requests", largest_samples},
-                 {"kv", kv_evidence},
-                 {"scheduler", scheduler_evidence},
-                 {"pressure", pressure_evidence},
-                 {"high_kv_ratio", kHighKvRatio}},
-                rec.str(), "measured", cap_over));
+            insights.push_back(insight_available("capacity.context_kv_pressure", severity,
+                                                 "Context and KV capacity pressure", stmt.str(),
+                                                 {{"server_instance_id", latest_instance_},
+                                                  {"kind", kind},
+                                                  {"config", config},
+                                                  {"requests", requests_evidence},
+                                                  {"largest_requests", largest_samples},
+                                                  {"kv", kv_evidence},
+                                                  {"scheduler", scheduler_evidence},
+                                                  {"pressure", pressure_evidence},
+                                                  {"high_kv_ratio", kHighKvRatio}},
+                                                 rec.str(), "measured", cap_over));
         }
     }
 
@@ -1307,7 +1325,7 @@ inline nlohmann::json analyze_request_log_jsonl(std::string_view jsonl, std::str
     RequestLogInsights insights;
     std::size_t begin = 0;
     while (begin < jsonl.size()) {
-        const auto end = jsonl.find('\n', begin);
+        const auto end  = jsonl.find('\n', begin);
         const auto stop = end == std::string_view::npos ? jsonl.size() : end;
         insights.fold_line(jsonl.substr(begin, stop - begin));
         begin = stop + 1;
@@ -1318,18 +1336,18 @@ inline nlohmann::json analyze_request_log_jsonl(std::string_view jsonl, std::str
 inline nlohmann::json request_log_unconfigured_report() {
     nlohmann::json report;
     report["source"]   = {{"request_log", "unconfigured"}, {"path", ""}};
-    report["insights"] = nlohmann::json::array({insight_unavailable(
-        "source.request_log", "Request log is not configured", "no request_done records in window",
-        {{"path", ""}})});
+    report["insights"] = nlohmann::json::array(
+        {insight_unavailable("source.request_log", "Request log is not configured",
+                             "no request_done records in window", {{"path", ""}})});
     return report;
 }
 
 inline nlohmann::json request_log_missing_report(const std::string& path) {
     nlohmann::json report;
     report["source"]   = {{"request_log", "missing"}, {"path", path}};
-    report["insights"] = nlohmann::json::array({insight_unavailable(
-        "source.request_log", "Request log is not present", "no request_done records in window",
-        {{"path", path}})});
+    report["insights"] = nlohmann::json::array(
+        {insight_unavailable("source.request_log", "Request log is not present",
+                             "no request_done records in window", {{"path", path}})});
     return report;
 }
 
@@ -1338,20 +1356,20 @@ inline nlohmann::json request_log_missing_report(const std::string& path) {
 // report says it is still reading rather than showing that.
 inline nlohmann::json request_log_reading_report(const std::string& path, std::uint64_t bytes_read,
                                                  std::uint64_t bytes_total) {
-    const double mib     = 1024.0 * 1024.0;
-    const double percent = bytes_total > 0 ? 100.0 * static_cast<double>(bytes_read) /
-                                                 static_cast<double>(bytes_total)
-                                           : 0.0;
+    const double mib = 1024.0 * 1024.0;
+    const double percent =
+        bytes_total > 0 ? 100.0 * static_cast<double>(bytes_read) / static_cast<double>(bytes_total)
+                        : 0.0;
     std::ostringstream statement;
-    statement << std::fixed << std::setprecision(0) << "Reading the request log: "
-              << static_cast<double>(bytes_read) / mib << " of "
+    statement << std::fixed << std::setprecision(0)
+              << "Reading the request log: " << static_cast<double>(bytes_read) / mib << " of "
               << static_cast<double>(bytes_total) / mib << " MiB (" << percent
               << "%). Findings appear once the whole log has been read.";
     nlohmann::json report;
-    report["source"] = {{"request_log", "reading"},
-                        {"path", path},
-                        {"bytes_read", bytes_read},
-                        {"bytes_total", bytes_total}};
+    report["source"]   = {{"request_log", "reading"},
+                          {"path", path},
+                          {"bytes_read", bytes_read},
+                          {"bytes_total", bytes_total}};
     report["insights"] = nlohmann::json::array({insight_unavailable(
         "source.request_log", "Reading the request log", statement.str(),
         {{"path", path}, {"bytes_read", bytes_read}, {"bytes_total", bytes_total}})});
@@ -1371,7 +1389,7 @@ inline void append_admin_vram_insights(nlohmann::json& report, const nlohmann::j
             {{"note", note}}));
         return;
     }
-    nlohmann::json pinned = nlohmann::json::array();
+    nlohmann::json pinned   = nlohmann::json::array();
     nlohmann::json released = nlohmann::json::array();
     if (admin.contains("tiers") && admin.at("tiers").is_array()) {
         for (const auto& tier : admin.at("tiers")) {
@@ -1402,20 +1420,19 @@ inline void append_admin_vram_insights(nlohmann::json& report, const nlohmann::j
             {{"pinned_tiers", pinned},
              {"last_transition", admin.value("last_transition", "")},
              {"last_reason", admin.value("last_reason", "")}},
-            "Omit --prefix-cache-mib or set a max above min if you want idle release.",
-            "measured", over));
+            "Omit --prefix-cache-mib or set a max above min if you want idle release.", "measured",
+            over));
     }
     if (!released.empty()) {
         report["insights"].push_back(insight_available(
-            "vram.tier_currently_released", "notice",
-            "A VRAM tier is currently released",
+            "vram.tier_currently_released", "notice", "A VRAM tier is currently released",
             "Released tiers: " + released.dump() +
                 ". The engine is serving degraded (no cross-request prefix seeding) until reclaim. "
                 "Release is ~120x cheaper than reclaim on this hardware.",
             {{"released", released},
              {"last_transition", admin.value("last_transition", "")},
              {"last_reason", admin.value("last_reason", "")}},
-            "Reclaim before a traffic burst; a released seed store will full_reset more often.",
+            "Reclaim before a traffic burst; released checkpoints can require more recomputation.",
             "measured", over));
     }
 }

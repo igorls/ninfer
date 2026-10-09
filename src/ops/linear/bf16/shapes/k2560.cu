@@ -2,11 +2,9 @@
 #include "ops/linear/bf16/bf16_shapes.h"
 #include "ops/linear/bf16/bf16_launch.cuh"
 
-// Every BF16 K=2560 problem. Kernel instances depend on K and the token tile, not on N, so all
-// routes live in this one translation unit: a second TU instantiating the same schedule would
-// register a duplicate device kernel. Wide rows ([10240,2560], [13312,2560] and the [248320,2560]
-// vocabulary head) share one route table; the narrow [2560,2560] and [640,2560] problems use
-// eight-row GEMV tiles that keep 80-320 CTAs resident at T=1.
+// Shared Flash-Next K=2560 decode reductions are instantiated here once. The vocabulary
+// head and square projection preserve single-column arithmetic through 48 physical columns;
+// their wider prefill routes use the upstream shape-specific schedules.
 namespace ninfer::ops::detail {
 namespace {
 using Gemv = Bf16A16GemvSchedule<4, 1, 8, 8, 4, Bf16ActivationAccess::Direct,
@@ -14,8 +12,9 @@ using Gemv = Bf16A16GemvSchedule<4, 1, 8, 8, 4, Bf16ActivationAccess::Direct,
 // PLE and the target readout retain the single-column reduction when a speculative window
 // changes the physical column count. Reuse weights across four independent columns,
 // preserving GEMV's phase order and four accumulator chains.
-using DecodeBatch = Bf16A16SimtSchedule<4, 1, 8, 8, 4, 4, Bf16SimtActivationAccess::WarpPacked,
-                                 Bf16WeightCache::Default, Bf16PhaseOrder::RowSwizzled, 1, 1, 1, 2>;
+using DecodeBatch =
+    Bf16A16SimtSchedule<4, 1, 8, 8, 4, 4, Bf16SimtActivationAccess::WarpPacked,
+                        Bf16WeightCache::Default, Bf16PhaseOrder::RowSwizzled, 1, 1, 1, 2>;
 } // namespace
 
 Bf16Launch select_bf16_n10240_k2560(std::int32_t tokens) {
@@ -34,28 +33,25 @@ Bf16Launch select_bf16_n13312_k2560(std::int32_t tokens) {
     return select_bf16_n10240_k2560(tokens);
 }
 
-Bf16Launch select_bf16_n248320_k2560(std::int32_t tokens) {
-    return select_bf16_n10240_k2560(tokens);
-}
 namespace {
-using NarrowGemv = Bf16A16GemvSchedule<8, 2, 2, 8, 4, Bf16ActivationAccess::Direct,
-                                 Bf16WeightCache::Default, Bf16PhaseOrder::RowSwizzled, 1, 2, 1, 1>;
-using NarrowC2 = Bf16A16SimtSchedule<4, 1, 4, 8, 1, 4, Bf16SimtActivationAccess::WarpPacked,
-                                 Bf16WeightCache::Default, Bf16PhaseOrder::Sequential, 1, 2, 1, 2>;
-using NarrowC4 = Bf16A16SimtSchedule<4, 1, 2, 8, 1, 4, Bf16SimtActivationAccess::WarpPacked,
-                                 Bf16WeightCache::Default, Bf16PhaseOrder::Sequential, 1, 2, 1, 2>;
-using NarrowDecodeBatch = Bf16A16SimtSchedule<4, 2, 2, 8, 4, 4,
-                                 Bf16SimtActivationAccess::WarpPacked, Bf16WeightCache::Default,
-                                 Bf16PhaseOrder::RowSwizzled, 1, 1, 2, 1>;
+using NarrowGemv =
+    Bf16A16GemvSchedule<8, 2, 2, 8, 4, Bf16ActivationAccess::Direct, Bf16WeightCache::Default,
+                        Bf16PhaseOrder::RowSwizzled, 1, 2, 1, 1>;
+using NarrowC2 =
+    Bf16A16SimtSchedule<4, 1, 4, 8, 1, 4, Bf16SimtActivationAccess::WarpPacked,
+                        Bf16WeightCache::Default, Bf16PhaseOrder::Sequential, 1, 2, 1, 2>;
+using NarrowC4 =
+    Bf16A16SimtSchedule<4, 1, 2, 8, 1, 4, Bf16SimtActivationAccess::WarpPacked,
+                        Bf16WeightCache::Default, Bf16PhaseOrder::Sequential, 1, 2, 1, 2>;
+using NarrowDecodeBatch =
+    Bf16A16SimtSchedule<4, 2, 2, 8, 4, 4, Bf16SimtActivationAccess::WarpPacked,
+                        Bf16WeightCache::Default, Bf16PhaseOrder::RowSwizzled, 1, 1, 2, 1>;
 } // namespace
 
 Bf16Launch select_bf16_n2560_k2560(std::int32_t tokens) {
     if (tokens == 1) return launch_bf16_gemv<Bf16ScheduleInstance<NarrowGemv, 2560>>;
     if (tokens <= 48) return launch_bf16_simt<Bf16ScheduleInstance<NarrowDecodeBatch, 2560>>;
-    if (tokens <= 64) return launch_bf16_mma<Bf16ScheduleInstance<Bf16A16MmaR32T32K128S3, 2560>>;
-    if (tokens <= 128)
-        return launch_bf16_tma_mma<Bf16ScheduleInstance<Bf16A16TmaR64T64K64S3, 2560>>;
-    return launch_bf16_tma_mma<Bf16ScheduleInstance<Bf16A16TmaR64T128K64S2, 2560>>;
+    return select_bf16_n2560_k2560_prefill(tokens);
 }
 
 Bf16Launch select_bf16_n640_k2560(std::int32_t tokens) {

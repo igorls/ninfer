@@ -290,7 +290,8 @@ void TextContext::gdn(const GdnParameters& p, std::uint32_t layer, workspace::La
     Tensor recurrent  = stage.recurrent.view({head_dim, value_heads * tokens});
     Tensor z          = stage.z.view({head_dim, value_heads * tokens});
     Tensor normalized = stage.normalized.view({head_dim, value_heads * tokens});
-    ops::gated_rmsnorm_sigmoid(recurrent, p.norm, z, config_.rms_norm_eps, normalized, s);
+    ops::gated_rmsnorm_sigmoid(recurrent, p.norm, z, config_.rms_norm_eps, normalized,
+                               ctx_.execution_view());
     project(stage.normalized, p.output, roots.block_output);
 }
 
@@ -551,6 +552,7 @@ PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std
                               prompt->positions.size() != 3 * full_ids.size())) {
         throw std::invalid_argument("prepared prompt positions do not cover the prefill ledger");
     }
+    if (prefill_gpu_timer_) { prefill_gpu_timer_->start(); }
     const bool is_last = finalize_at_end && static_cast<std::uint32_t>(len) == nominal_length;
     nvtx::ScopedRange chunk_range(nvtx::Name::PrefillChunk, nvtx::Category::Prefill,
                                   static_cast<std::uint64_t>(len));
@@ -715,9 +717,14 @@ PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std
         rope_positions_ = nullptr;
     }
     prefill_split_frontier_ = -1;
+    if (prefill_gpu_timer_) { prefill_gpu_timer_->record_stop(); }
     timing.begin_wait();
     ctx_.synchronize();
     timing.end_wait();
+    if (prefill_gpu_timer_) {
+        timing.include({.gpu_elapsed_ns = static_cast<std::uint64_t>(
+                            static_cast<double>(prefill_gpu_timer_->elapsed_ms()) * 1.0e6 + 0.5)});
+    }
     work_.reset();
     return PrefillChunkResult{.processed_tokens = static_cast<std::uint32_t>(len),
                               .finalized        = is_last,

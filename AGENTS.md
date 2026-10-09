@@ -44,11 +44,12 @@ use the same architecture, binding and execution path. The implementation target
 is tuned on NVIDIA GeForce RTX 5090.
 
 Generation uses one GPU, one resident model, startup-fixed concurrency of one to eight requests,
-bounded FIFO ingress, no active-request preemption, and one compact decode batch per round.
+bounded FIFO ingress, resource-pressure preemption with snapshot or token-replay recovery, and
+one compact decode batch per round.
 Generation and offline CausalScoring use the same public `.ninfer` Engine route. Delivered
 capabilities and commands are documented in `README.md`, the product guides, and executable
-`--help`. New mathematical architectures, execution platforms, large-scale/preemptive continuous
-batching, and priority/QoS require an explicit product change. Another training instance or mixture
+`--help`. New mathematical architectures, execution platforms, large-scale continuous
+batching and priority/QoS require an explicit product change. Another training instance or mixture
 of existing representations does not require a checkpoint-specific execution registration.
 
 This is a local, single-owner project with trusted local models, generated artifacts, and

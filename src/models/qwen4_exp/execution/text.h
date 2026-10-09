@@ -159,6 +159,8 @@ public:
                      Tensor* logits, const OrdinaryDecodeInputs* batch = nullptr,
                      bool teacher = false);
 
+    void set_prefill_gpu_timer(CudaEventTimer* timer) noexcept { prefill_gpu_timer_ = timer; }
+
 private:
     void project(const Tensor& x, const LinearParameters& parameters, Tensor& out);
     void decode_batch(const OrdinaryDecodeInputs& inputs, Tensor& hidden, Tensor& logits);
@@ -173,6 +175,7 @@ private:
              bool prefill, std::int32_t tokens);
     void run_prompt_readout(const Tensor& streams, std::int64_t begin, std::int32_t length);
 
+    CudaEventTimer* prefill_gpu_timer_ = nullptr;
     DeviceContext& ctx_;
     const Parameters& parameters_;
     const TextConfig& config_;

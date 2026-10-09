@@ -27,9 +27,9 @@ namespace ninfer::ops {
  * Logical shapes:
  *   logits is [physical_rows,C] with C>0 and 1<=valid_rows<=physical_rows; sampled_ids is I32
  *   [C]; candidate_ids is I32 [N] with N>0 when given; allowed is I32 [mask_words] with
- *   mask_words*32>=valid_rows when given, one mask for every column; sampled_out is FP32 [2,C];
- *   candidates_out is FP32 [2,N,C], required exactly when candidate_ids is given. Every id is in
- *   [0,valid_rows). Rows [valid_rows,physical_rows) do not participate.
+ *   mask_words*32>=valid_rows when given (broadcast), or [mask_words,C] for per-column masks;
+ * sampled_out is FP32 [2,C]; candidates_out is FP32 [2,N,C], required exactly when candidate_ids is
+ * given. Every id is in [0,valid_rows). Rows [valid_rows,physical_rows) do not participate.
  *
  * Supported domain:
  *   logits is contiguous finite BF16; ids and allowed are contiguous I32; outputs are contiguous

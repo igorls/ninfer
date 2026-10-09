@@ -44,10 +44,13 @@ struct RunResult {
 bool same_config(const ops::SamplingConfig& a, const ops::SamplingConfig& b) {
     return a.temperature == b.temperature && a.top_k == b.top_k && a.top_p == b.top_p &&
            a.min_p == b.min_p && a.presence_penalty == b.presence_penalty &&
-           a.frequency_penalty == b.frequency_penalty && a.repetition_penalty == b.repetition_penalty &&
-           a.prompt_presence == b.prompt_presence && a.history_overlay == b.history_overlay &&
-           a.history_overlay_size == b.history_overlay_size && a.commit_token_counts == b.commit_token_counts && a.seed == b.seed &&
-           a.token_counts == b.token_counts && a.allowed_tokens == b.allowed_tokens;
+           a.frequency_penalty == b.frequency_penalty &&
+           a.repetition_penalty == b.repetition_penalty && a.prompt_presence == b.prompt_presence &&
+           a.history_overlay == b.history_overlay &&
+           a.history_overlay_size == b.history_overlay_size &&
+           a.commit_token_counts == b.commit_token_counts && a.seed == b.seed &&
+           a.token_counts == b.token_counts && a.mask.words == b.mask.words &&
+           a.mask.stride == b.mask.stride;
 }
 
 std::vector<std::uint16_t> bf16_bits(const std::vector<float>& values) {
@@ -75,8 +78,10 @@ std::vector<int> greedy_oracle(const std::vector<float>& logits, int physical_ro
         for (int token = 1; token < token_domain; ++token) {
             const auto adjusted = [&](int candidate) {
                 const int count = counts[static_cast<std::size_t>(candidate)];
-                double value = logits[base + candidate];
-                if (count > 0) value = value < 0 ? value * config.repetition_penalty : value / config.repetition_penalty;
+                double value    = logits[base + candidate];
+                if (count > 0)
+                    value = value < 0 ? value * config.repetition_penalty
+                                      : value / config.repetition_penalty;
                 return value - config.presence_penalty * (count > 0) -
                        config.frequency_penalty * count;
             };
@@ -89,17 +94,21 @@ std::vector<int> greedy_oracle(const std::vector<float>& logits, int physical_ro
 
 Distribution distribution_oracle(const std::vector<float>& column, int token_domain,
                                  const ops::SamplingConfig& config,
-                                 const std::vector<int>* counts = nullptr) {
-    std::vector<Candidate> candidates(static_cast<std::size_t>(token_domain));
+                                 const std::vector<int>* counts         = nullptr,
+                                 const std::vector<std::uint32_t>* mask = nullptr) {
+    std::vector<Candidate> candidates;
+    candidates.reserve(token_domain);
     for (int token = 0; token < token_domain; ++token) {
+        if (mask && !((*mask)[token / 32] & (1u << (token % 32)))) { continue; }
         const int count = counts == nullptr ? 0 : (*counts)[static_cast<std::size_t>(token)];
         double adjusted = static_cast<double>(column[static_cast<std::size_t>(token)]);
         if (count > 0) {
-            adjusted = adjusted < 0 ? adjusted * config.repetition_penalty : adjusted / config.repetition_penalty;
+            adjusted = adjusted < 0 ? adjusted * config.repetition_penalty
+                                    : adjusted / config.repetition_penalty;
             adjusted -= static_cast<double>(config.presence_penalty);
         }
         adjusted -= static_cast<double>(config.frequency_penalty) * static_cast<double>(count);
-        candidates[static_cast<std::size_t>(token)] = {adjusted, token};
+        candidates.push_back({adjusted, token});
     }
     std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
         if (a.adjusted != b.adjusted) { return a.adjusted > b.adjusted; }
@@ -108,7 +117,7 @@ Distribution distribution_oracle(const std::vector<float>& column, int token_dom
 
     int cap = 20;
     if (config.top_k > 0 && config.top_k < 20) { cap = config.top_k; }
-    cap = std::min(cap, token_domain);
+    cap = std::min(cap, static_cast<int>(candidates.size()));
     candidates.resize(static_cast<std::size_t>(cap));
 
     std::vector<double> weights(static_cast<std::size_t>(cap));
@@ -396,12 +405,12 @@ int deterministic_stochastic_contract() {
     };
     for (const Case& test_case : cases) {
         ops::SamplingConfig config;
-        config.temperature       = 0.8f;
-        config.top_k             = 1;
-        config.presence_penalty  = test_case.presence;
-        config.frequency_penalty = test_case.frequency;
+        config.temperature        = 0.8f;
+        config.top_k              = 1;
+        config.presence_penalty   = test_case.presence;
+        config.frequency_penalty  = test_case.frequency;
         config.repetition_penalty = 1.25f;
-        config.seed              = 9981;
+        config.seed               = 9981;
         const Distribution oracle =
             distribution_oracle(column, static_cast<int>(column.size()), config, &test_case.counts);
         RunResult result = run_homogeneous_batch(column, static_cast<int>(column.size()),
@@ -611,7 +620,8 @@ int constrained_sampling_contract() {
             std::vector<float> logits(static_cast<std::size_t>(domain + 3) * batch, 100.0f);
             for (int row = 0; row < batch; ++row) {
                 expected[row] = domain - 1 - row;
-                masks[row * words + expected[row] / 32] = static_cast<std::int32_t>(1U << (expected[row] % 32));
+                masks[row * words + expected[row] / 32] =
+                    static_cast<std::int32_t>(1U << (expected[row] % 32));
                 logits[row * (domain + 3) + expected[row]] = -10.0f;
             }
             DeviceBuffer device_masks = to_device(masks);
@@ -619,14 +629,47 @@ int constrained_sampling_contract() {
                 std::vector<ops::SamplingConfig> configs(batch);
                 for (int row = 0; row < batch; ++row) {
                     configs[row].temperature = temperature;
-                    configs[row].allowed_tokens = static_cast<const std::int32_t*>(device_masks.p) + row * words;
+                    configs[row].mask.words =
+                        static_cast<const std::uint32_t*>(device_masks.p) + row * words;
                 }
-                const auto result = run_batch(logits, domain + 3, domain, configs, positions, ops::kSamplePurposeDecode);
+                const auto result = run_batch(logits, domain + 3, domain, configs, positions,
+                                              ops::kSamplePurposeDecode);
                 failures += result.integrity_failures;
-                failures += verify_exact("mask precedes greedy and top-k with per-row isolation", result.tokens, expected);
-                failures += verify_exact("sampling mask is read-only", from_device<std::int32_t>(device_masks, masks.size()), masks);
+                failures += verify_exact("mask precedes greedy and top-k with per-row isolation",
+                                         result.tokens, expected);
+                failures +=
+                    verify_exact("sampling mask is read-only",
+                                 from_device<std::int32_t>(device_masks, masks.size()), masks);
             }
         }
+    }
+    return failures;
+}
+
+int grammar_mask_contract() {
+    int failures = 0;
+    for (int domain : {64, 257, 248077}) {
+        // Legal candidates rank below the unmasked top-20. Only two legal tokens remain.
+        std::vector<float> column(domain + 3, 10.0f);
+        column[domain - 1] = 1.0f;
+        column[domain - 2] = 0.0f;
+        std::vector<std::uint32_t> mask((domain + 31) / 32, 0);
+        for (int token : {domain - 1, domain - 2}) mask[token / 32] |= 1u << (token % 32);
+        auto device_mask = to_device(mask);
+        ops::SamplingConfig config;
+        config.mask       = {static_cast<const std::uint32_t*>(device_mask.p),
+                             static_cast<int>(mask.size())};
+        const auto greedy = run_homogeneous_batch(repeat_column(column, 8), domain + 3, domain, 8,
+                                                  config, 0, ops::kSamplePurposeDecode);
+        failures += greedy.integrity_failures;
+        failures += verify_exact("masked greedy", greedy.tokens, std::vector<int>(8, domain - 1));
+        config.temperature = 0.75f;
+        config.seed        = 713179;
+        const auto oracle  = distribution_oracle(column, domain, config, nullptr, &mask);
+        const auto sampled =
+            run_repeated(column, domain, 4096, 8, config, 100, ops::kSamplePurposeDecode);
+        failures += sampled.integrity_failures;
+        failures += verify_distribution("masked distribution", sampled.tokens, oracle);
     }
     return failures;
 }
@@ -659,29 +702,29 @@ int qualify_repetition_penalty() {
         // Token 31 also exercises the signed high bit of the membership word.
         for (const int source : {0, 1, 2}) {
             const int repeated = source == 0 ? 31 : source == 1 ? 32 : domain - 1;
-            const int unseen = 33;
+            const int unseen   = 33;
             std::vector<int> counts(domain, 0);
             std::vector<int> prompt((domain + 31) / 32, 0);
             std::vector<int> overlay{repeated, repeated};
             if (source == 0) prompt[repeated / 32] = std::bit_cast<int>(1U << (repeated % 32));
             if (source == 1) counts[repeated] = 2;
-            auto device_prompt = to_device(prompt);
+            auto device_prompt  = to_device(prompt);
             auto device_overlay = to_device(overlay);
             for (const float penalty : {0.75f, 1.0f, 1.25f}) {
                 for (const bool negative : {false, true}) {
                     std::vector<float> values(domain, -20.0f);
-                    values[repeated] = negative ? (penalty < 1 ? -4.0f : -3.0f)
-                                                : (penalty < 1 ? 3.0f : 4.0f);
+                    values[repeated] =
+                        negative ? (penalty < 1 ? -4.0f : -3.0f) : (penalty < 1 ? 3.0f : 4.0f);
                     values[unseen] = negative ? -3.5f : 3.5f;
                     ops::SamplingConfig config;
-                    config.repetition_penalty = penalty;
-                    config.prompt_presence = static_cast<const int*>(device_prompt.p);
-                    config.history_overlay = static_cast<const int*>(device_overlay.p);
+                    config.repetition_penalty   = penalty;
+                    config.prompt_presence      = static_cast<const int*>(device_prompt.p);
+                    config.history_overlay      = static_cast<const int*>(device_overlay.p);
                     config.history_overlay_size = source == 2 ? 2 : 0;
-                    config.commit_token_counts = false;
-                    const double raw = values[repeated];
-                    const double adjusted = raw < 0 ? raw * penalty : raw / penalty;
-                    const int expected = adjusted > values[unseen] ? repeated : unseen;
+                    config.commit_token_counts  = false;
+                    const double raw            = values[repeated];
+                    const double adjusted       = raw < 0 ? raw * penalty : raw / penalty;
+                    const int expected          = adjusted > values[unseen] ? repeated : unseen;
                     auto result = run_batch(values, domain, domain, {config}, {0}, 0, {counts});
                     failures += result.integrity_failures;
                     failures += verify_exact("repetition independent sign/membership oracle",
@@ -695,23 +738,27 @@ int qualify_repetition_penalty() {
         // Concurrent verification columns share committed history, but see different
         // provisional prefixes. Grammar masks still take precedence over penalties.
         std::vector<float> column(domain, -20.0f);
-        column[0] = 4.0f; column[1] = 3.5f; column[2] = 3.0f;
-        std::vector<int> counts(domain, 0); counts[2] = 2;
+        column[0] = 4.0f;
+        column[1] = 3.5f;
+        column[2] = 3.0f;
+        std::vector<int> counts(domain, 0);
+        counts[2] = 2;
         std::vector<int> overlay{0, 1};
-        std::vector<int> allowed((domain + 31) / 32, 0); allowed[0] = 1 << 2;
+        std::vector<int> allowed((domain + 31) / 32, 0);
+        allowed[0]          = 1 << 2;
         auto device_overlay = to_device(overlay);
         auto device_allowed = to_device(allowed);
         GuardedDeviceBuffer device_counts(counts.size() * sizeof(int));
         device_counts.copy_from_host(counts.data(), device_counts.bytes());
         std::vector<ops::SamplingConfig> configs(4);
         for (int col = 0; col < 4; ++col) {
-            configs[col].repetition_penalty = 2.0f;
-            configs[col].token_counts = static_cast<int*>(device_counts.data());
-            configs[col].history_overlay = static_cast<const int*>(device_overlay.p);
+            configs[col].repetition_penalty   = 2.0f;
+            configs[col].token_counts         = static_cast<int*>(device_counts.data());
+            configs[col].history_overlay      = static_cast<const int*>(device_overlay.p);
             configs[col].history_overlay_size = std::min(col, 2);
-            configs[col].commit_token_counts = false;
+            configs[col].commit_token_counts  = false;
         }
-        configs[3].allowed_tokens = static_cast<const int*>(device_allowed.p);
+        configs[3].mask.words = static_cast<const std::uint32_t*>(device_allowed.p);
         auto result = run_batch(repeat_column(column, 4), domain, domain, configs, {0, 1, 2, 3}, 0);
         failures += result.integrity_failures;
         failures += verify_exact("shared read-only verification history and grammar", result.tokens,
@@ -722,17 +769,19 @@ int qualify_repetition_penalty() {
 
         // Sign-aware repetition precedes additive penalties; two overlay occurrences
         // count twice for frequency, once for presence, and once for repetition.
-        column[0] = 4.0f; column[1] = 1.75f; column[2] = -20.0f;
-        overlay = {0, 0};
+        column[0]      = 4.0f;
+        column[1]      = 1.75f;
+        column[2]      = -20.0f;
+        overlay        = {0, 0};
         device_overlay = to_device(overlay);
         ops::SamplingConfig mixed;
-        mixed.repetition_penalty = 2.0f;
-        mixed.presence_penalty = 0.25f;
-        mixed.frequency_penalty = 0.125f;
-        mixed.history_overlay = static_cast<const int*>(device_overlay.p);
+        mixed.repetition_penalty   = 2.0f;
+        mixed.presence_penalty     = 0.25f;
+        mixed.frequency_penalty    = 0.125f;
+        mixed.history_overlay      = static_cast<const int*>(device_overlay.p);
         mixed.history_overlay_size = 2;
-        mixed.commit_token_counts = false;
-        result = run_batch(column, domain, domain, {mixed}, {0}, 0);
+        mixed.commit_token_counts  = false;
+        result                     = run_batch(column, domain, domain, {mixed}, {0}, 0);
         failures += result.integrity_failures;
         failures += verify_exact("repetition before presence and frequency", result.tokens, {1});
     }
@@ -770,6 +819,7 @@ int main() {
     failures += workspace_route_boundary_contract();
     failures += increment_counts_contract();
     failures += constrained_sampling_contract();
+    failures += grammar_mask_contract();
 
     std::cout << (failures == 0 ? "OK" : "FAIL") << " sample public contract\n";
     return failures == 0 ? 0 : 1;

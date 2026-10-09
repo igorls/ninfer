@@ -22,6 +22,7 @@ void candidate_logprobs_launch(const Tensor& logits, std::int32_t valid_rows,
                                      : nullptr,
             candidates,
             allowed != nullptr ? static_cast<const std::int32_t*>(allowed->data) : nullptr,
+            allowed != nullptr && allowed->ne[1] > 1 ? allowed->ne[0] : 0,
             static_cast<float*>(sampled_out.data),
             candidates_out != nullptr ? static_cast<float*>(candidates_out->data) : nullptr,
             columns);

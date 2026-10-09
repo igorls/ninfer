@@ -20,10 +20,18 @@ enum SamplePurpose : std::int32_t {
     kSamplePurposeDFlash2Proposal       = 5,
 };
 
-// Device-resident sampling parameters. token_counts is an optional device I32
-// [token_domain] generated-token occurrence-count array used by all penalties.
+// Borrowed round operand. Positions are contiguous packed vocabulary masks; null disables it.
+// Each consumed position must have at least one legal token. The caller carries dead-end status
+// separately and supplies a safe filler for dead/unreachable speculative positions.
+struct SamplingMask {
+    const std::uint32_t* words = nullptr;
+    std::int32_t stride        = 0;
+};
+
+// Device-resident sampling parameters and operands. token_counts is an optional device I32
+// [token_domain] committed generated-token occurrence-count array used by both penalties.
 struct SamplingConfig {
-    float temperature          = 0.0f; // <= 0 => greedy argmax over allowed, adjusted logits
+    float temperature          = 0.0f; // <= 0 => greedy argmax over allowed tokens
     std::int32_t top_k         = 20;   // runtime contract is [1,20]; Op defensively caps otherwise
     float top_p                = 1.0f; // >= 1 => disabled
     float min_p                = 0.0f; // <= 0 => disabled
@@ -32,15 +40,11 @@ struct SamplingConfig {
     float repetition_penalty   = 1.0f;
     unsigned long long seed    = 0;
     std::int32_t* token_counts = nullptr; // device [token_domain] i32, or null
-    const std::int32_t* allowed_tokens = nullptr; // device bitset [ceil(token_domain/32)], or null
-    // I32 words between the masks of consecutive speculative verification columns. 0 applies
-    // allowed_tokens to every column; W>0 makes column j read allowed_tokens + j*W. Single-column
-    // sampling always reads column 0.
-    std::int32_t allowed_tokens_column_stride = 0;
+    SamplingMask mask;
     const std::int32_t* prompt_presence = nullptr; // immutable prompt-membership bitset
     const std::int32_t* history_overlay = nullptr; // read-only provisional prefix, or null
-    std::int32_t history_overlay_size = 0;
-    bool commit_token_counts = true; // false: caller commits only the licensed output
+    std::int32_t history_overlay_size   = 0;
+    bool commit_token_counts            = true; // false: caller commits only the licensed output
 };
 
 // Caller-owned transient capacity for every parallel sampling-lane count in the inclusive
@@ -56,6 +60,8 @@ struct SamplingConfig {
  * [physical_rows,B], `out` and `logical_positions` are contiguous I32 [B], and only vocabulary
  * rows v in [0,token_domain) participate. `configs` is a device-resident contiguous
  * SamplingConfig[B] array. Greedy and stochastic rows may coexist in one invocation.
+ * A non-null config.mask excludes vocabulary rows before argmax/top-k and normalization. sample()
+ * consumes mask position zero; speculative acceptance consumes its corresponding verify position.
  *
  * With either greedy or positive-temperature sampling, let
  * logit_v=float(logits[v,b]) and c_v=configs[b].token_counts[v] (or zero when null)
@@ -68,8 +74,8 @@ struct SamplingConfig {
  *   adjusted_v = penalized_v
  *                - configs[b].presence_penalty * (c_v > 0)
  *                - configs[b].frequency_penalty * c_v.
- * If allowed_tokens is non-null, a zero bit v makes adjusted_v negative infinity before
- * ranking and filtering. Bit v is (uint32_t(allowed_tokens[v/32]) >> (v%32)) & 1.
+ * If mask.words is non-null, a zero bit v makes adjusted_v negative infinity before
+ * ranking and filtering. Bit v is (uint32_t(mask.words[v/32]) >> (v%32)) & 1.
  * The device mask has ceil(token_domain/32) words and is read-only. Each row must permit
  * at least one finite-logit vocabulary token. Padding bits beyond token_domain are ignored.
  *

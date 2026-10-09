@@ -1,6 +1,6 @@
 # Upstream ports
 
-Updated: September 29, 2026.
+Updated: October 8, 2026.
 
 This is the living record of how this workstation fork ([igorls/ninfer](https://github.com/igorls/ninfer))
 tracks [Neroued/ninfer](https://github.com/Neroued/ninfer): the reviewed upstream point, the fork
@@ -14,9 +14,9 @@ workstation.
 | Item | Value |
 |---|---|
 | Fork line | `workstation` (named `port/upstream-v3` until September 28, 2026), based on upstream [`bace20dc`](https://github.com/Neroued/ninfer/commit/bace20dc70249eed6402b66d4852c6c3f9612905) (September 24, 2026) and merged with upstream `e31bc99b` in `e2a149f1` and `d44ab584` in `d29866c9` |
-| Last reviewed upstream commit | [`d44ab584`](https://github.com/Neroued/ninfer/commit/d44ab58408aa389728cd8b1ee50179527e1f3e0d) (September 29, 2026), the merge-base |
+| Last reviewed upstream commit | [`81c8ce09`](https://github.com/Neroued/ninfer/commit/81c8ce093b2c1646a87566a8e59d807fcf0ec95c) (October 8, 2026), merged on `sync/upstream-81c8ce09` |
 | Pre-v3 fork line | `research/qwen4-flash-next` at `87812bc8` (September 26); the source for Flash-Next |
-| Not yet reviewed | `d44ab584..68c54356`: 11 upstream commits as of October 7, 2026, including the context-cache replacement `b9114396` |
+| Current sync | All 44 commits in `d44ab584..81c8ce09`; upstream preemptive runtime adopted and Flash-Next migrated |
 
 The fork syncs by merging `origin/master` into the fork line, never by rebasing or cherry-picking
 upstream work. Each merge records every upstream change it brings in here as integrated, deferred
@@ -176,6 +176,136 @@ Qualification:
   is unchanged within 0.2%, with identical device memory
   ([measurement](../performance/rtx-pro-6000.md#upstream-d44ab584-merge-against-the-previous-release-build-2026-09-29-colab-g4)).
 
+## Upstream `d44ab584..81c8ce09` (October 8, 2026)
+
+All 44 commits are merged from `origin/master` at `81c8ce09`. The sync adopts the upstream
+preemptive runtime, with request-owned output/grammar state and Snapshot/Replay recovery.
+The prior non-preemptive admission planner and its unsettled-StateImage workaround are
+superseded together. The experimental hybrid scheduler remains separate; this merge makes
+no claim of a latency or throughput improvement over the previous fork.
+
+| Upstream | Change | Disposition |
+|---|---|---|
+| `a667efdd` `417eb3d6` `e621c7d6` | Device-SM-derived RoPE, normalization, MoE and attention launches | Integrated for the PRO 6000 as well as upstream's 5090 |
+| `064965c7` `75a89050` `b9114396` `a8e212ac` `911d34db` | Explicit KV publication streams, cleanup synchronization, context replacement, preemption, preparation costs and cache-source preservation | Integrated; native Flash-Next storage, transactions, replay and MTP migrated to these contracts |
+| `f854788b` `c772812b` `624dcdd4` | TTFT workloads, diagnostics, timing quantiles and contract documentation | Integrated |
+| `abb7f14f` | Prometheus runtime/request metrics | Integrated alongside fork admin telemetry; Supervisor controls now use the shared host-context byte budget |
+| `68c54356` | Preserve cache boundaries through template trimming | Integrated |
+| `7e2973ee` `08902f73` `eb6696ae` `41e50d0d` `8ffa3131` `2734a56e` `81c8ce09` | XGrammar CPU core, GBNF, JSON/schema, constrained tools, choices, regex, composition, tuple schemas and bounded numbers | Integrated; old fork structured-output adapter removed; native Flash-Next MTP uses per-position target masks |
+| `a643abcd` | Maintainer guidance | Integrated with fork contracts |
+| `35e9b5c8` `04ded76f` `8f0aa859` `58ab3f22` `cd521ab7` | Five Q8 Linear shapes at K=2560/6144 | Integrated |
+| `471924b0` `f58e32e0` `714c5149` `bcdcbd45` `8beb4cdd` `16bdb491` `2553e26e` `cf91c818` `07e1f8c3` `d0f91cd9` `070fa61a` | Eleven BF16 Linear shapes | Integrated for wide prefill; fork narrow full-vocabulary/square reductions retained through 48 columns after the new dispatch failed the existing Flash-Next target-parity gate |
+| `7971ff18` `c02a07b4` `dd73c88e` `9879d052` `a64b5eea` `b21780f3` `15cba227` | Seven BF16 Vision/merger shapes | Integrated; supersede the fork's duplicate Vision shape file |
+
+The fork retains desktop reserve and optional concurrency clamping, blocking CUDA synchronization,
+serving logprobs/scoring/System One, Supervisor, and both native model packages. Active and paused
+requests participate in quiescence. Request-owned prompt readouts and reasoning features survive
+lane changes; restore rebinds device readouts and reinstalls sampling counts. Candidate-logprob
+readout supports the upstream per-column grammar masks and excludes padded speculative columns.
+Flash-Next replay preserves native QSA/GDN/PLE and continuation state, with its MTP KV frontier
+one token behind the target; it does not use the Qwen3.5 MTP bridge.
+
+MSVC adaptations use exact wide-product comparison, saturating prefill-cost arithmetic and exact
+decimal MiB parsing without `__int128`; XGrammar receives the MSVC unreachable marker. These
+adaptations preserve the Linux arithmetic semantics. The public header now includes `<array>`;
+KV-directory ownership checks use the C++20-supported `use_count()` API. Supervisor pressure and
+reuse displays now consume actual preemption/spill and root/checkpoint telemetry; occupied Host
+bytes already include reserved bytes and are not added twice.
+
+Qualification uses a Colab G4 RTX PRO 6000 Blackwell Server Edition (96 GB), CUDA 13.3.73,
+GCC 13.3 and Python 3.11.17. The explicit artifacts are Qwen3.8-27B NVFP4 v3 and the native
+Qwen3.8-Flash-Next mixed v3 artifact, including Vision and MTP. Native Windows verification uses
+MSVC 14.51, CUDA 13.3, Release `sm_120a`, and the LGPL FFmpeg bundle. Windows builds run below
+normal priority; GPU execution for this sync is on the G4, not the shared desktop.
+
+- Linux/CUDA and native Windows full builds pass. Eleven focused Windows CPU tests cover public
+  types, logprobs, serving schemas/options, telemetry and Supervisor. Python 3.11 syntax checks
+  pass for the 24 changed Python files. The existing Windows CRT linker warning remains.
+- The 158-entry G4 CTest run initially had six failures and 17 missing-artifact/source skips.
+  Five failures were missing `jsonschema` dependencies or stale schema-adapter assertions;
+  the focused rerun passes. The sixth was a superseded duplicate Vision BF16 fixture outside
+  upstream's supported patch/merger domains. The adopted independent BF16 oracle covers those
+  supported shapes and rejects invalid domains; its full rerun passes, including after restoring
+  narrow decode dispatch. This is a full run plus affected reruns, not a single green full run.
+- Qwen3.8-27B grammar (MTP/DFlash2), constrained tools (MTP, Snapshot and Replay), causal scoring,
+  reasoning-feature readouts, and the complete prefix suite pass. Native transaction tests for
+  ordinary, MTP and DFlash2 check exact ledger occurrence
+  counts after lane rebinding/replay, preserved prompt readouts, and resumed sampled/candidate
+  logprobs against independent FP64 normalization of the actual target BF16 column.
+- Public pressure tests cover two requests with 192-token prompts, 256 output tokens, 128-token
+  prefill chunks and a 512-token KV pool. Replay, 512-MiB Host Snapshot, paused cancellation and
+  replay cancellation pass for 27B ordinary/MTP/DFlash2 and Flash-Next ordinary/MTP; constrained
+  Flash-Next MTP passes the same cases. Checks include penalties, request-specific candidate IDs,
+  durable prompt readouts, stream/metric accounting and resource release. The 27B MTP result
+  initially included intermittent prompt-readout comparison failures; their FP8 TMA cause and
+  the subsequent qualification are recorded below.
+- Flash-Next passes all 21 cases across the final full run and one focused fixture rerun:
+  ordinary/MTP text, graphs/eager, ragged batches, context spill/reuse, structured output,
+  logprobs, causal scoring/hidden readout, chunk invariance, image/video and long concurrent
+  reuse. The full run passed 20 cases and rejected the correct red answer `#FF0000` because the
+  image fixture required the word `red`. Accepting that exact RGB representation makes the
+  focused image/reuse/video case pass. This is not a new numerical acceptance tolerance.
+
+Failures resolved during qualification include a native Flash-Next first replay permit using
+`E` instead of its MTP backend's `E-1` frontier; invalid continuation-tail copying from a scoring
+buffer; padded MTP candidate-readout columns; and duplicated response-format parsing. Tool-bearing
+prefix fixtures now honor the adopted default-EOS constraint contract. A newly added native test
+also needed the ordinary backend's implicit one-token row-count convention.
+
+Targeted CUDA initialization checking identified a whole-frame MTP output transfer containing
+uninitialized unused K/C array tails. Live outputs were written and consumers respected their
+row/count bounds; these tails are separate from prompt-readout storage. Fixed-size output frames
+are now initialized once at startup for both native packages. The full targeted MTP Replay
+`compute-sanitizer --tool initcheck` rerun passes with zero errors; the initial run reported
+4,045 accesses to those undefined tails. The separate prompt-comparison failure came from the
+FP8 projection path described below.
+
+The first Flash-Next run passed 20 of 21 cases. Its target-parity failure was a 0.25-nat first
+difference at token 84, reproduced by ordinary B=8 as well as MTP K=1/3/5. Restoring the fork's
+matched narrow BF16 reductions removes that failure without changing the 0.05-nat acceptance gate;
+upstream's wider prefill schedules remain. No end-to-end performance improvement is claimed.
+
+An initial added recovery check compared generated tokens/logprobs with sequential execution.
+The first differences were on requests that were never preempted (27B ordinary token 82,
+MTP/DFlash2 token 131; Flash-Next ordinary token 42), so that check confounded recovery with batch
+arithmetic. The replacement checks per-request token/readout association, distinct candidate IDs,
+probability normalization and durable prompt values, alongside the native actual-column oracle.
+It does not claim exact generated-token equality across batch shapes. Original failed runs remain
+part of the qualification record.
+
+The unchanged 0.002-nat prompt-readout comparison failed intermittently in 27B MTP Replay,
+including the sixth run of a later bounded repetition. Sequential fresh prefill reproduced it
+with and without graphs. Captures showed changing hidden values while FP64 normalization of the
+actual BF16 logits agreed with the readout kernel. The first divergence was a 32-row stripe in
+the first token of an FP8 GDN projection tile, already present in its FP32 accumulators.
+
+The existing FP8 TMA pipeline released staged inputs through one lane per consumer warp.
+Every consumer now contributes its own release arrival, and the empty barrier counts all those
+readers before the producer can reuse the stage. An isolated test alternating two identical
+resident weights reproduces the original defect with both real and synthetic operands; simply
+repeating one hot weight did not. Reverting the fix reproduces it again at iteration 1,371.
+The selected handoff passes 16,384 alternating-weight repetitions for each operand set and
+256 real-model requests with exact duplicate-projection comparisons. A full-consumer CTA barrier
+also passed but was unnecessary once every reader supplied its own release edge. The regression
+retains the independent mathematical oracle and adds 4,096 complete-output weight switches.
+An initial fixture build used an incompatible byte-buffer helper overload; the direct byte
+preservation check fixes that compilation error.
+
+Final production builds pass on Linux and MSVC. All nine affected FP8 Op suites pass, including
+the new repeated-weight regression. Another 256 fresh-prefill requests with graphs enabled have
+no prompt-readout mismatches, and all 12 MTP Replay repetitions pass. The four public pressure
+scenarios pass again for 27B ordinary/MTP/DFlash2, Flash-Next ordinary/MTP and constrained
+Flash-Next MTP. Two initial Flash-Next rerun commands omitted its required full proposal head and
+were rejected before inference; the correctly configured reruns pass. Targeted TMA `synccheck`
+and `racecheck` report zero errors and zero hazards. The focused timing distributions and their
+limitations are recorded in
+[FP8 TMA qualification](../performance.md#fp8-tma-staged-input-handoff-2026-10-08).
+
+Windows GPU execution, end-to-end speed changes, and desktop coexistence on this revision are
+unmeasured. G4 correctness evidence does not establish deployment or a workstation speed gain.
+
+Historical qualification in later sections describes its named revisions, not this runtime.
+
 ## Fork features carried onto v3
 
 Each group was transplanted onto the v3 structure as coherent commits naming their fork provenance.
@@ -189,7 +319,7 @@ Fork SHAs are on `research/qwen4-flash-next`.
 | Admin, telemetry, robustness | `7fc96721` `f704502a` `6a181abf` `00ad2b86` `f426d2c4` `2f375231` `3400f9c9` `039bef66` `ff20cd06` | `17e27079` | `/admin/vram`, `/admin/stats`, `/admin/quiesce`, `--api-key-file`, client attribution, tool-block digest, fatal exit, telemetry that never waits on execution |
 | Memory sizing, desktop reserve | `9bf5e8b8` `5c23fe2e` | `57a277c9` | NVML device-wide sizing, `--desktop-reserve-gib`, slack floor |
 | Prefix reuse under a full pool | `bb7b7305` `2b75ed5f` `aec32ee0` `f26ab57d` `529f85b8` `a29f97e2` `d2982875` | `352958d5`, clamp removed in `1c390ca6` | Observations survive consume-and-republish, newcomer protection, read-only retention, idle flush |
-| Structured output | `bb7b7305` `2cbdb2b6` `bb88a776` | `ff78ceae` `f9800e26` | XGrammar JSON object/schema, `tool_choice: required`, MTP drafting under constraint; constrained DFlash rows verify no drafts |
+| Structured output | `bb7b7305` `2cbdb2b6` `bb88a776` | `ff78ceae` `f9800e26` | Originally XGrammar JSON object/schema and required tools; superseded by upstream OutputSession and all-backend per-column masks in the October 8 sync |
 | Token logprobs, `/v1/score` | `f596a68e` `2c307887` `da87a3f5` `c4288317` `a0b43ad4` `05797621` `3181627f` `e17813cf` `d49a8e0c` `282f013c` | `3bbb06fa` `737b570a` | `candidate_logprobs` Op, device readout, prompt positions, read-only participation |
 | TypeSafe System One | `e20e7e23` `147370d7` `ff20cd06` `87812bc8` | `1833011e` | Jev drop-in contract |
 | Reasoning feature readout | `15f0c5aa` and the collector at `87812bc8` | `f290c8e7` | `capture_reasoning_features`, `ninfer-reasoning-collect` |
@@ -206,9 +336,8 @@ v3 paths were updated): the research records `docs/research/jevbench-qwen-intell
 product documents `DESIGN.md` and `PRODUCT.md`; and the demo design sidecars
 `docs/decide-demo.DESIGN.md` and `docs/dual-purpose.DESIGN.md`.
 
-The DFlash2 residue of `ddeeec19` needed nothing: v3 rejects an unsettled StateImage Fork at seal
-revalidation instead of the fork's early admission gate, and the fork-only all-constrained
-width-one DFlash path is not carried.
+The DFlash2 residue of `ddeeec19` and the old all-constrained width-one path are not carried.
+The October 8 sync uses upstream context reservations and per-column speculative grammar masks.
 
 ## Adapted from other forks
 
@@ -256,7 +385,7 @@ were produced with recipe overrides and are not committed recipes.
 | `preserve_thinking` server default (`3cb5e718`) | unset, so the Qwen3.8 template keeps returned closed-turn reasoning | `false` unless a request or `--preserve-thinking` asks | Parity with the pre-v3 fork (Igor, 2026-09-28) |
 | Unsupported reasoning effort | passed to the chat template, whose `raise_exception` comes back as HTTP 400 `invalid_prompt` on `messages` with the interpreter's source trace | checked before rendering against the efforts observed from the loaded template at startup: HTTP 400 `reasoning_effort_not_supported` on the effort field, listing the supported efforts; template errors carry no trace | Restores the pre-v3 fork contract (`8264394c`) on Chat Completions, Responses and Anthropic Messages; the protocol vocabulary is unchanged |
 | Continued final assistant turn (`737b570a`) | rendered without a think block | rendered behind the empty think block the generation prompt carries (thinking off) | `/v1/score` text form and assistant prefill are conditioned like a generated answer |
-| Admission planned while an active lane's StateImage Fork is unsettled (both models) | at `d44ab584`: a pressure target is Feasible without the seal's Fork check, so a burst of admissions with prefix reuse ends in the fatal `selected pressure target could not be sealed` | the target is deferred, and EngineCore retries a deferred admission once after the next execution unit | Reproduced on the 27B at concurrency 4 (October 7, 2026, [evidence](../research/flash-next-v3-port-2026-09-29.md#fatal-engine-failures-found-2026-10-06-fixed-2026-10-07)). Upstream `b9114396` (not yet reviewed) replaces this planner; the next sync reconciles the fix with it |
+
 | `POST /v1/rerank` | no rerank route | Jina-shaped rerank scored by an in-process System One Choice; `GET /v1/models` advertises `ninfer-choice-rerank-v1`; missing or wrong API key is HTTP 401 with the OpenAI error object | Added 2026-10-02. `return_documents` defaults to true. Choice labels stay off the public response |
 
 ## Dropped
@@ -281,7 +410,8 @@ Approved by Igor, 2026-09-27 and 2026-09-28.
 
 ## Flash-Next v3
 
-**Source integrated in the working tree, October 4, 2026; qualification below.**
+**Source integrated October 4, 2026; migrated to upstream runtime October 8.**
+The results below predate the runtime sync unless explicitly stated; see its qualification above.
 The `workstation` working tree carries the text port from
 `m3/4-text@577a1bcd` over its `6ad46d87` base, with native MTP and Vision added on the current
 workstation Engine contract. The original architecture source remains the pre-v3
@@ -348,7 +478,7 @@ Windows serving check with a smaller KV capacity remains open.
 Three fatal engine failures found on October 6 are fixed
 ([causes and evidence](../research/flash-next-v3-port-2026-09-29.md#fatal-engine-failures-found-2026-10-06-fixed-2026-10-07)):
 - `selected pressure target could not be sealed`: a burst of admissions planned while an earlier
-  admission's StateImage Fork was unsettled. It also affects the 27B; see the divergence above;
+  admission's StateImage Fork was unsettled. It also affected the 27B; the October 8 runtime replaces that planner;
 - `candidate token ledger does not match prompt length`: the Flash-Next MTP round borrowed a staged
   materialization's prompt ledger as scratch;
 - `KV committed frontier is invalid`: after a capture, a Flash-Next request with MTP re-mapped only
@@ -372,9 +502,11 @@ row-256 KV are the supported cache representations.
 
 ## Open qualification questions
 
-- `prefix_real`'s Host-restore check fails on the Qwen3.8-27B NVFP4 artifact identically on the
+- Before the October 8 runtime sync, `prefix_real`'s Host-restore check failed on the
+  Qwen3.8-27B NVFP4 artifact identically on the
   pristine base and the fork line (the demoted turn closure is not the selected source): upstream
-  behaviour on this artifact, not investigated further.
+  behaviour on that revision. The complete suite passes after adopting upstream context
+  replacement and preemption; the earlier failure is retained here as historical evidence.
 - A json_schema request whose prompt asks for prose produces whitespace until its output limit on
   both the pre-v3 build and the fork line: the grammar admits unbounded leading
   whitespace. A bound on outer whitespace would fix it.
@@ -387,7 +519,7 @@ row-256 KV are the supported cache representations.
   `d44ab584` merge the same probe accepted 21 of 23 on a Colab G4 (Linux); the Windows figures
   are from the workstation, so the two are not a like-for-like pair.
 
-## Qualification of the fork line
+## Historical qualification of the fork line
 
 Windows, MSVC 19.51, CUDA 13.3, `sm_120a`, RTX PRO 6000 Blackwell (driver 616.92):
 

@@ -48,7 +48,8 @@ void require_same_shape(const Tensor& a, const Tensor& b, const char* b_label) {
 namespace {
 
 void rmsnorm_impl(const Tensor& x, const Tensor& weight, float eps, detail::RmsNormForm form,
-                  const Tensor* z, Tensor& out, cudaStream_t stream) {
+                  const Tensor* z, Tensor& out, std::int32_t multiprocessor_count,
+                  cudaStream_t stream) {
     if (x.dtype != DType::BF16 || weight.dtype != DType::BF16 || out.dtype != DType::BF16 ||
         (z != nullptr && z->dtype != DType::BF16)) {
         throw std::invalid_argument("rmsnorm: x/weight/z/out must be BF16");
@@ -83,7 +84,7 @@ void rmsnorm_impl(const Tensor& x, const Tensor& weight, float eps, detail::RmsN
         throw std::invalid_argument("rmsnorm: x/weight/z/out data must be non-null");
     }
 
-    detail::rmsnorm_launch(x, weight, eps, form, z, out, stream);
+    detail::rmsnorm_launch(x, weight, eps, form, z, out, multiprocessor_count, stream);
 }
 
 } // namespace
@@ -92,17 +93,24 @@ void rmsnorm(const Tensor& x, const Tensor& weight, float eps, bool unit_offset,
              cudaStream_t stream) {
     rmsnorm_impl(x, weight, eps,
                  unit_offset ? detail::RmsNormForm::UnitOffset : detail::RmsNormForm::Plain,
-                 nullptr, out, stream);
+                 nullptr, out, 0, stream);
 }
 
 void gated_rmsnorm(const Tensor& x, const Tensor& weight, const Tensor& z, float eps, Tensor& out,
-                   cudaStream_t stream) {
-    rmsnorm_impl(x, weight, eps, detail::RmsNormForm::SiluGated, &z, out, stream);
+                   DeviceExecutionView execution) {
+    if (execution.multiprocessor_count <= 0) {
+        throw std::invalid_argument("gated_rmsnorm: positive multiprocessor count required");
+    }
+    rmsnorm_impl(x, weight, eps, detail::RmsNormForm::SiluGated, &z, out, execution.multiprocessor_count, execution.stream);
 }
 
 void gated_rmsnorm_sigmoid(const Tensor& x, const Tensor& weight, const Tensor& z, float eps,
-                           Tensor& out, cudaStream_t stream) {
-    rmsnorm_impl(x, weight, eps, detail::RmsNormForm::SigmoidGated, &z, out, stream);
+                           Tensor& out, DeviceExecutionView execution) {
+    if (execution.multiprocessor_count <= 0) {
+        throw std::invalid_argument("gated_rmsnorm_sigmoid: positive multiprocessor count required");
+    }
+    rmsnorm_impl(x, weight, eps, detail::RmsNormForm::SigmoidGated, &z, out,
+                 execution.multiprocessor_count, execution.stream);
 }
 
 } // namespace ninfer::ops

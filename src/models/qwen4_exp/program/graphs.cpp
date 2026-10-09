@@ -103,9 +103,38 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
 
 } // namespace
 
+DecodeGraphProfile& DecodeGraphFamily::select(std::uint32_t batch_size, std::uint32_t frontier) {
+    const auto it =
+        std::find_if(profiles.begin(), profiles.end(), [&](const DecodeGraphProfile& p) {
+            return p.batch_size == batch_size && p.min_execution_frontier <= frontier &&
+                   frontier <= p.max_execution_frontier;
+        });
+    if (it == profiles.end()) {
+        throw std::logic_error("CUDA Graph profile coverage is incomplete");
+    }
+    return *it;
+}
+
+DecodeGraphExecutable& DecodeGraphFamily::install(DecodeGraphProfile& profile) {
+    const auto it =
+        std::find_if(topologies.begin(), topologies.end(), [&](const DecodeGraphTopology& t) {
+            return t.topology_class == profile.topology_class;
+        });
+    if (it == topologies.end()) { throw std::logic_error("CUDA Graph topology is unavailable"); }
+    const auto index = static_cast<std::size_t>(&profile - profiles.data());
+    if (it->installed_profile != index) {
+        it->executable.update(profile.definition);
+        it->installed_profile = index;
+    }
+    return it->executable;
+}
+
 void ProgramImpl::prepare_graphs() {
     if (!use_cuda_graph) { return; }
-    if (speculative_backend == SpeculativeBackend::Mtp) { prepare_mtp_graphs(); return; }
+    if (speculative_backend == SpeculativeBackend::Mtp) {
+        prepare_mtp_graphs();
+        return;
+    }
     nvtx::ScopedRange prepare_range(nvtx::Name::CudaGraphPrepare, nvtx::Category::Graph);
 
     std::array<StateImageHandle, kMaximumConcurrency> capture_states{};
@@ -129,7 +158,7 @@ void ProgramImpl::prepare_graphs() {
         text_capture_allocations.reserve(max_concurrency);
         for (std::uint32_t row = 0; row < max_concurrency; ++row) {
             std::optional<KVAddressSpaceHandle> allocation =
-                text_kv_addresses->create_active(1, static_cast<std::int32_t>(row));
+                text_kv_addresses->create_active(1, static_cast<std::int32_t>(row), device.stream);
             if (!allocation) { throw std::bad_alloc(); }
             text_capture_allocations.push_back(*allocation);
             text_kv_addresses->ensure_mapped_to_tokens(*allocation, 1, device.stream);
@@ -155,8 +184,8 @@ void ProgramImpl::prepare_graphs() {
             state_images->zero_slot(capture_state_slot(row), device.stream);
         }
         decoder->text_kv.page_pool().zero_pages(pages, device.stream);
-        *ordinary_host_ingress = {};
-        *ordinary_host_egress  = {};
+        *ordinary_host_ingress      = {};
+        *ordinary_host_egress       = {};
         const std::int32_t position = checked_i32(frontier, "graph representative position");
         for (std::uint32_t row = 0; row < batch_size; ++row) {
             ordinary_host_ingress->tokens[row]          = 0;
@@ -171,10 +200,10 @@ void ProgramImpl::prepare_graphs() {
         }
     };
 
-    const auto& config        = parameters.model.config().text;
-    const auto indexer_block  = config.indexer.compress_ratio;
-    const auto selected       = config.indexer.budget / config.indexer.compress_ratio;
-    const auto profiles       = ordinary_graph_profiles(capacity, indexer_block, selected);
+    const auto& config       = parameters.model.config().text;
+    const auto indexer_block = config.indexer.compress_ratio;
+    const auto selected      = config.indexer.budget / config.indexer.compress_ratio;
+    const auto profiles      = ordinary_graph_profiles(capacity, indexer_block, selected);
     validate_graph_profiles(profiles, capacity - 1, "ordinary");
     execution::OrdinaryBatchContext ordinary_state{
         {device, parameters, work, *state_images, *ple_gather, io, prefill_hidden, prefill_chunk},
@@ -225,7 +254,7 @@ void ProgramImpl::prepare_graphs() {
 
 void ProgramImpl::prepare_mtp_graphs() {
     const auto& config = parameters.model.config().text;
-    const auto width = static_cast<std::int32_t>(draft_window + 1);
+    const auto width   = static_cast<std::int32_t>(draft_window + 1);
     std::array<StateImageHandle, kMaximumConcurrency> states{};
     std::vector<KVAddressSpaceHandle> text_addresses, mtp_addresses;
     for (std::uint32_t row = 0; row < max_concurrency; ++row) {
@@ -234,52 +263,65 @@ void ProgramImpl::prepare_mtp_graphs() {
         states[row] = *state;
         for (const bool mtp : {false, true}) {
             auto& addresses = mtp ? *backend_kv_addresses : *text_kv_addresses;
-            auto& cache = mtp ? *decoder->mtp_cache() : decoder->text_kv;
-            auto allocation = addresses.create_active(1, static_cast<std::int32_t>(row));
+            auto& cache     = mtp ? *decoder->mtp_cache() : decoder->text_kv;
+            auto allocation =
+                addresses.create_active(1, static_cast<std::int32_t>(row), device.stream);
             if (!allocation) { throw std::bad_alloc(); }
             (mtp ? mtp_addresses : text_addresses).push_back(*allocation);
             addresses.ensure_mapped_to_tokens(*allocation, 1, device.stream);
-            cache.execution_tables().publish_repeated(addresses.execution_row(*allocation).handle(),
-                addresses.physical_page(*allocation, 0), cache.execution_tables().logical_page_capacity(), device.stream);
+            cache.execution_tables().publish_repeated(
+                addresses.execution_row(*allocation).handle(),
+                addresses.physical_page(*allocation, 0),
+                cache.execution_tables().logical_page_capacity(), device.stream);
             const auto page = addresses.physical_page(*allocation, 0);
-            cache.page_pool().zero_pages(std::span<const DeviceKVPageHandle>(&page, 1), device.stream);
+            cache.page_pool().zero_pages(std::span<const DeviceKVPageHandle>(&page, 1),
+                                         device.stream);
         }
     }
     const auto prepare = [&](std::uint32_t frontier, std::uint32_t batch_u) {
         const auto batch = static_cast<std::int32_t>(batch_u);
-        auto frame = mtp_frame->batch(batch);
-        *mtp_ingress = {};
+        auto frame       = mtp_frame->batch(batch);
+        *mtp_ingress     = {};
         for (std::int32_t row = 0; row < batch; ++row) {
             const auto slot = state_store->physical_slot(states[row]);
             state_images->zero_slot(slot, device.stream);
             mtp_ingress->sources[row] = mtp_ingress->destinations[row] = slot;
-            mtp_ingress->snapshots[row] = state_images->slot_count() + row * width;
+            mtp_ingress->snapshots[row]     = state_images->slot_count() + row * width;
             mtp_ingress->sequence_rows[row] = mtp_ingress->mtp_sequence_rows[row] = row;
-            mtp_ingress->valid[row] = 1;
-            // Invalid suffixes are masked, but query-only computation still receives safe positions.
+            mtp_ingress->valid[row]                                               = 1;
+            // Invalid suffixes are masked, but query-only computation still receives safe
+            // positions.
             for (std::int32_t w = 0; w < width; ++w) {
                 mtp_ingress->positions[row * width + w] = static_cast<std::int32_t>(frontier);
-                mtp_ingress->rows[row * width + w] = row;
+                mtp_ingress->rows[row * width + w]      = row;
                 for (std::int32_t axis = 0; axis < 3; ++axis) {
-                    mtp_ingress->rope[axis * width * batch + row * width + w] = static_cast<std::int32_t>(frontier);
+                    mtp_ingress->rope[axis * width * batch + row * width + w] =
+                        static_cast<std::int32_t>(frontier);
                 }
             }
         }
-        CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, mtp_ingress, sizeof(MtpIngress), cudaMemcpyHostToDevice, device.stream));
-        CUDA_CHECK(cudaMemcpyAsync(frame.proposal_sources.data, frame.i32(offsetof(MtpIngress, sources), batch).data,
+        CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, mtp_ingress, sizeof(MtpIngress),
+                                   cudaMemcpyHostToDevice, device.stream));
+        CUDA_CHECK(cudaMemcpyAsync(
+            frame.proposal_sources.data, frame.i32(offsetof(MtpIngress, sources), batch).data,
             batch * sizeof(std::int32_t), cudaMemcpyDeviceToDevice, device.stream));
-        for (Tensor* tensor : {&frame.proposal_positions, &frame.proposal_rope, &frame.proposal_ids, &frame.ar_hidden}) {
+        for (Tensor* tensor : {&frame.proposal_positions, &frame.proposal_rope, &frame.proposal_ids,
+                               &frame.ar_hidden}) {
             CUDA_CHECK(cudaMemsetAsync(tensor->data, 0, tensor->bytes(), device.stream));
         }
         device.synchronize();
     };
-    const auto profiles = ordinary_graph_profiles(capacity, config.indexer.compress_ratio,
-                                                   config.indexer.budget / config.indexer.compress_ratio);
+    const auto profiles =
+        ordinary_graph_profiles(capacity, config.indexer.compress_ratio,
+                                config.indexer.budget / config.indexer.compress_ratio);
     for (const bool proposal : {true, false}) {
-        auto& family = proposal ? mtp_proposal_graphs : mtp_verify_graphs;
+        auto& family    = proposal ? mtp_proposal_graphs : mtp_verify_graphs;
         const auto body = [&](std::int32_t batch, ops::QsaIndexerSelectEnvelope envelope) {
-            if (proposal) { mtp_proposal_body(batch, envelope); }
-            else { mtp_verify_body(batch, envelope); }
+            if (proposal) {
+                mtp_proposal_body(batch, envelope);
+            } else {
+                mtp_verify_body(batch, envelope);
+            }
         };
         prepare(0, 1);
         body(1, {indexer_envelope_blocks(profiles.front().max, config.indexer.compress_ratio)});
@@ -288,15 +330,15 @@ void ProgramImpl::prepare_mtp_graphs() {
         for (std::uint32_t batch = 1; batch <= max_concurrency; ++batch) {
             for (const auto planned : profiles) {
                 family.profiles.emplace_back();
-                auto& profile = family.profiles.back();
-                profile.batch_size = batch;
+                auto& profile                  = family.profiles.back();
+                profile.batch_size             = batch;
                 profile.min_execution_frontier = planned.min;
                 profile.max_execution_frontier = planned.max;
                 profile.topology_class = planned.topology_class * max_concurrency + batch - 1;
                 work.reset();
                 profile.definition.capture(device.stream, [&] {
                     body(static_cast<std::int32_t>(batch),
-                        {indexer_envelope_blocks(planned.max, config.indexer.compress_ratio)});
+                         {indexer_envelope_blocks(planned.max, config.indexer.compress_ratio)});
                 });
             }
         }
@@ -305,12 +347,16 @@ void ProgramImpl::prepare_mtp_graphs() {
     state_images->zero_all(device.stream);
     device.synchronize();
     for (std::uint32_t row = 0; row < max_concurrency; ++row) {
-        if (!state_store->release(states[row])) { throw std::logic_error("MTP capture state release failed"); }
+        if (!state_store->release(states[row])) {
+            throw std::logic_error("MTP capture state release failed");
+        }
         for (const bool mtp : {false, true}) {
-            auto& addresses = mtp ? *backend_kv_addresses : *text_kv_addresses;
+            auto& addresses       = mtp ? *backend_kv_addresses : *text_kv_addresses;
             const auto allocation = (mtp ? mtp_addresses : text_addresses)[row];
             addresses.deactivate(allocation);
-            if (!addresses.release(allocation)) { throw std::logic_error("MTP capture KV release failed"); }
+            if (!addresses.release(allocation)) {
+                throw std::logic_error("MTP capture KV release failed");
+            }
         }
     }
 }

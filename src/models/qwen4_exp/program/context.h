@@ -42,10 +42,11 @@ struct PrefillContext {
     std::uint16_t* first_token_logits_host       = nullptr;
     const FirstTokenReadout* first_token_readout = nullptr;
     const PromptReadout* prompt_readout          = nullptr;
-    const PreparedPromptData* prompt = nullptr;
-    VisionPrefillSession* vision = nullptr;
+    const PreparedPromptData* prompt             = nullptr;
+    VisionPrefillSession* vision                 = nullptr;
     qwen4_exp::PagedKVCacheView mtp_kv;
-    std::int32_t rope_delta = 0;
+    std::int32_t rope_delta           = 0;
+    CudaEventTimer* prefill_gpu_timer = nullptr;
 };
 
 struct OrdinaryBatchContext {

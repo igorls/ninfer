@@ -243,9 +243,10 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_accept_greedy_draft
     std::int32_t* row_tokens        = licensed_tokens + row * cols;
     const __nv_bfloat16* row_logits =
         logits + static_cast<std::int64_t>(row) * cols * physical_rows;
-    const bool penalties = cfg.allowed_tokens != nullptr || cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f || cfg.repetition_penalty != 1.0f;
+    const bool penalties = cfg.mask.words != nullptr || cfg.presence_penalty != 0.0f ||
+                           cfg.frequency_penalty != 0.0f || cfg.repetition_penalty != 1.0f;
 
-    if (!(cfg.temperature > 0.0f) && !penalties) {
+    if (!(cfg.temperature > 0.0f) && !penalties && cfg.mask.words == nullptr) {
         if (tid == 0) {
             int a = 0;
             while (a < extent && row_targets[a] == row_drafts[a]) { ++a; }
@@ -289,7 +290,7 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_accept_greedy_draft
             int best_index          = INT_MAX;
             for (int v = tid; v < token_domain; v += blockDim.x) {
                 const float value = sampling_adjusted_logit(__bfloat162float(row_logits[base + v]),
-                                                            v, cfg, row_drafts, i, i);
+                                                            v, cfg, row_drafts, i);
                 if (sampling_better(value, v, best_value, best_index)) {
                     best_value = value;
                     best_index = v;
@@ -307,6 +308,7 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_accept_greedy_draft
                 __syncthreads();
             }
             if (tid == 0) {
+                if (cfg.mask.words && !isfinite(red_val[0])) { asm volatile("trap;"); }
                 const int selected = red_idx[0];
                 if (i < extent && selected == row_drafts[i]) {
                     a_sh = i + 1;
@@ -334,11 +336,11 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_accept_greedy_draft
         const std::int64_t base = static_cast<std::int64_t>(i) * physical_rows;
         if (token_domain <= kSamplerTileItems) {
             sampling_build_truncated_small(row_logits, base, token_domain, cfg, red_val, red_idx,
-                                           cand_val, cand_idx, prob, &n_support, row_drafts, i, i);
+                                           cand_val, cand_idx, prob, &n_support, row_drafts, i);
         } else {
             sampling_build_truncated_block_fast(row_logits, base, token_domain, cfg, merge_val,
                                                 merge_idx, cand_val, cand_idx, prob, &n_support,
-                                                row_drafts, i, i);
+                                                row_drafts, i);
         }
         if (tid == 0 && done_sh == 0) {
             const int L = L_sh;
@@ -394,8 +396,11 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_sampling_partial_to
     if (col > extent) { return; }
     const SamplingConfig cfg = configs[row];
     const bool greedy        = !(cfg.temperature > 0.0f);
-    const bool penalties     = cfg.allowed_tokens != nullptr || cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f || cfg.repetition_penalty != 1.0f;
-    if ((greedy && !penalties) || token_domain <= kSamplerTileItems) { return; }
+    const bool penalties     = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f ||
+                           cfg.repetition_penalty != 1.0f;
+    if ((greedy && !penalties && cfg.mask.words == nullptr) || token_domain <= kSamplerTileItems) {
+        return;
+    }
     workspace = speculative_workspace_row(workspace, workspace_row_stride, row);
     if (partial == 0 && threadIdx.x == 0) {
         workspace.group_done[col] = 0;
@@ -415,8 +420,11 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_sampling_partial_to
         for (int item = 0; item < kSamplerItemsPerThread; ++item) {
             const int tile_index = item * blockDim.x + threadIdx.x;
             const int v          = tile_start + tile_index;
-            keys[item] =
-                v < token_domain ? sampling_bf16_tile_sort_key(logits[base + v], tile_index) : 0u;
+            keys[item]           = (v < token_domain &&
+                          (!cfg.mask.words ||
+                           (cfg.mask.words[col * cfg.mask.stride + v / 32] & (1u << (v % 32)))))
+                                       ? sampling_bf16_tile_sort_key(logits[base + v], tile_index)
+                                       : 0u;
         }
         sampling_store_bf16_tile_topk(keys, cap, tile_start, workspace, col, partial,
                                       topk_storage.bf16);
@@ -433,7 +441,7 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_sampling_partial_to
         if (v < token_domain) {
             const __nv_bfloat16 raw = logits[base + v];
             keys[item]              = sampling_sort_key(
-                sampling_adjusted_logit(__bfloat162float(raw), v, cfg, row_drafts, col, col), v);
+                sampling_adjusted_logit(__bfloat162float(raw), v, cfg, row_drafts, col), v);
         } else {
             keys[item] = 0ull;
         }
@@ -476,9 +484,10 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void speculative_sampling_group
     std::int32_t* row_tokens        = licensed_tokens + row * cols;
     if (token_domain <= kSamplerTileItems) { return; }
     const bool greedy    = !(cfg.temperature > 0.0f);
-    const bool penalties = cfg.allowed_tokens != nullptr || cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f || cfg.repetition_penalty != 1.0f;
+    const bool penalties = cfg.mask.words != nullptr || cfg.presence_penalty != 0.0f ||
+                           cfg.frequency_penalty != 0.0f || cfg.repetition_penalty != 1.0f;
 
-    if (greedy && !penalties) {
+    if (greedy && !penalties && cfg.mask.words == nullptr) {
         if constexpr (SparseProposal) {
             if (tid < 32 && col == 0 && group == 0)
                 speculative_sparse_warp_greedy(target_tokens, drafts, lengths, anchors,
@@ -564,6 +573,8 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void speculative_sampling_group
         cand_idx[tid]                = sampling_key_index(key);
     }
     __syncthreads();
+
+    if (tid == 0 && greedy && cfg.mask.words && !isfinite(cand_val[0])) { asm volatile("trap;"); }
 
     if constexpr (SparseProposal) {
         __shared__ int last_column;
