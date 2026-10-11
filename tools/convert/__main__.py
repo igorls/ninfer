@@ -10,10 +10,11 @@ from pathlib import Path
 import sys
 from collections.abc import Mapping
 
+from . import qwen3_5
 from .official_recipes import RECIPES
 from .pipeline import convert
 from .proposal import DEFAULT_RANKING, add_official_proposal
-from .qwen3_5 import build_model
+from .qwen4_exp import build as qwen4_exp
 from .recipe import Recipe
 from .sources.safetensors import SafetensorsSource
 
@@ -129,7 +130,7 @@ def main(argv=None):
     parser.add_argument(
         "--components",
         default="text",
-        help="comma-separated text,vision,mtp,dflash,dflash2",
+        help="comma-separated text,vision,mtp,dflash,dflash2 (qwen4_exp: text,vision,mtp)",
     )
     parser.add_argument(
         "--resource",
@@ -164,7 +165,11 @@ def main(argv=None):
         companions = {
             key: sources[key] for key in ("dflash", "dflash2") if key in components
         }
-        model = build_model(
+        # The source config selects the architecture adapter.
+        adapter = qwen4_exp if qwen4_exp.accepts(base.config) else qwen3_5
+        if adapter is qwen4_exp and args.proposal:
+            raise ValueError("the qwen4_exp architecture has no indexed proposal head")
+        model = adapter.build_model(
             base,
             components=components,
             companions=companions,
@@ -190,6 +195,7 @@ def main(argv=None):
             "converter": "ninfer-v3",
             "recipe": args.recipe,
             "sources": sources.provenance(),
+            **model.provenance,
         }
         if args.override:
             provenance["override"] = args.override

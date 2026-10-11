@@ -344,6 +344,7 @@ def _check_source_fields(name, actual, expected, fields):
 class _Builder:
     def __init__(self, model: Model):
         self.model = model
+        self.consumed: set[str] = set()
 
     def validate_source(self, selected, original, name):
         if selected is original or not _has_model_config(selected):
@@ -449,6 +450,7 @@ class _Builder:
     ):
         shape = tuple(shape)
         original = shape if source_shape is None else tuple(source_shape)
+        self.consumed.add(source_name)
 
         def factory(selected, format=None):
             self.validate_source(selected, store, name)
@@ -902,6 +904,18 @@ class _Builder:
                     "candidate_selector." + role,
                     (target["vocab_size"], rank),
                 )
+
+
+def add_vision(
+    model: Model, store: SafetensorsSource, config: dict, output_width: int
+) -> set[str]:
+    """Add the Qwen3.5 Vision tower under its logical names; return the source tensors read.
+
+    The ``qwen4_exp`` adapter reuses this mapping for its identical Vision tower.
+    """
+    builder = _Builder(model)
+    builder.vision(store, config, output_width)
+    return builder.consumed
 
 
 def build_model(

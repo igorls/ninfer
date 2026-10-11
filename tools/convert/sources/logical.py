@@ -55,6 +55,33 @@ def array_source(values: torch.Tensor, label: str) -> LogicalSource:
     )
 
 
+def concat_sources(sources, label: str | None = None) -> LogicalSource:
+    """Concatenate value sources along their leading axis; trailing dimensions must agree."""
+    sources = tuple(sources)
+    if not sources or any(not source.shape for source in sources):
+        raise ValueError("concatenation requires nonscalar sources")
+    trailing = sources[0].shape[1:]
+    if any(source.shape[1:] != trailing for source in sources):
+        raise ValueError("concatenated sources need equal trailing dimensions")
+    offsets = [0]
+    for source in sources:
+        offsets.append(offsets[-1] + prod(source.shape))
+    shape = (sum(source.shape[0] for source in sources), *trailing)
+
+    def read(begin: int, end: int) -> torch.Tensor:
+        parts = []
+        for index, source in enumerate(sources):
+            low, high = max(begin, offsets[index]), min(end, offsets[index + 1])
+            if low < high:
+                parts.append(source.values(low - offsets[index], high - offsets[index]))
+        if not parts:
+            return sources[0].values(0, 0)
+        return parts[0] if len(parts) == 1 else torch.cat(parts)
+
+    name = label or "concat(" + ", ".join(source.label for source in sources) + ")"
+    return LogicalSource(shape, name, read)
+
+
 def transpose_source(
     source: LogicalSource, axes: tuple[int, ...], shape: tuple[int, ...]
 ) -> LogicalSource:

@@ -1,7 +1,10 @@
-"""Qwen3.8-Flash-Next (`qwen4_exp`) artifact tooling.
+"""Qwen4-family (`qwen4_exp`) artifact tooling, starting with Qwen3.8-Flash-Next.
 
-The v3 artifact is derived from the published v2 NInfer artifact: `upgrade` copies every
-v2 payload byte-for-byte into a new v3 directory and bakes the two BF16 MTP expert banks
-into NVFP4 expert banks; `verify` re-reads the result through the generic v3 reader; and
+The qualified Flash-Next v3 artifact is derived from the published v2 NInfer artifact: `upgrade`
+copies every v2 payload byte-for-byte into a new v3 directory and bakes the two BF16 MTP expert
+banks into NVFP4 expert banks; `verify` re-reads the result through the generic v3 reader; and
 `derive` downloads, upgrades and verifies unattended on a Linux VM.
+
+`build` is the native route from official safetensors through the generic converter
+(`python -m tools.convert`); `config` normalizes the official config for both routes.
 """

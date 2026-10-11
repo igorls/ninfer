@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from fnmatch import fnmatchcase
 import json
 
 from .methods import (
@@ -10,7 +11,9 @@ from .methods import (
     fp8_row_maxabs,
     grouped_absmax,
     import_encoded,
+    nvfp4_expert_maxabs,
     nvfp4_maxabs,
+    u4z8_maxabs,
 )
 
 Q4 = "q4_g64_fp16"
@@ -18,6 +21,8 @@ Q5 = "q5_g64_fp16"
 Q6 = "q6_g64_fp16"
 Q8 = "q8_g32_fp16"
 FP8 = "fp8_e4m3fn_row_bf16"
+FP8_FP32 = "fp8_e4m3fn_row_fp32"
+U4Z8 = "u4z8_g16_fp16"
 
 
 def _assign(recipe, name, format, *, source=None):
@@ -290,6 +295,93 @@ def qwen3_8_27b_nvfp4full(model, recipe, sources):
             recipe.use(name, input_name, auxiliaries={"activation_input_divisor": divisor})
 
 
+# Qwen4 family (qwen4_exp). Unassigned parameters keep the adapter default: BF16 (INT64 for the
+# PLE index tables), A16Only.
+_QWEN4_ROLES = {
+    "mixer": (
+        "text/layers/*/attention/query_gate_key_value",
+        "text/layers/*/attention/output",
+        "text/layers/*/gdn/query_key_value_z",
+        "text/layers/*/gdn/output",
+    ),
+    "experts": ("text/layers/*/mlp/experts/gate_up", "text/layers/*/mlp/experts/down"),
+    "dense_mlp": ("text/layers/*/mlp/gate", "text/layers/*/mlp/up", "text/layers/*/mlp/down"),
+    "mtp_mixer": (
+        "mtp/layers/0/attention/query_gate_key_value",
+        "mtp/layers/0/attention/output",
+    ),
+    "mtp_experts": ("mtp/layers/0/mlp/experts/gate_up", "mtp/layers/0/mlp/experts/down"),
+    "mtp_dense_mlp": ("mtp/layers/0/mlp/gate", "mtp/layers/0/mlp/up", "mtp/layers/0/mlp/down"),
+    "ple": ("text/layers/*/ple/embedding/shards/*",),
+}
+
+
+def _require_qwen4(model, *, moe: bool | None = None):
+    if model.config.get("architectures") != ["Qwen4ExpForCausalLM"]:
+        raise ValueError("this recipe requires the qwen4_exp architecture")
+    if moe is not None and ("num_experts" in model.config) != moe:
+        kind = "MoE" if moe else "dense"
+        raise ValueError(f"this recipe requires {kind} qwen4_exp feed-forward blocks")
+
+
+def qwen4_allocation(model, recipe, **formats):
+    """Assign formats to Qwen4 parameter roles; a recipe for a new checkpoint is one call.
+
+    Roles are the keys of ``_QWEN4_ROLES``: ``mixer`` (Text attention and GDN input/output
+    projections), ``experts``, ``dense_mlp``, their ``mtp_`` counterparts, and ``ple`` (the PLE
+    table shards). Matrix roles accept ``fp8_e4m3fn_row_fp32``/``fp8_e4m3fn_row_bf16``
+    (``fp8_row_maxabs``, AllowA8); expert banks ``nvfp4`` (``nvfp4_expert_maxabs``, AllowA4 with
+    dynamically quantized activations); ``ple`` ``u4z8_g16_fp16`` (``u4z8_maxabs``). Roles
+    absent from the model, such as experts of a dense checkpoint, are skipped.
+    """
+    _require_qwen4(model)
+    for role, format in formats.items():
+        if role not in _QWEN4_ROLES:
+            raise ValueError(f"unknown qwen4 role {role!r}")
+        names = [
+            name
+            for name in model.parameters
+            if any(fnmatchcase(name, pattern) for pattern in _QWEN4_ROLES[role])
+        ]
+        if format is None or not names:
+            continue
+        if role == "ple":
+            if format != U4Z8:
+                raise ValueError("PLE tables use u4z8_g16_fp16")
+            recipe.assign(names, format=U4Z8, method=u4z8_maxabs)
+        elif role.endswith("experts"):
+            if format != "nvfp4":
+                raise ValueError("expert banks use nvfp4")
+            recipe.assign(
+                names, format="nvfp4", method=nvfp4_expert_maxabs, activation_policy="AllowA4"
+            )
+        elif format in (FP8, FP8_FP32):
+            recipe.assign(names, format=format, method=fp8_row_maxabs, activation_policy="AllowA8")
+        else:
+            # NVFP4 matrices need calibrated activation divisors; assign them in a custom recipe.
+            raise ValueError(f"{role}: unsupported qwen4 allocation format {format!r}")
+
+
+def qwen3_8_flash_next(model, recipe, sources):
+    """Qwen3.8-Flash-Next from the official BF16 checkpoint in the qualified v3 allocation.
+
+    The 48 Text and the MTP expert banks are NVFP4 with one divisor per expert, the Text
+    attention and GDN projections FP8 with FP32 row multipliers, the PLE table U4Z8 G16;
+    everything else, including the MTP attention, Vision and both vocabulary weights, is BF16.
+    The production artifact imported its FP8, NVFP4 and U4Z8 words from third-party
+    quantizations; this recipe encodes them from the official BF16 weights.
+    """
+    _require_qwen4(model, moe=True)
+    qwen4_allocation(
+        model,
+        recipe,
+        mixer=FP8_FP32,
+        experts="nvfp4",
+        mtp_experts="nvfp4",
+        ple=U4Z8,
+    )
+
+
 RECIPES = {
     "qwen3_6_27b": qwen3_6_27b,
     "qwen3_6_27b_nvfp4": qwen3_6_27b_nvfp4,
@@ -298,4 +390,5 @@ RECIPES = {
     "qwen3_8_27b_nvfp4full": qwen3_8_27b_nvfp4full,
     "qwen3_8_27b_orcarouter_nvfp4": qwen3_8_27b_orcarouter_nvfp4,
     "qwen3_6_35b_a3b": qwen3_6_35b_a3b,
+    "qwen3_8_flash_next": qwen3_8_flash_next,
 }

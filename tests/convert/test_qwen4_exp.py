@@ -21,6 +21,7 @@ from tools.convert.qwen4_exp.inventory import Plan, V2Object, expected_tensors, 
 from tools.convert.qwen4_exp.source import (
     MAINTAINED_TEMPLATE_SHA256,
     TEMPLATE_OBJECT,
+    V2_SHA256,
     maintained_template,
 )
 from tools.convert.qwen4_exp.upgrade import artifact_id, stream_upgrade
@@ -35,6 +36,9 @@ def _published_directory() -> dict:
 
 def test_published_v2_directory_maps_to_the_closed_v3_inventory():
     plan = plan_upgrade(_published_directory())
+    # The directory, including the shared config normalizer's output, of the current derivation
+    # (eos_token_id and the maintained chat template; the published 1e7e026e... predates both).
+    assert artifact_id(plan, V2_SHA256).hex() == "3cade505298b575e009fe78877b76a33"
     formats = Counter(getattr(spec, "format", "resource") for spec in plan.specs)
     assert formats == {
         "bf16": 1235,

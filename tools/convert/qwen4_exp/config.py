@@ -1,8 +1,13 @@
-"""Normalize the official Qwen3.8-Flash-Next config.json into v3 component configs.
+"""Normalize an official Qwen4-family config.json into v3 component configs.
 
 The text component records the text-only ``Qwen4ExpForCausalLM`` / ``qwen4_exp_text`` pair,
 mirroring how ``qwen3_5`` records ``Qwen3_5*ForCausalLM`` for a ``...ForConditionalGeneration``
-checkpoint. Only facts the ``qwen4_exp`` architecture interprets are kept.
+checkpoint. Only facts the ``qwen4_exp`` architecture interprets are kept. The v2 upgrade and the
+native converter share this normalizer; Flash-Next's output is pinned by the derived artifact id.
+
+Feed-forward blocks are MoE (Flash-Next) or dense, decided by ``num_experts``: a dense config
+records ``intermediate_size`` in place of the four MoE fields. The engine binds MoE blocks only
+until dense blocks land (Qwen4 readiness Q3).
 """
 
 from __future__ import annotations
@@ -16,6 +21,17 @@ TEXT_ARCHITECTURE = "Qwen4ExpForCausalLM"
 TEXT_MODEL_TYPE = "qwen4_exp_text"
 MTP_CONFIG = {"architectures": ["Qwen4ExpMTP"]}
 VISION_MODEL_TYPE = "qwen4_exp_vision"
+# Official source architectures with qwen4_exp mathematics -> whether text_config is nested.
+SOURCE_ARCHITECTURES = {
+    "Qwen4ExpForConditionalGeneration": True,
+    "Qwen4ExpForCausalLM": False,
+}
+_MOE_INTEGERS = (
+    "num_experts",
+    "num_experts_per_tok",
+    "moe_intermediate_size",
+    "shared_expert_intermediate_size",
+)
 
 _TEXT_INTEGERS = (
     "hidden_size",
@@ -113,10 +129,30 @@ def _eos_token_id(raw: dict, vocab_size: int) -> int:
     return eos
 
 
-def text_config(source: dict) -> dict:
-    if source.get("architectures") != ["Qwen4ExpForConditionalGeneration"]:
+def accepts(source: dict) -> bool:
+    """Whether a source config names an architecture this normalizer interprets."""
+    architectures = source.get("architectures")
+    return (
+        isinstance(architectures, list)
+        and len(architectures) == 1
+        and architectures[0] in SOURCE_ARCHITECTURES
+    )
+
+
+def source_text(source: dict) -> dict:
+    """The raw text config of an accepted source config."""
+    if not accepts(source):
         raise ValueError(f"unsupported architecture {source.get('architectures')!r}")
-    raw = source["text_config"]
+    if not SOURCE_ARCHITECTURES[source["architectures"][0]]:
+        return source
+    raw = source.get("text_config")
+    if not isinstance(raw, dict):
+        raise ValueError("the source config must contain text_config")
+    return raw
+
+
+def text_config(source: dict) -> dict:
+    raw = source_text(source)
     _fixed(raw, "model_type", TEXT_MODEL_TYPE, "text")
     _fixed(raw, "hidden_act", "silu", "text")
     _fixed(raw, "attention_bias", False, "text")
@@ -125,8 +161,18 @@ def text_config(source: dict) -> dict:
     _fixed(raw, "mtp_num_hidden_layers", 1, "text")
     _fixed(raw, "mtp_use_dedicated_embeddings", False, "text")
     _fixed(raw, "tie_word_embeddings", False, "text")
+    moe = "num_experts" in raw
+    if raw.get("mlp_only_layers") not in (None, []) or raw.get("decoder_sparse_step") not in (
+        None,
+        1,
+    ):
+        raise ValueError("text: every block must use the same feed-forward kind")
     result: dict = {"architectures": [TEXT_ARCHITECTURE], "model_type": TEXT_MODEL_TYPE}
     for key in _TEXT_INTEGERS:
+        if key in _MOE_INTEGERS and not moe:
+            if key == _MOE_INTEGERS[0]:
+                result["intermediate_size"] = _positive(raw, "intermediate_size", "text")
+            continue
         result[key] = _positive(raw, key, "text")
     result["tie_word_embeddings"] = False
     result["rms_norm_eps"] = _f32(raw.get("rms_norm_eps"), "text.rms_norm_eps")
@@ -157,7 +203,7 @@ def text_config(source: dict) -> dict:
     # One-based like the source: PLE layer id i holds its weights under text/layers/{i - 1}.
     result["ple_layer_ids"] = _ple_layer_ids(raw, result["layer_types"])
     result["eos_token_id"] = _eos_token_id(raw, result["vocab_size"])
-    if result["num_experts_per_tok"] > result["num_experts"]:
+    if moe and result["num_experts_per_tok"] > result["num_experts"]:
         raise ValueError("selected experts exceed the expert count")
     if result["num_attention_heads"] % result["num_key_value_heads"]:
         raise ValueError("attention heads must be divisible by KV heads")
@@ -167,7 +213,9 @@ def text_config(source: dict) -> dict:
 
 
 def vision_config(source: dict, text: dict) -> dict:
-    raw = source["vision_config"]
+    raw = source.get("vision_config")
+    if not isinstance(raw, dict):
+        raise ValueError("Vision requires vision_config")
     _fixed(raw, "in_channels", 3, "vision")
     _fixed(raw, "hidden_act", "gelu_pytorch_tanh", "vision")
     _fixed(raw, "deepstack_visual_indexes", [], "vision")

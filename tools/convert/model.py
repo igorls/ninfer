@@ -34,6 +34,9 @@ class Model:
     packing_groups: list[tuple[str, ...]] = field(default_factory=list)
     token_count: int = 0
     special_token_ids: tuple[int, ...] = ()
+    # Facts the architecture adapter decided while reading the source, such as the selected
+    # chat template; the CLI records them in the artifact provenance and conversion report.
+    provenance: dict = field(default_factory=dict)
 
     @property
     def config(self) -> dict:
