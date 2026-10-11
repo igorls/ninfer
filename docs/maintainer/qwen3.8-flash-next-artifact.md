@@ -68,6 +68,11 @@ decoder layers from 1: the PLE weights and injection belong to 0-based layer 1.
 The six resources are the v2 artifact's frontend files, unchanged. The chat template is
 Flash-Next's official template (8,952 bytes, SHA256 `c3cf9e34abf4...d7a81041`), not the maintained
 `tools/chat_templates/qwen3_8.jinja`.
+The official template is byte-identical to the official Qwen3.8-27B template, which the maintained one
+derives from. It rejects `developer` messages (including the leading turn that Responses
+`instructions` become), system messages after the first turn and tool-result histories without a
+user turn. Serve the artifact with `--chat-template` naming the maintained `qwen3_8.jinja` to accept
+them; the Windows installer ships it in `chat-templates`.
 
 ## 3. Objects
 

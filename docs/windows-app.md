@@ -34,6 +34,7 @@ paths for any other auxiliary resources in custom arguments.
 | Item | Default location |
 |---|---|
 | Executables and runtime DLLs | `%LOCALAPPDATA%\Programs\NInfer\bin` |
+| Maintained chat templates for `--chat-template` | `%LOCALAPPDATA%\Programs\NInfer\chat-templates` |
 | Active configuration | `%LOCALAPPDATA%\NInfer\supervisor.json` |
 | Tray preferences | `%LOCALAPPDATA%\NInfer\supervisor.tray.json` |
 | Engine and request logs | `%LOCALAPPDATA%\NInfer\logs` |

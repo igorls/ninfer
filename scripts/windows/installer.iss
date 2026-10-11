@@ -41,6 +41,7 @@ VersionInfoVersion=2026.9.11.1
 [Files]
 Source: "{#PayloadDir}\bin\*"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#PayloadDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PayloadDir}\chat-templates\*"; DestDir: "{app}\chat-templates"; Flags: ignoreversion
 Source: "{#PayloadDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\INSTALL-NOTES.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\release-manifest.json"; DestDir: "{app}"; Flags: ignoreversion

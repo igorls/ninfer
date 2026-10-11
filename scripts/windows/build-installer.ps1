@@ -36,6 +36,17 @@ foreach ($entry in $licenses.GetEnumerator()) {
     Copy-Item -LiteralPath $entry.Value -Destination (Join-Path $payload ('licenses/' + $entry.Key))
 }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'installer-notes.txt') -Destination (Join-Path $payload 'INSTALL-NOTES.txt')
+# Maintained chat templates for --chat-template, as committed (LF) whatever the checkout's line
+# endings; artifacts carrying an official template use them to accept developer and positional
+# system turns.
+$templates = Join-Path $payload 'chat-templates'
+New-Item -ItemType Directory -Path $templates -Force | Out-Null
+foreach ($template in @(& git -C $repo ls-files 'tools/chat_templates/*.jinja')) {
+    $target = Join-Path $templates ([IO.Path]::GetFileName($template))
+    & cmd /c "git -C `"$repo`" cat-file blob HEAD:$template > `"$target`""
+    if ($LASTEXITCODE -ne 0) { throw "Cannot export $template" }
+    if ([IO.File]::ReadAllBytes($target) -contains 13) { throw "$template was exported with CR bytes" }
+}
 $files = @(Get-ChildItem -LiteralPath (Join-Path $payload 'bin') -File | ForEach-Object {
     @{name=$_.Name; bytes=$_.Length; sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}
 })
