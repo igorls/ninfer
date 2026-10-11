@@ -3,8 +3,10 @@
 #include "models/load_options.h"
 #include "models/qwen3_5/config.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 namespace ninfer::artifact {
@@ -12,6 +14,11 @@ struct Directory;
 }
 
 namespace ninfer::models::qwen4_exp {
+
+// Companion component identities the converter writes and this package executes. The Text pair
+// (Qwen4ExpForCausalLM / qwen4_exp_text) selects the package in models/registry.
+inline constexpr std::string_view kMtpArchitecture = "Qwen4ExpMTP";
+inline constexpr std::string_view kVisionModelType = "qwen4_exp_vision";
 
 // Leaf value types whose mathematics Qwen4Exp shares with Qwen3.5 (GDN core, attention heads,
 // interleaved MRoPE, the Vision tower). Their Qwen4Exp values are parsed here.
@@ -37,9 +44,12 @@ struct IndexerConfig {
     std::uint32_t budget              = 0;
 };
 
-// Per-layer n-gram embeddings injected into one decoder layer.
+// Per-layer n-gram embeddings (PLE), injected before each listed decoder layer. Every PLE layer
+// owns its hashed n-gram table, projections, norms, dilated convolution and convolution history;
+// the geometry below is shared.
 struct PleConfig {
-    std::uint32_t layer            = 0; // 0-based; the source ple_layer_ids counts from 1.
+    // Ascending, distinct, 0-based GDN decoder layers; the source ple_layer_ids counts from 1.
+    std::vector<std::uint32_t> layers;
     std::uint32_t embed_dim        = 0;
     std::uint32_t conv_kernel_size = 0;
     std::uint32_t ngram_size       = 0;
@@ -54,6 +64,26 @@ struct PleConfig {
     }
 
     [[nodiscard]] std::uint32_t head_width() const noexcept { return embed_dim / heads(); }
+
+    // Stored u4z8_g16_fp16 row of one n-gram head: two codes per byte, one FP16 scale per 16.
+    [[nodiscard]] std::size_t code_row_bytes() const noexcept { return head_width() / 2U; }
+
+    [[nodiscard]] std::size_t scale_row_bytes() const noexcept {
+        return head_width() / 16U * sizeof(std::uint16_t);
+    }
+
+    // Columns the causal convolution (conv_kernel_size taps at dilation ngram_size) keeps.
+    [[nodiscard]] std::uint32_t history_columns() const noexcept {
+        return (conv_kernel_size - 1) * ngram_size;
+    }
+
+    // Position of decoder `layer` in `layers`, or nullopt when the layer carries no PLE.
+    [[nodiscard]] std::optional<std::size_t> index_of(std::uint32_t layer) const noexcept {
+        for (std::size_t i = 0; i < layers.size(); ++i) {
+            if (layers[i] == layer) { return i; }
+        }
+        return std::nullopt;
+    }
 };
 
 struct TextConfig {

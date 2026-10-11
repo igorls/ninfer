@@ -56,7 +56,7 @@ LayerRoots layer_roots(Allocator& allocator, const TextConfig& config, std::int3
     };
 }
 
-// Prefill PLE row staging (decode rows arrive in the round ingress).
+// Prefill PLE rows of every PLE layer, planar by layer (decode rows arrive in the round ingress).
 struct PleRows {
     Tensor codes;
     Tensor scales;
@@ -64,10 +64,11 @@ struct PleRows {
 
 template <class Allocator>
 PleRows ple_rows(Allocator& allocator, const TextConfig& config, std::int32_t tokens) {
-    const std::int32_t rows = dimension(std::uint64_t(config.ple.heads()) * std::uint64_t(tokens));
-    const std::int32_t width = dimension(config.ple.head_width());
-    return {matrix(allocator, DType::U8, width / 2, rows),
-            matrix(allocator, DType::FP16, width / 16, rows)};
+    const std::int32_t rows = dimension(std::uint64_t(config.ple.layers.size()) *
+                                        config.ple.heads() * std::uint64_t(tokens));
+    return {matrix(allocator, DType::U8, dimension(config.ple.code_row_bytes()), rows),
+            matrix(allocator, DType::FP16,
+                   dimension(config.ple.scale_row_bytes() / sizeof(std::uint16_t)), rows)};
 }
 
 struct PleStage {

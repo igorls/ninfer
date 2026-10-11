@@ -38,8 +38,9 @@ bool same_linear_spec(const LinearAttentionStatePoolSpec& left,
 bool same_token_mixer_spec(const TokenMixerStateSpec& left,
                            const TokenMixerStateSpec& right) noexcept {
     return left.indexer_layers == right.indexer_layers && left.indexer_dim == right.indexer_dim &&
-           left.indexer_block == right.indexer_block && left.ple_channels == right.ple_channels &&
-           left.ple_history == right.ple_history && left.transient_slots == right.transient_slots;
+           left.indexer_block == right.indexer_block && left.ple_layers == right.ple_layers &&
+           left.ple_channels == right.ple_channels && left.ple_history == right.ple_history &&
+           left.transient_slots == right.transient_slots;
 }
 
 bool same_region(const LayoutRegion& left, const LayoutRegion& right) noexcept {
@@ -61,6 +62,7 @@ bool same_host_layout(const StateImageHostLayout& left,
            same_region(left.indexer_positions, right.indexer_positions) &&
            left.indexer_positions_layer_bytes == right.indexer_positions_layer_bytes &&
            same_region(left.ple_history, right.ple_history) &&
+           left.ple_history_layer_bytes == right.ple_history_layer_bytes &&
            same_region(left.continuation_hidden, right.continuation_hidden) &&
            same_region(left.continuation_positions, right.continuation_positions) &&
            left.image_bytes == right.image_bytes;
@@ -73,7 +75,8 @@ void validate_spec(const StateImageSpec& spec) {
         linear.value_heads <= 0 || linear.value_head_dim <= 0 || linear.key_head_dim <= 0 ||
         linear.slot_count <= 0 || linear.conv_dtype != DType::BF16 || spec.hidden <= 0 ||
         mixer.indexer_layers == 0 || mixer.indexer_dim <= 0 || mixer.indexer_block <= 0 ||
-        mixer.ple_channels <= 0 || mixer.ple_history <= 0 || mixer.transient_slots < 0 ||
+        mixer.ple_layers == 0 || mixer.ple_channels <= 0 || mixer.ple_history <= 0 ||
+        mixer.transient_slots < 0 ||
         mixer.transient_slots > std::numeric_limits<std::int32_t>::max() - linear.slot_count) {
         throw std::invalid_argument("Qwen4Exp StateImage geometry is invalid");
     }
@@ -113,8 +116,10 @@ StateImageHostLayout plan_host_state_image(const StateImageSpec& spec) {
         builder.add(checked_mul(host.indexer_positions_layer_bytes, mixer.indexer_layers,
                                 "StateImage host indexer positions bytes overflow"),
                     kStateImageAlignment, "StateImage host indexer positions");
-    host.ple_history =
-        builder.add(ple_slot.bytes(), kStateImageAlignment, "StateImage host PLE history");
+    host.ple_history_layer_bytes = ple_slot.bytes();
+    host.ple_history = builder.add(checked_mul(host.ple_history_layer_bytes, mixer.ple_layers,
+                                               "StateImage host PLE history bytes overflow"),
+                                   kStateImageAlignment, "StateImage host PLE history");
     host.continuation_hidden    = builder.add(hidden_slot.bytes(), kStateImageAlignment,
                                               "StateImage host continuation hidden");
     host.continuation_positions = builder.add(3 * sizeof(std::int32_t), kStateImageAlignment,
@@ -164,10 +169,13 @@ StateImageDeviceLayout plan_state_image_device_pool(LayoutBuilder& builder,
             {kMropeAxes, mixer.indexer_block, spec.linear.slot_count + mixer.transient_slots},
             kStateImageAlignment, "StateImage indexer forming positions"));
     }
-    out.ple_history = builder.add_tensor(
-        DType::BF16,
-        {mixer.ple_channels, mixer.ple_history, spec.linear.slot_count + mixer.transient_slots},
-        kStateImageAlignment, "StateImage PLE history");
+    out.ple_history.reserve(mixer.ple_layers);
+    for (std::uint32_t layer = 0; layer < mixer.ple_layers; ++layer) {
+        out.ple_history.push_back(builder.add_tensor(
+            DType::BF16,
+            {mixer.ple_channels, mixer.ple_history, spec.linear.slot_count + mixer.transient_slots},
+            kStateImageAlignment, "StateImage PLE history"));
+    }
     out.continuation_hidden =
         builder.add_tensor(DType::BF16, {spec.hidden, spec.linear.slot_count}, kStateImageAlignment,
                            "StateImage continuation hidden");
@@ -191,8 +199,9 @@ TransferWork state_image_transfer_work(const StateImageHostLayout& layout) {
                           "StateImage transfer payload overflow");
     payload = checked_add(payload, layout.continuation_positions.bytes,
                           "StateImage transfer payload overflow");
-    const std::uint64_t operations =
-        2ULL * layout.spec.linear.layers + 2ULL * layout.spec.token_mixer.indexer_layers + 3ULL;
+    const std::uint64_t operations = 2ULL * layout.spec.linear.layers +
+                                     2ULL * layout.spec.token_mixer.indexer_layers +
+                                     layout.spec.token_mixer.ple_layers + 2ULL;
     if (operations > std::numeric_limits<std::uint32_t>::max()) {
         throw std::overflow_error("StateImage transfer operation count exceeds uint32");
     }
@@ -277,14 +286,15 @@ std::byte* HostStatePool::slot_data(std::uint32_t index) const noexcept {
 }
 
 StateImageDevicePool::StateImageDevicePool(DeviceSpan backing, const StateImageDeviceLayout& layout)
-    : linear_(backing, layout.linear), ple_history_(layout.ple_history.bind(backing)),
+    : linear_(backing, layout.linear),
       continuation_hidden_(layout.continuation_hidden.bind(backing)),
       continuation_positions_(layout.continuation_positions.bind(backing)),
       host_layout_(layout.host) {
     const StateImageSpec& spec = host_layout_.spec;
     if (layout.indexer_keys.size() != spec.token_mixer.indexer_layers ||
-        layout.indexer_positions.size() != spec.token_mixer.indexer_layers) {
-        throw std::invalid_argument("StateImage indexer layout is inconsistent");
+        layout.indexer_positions.size() != spec.token_mixer.indexer_layers ||
+        layout.ple_history.size() != spec.token_mixer.ple_layers) {
+        throw std::invalid_argument("StateImage indexer or PLE layout is inconsistent");
     }
     indexer_keys_.reserve(layout.indexer_keys.size());
     indexer_positions_.reserve(layout.indexer_positions.size());
@@ -297,10 +307,16 @@ StateImageDevicePool::StateImageDevicePool(DeviceSpan backing, const StateImageD
             throw std::invalid_argument("StateImage components do not share one slot geometry");
         }
     }
+    ple_history_.reserve(layout.ple_history.size());
+    for (const TensorRegion& region : layout.ple_history) {
+        ple_history_.push_back(region.bind(backing));
+        if (ple_history_.back().ne[2] != linear_.slot_count() + spec.token_mixer.transient_slots) {
+            throw std::invalid_argument("StateImage components do not share one slot geometry");
+        }
+    }
     if (continuation_hidden_.dtype != DType::BF16 || !continuation_hidden_.is_contiguous() ||
         continuation_hidden_.ne[0] != spec.hidden ||
         continuation_hidden_.ne[1] != linear_.slot_count() ||
-        ple_history_.ne[2] != linear_.slot_count() + spec.token_mixer.transient_slots ||
         continuation_positions_.dtype != DType::I32 || continuation_positions_.ne[0] != 3 ||
         continuation_positions_.ne[1] != linear_.slot_count()) {
         throw std::invalid_argument("StateImage continuation layout is inconsistent");
@@ -324,7 +340,8 @@ Tensor StateImageDevicePool::continuation_positions_slot(std::int32_t slot) cons
 
 void StateImageDevicePool::commit_token_mixer(std::int32_t snapshot, std::int32_t destination,
                                               cudaStream_t stream) {
-    validate_slot(snapshot, ple_history_.ne[2], "token mixer snapshot is out of range");
+    validate_slot(snapshot, linear_.slot_count() + host_layout_.spec.token_mixer.transient_slots,
+                  "token mixer snapshot is out of range");
     validate_slot(destination, slot_count(), "token mixer destination is out of range");
     for (std::size_t layer = 0; layer < indexer_keys_.size(); ++layer) {
         copy_device(slot_of(indexer_keys_[layer], 2, destination),
@@ -332,7 +349,9 @@ void StateImageDevicePool::commit_token_mixer(std::int32_t snapshot, std::int32_
         copy_device(slot_of(indexer_positions_[layer], 2, destination),
                     slot_of(indexer_positions_[layer], 2, snapshot), stream);
     }
-    copy_device(slot_of(ple_history_, 2, destination), slot_of(ple_history_, 2, snapshot), stream);
+    for (const Tensor& history : ple_history_) {
+        copy_device(slot_of(history, 2, destination), slot_of(history, 2, snapshot), stream);
+    }
 }
 
 IndexerStateView StateImageDevicePool::indexer(std::uint32_t layer) const {
@@ -342,9 +361,16 @@ IndexerStateView StateImageDevicePool::indexer(std::uint32_t layer) const {
     return {.raw_keys = indexer_keys_[layer], .raw_positions = indexer_positions_[layer]};
 }
 
-Tensor StateImageDevicePool::ple_history_slot(std::int32_t slot) const {
+const Tensor& StateImageDevicePool::ple_history(std::size_t index) const {
+    if (index >= ple_history_.size()) {
+        throw std::out_of_range("StateImage PLE layer is out of range");
+    }
+    return ple_history_[index];
+}
+
+Tensor StateImageDevicePool::ple_history_slot(std::size_t index, std::int32_t slot) const {
     validate_slot(slot, slot_count(), "StateImage PLE slot is out of range");
-    return slot_of(ple_history_, 2, slot)
+    return slot_of(ple_history(index), 2, slot)
         .view({host_layout_.spec.token_mixer.ple_channels,
                host_layout_.spec.token_mixer.ple_history});
 }
@@ -358,8 +384,10 @@ void StateImageDevicePool::zero_slot(std::int32_t slot, cudaStream_t stream) {
         CUDA_CHECK(cudaMemsetAsync(keys.data, 0, keys.bytes(), stream));
         CUDA_CHECK(cudaMemsetAsync(positions.data, 0, positions.bytes(), stream));
     }
-    const Tensor history = ple_history_slot(slot);
-    CUDA_CHECK(cudaMemsetAsync(history.data, 0, history.bytes(), stream));
+    for (std::size_t index = 0; index < ple_history_.size(); ++index) {
+        const Tensor history = ple_history_slot(index, slot);
+        CUDA_CHECK(cudaMemsetAsync(history.data, 0, history.bytes(), stream));
+    }
     const Tensor hidden = continuation_hidden_slot(slot);
     CUDA_CHECK(cudaMemsetAsync(hidden.data, 0, hidden.bytes(), stream));
     const Tensor positions = continuation_positions_slot(slot);
@@ -374,7 +402,9 @@ void StateImageDevicePool::zero_all(cudaStream_t stream) {
         CUDA_CHECK(cudaMemsetAsync(indexer_positions_[layer].data, 0,
                                    indexer_positions_[layer].bytes(), stream));
     }
-    CUDA_CHECK(cudaMemsetAsync(ple_history_.data, 0, ple_history_.bytes(), stream));
+    for (const Tensor& history : ple_history_) {
+        CUDA_CHECK(cudaMemsetAsync(history.data, 0, history.bytes(), stream));
+    }
     CUDA_CHECK(cudaMemsetAsync(continuation_hidden_.data, 0, continuation_hidden_.bytes(), stream));
     CUDA_CHECK(
         cudaMemsetAsync(continuation_positions_.data, 0, continuation_positions_.bytes(), stream));
@@ -392,7 +422,9 @@ void StateImageDevicePool::copy_slot(std::int32_t source, std::int32_t destinati
         copy_device(slot_of(indexer_positions_[layer], 2, destination),
                     slot_of(indexer_positions_[layer], 2, source), stream);
     }
-    copy_device(ple_history_slot(destination), ple_history_slot(source), stream);
+    for (std::size_t index = 0; index < ple_history_.size(); ++index) {
+        copy_device(ple_history_slot(index, destination), ple_history_slot(index, source), stream);
+    }
     copy_device(continuation_hidden_slot(destination), continuation_hidden_slot(source), stream);
     copy_device(continuation_positions_slot(destination), continuation_positions_slot(source),
                 stream);
@@ -427,7 +459,10 @@ void StateImageDevicePool::copy_to_host(std::int32_t source, HostStateImageView 
                     layer * host_layout_.indexer_positions_layer_bytes,
                 slot_of(indexer_positions_[layer], 2, source));
     }
-    to_host(host_layout_.ple_history.offset, ple_history_slot(source));
+    for (std::size_t index = 0; index < ple_history_.size(); ++index) {
+        to_host(host_layout_.ple_history.offset + index * host_layout_.ple_history_layer_bytes,
+                ple_history_slot(index, source));
+    }
     to_host(host_layout_.continuation_hidden.offset, continuation_hidden_slot(source));
     to_host(host_layout_.continuation_positions.offset, continuation_positions_slot(source));
 }
@@ -455,7 +490,10 @@ void StateImageDevicePool::copy_from_host(HostStateImageConstView source, std::i
                   host_layout_.indexer_positions.offset +
                       layer * host_layout_.indexer_positions_layer_bytes);
     }
-    from_host(ple_history_slot(destination), host_layout_.ple_history.offset);
+    for (std::size_t index = 0; index < ple_history_.size(); ++index) {
+        from_host(ple_history_slot(index, destination),
+                  host_layout_.ple_history.offset + index * host_layout_.ple_history_layer_bytes);
+    }
     from_host(continuation_hidden_slot(destination), host_layout_.continuation_hidden.offset);
     from_host(continuation_positions_slot(destination), host_layout_.continuation_positions.offset);
 }

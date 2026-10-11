@@ -48,11 +48,11 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
                     kCausalScoreTile *
                     ((kCausalScoreReadoutRows + 1U) * sizeof(float) + sizeof(TokenId)))
               : std::nullopt),
-      ordinary_host(
-          !plan.causal_scoring && plan.speculative_backend == SpeculativeBackend::None
-              ? std::make_optional<PinnedHostBuffer>(sizeof(qwen4_exp::OrdinaryDecodeIngress) +
-                                                     sizeof(qwen4_exp::OrdinaryDecodeEgress))
-              : std::nullopt),
+      ordinary_host(!plan.causal_scoring && plan.speculative_backend == SpeculativeBackend::None
+                        ? std::make_optional<PinnedHostBuffer>(
+                              plan.persistent.round.ordinary.value().ple.bytes +
+                              sizeof(qwen4_exp::OrdinaryDecodeEgress))
+                        : std::nullopt),
       context_source_ready_(device_in), context_completion_(device_in),
       context_transfer_timers_{CudaEventTimer(device_in, device_in.transfer_stream),
                                CudaEventTimer(device_in, device_in.transfer_stream),
@@ -72,7 +72,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     decoder      = std::make_unique<qwen4_exp::DecoderState>(backing, plan.persistent.decoder);
     state_images = std::make_unique<StateImageDevicePool>(backing, plan.persistent.state_images);
     ple_gather   = std::make_unique<execution::PleGather>(
-        parameters.model.ple_table(), parameters.model.config().text.ple,
+        parameters.model.ple_tables(), parameters.model.config().text.ple,
         std::min(plan.prefill_chunk, plan.capacity), kPleGatherThreads);
     const auto host_bytes = plan.context_cache.host_capacity_bytes.value();
     std::vector<HostKVPageLayout> layouts{
@@ -136,12 +136,17 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     if (plan.persistent.mtp) {
         mtp_frame.emplace(plan.persistent.mtp_storage->bind(backing), *plan.persistent.mtp);
         mtp_fold.emplace(mtp_frame->records, state_images->linear().all_layers_view());
-        mtp_host.emplace(sizeof(MtpIngress) + sizeof(MtpEgress));
-        mtp_ingress  = static_cast<MtpIngress*>(mtp_host->data());
-        mtp_egress   = reinterpret_cast<MtpEgress*>(static_cast<std::byte*>(mtp_host->data()) +
-                                                    sizeof(MtpIngress));
-        *mtp_ingress = {};
-        *mtp_egress  = {};
+        const PleTransferLayout& ple = plan.persistent.mtp->ple;
+        mtp_host.emplace(ple.bytes + sizeof(MtpEgress));
+        auto* host = static_cast<std::byte*>(mtp_host->data());
+        // Graph warm-up decodes the zero PLE planes before any request gathers real rows.
+        std::memset(host, 0, mtp_host->size());
+        mtp_ingress         = reinterpret_cast<MtpIngress*>(host);
+        mtp_host_ple_codes  = host + ple.codes_offset;
+        mtp_host_ple_scales = host + ple.scales_offset;
+        mtp_egress          = reinterpret_cast<MtpEgress*>(host + ple.bytes);
+        *mtp_ingress        = {};
+        *mtp_egress         = {};
     }
     io = qwen4_exp::RoundState(backing, plan.persistent.round);
     if (io.ordinary.has_value() != !causal_scoring) {
@@ -181,11 +186,14 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
                    : nullptr;
     mtp_proposal_ledger_.reserve(ple_gather->history_tokens() + draft_window + 1U);
     if (ordinary_host) {
-        ordinary_host_ingress =
-            static_cast<qwen4_exp::OrdinaryDecodeIngress*>(ordinary_host->data());
-        ordinary_host_egress = reinterpret_cast<qwen4_exp::OrdinaryDecodeEgress*>(
-            static_cast<unsigned char*>(ordinary_host->data()) +
-            sizeof(qwen4_exp::OrdinaryDecodeIngress));
+        const PleTransferLayout& ple = io.ordinary->ple;
+        auto* host                   = static_cast<std::byte*>(ordinary_host->data());
+        // Graph warm-up decodes the zero PLE planes before any request gathers real rows.
+        std::memset(host, 0, ordinary_host->size());
+        ordinary_host_ingress    = reinterpret_cast<qwen4_exp::OrdinaryDecodeIngress*>(host);
+        ordinary_host_ple_codes  = host + ple.codes_offset;
+        ordinary_host_ple_scales = host + ple.scales_offset;
+        ordinary_host_egress = reinterpret_cast<qwen4_exp::OrdinaryDecodeEgress*>(host + ple.bytes);
         *ordinary_host_ingress = {};
         *ordinary_host_egress  = {};
         // The fixed-size transfer also carries unused batch capacity.

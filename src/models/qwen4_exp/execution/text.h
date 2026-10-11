@@ -69,7 +69,8 @@ struct PrefillChunkResult {
 };
 
 // One exact-B ordinary decode step's device inputs. rope_positions is planar I32 [B,3]; the PLE
-// rows are the B x heads gathered rows in ops::ple_ngram_decode operand order.
+// rows are the B x heads gathered rows of each PLE layer in ops::ple_ngram_decode operand order,
+// planar by layer (PleGather).
 struct OrdinaryDecodeInputs {
     Tensor ids;
     Tensor cache_positions;
@@ -89,9 +90,9 @@ struct OrdinaryDecodeInputs {
     const GdnReplayRecords* replay = nullptr;
 };
 
-// The fixed Qwen4Exp Text schedule: four-stream hyper-connections around 48 blocks (QSA attention
-// or Gated DeltaNet, then the NVFP4-bank MoE), the per-layer n-gram embedding injected before
-// block `ple.layer`, and the final mixer before the independent output head.
+// The fixed Qwen4Exp Text schedule: four-stream hyper-connections around the decoder blocks (QSA
+// attention or Gated DeltaNet, then the NVFP4-bank MoE), each PLE layer's n-gram embedding
+// injected before its block, and the final mixer before the independent output head.
 class TextContext {
 public:
     TextContext(DeviceContext& ctx, const Parameters& parameters, WorkspaceArena& work,
@@ -167,8 +168,9 @@ private:
     void run_layers(workspace::LayerRoots& roots, const Tensor& ple_codes, const Tensor& ple_scales,
                     bool prefill, std::int32_t tokens);
 
-    void inject_ple(workspace::LayerRoots& roots, const Tensor& codes, const Tensor& scales,
-                    bool prefill, std::int32_t tokens);
+    // PLE layer `index` (Parameters::text.ple order) over its slice of the planar rows.
+    void inject_ple(std::size_t index, workspace::LayerRoots& roots, const Tensor& codes,
+                    const Tensor& scales, bool prefill, std::int32_t tokens);
     void attention(const AttentionParameters& p, std::uint32_t layer, workspace::LayerRoots& roots,
                    bool prefill, std::int32_t tokens);
     void gdn(const GdnParameters& p, std::uint32_t layer, workspace::LayerRoots& roots,

@@ -104,15 +104,17 @@ void TextContext::project(const Tensor& x, const LinearParameters& parameters, T
     ops::linear(x, parameters.weight, out, policy, work_, ctx_.stream);
 }
 
-void TextContext::inject_ple(workspace::LayerRoots& roots, const Tensor& codes,
+void TextContext::inject_ple(std::size_t index, workspace::LayerRoots& roots, const Tensor& codes,
                              const Tensor& scales, bool prefill, std::int32_t tokens) {
-    const PleParameters& p  = parameters_.text.ple;
+    const PleParameters& p  = parameters_.text.ple[index];
     cudaStream_t s          = ctx_.stream;
     auto scope              = work_.scope();
     auto stage              = workspace::ple_stage(work_, config_, tokens);
     const std::int32_t rows = dimension(std::uint64_t(config_.ple.heads()) * std::uint64_t(tokens));
     Tensor decoded          = stage.embedding.view({dimension(config_.ple.head_width()), rows});
-    ops::ple_ngram_decode(codes, scales, decoded, s);
+    // The rows are planar by PLE layer; this layer's rows are one contiguous operand.
+    const auto first = dimension(std::uint64_t(index) * std::uint64_t(rows));
+    ops::ple_ngram_decode(codes.slice(1, first, rows), scales.slice(1, first, rows), decoded, s);
     project(stage.embedding, p.key_projection, stage.key);
     project(stage.embedding, p.value_projection, stage.value);
     {
@@ -120,13 +122,13 @@ void TextContext::inject_ple(workspace::LayerRoots& roots, const Tensor& codes,
         WorkspaceArena scratch(work_.alloc_bytes(
             std::max<std::size_t>(1, ops::ple_ngram_workspace_capacity_bytes(tokens, tokens))));
         if (prefill) {
-            const Tensor history_in = state_.ple_history_slot(state_source_slot_);
-            Tensor history_out      = state_.ple_history_slot(state_destination_slot_);
+            const Tensor history_in = state_.ple_history_slot(index, state_source_slot_);
+            Tensor history_out      = state_.ple_history_slot(index, state_destination_slot_);
             ops::ple_ngram(roots.hidden, stage.key, stage.value, p.query_norm, p.key_norm,
                            p.conv_norm, p.convolution, history_in, history_out, stage.output,
                            scratch, s);
         } else {
-            Tensor histories           = state_.ple_history();
+            Tensor histories           = state_.ple_history(index);
             const std::int32_t streams = dimension(config_.stream_width());
             const auto width           = decode_->width;
             const auto batch           = tokens / width;
@@ -297,13 +299,16 @@ void TextContext::gdn(const GdnParameters& p, std::uint32_t layer, workspace::La
 
 void TextContext::run_layers(workspace::LayerRoots& roots, const Tensor& ple_codes,
                              const Tensor& ple_scales, bool prefill, std::int32_t tokens) {
-    cudaStream_t s     = ctx_.stream;
-    const auto& layers = parameters_.text.layers;
+    cudaStream_t s       = ctx_.stream;
+    const auto& layers   = parameters_.text.layers;
+    const auto& ple      = parameters_.text.ple;
+    std::size_t next_ple = 0;
     for (std::uint32_t layer = 0; layer < layers.size(); ++layer) {
         const BlockParameters& block = layers[layer];
         try {
-            if (layer == parameters_.text.ple.layer) {
-                inject_ple(roots, ple_codes, ple_scales, prefill, tokens);
+            if (next_ple < ple.size() && ple[next_ple].layer == layer) {
+                inject_ple(next_ple, roots, ple_codes, ple_scales, prefill, tokens);
+                ++next_ple;
             }
             {
                 auto scope = work_.scope();
@@ -753,7 +758,8 @@ void TextContext::decode_batch(const OrdinaryDecodeInputs& inputs, Tensor& hidde
         batch_kv_ == nullptr) {
         throw std::invalid_argument("ordinary decode batch is outside [1,8] or has no cache");
     }
-    const std::int32_t rows = dimension(std::uint64_t(config_.ple.heads()) * std::uint64_t(batch));
+    const std::int32_t rows = dimension(std::uint64_t(config_.ple.layers.size()) *
+                                        config_.ple.heads() * std::uint64_t(batch));
     require_shape(inputs.ids, DType::I32, {batch}, "ordinary decode ids");
     require_shape(inputs.cache_positions, DType::I32, {batch}, "ordinary decode positions");
     require_shape(inputs.rope_positions, DType::I32, {batch, 3}, "ordinary decode RoPE positions");
@@ -762,9 +768,10 @@ void TextContext::decode_batch(const OrdinaryDecodeInputs& inputs, Tensor& hidde
                   "ordinary decode source slots");
     require_shape(inputs.state_destination_slots, DType::I32, {batch / inputs.width},
                   "ordinary decode destination slots");
-    require_shape(inputs.ple_codes, DType::U8, {dimension(config_.ple.head_width() / 2), rows},
+    require_shape(inputs.ple_codes, DType::U8, {dimension(config_.ple.code_row_bytes()), rows},
                   "ordinary decode PLE codes");
-    require_shape(inputs.ple_scales, DType::FP16, {dimension(config_.ple.head_width() / 16), rows},
+    require_shape(inputs.ple_scales, DType::FP16,
+                  {dimension(config_.ple.scale_row_bytes() / sizeof(std::uint16_t)), rows},
                   "ordinary decode PLE scales");
     require_shape(hidden, DType::BF16, {dimension(config_.stream_width()), batch},
                   "ordinary decode hidden");

@@ -372,9 +372,12 @@ public:
     qwen4_exp::RoundState io;
     std::optional<MtpFrame> mtp_frame;
     std::optional<ops::GdnReplayFoldPlan> mtp_fold;
+    // MtpIngress, the verification PLE planes (MtpFrameLayout::ple), then MtpEgress.
     std::optional<PinnedHostBuffer> mtp_host;
-    MtpIngress* mtp_ingress = nullptr;
-    MtpEgress* mtp_egress   = nullptr;
+    MtpIngress* mtp_ingress        = nullptr;
+    std::byte* mtp_host_ple_codes  = nullptr;
+    std::byte* mtp_host_ple_scales = nullptr;
+    MtpEgress* mtp_egress          = nullptr;
     Tensor prefill_hidden;
     std::optional<Tensor> score_hidden;
     Tensor sampling_config;
@@ -406,8 +409,11 @@ public:
     std::optional<PinnedHostBuffer> score_hidden_host;
     std::size_t vision_handoff_peak_bytes = 0;
     TokenId* host_tokens                  = nullptr;
+    // OrdinaryDecodeIngress, the round's PLE planes (OrdinaryDecodeState::ple), then the egress.
     std::optional<PinnedHostBuffer> ordinary_host;
     qwen4_exp::OrdinaryDecodeIngress* ordinary_host_ingress = nullptr;
+    std::byte* ordinary_host_ple_codes                      = nullptr;
+    std::byte* ordinary_host_ple_scales                     = nullptr;
     qwen4_exp::OrdinaryDecodeEgress* ordinary_host_egress   = nullptr;
 
     std::size_t workspace_logical_peak_bytes = 0;

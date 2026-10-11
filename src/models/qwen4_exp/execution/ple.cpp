@@ -69,33 +69,44 @@ void PleRowSelector::select(std::span<const TokenId> ledger, std::uint32_t posit
     }
 }
 
-PleGather::PleGather(const PleTable& table, const PleConfig& config,
+PleGather::PleGather(std::span<const PleTable> tables, const PleConfig& config,
                      std::uint32_t staged_positions, std::uint32_t worker_threads)
-    : selector_(table, config), staged_positions_(staged_positions) {
-    if (table.shards.empty()) { throw std::invalid_argument("PLE gather: the table has no shards"); }
-    rows_per_shard_ = table.rows_per_shard();
-    shards_.reserve(table.shards.size());
-    for (const WeightView& shard : table.shards) {
-        if (shard.parts.size() != 1 || shard.shape.size() != 2 ||
-            shard.shape[0] != rows_per_shard_) {
-            throw std::invalid_argument("PLE gather: shards must be complete equal-height tables");
+    : heads_(config.heads()), history_tokens_(config.ngram_size - 1U),
+      code_row_bytes_(config.code_row_bytes()), scale_row_bytes_(config.scale_row_bytes()),
+      staged_positions_(staged_positions) {
+    if (tables.empty() || tables.size() != config.layers.size()) {
+        throw std::invalid_argument("PLE gather: one table per configured PLE layer is required");
+    }
+    layers_.reserve(tables.size());
+    for (const PleTable& table : tables) {
+        if (table.shards.empty()) {
+            throw std::invalid_argument("PLE gather: a table has no shards");
         }
-        const WeightRowPlanes planes = weight_row_planes(shard.parts.front());
-        if (planes.codes == nullptr || planes.scales == nullptr || planes.row_begin != 0 ||
-            planes.row_count != rows_per_shard_) {
-            throw std::invalid_argument("PLE gather: shard planes are not addressable");
+        Layer& layer         = layers_.emplace_back(Layer{PleRowSelector(table, config), {}, 0});
+        layer.rows_per_shard = table.rows_per_shard();
+        layer.shards.reserve(table.shards.size());
+        for (const WeightView& shard : table.shards) {
+            if (shard.parts.size() != 1 || shard.shape.size() != 2 ||
+                shard.shape[0] != layer.rows_per_shard) {
+                throw std::invalid_argument(
+                    "PLE gather: shards must be complete equal-height tables");
+            }
+            const WeightRowPlanes planes = weight_row_planes(shard.parts.front());
+            if (planes.codes == nullptr || planes.scales == nullptr || planes.row_begin != 0 ||
+                planes.row_count != layer.rows_per_shard) {
+                throw std::invalid_argument("PLE gather: shard planes are not addressable");
+            }
+            // Transfers and the decode operand are sized from the configured head width.
+            if (planes.code_row_bytes != code_row_bytes_ ||
+                planes.scale_row_bytes != scale_row_bytes_) {
+                throw std::invalid_argument(
+                    "PLE gather: stored rows differ from the configured head width");
+            }
+            layer.shards.push_back({planes.codes, planes.scales});
         }
-        if (code_row_bytes_ == 0) {
-            code_row_bytes_  = planes.code_row_bytes;
-            scale_row_bytes_ = planes.scale_row_bytes;
-        } else if (code_row_bytes_ != planes.code_row_bytes ||
-                   scale_row_bytes_ != planes.scale_row_bytes) {
-            throw std::invalid_argument("PLE gather: shards disagree on the row geometry");
-        }
-        shards_.push_back({planes.codes, planes.scales});
     }
     if (staged_positions_ != 0) {
-        staging_.emplace(static_cast<std::size_t>(staged_positions_) * heads() *
+        staging_.emplace(static_cast<std::size_t>(staged_positions_) * layers() * heads_ *
                          (code_row_bytes_ + scale_row_bytes_));
     }
     if (worker_threads != 0) { workers_ = std::make_unique<HostWorkerPool>(worker_threads, 4096); }
@@ -103,29 +114,43 @@ PleGather::PleGather(const PleTable& table, const PleConfig& config,
 
 PleGather::~PleGather() = default;
 
-void PleGather::copy_rows(std::span<const std::int64_t> rows, std::byte* codes,
+void PleGather::copy_rows(const Layer& layer, std::span<const std::int64_t> rows, std::byte* codes,
                           std::byte* scales) const {
     for (std::size_t i = 0; i < rows.size(); ++i) {
         const auto row   = static_cast<std::uint64_t>(rows[i]);
-        const auto shard = row / rows_per_shard_;
-        if (shard >= shards_.size()) {
+        const auto shard = row / layer.rows_per_shard;
+        if (shard >= layer.shards.size()) {
             throw std::out_of_range("PLE gather: selected row is outside the table");
         }
-        const std::uint64_t local = row % rows_per_shard_;
-        std::memcpy(codes + i * code_row_bytes_, shards_[shard].codes + local * code_row_bytes_,
-                    code_row_bytes_);
+        const std::uint64_t local = row % layer.rows_per_shard;
+        std::memcpy(codes + i * code_row_bytes_,
+                    layer.shards[shard].codes + local * code_row_bytes_, code_row_bytes_);
         std::memcpy(scales + i * scale_row_bytes_,
-                    shards_[shard].scales + local * scale_row_bytes_, scale_row_bytes_);
+                    layer.shards[shard].scales + local * scale_row_bytes_, scale_row_bytes_);
     }
+}
+
+PleRowStaging PleGather::token_staging(std::byte* codes, std::byte* scales, std::uint32_t tokens,
+                                       std::uint32_t index) const {
+    if (codes == nullptr || scales == nullptr || index >= tokens) {
+        throw std::invalid_argument("PLE gather: token destination is outside its transfer");
+    }
+    const std::size_t token_rows = heads_;
+    return {codes + index * token_rows * code_row_bytes_,
+            scales + index * token_rows * scale_row_bytes_, tokens * token_rows * code_row_bytes_,
+            tokens * token_rows * scale_row_bytes_};
 }
 
 void PleGather::gather_position(std::span<const TokenId> ledger, std::uint32_t position,
                                 PleRowStaging staging) const {
     std::int64_t rows[64];
-    const std::uint32_t heads = selector_.heads();
-    if (heads > std::size(rows)) { throw std::invalid_argument("PLE gather: too many heads"); }
-    selector_.select(ledger, position, std::span<std::int64_t>(rows, heads));
-    copy_rows(std::span<const std::int64_t>(rows, heads), staging.codes, staging.scales);
+    if (heads_ > std::size(rows)) { throw std::invalid_argument("PLE gather: too many heads"); }
+    const std::span<std::int64_t> selected(rows, heads_);
+    for (std::size_t k = 0; k < layers_.size(); ++k) {
+        layers_[k].selector.select(ledger, position, selected);
+        copy_rows(layers_[k], selected, staging.codes + k * staging.layer_code_bytes,
+                  staging.scales + k * staging.layer_scale_bytes);
+    }
 }
 
 PleRowStaging PleGather::gather(std::span<const TokenId> ledger, std::uint32_t begin,
@@ -134,18 +159,16 @@ PleRowStaging PleGather::gather(std::span<const TokenId> ledger, std::uint32_t b
         static_cast<std::uint64_t>(begin) + count > ledger.size()) {
         throw std::invalid_argument("PLE gather: positions are outside the ledger or staging");
     }
-    auto* base = static_cast<std::byte*>(staging_->data());
-    const PleRowStaging staging{
-        base, base + static_cast<std::size_t>(count) * heads() * code_row_bytes_};
-    const std::uint32_t heads = selector_.heads();
-    const auto run            = [&, heads](std::uint32_t first, std::uint32_t last) {
+    auto* codes  = static_cast<std::byte*>(staging_->data());
+    auto* scales = codes + static_cast<std::size_t>(count) * layers() * heads_ * code_row_bytes_;
+
+    const auto run = [&](std::uint32_t first, std::uint32_t last) {
         for (std::uint32_t position = first; position < last; ++position) {
-            const std::size_t column = static_cast<std::size_t>(position - begin) * heads;
             gather_position(ledger, position,
-                            {staging.codes + column * code_row_bytes_,
-                             staging.scales + column * scale_row_bytes_});
+                            token_staging(codes, scales, count, position - begin));
         }
     };
+    const PleRowStaging staging = token_staging(codes, scales, count, 0);
     if (count <= kInlinePositions || workers_ == nullptr) {
         run(begin, begin + count);
         return staging;

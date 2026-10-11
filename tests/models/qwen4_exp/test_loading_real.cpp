@@ -180,8 +180,10 @@ void check_native_inputs(const flash::Model& model) {
     (void)native_weight(model.weight(weights.text.token_embedding).view);
     (void)ops::prepare_linear_weight(model.input(weights.text.output_head_use));
     for (const auto& layer : weights.text.layers) { block(layer); }
-    linear(weights.text.ple.key_projection);
-    linear(weights.text.ple.value_projection);
+    for (const auto& ple : weights.text.ple) {
+        linear(ple.key_projection);
+        linear(ple.value_projection);
+    }
     mixer(weights.text.final_mixer);
     if (weights.mtp) {
         const auto& mtp = *weights.mtp;
@@ -217,9 +219,8 @@ void check_native_inputs(const flash::Model& model) {
     }
 }
 
-void check_ple(const flash::Model& model) {
-    const auto& table = model.ple_table();
-    const auto& ple   = model.config().text.ple;
+void check_ple_table(const flash::PleTable& table, const flash::PleConfig& ple,
+                     std::uint32_t layer) {
     require(table.shards.size() == ple.shards && table.layer_multipliers.size() == ple.ngram_size &&
                 table.ngram_head_offsets.size() == ple.heads() &&
                 table.ngram_head_vocab_sizes.size() == ple.heads(),
@@ -234,11 +235,19 @@ void check_ple(const flash::Model& model) {
         require(attributes.type == cudaMemoryTypeUnregistered,
                 "PLE shard is not a plain Host mapping");
     }
-    std::cout << "PLE: layer=" << ple.layer << " shards=" << table.shards.size()
+    std::cout << "PLE: layer=" << layer << " shards=" << table.shards.size()
               << " rows_per_shard=" << table.rows_per_shard() << " multipliers=";
     for (const auto value : table.layer_multipliers) { std::cout << value << ' '; }
     std::cout << "head_rows="
               << table.ngram_head_offsets.back() + table.ngram_head_vocab_sizes.back() << '\n';
+}
+
+void check_ple(const flash::Model& model) {
+    const auto& ple = model.config().text.ple;
+    require(model.ple_tables().size() == ple.layers.size(), "PLE tables differ from PLE layers");
+    for (std::size_t index = 0; index < ple.layers.size(); ++index) {
+        check_ple_table(model.ple_tables()[index], ple, ple.layers[index]);
+    }
 }
 
 void check_frontend(const flash::Model& model) {
@@ -349,10 +358,13 @@ int main(int argc, char** argv) {
             }
         }
         const auto& ple = model->config().text.ple;
-        for (std::size_t i = 0; i < model->ple_table().shards.size(); ++i) {
-            check_parent("text/layers/" + std::to_string(ple.layer) + "/ple/embedding/shards/" +
-                             std::to_string(i),
-                         model->ple_table().shards[i].parts[0].parent, false);
+        for (std::size_t index = 0; index < ple.layers.size(); ++index) {
+            const auto& table = model->ple_tables()[index];
+            for (std::size_t i = 0; i < table.shards.size(); ++i) {
+                check_parent("text/layers/" + std::to_string(ple.layers[index]) +
+                                 "/ple/embedding/shards/" + std::to_string(i),
+                             table.shards[i].parts[0].parent, false);
+            }
         }
         require(visited.size() == samples.size(),
                 "some resident parents are not reachable from the model");

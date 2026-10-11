@@ -33,9 +33,6 @@ namespace workspace = execution::workspace;
 
 constexpr std::size_t kMiB        = 1024ULL * 1024ULL;
 constexpr std::size_t kArenaAlign = 256ULL;
-// The PLE dilated convolution (four taps, dilation three) keeps nine history columns
-// (ops::ple_ngram state [channels,9]).
-constexpr std::int32_t kPleHistoryColumns = 9;
 // Driver/module state of one instantiated ordinary decode executable (one per B and topology).
 constexpr std::size_t kGraphTopologyAllowance = 16ULL * kMiB;
 
@@ -121,8 +118,9 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                             (plan.speculative_backend == SpeculativeBackend::Mtp ? 1U : 0U),
                         .indexer_dim   = dimension(config.indexer.head_dim),
                         .indexer_block = dimension(config.indexer.compress_ratio),
+                        .ple_layers    = static_cast<std::uint32_t>(config.ple.layers.size()),
                         .ple_channels  = dimension(config.stream_width()),
-                        .ple_history   = kPleHistoryColumns,
+                        .ple_history   = dimension(config.ple.history_columns()),
                         .transient_slots =
                             plan
                                         .speculative_backend == SpeculativeBackend::Mtp
@@ -136,7 +134,8 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
         builder, qwen4_exp::RoundStateSpec{.stream_hidden  = dimension(config.stream_width()),
                                            .output_rows    = dimension(config.vocab_size),
                                            .batch_capacity = plan.max_concurrency,
-                                           .causal_scoring = plan.causal_scoring});
+                                           .causal_scoring = plan.causal_scoring,
+                                           .ple            = qwen4_exp::ple_row_geometry(config)});
     if (plan.speculative_backend == SpeculativeBackend::Mtp) {
         out.mtp         = plan_mtp_frame(config, plan.draft_window + 1, plan.max_concurrency);
         out.mtp_storage = builder.add(out.mtp->bytes, kArenaAlign, "MTP persistent frame");
@@ -206,17 +205,19 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         return ops::linear_workspace_capacity_bytes(p.weight.qtype, p.weight.n, p.weight.k,
                                                     p.policy, tokens, tokens);
     };
-    const auto& ple = parameters.text.ple;
     const ops::QsaIndexerSelectEnvelope full_envelope{
         indexer_envelope_blocks(plan.capacity - 1U, config.indexer.compress_ratio)};
 
-    // One traversal of the 48 blocks at T columns (B rows when decoding).
+    // One traversal of the decoder blocks at T columns (B rows when decoding).
     const auto body = [&](WorkspaceLayoutBuilder& layout, std::int32_t tokens, bool prefill,
                           std::int32_t width = 1) {
+        std::size_t next_ple = 0;
         for (std::uint32_t layer = 0; layer < parameters.text.layers.size(); ++layer) {
             const auto& block = parameters.text.layers[layer];
-            if (layer == ple.layer) {
-                auto stage = layout.scope();
+            if (next_ple < parameters.text.ple.size() &&
+                parameters.text.ple[next_ple].layer == layer) {
+                const auto& ple = parameters.text.ple[next_ple++];
+                auto stage      = layout.scope();
                 (void)workspace::ple_stage(layout, config, tokens);
                 scratch(layout, linear_bytes(ple.key_projection, tokens));
                 scratch(layout, linear_bytes(ple.value_projection, tokens));

@@ -14,6 +14,9 @@ std::string prefill_signature(const Model& model) {
     using Json         = nlohmann::json;
     const auto& config = model.config();
     const auto& t      = config.text;
+    // One PLE layer keeps its scalar form, so single-layer signatures (Flash-Next) are unchanged.
+    const Json ple_layers =
+        t.ple.layers.size() == 1 ? Json(t.ple.layers.front()) : Json(t.ple.layers);
     Json facts{{"implementation", "qwen4_exp-prefill-1"},
                {"architecture", architecture_name(Architecture::Qwen4Exp)},
                {"hidden_size", t.hidden_size},
@@ -40,7 +43,7 @@ std::string prefill_signature(const Model& model) {
                 {t.indexer.num_heads, t.indexer.num_key_value_heads, t.indexer.head_dim,
                  t.indexer.compress_ratio, t.indexer.budget}},
                {"ple",
-                {t.ple.layer, t.ple.embed_dim, t.ple.conv_kernel_size, t.ple.ngram_size,
+                {ple_layers, t.ple.embed_dim, t.ple.conv_kernel_size, t.ple.ngram_size,
                  t.ple.heads_per_ngram, t.ple.boundary_token}}};
     if (config.vision) {
         const auto& v   = *config.vision;

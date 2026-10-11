@@ -15,6 +15,7 @@ SOURCE_CONFIG = Path(__file__).with_name("source_config.json")
 TEXT_ARCHITECTURE = "Qwen4ExpForCausalLM"
 TEXT_MODEL_TYPE = "qwen4_exp_text"
 MTP_CONFIG = {"architectures": ["Qwen4ExpMTP"]}
+VISION_MODEL_TYPE = "qwen4_exp_vision"
 
 _TEXT_INTEGERS = (
     "hidden_size",
@@ -80,6 +81,38 @@ def load_source() -> dict:
     return json.loads(SOURCE_CONFIG.read_text(encoding="utf-8"))
 
 
+def _ple_layer_ids(raw: dict, layers: list[str]) -> list[int]:
+    """The source's one-based PLE layers, sorted and distinct as transformers normalizes them.
+
+    PLE is defined only before GDN (``linear_attention``) blocks.
+    """
+    ids = raw.get("ple_layer_ids")
+    if (
+        not isinstance(ids, list)
+        or not ids
+        or any(type(layer) is not int or not 1 <= layer <= len(layers) for layer in ids)
+    ):
+        raise ValueError(
+            f"text.ple_layer_ids: expected one-based decoder layers in [1, {len(layers)}], "
+            f"got {ids!r}"
+        )
+    ids = sorted(set(ids))
+    attention = [layer for layer in ids if layers[layer - 1] != "linear_attention"]
+    if attention:
+        raise ValueError(f"text.ple_layer_ids: PLE layers {attention} are not linear_attention")
+    return ids
+
+
+def _eos_token_id(raw: dict, vocab_size: int) -> int:
+    """The token that resets the PLE n-gram history: eos_token_id, or its first entry."""
+    eos = raw.get("eos_token_id")
+    if isinstance(eos, list) and eos:
+        eos = eos[0]
+    if type(eos) is not int or not 0 <= eos < vocab_size:
+        raise ValueError(f"text.eos_token_id: expected a token below {vocab_size}, got {eos!r}")
+    return eos
+
+
 def text_config(source: dict) -> dict:
     if source.get("architectures") != ["Qwen4ExpForConditionalGeneration"]:
         raise ValueError(f"unsupported architecture {source.get('architectures')!r}")
@@ -121,10 +154,9 @@ def text_config(source: dict) -> dict:
         "partial_rotary_factor": factor,
         "mrope_section": list(sections),
     }
-    # The source counts PLE layers from 1; its weights belong to 0-based decoder layer 1.
-    if raw.get("ple_layer_ids") != [2]:
-        raise ValueError("text.ple_layer_ids: expected [2]")
-    result["ple_layer_ids"] = [2]
+    # One-based like the source: PLE layer id i holds its weights under text/layers/{i - 1}.
+    result["ple_layer_ids"] = _ple_layer_ids(raw, result["layer_types"])
+    result["eos_token_id"] = _eos_token_id(raw, result["vocab_size"])
     if result["num_experts_per_tok"] > result["num_experts"]:
         raise ValueError("selected experts exceed the expert count")
     if result["num_attention_heads"] % result["num_key_value_heads"]:
@@ -140,7 +172,7 @@ def vision_config(source: dict, text: dict) -> dict:
     _fixed(raw, "hidden_act", "gelu_pytorch_tanh", "vision")
     _fixed(raw, "deepstack_visual_indexes", [], "vision")
     _fixed(raw, "out_hidden_size", text["hidden_size"], "vision")
-    result = {"model_type": "qwen4_exp_vision"}
+    result = {"model_type": VISION_MODEL_TYPE}
     for key in _VISION_INTEGERS:
         result[key] = _positive(raw, key, "vision")
     result["out_hidden_size"] = text["hidden_size"]

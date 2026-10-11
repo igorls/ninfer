@@ -6,6 +6,10 @@ ninfer_add_test(ninfer_qwen4_exp_engine_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_real.cpp"
   LIBRARIES ninfer_engine ninfer::json)
 
+ninfer_add_test(ninfer_qwen4_exp_loading_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_loading.cpp"
+  LIBRARIES ninfer_model_runtime)
+
 ninfer_add_test(ninfer_qwen4_exp_state_image_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_state_image.cpp"
   LIBRARIES ninfer_model_runtime ninfer_core)

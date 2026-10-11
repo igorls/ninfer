@@ -11,8 +11,12 @@
 namespace ninfer::models::qwen4_exp {
 namespace {
 
-// text_config.eos_token_id of the pinned Qwen/Qwen3.8-Flash-Next source config.
-constexpr std::int32_t kPleBoundaryToken = 248044;
+// The published Flash-Next derivation (artifact 1e7e026e...) predates the normalized
+// eos_token_id. Its provenance names the pinned source config, whose text_config.eos_token_id
+// is the PLE boundary below. No other artifact may omit the key.
+constexpr std::string_view kPinnedSourceRepository = "Qwen/Qwen3.8-Flash-Next";
+constexpr std::string_view kPinnedSourceRevision   = "de4b8e4d43b917e7706784d8bb445c9af86a3540";
+constexpr std::int32_t kPinnedSourceEosToken       = 248044;
 
 using artifact::ArtifactError;
 using artifact::Json;
@@ -56,6 +60,55 @@ const artifact::Component& companion(const artifact::Directory& directory, std::
     return component;
 }
 
+// The source counts PLE layers from 1 and places PLE only before GDN blocks; the normalized list
+// is ascending and distinct.
+std::vector<std::uint32_t> ple_layers(const Json& value,
+                                      const std::vector<MixerKind>& layer_types) {
+    if (!value.is_array() || value.empty()) {
+        throw ArtifactError("ple_layer_ids must name at least one decoder layer");
+    }
+    std::vector<std::uint32_t> out;
+    out.reserve(value.size());
+    for (const auto& entry : value) {
+        const auto one_based = integer(entry, "ple_layer_ids");
+        if (one_based > layer_types.size()) {
+            throw ArtifactError("ple_layer_ids exceeds the decoder depth");
+        }
+        const std::uint32_t layer = one_based - 1;
+        if (!out.empty() && layer <= out.back()) {
+            throw ArtifactError("ple_layer_ids must be ascending and distinct");
+        }
+        if (layer_types[layer] != MixerKind::LinearAttention) {
+            throw ArtifactError("ple_layer_ids must name linear_attention layers");
+        }
+        out.push_back(layer);
+    }
+    return out;
+}
+
+// The PLE segment boundary is the source text config's eos_token_id, which the converter keeps.
+std::int32_t ple_boundary_token(const Json& text, const Json& provenance,
+                                std::uint32_t vocab_size) {
+    std::uint64_t token = 0;
+    if (const auto found = text.find("eos_token_id"); found != text.end()) {
+        token = artifact::require_u64(*found, "eos_token_id");
+    } else {
+        const auto source = provenance.is_object() ? provenance.find("config") : provenance.end();
+        if (source == provenance.end() || !source->is_object() ||
+            source->value("repository", std::string()) != kPinnedSourceRepository ||
+            source->value("revision", std::string()) != kPinnedSourceRevision) {
+            throw ArtifactError("text config lacks eos_token_id, the PLE n-gram boundary; "
+                                "re-derive the artifact with tools/convert/qwen4_exp");
+        }
+        token = kPinnedSourceEosToken;
+    }
+    if (token >= vocab_size ||
+        token > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max())) {
+        throw ArtifactError("PLE boundary token is outside the vocabulary");
+    }
+    return static_cast<std::int32_t>(token);
+}
+
 // Interleaved MRoPE: rotary pair p belongs to axis 1 or 2 when p%3 selects that axis inside its
 // section, and to axis 0 otherwise.
 RopeConfig rope(const Json& value, std::uint32_t head_dim) {
@@ -95,7 +148,7 @@ RopeConfig rope(const Json& value, std::uint32_t head_dim) {
     return out;
 }
 
-TextConfig text(const Json& value) {
+TextConfig text(const Json& value, const Json& provenance) {
     require_members(value,
                     {"architectures",
                      "model_type",
@@ -132,7 +185,7 @@ TextConfig text(const Json& value) {
                      "layer_types",
                      "rope_parameters",
                      "ple_layer_ids"},
-                    {}, "text config");
+                    {"eos_token_id"}, "text config");
     if (resolve_architecture(architecture(value),
                              artifact::require_id(value.at("model_type"), "model_type")) !=
         Architecture::Qwen4Exp) {
@@ -189,30 +242,15 @@ TextConfig text(const Json& value) {
     if (out.indexer.num_heads % out.indexer.num_key_value_heads) {
         throw ArtifactError("indexer heads must be divisible by indexer KV heads");
     }
-    const auto& ple_layers = value.at("ple_layer_ids");
-    if (!ple_layers.is_array() || ple_layers.size() != 1) {
-        throw ArtifactError("ple_layer_ids must name exactly one decoder layer");
-    }
-    // The source counts decoder layers from 1.
-    const auto ple_layer = integer(ple_layers[0], "ple_layer_ids");
-    if (ple_layer > out.num_hidden_layers) {
-        throw ArtifactError("ple_layer_ids exceeds the decoder depth");
-    }
-    out.ple = {ple_layer - 1,
+    out.ple = {ple_layers(value.at("ple_layer_ids"), out.layer_types),
                dimension(value, "ple_embed_dim"),
                dimension(value, "ple_conv_kernel_size"),
                dimension(value, "ngram_size"),
                dimension(value, "heads_per_ngram"),
-               dimension(value, "split_ngram_parts")};
+               dimension(value, "split_ngram_parts"),
+               ple_boundary_token(value, provenance, out.vocab_size)};
     if (out.ple.ngram_size < 2 || out.ple.embed_dim % out.ple.heads()) {
         throw ArtifactError("PLE heads must be n-grams of two or more tokens dividing its width");
-    }
-    // The normalized text config does not carry eos_token_id; the PLE segment boundary is the
-    // pinned source config's text_config.eos_token_id (tools/convert/qwen4_exp/source_config.json).
-    out.ple.boundary_token = kPleBoundaryToken;
-    if (out.ple.boundary_token < 0 ||
-        static_cast<std::uint32_t>(out.ple.boundary_token) >= out.vocab_size) {
-        throw ArtifactError("PLE boundary token is outside the vocabulary");
     }
     return out;
 }
@@ -223,7 +261,7 @@ VisionConfig vision(const Json& value, const TextConfig& target) {
                      "patch_size", "temporal_patch_size", "spatial_merge_size",
                      "num_position_embeddings", "out_hidden_size"},
                     {}, "vision config");
-    if (value.at("model_type") != "qwen4_exp_vision") {
+    if (artifact::require_id(value.at("model_type"), "Vision model_type") != kVisionModelType) {
         throw ArtifactError("unknown Vision model_type");
     }
     if (dimension(value, "out_hidden_size") != target.hidden_size) {
@@ -271,14 +309,14 @@ Config parse_config(const artifact::Directory& directory, const LoadOptions& opt
         }
         Config out;
         out.mtp  = options.mtp();
-        out.text = text(directory.component("text").config);
+        out.text = text(directory.component("text").config, directory.provenance);
         if (options.vision) {
             out.vision = vision(companion(directory, "vision").config, out.text);
         }
         if (out.mtp) {
             const auto& config = companion(directory, "mtp").config;
             require_members(config, {"architectures"}, {}, "MTP config");
-            if (architecture(config) != "Qwen4ExpMTP") {
+            if (architecture(config) != kMtpArchitecture) {
                 throw ArtifactError("MTP architecture differs from target mathematics");
             }
         }

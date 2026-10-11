@@ -66,7 +66,9 @@ private:
 [[nodiscard]] HyperMixerWeights bind_mixer(Bindings& bindings, const TextConfig& config,
                                            const std::string& prefix);
 [[nodiscard]] TextWeights bind_text(Bindings& bindings, const TextConfig& config, bool mtp);
-[[nodiscard]] PendingPleTable bind_ple_table(Bindings& bindings, const TextConfig& config);
+// One table per TextConfig::ple.layers entry, in that order.
+[[nodiscard]] std::vector<PendingPleTable> bind_ple_tables(Bindings& bindings,
+                                                           const TextConfig& config);
 [[nodiscard]] MtpWeights bind_mtp(Bindings& bindings, const TextConfig& config,
                                   const TextWeights& target);
 [[nodiscard]] VisionWeights bind_vision(Bindings& bindings, const VisionConfig& config,

@@ -1,6 +1,7 @@
 #include "models/qwen4_exp/execution/parameters.h"
 
 #include "core/weight_view.h"
+#include "ninfer/ops/ple_ngram.h"
 
 #include <array>
 #include <limits>
@@ -182,6 +183,18 @@ private:
 
 } // namespace
 
+void require_supported_ple(const TextConfig& config) {
+    // The PLE convolution's dilation is the n-gram size (transformers Qwen4ExpTextPLELayer).
+    ops::require_ple_ngram_geometry({
+        .stream_width = config.hidden_size,
+        .streams      = config.hyper_connection.streams,
+        .row_width    = config.ple.head_width(),
+        .taps         = config.ple.conv_kernel_size,
+        .dilation     = config.ple.ngram_size,
+        .epsilon      = config.rms_norm_eps,
+    });
+}
+
 Parameters::Parameters(const Model& source) : model(source) {
     const Prepare prepare(model);
     const auto& w        = model.weights().text;
@@ -192,17 +205,23 @@ Parameters::Parameters(const Model& source) : model(source) {
         text.layers.push_back(with_context("text/layers/" + std::to_string(i),
                                            [&] { return prepare.block(w.layers[i]); }));
     }
-    text.ple = with_context("text/ple", [&] {
-        return PleParameters{
-            .layer            = model.config().text.ple.layer,
-            .key_projection   = prepare.linear(w.ple.key_projection),
-            .value_projection = prepare.linear(w.ple.value_projection),
-            .query_norm       = prepare.tensor(w.ple.query_norm),
-            .key_norm         = prepare.tensor(w.ple.key_norm),
-            .conv_norm        = prepare.tensor(w.ple.conv_norm),
-            .convolution      = prepare.tensor(w.ple.convolution),
-        };
-    });
+    const auto& config = model.config().text;
+    with_context("text/ple", [&] { require_supported_ple(config); });
+    text.ple.reserve(w.ple.size());
+    for (std::size_t i = 0; i < w.ple.size(); ++i) {
+        const std::uint32_t layer = config.ple.layers.at(i);
+        text.ple.push_back(with_context("text/layers/" + std::to_string(layer) + "/ple", [&] {
+            return PleParameters{
+                .layer            = layer,
+                .key_projection   = prepare.linear(w.ple[i].key_projection),
+                .value_projection = prepare.linear(w.ple[i].value_projection),
+                .query_norm       = prepare.tensor(w.ple[i].query_norm),
+                .key_norm         = prepare.tensor(w.ple[i].key_norm),
+                .conv_norm        = prepare.tensor(w.ple[i].conv_norm),
+                .convolution      = prepare.tensor(w.ple[i].convolution),
+            };
+        }));
+    }
     text.final_mixer = with_context("text/hyper_connection", [&] {
         return prepare.mixing(w.final_mixer.norm, w.final_mixer.input_mix_down,
                               w.final_mixer.input_mix_up);

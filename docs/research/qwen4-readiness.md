@@ -24,7 +24,7 @@ Code facts from `workstation` `c2bbf835`:
 - Every block is MoE (`weights.h` `BlockWeights::moe`, `execution/text.cpp` `run_layers`), and the
   MoE configuration keys are required.
 - One PLE layer only, `ple_layer_ids == [2]` in the converter, a constant PLE boundary token
-  (248044), 16 PLE heads with 80-byte rows and history 9.
+  (248044), 16 PLE heads with 80-byte rows and history 9. (Read from config since Q1.)
 - Op geometries accept only Flash-Next shapes, with no generic fallback: hyper-connection
   (H 2560, 4 streams, rank 320), PLE n-gram (2560/10240/160), QSA indexer (d128, 4 heads,
   projection 640, 512 selected), selected-block attention (24 query / 2 KV heads, d256), gated
@@ -50,6 +50,30 @@ unless it states otherwise.
 
 Order: Q1 and Q4 start now and run in parallel; Q2 follows Q1; Q3 and Q5 need Q2; Q6 is drafted
 alongside.
+
+## Status
+
+Q1 is implemented in source; its Flash-Next bit-identity is unverified until the real cases run.
+
+- [x] `ple_layer_ids` is a list end to end: config (ascending, distinct, GDN layers only), one PLE
+  parameter set and table per layer, injection before each listed block, decode and MTP transfers
+  planar by PLE layer, and one convolution history per PLE layer in every state image.
+- [x] The PLE boundary is the text config's `eos_token_id`, which the converter now writes. The
+  published Flash-Next derivation lacks the key; the loader takes 248044 from the source config its
+  provenance names and rejects any other artifact without the key.
+- [x] PLE head count, row bytes and history columns come from config; native preparation rejects
+  a PLE geometry `ops::ple_ngram` does not execute. The companion identities are constants in
+  `config.h` (C++) and `config.py` (converter).
+- [x] Tests: `ninfer_qwen4_exp_loading_test` (Flash-Next config, lists, boundary rules, rejected
+  geometries, a dense config's clear rejection, two-layer bindings) and the two-layer state image
+  test; `tests/convert/test_qwen4_exp.py`.
+- [ ] Run the real cases: `ninfer_qwen4_exp_loading_real_test` and
+  `ninfer_qwen4_exp_engine_real_test` (Engine cases, prefill chunk invariance, MTP parity) on the
+  published artifact.
+- [ ] Re-derive the published artifact so it carries `eos_token_id`, pin its file digests in
+  `source.py`, then remove the provenance rule.
+- [ ] An empty `ple_layer_ids` (a checkpoint without PLE) is still rejected; making PLE optional is
+  a Q3-like change if an official checkpoint needs it.
 
 ## Template
 

@@ -26,8 +26,8 @@ struct InstanceInfo {
     artifact::ArtifactId artifact_id{};
 };
 
-// Host half of the per-layer n-gram embedding. Global row r of the table is row r % rows of shard
-// r / rows; head h of an n-gram addresses rows [head_offsets[h], head_offsets[h] + vocab[h]).
+// Host half of one PLE layer's n-gram embedding. Global row r of the table is row r % rows of
+// shard r / rows; head h of an n-gram addresses rows [head_offsets[h], head_offsets[h] + vocab[h]).
 // Shards are read-only file mappings warmed before readiness, never Device weights.
 struct PleTable {
     std::vector<WeightView> shards;
@@ -59,10 +59,11 @@ public:
     [[nodiscard]] ops::WeightInput input(WeightUseId id) const;
     [[nodiscard]] ops::WeightInput input(WeightId id) const;
 
-    // Device parameters only; the mapped PLE shards are in ple_table().
+    // Device parameters only; the mapped PLE shards are in ple_tables().
     [[nodiscard]] std::span<const BoundWeight> weight_data() const noexcept { return bound_; }
 
-    [[nodiscard]] const PleTable& ple_table() const noexcept { return ple_table_; }
+    // One table per TextConfig::ple.layers entry, in that order.
+    [[nodiscard]] std::span<const PleTable> ple_tables() const noexcept { return ple_tables_; }
 
     [[nodiscard]] const FrontendResources& resources() const noexcept { return resources_; }
 
@@ -76,7 +77,7 @@ private:
     friend std::unique_ptr<Model> materialize_model(LoadPlan&&, DeviceContext&,
                                                     const StartupObserver*);
     Model(Config config, LoadOptions options, ModelWeights weights, std::vector<BoundWeight> bound,
-          PleTable ple_table, FrontendResources resources, InstanceInfo info,
+          std::vector<PleTable> ple_tables, FrontendResources resources, InstanceInfo info,
           artifact::MaterializedArtifact backing);
 
     // Destroy all borrowers before backing. The caller keeps DeviceContext alive through cleanup.
@@ -85,7 +86,7 @@ private:
     LoadOptions options_;
     ModelWeights weights_;
     std::vector<BoundWeight> bound_;
-    PleTable ple_table_;
+    std::vector<PleTable> ple_tables_;
     FrontendResources resources_;
     InstanceInfo info_;
 };

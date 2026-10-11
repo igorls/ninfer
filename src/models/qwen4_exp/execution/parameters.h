@@ -56,7 +56,8 @@ struct BlockParameters {
     ops::SparseMoeNvfp4BankWeights moe;
 };
 
-// Device half of the per-layer n-gram embedding; the gathered rows come from Model::ple_table().
+// Device half of one PLE layer's n-gram embedding, injected before decoder block `layer`; the
+// gathered rows come from Model::ple_tables() at the same index.
 struct PleParameters {
     std::uint32_t layer = 0;
     LinearParameters key_projection, value_projection;
@@ -67,7 +68,7 @@ struct TextParameters {
     Weight token_embedding;
     LinearParameters output_head;
     std::vector<BlockParameters> layers;
-    PleParameters ple;
+    std::vector<PleParameters> ple; // ascending `layer`, one per TextConfig::ple.layers entry
     ops::HyperConnectionWeights final_mixer;
 };
 
@@ -79,6 +80,11 @@ struct MtpParameters {
     Weight token_embedding;
     LinearParameters output_head;
 };
+
+// Throws std::invalid_argument when ops::ple_ngram does not execute the configured PLE geometry
+// (stream width, streams, n-gram head width, convolution taps and dilation, RMSNorm epsilon).
+// Parameters calls it, so such a model fails at load rather than at its first PLE injection.
+void require_supported_ple(const TextConfig& config);
 
 // Cold native preparation for the fixed model implementation. All weight addresses borrow the
 // source Model; shape-dependent kernel selection and scratch remain with the calling Op.

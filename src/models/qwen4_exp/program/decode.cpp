@@ -32,9 +32,9 @@ auto ordinary_batch_body(OrdinaryBatchContext& state, std::int32_t batch_size,
         }
         qwen4_exp::OrdinaryDecodeState& ordinary = state.frame;
         cudaStream_t stream                      = state.execution.device.stream;
-        CUDA_CHECK(cudaMemcpyAsync(ordinary.ingress.data, &state.host_ingress,
-                                   sizeof(qwen4_exp::OrdinaryDecodeIngress), cudaMemcpyHostToDevice,
-                                   stream));
+        // The control record and the round's PLE planes.
+        CUDA_CHECK(cudaMemcpyAsync(ordinary.ingress.data, &state.host_ingress, ordinary.ple.bytes,
+                                   cudaMemcpyHostToDevice, stream));
 
         TextContext card(state.execution.device, state.execution.parameters, state.execution.work,
                          state.execution.ple, {}, state.execution.state, state.execution.io,
@@ -451,12 +451,10 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_ordinary_batch(
             for (std::uint32_t axis = 0; axis < 3; ++axis) {
                 ordinary_host_ingress->rope_positions[axis * batch + row] = rope_position;
             }
-            ple_gather->gather_position(
-                sequence.ledger, frontier,
-                {reinterpret_cast<std::byte*>(ordinary_host_ingress->ple_codes.data()) +
-                     row * kPleHeads * kPleCodeRowBytes,
-                 reinterpret_cast<std::byte*>(ordinary_host_ingress->ple_scales.data() +
-                                              row * kPleHeads * kPleScaleRowWords)});
+            ple_gather->gather_position(sequence.ledger, frontier,
+                                        ple_gather->token_staging(ordinary_host_ple_codes,
+                                                                  ordinary_host_ple_scales, batch,
+                                                                  static_cast<std::uint32_t>(row)));
             ordinary_host_ingress->text_kv_table_rows[row] =
                 text_kv_addresses->bound_row(sequence.kv->text);
             const StateImageSelectors selectors                 = state_selectors(sequence);

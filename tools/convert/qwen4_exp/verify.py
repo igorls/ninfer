@@ -6,7 +6,8 @@ Every object is opened through ``tools.artifact.reader.Artifact`` (which checks 
 directory, part headers and each object's encoded size and alignment) and hashed. Unchanged
 objects must equal the v2 object digests recorded by the upgrade; the two baked MTP banks must
 equal the upgrade's bank digests and the pinned loader-oracle digests. ``--file-digests`` also
-hashes every file of the set and compares them with the pinned qualified digests.
+hashes every file of the set, reports the digests and compares them with the pinned qualified
+digests when ``source.V3_FILE_SHA256`` pins any.
 """
 
 from __future__ import annotations

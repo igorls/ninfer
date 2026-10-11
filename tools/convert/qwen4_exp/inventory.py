@@ -168,6 +168,9 @@ def expected_tensors(text: dict, vision: dict) -> dict[str, tuple[str, tuple[int
         expected[prefix + "hyper_connection/input_mix/up"] = ("BF16", (hc, low))
     for index, kind in enumerate(text["layer_types"]):
         _block(expected, f"text/layers/{index}/", text, kind, mtp=False)
+    # The published v2 file holds one PLE table, at the layer its pinned config names.
+    if text["ple_layer_ids"] != [PLE_LAYER + 1]:
+        raise ValueError(f"the v2 inventory holds PLE only at one-based layer {PLE_LAYER + 1}")
     ple = f"text/layers/{PLE_LAYER}/ple/"
     width = text["ple_embed_dim"]
     expected[ple + "key_projection"] = ("BF16", (hc, width))

@@ -10,7 +10,9 @@ MtpFrameLayout plan_mtp_frame(const TextConfig& c, std::int32_t width, std::int3
     MtpFrameLayout l;
     l.width          = width;
     l.batch_capacity = batch;
-    l.ingress        = b.add(sizeof(MtpIngress), 256, "MTP ingress");
+    l.ple            = plan_ple_transfer(sizeof(MtpIngress), ple_row_geometry(c),
+                                         static_cast<std::size_t>(width) * batch);
+    l.ingress        = b.add(l.ple.bytes, 256, "MTP ingress");
     const auto add   = [&](DType dtype, std::initializer_list<std::int32_t> shape) {
         return b.add_tensor(dtype, shape, 256, "MTP frame");
     };
@@ -56,7 +58,7 @@ MtpFrameLayout plan_mtp_frame(const TextConfig& c, std::int32_t width, std::int3
                 F(proposal_sources)
 
 MtpFrame::MtpFrame(DeviceSpan backing, const MtpFrameLayout& l)
-    : ingress(l.ingress.bind(backing)), records(backing, l.records), width(l.width),
+    : ingress(l.ingress.bind(backing)), ple(l.ple), records(backing, l.records), width(l.width),
       batch_capacity(l.batch_capacity) {
 #define BIND(name) name = l.name.bind(backing);
     NINFER_MTP_TENSORS(BIND)
@@ -91,6 +93,14 @@ Tensor MtpFrame::i32(std::size_t offset, std::int32_t count) const {
 const ops::SamplingConfig* MtpFrame::sampling() const {
     return reinterpret_cast<const ops::SamplingConfig*>(
         static_cast<const std::byte*>(ingress.data) + offsetof(MtpIngress, sampling));
+}
+
+Tensor MtpFrame::ple_codes(std::int32_t columns) const {
+    return ple_transfer_codes(ingress, ple, columns);
+}
+
+Tensor MtpFrame::ple_scales(std::int32_t columns) const {
+    return ple_transfer_scales(ingress, ple, columns);
 }
 
 #undef NINFER_MTP_TENSORS

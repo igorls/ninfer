@@ -13,7 +13,7 @@ struct LoadPlan::Impl {
     LoadOptions options;
     ModelWeights weights;
     std::vector<loading::PendingWeight> pending;
-    loading::PendingPleTable ple;
+    std::vector<loading::PendingPleTable> ple;
     artifact::MaterializationPlan materialization;
     FrontendResources resources;
     InstanceInfo info;
@@ -36,8 +36,10 @@ const artifact::MaterializationPlan& LoadPlan::materialization() const {
 }
 
 std::size_t LoadPlan::binding_count() const {
-    // Device parameters, mapped PLE shards and the three owning PLE index tables.
-    return impl_->pending.size() + impl_->ple.shards.size() + 3;
+    // Device parameters, and per PLE layer its mapped shards and three owning index tables.
+    std::size_t count = impl_->pending.size();
+    for (const auto& table : impl_->ple) { count += table.shards.size() + 3; }
+    return count;
 }
 
 LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options) {
@@ -49,7 +51,7 @@ LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options) {
     loading::Bindings bindings(binder);
     const auto& text  = out->config.text;
     out->weights.text = loading::bind_text(bindings, text, out->config.mtp);
-    out->ple          = loading::bind_ple_table(bindings, text);
+    out->ple          = loading::bind_ple_tables(bindings, text);
     if (out->config.vision) {
         out->weights.vision = loading::bind_vision(bindings, *out->config.vision, text);
     }
@@ -74,14 +76,18 @@ std::unique_ptr<Model> materialize_model(LoadPlan&& plan, DeviceContext& device,
     auto backing = artifact::materialize(*data->materialization.source,
                                          std::move(data->materialization), device, observer);
     auto bound   = loading::resolve_weights(std::move(data->pending), backing);
-    PleTable ple;
-    ple.shards.reserve(data->ple.shards.size());
-    for (const auto& shard : data->ple.shards) {
-        ple.shards.push_back(artifact::bind_view(shard, backing));
+    std::vector<PleTable> ple;
+    ple.reserve(data->ple.size());
+    for (auto& pending : data->ple) {
+        PleTable& table = ple.emplace_back();
+        table.shards.reserve(pending.shards.size());
+        for (const auto& shard : pending.shards) {
+            table.shards.push_back(artifact::bind_view(shard, backing));
+        }
+        table.layer_multipliers      = std::move(pending.layer_multipliers);
+        table.ngram_head_offsets     = std::move(pending.ngram_head_offsets);
+        table.ngram_head_vocab_sizes = std::move(pending.ngram_head_vocab_sizes);
     }
-    ple.layer_multipliers      = std::move(data->ple.layer_multipliers);
-    ple.ngram_head_offsets     = std::move(data->ple.ngram_head_offsets);
-    ple.ngram_head_vocab_sizes = std::move(data->ple.ngram_head_vocab_sizes);
     return std::unique_ptr<Model>(new Model(
         std::move(data->config), data->options, std::move(data->weights), std::move(bound),
         std::move(ple), std::move(data->resources), std::move(data->info), std::move(backing)));

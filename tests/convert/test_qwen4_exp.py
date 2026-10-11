@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import copy
 import gzip
 import hashlib
 import json
@@ -15,7 +16,8 @@ from tools.artifact.codecs.nvfp4 import encode_nvfp4_expert_bank
 from tools.artifact.reader import Artifact
 from tools.artifact.schema import ResourceSpec, TensorSpec, plan_objects
 from tools.artifact.writer import ArtifactWriter
-from tools.convert.qwen4_exp.inventory import Plan, V2Object, plan_upgrade
+from tools.convert.qwen4_exp.config import load_source, text_config, vision_config
+from tools.convert.qwen4_exp.inventory import Plan, V2Object, expected_tensors, plan_upgrade
 from tools.convert.qwen4_exp.upgrade import artifact_id, stream_upgrade
 from tools.convert.quantization.nvfp4 import encode_rows, weight_divisor
 
@@ -47,6 +49,8 @@ def test_published_v2_directory_maps_to_the_closed_v3_inventory():
     text = plan.components["text"]["config"]
     assert text["architectures"] == ["Qwen4ExpForCausalLM"]
     assert text["model_type"] == "qwen4_exp_text"
+    assert text["ple_layer_ids"] == [2]
+    assert text["eos_token_id"] == 248044
     assert plan.components["mtp"] == {
         "config": {"architectures": ["Qwen4ExpMTP"]},
         "target": "text",
@@ -72,6 +76,31 @@ def test_published_v2_directory_maps_to_the_closed_v3_inventory():
         ("mtp/layers/0/attention/output", "mtp/layers/0/attention/gated_output")
     ] == ("A16Only")
     assert uses[("text/output_head", "mtp/final_hidden")] == "A16Only"
+
+
+def _text(**changes) -> dict:
+    source = copy.deepcopy(load_source())
+    source["text_config"].update(changes)
+    return text_config(source)
+
+
+def test_text_config_reads_ple_layer_lists_and_the_boundary_token():
+    # transformers sorts and deduplicates ple_layer_ids; the normalized list stays one-based.
+    assert _text(ple_layer_ids=[6, 2, 6])["ple_layer_ids"] == [2, 6]
+    assert _text(eos_token_id=[248044, 248046])["eos_token_id"] == 248044
+    for ids in ([], [0], [49], [4], [2.0], 2):  # layer 4 is full attention
+        with pytest.raises(ValueError, match="ple_layer_ids"):
+            _text(ple_layer_ids=ids)
+    for eos in (None, [], 248320, -1, "248044"):
+        with pytest.raises(ValueError, match="eos_token_id"):
+            _text(eos_token_id=eos)
+
+
+def test_v2_inventory_holds_only_its_published_ple_layer():
+    source = load_source()
+    text = _text(ple_layer_ids=[2, 6])
+    with pytest.raises(ValueError, match="PLE"):
+        expected_tensors(text, vision_config(source, text))
 
 
 def test_directory_rejects_a_changed_v2_inventory():

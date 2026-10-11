@@ -6,11 +6,16 @@
 namespace ninfer::models::qwen4_exp {
 
 Model::Model(Config config, LoadOptions options, ModelWeights weights,
-             std::vector<BoundWeight> bound, PleTable ple_table, FrontendResources resources,
-             InstanceInfo info, artifact::MaterializedArtifact backing)
+             std::vector<BoundWeight> bound, std::vector<PleTable> ple_tables,
+             FrontendResources resources, InstanceInfo info, artifact::MaterializedArtifact backing)
     : backing_(std::move(backing)), config_(std::move(config)), options_(options),
-      weights_(std::move(weights)), bound_(std::move(bound)), ple_table_(std::move(ple_table)),
-      resources_(std::move(resources)), info_(std::move(info)) {}
+      weights_(std::move(weights)), bound_(std::move(bound)), ple_tables_(std::move(ple_tables)),
+      resources_(std::move(resources)), info_(std::move(info)) {
+    if (ple_tables_.size() != config_.text.ple.layers.size() ||
+        weights_.text.ple.size() != config_.text.ple.layers.size()) {
+        throw std::invalid_argument("Qwen4Exp PLE tables do not match the configured PLE layers");
+    }
+}
 
 Model::~Model() = default;
 

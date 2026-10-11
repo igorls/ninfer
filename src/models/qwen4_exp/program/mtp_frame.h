@@ -23,9 +23,7 @@ struct MtpIngress {
     alignas(16) std::array<std::int32_t, kMaximumConcurrency> frontiers{}, anchors{}, extents{},
         valid{};
     alignas(16) std::array<ops::SamplingConfig, kMaximumConcurrency> sampling{};
-    alignas(16) std::array<std::uint8_t, kMtpMaximumColumns * kPleHeads * kPleCodeRowBytes> codes{};
-    alignas(
-        16) std::array<std::uint16_t, kMtpMaximumColumns * kPleHeads * kPleScaleRowWords> scales{};
+    // The verification columns' PLE planes follow in the transfer (MtpFrameLayout::ple).
 };
 
 struct MtpEgress {
@@ -35,7 +33,8 @@ struct MtpEgress {
 };
 
 struct MtpFrameLayout {
-    LayoutRegion ingress;
+    LayoutRegion ingress; // MtpIngress and the verification PLE planes, ple.bytes long
+    PleTransferLayout ple;
     TensorRegion hidden, logits, argmax, drafts, licensed, counts, accepted;
     TensorRegion previous, teacher_output, teacher_positions, teacher_rope;
     TensorRegion ar_hidden, next_hidden, embedding, proposal_logits;
@@ -51,6 +50,7 @@ MtpFrameLayout plan_mtp_frame(const TextConfig& config, std::int32_t width, std:
 // token-mixer snapshots remain live until the whole pending round is committed or cancelled.
 struct MtpFrame {
     DeviceSpan ingress;
+    PleTransferLayout ple;
     Tensor hidden, logits, argmax, drafts, licensed, counts, accepted;
     Tensor previous, teacher_output, teacher_positions, teacher_rope;
     Tensor ar_hidden, next_hidden, embedding, proposal_logits;
@@ -61,5 +61,8 @@ struct MtpFrame {
     [[nodiscard]] MtpFrame batch(std::int32_t count) const;
     [[nodiscard]] Tensor i32(std::size_t offset, std::int32_t count) const;
     [[nodiscard]] const ops::SamplingConfig* sampling() const;
+    // Verification PLE rows of `columns` columns, planar by PLE layer.
+    [[nodiscard]] Tensor ple_codes(std::int32_t columns) const;
+    [[nodiscard]] Tensor ple_scales(std::int32_t columns) const;
 };
 } // namespace ninfer::models::qwen4_exp

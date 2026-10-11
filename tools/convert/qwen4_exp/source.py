@@ -30,11 +30,8 @@ MTP_BANK_SHA256 = {
     ),
 }
 
-# The qualified v3 artifact (artifact_id 1e7e026e9f634926ae26b80f0fc8591e): SHA256 of every file,
-# in `files` order (entry, part-0001, part-0002, part-0003).
-V3_FILE_SHA256 = (
-    "0de7b5f6c3ac9719e1c6e5811a765fda15fb4618444343502fc798dff2282714",
-    "e5d74e6a4874ef270f000799db5e171786dd685fb4c0d14c0baa075cae13cda8",
-    "67a30b1e718f2205d45ed22235ea93d1c0f9f0bf7cba963155002b5bccbf7baa",
-    "8bc02c7328ff27ce22858ce447afeb5a60d4d01f1f3a12955f9e2a5220780565",
-)
+# SHA256 of every file of the qualified v3 derivation, in `files` order (entry, part-0001,
+# part-0002, part-0003). Empty until the derivation that writes text eos_token_id is qualified:
+# the published derivation (artifact_id 1e7e026e9f634926ae26b80f0fc8591e) predates that key, so
+# this upgrade no longer reproduces its bytes.
+V3_FILE_SHA256: tuple[str, ...] = ()

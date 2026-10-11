@@ -3,10 +3,10 @@
 #include <string>
 
 namespace ninfer::models::qwen4_exp::loading {
+namespace {
 
-PendingPleTable bind_ple_table(Bindings& b, const TextConfig& config) {
-    const auto& ple = config.ple;
-    const auto p    = "text/layers/" + std::to_string(ple.layer) + "/ple/embedding/";
+PendingPleTable bind_table(Bindings& b, const PleConfig& ple, std::uint32_t layer) {
+    const auto p = "text/layers/" + std::to_string(layer) + "/ple/embedding/";
     PendingPleTable out;
     out.layer_multipliers      = b.int64_values(p + "layer_multipliers", ple.ngram_size);
     out.ngram_head_offsets     = b.int64_values(p + "ngram_head_offsets", ple.heads());
@@ -42,6 +42,19 @@ PendingPleTable bind_ple_table(Bindings& b, const TextConfig& config) {
     }
     if (artifact::checked_mul(shard_rows, ple.shards, "PLE rows") < std::uint64_t(rows)) {
         throw artifact::ArtifactError("PLE shards do not cover every n-gram head row");
+    }
+    return out;
+}
+
+} // namespace
+
+std::vector<PendingPleTable> bind_ple_tables(Bindings& b, const TextConfig& config) {
+    // Each PLE layer hashes into its own table: the source seeds its multipliers and sizes its
+    // head vocabularies by the layer's position in ple_layer_ids.
+    std::vector<PendingPleTable> out;
+    out.reserve(config.ple.layers.size());
+    for (const std::uint32_t layer : config.ple.layers) {
+        out.push_back(bind_table(b, config.ple, layer));
     }
     return out;
 }

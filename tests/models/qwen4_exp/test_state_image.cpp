@@ -11,19 +11,21 @@
 namespace {
 namespace q4 = ninfer::models::qwen4_exp;
 
-std::vector<ninfer::Tensor> components(q4::StateImageDevicePool& pool, int slot,
-                                       std::uint32_t indexer_layers) {
+std::vector<ninfer::Tensor> components(q4::StateImageDevicePool& pool, int slot) {
+    const auto& mixer = pool.host_layout().spec.token_mixer;
     std::vector<ninfer::Tensor> tensors;
     for (std::uint32_t layer = 0; layer < pool.linear().layer_count(); ++layer) {
         tensors.push_back(pool.linear().conv_slot(layer, slot));
         tensors.push_back(pool.linear().recurrent_slot(layer, slot));
     }
-    for (std::uint32_t layer = 0; layer < indexer_layers; ++layer) {
+    for (std::uint32_t layer = 0; layer < mixer.indexer_layers; ++layer) {
         const auto indexer = pool.indexer(layer);
         tensors.push_back(indexer.raw_keys.slice(2, slot, 1));
         tensors.push_back(indexer.raw_positions.slice(2, slot, 1));
     }
-    tensors.push_back(pool.ple_history_slot(slot));
+    for (std::uint32_t layer = 0; layer < mixer.ple_layers; ++layer) {
+        tensors.push_back(pool.ple_history_slot(layer, slot));
+    }
     tensors.push_back(pool.continuation_hidden_slot(slot));
     tensors.push_back(pool.continuation_positions_slot(slot));
     return tensors;
@@ -38,14 +40,14 @@ std::vector<std::uint8_t> pattern(std::size_t bytes, unsigned seed) {
 }
 
 void fill(q4::StateImageDevicePool& pool, int slot, unsigned seed) {
-    for (const auto& tensor : components(pool, slot, 2)) {
+    for (const auto& tensor : components(pool, slot)) {
         const auto bytes = pattern(tensor.bytes(), seed++);
         CUDA_CHECK(cudaMemcpy(tensor.data, bytes.data(), bytes.size(), cudaMemcpyHostToDevice));
     }
 }
 
 void check(q4::StateImageDevicePool& pool, int slot, unsigned seed, bool zero = false) {
-    for (const auto& tensor : components(pool, slot, 2)) {
+    for (const auto& tensor : components(pool, slot)) {
         std::vector<std::uint8_t> actual(tensor.bytes());
         CUDA_CHECK(cudaMemcpy(actual.data(), tensor.data, actual.size(), cudaMemcpyDeviceToHost));
         const auto expected =
@@ -56,7 +58,7 @@ void check(q4::StateImageDevicePool& pool, int slot, unsigned seed, bool zero = 
     }
 }
 
-void round_trip(ninfer::DeviceContext& device, bool real_shape) {
+void round_trip(ninfer::DeviceContext& device, bool real_shape, std::uint32_t ple_layers) {
     q4::StateImageSpec spec{
         .linear      = {.layers         = 2,
                         .conv_channels  = real_shape ? 10240 : 5,
@@ -69,6 +71,7 @@ void round_trip(ninfer::DeviceContext& device, bool real_shape) {
         .token_mixer = {.indexer_layers  = 2,
                         .indexer_dim     = real_shape ? 128 : 7,
                         .indexer_block   = 4,
+                        .ple_layers      = ple_layers,
                         .ple_channels    = real_shape ? 10240 : 11,
                         .ple_history     = 9,
                         .transient_slots = 8},
@@ -94,13 +97,20 @@ void round_trip(ninfer::DeviceContext& device, bool real_shape) {
     check(pool, 2, 20);
     check(pool, 3, 20);
 
-    auto wrong_layout = layout.host;
-    ++wrong_layout.spec.token_mixer.ple_history;
-    bool rejected = false;
-    try {
-        pool.copy_from_host({host_bytes, &wrong_layout}, 1, device.stream);
-    } catch (const std::invalid_argument&) { rejected = true; }
-    if (!rejected) { throw std::runtime_error("incompatible Host state was accepted"); }
+    // A Host image of another PLE history geometry or PLE layer count is never restored.
+    for (const bool layers : {false, true}) {
+        auto wrong_layout = layout.host;
+        if (layers) {
+            ++wrong_layout.spec.token_mixer.ple_layers;
+        } else {
+            ++wrong_layout.spec.token_mixer.ple_history;
+        }
+        bool rejected = false;
+        try {
+            pool.copy_from_host({host_bytes, &wrong_layout}, 1, device.stream);
+        } catch (const std::invalid_argument&) { rejected = true; }
+        if (!rejected) { throw std::runtime_error("incompatible Host state was accepted"); }
+    }
     device.synchronize();
     check(pool, 1, 40);
     pool.zero_all(device.stream);
@@ -119,8 +129,10 @@ int main() {
     try {
         CUDA_CHECK(status);
         ninfer::DeviceContext device(0);
-        round_trip(device, false);
-        round_trip(device, true);
+        for (const std::uint32_t ple_layers : {1U, 2U}) {
+            round_trip(device, false, ple_layers);
+            round_trip(device, true, ple_layers);
+        }
         std::cout << "PASS: complete StateImage transfer, restore, isolation and reset\n";
         return 0;
     } catch (const std::exception& error) {

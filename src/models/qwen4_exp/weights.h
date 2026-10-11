@@ -54,7 +54,8 @@ struct BlockWeights {
     MoeWeights moe;
 };
 
-// Device half of the per-layer n-gram embedding; its Host table is Model::ple_table().
+// Device half of one PLE layer's n-gram embedding; its Host table is Model::ple_tables() at the
+// same index.
 struct PleWeights {
     WeightId key_projection, value_projection;
     WeightId query_norm, key_norm, conv_norm, convolution;
@@ -64,7 +65,7 @@ struct TextWeights {
     WeightId token_embedding, output_head;
     WeightUseId output_head_use;
     std::vector<BlockWeights> layers;
-    PleWeights ple;
+    std::vector<PleWeights> ple; // one per TextConfig::ple.layers entry, in that order
     HyperMixerWeights final_mixer;
 };
 

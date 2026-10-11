@@ -18,11 +18,13 @@ namespace ninfer::models::qwen4_exp {
 
 // Per-sequence state of the QSA indexer and the per-layer n-gram embedding that lives beside the
 // GDN state: the raw keys and MRoPE positions of each attention layer's forming four-token block
-// (ops::QsaIndexerKeyState) and the nine BF16 history columns of the PLE dilated convolution.
+// (ops::QsaIndexerKeyState) and, per PLE layer, the BF16 history columns of its dilated
+// convolution.
 struct TokenMixerStateSpec {
     std::uint32_t indexer_layers = 0;
     std::int32_t indexer_dim     = 0;
     std::int32_t indexer_block   = 0;
+    std::uint32_t ple_layers     = 0;
     std::int32_t ple_channels    = 0;
     std::int32_t ple_history     = 0;
     // Extra QSA/PLE slots for a pending verification block; never cache-owned.
@@ -47,6 +49,7 @@ struct StateImageHostLayout {
     LayoutRegion indexer_positions;
     std::size_t indexer_positions_layer_bytes = 0;
     LayoutRegion ple_history;
+    std::size_t ple_history_layer_bytes = 0;
     LayoutRegion continuation_hidden;
     LayoutRegion continuation_positions;
     std::size_t image_bytes = 0;
@@ -56,7 +59,7 @@ struct StateImageDeviceLayout {
     LinearAttentionStatePoolLayout linear;
     std::vector<TensorRegion> indexer_keys;      // BF16 [dim, block, slots] per attention layer
     std::vector<TensorRegion> indexer_positions; // I32 [3, block, slots] per attention layer
-    TensorRegion ple_history;                    // BF16 [channels, history, slots]
+    std::vector<TensorRegion> ple_history;       // BF16 [channels, history, slots] per PLE layer
     TensorRegion continuation_hidden;            // BF16 [hidden, slots]
     TensorRegion continuation_positions;         // I32 [3, slots]
     StateImageHostLayout host;
@@ -168,9 +171,10 @@ public:
 
     [[nodiscard]] IndexerStateView indexer(std::uint32_t layer) const;
 
-    [[nodiscard]] const Tensor& ple_history() const noexcept { return ple_history_; }
+    // PLE layer `index` (TextConfig::ple.layers order): BF16 [channels, history, slots].
+    [[nodiscard]] const Tensor& ple_history(std::size_t index) const;
 
-    [[nodiscard]] Tensor ple_history_slot(std::int32_t slot) const;
+    [[nodiscard]] Tensor ple_history_slot(std::size_t index, std::int32_t slot) const;
 
     [[nodiscard]] Tensor& continuation_hidden_store() noexcept { return continuation_hidden_; }
 
@@ -194,7 +198,7 @@ private:
     LinearAttentionStatePool linear_;
     std::vector<Tensor> indexer_keys_;
     std::vector<Tensor> indexer_positions_;
-    Tensor ple_history_;
+    std::vector<Tensor> ple_history_;
     Tensor continuation_hidden_;
     Tensor continuation_positions_;
     StateImageHostLayout host_layout_;

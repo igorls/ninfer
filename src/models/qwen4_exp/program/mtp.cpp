@@ -35,21 +35,13 @@ execution::OrdinaryDecodeInputs mtp_verify_inputs(MtpFrame& frame, std::int32_t 
             .kv_table_rows      = input(offsetof(MtpIngress, rows), columns),
             .state_source_slots = input(offsetof(MtpIngress, sources), batch),
             .state_destination_slots = input(offsetof(MtpIngress, snapshots), batch),
-            .ple_codes =
-                Tensor(static_cast<std::byte*>(frame.ingress.data) + offsetof(MtpIngress, codes),
-                       DType::U8,
-                       {static_cast<std::int32_t>(kPleCodeRowBytes),
-                        columns * static_cast<std::int32_t>(kPleHeads)}),
-            .ple_scales =
-                Tensor(static_cast<std::byte*>(frame.ingress.data) + offsetof(MtpIngress, scales),
-                       DType::FP16,
-                       {static_cast<std::int32_t>(kPleScaleRowWords),
-                        columns * static_cast<std::int32_t>(kPleHeads)}),
-            .indexer       = envelope,
-            .width         = width,
-            .sequence_rows = input(offsetof(MtpIngress, sequence_rows), batch),
-            .valid_columns = input(offsetof(MtpIngress, valid), batch),
-            .replay        = &frame.records};
+            .ple_codes               = frame.ple_codes(columns),
+            .ple_scales              = frame.ple_scales(columns),
+            .indexer                 = envelope,
+            .width                   = width,
+            .sequence_rows           = input(offsetof(MtpIngress, sequence_rows), batch),
+            .valid_columns           = input(offsetof(MtpIngress, valid), batch),
+            .replay                  = &frame.records};
 }
 
 DecodeGraphExecutable& mtp_graph_for(DecodeGraphFamily& family, std::uint32_t batch,
@@ -264,13 +256,13 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
             }
             ple_gather->gather_position(
                 mtp_proposal_ledger_, host.positions[column] - tail_begin,
-                {reinterpret_cast<std::byte*>(host.codes.data()) +
-                     column * kPleHeads * kPleCodeRowBytes,
-                 reinterpret_cast<std::byte*>(host.scales.data() +
-                                              column * kPleHeads * kPleScaleRowWords)});
+                ple_gather->token_staging(mtp_host_ple_codes, mtp_host_ple_scales,
+                                          static_cast<std::uint32_t>(columns),
+                                          static_cast<std::uint32_t>(column)));
         }
     }
-    CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, &host, sizeof(host), cudaMemcpyHostToDevice,
+    // The control record and the verification PLE planes.
+    CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, &host, frame.ple.bytes, cudaMemcpyHostToDevice,
                                device.stream));
     auto verify = mtp_verify_inputs(frame, batch, envelope);
     auto logits = frame.logits.view({frame.logits.ne[0], columns});

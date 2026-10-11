@@ -719,7 +719,7 @@ when a new source revision is adopted.
 | 1. payload identity | `verify` re-read all 1,566 objects through `tools.artifact.reader.Artifact`: 1,564 unchanged objects (1,558 tensors + 6 resources) equal their v2 object digests |
 | 2. MTP banks | `ninfer_quantize_mtp` at `87812bc8` (the v2 loader's `quantize_bf16_expert_bank_to_nvfp4` on the host-mapped BF16 banks) dumped gate/up `9e25663a...2087b1f6` and down `fa78245b...6fb8c9f60`; the baked banks are byte-identical (`reference.equal`). FP64 oracle on experts 0/256/511: divisors and signs exact, scales within 0.50 E4M3FN step, code excess ≤ 3e-7 |
 | 3. container | `python -m tools.artifact.inspect`: 1,566 objects, 1,668 bindings, 959 Uses, formats bf16 1,235 / nvfp4 98 / fp8 row fp32 96 / u4z8 128 / int64 3; C++ `ninfer_artifact_reader_test <v3>` ran `Reader::validate_object` on every object (`v3 objects=1566`) |
-| v3 artifact | `artifact_id 1e7e026e9f634926ae26b80f0fc8591e`, 4 files, 109,681,105,664 bytes; entry `0de7b5f6...5fda15fb4618444343502fc798dff2282714`, part-0001 `e5d74e6a...`, part-0002 `67a30b1e...`, part-0003 `8bc02c73...` (full digests pinned in `tools/convert/qwen4_exp/source.py`) |
+| v3 artifact | `artifact_id 1e7e026e9f634926ae26b80f0fc8591e`, 4 files, 109,681,105,664 bytes; entry `0de7b5f6...5fda15fb4618444343502fc798dff2282714`, part-0001 `e5d74e6a...`, part-0002 `67a30b1e...`, part-0003 `8bc02c73...` (full digests in [the artifact reference](../maintainer/qwen3.8-flash-next-artifact.md#1-derivation)) |
 | regressions | `ctest -R '^ninfer_artifact|^ninfer_qwen3_5_loading_test$'` 4/4 on G4; `pytest tests/artifact tests/convert` 59 passed (Python 3.11.16, torch 2.14 CPU) |
 
 **Time on G4** (measured): download 6.5 min (`aria2c -x16`, ~290 MB/s); in-place upgrade 7.3 min

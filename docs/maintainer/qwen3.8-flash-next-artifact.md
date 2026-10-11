@@ -44,10 +44,22 @@ a hole-punched file keeps its length and would pass a resumed download as comple
 
 The generic `tools/upgrade_ninfer_v2_to_v3.py` rejects the Flash-Next identity and points here.
 
-The qualified derivation is `artifact_id 1e7e026e9f634926ae26b80f0fc8591e`: four files, 109,681,105,664
-bytes, whose SHA256 digests are pinned in `tools/convert/qwen4_exp/source.py` and checked by
-`verify --file-digests`. On a Colab G4 an unattended `derive` takes ~13 minutes (6.5 min download,
-6.7 min upgrade) plus ~2 minutes of optional verification.
+The published qualified derivation is `artifact_id 1e7e026e9f634926ae26b80f0fc8591e`: four files,
+109,681,105,664 bytes, with SHA256 `0de7b5f6c3ac9719e1c6e5811a765fda15fb4618444343502fc798dff2282714`
+(entry), `e5d74e6a4874ef270f000799db5e171786dd685fb4c0d14c0baa075cae13cda8`,
+`67a30b1e718f2205d45ed22235ea93d1c0f9f0bf7cba963155002b5bccbf7baa` and
+`8bc02c7328ff27ce22858ce447afeb5a60d4d01f1f3a12955f9e2a5220780565` (parts 1 to 3). It predates the
+text config's `eos_token_id` (Section 2). The current upgrade writes that key, so it yields a
+different artifact id; `source.V3_FILE_SHA256` stays empty, and `verify --file-digests` reports the
+file digests without comparing them, until that derivation is qualified and pinned. On a Colab G4
+an unattended `derive` takes ~13 minutes (6.5 min download, 6.7 min upgrade) plus ~2 minutes of
+optional verification.
+
+The loader still accepts the published derivation: a text config without `eos_token_id` takes the
+PLE boundary from the source config its provenance names (`Qwen/Qwen3.8-Flash-Next` at
+`de4b8e4d43b917e7706784d8bb445c9af86a3540`, whose `text_config.eos_token_id` is 248044), and any
+other artifact without the key is rejected. Remove that rule once the published artifact is
+re-derived.
 
 ## 2. Components and resources
 
@@ -62,8 +74,12 @@ MRoPE (`rope_theta`, `partial_rotary_factor`, `mrope_section`), GDN, MoE (512 ex
 intermediate 640), hyper-connections (`hc_count` 4, `hc_lowrank` 320), the QSA indexer
 (`indexer_n_heads` 4, `indexer_kv_heads` 1, `indexer_head_dim` 128, `indexer_compress_ratio` 4,
 `indexer_budget` 2048) and PLE (`ple_embed_dim`, `ple_conv_kernel_size`, `ngram_size`,
-`heads_per_ngram`, `split_ngram_parts`). `ple_layer_ids` is the source's `[2]`, which counts
-decoder layers from 1: the PLE weights and injection belong to 0-based layer 1.
+`heads_per_ngram`, `split_ngram_parts`, and `eos_token_id` 248044, the token that resets the n-gram
+history). `ple_layer_ids` lists the decoder layers that carry PLE, one-based like the source,
+ascending and distinct, and only GDN layers (transformers sorts, deduplicates and checks the source
+list the same way). Flash-Next's `[2]` places its PLE weights and injection at 0-based layer 1. Each
+listed layer owns a table, projections, norms and convolution under `text/layers/{l}/ple/`; the
+converter's closed v2 inventory holds only layer 1's.
 
 The six resources are the v2 artifact's frontend files, unchanged. The chat template is
 Flash-Next's official template (8,952 bytes, SHA256 `c3cf9e34abf4...d7a81041`), not the maintained
@@ -186,6 +202,13 @@ unbound. Residency follows the role:
 stored activation divisor, because the A4 route quantizes activations dynamically. The shard height
 (2,500,012 rows) is read from the stored shape, not from the config.
 
+The loader binds one PLE parameter set and one table per `ple_layer_ids` entry. The PLE row geometry
+(16 heads of 160 columns: 80 code bytes and 10 FP16 scales per row) and the convolution history
+(`(ple_conv_kernel_size - 1) * ngram_size` = 9 columns) are derived from the config. Native
+preparation rejects a PLE geometry that `ops::ple_ngram` does not execute (stream width 2560, four
+streams, head width 160, a four-tap dilation-3 convolution, RMSNorm epsilon 1e-6) before a Program
+is planned.
+
 
 ## 7. Execution
 
@@ -200,6 +223,10 @@ structured-output and logprob contracts. `--spec mtp --draft-tokens 3` selects t
 component; the supported draft interval is 1 through 5, with the full output head. Requests
 needing host top-logprob readout use target-only steps, as on the other architecture.
 `--vision` selects the Vision component and the common image/video frontend.
+
+Each PLE layer is injected before its block. Decode and verification transfers carry the gathered
+rows of every PLE layer planar by layer for the round's token count, so each layer's rows form one
+decode operand; every state image holds each PLE layer's convolution history.
 
 MTP verification records GDN updates and snapshots QSA/PLE state for each physical column. Only
 the accepted prefix is folded into the continuation. At target frontier E, the MTP KV frontier

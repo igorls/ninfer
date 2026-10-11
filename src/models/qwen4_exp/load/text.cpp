@@ -116,17 +116,22 @@ TextWeights bind_text(Bindings& b, const TextConfig& config, bool mtp) {
         out.layers.push_back(
             bind_block(b, config, "text/layers/" + std::to_string(i) + "/", config.layer_types[i]));
     }
-    const auto p     = "text/layers/" + std::to_string(config.ple.layer) + "/ple/";
     const auto width = config.stream_width();
-    out.ple.key_projection =
-        b.parameter(p + "key_projection", {width, config.ple.embed_dim}, {p + "embedding"});
-    out.ple.value_projection =
-        b.parameter(p + "value_projection", {h, config.ple.embed_dim}, {p + "embedding"});
-    out.ple.query_norm  = b.direct(p + "query_norm", {width});
-    out.ple.key_norm    = b.direct(p + "key_norm", {width});
-    out.ple.conv_norm   = b.direct(p + "conv_norm", {width});
-    out.ple.convolution = b.direct(p + "convolution", {config.ple.conv_kernel_size, width});
-    out.final_mixer     = bind_mixer(b, config, "text/hyper_connection/");
+    out.ple.reserve(config.ple.layers.size());
+    for (const std::uint32_t layer : config.ple.layers) {
+        const auto p = "text/layers/" + std::to_string(layer) + "/ple/";
+        PleWeights ple;
+        ple.key_projection =
+            b.parameter(p + "key_projection", {width, config.ple.embed_dim}, {p + "embedding"});
+        ple.value_projection =
+            b.parameter(p + "value_projection", {h, config.ple.embed_dim}, {p + "embedding"});
+        ple.query_norm  = b.direct(p + "query_norm", {width});
+        ple.key_norm    = b.direct(p + "key_norm", {width});
+        ple.conv_norm   = b.direct(p + "conv_norm", {width});
+        ple.convolution = b.direct(p + "convolution", {config.ple.conv_kernel_size, width});
+        out.ple.push_back(ple);
+    }
+    out.final_mixer = bind_mixer(b, config, "text/hyper_connection/");
     return out;
 }
 

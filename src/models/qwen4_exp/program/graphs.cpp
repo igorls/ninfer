@@ -300,7 +300,8 @@ void ProgramImpl::prepare_mtp_graphs() {
                 }
             }
         }
-        CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, mtp_ingress, sizeof(MtpIngress),
+        // The control record and the zero PLE planes that warm-up verification decodes.
+        CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, mtp_ingress, frame.ple.bytes,
                                    cudaMemcpyHostToDevice, device.stream));
         CUDA_CHECK(cudaMemcpyAsync(
             frame.proposal_sources.data, frame.i32(offsetof(MtpIngress, sources), batch).data,
