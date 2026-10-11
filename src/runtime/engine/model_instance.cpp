@@ -202,6 +202,7 @@ Qwen4ExpInstance::ModelInstanceOf(std::unique_ptr<models::qwen4_exp::Model> sour
     : model(std::move(source)), parameters(*model),
       frontend(models::qwen3_5::make_frontend(
           model->resources(), {.chat_template_path       = options.chat_template_path,
+                               .grammar_cache_bytes      = options.grammar_cache_bytes,
                                .architecture             = models::Architecture::Qwen4Exp,
                                .vision_enabled           = options.enable_vision,
                                .max_context              = options.max_context,
