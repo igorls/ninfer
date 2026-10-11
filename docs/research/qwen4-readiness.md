@@ -53,7 +53,8 @@ alongside.
 
 ## Status
 
-**Q1: implemented in source;** Flash-Next bit-identity is unverified until the real cases run.
+**Q1: qualified on Flash-Next.** The re-derived artifact (`artifact_id` 3cade505...) passes the
+loading and all 19 Engine real cases; greedy serving text matches the previous build and artifact.
 
 - [x] `ple_layer_ids` is a list end to end: config (ascending, distinct, GDN layers only), one PLE
   parameter set and table per layer, injection before each listed block, decode and MTP transfers
@@ -66,10 +67,12 @@ alongside.
 - [x] Tests: `ninfer_qwen4_exp_loading_test` (Flash-Next config, lists, boundary rules, rejected
   geometries, a dense config's clear rejection, two-layer bindings) and the two-layer state image
   test; `tests/convert/test_qwen4_exp.py`.
-- [ ] Re-derive the Flash-Next artifact (it now also carries the maintained chat template), pin its
-  file digests in `source.py`, and run `ninfer_qwen4_exp_loading_real_test` and
-  `ninfer_qwen4_exp_engine_real_test` on it, plus a greedy-output and logprob A/B against the
-  previous build and artifact.
+- [x] Re-derived the Flash-Next artifact (it also carries the maintained chat template) and pinned
+  its file digests in `source.py`; `verify --file-digests` passes. `ninfer_qwen4_exp_loading_real_test`
+  and the 19 cases of `ninfer_qwen4_exp_engine_real_test` pass on it (Windows, RTX PRO 6000).
+  Served with MTP K=3, greedy text equals the previous build serving the previous artifact with the
+  same template on seven of eight workloads, including both logprob readouts; the eighth workload's
+  prompt changed between the runs. Published on the Hugging Face repository (2026-10-11).
 - [ ] An empty `ple_layer_ids` (a checkpoint without PLE) is still rejected; making PLE optional is
   a Q3-like change if an official checkpoint needs it.
 
