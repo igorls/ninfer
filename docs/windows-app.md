@@ -107,13 +107,25 @@ band, generation and prompt-reading rates on separate scales, the calling apps, 
 from the findings. Pointing at either history, or using the arrow keys on it, reads both at the
 same moment. The other pages keep a one-line memory and rate band in view.
 
-**Connect**, **Diagnose** (findings, engine log, engine data, acceleration) and **Settings** are
-pages of one control display. The Settings index shows each page's current values; model presets
+**Connect**, **API**, **Diagnose** (findings, engine log, engine data, acceleration) and **Settings**
+are pages of one control display. The Settings index shows each page's current values; model presets
 and the desktop reserve have their own pages there. Edits are staged as a temporary revision,
 shown in amber, until **Insert** saves them or **Erase** discards them; a staged edit also shows
 under the engine mode. **Explain** shows plain-language notes on every page. **Master caution**
 lights for a caution or warning finding that has not been acknowledged in this browser; pressing
 it acknowledges the current findings and opens Diagnose.
+The display-mode key switches between **Auto**, which follows the Windows app theme, **Day** and
+**Night**; the choice is kept in the browser.
+
+**API** is a test bench for every route the engine exposes (status, OpenAI, Anthropic, NInfer and
+admin) and for the Supervisor's own read routes. Each route has ready examples; the answer shows
+its status and timings, the assembled text of a stream, its raw events, the body and the headers,
+and **Copy as curl** writes the same request against the engine's own address. The page sends
+engine requests through the Supervisor at `/api/engine/<engine route>`, which adds the configured
+API key and streams each answer as the engine writes it. That route forwards engine routes only
+and accepts only loopback callers that send the `X-NInfer-Supervisor` header, like the engine
+controls. Unlike a web frontend it can call the engine's admin writes; the page asks before it
+sends `POST /admin/quiesce`, which holds incoming requests while it runs.
 
 ## Web frontends
 

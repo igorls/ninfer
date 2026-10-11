@@ -8,9 +8,6 @@
 #include <httplib.h>
 
 #include <algorithm>
-#include <chrono>
-#include <condition_variable>
-#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -22,10 +19,6 @@ namespace {
 // The engine's default request limit, so an image upload that the engine accepts also passes the
 // proxy.
 constexpr std::size_t kMaxRequestBytes = 384ULL << 20;
-// A request without streaming sends no headers until the whole answer is generated.
-constexpr auto kUpstreamReadTimeout = std::chrono::hours(1);
-constexpr auto kDisconnectPoll      = std::chrono::milliseconds(100);
-
 const char* state_name(FrontendState state) {
     switch (state) {
     case FrontendState::Serving: return "serving";
@@ -36,156 +29,11 @@ const char* state_name(FrontendState state) {
     return "stopped";
 }
 
-void write_json_error(httplib::Response& res, int status, const std::string& type,
-                      const std::string& message) {
-    res.status = status;
-    res.set_content(
-        nlohmann::json{{"error", {{"message", message}, {"type", type}, {"code", nullptr}}}}.dump(),
-        "application/json");
-}
-
 std::string read_index(const std::string& dir) {
     std::ifstream in(std::filesystem::path(dir) / "index.html", std::ios::binary);
     std::ostringstream out;
     out << in.rdbuf();
     return out.str();
-}
-
-// One forwarded request. The upstream call runs on its own detached thread and hands the response
-// over through this bridge, so the browser receives each chunk as the engine writes it. Whoever
-// sees the browser go away sets `cancelled`; the content receiver then returns false, the client
-// closes the engine connection, and the engine stops the request.
-struct ProxyBridge {
-    std::mutex mutex;
-    std::condition_variable cv;
-    bool headers_ready = false;
-    bool finished      = false;
-    bool cancelled     = false;
-    int status         = 0;
-    httplib::Headers headers;
-    std::deque<std::string> chunks;
-    std::string error;
-
-    void cancel() {
-        std::lock_guard<std::mutex> lock(mutex);
-        cancelled = true;
-        cv.notify_all();
-    }
-};
-
-void forward(const httplib::Request& req, httplib::Response& res, const EngineSpec& engine,
-             const std::atomic<bool>& stopping) {
-    const std::string key  = read_api_key_quiet(engine.api_key_file);
-    const bool replace_key = !key.empty();
-    httplib::Headers headers;
-    for (const auto& [name, value] : req.headers) {
-        if (forward_request_header(name) && !frontend_replaces_credentials(name, replace_key)) {
-            headers.emplace(name, value);
-        }
-    }
-    if (replace_key) { headers.emplace("Authorization", "Bearer " + key); }
-
-    auto bridge = std::make_shared<ProxyBridge>();
-    std::thread([bridge, host = engine_connect_host(engine), port = engine.engine_port,
-                 method = req.method, target = req.target, headers = std::move(headers),
-                 body = req.body]() mutable {
-        httplib::Client client(host, port);
-        client.set_connection_timeout(std::chrono::seconds(5));
-        client.set_read_timeout(kUpstreamReadTimeout);
-        client.set_write_timeout(std::chrono::seconds(60));
-        httplib::Request upstream;
-        upstream.method  = std::move(method);
-        upstream.path    = std::move(target);
-        upstream.headers = std::move(headers);
-        upstream.body    = std::move(body);
-        upstream.response_handler = [bridge](const httplib::Response& response) {
-            std::lock_guard<std::mutex> lock(bridge->mutex);
-            bridge->status        = response.status;
-            bridge->headers       = response.headers;
-            bridge->headers_ready = true;
-            bridge->cv.notify_all();
-            return !bridge->cancelled;
-        };
-        upstream.content_receiver = [bridge](const char* data, std::size_t size, std::size_t,
-                                             std::size_t) {
-            std::lock_guard<std::mutex> lock(bridge->mutex);
-            if (bridge->cancelled) { return false; }
-            bridge->chunks.emplace_back(data, size);
-            bridge->cv.notify_all();
-            return true;
-        };
-        const httplib::Result result = client.send(upstream);
-        std::lock_guard<std::mutex> lock(bridge->mutex);
-        if (!result && !bridge->headers_ready) { bridge->error = httplib::to_string(result.error()); }
-        bridge->finished = true;
-        bridge->cv.notify_all();
-    }).detach();
-
-    // Headers arrive with the first token of a stream, or with the whole answer otherwise. A
-    // browser that leaves meanwhile cancels the engine request.
-    {
-        std::unique_lock<std::mutex> lock(bridge->mutex);
-        while (!bridge->headers_ready && !bridge->finished) {
-            bridge->cv.wait_for(lock, kDisconnectPoll);
-            if (bridge->headers_ready || bridge->finished) { break; }
-            lock.unlock();
-            const bool closed = req.is_connection_closed() || stopping.load();
-            lock.lock();
-            if (closed) {
-                bridge->cancelled = true;
-                return;
-            }
-        }
-        if (!bridge->headers_ready) {
-            lock.unlock();
-            write_json_error(res, 502, "server_error",
-                             "the NInfer engine is not reachable (" + bridge->error + ")");
-            return;
-        }
-        res.status = bridge->status;
-        for (const auto& [name, value] : bridge->headers) {
-            if (forward_response_header(name)) { res.set_header(name, value); }
-        }
-    }
-    std::string content_type;
-    {
-        std::lock_guard<std::mutex> lock(bridge->mutex);
-        const auto type = bridge->headers.find("Content-Type");
-        if (type != bridge->headers.end()) { content_type = type->second; }
-        // An empty answer, such as the engine's 404 for a route it does not have, stays empty
-        // and untyped.
-        const auto length = bridge->headers.find("Content-Length");
-        if (length != bridge->headers.end() && length->second == "0") { return; }
-    }
-    if (content_type.empty()) { content_type = "application/octet-stream"; }
-    res.set_chunked_content_provider(
-        content_type,
-        [bridge, &stopping](std::size_t, httplib::DataSink& sink) {
-            if (stopping.load()) {
-                bridge->cancel();
-                return false;
-            }
-            std::unique_lock<std::mutex> lock(bridge->mutex);
-            bridge->cv.wait_for(lock, kDisconnectPoll, [&] {
-                return !bridge->chunks.empty() || bridge->finished || bridge->cancelled;
-            });
-            while (!bridge->chunks.empty()) {
-                std::string chunk = std::move(bridge->chunks.front());
-                bridge->chunks.pop_front();
-                lock.unlock();
-                if (!sink.write(chunk.data(), chunk.size())) {
-                    bridge->cancel();
-                    return false;
-                }
-                lock.lock();
-            }
-            if (bridge->cancelled) { return false; }
-            if (bridge->finished) { sink.done(); }
-            return true;
-        },
-        [bridge](bool success) {
-            if (!success) { bridge->cancel(); }
-        });
 }
 
 } // namespace
@@ -226,15 +74,15 @@ bool FrontendServer::bind() {
     svr->set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
         const int port = bound_port_.load();
         if (!host_header_allowed(req.get_header_value("Host"), port, kFrontendHost, false)) {
-            write_json_error(res, 403, "invalid_request_error", "host not allowed");
+            write_engine_error(res, 403, "invalid_request_error", "host not allowed");
             return httplib::Server::HandlerResponse::Handled;
         }
         if (!frontend_origin_allowed(req.get_header_value("Origin"), port)) {
-            write_json_error(res, 403, "invalid_request_error", "cross-origin request refused");
+            write_engine_error(res, 403, "invalid_request_error", "cross-origin request refused");
             return httplib::Server::HandlerResponse::Handled;
         }
         if (!frontend_method_allowed(req.method, req.path)) {
-            write_json_error(res, 403, "invalid_request_error",
+            write_engine_error(res, 403, "invalid_request_error",
                              "engine admin writes are not available through a frontend");
             return httplib::Server::HandlerResponse::Handled;
         }
@@ -255,7 +103,7 @@ bool FrontendServer::bind() {
             res.set_content(read_index(spec_.dir), "text/html; charset=utf-8");
             return;
         }
-        forward(req, res, engine_(), stopping_);
+        forward_to_engine(req, res, engine_(), stopping_, req.target);
     };
     svr->Get(".*", dispatch);
     svr->Post(".*", dispatch);

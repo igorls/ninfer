@@ -1,6 +1,7 @@
 #include "logic.hpp"
 #include "client_activity.hpp"
 #include "config.hpp"
+#include "engine_proxy.hpp"
 #include "frontend_server.hpp"
 #include "insights.hpp"
 #include "request_log_tail.hpp"
@@ -1973,6 +1974,31 @@ int test_frontend_routing() {
                    frontend_replaces_credentials("X-Api-Key", true) &&
                    !frontend_replaces_credentials("Authorization", false),
                "the supervisor's key replaces the page's credentials only when it has one");
+    f += check(!forward_request_header("X-NInfer-Supervisor"),
+               "the supervisor's control header is not forwarded to the engine");
+    // The API bench forwards engine routes only, query intact, never with dot segments.
+    const std::pair<const char*, const char*> bench[] = {
+        {"/api/engine/v1/models", "/v1/models"},
+        {"/api/engine/v1/models?x=1&y=2", "/v1/models?x=1&y=2"},
+        {"/api/engine/v1/responses/resp_1/input_items?limit=5", "/v1/responses/resp_1/input_items?limit=5"},
+        {"/api/engine/health", "/health"},
+        {"/api/engine/metrics", "/metrics"},
+        {"/api/engine/admin/quiesce", "/admin/quiesce"},
+        {"/api/engine/systemone", "/systemone"},
+        {"/api/engine", ""},
+        {"/api/engine/", ""},
+        {"/api/enginex/v1/models", ""},
+        {"/api/engine/slots", ""},
+        {"/api/engine/v1/../admin/quiesce", ""},
+        {"/api/engine/v1/./models", ""},
+        {"/api/engine/v1/%2E%2E/admin", ""},
+        {"/api/engine/v1\\..\\admin", ""},
+        {"/api/state", ""},
+    };
+    for (const auto& [target, expected] : bench) {
+        f += check(engine_bench_target(target) == expected,
+                   std::string("bench target for ") + target + " is \"" + expected + "\"");
+    }
     return f;
 }
 
@@ -1996,6 +2022,7 @@ struct FakeEngine {
             res.set_content(nlohmann::json{{"auth", req.get_header_value("Authorization")},
                                            {"cookie", req.has_header("Cookie")},
                                            {"origin", req.has_header("Origin")},
+                                           {"control", req.has_header("X-NInfer-Supervisor")},
                                            {"target", req.target}}
                                 .dump(),
                             "application/json");
@@ -2405,6 +2432,91 @@ int test_client_activity_causes() {
     return f;
 }
 
+// The dashboard's API bench in front of the fake engine: local callers with the control header
+// reach engine routes with the supervisor's key, streams arrive as written, admin writes pass.
+int test_engine_bench() {
+    using namespace ninfer::supervisor;
+    namespace fs       = std::filesystem;
+    int f              = 0;
+    const fs::path dir = fs::temp_directory_path() / "ninfer_bench_test";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+    std::ofstream(dir / "key.txt", std::ios::binary) << "bench-key\n";
+
+    FakeEngine engine;
+    EngineSpec spec;
+    spec.engine_host  = "127.0.0.1";
+    spec.engine_port  = engine.port;
+    spec.api_key_file = (dir / "key.txt").string();
+    std::atomic<bool> stopping{false};
+    std::atomic<bool> local{true};
+    httplib::Server bench;
+    add_engine_bench_routes(bench, [spec] { return spec; }, stopping,
+                            [&local](const std::string&) { return local.load(); });
+    const int port = bench.bind_to_any_port("127.0.0.1");
+    std::thread serving([&] { bench.listen_after_bind(); });
+    while (!bench.is_running()) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
+
+    httplib::Client client("127.0.0.1", port);
+    client.set_read_timeout(std::chrono::seconds(20));
+    const auto status_of = [](const httplib::Result& r) { return r ? r->status : -1; };
+    const auto body_of   = [](const httplib::Result& r) { return r ? r->body : std::string(); };
+    const httplib::Headers control{{"X-NInfer-Supervisor", "1"}};
+
+    auto bare = client.Get("/api/engine/v1/models");
+    f += check(status_of(bare) == 403, "the bench needs the supervisor control header");
+    auto models = client.Get("/api/engine/v1/models?x=1",
+                             httplib::Headers{{"X-NInfer-Supervisor", "1"},
+                                              {"Authorization", "Bearer page-key"},
+                                              {"Cookie", "a=b"}});
+    const auto echoed = nlohmann::json::parse(body_of(models), nullptr, false);
+    f += check(status_of(models) == 200 && echoed.is_object() &&
+                   echoed.value("auth", "") == "Bearer bench-key" && !echoed.value("cookie", true) &&
+                   !echoed.value("control", true) && echoed.value("target", "") == "/v1/models?x=1" &&
+                   models->get_header_value("x-request-id") == "req-1",
+               "the bench forwards with the supervisor's key and the query intact: " + body_of(models));
+    auto outside = client.Get("/api/engine/slots", control);
+    f += check(status_of(outside) == 404 && body_of(outside).find("engine routes only") != std::string::npos,
+               "the bench refuses paths that are not engine routes");
+    auto dotted = client.Get("/api/engine/v1/../admin/vram", control);
+    f += check(status_of(dotted) == 404, "the bench refuses dot segments");
+    auto quiesce = client.Post("/api/engine/admin/quiesce", control, "{}", "application/json");
+    f += check(status_of(quiesce) == 200 && engine.quiesce_called.load(),
+               "the bench may call engine admin writes");
+
+    std::string streamed;
+    bool opened = false;
+    httplib::Request chat;
+    chat.method           = "POST";
+    chat.path             = "/api/engine/v1/chat/completions";
+    chat.body             = "hello";
+    chat.headers          = {{"Content-Type", "application/json"}, {"X-NInfer-Supervisor", "1"}};
+    chat.content_receiver = [&](const char* data, std::size_t size, std::size_t, std::size_t) {
+        streamed.append(data, size);
+        if (!opened && streamed.find("data: one hello") != std::string::npos) {
+            opened = true;
+            engine.release_second.set_value();
+        }
+        return true;
+    };
+    auto streamed_result = client.send(chat);
+    f += check(status_of(streamed_result) == 200 && opened &&
+                   streamed.find("data: two") != std::string::npos &&
+                   streamed.find("timeout") == std::string::npos,
+               "bench SSE arrives as the engine writes it: " + streamed);
+
+    local = false;
+    auto remote = client.Get("/api/engine/v1/models", control);
+    f += check(status_of(remote) == 403, "the bench is loopback-only");
+
+    stopping = true;
+    bench.stop();
+    if (serving.joinable()) { serving.join(); }
+    fs::remove_all(dir, ec);
+    return f;
+}
+
 int main() {
     int failures = 0;
     failures += test_client_activity_causes();
@@ -2456,6 +2568,7 @@ int main() {
     failures += test_frontend_config();
     failures += test_frontend_routing();
     failures += test_frontend_proxy();
+    failures += test_engine_bench();
     failures += test_frontends_request();
     failures += test_frontend_host_apply();
     if (failures == 0) { std::cout << "ok\n"; }

@@ -1,4 +1,5 @@
 #include "server.hpp"
+#include "engine_proxy.hpp"
 #include "insights.hpp"
 
 #ifdef _WIN32
@@ -792,6 +793,11 @@ void DashboardServer::run() {
         res.status                = result.status;
         res.set_content(result.body.dump(), "application/json");
     });
+
+    // The dashboard's API test bench: the engine's own routes, with the supervisor's
+    // key, from the dashboard's origin.
+    add_engine_bench_routes(svr, [this] { return child_.config().engine; }, stop_,
+                            [this](const std::string& remote) { return control_allowed(remote); });
 
     const std::string host = cfg_.bind_any ? "0.0.0.0" : cfg_.host;
     if (cfg_.bind_any || !is_loopback_host(host)) {

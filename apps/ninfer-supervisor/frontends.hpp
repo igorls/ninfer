@@ -128,6 +128,13 @@ inline std::string frontend_assets_problem(const std::string& dir) {
     return {};
 }
 
+inline std::string lower_ascii(std::string_view text) {
+    std::string out(text);
+    std::transform(out.begin(), out.end(), out.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return out;
+}
+
 inline bool path_has_prefix(std::string_view path, std::string_view prefix) {
     return path == prefix ||
            (path.size() > prefix.size() && path.substr(0, prefix.size()) == prefix &&
@@ -159,6 +166,32 @@ inline bool frontend_method_allowed(std::string_view method, std::string_view pa
     return true;
 }
 
+// The dashboard's API test bench reaches the engine at /api/engine/<engine route>. Only engine
+// routes are forwarded, and never with dot segments or encoded dots, so the bench cannot reach
+// anything else that listens on the engine's port. Returns the engine target (path and query),
+// or an empty string when the request is not forwarded.
+inline constexpr std::string_view kEngineBenchPrefix = "/api/engine";
+
+inline std::string engine_bench_target(std::string_view target) {
+    if (target.substr(0, kEngineBenchPrefix.size()) != kEngineBenchPrefix) { return {}; }
+    const std::string_view rest = target.substr(kEngineBenchPrefix.size());
+    if (rest.empty() || rest.front() != '/') { return {}; }
+    const std::string_view path = rest.substr(0, rest.find('?'));
+    if (path.find('\\') != std::string_view::npos || lower_ascii(path).find("%2e") != std::string::npos) {
+        return {};
+    }
+    std::size_t at = 0;
+    while (at <= path.size()) {
+        const std::size_t next = path.find('/', at);
+        const std::string_view segment = path.substr(at, next == std::string_view::npos ? std::string_view::npos : next - at);
+        if (segment == "." || segment == "..") { return {}; }
+        if (next == std::string_view::npos) { break; }
+        at = next + 1;
+    }
+    if (!is_engine_api_path(path) && path != "/metrics") { return {}; }
+    return std::string(rest);
+}
+
 // Browsers send Origin on cross-origin requests and on same-origin writes. A request from
 // another site's page must not reach the engine with the key this proxy adds. A missing Origin is
 // a client on this computer that is not a browser page.
@@ -171,13 +204,6 @@ inline bool frontend_origin_allowed(std::string_view origin, int port) {
     return false;
 }
 
-inline std::string lower_ascii(std::string_view text) {
-    std::string out(text);
-    std::transform(out.begin(), out.end(), out.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return out;
-}
-
 // Hop-by-hop and framing headers belong to each connection. The proxy also drops the page's own
 // credentials and context (cookies, Origin, Referer) and compression negotiation.
 inline bool forward_request_header(std::string_view name) {
@@ -186,7 +212,7 @@ inline bool forward_request_header(std::string_view name) {
          {"host", "connection", "keep-alive", "proxy-connection", "proxy-authorization", "te",
           "trailer", "transfer-encoding", "upgrade", "content-length", "accept-encoding",
           "cookie", "origin", "referer", "remote_addr", "remote_port", "local_addr",
-          "local_port"}) {
+          "local_port", "x-ninfer-supervisor"}) {
         if (n == drop) { return false; }
     }
     return true;

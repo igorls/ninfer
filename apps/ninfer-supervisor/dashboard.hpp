@@ -7,24 +7,54 @@ R"HTML(<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark">
+<meta name="color-scheme" content="dark light">
 <title>NInfer · Your local engine</title>
+<script>(function(){var r=document.documentElement,m='auto';try{m=localStorage.getItem('ninfer:display')||'auto';}catch(e){}r.dataset.display=m;r.dataset.theme=m==='day'||m==='night'?m:(window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches?'day':'night');})();</script>
 <style>:root{
   --panel:#343a3f;--panel-hi:#3d444a;--panel-lo:#1d2124;--seam:#121517;--bezel:#262b2f;--bezel-top:#2e3439;--bezel-low:#1f2326;
   --key:#1e2225;--key-top:#4a5157;--key-hover:#262b2f;--legend:#e9edef;--legend-dim:#aab4ba;
   --glass:#040708;--glass-2:#0a0f12;--rule:rgba(233,240,244,.15);--rule-2:rgba(233,240,244,.075);
-  --white:#f1f4f5;--dim:#a8b2b8;--faint:#8592a0;--off:#76828a;
+  --ink:#f1f4f5;--dim:#a8b2b8;--faint:#8592a0;--off:#76828a;
   --green:#4fd98d;--cyan:#41cdea;--magenta:#ee78de;--amber:#f5b53d;--red:#ff6257;--ice:#98bfe0;
   --amber-glass:#1c1406;--red-glass:#200807;
+  --on-panel:#e9edef;--on-panel-dim:#aab4ba;--on-amber:#1b1305;--key-edge:#0f1113;--key-stop:#ffb2ab;
+  --red-on-glass:#ffb2ab;--bezel-glint:#4a5157;--well-edge:#1d262b;--well-ink:#c9d3d8;
+  --field-edge:#2a343a;--field-edge-hover:#3d4a52;--field-edge-off:#1f272c;--placeholder:#7d8a92;
+  --track:#1a2226;--track-edge:#2b353b;--green-share:#2f6b4c;--hover-glass:#0f171b;--selection:#41cdea55;
+  --scroll-thumb:#4b555c;--readout-bg:#0d1418ee;--backdrop:#0b0e10b0;--dialog-shadow:#000000aa;
+  --log-dim:#94a3ab;--log-info:#d7e0e4;--log-error:#ff9d94;
+  --pole-dark:#2a0a08;--sheen-a:rgba(255,255,255,.045);--sheen-b:rgba(255,255,255,.012);
+  --tape-body:rgba(128,138,146,.16);--tick:rgba(241,244,245,.55);--axis:rgba(241,244,245,.45);--envelope:rgba(241,244,245,.35);
+  --trace-fill:rgba(241,244,245,.07);--gen-fill:rgba(79,217,141,.12);--reserve-label:#ff8a80;
+  --du-shadow:0 0 0 1px var(--seam),0 1px 0 1px var(--bezel-glint),inset 0 0 0 1px #000,inset 0 2px 9px rgba(0,0,0,.9);
   --f-panel:Bahnschrift,'DIN Alternate','Barlow Semi Condensed','Arial Narrow',sans-serif;
   --f-text:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;
   --f-mono:'Cascadia Mono','Cascadia Code',Consolas,monospace;
   --r-glass:7px;--gap:8px;
   color-scheme:dark;
 }
+:root[data-theme=day]{
+  --panel:#cdd2d6;--panel-hi:#d6dade;--panel-lo:#b7bec3;--seam:#98a1a8;--bezel:#aeb6bc;--bezel-top:#bcc3c8;--bezel-low:#a1aab0;
+  --glass:#fbfbfa;--glass-2:#eef1f2;--rule:rgba(18,24,28,.17);--rule-2:rgba(18,24,28,.085);
+  --ink:#11171a;--dim:#44515a;--faint:#56636c;--off:#86919a;
+  --green:#0a7a43;--cyan:#006f99;--magenta:#9e2189;--amber:#8f5400;--red:#b3241c;--ice:#2b5fa3;
+  --amber-glass:#fff1d4;--red-glass:#fde6e3;
+  --on-panel:#141a1d;--on-panel-dim:#3d4950;--red-on-glass:#a01d16;--bezel-glint:#e4e8eb;
+  --well-edge:#d3d9dd;--well-ink:#1f282d;--field-edge:#b6c0c6;--field-edge-hover:#7f8c94;--field-edge-off:#d6dce0;--placeholder:#69757d;
+  --track:#e2e7ea;--track-edge:#c9d1d6;--green-share:#8fcfaf;--hover-glass:#e8eef1;--selection:#006f9940;
+  --scroll-thumb:#a7b1b7;--readout-bg:#ffffffee;--backdrop:#3a434980;--dialog-shadow:#2a333a55;
+  --log-dim:#56636c;--log-info:#1f282d;--log-error:#b3241c;
+  --pole-dark:#ffffff;--sheen-a:transparent;--sheen-b:transparent;
+  --tape-body:rgba(18,24,28,.055);--tick:rgba(17,23,26,.62);--axis:rgba(17,23,26,.5);--envelope:rgba(17,23,26,.3);
+  --trace-fill:rgba(17,23,26,.06);--gen-fill:rgba(10,122,67,.12);--reserve-label:#b3241c;
+  --du-shadow:0 0 0 1px var(--seam),0 1px 0 1px var(--bezel-glint),inset 0 0 0 1px rgba(40,48,54,.3),inset 0 2px 6px rgba(40,48,54,.16);
+  color-scheme:light;
+}
+/* Keys are hardware: the caps and their legends do not change with the display. */
+:root[data-theme=day] :is(.key,.fkey,.master){--ink:#f1f4f5;--green:#4fd98d;--cyan:#41cdea;--amber:#f5b53d;--red:#ff6257;--off:#76828a;--dim:#a8b2b8}
 *{box-sizing:border-box}
 html,body{height:100%}
-body{margin:0;display:flex;flex-direction:column;height:100dvh;background:var(--panel);color:var(--white);font:13px/1.5 var(--f-text);-webkit-font-smoothing:antialiased;overflow:hidden}
+body{margin:0;display:flex;flex-direction:column;height:100dvh;background:var(--panel);color:var(--ink);font:13px/1.5 var(--f-text);-webkit-font-smoothing:antialiased;overflow:hidden}
 button,input,select{font:inherit;color:inherit}
 button,a,input,select,summary{-webkit-tap-highlight-color:transparent}
 button,a{touch-action:manipulation}
@@ -32,10 +62,10 @@ a{color:var(--cyan)}
 button{cursor:pointer}
 h1,h2,h3,p,dl,dd,ul,ol{margin:0}
 ul,ol{padding:0;list-style:none}
-::selection{background:#41cdea55;color:#fff}
+::selection{background:var(--selection);color:var(--ink)}
 input,select,textarea{caret-color:var(--cyan);accent-color:var(--cyan)}
 :focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
-*{scrollbar-color:#4b555c transparent;scrollbar-width:thin}
+*{scrollbar-color:var(--scroll-thumb) transparent;scrollbar-width:thin}
 [hidden]{display:none!important}
 .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
 .skip-link{position:fixed;top:-60px;left:12px;z-index:200;padding:10px 16px;background:var(--glass);color:var(--cyan);font:600 13px var(--f-panel)}
@@ -51,34 +81,34 @@ b,strong{font-weight:600}
 
 /* Glareshield: function keys and the link annunciator. */
 .glareshield{display:flex;align-items:center;gap:14px;padding:8px 12px;background:var(--panel-lo);border-bottom:1px solid var(--seam);flex-shrink:0;min-width:0}
-.brand{display:flex;align-items:center;gap:7px;text-decoration:none;color:var(--white);flex-shrink:0}
-.brand-mark{font:700 24px/1 var(--f-panel);letter-spacing:-.04em;color:var(--white)}
+.brand{display:flex;align-items:center;gap:7px;text-decoration:none;color:var(--on-panel);flex-shrink:0}
+.brand-mark{font:700 24px/1 var(--f-panel);letter-spacing:-.04em;color:var(--on-panel)}
 .brand-mark span{color:var(--green)}
 .brand-name{font-weight:600;font-size:15px;letter-spacing:.02em}
 .fkeys{display:flex;gap:6px;min-width:0;flex:1}
-.fkey,.key{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:32px;padding:0 13px;background:var(--key);border:1px solid #0f1113;border-top-color:var(--key-top);border-radius:4px;color:var(--legend);font-size:12.5px;font-weight:600;text-decoration:none;white-space:nowrap;transition:background-color .15s ease-out,color .15s ease-out}
+.fkey,.key{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:32px;padding:0 13px;background:var(--key);border:1px solid var(--key-edge);border-top-color:var(--key-top);border-radius:4px;color:var(--legend);font-size:12.5px;font-weight:600;text-decoration:none;white-space:nowrap;transition:background-color .15s ease-out,color .15s ease-out}
 .fkey:hover,.key:hover:not(:disabled){background:var(--key-hover);color:#fff}
 .fkey:active,.key:active:not(:disabled){transform:translateY(1px);border-top-color:#353b40}
 .key:disabled{color:var(--off);cursor:not-allowed;border-top-color:#2f3438}
 .fkey-lamp{position:absolute;left:9px;right:9px;top:3px;height:2px;border-radius:1px;background:#3a4146}
 .fkey[aria-current=page]{color:#fff}
 .fkey[aria-current=page] .fkey-lamp{background:var(--green)}
-.fkey-count{min-width:18px;padding:0 5px;border-radius:3px;background:var(--amber);color:#1b1305;font-size:11px;line-height:17px;text-align:center}
+.fkey-count{min-width:18px;padding:0 5px;border-radius:3px;background:var(--amber);color:var(--on-amber);font-size:11px;line-height:17px;text-align:center}
 .fkey-dirty{padding:0 5px;border-radius:3px;border:1px solid var(--amber);color:var(--amber);font-size:10px;line-height:15px}
 .fkey-small{min-height:28px;padding:0 10px;font-size:11.5px}
-.fkey-small[aria-pressed=true]{color:var(--cyan);border-color:#0f1113;border-top-color:var(--cyan)}
+.fkey-small[aria-pressed=true]{color:var(--cyan);border-color:var(--key-edge);border-top-color:var(--cyan)}
 .glare-end{display:flex;align-items:center;gap:12px;margin-left:auto;flex-shrink:0}
-.master{display:grid;place-items:center;gap:0;min-width:70px;min-height:32px;padding:2px 8px;border:1px solid #0f1113;border-top-color:#3f3524;border-radius:4px;background:#241b0b;color:#6e5726;font:700 11px/1.15 var(--f-panel);font-stretch:87.5%;letter-spacing:.08em;text-transform:uppercase;transition:background-color .12s ease-out,color .12s ease-out}
-.master.lit{background:var(--amber);border-top-color:#ffd88a;color:#1b1305}
+.master{display:grid;place-items:center;gap:0;min-width:70px;min-height:32px;padding:2px 8px;border:1px solid var(--key-edge);border-top-color:#3f3524;border-radius:4px;background:#241b0b;color:#6e5726;font:700 11px/1.15 var(--f-panel);font-stretch:87.5%;letter-spacing:.08em;text-transform:uppercase;transition:background-color .12s ease-out,color .12s ease-out}
+.master.lit{background:var(--amber);border-top-color:#ffd88a;color:var(--on-amber)}
 .master.lit.warning{background:var(--red);border-top-color:#ffb2ab;color:#200807}
 .master:active{transform:translateY(1px)}
-.link-state{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--legend-dim)}
+.link-state{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--on-panel-dim)}
 .lamp{display:inline-block;width:9px;height:9px;border-radius:2px;background:var(--green);box-shadow:inset 0 0 0 1px #00000055}
 .lamp.offline{background:var(--red)}
 .lamp.paused{background:var(--amber)}
 
 /* Mode annunciator row: the band that never leaves the screen. */
-.fma{position:relative;display:grid;grid-template-columns:minmax(250px,auto) minmax(0,1.3fr) minmax(0,1.45fr) minmax(0,1.1fr);align-items:stretch;margin:var(--gap) var(--gap) 0;background:var(--glass);border-radius:10px;border:4px solid var(--bezel);border-top-color:var(--bezel-top);border-bottom-color:var(--bezel-low);background-clip:padding-box;box-shadow:0 0 0 1px var(--seam),0 1px 0 1px #4a5157,inset 0 0 0 1px #000,inset 0 2px 9px rgba(0,0,0,.9);flex-shrink:0}
+.fma{position:relative;display:grid;grid-template-columns:minmax(250px,auto) minmax(0,1.3fr) minmax(0,1.45fr) minmax(0,1.1fr);align-items:stretch;margin:var(--gap) var(--gap) 0;background:var(--glass);border-radius:10px;border:4px solid var(--bezel);border-top-color:var(--bezel-top);border-bottom-color:var(--bezel-low);background-clip:padding-box;box-shadow:var(--du-shadow);flex-shrink:0}
 .fma-col{display:flex;flex-direction:column;justify-content:center;gap:1px;min-width:0;padding:7px 12px;border-left:1px solid var(--rule)}
 .fma-col:first-child{border-left:0}
 .fma-label{font-size:11px;color:var(--faint)}
@@ -87,10 +117,10 @@ b,strong{font-weight:600}
 .fma-value{text-transform:uppercase;letter-spacing:.03em}
 .fma-armed{font:600 11.5px var(--f-panel);font-stretch:87.5%;color:var(--cyan);text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
 .fma-sub{font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.fma-sub b{font-weight:500;color:var(--white);font-variant-numeric:tabular-nums}
+.fma-sub b{font-weight:500;color:var(--ink);font-variant-numeric:tabular-nums}
 /* A mode that just changed is boxed in white for ten seconds, as flight-mode
    annunciators do, so a glance catches the change rather than the state. */
-.annunciated{outline-color:var(--white)}
+.annunciated{outline-color:var(--ink)}
 .fma-copy{display:flex;align-items:center;gap:7px;max-width:100%;min-width:0;padding:0;border:0;background:none;color:var(--cyan);font-size:14.5px;text-align:left}
 .fma-copy span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fma-copy:hover span{text-decoration:underline;text-underline-offset:3px}
@@ -100,7 +130,7 @@ b,strong{font-weight:600}
 .fma-engine .fma-mode{overflow:visible}
 .engine-keys{display:flex;align-items:center;gap:6px}
 .engine-keys .key{min-height:30px;padding:0 11px}
-.key-stop{color:#ffb2ab}
+.key-stop{color:var(--key-stop)}
 .key-go{color:var(--green)}
 
 .prompt{display:inline-flex;align-items:baseline;gap:1px;color:var(--cyan);font-weight:600;font-size:12px;text-decoration:none;white-space:nowrap}
@@ -109,34 +139,35 @@ b,strong{font-weight:600}
 /* Scratchpad: one line per message, cleared with CLR. */
 .scratchpad{display:flex;flex-direction:column;gap:4px;margin:0 var(--gap);flex-shrink:0}
 .scratchpad:has(.pad-line:not([hidden])){margin-top:6px}
-.pad-line{display:flex;align-items:center;gap:10px;padding:6px 12px;background:var(--glass);border-radius:5px;font-size:12.5px;color:var(--white);box-shadow:0 0 0 1px var(--seam)}
+.pad-line{display:flex;align-items:center;gap:10px;padding:6px 12px;background:var(--glass);border-radius:5px;font-size:12.5px;color:var(--ink);box-shadow:0 0 0 1px var(--seam)}
 .pad-line.amber{color:var(--amber);background:var(--amber-glass)}
-.pad-line.red,.pad-line.error{color:#ffb2ab;background:var(--red-glass)}
+.pad-line.red,.pad-line.error{color:var(--red-on-glass);background:var(--red-glass)}
 .pad-action span{flex:1;min-width:0;overflow-wrap:anywhere}
 .key-tiny{min-height:24px;padding:0 8px;font-size:11px}
 
-/* Live band: memory and rates stay in view on every page that is not Monitor. */
-.live-band{position:relative;display:flex;align-items:center;gap:6px 20px;flex-wrap:wrap;margin:6px var(--gap) 0;padding:6px 12px;background:var(--glass);border-radius:9px;border:4px solid var(--bezel);border-top-color:var(--bezel-top);border-bottom-color:var(--bezel-low);background-clip:padding-box;box-shadow:0 0 0 1px var(--seam),0 1px 0 1px #4a5157,inset 0 0 0 1px #000,inset 0 2px 9px rgba(0,0,0,.9);flex-shrink:0;font-variant-numeric:tabular-nums}
+)HTML"
+R"HTML(/* Live band: memory and rates stay in view on every page that is not Monitor. */
+.live-band{position:relative;display:flex;align-items:center;gap:6px 20px;flex-wrap:wrap;margin:6px var(--gap) 0;padding:6px 12px;background:var(--glass);border-radius:10px;border:4px solid var(--bezel);border-top-color:var(--bezel-top);border-bottom-color:var(--bezel-low);background-clip:padding-box;box-shadow:var(--du-shadow);flex-shrink:0;font-variant-numeric:tabular-nums}
 body.on-monitor .live-band{display:none}
 .band-item{display:flex;align-items:baseline;gap:7px;white-space:nowrap}
 .band-label{font-size:11px;color:var(--faint)}
 .band-item b{font:600 14px var(--f-panel);font-stretch:87.5%}
 .band-sub{font-size:12px;color:var(--green)}
-.band-bar{align-self:center;width:84px;height:6px;background:#1b2226;border-radius:1px;overflow:hidden}
-.band-bar span{display:block;height:100%;background:var(--white);width:0;transition:width .2s ease-out}
+.band-bar{align-self:center;width:84px;height:6px;background:var(--track);border-radius:1px;overflow:hidden}
+.band-bar span{display:block;height:100%;background:var(--ink);width:0;transition:width .2s ease-out}
 .band-return{margin-left:auto}
 
 /* Cover glass: anti-glare coating catches a little of the room. A specific
    effect on display glass only, never on panels or keys. */
-.display::after,.fma::after,.cdu::after,.live-band::after{content:'';position:absolute;inset:0;border-radius:6px;pointer-events:none;background:linear-gradient(162deg,rgba(255,255,255,.045) 0,rgba(255,255,255,.012) 28%,rgba(255,255,255,0) 46%)}
+.display::after,.fma::after,.cdu::after,.live-band::after{content:'';position:absolute;inset:0;border-radius:6px;pointer-events:none;background:linear-gradient(162deg,var(--sheen-a) 0,var(--sheen-b) 28%,transparent 46%)}
 
 /* Workspace */
 .workspace{flex:1;min-height:0;overflow:auto;padding:var(--gap);outline:none}
 .view-monitor{height:100%;min-height:440px}
 .monitor-grid{display:grid;height:100%;gap:var(--gap);grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(232px,1.3fr) minmax(206px,1fr) auto auto}
-.display{position:relative;display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--glass);border-radius:10px;border:4px solid var(--bezel);border-top-color:var(--bezel-top);border-bottom-color:var(--bezel-low);background-clip:padding-box;box-shadow:0 0 0 1px var(--seam),0 1px 0 1px #4a5157,inset 0 0 0 1px #000,inset 0 2px 9px rgba(0,0,0,.9);padding:7px 11px 9px}
+.display{position:relative;display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--glass);border-radius:10px;border:4px solid var(--bezel);border-top-color:var(--bezel-top);border-bottom-color:var(--bezel-low);background-clip:padding-box;box-shadow:var(--du-shadow);padding:7px 11px 9px}
 .display-head{display:flex;align-items:baseline;gap:12px;min-width:0;margin-bottom:6px}
-.display-head h2{font-size:12px;font-weight:600;color:var(--white);flex-shrink:0}
+.display-head h2{font-size:12px;font-weight:600;color:var(--ink);flex-shrink:0}
 .display-source{min-width:0;font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .display-range{margin-left:auto;font-size:11px;color:var(--faint);white-space:nowrap}
 .display-label{font-size:11px;color:var(--faint);white-space:nowrap;flex-shrink:0}
@@ -144,8 +175,7 @@ body.on-monitor .live-band{display:none}
 body.explain .note{display:block}
 body.explain .view-monitor{height:auto}
 body.explain .monitor-grid{height:auto;grid-template-rows:auto}
-)HTML"
-R"HTML(body.explain .display-memory .display-body,body.explain .display-rates .display-body{min-height:220px}
+body.explain .display-memory .display-body,body.explain .display-rates .display-body{min-height:220px}
 body.explain .display-traffic{max-height:none}
 .explain-only{display:none}
 body.explain .explain-only{display:block}
@@ -157,7 +187,7 @@ body.explain .explain-only{display:block}
 .trace canvas{position:absolute;inset:0;width:100%;height:100%;display:block;border-radius:3px}
 .trace canvas:focus-visible{outline-offset:-2px}
 .trace-empty{position:absolute;left:0;right:0;top:40%;text-align:center;font:600 12px var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);pointer-events:none}
-.cursor-readout{display:none;position:absolute;top:2px;left:50px;z-index:2;padding:4px 8px;background:#0d1418ee;border:1px solid var(--rule);border-radius:3px;font:500 12px/1.45 var(--f-panel);font-stretch:87.5%;color:var(--white);font-variant-numeric:tabular-nums;pointer-events:none;white-space:nowrap}
+.cursor-readout{display:none;position:absolute;top:2px;left:50px;z-index:2;padding:4px 8px;background:var(--readout-bg);border:1px solid var(--rule);border-radius:3px;font:500 12px/1.45 var(--f-panel);font-stretch:87.5%;color:var(--ink);font-variant-numeric:tabular-nums;pointer-events:none;white-space:nowrap}
 .cursor-readout .t{color:var(--faint)}
 
 .readouts{display:grid;align-content:start;gap:7px;font-variant-numeric:tabular-nums}
@@ -169,7 +199,10 @@ body.explain .explain-only{display:block}
 .ro-unit{font-size:12px;color:var(--dim)}
 .ro-sub{display:block!important;font-family:var(--f-text)!important;font-stretch:normal!important;font-size:12px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ro .prompt{font-size:11.5px}
-.readouts{border-left:1px solid var(--rule-2);padding-left:12px}
+.readouts{border-left:1px solid var(--rule-2);padding-left:12px;min-height:0;overflow:hidden}
+/* Secondary memory readouts are single label-value lines, so the column never outgrows a short display. */
+.memory-readouts .ro:not(.ro-major){display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.memory-readouts .ro:not(.ro-major) dd b{font-size:15px}
 .ro-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
 .swatch{display:inline-block;width:12px;height:3px;border-radius:1px}
 .swatch-gen{background:var(--green)}
@@ -178,10 +211,11 @@ body.explain .explain-only{display:block}
 .gpu-apps{display:flex;align-items:baseline;gap:12px;margin-top:7px;padding-top:6px;border-top:1px solid var(--rule-2);min-width:0}
 .gpu-app-list{display:flex;flex-wrap:wrap;gap:2px 16px;min-width:0;font-size:12px;color:var(--dim);font-variant-numeric:tabular-nums}
 .gpu-app{white-space:nowrap}
-.gpu-app b{font:600 12.5px var(--f-panel);font-stretch:87.5%;color:var(--white);margin-left:5px}
+.gpu-app b{font:600 12.5px var(--f-panel);font-stretch:87.5%;color:var(--ink);margin-left:5px}
 .gpu-app.own b{color:var(--green)}
 
 
+.monitor-side{display:contents}
 .display-traffic{max-height:31vh;min-height:118px}
 .col-app{width:38%}
 .traffic-scroll{min-height:0;overflow:auto;margin:0 -12px;padding:0 12px}
@@ -191,11 +225,11 @@ body.explain .explain-only{display:block}
 .traffic th:last-child,.traffic td:last-child{padding-right:0}
 .traffic td{padding:6px 10px 6px 0;border-bottom:1px solid var(--rule-2);vertical-align:top}
 .traffic tbody tr.client:last-of-type td,.traffic tr.evidence-row td{border-bottom-color:var(--rule-2)}
-.traffic .v{display:block;font:600 15px/1.25 var(--f-panel);font-stretch:87.5%;color:var(--white);white-space:nowrap}
+.traffic .v{display:block;font:600 15px/1.25 var(--f-panel);font-stretch:87.5%;color:var(--ink);white-space:nowrap}
 .traffic .s{display:block;font-size:12px;color:var(--faint);white-space:nowrap}
-.client-name{display:flex;align-items:center;gap:8px;font:600 14px/1.25 var(--f-panel);font-stretch:87.5%;color:var(--white);overflow-wrap:anywhere}
+.client-name{display:flex;align-items:center;gap:8px;font:600 14px/1.25 var(--f-panel);font-stretch:87.5%;color:var(--ink);overflow-wrap:anywhere}
 .client-counts{font-size:12px;color:var(--faint);font-variant-numeric:tabular-nums}
-.client-counts b{font:600 12.5px var(--f-panel);font-stretch:87.5%;color:var(--white)}
+.client-counts b{font:600 12.5px var(--f-panel);font-stretch:87.5%;color:var(--ink)}
 .client-tag{padding:0 5px;border:1px solid var(--rule);border-radius:3px;font-size:11px;font-weight:500;color:var(--dim);white-space:nowrap}
 .client-evidence{margin-top:2px;padding:0;border:0;background:none;color:var(--cyan);font:600 11.5px var(--f-panel);font-stretch:87.5%;text-transform:uppercase;letter-spacing:.06em}
 .client-evidence:hover{text-decoration:underline;text-underline-offset:3px}
@@ -212,36 +246,36 @@ tr.caution td,tr.caution-line td{background:var(--amber-glass)}
 .alert-sev{flex-shrink:0;width:66px;font-size:11px;font-weight:600}
 .alert-title{flex-shrink:0;font-weight:600}
 .alert-text{min-width:0;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.alert-quiet{color:var(--dim)}
+.alert-list li.alert-quiet,.display-alerts .alert-list li.alert-quiet{display:block;color:var(--dim)}
 .alert-quiet b{color:var(--green);font:600 12.5px var(--f-panel);font-stretch:87.5%;text-transform:uppercase;letter-spacing:.05em}
 
 /* Control display unit: every non-live page. */
 .view-cdu{display:flex;justify-content:center;min-height:100%;padding:0 34px}
 .view-cdu>.cdu{min-height:100%}
-.cdu{position:relative;width:100%;max-width:980px;background:var(--glass);border-radius:10px;border:4px solid var(--bezel);border-top-color:var(--bezel-top);border-bottom-color:var(--bezel-low);background-clip:padding-box;box-shadow:0 0 0 1px var(--seam),0 1px 0 1px #4a5157,inset 0 0 0 1px #000,inset 0 2px 9px rgba(0,0,0,.9);padding:12px 18px 18px}
+.cdu{position:relative;width:100%;max-width:980px;background:var(--glass);border-radius:10px;border:4px solid var(--bezel);border-top-color:var(--bezel-top);border-bottom-color:var(--bezel-low);background-clip:padding-box;box-shadow:var(--du-shadow);padding:12px 18px 18px}
 .cdu-wide{max-width:1240px}
 .cdu-title{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);grid-template-areas:'left title right';align-items:baseline;gap:12px;padding-bottom:8px;margin-bottom:10px;border-bottom:1px solid var(--rule)}
 .cdu-title h1{grid-area:title;text-align:center}
 .cdu-title h1{font-size:17px;font-weight:600;line-height:1.2}
-.cdu-page{grid-area:right;justify-self:end;font-size:12px;color:var(--faint)}
+.cdu-page{grid-area:right;justify-self:end;font-size:12px;color:var(--faint);white-space:nowrap}
 .cdu-file{font-family:var(--f-mono);font-stretch:normal;font-size:11.5px;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cdu-tmpy{grid-area:left;justify-self:start;padding:1px 7px;border:1px solid var(--amber);border-radius:3px;color:var(--amber);font-size:11.5px;font-weight:600}
 .cdu-help{font-size:12.5px;color:var(--dim);max-width:88ch;margin-bottom:12px}
 .cdu-small{font-size:12px;color:var(--faint);max-width:90ch}
-.cdu-data{font-size:13px;color:var(--white);max-width:90ch}
+.cdu-data{font-size:13px;color:var(--ink);max-width:90ch}
 .cdu-label{display:block;font-size:11px;font-weight:600;color:var(--faint);margin-bottom:3px}
 .cdu-lines{display:grid;gap:0}
 .cdu-line{display:grid;gap:4px;padding:10px 0;border-bottom:1px solid var(--rule-2)}
 .cdu-line:first-child{padding-top:2px}
 .cdu-field-row{display:flex;gap:8px;align-items:center;max-width:620px}
-.cdu-input,.cfg-input,.cfg-select{min-height:34px;min-width:0;padding:6px 10px;background:var(--glass-2);border:1px solid #2a343a;border-radius:4px;color:var(--cyan);font:500 14px var(--f-panel);font-stretch:87.5%;font-variant-numeric:tabular-nums}
+.cdu-input,.cfg-input,.cfg-select{min-height:34px;min-width:0;padding:6px 10px;background:var(--glass-2);border:1px solid var(--field-edge);border-radius:4px;color:var(--cyan);font:500 14px var(--f-panel);font-stretch:87.5%;font-variant-numeric:tabular-nums}
 .cdu-input{flex:1}
 .cdu-input-mono{font-family:var(--f-mono);font-stretch:normal;font-size:13px}
 .cdu-input-num{flex:0 0 96px;text-align:right}
 .cdu-unit{font-size:13px;color:var(--dim)}
-input[readonly]{color:var(--white)}
-.cdu-input:hover,.cfg-input:hover:not([readonly]),.cfg-select:hover{border-color:#3d4a52}
-.cdu-input::placeholder,.cfg-input::placeholder{color:#7d8a92}
+input[readonly]{color:var(--ink)}
+.cdu-input:hover,.cfg-input:hover:not([readonly]),.cfg-select:hover{border-color:var(--field-edge-hover)}
+.cdu-input::placeholder,.cfg-input::placeholder{color:var(--placeholder)}
 .frontend-list{display:grid;gap:4px;margin-top:2px}
 .frontend-list li{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;font-size:13px}
 .frontend-list code{font:12px var(--f-mono);color:var(--faint)}
@@ -254,12 +288,13 @@ input[readonly]{color:var(--white)}
 .cdu-health .cdu-data{font:600 14px var(--f-panel);font-stretch:87.5%;text-transform:uppercase;letter-spacing:.05em}
 .cdu-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:12px}
 .cdu-tab{display:inline-flex;align-items:center;gap:7px;min-height:30px;padding:0 12px;border:1px solid var(--rule);border-radius:4px;color:var(--cyan);font-size:12px;font-weight:600;text-decoration:none}
-.cdu-tab:hover{background:#0f171b}
-.cdu-tab[aria-current=page]{color:var(--white);border-color:var(--white)}
+.cdu-tab:hover{background:var(--hover-glass)}
+.cdu-tab[aria-current=page]{color:var(--ink);border-color:var(--ink)}
 .cdu-tab-count{color:var(--faint);font-weight:500}
-.cdu-subhead{display:flex;align-items:center;gap:10px;margin:16px 0 4px;font-size:12px;font-weight:600;color:var(--white)}
+)HTML"
+R"HTML(.cdu-subhead{display:flex;align-items:center;gap:10px;margin:16px 0 4px;font-size:12px;font-weight:600;color:var(--ink)}
 .cdu-tag{padding:0 6px;border:1px solid var(--rule);border-radius:3px;font-size:11px;color:var(--dim);font-weight:500}
-.cdu-pre{margin-top:6px;padding:10px 12px;background:var(--glass-2);border:1px solid #1d262b;border-radius:4px;font:11.5px/1.7 var(--f-mono);color:#c9d3d8;white-space:pre-wrap;overflow-wrap:anywhere;max-height:40vh;overflow:auto}
+.cdu-pre{margin-top:6px;padding:10px 12px;background:var(--glass-2);border:1px solid var(--well-edge);border-radius:4px;font:11.5px/1.7 var(--f-mono);color:var(--well-ink);white-space:pre-wrap;overflow-wrap:anywhere;max-height:40vh;overflow:auto}
 .cdu-facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:0 28px}
 .cdu-facts div{display:grid;grid-template-columns:minmax(150px,.9fr) minmax(0,1.1fr);gap:14px;padding:7px 0;border-bottom:1px solid var(--rule-2);font-size:12.5px}
 .cdu-facts dt{font-size:11px;color:var(--faint);padding-top:1px}
@@ -270,17 +305,17 @@ input[readonly]{color:var(--white)}
 .launch-plan dt{font:600 11px var(--f-panel);font-stretch:87.5%;color:var(--faint);text-transform:uppercase;letter-spacing:.06em}
 .launch-plan dd{font:500 14px var(--f-panel);font-stretch:87.5%;font-variant-numeric:tabular-nums}
 .plan-compromise{grid-column:1/-1;padding:6px 10px;background:var(--amber-glass);color:var(--amber);border-radius:4px;font-size:12.5px}
-.launch-plan code{display:block;margin-top:6px;padding:10px 12px;background:var(--glass-2);border:1px solid #1d262b;border-radius:4px;font:11.5px/1.7 var(--f-mono);color:#c9d3d8;white-space:pre-wrap;word-break:break-all}
+.launch-plan code{display:block;margin-top:6px;padding:10px 12px;background:var(--glass-2);border:1px solid var(--well-edge);border-radius:4px;font:11.5px/1.7 var(--f-mono);color:var(--well-ink);white-space:pre-wrap;word-break:break-all}
 
 .findings{display:grid}
 @media (min-width:1280px){.findings{display:block;columns:2;column-gap:36px}.finding{break-inside:avoid}.finding:first-child{border-top:0}}
 .finding{display:grid;grid-template-columns:96px minmax(0,1fr);gap:2px 14px;padding:9px 0;border-bottom:1px solid var(--rule-2)}
 .finding:first-child{border-top:1px solid var(--rule-2)}
 .finding-sev{grid-row:1/span 4;font-size:11.5px;font-weight:600;padding-top:1px}
-.finding-sev.critical{color:var(--red)}.finding-sev.warning{color:var(--amber)}.finding-sev.notice{color:var(--white)}.finding-sev.info{color:var(--dim)}
+.finding-sev.critical{color:var(--red)}.finding-sev.warning{color:var(--amber)}.finding-sev.notice{color:var(--ink)}.finding-sev.info{color:var(--dim)}
 .finding-title{font-weight:600;font-size:13.5px}
 .finding-body{color:var(--dim);font-size:12.5px;max-width:95ch;overflow-wrap:anywhere}
-.finding-action{color:var(--white);font-size:12.5px;max-width:95ch}
+.finding-action{color:var(--ink);font-size:12.5px;max-width:95ch}
 .finding details summary{width:fit-content;color:var(--cyan);font:600 11.5px var(--f-panel);font-stretch:87.5%;text-transform:uppercase;letter-spacing:.06em;cursor:pointer;list-style:none;padding:2px 0}
 .finding details summary::-webkit-details-marker{display:none}
 .finding details summary::after{content:'>';margin-left:2px}
@@ -289,8 +324,7 @@ input[readonly]{color:var(--white)}
 .finding .cdu-pre{max-height:32vh}
 .finding.compact{grid-template-columns:96px minmax(0,auto) minmax(0,1fr) auto;align-items:baseline;padding:6px 0}
 .finding.compact .finding-sev{grid-row:auto}
-)HTML"
-R"HTML(.finding.compact .finding-title{font-size:13px;white-space:nowrap}
+.finding.compact .finding-title{font-size:13px;white-space:nowrap}
 .finding.compact .finding-body{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .finding.compact.open .finding-body{white-space:normal;grid-column:2/-1}
 .finding.compact.open details{grid-column:2/-1}
@@ -304,13 +338,61 @@ R"HTML(.finding.compact .finding-title{font-size:13px;white-space:nowrap}
 .log-toolbar .cdu-input{flex:1 1 160px;min-height:32px;font-size:13px}
 .key-toggle{min-height:30px;padding:0 11px;font-size:12px}
 .key-toggle.active{color:var(--cyan);border-top-color:var(--cyan)}
-.log-pane{flex:1;min-height:240px;overflow:auto;padding:8px 10px;background:var(--glass-2);border:1px solid #1d262b;border-radius:4px;font:11.5px/1.75 var(--f-mono);color:#c9d3d8;white-space:pre-wrap;overflow-wrap:anywhere}
-.log-line-dim{color:#94a3ab}.log-line-info{color:#d7e0e4}.log-line-req{color:var(--green)}.log-line-warn{color:var(--amber)}.log-line-error{color:#ff9d94}
+.log-pane{flex:1;min-height:240px;overflow:auto;padding:8px 10px;background:var(--glass-2);border:1px solid var(--well-edge);border-radius:4px;font:11.5px/1.75 var(--f-mono);color:var(--well-ink);white-space:pre-wrap;overflow-wrap:anywhere}
+.log-line-dim{color:var(--log-dim)}.log-line-info{color:var(--log-info)}.log-line-req{color:var(--green)}.log-line-warn{color:var(--amber)}.log-line-error{color:var(--log-error)}
 
 .mtp-bars{display:flex;gap:14px;max-width:420px;margin-top:8px}
 .mtp-col{flex:1;text-align:center;font-size:11px;color:var(--faint)}
-.mtp-track{position:relative;height:72px;margin-bottom:4px;background:#11191d;border-bottom:1px solid var(--rule)}
+.mtp-track{position:relative;height:72px;margin-bottom:4px;background:var(--track);border-bottom:1px solid var(--rule)}
 .mtp-bar{position:absolute;inset:0;background:var(--green);transform:scaleY(0);transform-origin:bottom;transition:transform .2s ease-out}
+
+/* API test bench: endpoint index beside the request and its answer; one screen. */
+.view-bench{height:100%}
+.view-bench .cdu{display:flex;flex-direction:column;height:100%;min-height:520px}
+.bench-panes{flex:1;min-height:0;display:grid;grid-template-columns:minmax(220px,280px) minmax(0,1fr);gap:16px}
+.bench-index{display:flex;flex-direction:column;gap:6px;min-height:0;padding-right:14px;border-right:1px solid var(--rule-2)}
+.bench-index .cdu-input{flex:none;min-height:30px;font-size:13px}
+.bench-list{flex:1;min-height:0;overflow:auto;margin:0 -6px;padding:0 6px}
+.bench-group{margin:8px 0 2px;font:600 11px var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
+.bench-ep{display:grid;grid-template-columns:46px minmax(0,1fr);gap:0 8px;width:100%;padding:4px 6px;border:0;border-radius:3px;background:none;color:var(--ink);text-align:left;cursor:pointer}
+.bench-ep:hover{background:var(--hover-glass)}
+.bench-ep[aria-current=true]{background:var(--hover-glass);box-shadow:inset 0 0 0 1px var(--cyan)}
+.bench-m{grid-row:1/span 2;font:600 11px var(--f-panel);font-stretch:87.5%;letter-spacing:.05em;color:var(--dim);padding-top:2px}
+.bench-p{font:12px var(--f-mono);color:var(--cyan);overflow-wrap:anywhere}
+.bench-t{font-size:12px;color:var(--faint)}
+.bench-history-head{display:flex;align-items:baseline;justify-content:space-between;margin-top:6px;padding-top:6px;border-top:1px solid var(--rule-2)}
+.bench-history{max-height:24vh;overflow:auto;display:grid;gap:1px}
+.bench-hist{display:grid;grid-template-columns:34px minmax(0,1fr) auto;gap:6px;width:100%;padding:3px 4px;border:0;border-radius:3px;background:none;color:var(--ink);font:12px var(--f-mono);text-align:left;cursor:pointer}
+.bench-hist:hover{background:var(--hover-glass)}
+.bench-hist span:nth-child(2){overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bench-work{display:flex;flex-direction:column;gap:8px;min-width:0;min-height:0}
+.bench-request{display:flex;flex-direction:column;gap:6px}
+.bench-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.bench-method{min-width:62px;padding:6px 8px;border:1px solid var(--rule);border-radius:4px;text-align:center;font:600 13px var(--f-panel);font-stretch:87.5%;letter-spacing:.05em}
+.bench-line #bench-path{flex:1 1 280px}
+.bench-options{gap:6px 10px}
+.bench-examples{display:flex;flex-wrap:wrap;gap:4px;margin-right:auto}
+button.cdu-tab{background:none;cursor:pointer;font-family:var(--f-panel);font-stretch:87.5%;text-transform:uppercase;letter-spacing:.06em}
+button.cdu-tab[aria-pressed=true]{color:var(--ink);border-color:var(--ink)}
+.bench-stream{min-height:28px;font-size:13px}
+.bench-body{width:100%;height:clamp(96px,22vh,280px);resize:vertical;padding:8px 10px;background:var(--glass-2);border:1px solid var(--field-edge);border-radius:4px;color:var(--ink);font:12.5px/1.55 var(--f-mono);tab-size:2;white-space:pre}
+.bench-body:focus-visible{outline-offset:0}
+.bench-body.invalid{border-color:var(--red)}
+.bench-body-state{font-size:12px;color:var(--faint)}
+.bench-response{flex:1;min-height:0;display:flex;flex-direction:column;padding-top:8px;border-top:1px solid var(--rule)}
+.bench-status{display:flex;align-items:baseline;gap:6px 14px;flex-wrap:wrap;margin-bottom:6px}
+.bench-code{font:600 16px var(--f-panel);font-stretch:87.5%;letter-spacing:.04em;text-transform:uppercase}
+.bench-timing{min-width:0;font-size:12px;color:var(--dim);font-variant-numeric:tabular-nums}
+.bench-tabs{display:flex;gap:4px;margin-left:auto}
+.bench-out{flex:1;min-height:110px;overflow:auto;padding:8px 10px;background:var(--glass-2);border:1px solid var(--well-edge);border-radius:4px;color:var(--well-ink);font:12px/1.65 var(--f-mono);white-space:pre-wrap;overflow-wrap:anywhere}
+.bench-out .j-k{color:var(--faint)}.bench-out .j-s{color:var(--ink)}.bench-out .j-n{color:var(--ink);font-weight:600}.bench-out .j-l{color:var(--dim)}
+.bench-label{display:block;margin-bottom:2px;font:600 11px var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
+.bench-reasoning{color:var(--dim)}
+.bench-empty{color:var(--faint);font-family:var(--f-text)}
+.bench-ev{display:grid;grid-template-columns:62px minmax(64px,120px) minmax(0,1fr);gap:8px;padding:1px 0;border-bottom:1px solid var(--rule-2)}
+.bench-ev>span:last-child{overflow-wrap:break-word;word-break:normal}
+.bench-ev-t{color:var(--faint);text-align:right}
+.bench-ev-n{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* Settings: an index of line-select prompts, then one page per category. */
 .lsk-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 28px}
@@ -332,23 +414,24 @@ R"HTML(.finding.compact .finding-title{font-size:13px;white-space:nowrap}
 .cfg-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 28px}
 .cfg-field{min-width:0}
 .cfg-field-top{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:4px}
-.cfg-label{font-size:11.5px;font-weight:600;color:var(--white);text-transform:uppercase;letter-spacing:.05em}
+.cfg-label{font-size:11.5px;font-weight:600;color:var(--ink);text-transform:uppercase;letter-spacing:.05em}
 .cfg-flag{font:11px var(--f-mono);color:var(--faint);overflow-wrap:anywhere;max-width:50%;text-align:right}
 .cfg-input,.cfg-select{width:100%}
 .cfg-select{color:var(--cyan)}
-.cfg-select option{background:#0a0f12;color:var(--white)}
+.cfg-select option{background:var(--glass-2);color:var(--ink)}
 .cfg-input[readonly]{color:var(--dim);background:transparent;border-style:dashed}
 .cfg-input.dirty,.cfg-select.dirty{border-color:var(--amber);color:var(--amber);background:var(--amber-glass)}
 .cfg-input:invalid{border-color:var(--red)}
-.cfg-input:disabled,.cfg-select:disabled{color:var(--off);border-color:#1f272c;cursor:not-allowed}
+.cfg-input:disabled,.cfg-select:disabled{color:var(--off);border-color:var(--field-edge-off);cursor:not-allowed}
 .cfg-help{font-size:12px;color:var(--faint);line-height:1.55;margin-top:4px}
 .cfg-check{display:flex;align-items:center;gap:9px;min-height:34px;font:500 14px var(--f-panel);font-stretch:87.5%;color:var(--cyan)}
 .cfg-check input{width:16px;height:16px}
 .cfg-check:has(input.dirty){color:var(--amber)}
 .cfg-note{grid-column:1/-1;padding:8px 0 0;border-top:1px solid var(--rule-2);font-size:12px;color:var(--faint);line-height:1.55;max-width:95ch}
 .cfg-token-controls{margin-top:6px}
-.cfg-token-summary{display:flex;justify-content:space-between;gap:12px;font-size:12px;color:var(--faint)}
-.cfg-token-summary output{font:600 14px var(--f-panel);font-stretch:87.5%;color:var(--white);font-variant-numeric:tabular-nums}
+)HTML"
+R"HTML(.cfg-token-summary{display:flex;justify-content:space-between;gap:12px;font-size:12px;color:var(--faint)}
+.cfg-token-summary output{font:600 14px var(--f-panel);font-stretch:87.5%;color:var(--ink);font-variant-numeric:tabular-nums}
 .cfg-token-slider,.reserve-slider{display:block;width:100%;height:30px;margin:0;accent-color:var(--magenta);cursor:pointer}
 .cfg-token-slider:disabled{cursor:not-allowed;opacity:.45}
 .cfg-token-scale{position:relative;height:16px;font:11px var(--f-panel);font-stretch:87.5%;color:var(--faint);font-variant-numeric:tabular-nums}
@@ -358,16 +441,16 @@ R"HTML(.finding.compact .finding-title{font-size:13px;white-space:nowrap}
 .cfg-capacity-preview{grid-column:1/-1}
 .cfg-capacity-preview p{max-width:95ch;font-size:12.5px;color:var(--dim)}
 .cfg-capacity-slots{display:flex;gap:4px;height:12px;margin:0 0 6px;max-width:520px}
-.cfg-capacity-slots span{flex:1;min-width:0;border-radius:1px;background:#1a2226;box-shadow:inset 0 0 0 1px #2b353b}
+.cfg-capacity-slots span{flex:1;min-width:0;border-radius:1px;background:var(--track);box-shadow:inset 0 0 0 1px var(--track-edge)}
 .cfg-capacity-slots span.fit{background:var(--green);box-shadow:none}
-.cfg-capacity-slots span.share{background:#2f6b4c;box-shadow:none}
+.cfg-capacity-slots span.share{background:var(--green-share);box-shadow:none}
 .config-advanced{grid-column:1/-1;border-top:1px solid var(--rule-2);padding-top:8px}
 .config-advanced>summary{width:fit-content;color:var(--cyan);font:600 12px var(--f-panel);font-stretch:87.5%;text-transform:uppercase;letter-spacing:.06em;cursor:pointer}
 .config-advanced .cfg-grid{margin-top:12px}
 .fe-editor{grid-column:1/-1;display:grid;gap:8px}
 .fe-row{display:grid;grid-template-columns:minmax(120px,1fr) minmax(200px,2fr) 100px auto;gap:8px 10px;align-items:end;padding:10px 0;border-bottom:1px solid var(--rule-2)}
 .fe-row label{display:grid;gap:3px;font:600 11px var(--f-panel);font-stretch:87.5%;color:var(--faint);text-transform:uppercase;letter-spacing:.05em}
-.fe-row input{min-height:34px;padding:6px 10px;background:var(--glass-2);border:1px solid #2a343a;border-radius:4px;color:var(--cyan);font:500 14px var(--f-panel);font-stretch:87.5%;min-width:0;text-transform:none;letter-spacing:0}
+.fe-row input{min-height:34px;padding:6px 10px;background:var(--glass-2);border:1px solid var(--field-edge);border-radius:4px;color:var(--cyan);font:500 14px var(--f-panel);font-stretch:87.5%;min-width:0;text-transform:none;letter-spacing:0}
 .fe-meta{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12px;color:var(--faint)}
 .fe-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;margin-top:4px}
 .empty-state{font-size:12.5px;color:var(--faint)}
@@ -378,11 +461,11 @@ R"HTML(.finding.compact .finding-title{font-size:13px;white-space:nowrap}
 .cfg-status.dirty{color:var(--amber)}
 .cfg-status.saved{color:var(--green)}
 .key-insert{color:var(--cyan)}
-.cfg-errors{margin-top:12px;padding:10px 12px;background:var(--red-glass);color:#ffb2ab;border-radius:4px;font-size:12.5px}
+.cfg-errors{margin-top:12px;padding:10px 12px;background:var(--red-glass);color:var(--red-on-glass);border-radius:4px;font-size:12.5px}
 .cfg-errors ul{margin:4px 0 0;padding-left:18px;list-style:disc}
 /* A staged revision turns the page amber, the way a temporary flight plan does,
    until it is inserted or erased. */
-.cdu.tmpy{box-shadow:0 0 0 1px var(--amber),0 1px 0 1px #3a4045}
+.cdu.tmpy{box-shadow:0 0 0 1px var(--amber),0 1px 0 1px var(--bezel-glint)}
 .cdu.tmpy .cdu-title h1{color:var(--amber)}
 
 .presets{border:0;margin:0;padding:0;min-width:0}
@@ -400,14 +483,15 @@ R"HTML(.finding.compact .finding-title{font-size:13px;white-space:nowrap}
 .reserve-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px 32px;align-items:start}
 .reserve-entry .cdu-field-row{max-width:220px;margin-bottom:6px}
 .reserve-scale{display:flex;justify-content:space-between;font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.05em}
-.reserve-preview{display:flex;height:12px;margin-top:10px;overflow:hidden;border-radius:1px;background:#1a2226}
-.reserve-preview span{background:var(--white);transition:width .15s ease-out}
-.reserve-preview span+span{background:repeating-linear-gradient(-45deg,var(--red) 0 5px,#2a0a08 5px 10px)}
+.reserve-preview{display:flex;height:12px;margin-top:10px;overflow:hidden;border-radius:1px;background:var(--track)}
+.reserve-preview span{background:var(--ink);transition:width .15s ease-out}
+.reserve-preview span+span{background:repeating-linear-gradient(-45deg,var(--red) 0 5px,var(--pole-dark) 5px 10px)}
 .reserve-facts{display:grid;gap:8px}
 
-dialog{border:0;padding:16px 18px;max-width:440px;width:calc(100% - 32px);background:var(--glass);color:var(--white);border-radius:var(--r-glass);box-shadow:0 0 0 1px var(--rule),0 18px 50px #000000aa}
-dialog::backdrop{background:#0b0e10b0}
+dialog{border:0;padding:16px 18px;max-width:440px;width:calc(100% - 32px);background:var(--glass);color:var(--ink);border-radius:var(--r-glass);box-shadow:0 0 0 1px var(--rule),0 18px 50px var(--dialog-shadow)}
+dialog::backdrop{background:var(--backdrop)}
 dialog h2{font:600 16px var(--f-panel);font-stretch:87.5%;text-transform:uppercase;letter-spacing:.05em;padding-bottom:8px;border-bottom:1px solid var(--rule)}
+.dialog-path{font:600 14px var(--f-mono);text-transform:none;letter-spacing:0}
 dialog p{margin:12px 0 16px;font-size:13px;color:var(--dim)}
 .dialog-keys{display:flex;justify-content:space-between;gap:8px}
 
@@ -420,13 +504,22 @@ dialog p{margin:12px 0 16px;font-size:13px;color:var(--dim)}
 .ice{color:var(--ice)}
 .dim{color:var(--dim)}
 @media (min-width:1180px){
-  .monitor-grid{grid-template-columns:minmax(0,1.55fr) minmax(380px,1fr);grid-template-rows:auto minmax(0,1fr) minmax(206px,1fr);grid-template-areas:"mem traffic" "mem alerts" "rates alerts"}
-  .display-memory{min-height:232px}
-  .display-alerts{overflow:auto}
+  .monitor-grid{grid-template-columns:minmax(0,1.55fr) minmax(380px,1fr);grid-template-rows:minmax(232px,1fr) minmax(206px,1fr);grid-template-areas:"mem side" "rates side"}
+  .monitor-side{grid-area:side;display:flex;flex-direction:column;gap:var(--gap);min-height:0}
+  .monitor-side .display-traffic{flex:0 1 auto;min-height:118px;max-height:none}
+  .monitor-side .display-alerts{flex:1 0 auto}
   .display-alerts .alert-list li{display:grid;grid-template-columns:66px minmax(0,1fr);gap:1px 10px;padding:4px 0}
   .display-alerts .alert-title,.display-alerts .alert-text{grid-column:2;white-space:normal}
-  .display-memory{grid-area:mem}.display-rates{grid-area:rates}.display-traffic{grid-area:traffic;max-height:46vh}.display-alerts{grid-area:alerts}
+  .display-memory{grid-area:mem}.display-rates{grid-area:rates}
   .display-traffic .traffic-scroll{flex:1}
+}
+@media (max-width:880px){
+  .view-bench,.view-bench .cdu{height:auto}
+  .bench-panes{grid-template-columns:minmax(0,1fr)}
+  .bench-index{padding-right:0;border-right:0;padding-bottom:8px;border-bottom:1px solid var(--rule-2)}
+  .bench-list{max-height:30vh}
+  .bench-out{min-height:260px}
+  .bench-ev{grid-template-columns:54px 84px minmax(0,1fr)}
 }
 @media (max-width:820px){
   .view-cdu{padding:0}
@@ -442,6 +535,8 @@ dialog p{margin:12px 0 16px;font-size:13px;color:var(--dim)}
   .fma-col:nth-child(odd):not(.fma-engine){border-left:1px solid var(--rule)}
   .display-body{grid-template-columns:52px minmax(0,1fr);grid-template-rows:auto minmax(100px,1fr)}
   .readouts{grid-column:1/-1;grid-row:1;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-left:0;padding-left:0}
+  .memory-readouts .ro:not(.ro-major){display:block}
+  .memory-readouts .ro:not(.ro-major) dd b{font-size:17px}
   .ro-pair{display:contents}
   .monitor-grid{grid-template-rows:minmax(250px,1.3fr) minmax(230px,1fr) auto auto}
   .display-traffic{max-height:none}
@@ -451,8 +546,7 @@ dialog p{margin:12px 0 16px;font-size:13px;color:var(--dim)}
   .fe-row{grid-template-columns:1fr}
 }
 @media (max-width:560px){
-)HTML"
-R"HTML(  .rate-readouts,.memory-readouts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .rate-readouts,.memory-readouts{grid-template-columns:repeat(2,minmax(0,1fr))}
   .ro-major dd b{font-size:22px}
   .traffic thead{display:none}
   .traffic,.traffic tbody,.traffic tr,.traffic td{display:block;width:100%}
@@ -473,6 +567,9 @@ R"HTML(  .rate-readouts,.memory-readouts{grid-template-columns:repeat(2,minmax(0
   .finding-sev{grid-row:auto}
   .finding.compact .finding-body{white-space:normal}
   .cdu{padding:10px 12px 14px}
+  .cdu-title{grid-template-columns:auto minmax(0,1fr);grid-template-areas:'title right' 'left left'}
+  .cdu-title h1{text-align:left}
+  .cdu-page{overflow:hidden;text-overflow:ellipsis;max-width:100%}
   .cfg-actions{margin:12px -12px -14px;padding:10px 12px}
   .cdu-facts div{grid-template-columns:1fr;gap:2px}
 }
@@ -487,8 +584,26 @@ R"HTML(  .rate-readouts,.memory-readouts{grid-template-columns:repeat(2,minmax(0
   .alert-list li{font-size:12px}
 }
 @media (max-height:780px) and (min-width:1180px){
-  .monitor-grid{grid-template-rows:auto minmax(0,1fr) minmax(176px,1fr)}
-  .display-memory{min-height:196px}
+  .monitor-grid{grid-template-rows:minmax(196px,1fr) minmax(176px,1fr)}
+}
+@media (min-width:561px){
+  .display-traffic .traffic{table-layout:fixed}
+  .display-traffic .client-name span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+  .display-traffic .traffic .s{white-space:normal}
+}
+@media (min-width:821px){
+  body:not(.explain) .display-memory .display-body,body:not(.explain) .display-rates .display-body{container:dbody/size}
+}
+@container dbody (max-height:190px){
+  .readouts{gap:3px}
+  .ro dt{font-size:11px}
+  .ro-major dd b{font-size:20px}
+  .ro-sub{font-size:11px!important}
+  .ro-pair dd b{font-size:14px}
+}
+@container dbody (max-height:150px){
+  .ro-major dd b{font-size:17px}
+  .ro-sub{line-height:1.2}
 }
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}}
 </style>
@@ -498,19 +613,23 @@ R"HTML(  .rate-readouts,.memory-readouts{grid-template-columns:repeat(2,minmax(0
 <svg class="icon-defs" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
 <symbol id="i-copy" viewBox="0 0 16 16"><rect x="5.5" y="5.5" width="8" height="8" rx="1"/><path d="M10.5 5.5v-3h-8v8h3"/></symbol>
 <symbol id="i-out" viewBox="0 0 16 16"><path d="M9 2.5h4.5V7M13.5 2.5 7.5 8.5M11.5 9.5v4h-9v-9h4"/></symbol>
+<symbol id="i-display" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5v11a5.5 5.5 0 0 0 0-11z" fill="currentColor"/></symbol>
 <symbol id="i-explain" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 7.2v4.3M8 4.6v.1"/></symbol>
 </defs></svg>
 
 <header class="glareshield">
-  <a class="brand" href="#overview" aria-label="NInfer monitor"><span class="brand-mark" aria-hidden="true">n<span>.</span></span><span class="brand-name">NInfer</span></a>
+)HTML"
+R"HTML(  <a class="brand" href="#overview" aria-label="NInfer monitor"><span class="brand-mark" aria-hidden="true">n<span>.</span></span><span class="brand-name">NInfer</span></a>
   <nav class="fkeys" aria-label="Main navigation">
     <a class="fkey" href="#overview" data-view="overview" aria-current="page"><span class="fkey-lamp" aria-hidden="true"></span>Monitor</a>
     <a class="fkey" href="#connect" data-view="connect"><span class="fkey-lamp" aria-hidden="true"></span>Connect</a>
+    <a class="fkey" href="#api" data-view="api"><span class="fkey-lamp" aria-hidden="true"></span>API</a>
     <a class="fkey" href="#diagnostics" data-view="diagnostics"><span class="fkey-lamp" aria-hidden="true"></span>Diagnose<span id="nav-issues" class="fkey-count" hidden></span></a>
     <a class="fkey" href="#settings" data-view="settings"><span class="fkey-lamp" aria-hidden="true"></span>Settings<span id="settings-dirty" class="fkey-dirty" hidden>Unsaved</span></a>
   </nav>
   <div class="glare-end">
     <button type="button" id="master-caution" class="master" aria-label="Master caution: no new findings" title="Lights for new caution or warning findings. Press to acknowledge and open Diagnose."><span>Master</span><span id="master-word">Caution</span></button>
+    <button type="button" id="display-mode" class="fkey fkey-small" title="Display mode: Auto follows Windows; Day and Night stay as chosen"><svg class="icon"><use href="#i-display"/></svg><span id="display-mode-label">Auto</span></button>
     <button type="button" id="explain-toggle" class="fkey fkey-small" aria-pressed="false" title="Show plain-language explanations on every page"><svg class="icon"><use href="#i-explain"/></svg>Explain</button>
     <span class="link-state" role="status"><span id="live-dot" class="lamp paused" aria-hidden="true"></span><span id="live-label">Connecting…</span></span>
   </div>
@@ -607,7 +726,7 @@ R"HTML(  .rate-readouts,.memory-readouts{grid-template-columns:repeat(2,minmax(0
         </div>
         <dl class="readouts rate-readouts">
           <div class="ro ro-major"><dt><i class="swatch swatch-gen"></i>Generating</dt><dd><b id="thr-decode" class="green">—</b></dd><dd id="kpi-decode-explainer" class="ro-sub">all requests together</dd></div>
-          <div class="ro ro-major"><dt><i class="swatch swatch-read"></i>Reading</dt><dd><b id="thr-prefill" class="ice">—</b></dd><dd class="ro-sub">prompt tokens</dd></div>
+          <div class="ro ro-major"><dt><i class="swatch swatch-read"></i>Reading</dt><dd><b id="thr-prefill" class="ice">—</b></dd></div>
           <div class="ro-pair">
             <div class="ro"><dt>First token</dt><dd><b id="kpi-ttft">—</b></dd></div>
             <div class="ro"><dt>Done</dt><dd><b id="kpi-done">—</b></dd></div>
@@ -617,6 +736,7 @@ R"HTML(  .rate-readouts,.memory-readouts{grid-template-columns:repeat(2,minmax(0
       <p class="note">Measured by the engine while work happens, so long answers count as they stream. Every generated token counts, reasoning included. Prompt reading runs far faster than generation, so the two traces use separate scales: generation on the green tape at the left, prompt reading on the blue figures at the right edge. First token is the average wait before a response begins; Done counts completed requests in the request log.</p>
     </section>
 
+    <div class="monitor-side">
     <section class="display display-traffic" aria-labelledby="clients-title" id="clients-panel">
       <header class="display-head">
         <h2 id="clients-title">Calling apps</h2>
@@ -626,8 +746,7 @@ R"HTML(  .rate-readouts,.memory-readouts{grid-template-columns:repeat(2,minmax(0
       <div class="traffic-scroll">
         <table class="traffic">
           <colgroup><col class="col-app"><col span="4"></colgroup>
-)HTML"
-R"HTML(          <thead><tr><th scope="col">App · requests</th><th scope="col" class="num">First token</th><th scope="col" class="num">Queue</th><th scope="col" class="num">Prefill</th><th scope="col" class="num">Reuse</th></tr></thead>
+          <thead><tr><th scope="col">App · requests</th><th scope="col" class="num">First token</th><th scope="col" class="num">Queue</th><th scope="col" class="num">Prefill</th><th scope="col" class="num">Reuse</th></tr></thead>
           <tbody id="clients-list"><tr class="traffic-empty"><td colspan="5">No app has sent a request in the observation window. Apps appear here as they call the engine.</td></tr></tbody>
         </table>
       </div>
@@ -642,6 +761,7 @@ R"HTML(          <thead><tr><th scope="col">App · requests</th><th scope="col" 
       </header>
       <ul id="alert-list" class="alert-list"><li class="alert-quiet">Findings appear as the engine records activity.</li></ul>
     </section>
+    </div>
   </div>
 </section>
 
@@ -654,7 +774,8 @@ R"HTML(          <thead><tr><th scope="col">App · requests</th><th scope="col" 
       <li class="cdu-line">
         <label class="cdu-label" for="api-address">2 · Base URL</label>
         <span class="cdu-small">Paste it into your app's OpenAI-compatible provider settings.</span>
-        <span class="cdu-field-row"><input id="api-address" class="cdu-input cdu-input-mono" readonly value="Loading…"><button type="button" class="key" id="copy-address"><svg class="icon"><use href="#i-copy"/></svg>Copy</button></span>
+)HTML"
+R"HTML(        <span class="cdu-field-row"><input id="api-address" class="cdu-input cdu-input-mono" readonly value="Loading…"><button type="button" class="key" id="copy-address"><svg class="icon"><use href="#i-copy"/></svg>Copy</button></span>
         <span id="connection-pending" class="cdu-data amber" hidden>Connection settings were saved but may not be active yet. Restart the engine and confirm it is ready before using this address.</span>
         <span class="cdu-small">This is the saved address and works on this computer. Reaching it from another device needs network configuration.</span>
       </li>
@@ -671,6 +792,55 @@ R"HTML(          <thead><tr><th scope="col">App · requests</th><th scope="col" 
       <div><dt>API</dt><dd>The connection your app uses to talk to the engine. NInfer writes the responses; your app provides the conversation.</dd></div>
       <div><dt>Token</dt><dd>A small piece of text. Generation speed counts how many the engine produces each second.</dd></div>
     </dl>
+  </div>
+</section>
+
+<section id="view-api" class="view view-cdu view-bench" aria-labelledby="api-title" hidden>
+  <div class="cdu cdu-wide bench">
+    <header class="cdu-title"><h1 id="api-title">API test bench</h1><span id="bench-auth" class="cdu-page">Checking authentication…</span></header>
+    <div class="bench-panes">
+      <nav class="bench-index" aria-label="Endpoints">
+        <label class="sr-only" for="bench-filter">Filter endpoints</label>
+        <input id="bench-filter" class="cdu-input" type="search" placeholder="Filter endpoints" autocomplete="off">
+        <div id="bench-list" class="bench-list"></div>
+        <div class="bench-history-head"><span class="cdu-label">Recent</span><button type="button" id="bench-history-clear" class="client-evidence" hidden>Clear</button></div>
+        <ol id="bench-history" class="bench-history"><li class="cdu-small">Requests you send appear here.</li></ol>
+      </nav>
+      <section class="bench-work" aria-label="Request and response">
+        <div class="bench-request">
+          <div class="bench-line">
+            <span id="bench-method" class="bench-method">GET</span>
+            <label class="sr-only" for="bench-path">Path</label>
+            <input id="bench-path" class="cdu-input cdu-input-mono" spellcheck="false" autocomplete="off">
+            <button type="button" id="bench-send" class="key key-insert">Send<span aria-hidden="true">&gt;</span></button>
+            <button type="button" id="bench-stop" class="key key-stop" hidden>Stop</button>
+          </div>
+          <p id="bench-note" class="cdu-small"></p>
+          <div class="bench-line bench-options">
+            <div id="bench-examples" class="bench-examples" role="group" aria-label="Examples"></div>
+            <label id="bench-stream-wrap" class="cfg-check bench-stream"><input type="checkbox" id="bench-stream"><span>Stream</span></label>
+            <button type="button" id="bench-format" class="key key-small">Format</button>
+            <button type="button" id="bench-curl" class="key key-small"><svg class="icon"><use href="#i-copy"/></svg>Copy as curl</button>
+          </div>
+          <label class="sr-only" for="bench-body">Request body (JSON)</label>
+          <textarea id="bench-body" class="bench-body" spellcheck="false" autocomplete="off" aria-describedby="bench-body-state"></textarea>
+          <span id="bench-body-state" class="bench-body-state" role="status"></span>
+        </div>
+        <div class="bench-response" aria-live="off">
+          <div class="bench-status">
+            <span id="bench-code" class="bench-code">—</span>
+            <span id="bench-timing" class="bench-timing">Send a request to see the engine's answer.</span>
+            <nav class="bench-tabs" aria-label="Response views">
+              <button type="button" class="cdu-tab" data-bench-tab="text" aria-pressed="false">Text</button>
+              <button type="button" class="cdu-tab" data-bench-tab="body" aria-pressed="true">Body</button>
+              <button type="button" class="cdu-tab" data-bench-tab="events" aria-pressed="false">Events <span id="bench-event-count" class="cdu-tab-count"></span></button>
+              <button type="button" class="cdu-tab" data-bench-tab="headers" aria-pressed="false">Headers</button>
+            </nav>
+          </div>
+          <div id="bench-out" class="bench-out" tabindex="0" aria-label="Response"></div>
+        </div>
+      </section>
+    </div>
   </div>
 </section>
 
@@ -747,7 +917,8 @@ R"HTML(          <thead><tr><th scope="col">App · requests</th><th scope="col" 
         <li><a class="lsk lsk-r" href="#settings/capacity"><span class="lsk-prompt">Request capacity<span aria-hidden="true">&gt;</span></span><span class="lsk-sum" id="sum-capacity">—</span></a></li>
         <li><a class="lsk lsk-l" href="#settings/api"><span class="lsk-prompt"><span aria-hidden="true">&lt;</span>API &amp; access</span><span class="lsk-sum" id="sum-api">—</span></a></li>
         <li><a class="lsk lsk-r" href="#settings/memory"><span class="lsk-prompt">Memory &amp; precision<span aria-hidden="true">&gt;</span></span><span class="lsk-sum" id="sum-memory">—</span></a></li>
-        <li><a class="lsk lsk-l" href="#settings/frontends"><span class="lsk-prompt"><span aria-hidden="true">&lt;</span>Web frontends</span><span class="lsk-sum" id="sum-frontends">—</span></a></li>
+)HTML"
+R"HTML(        <li><a class="lsk lsk-l" href="#settings/frontends"><span class="lsk-prompt"><span aria-hidden="true">&lt;</span>Web frontends</span><span class="lsk-sum" id="sum-frontends">—</span></a></li>
         <li><a class="lsk lsk-r" href="#settings/features"><span class="lsk-prompt">Model features<span aria-hidden="true">&gt;</span></span><span class="lsk-sum" id="sum-features">—</span></a></li>
         <li><a class="lsk lsk-l" href="#settings/presets"><span class="lsk-prompt"><span aria-hidden="true">&lt;</span>Model presets</span><span class="lsk-sum" id="sum-presets">—</span></a></li>
         <li><a class="lsk lsk-r" href="#settings/reserve"><span class="lsk-prompt">Desktop reserve<span aria-hidden="true">&gt;</span></span><span class="lsk-sum" id="sum-reserve">—</span></a></li>
@@ -756,8 +927,7 @@ R"HTML(          <thead><tr><th scope="col">App · requests</th><th scope="col" 
     </section>
 
     <section class="settings-page" data-settings-page="config" aria-labelledby="settings-section-title" hidden>
-)HTML"
-R"HTML(      <header class="page-head"><a class="prompt" href="#settings"><span aria-hidden="true">&lt;</span>Index</a><h2 id="settings-section-title">Connection</h2></header>
+      <header class="page-head"><a class="prompt" href="#settings"><span aria-hidden="true">&lt;</span>Index</a><h2 id="settings-section-title">Connection</h2></header>
       <p id="settings-section-help" class="cdu-help">Addresses and ports used by the engine and this dashboard.</p>
       <div id="cfg-body" class="cfg-grid"><p class="cdu-small">Loading settings…</p></div>
       <div id="cfg-errors" class="cfg-errors" role="alert" hidden></div>
@@ -917,6 +1087,29 @@ R"HTML(      <header class="page-head"><a class="prompt" href="#settings"><span 
   try { setExplain(localStorage.getItem('ninfer:explain') === '1'); } catch (_) { setExplain(false); }
 
   // ---------------------------------------------------------------------
+  // Display mode: Auto follows the Windows app theme; Day and Night stay put.
+  // ---------------------------------------------------------------------
+  const displayKey = $('display-mode');
+  const lightQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
+  const displayNames = {auto: 'Auto', day: 'Day', night: 'Night'};
+  function applyDisplay(mode) {
+    const r = document.documentElement;
+    r.dataset.display = mode;
+    r.dataset.theme = mode === 'auto' ? (lightQuery && lightQuery.matches ? 'day' : 'night') : mode;
+    $('display-mode-label').textContent = mode === 'auto' ? 'Auto · ' + displayNames[r.dataset.theme] : displayNames[mode];
+    displayKey.setAttribute('aria-label', `Display mode: ${displayNames[mode]}${mode === 'auto' ? ', following Windows (' + displayNames[r.dataset.theme] + ')' : ''}. Press to change.`);
+    readPalette();
+    requestAnimationFrame(drawAll);
+  }
+  displayKey.onclick = () => {
+    const next = {auto: 'day', day: 'night', night: 'auto'}[document.documentElement.dataset.display] || 'auto';
+    try { localStorage.setItem('ninfer:display', next); } catch (_) {}
+    applyDisplay(next);
+  };
+)HTML"
+R"HTML(  if (lightQuery) lightQuery.addEventListener('change', () => { if (document.documentElement.dataset.display === 'auto') applyDisplay('auto'); });
+
+  // ---------------------------------------------------------------------
   // Scratchpad messages
   // ---------------------------------------------------------------------
   function notify(message, error = false) {
@@ -936,10 +1129,10 @@ R"HTML(      <header class="page-head"><a class="prompt" href="#settings"><span 
   // ---------------------------------------------------------------------
   // Routing: four function keys, each with its own pages.
   // ---------------------------------------------------------------------
-  const viewNames = ['overview', 'connect', 'diagnostics', 'settings'];
+  const viewNames = ['overview', 'connect', 'api', 'diagnostics', 'settings'];
   const diagPages = ['findings', 'log', 'engine', 'accel'];
   const settingsPages = ['network', 'api', 'frontends', 'capacity', 'memory', 'features', 'raw', 'presets', 'reserve'];
-  const viewLabels = {overview:'Monitor', connect:'Connect', diagnostics:'Diagnose', settings:'Settings'};
+  const viewLabels = {overview:'Monitor', connect:'Connect', api:'API test bench', diagnostics:'Diagnose', settings:'Settings'};
   const diagLabels = {findings:'Findings', log:'Engine log', engine:'Engine data', accel:'Acceleration'};
   const tabLabels = {network:'Connection', api:'API & access', frontends:'Web frontends', capacity:'Request capacity', memory:'Memory & precision', features:'Model features', raw:'Launch details', presets:'Model presets', reserve:'Desktop reserve'};
 
@@ -956,8 +1149,7 @@ R"HTML(      <header class="page-head"><a class="prompt" href="#settings"><span 
     if (activeView === 'diagnostics') {
       diagPage = diagPages.includes(sub) ? sub : 'findings';
       document.querySelectorAll('[data-diag-page]').forEach(el => { el.hidden = el.dataset.diagPage !== diagPage; });
-)HTML"
-R"HTML(      document.querySelectorAll('[data-diag]').forEach(el => {
+      document.querySelectorAll('[data-diag]').forEach(el => {
         if (el.dataset.diag === diagPage) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
       });
       $('diag-page-label').textContent = diagLabels[diagPage];
@@ -973,6 +1165,7 @@ R"HTML(      document.querySelectorAll('[data-diag]').forEach(el => {
       if (settingsPage !== 'index') title += ' · ' + tabLabels[settingsPage];
       updateTmpy();
     }
+    if (activeView === 'api') benchInit();
     document.title = title + ' · NInfer';
     if (activeView === 'overview') requestAnimationFrame(drawAll);
   }
@@ -1120,7 +1313,8 @@ R"HTML(      document.querySelectorAll('[data-diag]').forEach(el => {
     if (modelBusy) return 'Switch in progress. Other engine changes are paused.';
     if (modelUncertain) return 'The switch result is unknown. Verify completion before reloading this page to enable changes.';
     if (catalogLoading) return 'Checking available files…';
-    if (!connected) return 'Reconnect to the supervisor before switching.';
+)HTML"
+R"HTML(    if (!connected) return 'Reconnect to the supervisor before switching.';
     if (!cfgData || cfgData.manages_engine === false || (lastState || {}).monitor_only) return 'Switch models in the application that starts this engine.';
     if (!cfgData.writable) return 'The supervisor configuration is read-only.';
     if (configBusy || reserveBusy || actionBusy) return 'Wait for the current change to finish.';
@@ -1158,8 +1352,7 @@ R"HTML(      document.querySelectorAll('[data-diag]').forEach(el => {
     data.models.forEach((model, index) => {
       const label = document.createElement('label');
       label.className = 'preset' + (model.available ? '' : ' unavailable') + (model.active ? ' current' : '') + (model.id === modelSelection ? ' selected' : '');
-)HTML"
-R"HTML(      const input = document.createElement('input');
+      const input = document.createElement('input');
       input.type = 'radio'; input.name = 'catalog-model'; input.value = model.id;
       input.checked = model.id === modelSelection; input.disabled = !model.available;
       input.setAttribute('aria-describedby', 'catalog-detail-' + index);
@@ -1261,8 +1454,20 @@ R"HTML(      const input = document.createElement('input');
   const rateTape = $('rate-tape');
   const memTape = $('memory-tape'), memTrace = $('timeline-canvas'), rateTrace = $('throughput-canvas');
   const memTip = $('chart-tooltip'), rateTip = $('throughput-tooltip');
-  const C = {white:'#f1f4f5', dim:'#a8b2b8', faint:'#8592a0', rule:'rgba(233,240,244,0.15)', rule2:'rgba(233,240,244,0.07)', green:'#4fd98d', ice:'#98bfe0', magenta:'#ee78de', red:'#ff6257', amber:'#f5b53d', glass:'#040708'};
+  // The canvases draw from the same tokens as the page, so a display-mode change
+  // repaints the instruments in the new palette.
+  const C = {};
+  function readPalette() {
+    const cs = getComputedStyle(document.documentElement);
+    const v = name => cs.getPropertyValue(name).trim();
+    Object.assign(C, {ink: v('--ink'), dim: v('--dim'), faint: v('--faint'), rule: v('--rule'), rule2: v('--rule-2'), green: v('--green'), ice: v('--ice'),
+      magenta: v('--magenta'), red: v('--red'), amber: v('--amber'), glass: v('--glass'), tapeBody: v('--tape-body'), tick: v('--tick'), axis: v('--axis'),
+      envelope: v('--envelope'), traceFill: v('--trace-fill'), genFill: v('--gen-fill'), reserveLabel: v('--reserve-label'), poleDark: v('--pole-dark')});
+  }
+  readPalette();
   const PAD_TOP = 8, PAD_BOTTOM = 18;
+  // Right gutter of both traces: the prompt-reading scale lives there, clear of the plot.
+  const GUTTER = 40;
   let cursorT = null;
 
   function prep(canvas) {
@@ -1298,7 +1503,8 @@ R"HTML(      const input = document.createElement('input');
     let lo = 0, hi = ts.length - 1;
     if (hi < 0) return -1;
     while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (ts[mid] < t) lo = mid; else hi = mid; }
-    return Math.abs(ts[lo] - t) <= Math.abs(ts[hi] - t) ? lo : hi;
+)HTML"
+R"HTML(    return Math.abs(ts[lo] - t) <= Math.abs(ts[hi] - t) ? lo : hi;
   }
   function relTime(ms) {
     const s = Math.round(ms / 1000);
@@ -1310,7 +1516,7 @@ R"HTML(      const input = document.createElement('input');
     const step = niceStep(span / 1000, W, 70) * 1000;
     c.font = '500 11px Bahnschrift, sans-serif';
     c.fillStyle = C.faint; c.textBaseline = 'alphabetic';
-    c.strokeStyle = 'rgba(241,244,245,0.45)'; c.lineWidth = 1;
+    c.strokeStyle = C.axis; c.lineWidth = 1;
     c.beginPath(); c.moveTo(0, H - PAD_BOTTOM + .5); c.lineTo(W, H - PAD_BOTTOM + .5); c.stroke();
     for (let t = win.t1; t >= win.t0; t -= step / 2) {
       const xm = Math.round(xOf(t)) + .5;
@@ -1321,7 +1527,7 @@ R"HTML(      const input = document.createElement('input');
       c.strokeStyle = C.rule; c.lineWidth = 1; c.setLineDash([1, 4]);
       c.beginPath(); c.moveTo(Math.round(x) + .5, PAD_TOP); c.lineTo(Math.round(x) + .5, H - PAD_BOTTOM); c.stroke();
       c.setLineDash([]);
-      c.strokeStyle = 'rgba(241,244,245,0.45)';
+      c.strokeStyle = C.axis;
       c.beginPath(); c.moveTo(Math.round(x) + .5, H - PAD_BOTTOM); c.lineTo(Math.round(x) + .5, H - PAD_BOTTOM + 5); c.stroke();
       const label = relTime(win.t1 - t);
       c.textAlign = t === win.t1 ? 'right' : 'center';
@@ -1332,7 +1538,7 @@ R"HTML(      const input = document.createElement('input');
     (ser.events || []).forEach(ev => {
       if (ev.t_ms < win.t0 || ev.t_ms > win.t1) return;
       const x = Math.round(xOf(ev.t_ms)) + .5;
-      const col = /up/.test(ev.kind) ? C.green : /stop/.test(ev.kind) ? C.white : C.amber;
+      const col = /up/.test(ev.kind) ? C.green : /stop/.test(ev.kind) ? C.ink : C.amber;
       c.strokeStyle = col; c.globalAlpha = .55; c.lineWidth = 1; c.setLineDash([2, 3]);
       c.beginPath(); c.moveTo(x, PAD_TOP + 6); c.lineTo(x, H - PAD_BOTTOM); c.stroke();
       c.setLineDash([]); c.globalAlpha = 1;
@@ -1358,16 +1564,15 @@ R"HTML(      const input = document.createElement('input');
   }
 
   function tapeBody(c, W, plotH) {
-    c.fillStyle = 'rgba(128,138,146,0.16)';
+    c.fillStyle = C.tapeBody;
     c.fillRect(0, PAD_TOP, W - 1, plotH);
-    c.strokeStyle = 'rgba(241,244,245,0.55)'; c.lineWidth = 1;
+    c.strokeStyle = C.tick; c.lineWidth = 1;
     c.beginPath(); c.moveTo(W - 1.5, PAD_TOP); c.lineTo(W - 1.5, PAD_TOP + plotH); c.stroke();
   }
   // A readout window points at the tape; the last digit sits on a drum that
   // rolls with the value, so the direction of change shows before the digit flips.
   const drum = {shown: null, from: 0, to: 0, start: 0};
-)HTML"
-R"HTML(  const reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   // Tenths shown on the drum: animates 250 ms toward the new reading, then rests
   // on a whole digit so the neighbours show only as clipped edges.
   function drumTenths(value) {
@@ -1426,9 +1631,9 @@ R"HTML(  const reducedMotion = window.matchMedia && window.matchMedia('(prefers-
     for (let g = 0; g * GiB <= max + 1; g += stepGiB / 2) {
       const y = Math.round(yOf(g * GiB)) + .5;
       const major = Math.abs((g / stepGiB) - Math.round(g / stepGiB)) < 1e-6;
-      c.strokeStyle = major ? C.white : C.dim; c.lineWidth = 1;
+      c.strokeStyle = major ? C.ink : C.dim; c.lineWidth = 1;
       c.beginPath(); c.moveTo(edge - (major ? 8 : 5), y); c.lineTo(edge, y); c.stroke();
-      if (major && (readY == null || Math.abs(y - readY) > 24)) { c.fillStyle = C.white; c.fillText(String(Math.round(g)), edge - 11, y); }
+      if (major && (readY == null || Math.abs(y - readY) > 24)) { c.fillStyle = C.ink; c.fillText(String(Math.round(g)), edge - 11, y); }
     }
     // The desktop reserve as a barber pole: memory above this line is memory the
     // desktop was promised.
@@ -1437,7 +1642,7 @@ R"HTML(  const reducedMotion = window.matchMedia && window.matchMedia('(prefers-
       const yTop = yOf(total), yLim = yOf(total - floor);
       c.save();
       c.beginPath(); c.rect(edge - 5, yTop, 5, yLim - yTop); c.clip();
-      c.fillStyle = '#2a0a08'; c.fillRect(edge - 5, yTop, 5, yLim - yTop);
+      c.fillStyle = C.poleDark; c.fillRect(edge - 5, yTop, 5, yLim - yTop);
       c.strokeStyle = C.red; c.lineWidth = 2.5;
       for (let y = yTop - 10; y < yLim + 10; y += 7) { c.beginPath(); c.moveTo(edge - 6, y + 6); c.lineTo(edge + 1, y - 1); c.stroke(); }
       c.restore();
@@ -1468,7 +1673,7 @@ R"HTML(  const reducedMotion = window.matchMedia && window.matchMedia('(prefers-
       }
     }
     const breached = s.admin_vram && s.admin_vram.desktop_reserve && s.admin_vram.desktop_reserve.holding === false;
-    readoutWindow(c, W, Math.max(PAD_TOP + 18, Math.min(PAD_TOP + plotH - 18, y)), used / GiB, breached ? C.red : C.white, true);
+    readoutWindow(c, W, Math.max(PAD_TOP + 18, Math.min(PAD_TOP + plotH - 18, y)), used / GiB, breached ? C.red : C.ink, true);
   }
 
   function drawMemoryTrace(s, win) {
@@ -1480,13 +1685,14 @@ R"HTML(  const reducedMotion = window.matchMedia && window.matchMedia('(prefers-
     if (n < 2 || !win || W <= 0) { memTip.style.display = 'none'; return; }
     const max = memoryScale(s);
     const plotH = H - PAD_TOP - PAD_BOTTOM;
-    const xOf = tt => 1 + (W - 2) * ((tt - win.t0) / (win.t1 - win.t0));
+    const PW = W - GUTTER;
+    const xOf = tt => 1 + (PW - 2) * ((tt - win.t0) / (win.t1 - win.t0));
     const yOf = v => PAD_TOP + plotH - plotH * (Math.max(0, v || 0) / max);
     const stepGiB = niceStep(max / GiB, plotH, 26);
     c.strokeStyle = C.rule; c.lineWidth = 1; c.setLineDash([1, 4]);
-    for (let g = stepGiB; g * GiB <= max + 1; g += stepGiB) { const y = Math.round(yOf(g * GiB)) + .5; c.beginPath(); c.moveTo(0, y); c.lineTo(W, y); c.stroke(); }
+    for (let g = stepGiB; g * GiB <= max + 1; g += stepGiB) { const y = Math.round(yOf(g * GiB)) + .5; c.beginPath(); c.moveTo(0, y); c.lineTo(PW, y); c.stroke(); }
     c.setLineDash([]);
-    drawTimeAxis(c, W, H, win, xOf);
+    drawTimeAxis(c, PW, H, win, xOf);
     // One column per pixel: the 10 Hz series is denser than the canvas.
     const cols = Math.max(2, Math.floor(W));
     const hiY = new Array(cols).fill(null), loY = new Array(cols).fill(null);
@@ -1502,27 +1708,33 @@ R"HTML(  const reducedMotion = window.matchMedia && window.matchMedia('(prefers-
       c.beginPath(); c.moveTo(pts[0][0], PAD_TOP + plotH);
       pts.forEach(p => c.lineTo(p[0], p[1]));
       c.lineTo(pts[pts.length - 1][0], PAD_TOP + plotH); c.closePath();
-      c.fillStyle = 'rgba(241,244,245,0.07)'; c.fill();
-      c.strokeStyle = C.white; c.lineWidth = 1.5; c.lineJoin = 'round';
+      c.fillStyle = C.traceFill; c.fill();
+      c.strokeStyle = C.ink; c.lineWidth = 1.5; c.lineJoin = 'round';
       c.beginPath(); pts.forEach((p, i) => i ? c.lineTo(p[0], p[1]) : c.moveTo(p[0], p[1])); c.stroke();
-      c.strokeStyle = 'rgba(241,244,245,0.35)'; c.lineWidth = 1;
+      c.strokeStyle = C.envelope; c.lineWidth = 1;
       pts.forEach(p => { if (p[3] - p[2] > 2) { c.beginPath(); c.moveTo(p[0], p[2]); c.lineTo(p[0], p[3]); c.stroke(); } });
     }
     const floor = reserveFloorBytes(s), total = (s.device_memory || {}).total_bytes || 0;
     if (floor > 0 && total > 0) {
       const y = Math.round(yOf(total - floor)) + .5;
       c.strokeStyle = C.red; c.lineWidth = 1; c.setLineDash([6, 4]);
-      c.beginPath(); c.moveTo(0, y); c.lineTo(W, y); c.stroke(); c.setLineDash([]);
-      c.fillStyle = '#ff8a80'; c.font = '600 11px Bahnschrift, sans-serif'; c.textAlign = 'left'; c.textBaseline = 'alphabetic';
-      c.fillText('DESKTOP RESERVE', 6, y - 4);
+      c.beginPath(); c.moveTo(0, y); c.lineTo(PW, y); c.stroke(); c.setLineDash([]);
     }
     drawEvents(c, H, ser, win, xOf, W);
+    if (floor > 0 && total > 0) {
+      const y = Math.round(yOf(total - floor)) + .5;
+      c.font = '600 11px Bahnschrift, sans-serif'; c.textAlign = 'left'; c.textBaseline = 'alphabetic';
+      const w = c.measureText('DESKTOP RESERVE').width;
+      c.fillStyle = C.glass; c.fillRect(3, y - 15, w + 6, 12);
+      c.fillStyle = C.reserveLabel; c.fillText('DESKTOP RESERVE', 6, y - 5);
+    }
     if (cursorT != null) {
-      const i = nearest(t, cursorT);
+)HTML"
+R"HTML(      const i = nearest(t, cursorT);
       const x = Math.round(xOf(t[i])) + .5;
       c.strokeStyle = C.dim; c.lineWidth = 1;
       c.beginPath(); c.moveTo(x, PAD_TOP); c.lineTo(x, H - PAD_BOTTOM); c.stroke();
-      c.fillStyle = C.white; c.beginPath(); c.arc(x, yOf(u[i]), 3.5, 0, Math.PI * 2); c.fill();
+      c.fillStyle = C.ink; c.beginPath(); c.arc(x, yOf(u[i]), 3.5, 0, Math.PI * 2); c.fill();
       const ev = eventNear(ser, cursorT, win.t1 - win.t0);
       memTip.innerHTML = `<span class="t">${esc(relTime(win.t1 - t[i]))}</span> · ${esc(gib(u[i]))}${ev ? ` · <span class="${/up/.test(ev.kind) ? 'green' : 'amber'}">${esc(ev.label || ev.kind)}</span>` : ''}`;
       memTip.style.display = 'block';
@@ -1565,7 +1777,7 @@ R"HTML(  const reducedMotion = window.matchMedia && window.matchMedia('(prefers-
     c.font = '500 11px Bahnschrift, sans-serif'; c.textAlign = 'right'; c.textBaseline = 'middle';
     for (let k = 0; k <= steps * 2; k++) {
       const v = decMax * k / (steps * 2), y = Math.round(yOf(v)) + .5, major = k % 2 === 0;
-      c.strokeStyle = major ? C.white : C.dim;
+      c.strokeStyle = major ? C.ink : C.dim;
       c.beginPath(); c.moveTo(edge - (major ? 8 : 5), y); c.lineTo(edge, y); c.stroke();
       if (major && Math.abs(y - readY) > 16) { c.fillStyle = C.green; c.fillText(Math.round(v).toLocaleString(), edge - 11, y); }
     }
@@ -1577,29 +1789,30 @@ R"HTML(  const reducedMotion = window.matchMedia && window.matchMedia('(prefers-
   function drawRateTrace(s, win) {
     const {c, W, H} = prep(rateTrace);
     const ser = s.throughput || {};
-)HTML"
-R"HTML(    const t = ser.t_ms || [], dec = ser.decode_tok_s || [], pre = ser.prefill_tok_s || [];
+    const t = ser.t_ms || [], dec = ser.decode_tok_s || [], pre = ser.prefill_tok_s || [];
     const n = Math.min(t.length, dec.length, pre.length);
     $('throughput-empty').hidden = n >= 2;
-    $('throughput-empty').textContent = 'No requests in this window';
+    // The history comes from the engine's 5-second throughput reports; the running count and
+    // the current rate come from the request log. An empty window says only what it knows.
+    const busy = ((s.requests || {}).running_requests || 0) > 0 || ((s.requests || {}).decode_tok_s_total || 0) > 0;
+    $('throughput-empty').textContent = busy ? 'Collecting rate samples…' : 'No rate samples in this window';
     if (!win || W <= 0) { rateTip.style.display = 'none'; return; }
     const plotH = H - PAD_TOP - PAD_BOTTOM;
     const {decMax, preMax, steps} = rateScales(s, plotH);
-    const xOf = tt => 1 + (W - 2) * ((tt - win.t0) / (win.t1 - win.t0));
+    const PW = W - GUTTER;
+    const xOf = tt => 1 + (PW - 2) * ((tt - win.t0) / (win.t1 - win.t0));
     c.font = '500 11px Bahnschrift, sans-serif'; c.textBaseline = 'middle';
     for (let k = 0; k <= steps; k++) {
       const y = Math.round(PAD_TOP + plotH - plotH * (k / steps)) + .5;
-      if (k > 0) { c.strokeStyle = C.rule; c.lineWidth = 1; c.setLineDash([1, 4]); c.beginPath(); c.moveTo(0, y); c.lineTo(W, y); c.stroke(); c.setLineDash([]); }
+      if (k > 0) { c.strokeStyle = C.rule; c.lineWidth = 1; c.setLineDash([1, 4]); c.beginPath(); c.moveTo(0, y); c.lineTo(PW, y); c.stroke(); c.setLineDash([]); }
       if (k > 0) {
         const label = Math.round(preMax * k / steps).toLocaleString();
         c.textAlign = 'right';
-        const tw = c.measureText(label).width;
-        c.fillStyle = C.glass; c.fillRect(W - tw - 8, y - 7, tw + 6, 14);
-        c.fillStyle = C.ice; c.fillText(label, W - 4, y);
+        c.fillStyle = C.ice; c.fillText(label, W - 2, y);
       }
     }
     c.textBaseline = 'alphabetic';
-    drawTimeAxis(c, W, H, win, xOf);
+    drawTimeAxis(c, PW, H, win, xOf);
     if (n < 2) { rateTip.style.display = 'none'; drawEvents(c, H, (s.series || {}), win, xOf, W); return; }
     const line = (vals, max, colour, fill) => {
       const yOf = v => PAD_TOP + plotH - plotH * (Math.max(0, v || 0) / max);
@@ -1607,7 +1820,7 @@ R"HTML(    const t = ser.t_ms || [], dec = ser.decode_tok_s || [], pre = ser.pre
         c.beginPath(); c.moveTo(xOf(t[0]), PAD_TOP + plotH);
         for (let i = 0; i < n; i++) c.lineTo(xOf(t[i]), yOf(vals[i]));
         c.lineTo(xOf(t[n - 1]), PAD_TOP + plotH); c.closePath();
-        c.fillStyle = 'rgba(79,217,141,0.12)'; c.fill();
+        c.fillStyle = C.genFill; c.fill();
       }
       c.beginPath(); c.lineWidth = fill ? 1.75 : 1.25; c.strokeStyle = colour; c.lineJoin = 'round';
       for (let i = 0; i < n; i++) { if (i === 0) c.moveTo(xOf(t[i]), yOf(vals[i])); else c.lineTo(xOf(t[i]), yOf(vals[i])); }
@@ -1650,7 +1863,7 @@ R"HTML(    const t = ser.t_ms || [], dec = ser.decode_tok_s || [], pre = ser.pre
     const win = lastState && timeWindow(lastState);
     if (!win) return;
     const r = canvas.getBoundingClientRect();
-    const f = Math.min(1, Math.max(0, (e.clientX - r.left - 1) / (r.width - 2)));
+    const f = Math.min(1, Math.max(0, (e.clientX - r.left - 1) / (r.width - 2 - GUTTER)));
     cursorT = win.t0 + f * (win.t1 - win.t0);
     drawAll();
   }
@@ -1706,7 +1919,7 @@ R"HTML(    const t = ser.t_ms || [], dec = ser.decode_tok_s || [], pre = ser.pre
       const app = document.createElement('td');
       const name = document.createElement('div'); name.className = 'client-name';
       // An app that sends no User-Agent cannot be named; saying so beats inventing a label.
-      const label = document.createElement('span'); label.textContent = c.name || 'Unidentified app';
+      const label = document.createElement('span'); label.textContent = c.name || 'Unidentified app'; label.title = c.name || 'This app sends no User-Agent';
       name.append(label);
       if (c.tool_count > 0) { const tag = document.createElement('span'); tag.className = 'client-tag'; tag.textContent = `${c.tool_count} tool${c.tool_count === 1 ? '' : 's'}`; name.append(tag); }
       const counts = document.createElement('div'); counts.className = 'client-counts';
@@ -1714,7 +1927,8 @@ R"HTML(    const t = ser.t_ms || [], dec = ser.decode_tok_s || [], pre = ser.pre
       counts.innerHTML = `<b>${(c.completed || 0).toLocaleString()}</b> done · ${c.failed || 0} fail · ${c.cancelled || 0} cxl · ${c.interrupted || 0} cut · ${c.active || 0} open`;
       const ev = document.createElement('button');
       ev.type = 'button'; ev.className = 'client-evidence'; ev.dataset.client = key;
-      ev.setAttribute('aria-expanded', String(expandedClients.has(key)));
+)HTML"
+R"HTML(      ev.setAttribute('aria-expanded', String(expandedClients.has(key)));
       ev.textContent = expandedClients.has(key) ? 'Evidence <' : 'Evidence >';
       ev.onclick = () => { if (expandedClients.has(key)) expandedClients.delete(key); else expandedClients.add(key); renderClients((lastState || {}).requests || {}); };
       app.append(name, counts, ev);
@@ -1749,8 +1963,7 @@ R"HTML(    const t = ser.t_ms || [], dec = ser.decode_tok_s || [], pre = ser.pre
         evidence.push('Tool-definition changes and conversation changes are not diagnosed by these counters.');
         const er = document.createElement('tr'); er.className = 'evidence-row';
         const td = document.createElement('td'); td.colSpan = 5;
-)HTML"
-R"HTML(        evidence.forEach(text => { const p = document.createElement('p'); p.textContent = text; td.append(p); });
+        evidence.forEach(text => { const p = document.createElement('p'); p.textContent = text; td.append(p); });
         er.append(td); rows.push(er);
       }
     }
@@ -1816,7 +2029,8 @@ R"HTML(        evidence.forEach(text => { const p = document.createElement('p');
     // After a start the Supervisor reads the existing request log once before it reports on it.
     const src = rep.source || {};
     const reading = src.request_log === 'reading';
-    $('insights-count-badge').textContent = reading ? `reading ${src.bytes_total ? Math.floor(100 * src.bytes_read / src.bytes_total) : 0}%` : String(items.length);
+)HTML"
+R"HTML(    $('insights-count-badge').textContent = reading ? `reading ${src.bytes_total ? Math.floor(100 * src.bytes_read / src.bytes_total) : 0}%` : String(items.length);
     const problems = items.filter(it => ['critical', 'warning'].includes(it.severity));
     if (!reading) updateMaster(problems);
     const navIssues = $('nav-issues');
@@ -1866,8 +2080,7 @@ R"HTML(        evidence.forEach(text => { const p = document.createElement('p');
   const reserveSlider = $('reserve-slider'), reserveAmount = $('reserve-amount'), reserveSave = $('reserve-save');
   function renderMemoryControls(s) {
     const info = s.desktop_reserve || {};
-)HTML"
-R"HTML(    const saved = info.next_gib == null ? 8 : info.next_gib;
+    const saved = info.next_gib == null ? 8 : info.next_gib;
     const value = reserveDraft == null ? saved : reserveDraft === 0 ? 8 : reserveDraft;
     const nv = s.device_memory || {};
     const total = nv.ok ? nv.total_bytes / GiB : null;
@@ -1970,7 +2183,8 @@ R"HTML(    const saved = info.next_gib == null ? 8 : info.next_gib;
     const managed = managedEngine();
     if (ready && managed && pendingRestartPid != null && eng.pid && eng.pid !== pendingRestartPid) setPendingRestart(null);
     const labels = {Stopped:'Engine is stopped', Starting:'Starting your engine', Stopping:'Stopping your engine', BackingOff:'Waiting to try again', Halted:'Your engine needs attention'};
-    const guidance = {Stopped:'Start the engine to load your model and connect an app.', Starting:'Your model is loading. The first start can take a little while.', Stopping:'The engine is shutting down. Connected apps stop receiving responses.', BackingOff:'The engine stopped unexpectedly. The supervisor will try to restart it.', Halted:'Automatic restarts have paused. Check Diagnose before starting again.'};
+)HTML"
+R"HTML(    const guidance = {Stopped:'Start the engine to load your model and connect an app.', Starting:'Your model is loading. The first start can take a little while.', Stopping:'The engine is shutting down. Connected apps stop receiving responses.', BackingOff:'The engine stopped unexpectedly. The supervisor will try to restart it.', Halted:'Automatic restarts have paused. Check Diagnose before starting again.'};
     let heading = ready ? 'Your engine is ready' : labels[state] || (state === 'Running' ? 'Engine is not ready yet' : 'Checking your engine');
     let guide = ready ? 'Your model is loaded and ready for requests.' : guidance[state] || 'The engine process is running, but its health check has not confirmed readiness. Check Diagnose if this continues.';
     if (!managed && !ready) { heading = 'Engine is not reachable'; guide = 'Check that the engine is running in its original application and that your connection settings match.'; }
@@ -2012,8 +2226,7 @@ R"HTML(    const saved = info.next_gib == null ? 8 : info.next_gib;
     $('band-mem-bar').style.width = (frac * 100) + '%';
     $('band-free').textContent = freeBytes == null ? '' : `${(freeBytes / GiB).toFixed(1)} free`;
     $('band-free').className = 'band-sub' + (breached ? ' red' : '');
-)HTML"
-R"HTML(    const guidanceEl = $('memory-guidance');
+    const guidanceEl = $('memory-guidance');
     const memMessage = usedBytes == null ? 'Memory readings are unavailable. Open Diagnose for details.' : breached ? 'Available memory is below the desktop reserve. Review memory settings or close other GPU-heavy apps.' : '';
     guidanceEl.textContent = memMessage;
     guidanceEl.hidden = !memMessage;
@@ -2051,7 +2264,11 @@ R"HTML(    const guidanceEl = $('memory-guidance');
     renderClients(reqs);
     const running = reqs.running_requests || 0;
     const lanes = Number(launchFlags['--max-concurrency']) || null;
-    $('kpi-thr-window').textContent = running > 0 ? `${running}${lanes ? ' of ' + lanes : ''} request${running === 1 && !lanes ? '' : 's'} running` : `Idle${lanes ? ' · ' + lanes + ' lane' + (lanes === 1 ? '' : 's') : ''}`;
+    // Both figures come from the engine's latest 5-second report: the running count is taken
+    // at the report, the rates over its window, so requests that just finished still count.
+    $('kpi-thr-window').textContent = running > 0 || thrTotal > 0
+      ? `${running}${lanes ? ' of ' + lanes : ''} running`
+      : `Idle${lanes ? ' · ' + lanes + ' lane' + (lanes === 1 ? '' : 's') : ''}`;
     $('kpi-thr-window').className = 'display-source' + (running > 0 ? ' green' : '');
     $('band-run').textContent = `${running}${lanes ? ' / ' + lanes : ''}`;
     $('kpi-ttft').textContent = Number.isFinite(reqs.ttft_ms_mean) ? duration(reqs.ttft_ms_mean) : 'No data yet';
@@ -2128,7 +2345,8 @@ R"HTML(    const guidanceEl = $('memory-guidance');
     pendingAction = {actionName, btn};
     const restart = actionName === 'restart' || actionName === 'save-restart';
     modalTitle.textContent = restart ? 'Restart your engine?' : 'Stop your engine?';
-    modalDesc.textContent = restart ? 'Active requests are interrupted while the model reloads. Connected apps can send requests again when the engine is ready.' : 'Active requests are interrupted. Your model is unloaded until you start the engine again.';
+)HTML"
+R"HTML(    modalDesc.textContent = restart ? 'Active requests are interrupted while the model reloads. Connected apps can send requests again when the engine is ready.' : 'Active requests are interrupted. Your model is unloaded until you start the engine again.';
     modalConfirmBtn.firstChild.textContent = actionName === 'save-restart' ? 'Insert and restart' : restart ? 'Restart engine' : 'Stop engine';
     confirmModal.showModal();
     modalCancelBtn.focus();
@@ -2144,7 +2362,8 @@ R"HTML(    const guidanceEl = $('memory-guidance');
     if (!pendingAction) return;
     const action = pendingAction.actionName, modelId = pendingAction.modelId;
     hideConfirmModal();
-    if (action === 'model') switchModel(modelId);
+    if (action === 'bench') benchSend(true);
+    else if (action === 'model') switchModel(modelId);
     else if (action === 'save-restart') cfgApply(true);
     else runAction(action);
   };
@@ -2199,8 +2418,7 @@ R"HTML(    const guidanceEl = $('memory-guidance');
   //
   // Two things are shown and deliberately not editable: the executable and the
   // working directory. The control gate on this page is a loopback check plus a
-)HTML"
-R"HTML(  // header, which stops a random web page from driving it -- it is not an
+  // header, which stops a random web page from driving it -- it is not an
   // authorization system, and it should not be what stands between a browser and
   // choosing which binary runs.
   // ---------------------------------------------------------------------
@@ -2323,7 +2541,8 @@ R"HTML(  // header, which stops a random web page from driving it -- it is not a
       if (clamp) { capacityPairBusy = true; ctxEl.value = String(kv.n); ctxEl.oninput(); capacityPairBusy = false; }
       else if (sourceId === 'param-max_context') ctxEl.setCustomValidity('Max context cannot exceed the KV pool (' + kv.n.toLocaleString() + ' tokens). Enlarge the pool first.');
       else if (sourceId === 'param-kv_capacity') kvEl.setCustomValidity('KV pool must cover max context (' + ctx.n.toLocaleString() + ' tokens).');
-    } else if (kv.kind === 'num' && poolCap != null && kv.n > poolCap) {
+)HTML"
+R"HTML(    } else if (kv.kind === 'num' && poolCap != null && kv.n > poolCap) {
       if (clamp) { capacityPairBusy = true; kvEl.value = String(poolCap); kvEl.oninput(); capacityPairBusy = false; }
       else kvEl.setCustomValidity('KV pool cannot exceed ' + lanes.n + ' × max context (' + poolCap.toLocaleString() + ' tokens). Raise max context or max concurrency.');
     }
@@ -2380,8 +2599,7 @@ R"HTML(  // header, which stops a random web page from driving it -- it is not a
       slider.setAttribute('aria-valuetext', numeric ? n.toLocaleString() + ' tokens' + (custom ? ' (custom)' : '') : isAuto ? 'Auto: size from free memory' : raw === '' ? (automatic ? 'Engine default: follow max context' : 'Engine default') : 'Choose a valid size');
       scale.replaceChildren();
       const last = stops.length - 1;
-)HTML"
-R"HTML(      const tickAt = last <= 0 ? [0] : [0, Math.ceil(last / 2), last];
+      const tickAt = last <= 0 ? [0] : [0, Math.ceil(last / 2), last];
       const seen = new Set();
       for (const index of tickAt) {
         if (seen.has(index) || !stops[index] && stops[index] !== '') continue;
@@ -2500,7 +2718,8 @@ R"HTML(      const tickAt = last <= 0 ? [0] : [0, Math.ceil(last / 2), last];
       else input.oninput = () => {
         const v = opts.type === 'int' ? parseInt(input.value, 10) : input.value;
         cfgEdit(section, key, v, original);
-        input.classList.toggle('dirty', String(input.value) !== String(original == null ? '' : original));
+)HTML"
+R"HTML(        input.classList.toggle('dirty', String(input.value) !== String(original == null ? '' : original));
       };
       wrap.appendChild(input);
     }
@@ -2568,8 +2787,7 @@ R"HTML(      const tickAt = last <= 0 ? [0] : [0, Math.ceil(last / 2), last];
       row.appendChild(feInput('Name', fe.name, {required: '', maxlength: '64', placeholder: 'llama.cpp web UI'}, v => { fe.name = v; }));
       row.appendChild(feInput('Folder', fe.dir, {required: '', placeholder: 'C:\\path\\to\\built\\app', spellcheck: 'false'}, v => { fe.dir = v; }));
       row.appendChild(feInput('Port', fe.port, {required: '', type: 'number', min: '1', max: '65535'}, v => { fe.port = v === '' ? '' : Number(v); }));
-)HTML"
-R"HTML(      const remove = document.createElement('button'); remove.className = 'key'; remove.type = 'button'; remove.textContent = 'Remove';
+      const remove = document.createElement('button'); remove.className = 'key'; remove.type = 'button'; remove.textContent = 'Remove';
       remove.onclick = () => { feDraft.splice(i, 1); renderConfig(); };
       row.appendChild(remove);
       const meta = document.createElement('div'); meta.className = 'fe-meta'; meta.id = 'fe-meta-' + i;
@@ -2653,7 +2871,8 @@ R"HTML(      const remove = document.createElement('button'); remove.className =
       cfgBody.appendChild(plainField('engine', 'api_key_file', 'API key file', eng.api_key_file, {help: eng.api_key_present ? 'A key was read from this file. The key itself is never sent to this page.' : 'No key could be read from this path, so the engine accepts unauthenticated requests.'}));
       cfgBody.appendChild(plainField('engine', 'request_log', 'Request log path', eng.request_log, {help: 'Per-request JSONL. This is what fills the rates, calling apps, reuse and speculation readings.'}));
       (cfgData.schema || []).filter(x => x.group === 'api').forEach(spec => cfgBody.appendChild(fieldRow(spec, (cfgData.params || {})[spec.key])));
-      cfgBody.appendChild(cfgNote('The API key is read from the file above by the supervisor and handed to the engine. It never appears on this page, in /api/config, or in the launch command.'));
+)HTML"
+R"HTML(      cfgBody.appendChild(cfgNote('The API key is read from the file above by the supervisor and handed to the engine. It never appears on this page, in /api/config, or in the launch command.'));
     } else if (cfgTab === 'raw') {
       cfgBody.appendChild(plainField('engine', '_executable', 'Executable', eng.executable, {readonly: true, hint: 'file-only', help: 'Not editable here by design: this decides which binary runs.'}));
       cfgBody.appendChild(plainField('engine', '_workdir', 'Working directory', eng.workdir, {readonly: true, hint: 'file-only'}));
@@ -2701,8 +2920,7 @@ R"HTML(      const remove = document.createElement('button'); remove.className =
       const el = $(id); if (!el) return;
       const n = tab ? tabDirtyCount(tab) : 0;
       el.textContent = (n ? `${n} staged · ` : '') + text;
-)HTML"
-R"HTML(      el.className = 'lsk-sum' + (n ? ' amber' : '');
+      el.className = 'lsk-sum' + (n ? ' amber' : '');
     };
     set('sum-network', `engine ${val('engine', 'engine_host', eng.engine_host)}:${val('engine', 'engine_port', eng.engine_port)} · dashboard ${val('supervisor', 'host', sup.host)}:${val('supervisor', 'port', sup.port)}`, 'network');
     set('sum-api', `${eng.api_key_present ? 'API key required' : 'No API key'} · ${eng.request_log ? 'request log on' : 'no request log'}`, 'api');
@@ -2785,6 +3003,365 @@ R"HTML(      el.className = 'lsk-sum' + (n ? ' amber' : '');
     $('auth-guidance').textContent = d.engine.api_key_present ? 'Required. Enter the key configured for this engine into your app. The dashboard never displays or copies that key.' : 'None configured. If your app insists on an API key, enter a placeholder such as local; this does not enable authentication.';
   }
 
+  // ---------------------------------------------------------------------
+  // API test bench. Every route the engine exposes, sent through the
+  // supervisor's /api/engine bench: same origin, the supervisor's key, streams
+  // unbuffered. The supervisor's own read routes are called directly.
+  // ---------------------------------------------------------------------
+  let benchServedModel = '';
+  let benchLastResponseId = '';
+  let benchCurrent = null, benchExample = 0, benchAbort = null, benchTab = 'body', benchReady = false;
+  const benchHistory = [];
+  let benchView = {status: null, timing: '', text: null, body: '', events: [], headers: [], kind: ''};
+  const benchModel = () => benchServedModel || 'local';
+  const chatMessages = () => [{role: 'system', content: 'Answer concisely.'}, {role: 'user', content: 'What is speculative decoding?'}];
+  const ep = (group, method, path, title, extra) => Object.assign({group, method, path, title, examples: []}, extra || {});
+  const benchEndpoints = [
+    ep('Status', 'GET', '/health', 'Engine readiness', {note: 'Always open, even when an API key is set. 200 when ready; 503 after an engine-wide failure.'}),
+    ep('Status', 'GET', '/metrics', 'Prometheus metrics', {note: 'Counters, gauges and histograms in the Prometheus text format.'}),
+    ep('Status', 'GET', '/v1/models', 'Served models', {note: 'The served id, its aliases and the rerank id, with the effective max_model_len.'}),
+    ep('Status', 'GET', '/v1/models/{model}', 'One model'),
+    ep('Status', 'GET', '/props', 'Server properties', {note: 'llama.cpp-compatible properties used by its web UI.'}),
+    ep('OpenAI', 'POST', '/v1/chat/completions', 'Chat completions', {stream: 'openai', examples: [
+      {name: 'Basic', body: () => ({model: benchModel(), messages: chatMessages(), max_tokens: 128})},
+      {name: 'Streaming', body: () => ({model: benchModel(), messages: chatMessages(), max_tokens: 256, stream: true, stream_options: {include_usage: true}})},
+      {name: 'No thinking', body: () => ({model: benchModel(), messages: chatMessages(), max_tokens: 128, chat_template_kwargs: {enable_thinking: false}})},
+)HTML"
+R"HTML(      {name: 'JSON schema', body: () => ({model: benchModel(), messages: [{role: 'user', content: 'Name a city and its country.'}], max_tokens: 128, response_format: {type: 'json_schema', json_schema: {name: 'place', schema: {type: 'object', properties: {city: {type: 'string'}, country: {type: 'string'}}, required: ['city', 'country']}}}})},
+      {name: 'Choice', body: () => ({model: benchModel(), messages: [{role: 'user', content: 'Is the sky blue on a clear day? Answer yes or no.'}], max_tokens: 4, structured_outputs: {choice: ['yes', 'no']}})},
+      {name: 'Logprobs', body: () => ({model: benchModel(), messages: [{role: 'user', content: 'Say hello.'}], max_tokens: 8, logprobs: true, top_logprobs: 3})},
+      {name: 'Tool call', body: () => ({model: benchModel(), messages: [{role: 'user', content: 'What is the weather in Lisbon?'}], max_tokens: 256, tools: [{type: 'function', function: {name: 'get_weather', description: 'Current weather for a city', parameters: {type: 'object', properties: {city: {type: 'string'}}, required: ['city']}}}]})}]}),
+    ep('OpenAI', 'POST', '/v1/responses', 'Responses', {stream: 'responses', examples: [
+      {name: 'Basic', body: () => ({model: benchModel(), instructions: 'Answer concisely.', input: 'What is speculative decoding?', max_output_tokens: 128, store: true})},
+      {name: 'Streaming', body: () => ({model: benchModel(), instructions: 'Answer concisely.', input: 'What is speculative decoding?', max_output_tokens: 256, stream: true})}]}),
+    ep('OpenAI', 'POST', '/v1/responses/input_tokens', 'Count input tokens', {examples: [{name: 'Basic', body: () => ({model: benchModel(), input: 'Count this prompt.'})}]}),
+    ep('OpenAI', 'GET', '/v1/responses/{response_id}', 'Stored response', {note: 'A response stored by an earlier Responses call; the last id the bench saw is filled in.'}),
+    ep('OpenAI', 'GET', '/v1/responses/{response_id}/input_items?limit=20&order=desc', 'Stored input items'),
+    ep('OpenAI', 'DELETE', '/v1/responses/{response_id}', 'Delete stored response'),
+    ep('OpenAI', 'POST', '/v1/responses/{response_id}/cancel', 'Cancel response', {note: 'Always answers with an error: background execution is not supported.', examples: [{name: 'Empty', body: () => ({})}]}),
+    ep('OpenAI', 'POST', '/v1/responses/compact', 'Compact', {note: 'Always answers compaction_not_supported.', examples: [{name: 'Basic', body: () => ({model: benchModel()})}]}),
+    ep('Anthropic', 'POST', '/v1/messages', 'Messages', {stream: 'anthropic', examples: [
+      {name: 'Basic', body: () => ({model: benchModel(), max_tokens: 128, messages: [{role: 'user', content: 'Explain prefix reuse in one sentence.'}]})},
+      {name: 'Streaming', body: () => ({model: benchModel(), max_tokens: 256, stream: true, messages: [{role: 'user', content: 'Explain prefix reuse in one sentence.'}]})},
+      {name: 'Thinking', body: () => ({model: benchModel(), max_tokens: 512, system: 'Answer concisely.', thinking: {type: 'enabled', budget_tokens: 256}, messages: [{role: 'user', content: 'Why does prompt caching help?'}]})}]}),
+    ep('Anthropic', 'POST', '/v1/messages/count_tokens', 'Count tokens', {examples: [{name: 'Basic', body: () => ({model: benchModel(), messages: [{role: 'user', content: 'Count this prompt.'}]})}]}),
+    ep('NInfer', 'POST', '/v1/score', 'Score answers', {note: 'Closed-set scoring of 1 to 256 questions against one shared prefix. No streaming.', examples: [{name: 'Basic', body: () => ({model: benchModel(), messages: [{role: 'system', content: 'Invoice 1042 was due on 2026-09-30 and is unpaid. Today is 2026-10-11.'}], questions: [{id: 'q1', content: 'Is the invoice overdue? Answer A for yes, B for no.', candidates: ['A', 'B']}], candidates: ['A', 'B'], top_logprobs: 0, chat_template_kwargs: {enable_thinking: false}})}]}),
+    ep('NInfer', 'POST', '/v1/rerank', 'Rerank documents', {note: 'Scores each document; latency grows with the number of documents.', examples: [{name: 'Basic', body: () => ({query: 'where is the invoice?', documents: ['The invoice is in the drawer.', {text: 'The weather is clear.'}], top_n: 2, return_documents: true})}]}),
+    ep('NInfer', 'POST', '/v1/systemone', 'System One decisions', {note: 'Structured decisions read from next-token probabilities; no text is generated. POST /systemone is the same route.', examples: [{name: 'Ticket triage', body: () => ({model: 'jev-latest', state: "Customer: 'I was charged twice for order #9482. Please refund immediately!'", questions: {is_urgent: {type: 'noul', instructions: 'Is this customer inquiry urgent?'}, department: {type: 'choice', instructions: 'Which department should handle this ticket?', criteria: {billing: 'Charges and refunds', shipping: 'Delivery', general: null}}, frustration: {type: 'score', instructions: 'How frustrated is the customer?', criteria: ['Calm', 'Mildly annoyed', 'Very upset']}}})}]}),
+    ep('Admin', 'GET', '/admin/vram', 'Memory plan and device memory'),
+    ep('Admin', 'GET', '/admin/stats', 'Runtime counters'),
+    ep('Admin', 'POST', '/admin/quiesce', 'Quiesce', {disruptive: true, note: 'Diagnostic: stops admission, drains active requests and holds the engine idle, then resumes. Your apps’ requests wait while it runs.', examples: [{name: 'Hold 0 ms', body: () => ({hold_ms: 0})}]}),
+    ep('Supervisor', 'GET', '/api/state', 'Supervisor state', {local: true, note: 'This dashboard’s own state, as Monitor reads it every second.'}),
+    ep('Supervisor', 'GET', '/api/insights', 'Findings report', {local: true}),
+    ep('Supervisor', 'GET', '/api/config', 'Configuration', {local: true, note: 'The API key itself is never included.'}),
+    ep('Supervisor', 'GET', '/api/models', 'Model presets', {local: true}),
+  ];
+  benchEndpoints.forEach((e, i) => { e.id = i; });
+  const benchBody = $('bench-body'), benchPath = $('bench-path'), benchOut = $('bench-out');
+
+  function benchFillPath(path) {
+    return path.replace('{model}', encodeURIComponent(benchModel())).replace('{response_id}', benchLastResponseId || '{response_id}');
+  }
+  function renderBenchList() {
+    const q = $('bench-filter').value.trim().toLowerCase();
+    const list = $('bench-list');
+    list.replaceChildren();
+    let group = '';
+    benchEndpoints.forEach(e => {
+      if (q && !(e.path + ' ' + e.title + ' ' + e.method + ' ' + e.group).toLowerCase().includes(q)) return;
+      if (e.group !== group) {
+        group = e.group;
+        const h = document.createElement('h2'); h.className = 'bench-group'; h.textContent = group; list.append(h);
+      }
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'bench-ep'; b.dataset.ep = e.id;
+      if (benchCurrent && benchCurrent.id === e.id) b.setAttribute('aria-current', 'true');
+      b.innerHTML = `<span class="bench-m">${esc(e.method)}</span><span class="bench-p">${esc(e.path.split('?')[0]).replace(/\//g, '/<wbr>')}</span><span class="bench-t">${esc(e.title)}${e.disruptive ? ' <span class="amber">· disruptive</span>' : ''}</span>`;
+      b.onclick = () => benchSelect(e, 0);
+      list.append(b);
+    });
+    if (!list.children.length) list.innerHTML = '<p class="cdu-small">No endpoint matches this filter.</p>';
+  }
+  function benchSetBody(obj) {
+    benchBody.value = obj == null ? '' : JSON.stringify(obj, null, 2);
+    benchValidate();
+  }
+  function benchSelect(e, exampleIndex) {
+    benchCurrent = e; benchExample = exampleIndex;
+    $('bench-method').textContent = e.method;
+    $('bench-method').className = 'bench-method' + (e.disruptive ? ' amber' : '');
+    benchPath.value = benchFillPath(e.path);
+    $('bench-note').textContent = e.note || '';
+    $('bench-note').hidden = !e.note;
+    const exBox = $('bench-examples');
+    exBox.replaceChildren();
+    e.examples.forEach((x, i) => {
+      const k = document.createElement('button');
+      k.type = 'button'; k.className = 'cdu-tab'; k.textContent = x.name;
+      k.setAttribute('aria-pressed', String(i === exampleIndex));
+      k.onclick = () => benchSelect(e, i);
+      exBox.append(k);
+    });
+    const hasBody = e.method !== 'GET' && e.method !== 'DELETE';
+    benchBody.hidden = $('bench-body-state').hidden = $('bench-format').hidden = !hasBody;
+    $('bench-stream-wrap').hidden = !e.stream;
+    benchSetBody(hasBody && e.examples[exampleIndex] ? e.examples[exampleIndex].body() : hasBody ? {} : null);
+    renderBenchList();
+  }
+  function benchValidate() {
+    const state = $('bench-body-state');
+    const raw = benchBody.value.trim();
+    let ok = true, msg = raw ? 'Valid JSON' : 'Empty body';
+    if (raw) { try { const v = JSON.parse(raw); if (benchCurrent && benchCurrent.stream) $('bench-stream').checked = v && v.stream === true; } catch (err) { ok = false; msg = 'Not valid JSON: ' + err.message; } }
+    benchBody.classList.toggle('invalid', !ok);
+    state.textContent = msg + ' · Ctrl+Enter sends';
+    state.className = 'bench-body-state' + (ok ? '' : ' red');
+    return ok;
+  }
+  benchBody.addEventListener('input', benchValidate);
+  benchBody.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); benchSend(); } });
+  benchPath.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); benchSend(); } });
+  $('bench-stream').onchange = () => {
+    let v = {};
+    try { v = JSON.parse(benchBody.value || '{}'); } catch (_) { return; }
+    if ($('bench-stream').checked) v.stream = true; else delete v.stream;
+    if (!$('bench-stream').checked && v.stream_options) delete v.stream_options;
+    benchSetBody(v);
+  };
+  $('bench-format').onclick = () => { try { benchSetBody(JSON.parse(benchBody.value || '{}')); } catch (_) { benchValidate(); } };
+  $('bench-filter').addEventListener('input', renderBenchList);
+  $('bench-curl').onclick = e => {
+    if (!benchCurrent) return;
+    const path = benchPath.value.trim();
+    const base = benchCurrent.local ? location.origin : ($('api-address').value || '').replace(/\/v1\/?$/, '');
+    const parts = [`curl${benchCurrent.stream && $('bench-stream').checked ? ' -N' : ''} -X ${benchCurrent.method} '${base}${path}'`];
+    if (!benchCurrent.local && cfgData && cfgData.engine && cfgData.engine.api_key_present) parts.push(`-H "Authorization: Bearer $NINFER_API_KEY"`);
+    if (!benchBody.hidden && benchBody.value.trim()) {
+      let compact = benchBody.value.trim();
+      try { compact = JSON.stringify(JSON.parse(compact)); } catch (_) {}
+      parts.push(`-H 'Content-Type: application/json'`, `-d '${compact.replace(/'/g, "'\\''")}'`);
+    }
+    copyText(e.currentTarget, parts.join(' \\\n  '), e.currentTarget.lastChild);
+  };
+
+  // Stream dialects: OpenAI chat chunks, Responses semantic events, Anthropic message events.
+  function benchDelta(kind, name, data, acc) {
+    if (kind === 'openai') {
+      const d = data && data.choices && data.choices[0] && data.choices[0].delta;
+      if (d) { if (d.reasoning_content) acc.reasoning += d.reasoning_content; if (d.content) acc.text += d.content; if (d.tool_calls) acc.tools += JSON.stringify(d.tool_calls); }
+    } else if (kind === 'responses') {
+      const type = (data && data.type) || name;
+      if (type === 'response.output_text.delta') acc.text += data.delta || '';
+      else if (/reasoning.*delta/.test(type)) acc.reasoning += data.delta || '';
+      if (data && data.response && data.response.id) benchLastResponseId = data.response.id;
+    } else if (kind === 'anthropic') {
+      if (data && data.type === 'content_block_delta' && data.delta) {
+        if (data.delta.type === 'text_delta') acc.text += data.delta.text || '';
+        else if (data.delta.type === 'thinking_delta') acc.reasoning += data.delta.thinking || '';
+        else if (data.delta.type === 'input_json_delta') acc.tools += data.delta.partial_json || '';
+      }
+    }
+  }
+  // The readable answer of a finished, non-streamed call, when the shape is a known one.
+  function benchTextOf(json) {
+)HTML"
+R"HTML(    if (!json || typeof json !== 'object') return null;
+    if (Array.isArray(json.choices) && json.choices[0] && json.choices[0].message) {
+      const m = json.choices[0].message;
+      return {reasoning: m.reasoning_content || '', text: m.content || '', tools: m.tool_calls ? JSON.stringify(m.tool_calls, null, 2) : ''};
+    }
+    if (json.object === 'response' && Array.isArray(json.output)) {
+      if (json.id) benchLastResponseId = json.id;
+      const acc = {reasoning: '', text: '', tools: ''};
+      json.output.forEach(item => {
+        if (item.type === 'message') (item.content || []).forEach(c => { if (c.text) acc.text += c.text; });
+        else if (item.type === 'reasoning') (item.content || item.summary || []).forEach(c => { if (c.text) acc.reasoning += c.text; });
+        else if (item.type === 'function_call') acc.tools += `${item.name}(${item.arguments || ''})\n`;
+      });
+      return acc;
+    }
+    if (json.type === 'message' && Array.isArray(json.content)) {
+      const acc = {reasoning: '', text: '', tools: ''};
+      json.content.forEach(b => { if (b.type === 'text') acc.text += b.text; else if (b.type === 'thinking') acc.reasoning += b.thinking || ''; else if (b.type === 'tool_use') acc.tools += `${b.name}(${JSON.stringify(b.input)})\n`; });
+      return acc;
+    }
+    return null;
+  }
+  // Compact JSON has no break opportunities; a space after each separator gives the wrap
+  // points at structure boundaries instead of mid-token.
+  function benchWrapJson(text) {
+    let v;
+    try { v = JSON.parse(text); } catch (_) { return text; }
+    return JSON.stringify(v).replace(/("(?:[^"\\]|\\.)*")|([,:])/g, (m, str, sep) => str ? str : sep + ' ');
+  }
+  function benchJsonHtml(text) {
+    let json;
+    try { json = JSON.parse(text); } catch (_) { return esc(text); }
+    return esc(JSON.stringify(json, null, 2)).replace(/(&quot;(?:[^&]|&(?!quot;))*?&quot;)(\s*:)?|\b(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b|\b(true|false|null)\b/g,
+      (m, str, colon, num, lit) => str ? (colon ? `<span class="j-k">${str}</span>${colon}` : `<span class="j-s">${str}</span>`) : num ? `<span class="j-n">${num}</span>` : `<span class="j-l">${lit}</span>`);
+  }
+  function renderBenchOut() {
+    document.querySelectorAll('[data-bench-tab]').forEach(t => t.setAttribute('aria-pressed', String(t.dataset.benchTab === benchTab)));
+    $('bench-event-count').textContent = benchView.events.length ? benchView.events.length.toLocaleString() : '';
+    const code = $('bench-code');
+    code.textContent = benchView.status == null ? '—' : benchView.status === 0 ? 'Failed' : 'HTTP ' + benchView.status;
+    code.className = 'bench-code' + (benchView.status == null ? '' : benchView.status >= 200 && benchView.status < 300 ? ' green' : benchView.status >= 500 || benchView.status === 0 ? ' red' : ' amber');
+    $('bench-timing').textContent = benchView.timing;
+    let html = '';
+    if (benchTab === 'text') {
+      const t = benchView.text;
+      if (!t) html = '<span class="bench-empty">No readable text for this answer. See Body.</span>';
+      else html = (t.reasoning ? `<span class="bench-label">Reasoning</span><span class="bench-reasoning">${esc(t.reasoning)}</span>\n\n` : '') + (t.tools ? `<span class="bench-label">Tool calls</span>${esc(t.tools)}\n\n` : '') + `<span class="bench-label">Answer</span>${esc(t.text || '')}`;
+    } else if (benchTab === 'events') {
+      html = benchView.events.length ? benchView.events.map(ev => `<span class="bench-ev"><span class="bench-ev-t">+${ev.t} ms</span><span class="bench-ev-n" title="${esc(ev.name)}">${esc(ev.name)}</span><span>${esc(benchWrapJson(ev.data))}</span></span>`).join('') : '<span class="bench-empty">This answer was not a stream.</span>';
+    } else if (benchTab === 'headers') {
+      html = benchView.headers.length ? benchView.headers.map(([k, v]) => `<span class="j-k">${esc(k)}</span>: ${esc(v)}`).join('\n') : '<span class="bench-empty">No response yet.</span>';
+    } else {
+      html = benchView.body ? (benchView.kind === 'json' ? benchJsonHtml(benchView.body) : esc(benchView.body)) : '<span class="bench-empty">No body.</span>';
+    }
+    const stick = benchOut.scrollTop + benchOut.clientHeight >= benchOut.scrollHeight - 8;
+    benchOut.innerHTML = html;
+    if (benchAbort && stick) benchOut.scrollTop = benchOut.scrollHeight;
+  }
+  document.querySelectorAll('[data-bench-tab]').forEach(t => { t.onclick = () => { benchTab = t.dataset.benchTab; renderBenchOut(); }; });
+
+  function benchMs(ms) { return ms >= 1000 ? (ms / 1000).toFixed(2) + ' s' : Math.round(ms) + ' ms'; }
+  async function benchSend(confirmed) {
+    if (!benchCurrent || benchAbort) return;
+    const e = benchCurrent;
+    const path = benchPath.value.trim();
+    const placeholder = path.match(/\{[^}]+\}/);
+    if (!path.startsWith('/')) { benchView = {...benchView, status: null, timing: 'The path must start with /.'}; renderBenchOut(); return; }
+    if (placeholder) { benchView = {...benchView, status: null, timing: `Replace ${placeholder[0]} in the path first.`}; renderBenchOut(); return; }
+    const hasBody = !benchBody.hidden;
+    if (hasBody && !benchValidate()) { benchView = {...benchView, status: null, timing: 'Fix the JSON body before sending.'}; renderBenchOut(); return; }
+    if (e.disruptive && !confirmed) {
+      showConfirmModal('bench', $('bench-send'));
+      modalTitle.innerHTML = `Send <span class="dialog-path">${esc(e.method)} ${esc(path.split('?')[0])}</span>?`;
+      modalDesc.textContent = e.note || 'This request changes the engine’s state.';
+      modalConfirmBtn.firstChild.textContent = 'Send';
+      return;
+    }
+    const url = (e.local ? '' : '/api/engine') + path;
+    const ctl = new AbortController();
+    benchAbort = ctl;
+    $('bench-send').hidden = true; $('bench-stop').hidden = false;
+    const kind = e.stream || '';
+    benchView = {status: null, timing: 'Waiting for the engine…', text: null, body: '', events: [], headers: [], kind: ''};
+    renderBenchOut();
+    const t0 = performance.now();
+    let tHead = 0, tFirst = 0, bytes = 0;
+    const record = {endpoint: e.id, method: e.method, path, body: hasBody ? benchBody.value : '', example: benchExample};
+    try {
+      const res = await fetch(url, {method: e.method, signal: ctl.signal, headers: Object.assign({'X-NInfer-Supervisor': '1'}, hasBody ? {'Content-Type': 'application/json'} : {}), body: hasBody && benchBody.value.trim() ? benchBody.value : undefined});
+      tHead = performance.now() - t0;
+      benchView.status = res.status;
+      benchView.headers = [...res.headers.entries()];
+      const type = res.headers.get('content-type') || '';
+      const rid = res.headers.get('x-request-id') || res.headers.get('request-id') || '';
+      const timing = () => [`headers ${benchMs(tHead)}`, tFirst ? `first event ${benchMs(tFirst)}` : '', `total ${benchMs(performance.now() - t0)}`, `${bytes.toLocaleString()} B`, rid ? `id ${rid}` : ''].filter(Boolean).join(' · ');
+      if (type.includes('text/event-stream') && res.body) {
+        const acc = {reasoning: '', text: '', tools: ''};
+        benchView.text = acc; benchView.kind = 'sse';
+        if (benchTab === 'body') benchTab = 'text';
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '', last = 0;
+        for (;;) {
+          const {value, done} = await reader.read();
+          if (done) break;
+          bytes += value.length;
+          buffer += decoder.decode(value, {stream: true}).replace(/\r\n/g, '\n');
+          let cut;
+          while ((cut = buffer.indexOf('\n\n')) >= 0) {
+            const block = buffer.slice(0, cut); buffer = buffer.slice(cut + 2);
+            let name = 'message'; const data = [];
+            block.split('\n').forEach(line => {
+              if (line.startsWith(':')) { name = 'comment'; data.push(line.slice(1).trim()); }
+              else if (line.startsWith('event:')) name = line.slice(6).trim();
+              else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+            });
+            const payload = data.join('\n');
+            if (!tFirst && name !== 'comment') tFirst = performance.now() - t0;
+            benchView.events.push({t: Math.round(performance.now() - t0), name, data: payload});
+            if (payload && payload !== '[DONE]' && name !== 'comment') { try { benchDelta(kind, name, JSON.parse(payload), acc); } catch (_) {} }
+          }
+          benchView.body += decoder.decode();
+          benchView.timing = timing();
+          if (performance.now() - last > 80) { last = performance.now(); renderBenchOut(); }
+        }
+        benchView.body = benchView.events.map(ev => (ev.name !== 'message' ? 'event: ' + ev.name + '\n' : '') + 'data: ' + ev.data).join('\n\n');
+      } else {
+        const text = await res.text();
+        bytes = new TextEncoder().encode(text).length;
+        benchView.body = text;
+        benchView.kind = type.includes('json') ? 'json' : 'text';
+        let parsed = null;
+        if (benchView.kind === 'json') { try { parsed = JSON.parse(text); } catch (_) {} }
+        benchView.text = benchTextOf(parsed);
+        if (benchTab === 'events' || (benchTab === 'text' && !benchView.text)) benchTab = 'body';
+      }
+      benchView.timing = timing();
+    } catch (err) {
+      if (err.name === 'AbortError') benchView.timing = (benchView.timing ? benchView.timing + ' · ' : '') + 'stopped';
+      else { benchView.status = 0; benchView.timing = 'The request did not complete: ' + err.message; }
+    } finally {
+      benchAbort = null;
+      $('bench-send').hidden = false; $('bench-stop').hidden = true;
+      record.view = JSON.parse(JSON.stringify(benchView));
+      record.when = new Date();
+      benchHistory.unshift(record);
+      benchHistory.length = Math.min(benchHistory.length, 12);
+      renderBenchHistory();
+      renderBenchOut();
+    }
+  }
+  $('bench-send').onclick = () => benchSend(false);
+  $('bench-stop').onclick = () => { if (benchAbort) benchAbort.abort(); };
+  function renderBenchHistory() {
+    const list = $('bench-history');
+    $('bench-history-clear').hidden = !benchHistory.length;
+    if (!benchHistory.length) { list.innerHTML = '<li class="cdu-small">Requests you send appear here.</li>'; return; }
+    list.replaceChildren(...benchHistory.map(r => {
+      const li = document.createElement('li');
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'bench-hist';
+      const st = r.view.status;
+      b.innerHTML = `<span class="${st >= 200 && st < 300 ? 'green' : st == null ? 'dim' : st >= 500 || st === 0 ? 'red' : 'amber'}">${st == null ? '—' : st === 0 ? 'ERR' : st}</span><span>${esc(r.method)} ${esc(r.path.split('?')[0])}</span><span class="dim">${r.when.toLocaleTimeString()}</span>`;
+      b.onclick = () => {
+        const e = benchEndpoints[r.endpoint];
+        benchSelect(e, r.example);
+        benchPath.value = r.path;
+        if (r.body) { benchBody.value = r.body; benchValidate(); }
+        benchView = JSON.parse(JSON.stringify(r.view));
+        renderBenchOut();
+      };
+      li.append(b);
+      return li;
+    }));
+  }
+  $('bench-history-clear').onclick = () => { benchHistory.length = 0; renderBenchHistory(); };
+  async function benchInit() {
+    if (benchReady) return;
+    benchReady = true;
+    benchSelect(benchEndpoints.find(e => e.path === '/v1/chat/completions'), 0);
+    try {
+      const res = await fetch('/api/engine/v1/models', {headers: {'X-NInfer-Supervisor': '1'}});
+      const data = await res.json();
+      if (res.ok && data && Array.isArray(data.data) && data.data[0]) {
+        benchServedModel = data.data[0].id;
+        if (benchCurrent && benchCurrent.examples.length) benchSelect(benchCurrent, benchExample);
+      }
+    } catch (_) {}
+    renderBenchAuth();
+  }
+  function renderBenchAuth() {
+    const el = $('bench-auth');
+    if (!cfgData) { el.textContent = 'Checking authentication…'; return; }
+)HTML"
+R"HTML(    el.textContent = cfgData.engine && cfgData.engine.api_key_present ? 'The supervisor adds the engine’s API key' : 'No API key configured';
+  }
+
   fetch('/api/config').then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).then(d => {
     cfgData = d;
     updateEngineControls();
@@ -2794,12 +3371,14 @@ R"HTML(      el.className = 'lsk-sum' + (n ? ' amber' : '');
     $('kpi-engine-port').textContent = (d.engine && d.engine.engine_port) ? ':' + d.engine.engine_port : '—';
     renderConfig();
     renderSettingsIndex();
+    renderBenchAuth();
   }).catch(() => {
     cfgBody.innerHTML = '<p class="cdu-small">Settings could not be loaded. Check that you opened the dashboard on the engine’s computer, then reload the page.</p>';
   });
 
   window.addEventListener('beforeunload', e => { if (cfgDirtyCount() || reserveDraft != null || feDirty()) { e.preventDefault(); e.returnValue = ''; } });
   setPendingRestart(pendingRestartPid);
+  applyDisplay(document.documentElement.dataset.display || 'auto');
   selectView();
   // One stream powers every view; transport failures are visible and recover automatically.
   refreshModelCatalog();

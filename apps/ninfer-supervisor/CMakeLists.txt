@@ -12,6 +12,7 @@ add_executable(ninfer-supervisor WIN32
   collector.cpp
   server.cpp
   frontend_server.cpp
+  engine_proxy.cpp
   tray.cpp)
 target_include_directories(ninfer-supervisor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ninfer-supervisor PRIVATE ninfer::httplib ninfer::json CUDA::cudart)

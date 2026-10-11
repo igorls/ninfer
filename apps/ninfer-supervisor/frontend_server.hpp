@@ -1,6 +1,7 @@
 #pragma once
 
 #include "config.hpp"
+#include "engine_proxy.hpp"
 #include "frontends.hpp"
 
 #include <nlohmann/json.hpp>
@@ -14,10 +15,6 @@
 #include <vector>
 
 namespace ninfer::supervisor {
-
-// The engine a frontend forwards to, read for every request so a key file or port changed
-// through the dashboard applies without restarting the supervisor.
-using EngineSpecProvider = std::function<EngineSpec()>;
 
 enum class FrontendState : std::uint8_t {
     Stopped,
