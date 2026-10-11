@@ -385,7 +385,8 @@ were produced with recipe overrides and are not committed recipes.
 | `preserve_thinking` server default (`3cb5e718`) | unset, so the Qwen3.8 template keeps returned closed-turn reasoning | `false` unless a request or `--preserve-thinking` asks | Parity with the pre-v3 fork (Igor, 2026-09-28) |
 | Unsupported reasoning effort | passed to the chat template, whose `raise_exception` comes back as HTTP 400 `invalid_prompt` on `messages` with the interpreter's source trace | checked before rendering against the efforts observed from the loaded template at startup: HTTP 400 `reasoning_effort_not_supported` on the effort field, listing the supported efforts; template errors carry no trace | Restores the pre-v3 fork contract (`8264394c`) on Chat Completions, Responses and Anthropic Messages; the protocol vocabulary is unchanged |
 | Continued final assistant turn (`737b570a`) | rendered without a think block | rendered behind the empty think block the generation prompt carries (thinking off) | `/v1/score` text form and assistant prefill are conditioned like a generated answer |
-
+| Request model names (`d17f6a52`) | the public model id only | `--model-alias NAME` (repeatable) adds names that `GET /v1/models` lists; every server also accepts `default`; responses report the public id | One client configuration keeps working across artifacts and renamed ids. Added 2026-10-11 |
+| Chat Completions `allowed_tools` entries (`d17f6a52`) | flat `{"type":"function","name":...}` only | also OpenAI's documented `{"type":"function","function":{"name":...}}` | The documented shape returned HTTP 400 `function name must be a string`; worth offering upstream |
 | `POST /v1/rerank` | no rerank route | Jina-shaped rerank scored by an in-process System One Choice; `GET /v1/models` advertises `ninfer-choice-rerank-v1`; missing or wrong API key is HTTP 401 with the OpenAI error object | Added 2026-10-02. `return_documents` defaults to true. Choice labels stay off the public response |
 
 ## Dropped
@@ -472,8 +473,30 @@ Windows GPU runtime qualification (October 6-7, 2026) ran on an RTX PRO 6000 Bla
 Workstation Edition beside the desktop: the 14 Flash-Next Op tests, the qwen4_exp loading test
 and all 17 real-artifact Engine cases pass, and `ninfer_bench` matches the G4. The serving
 configuration the G4 used (context 131072, KV capacity 262144, concurrency 8) does not fit beside
-the desktop: startup correctly refuses a 9.8 GB runtime reservation with 7.5 GB available. The
-Windows serving check with a smaller KV capacity remains open.
+the desktop: startup correctly refuses a 9.8 GB runtime reservation with 7.5 GB available.
+
+Windows serving on this runtime (October 11, 2026, release build `27cd69b2`, LGPL FFmpeg) uses
+context 131072, KV capacity 262144, concurrency 4, prefill chunk 8192, FP8 KV, Vision and a 6 GiB
+desktop reserve; startup leaves 10.9 GB free without speculation and 8.7 GB with MTP K=3. An
+HTTP API suite of about 120 checks across Chat Completions, Responses, Anthropic Messages, score,
+rerank, System One, Vision, tools, structured output, logprobs, caching, concurrency, cancellation
+and needles at 31K and 107K tokens passes on both, except the multi-turn reuse check described
+under open questions and a greedy empty answer under `tool_choice:"none"` (model behaviour). Greedy
+outputs are byte-identical with and without MTP; speeds are in
+[performance](../performance.md#windows-serving-mtp-draft-count-2026-10-11). The artifact's official
+template rejects developer and later system messages, so serving uses `--chat-template` with the
+maintained `qwen3_8.jinja`.
+
+Native Windows GPU tests at `27cd69b2`: 156 of 159 CTest entries pass without artifacts. The two
+JSON Schema and tool-schema Python oracles time out in their `--probe` subprocess, as they do with
+binaries built at `2f08a0b2`. `hyper_connection` failed once with a host `bad allocation` while
+host RAM was nearly exhausted and passes on rerun. With the Flash-Next artifact, 17 of 21 Engine
+cases pass in the full run. The other four failed in `cudaMallocHost`: the first reported out of
+memory, the next three `cudaErrorAlreadyMapped`. In fresh processes `mtp long concurrent reuse`,
+`mtp shared prefix promotion` and `mtp staged materialization ledger` pass alone, while
+`long concurrent reuse` (no speculation) fails again with `cudaErrorAlreadyMapped`. That case passes
+on the Linux G4 at this revision; its Windows cause is open. The Qwen3.8-27B real-artifact tests were
+not run on Windows at this revision.
 
 Three fatal engine failures found on October 6 are fixed
 ([causes and evidence](../research/flash-next-v3-port-2026-09-29.md#fatal-engine-failures-found-2026-10-06-fixed-2026-10-07)):
@@ -501,6 +524,17 @@ row-256 KV are the supported cache representations.
   uncached prefill and complete request latency reported separately.
 
 ## Open qualification questions
+
+- Once the context cache is full, a plain multi-turn chat (thinking off, closed-turn reasoning
+  dropped from history) reuses only the engine-added checkpoint at the end of the system message.
+  Each turn's turn-closure input point is an optional save without demand evidence. Its admission
+  budget is its coverage over the deepest surviving fallback, which includes the system point the
+  same request has just published, and that budget stays below every victim's recovery loss. On
+  Flash-Next v3 at `27cd69b2` with a full cache, turns 2 to 5 of a conversation with a
+  5.2K-token system message reused 5,182 tokens each while their prompts grew to 7,292 tokens.
+  Tool loops are unaffected because their generation endpoint stays a prefix. The rule and its
+  protecting test (`test_inherited_owner_heat_cannot_spend_a_full_other_continuation`) are
+  upstream's; changing it needs a retention-policy decision.
 
 - Before the October 8 runtime sync, `prefix_real`'s Host-restore check failed on the
   Qwen3.8-27B NVFP4 artifact identically on the

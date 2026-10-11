@@ -254,6 +254,50 @@ At chunk 8192 the plain-decode rows are 7,598 / 11,475 / 10,922 tok/s prefill an
 Edition figures above. The fixed corpus makes the MTP acceptance unrepresentative, as noted for
 the G4.
 
+### Windows serving, MTP draft count (2026-10-11)
+
+Release `2026.10.11-v3port.11` (`27cd69b2`, LGPL FFmpeg, MSVC 19.51, CUDA 13.3) on the RTX PRO 6000
+Workstation Edition beside the desktop. Server: `--max-context 131072 --kv-capacity 262144
+--max-concurrency 4 --prefill-chunk 8192 --kv-dtype fp8 --vision --desktop-reserve-gib 6`, with
+and without `--spec mtp --draft-tokens 3`. Rates are the server's own `timings.predicted_per_second`
+(decode only). Single-request rows ran on an otherwise idle server, three greedy repetitions each,
+median shown; every repetition of a row produced the same text, and both servers produced
+byte-identical text for every row.
+
+| Workload | Output tokens | No speculation | MTP K=3 | Change | MTP acceptance |
+|---|---:|---:|---:|---:|---:|
+| Chat explanation | 400 | 108.6 | 116.2 | +7% | 46% |
+| Code with tests | 493 | 108.8 | 177.4 | +63% | 89% |
+| Documentation summary (1,842-token prompt) | 400 | 105.5 | 133.9 | +27% | 61% |
+| JSON Schema extraction | 116 | 108.2 | 157.7 | +46% | 80% |
+| Thinking arithmetic | 440 | 105.2 | 139.8 | +33% | 64% |
+| `logprobs` with `top_logprobs: 3` | 200 | 83.8 | 44.7 | −47% | no drafts |
+| `logprobs` without `top_logprobs` | 200 | 97.9 | 110.6 | +13% | 44% |
+| Four concurrent 300-token chat requests, aggregate | 1,200 | 225.6 | 189.7 | −16% | — |
+
+A `top_logprobs` request reads the full vocabulary on the host and is offered no drafts, but on an
+MTP server it still pays the K+1-wide verification, hence the loss. Four concurrent low-acceptance
+requests lose aggregate throughput for the same reason.
+
+The draft count was chosen on a four-concurrent document-extraction workload with long outputs
+(median 600-740 tokens) over six-minute windows; per-request decode medians come from the engine
+log and aggregate rates from five-second windows with four decode-ready requests:
+
+| Draft K | Requests | Per-request median tok/s | Aggregate median tok/s | Acceptance |
+|---:|---:|---:|---:|---:|
+| 0 | 109 | 80.4 | 298.6 | — |
+| 2 | 134 | 95.6 | 334.7 | 89% |
+| 3 | 136 / 476 | 103.0 / 104.1 | 332.9 / 350.5 | 82% |
+| 4 | 162 | 98.0 | 329.7 | 77% |
+| 5 | 152 | 96.7 | 336.1 | 72% |
+
+K=3 has the best per-request median in both of its windows (the second figure is a longer window
+that also carried API-suite traffic). The aggregate differences between K=2 and K=5 are within
+the variation between K=3's two windows. The workload mix changes over time, so these are
+indicative rather than paired measurements. MTP is the better default for interactive, code and
+structured work and for high-acceptance batches; a server dominated by `top_logprobs` requests or
+by concurrent low-acceptance chat is faster without speculation.
+
 ### Prefill chunk invariance (2026-10-06)
 
 Removing M-dependent split-K (GDN control projection) and final-wave split-K (Flash-Next FP8
