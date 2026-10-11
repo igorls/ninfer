@@ -164,8 +164,14 @@ R"HTML(.context-note{font-size:12px;line-height:1.65;margin-top:14px}
 .client-meta{font-size:12px;color:var(--text-secondary);font-variant-numeric:tabular-nums}
 .client-reuse{text-align:right;font-size:14px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
 .client-reuse span{display:block;font-size:11px;font-weight:400;color:var(--text-muted)}
-.client-reuse.poor{color:var(--warn)}
-.client-note{grid-column:1/-1;font-size:11px;color:var(--warn);overflow-wrap:anywhere}
+.client-timings{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:12px 32px;margin:8px 0 0;font-variant-numeric:tabular-nums}
+.client-timings dt{font-size:12px;color:var(--text-secondary)}
+.client-timings dd{margin:2px 0 0;font-size:14px}
+.client-note{grid-column:1/-1;font-size:12px;color:var(--text-secondary);overflow-wrap:anywhere}
+.client-note.pressure{color:var(--warn)}
+.client-details{grid-column:1/-1;font-size:12px;color:var(--text-secondary)}
+.client-details summary{cursor:pointer;width:fit-content;padding:4px 0}
+.client-details p{margin:6px 0;max-width:72ch}
 @media(max-width:640px){.client-row{grid-template-columns:minmax(0,1fr)}.client-reuse{text-align:left}}
 .throughput-surface{margin:22px 0 0}
 .throughput-surface .chart-wrapper{height:190px}
@@ -524,9 +530,9 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
       <p class="context-note">Measured by the engine while the work happens, so long answers are counted as they stream rather than when they finish. Every token the model produces counts, reasoning included. Prompt reading runs far faster than generation, so the two lines use separate scales.</p>
     </section>
     <section class="surface clients-surface" aria-labelledby="clients-title" id="clients-panel" hidden>
-      <div class="section-heading"><div><h2 id="clients-title">Connected apps</h2><p id="clients-sub">Which apps are using your engine, and how well each one reuses its conversation.</p></div><span id="clients-count" class="kpi-badge">—</span></div>
+      <div class="section-heading"><div><h2 id="clients-title">Client activity</h2><p id="clients-sub">Observed requests, queue waits, and prompt processing.</p></div><span id="clients-count" class="kpi-badge">—</span></div>
       <div id="clients-list"></div>
-      <p class="context-name context-note">Reuse is how much of each prompt the engine could keep instead of reading again. A high number means an app is resending conversations the engine already holds; a low one means it is paying for the whole history every turn.</p>
+      <p class="context-name context-note">Reuse counts matching prompt tokens restored from cache. Computed tokens include new input. A full prefill alone does not reveal why reuse was unavailable.</p>
     </section>
     <div class="overview-configure">
     <section id="model-catalog" class="model-catalog" aria-labelledby="catalog-title" hidden>
@@ -948,52 +954,62 @@ R"HTML(    document.title = document.getElementById('view-' + activeView).queryS
     const list = document.getElementById('clients-list');
     const panel = document.getElementById('clients-panel');
     const clients = Array.isArray(reqs.clients) ? reqs.clients : [];
+    const expanded = new Set(Array.from(list.querySelectorAll('details[open]'), item => item.closest('.client-row').dataset.client));
+    const focusedClient = document.activeElement?.matches('.client-details summary') ? document.activeElement.closest('.client-row').dataset.client : null;
     panel.hidden = clients.length === 0;
     if (!clients.length) return;
     const mins = reqs.clients_window_minutes || 15;
-    document.getElementById('clients-count').textContent = clients.length === 1 ? '1 app' : `${clients.length} apps`;
-    document.getElementById('clients-sub').textContent = `Apps that sent a request in the last ${mins} minutes, busiest first.`;
+    const restarts = reqs.client_engine_starts || 0;
+    document.getElementById('clients-count').textContent = `${clients.length} app${clients.length === 1 ? '' : 's'}`;
+    document.getElementById('clients-sub').textContent = `Observed requests in the last ${mins} minutes${restarts ? ` · ${restarts} engine start${restarts === 1 ? '' : 's'}` : ''}${reqs.client_window_limited ? ' · observation limit reached' : ''}.`;
+    const duration = value => Number.isFinite(value) ? (value >= 1000 ? `${(value / 1000).toFixed(1)} s` : `${Math.round(value)} ms`) : 'Unavailable';
+    const tokens = value => Number(value).toLocaleString();
+    const reasons = {source_invalid:'Selected checkpoint was invalid',source_revoked:'Selected checkpoint was revoked',cost_changed:'Restore cost changed',capacity_limit:'Restore exceeded capacity',isolated_capacity:'Restore could not fit in isolated capacity'};
     list.replaceChildren();
     for (const c of clients) {
-      const row = document.createElement('div');
-      row.className = 'client-row';
+      const row = document.createElement('div'); row.className = 'client-row'; row.dataset.client = c.name || '';
       const left = document.createElement('div');
-      const name = document.createElement('div');
-      name.className = 'client-name';
-      // An app that sends no User-Agent cannot be named, and saying so is more
-      // useful than inventing a label or hiding the row.
+      const name = document.createElement('div'); name.className = 'client-name';
       name.textContent = c.name || 'Unidentified app';
       if (c.tool_count > 0) {
-        const badge = document.createElement('span');
-        badge.className = 'kpi-badge';
-        badge.textContent = `${c.tool_count} tools`;
-        name.append(badge);
+        const badge = document.createElement('span'); badge.className = 'kpi-badge'; badge.textContent = `${c.tool_count} tools`; name.append(badge);
       }
-      const meta = document.createElement('div');
-      meta.className = 'client-meta';
-      const reqCount = `${c.requests} request${c.requests === 1 ? '' : 's'}`;
-      const ttft = c.ttft_ms_mean > 0 ? ` · ${Math.round(c.ttft_ms_mean)} ms to first token` : '';
-      meta.textContent = reqCount + ttft;
+      const meta = document.createElement('div'); meta.className = 'client-meta';
+      meta.textContent = `${c.completed} completed · ${c.failed} failed · ${c.cancelled} cancelled · ${c.interrupted} unfinished at restart · ${c.active} awaiting outcome`;
       left.append(name, meta);
-      const reuse = document.createElement('div');
-      const pct = Number.isFinite(c.reuse_percent) ? c.reuse_percent : 0;
-      reuse.className = 'client-reuse' + (pct < 50 ? ' poor' : '');
-      reuse.textContent = `${pct.toFixed(0)}%`;
-      const cap = document.createElement('span');
-      cap.textContent = 'reused';
-      reuse.append(cap);
+      const reuse = document.createElement('div'); reuse.className = 'client-reuse';
+      reuse.textContent = Number.isFinite(c.reuse_percent) ? `${c.reuse_percent.toFixed(0)}%` : '—';
+      const caption = document.createElement('span'); caption.textContent = 'prompt tokens reused'; reuse.append(caption);
       row.append(left, reuse);
-      // Only worth calling out when it is costing something real and repeatedly.
-      if (c.from_root > 1 && pct < 50) {
-        const note = document.createElement('div');
-        note.className = 'client-note';
-        note.textContent = `Started over ${c.from_root} times, re-reading ${(c.refill_tokens / 1000).toFixed(0)}k tokens. This app is not reusing its conversation, which slows it down and takes capacity from the others.`;
+      const timing = document.createElement('dl'); timing.className = 'client-timings';
+      const queueIsFirst = c.queue_ms?.samples > 0 && c.queue_first_output_samples === c.queue_ms.samples;
+      for (const [label, metric] of [['First token',c.ttft_ms],[queueIsFirst ? 'Queue before first token' : 'Request queue wait',c.queue_ms],['Prefill work',c.prefill_ms]]) {
+        const item = document.createElement('div');
+        const term = document.createElement('dt'); term.textContent = label;
+        const value = document.createElement('dd'); value.textContent = Number.isFinite(metric?.mean) ? `${duration(metric.mean)} avg · ${duration(metric.p95)} p95` : 'Unavailable';
+        item.append(term, value); timing.append(item);
+      }
+      row.append(timing);
+      if ((c.queue_ms?.mean || 0) >= 1000 || c.admission_timeouts > 0) {
+        const note = document.createElement('p'); note.className = 'client-note pressure';
+        note.textContent = `${Number.isFinite(c.queue_ms?.mean) ? `Recorded queue wait averages ${duration(c.queue_ms.mean)}. ` : ''}${c.admission_timeouts ? `${c.admission_timeouts} request${c.admission_timeouts === 1 ? '' : 's'} expired before admission.` : 'Queue wait and prefill are measured separately.'}`;
         row.append(note);
       }
-      list.append(row);
+      const details = document.createElement('details'); details.className = 'client-details';
+      details.open = expanded.has(c.name || '');
+      const summary = document.createElement('summary'); summary.textContent = 'Cache and request evidence'; details.append(summary);
+      const evidence = [];
+      if (c.computed_samples > 0) evidence.push(`${tokens(c.computed_tokens)} prompt tokens computed across ${c.computed_samples} requests; this includes new input and recovery work.`);
+      evidence.push(`Cache-hit observations: ${c.cache_samples}. Timing observations: ${c.ttft_ms?.samples || 0} first-token, ${c.queue_ms?.samples || 0} queue, ${c.prefill_ms?.samples || 0} prefill.`);
+      if (c.full_prefills) evidence.push(`${c.full_prefills} full prefill${c.full_prefills === 1 ? '' : 's'}; ${c.unexplained_full_prefills} with no recorded cause${c.reuse_disabled_prefills ? `, ${c.reuse_disabled_prefills} with prefix reuse disabled` : ''}.`);
+      for (const [reason, count] of Object.entries(c.fallbacks || {})) evidence.push(`${reasons[reason] || `Admission fallback: ${reason}`}: ${count} request${count === 1 ? '' : 's'}.`);
+      if (c.engine_instances > 1) evidence.push(`Observations span ${c.engine_instances} engine instances. Each engine start clears its resident cache.`);
+      evidence.push('Tool-definition changes and conversation changes are not diagnosed by these counters.');
+      for (const text of evidence) { const p = document.createElement('p'); p.textContent = text; details.append(p); }
+      row.append(details); list.append(row);
+      if (focusedClient === (c.name || '')) summary.focus({ preventScroll: true });
     }
   }
-
   function drawThroughput(ser) {
     if (!ser || !isDocumentVisible || activeView !== 'overview') return;
     const t = ser.t_ms || [], dec = ser.decode_tok_s || [], pre = ser.prefill_tok_s || [];

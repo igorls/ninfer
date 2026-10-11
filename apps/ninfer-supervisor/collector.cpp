@@ -334,7 +334,10 @@ void Collector::poll_request_log(Collected& out) {
         // Aged here as well as on every poll, so the list never shows a client that left while
         // the engine was idle and no record arrived to trigger the poll's aging.
         age_client_window_locked();
-        out.requests.clients                = summarize_clients(client_window_);
+        const auto activity = clients_.summary();
+        out.requests.clients = activity.at("clients");
+        out.requests.client_engine_starts = activity.at("engine_starts").get<std::uint64_t>();
+        out.requests.client_window_limited = activity.at("limited").get<bool>();
         out.requests.clients_window_minutes = static_cast<int>(kClientWindowMs / 60000);
     }
 }
@@ -507,45 +510,7 @@ void Collector::observe_loop() {
 // history would fill the ring with samples from before this supervisor could have been
 // watching, and the chart claims to be live.
 void Collector::fold_live_line_locked(std::string_view line) {
-    // request_start names the client; request_done carries what it cost. The
-    // pair is joined on request_id so the panel can attribute re-prefills to
-    // the app responsible for them.
-    if (jsonl_event_is(line, "request_start")) {
-        try {
-            const auto j = nlohmann::json::parse(line);
-            const auto& r = j.at("request");
-            pending_clients_.insert_or_assign(
-                r.value("request_id", std::uint64_t{0}),
-                std::pair{r.value("client", std::string{}), r.value("tool_count", 0)});
-            // An engine that dies mid-request leaves its starts unmatched. Cap
-            // the map so a crash loop cannot grow it without bound.
-            if (pending_clients_.size() > 512) { pending_clients_.clear(); }
-        } catch (...) {}
-        return;
-    }
-    if (jsonl_event_is(line, "request_done")) {
-        try {
-            const auto j  = nlohmann::json::parse(line);
-            const auto& r = j.at("result");
-            const auto id = j.at("request").value("request_id", std::uint64_t{0});
-            ClientRequest c;
-            c.t_ms          = j.value("timestamp_unix_ms", std::int64_t{0});
-            c.prompt_tokens = r.value("prompt_tokens", std::uint64_t{0});
-            c.refill_tokens = r.value("computed_prefill_tokens", std::uint64_t{0});
-            const std::string path = r.value("prefix_reuse_path", std::string{});
-            c.from_root = path == "root" || path == "full_reset";
-            c.ttft_ms   = j.contains("timings_seconds")
-                              ? j.at("timings_seconds").value("ttft", 0.0) * 1000.0
-                              : 0.0;
-            if (const auto it = pending_clients_.find(id); it != pending_clients_.end()) {
-                c.client     = it->second.first;
-                c.tool_count = it->second.second;
-                pending_clients_.erase(it);
-            }
-            if (c.t_ms != 0) { client_window_.push_back(std::move(c)); }
-        } catch (...) {}
-        return;
-    }
+    clients_.fold(line);
     if (!jsonl_event_is(line, "throughput")) { return; }
     try {
         const auto j = nlohmann::json::parse(line);
@@ -566,9 +531,7 @@ void Collector::fold_live_line_locked(std::string_view line) {
 // rather than holding its place in the list.
 void Collector::age_client_window_locked() {
     const std::int64_t horizon = now_ms() - kClientWindowMs;
-    while (!client_window_.empty() && client_window_.front().t_ms < horizon) {
-        client_window_.pop_front();
-    }
+    clients_.expire(horizon);
 }
 
 void Collector::reset_request_log_locked() {
@@ -585,8 +548,7 @@ void Collector::reset_request_log_locked() {
 
 void Collector::reset_live_request_log_locked() {
     throughput_.clear();
-    pending_clients_.clear();
-    client_window_.clear();
+    clients_ = ClientActivityLog{};
 }
 
 // Routes what the tail reads. History feeds the insights and the request panel's lines older
@@ -612,6 +574,10 @@ struct Collector::RequestLogSink {
         // A file that replaced the one the supervisor started with is new as a whole: its
         // window is live data, as it was when the throughput tail started such a file at 0.
         if (gen.number > 1) { fold_live(line); }
+        else {
+            std::lock_guard lock(c.mu_);
+            c.clients_.fold(line);
+        }
     }
     void live(std::string_view line) {
         note_recent(line);

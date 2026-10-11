@@ -45,6 +45,20 @@ log is never trimmed, so the Supervisor reads an existing one once, in the backg
 starts (about 8 s for 750 MiB) and the findings show that progress until it finishes; after that
 it reads only the records the engine appends.
 
+**Client activity** reports observed requests over a rolling 15-minute window, grouped by
+User-Agent. Completed, cancelled, failed, unfinished-at-restart and awaiting-outcome requests are separate; admission
+timeouts are counted explicitly. First-token, queue and prefill timings include means,
+p95 values and sample counts. Queue timing is labelled as first-output or whole-request
+according to the recorded boundary. Missing measurements remain unavailable.
+
+Reuse is the recorded cache-hit token count divided by prompt tokens; computed tokens
+include new input and recovery work. Full prefills do not diagnose changed conversations
+or tool definitions. The evidence disclosure reports explicit admission fallback reasons,
+disabled reuse, unrecorded causes and engine-instance boundaries. Requests are joined by
+engine instance and request ID, so restarting the engine cannot mix client attribution.
+Troubleshooting also uses recorded queue timings; request total already includes queue
+wait and must not be subtracted from start/done wall time to infer it.
+
 The installed configuration is the active authority. Changes to the original source JSON do not
 alter the running installation. The dashboard saves model switches and settings to the installed
 copy. `-InstallDir` and `-DataDir` select custom app/data directories; keep them separate.

@@ -257,6 +257,8 @@ private:
         int mixed             = 0;
         int unpaired          = 0;
         double queue_wait_sum = 0;
+        int queue_samples = 0;
+        int first_queue_samples = 0;
         double prepare_sum    = 0;
         double prefill_sum    = 0;
         double decode_sum     = 0;
@@ -572,16 +574,22 @@ inline void RequestLogInsights::fold_done(const nlohmann::json& done, std::int64
     b_.total_sum += total;
 
     const auto it = open_starts_.find(join);
-    if (it == open_starts_.end()) {
-        ++b_.unpaired;
-        return;
+    if (it == open_starts_.end()) ++b_.unpaired;
+    else open_starts_.erase(it);
+    // Total already includes admission wait. Subtracting it from start/done wall time
+    // measures log/transport overhead and hid the observed 20–30 second queues.
+    const auto first = done.find("first_output_timing");
+    const bool first_scope = first != done.end() && first->is_object();
+    const auto engine = first_scope ? first->value("engine", nlohmann::json::object()) : done.value("engine_timing", nlohmann::json::object());
+    const auto queue = engine.find("queue_wait_seconds");
+    const bool queue_known = queue != engine.end() && queue->is_number() && std::isfinite(queue->get<double>()) && queue->get<double>() >= 0;
+    const double queue_wait = queue_known ? queue->get<double>() : 0;
+    if (queue_known) {
+        b_.queue_wait_sum += queue_wait;
+        ++b_.queue_samples;
+        if (first_scope) ++b_.first_queue_samples;
     }
-    const double wall_s = static_cast<double>(ts - it->second) / 1000.0;
-    open_starts_.erase(it);
-    double queue_wait = wall_s - total;
-    if (queue_wait < 0.0) { queue_wait = 0.0; }
-    b_.queue_wait_sum += queue_wait;
-    const bool queued = queue_wait >= 0.020 && wall_s > 0.0 && queue_wait >= 0.25 * wall_s;
+    const bool queued = queue_known && queue_wait >= 0.020 && total > 0.0 && queue_wait >= 0.25 * total;
     if (queued) {
         ++b_.queued;
         if (b_.queued_ids.size() < kSamples) { b_.queued_ids.push_back(id); }
@@ -759,7 +767,7 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
     }
 
     const double n_done       = static_cast<double>(dones_);
-    const double mean_queue   = paired > 0 ? b_.queue_wait_sum / paired : 0.0;
+    const double mean_queue   = b_.queue_samples > 0 ? b_.queue_wait_sum / b_.queue_samples : 0.0;
     const double mean_prefill = b_.prefill_sum / n_done;
     const double mean_decode  = b_.decode_sum / n_done;
     const int cause_max       = std::max({b_.queued, b_.prefill, b_.decode, b_.mixed});
@@ -783,8 +791,10 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
     std::ostringstream sat;
     sat << paired << " paired of " << dones_ << " request_done: " << b_.queued << " queued, "
         << b_.prefill << " prefill-dominated, " << b_.decode << " decode-dominated, " << b_.mixed
-        << " mixed. Dominant cause: " << cause << ". Mean queue wait " << (mean_queue * 1000.0)
-        << " ms, mean prefill " << (mean_prefill * 1000.0) << " ms, mean decode "
+        << " mixed. Dominant measured stage: " << cause << ". Queue observations " << b_.queue_samples << "/" << dones_ << ". ";
+    if (b_.queue_samples > 0) sat << "Mean recorded queue wait " << (mean_queue * 1000.0) << " ms. ";
+    else sat << "Queue wait unavailable. ";
+    sat << "Mean prefill " << (mean_prefill * 1000.0) << " ms, mean decode "
         << (mean_decode * 1000.0) << " ms. Scheduler peak waiting=" << max_waiting_
         << " running=" << max_running_ << " prefilling=" << max_prefill_ << ".";
 
@@ -795,7 +805,8 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
          {"prefill_dominated", b_.prefill},
          {"decode_dominated", b_.decode},
          {"mixed", b_.mixed},
-         {"mean_queue_wait_s", mean_queue},
+         {"mean_queue_wait_s", b_.queue_samples ? nlohmann::json(mean_queue) : nlohmann::json()},
+         {"queue_samples", b_.queue_samples},
          {"mean_prefill_s", mean_prefill},
          {"mean_decode_s", mean_decode},
          {"scheduler_peak",
@@ -814,7 +825,11 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
     std::string ttft_cause    = "mixed";
     std::string ttft_id       = "latency.ttft_mixed";
     std::string ttft_rec;
-    if (mean_prefill >= mean_prepare && mean_prefill >= mean_vision &&
+    if (b_.first_queue_samples == dones_ && mean_queue >= 0.4 * mean_ttft && mean_queue > 0.0) {
+        ttft_cause = "queue wait";
+        ttft_id = "latency.ttft_queue_dominated";
+        ttft_rec = "Reduce concurrent submissions and inspect admission pressure.";
+    } else if (mean_prefill >= mean_prepare && mean_prefill >= mean_vision &&
         mean_prefill >= 0.4 * std::max(ttft_body, mean_ttft)) {
         ttft_cause = "prefill";
         ttft_id    = "latency.ttft_prefill_dominated";

@@ -1,4 +1,5 @@
 #include "logic.hpp"
+#include "client_activity.hpp"
 #include "config.hpp"
 #include "frontend_server.hpp"
 #include "insights.hpp"
@@ -298,7 +299,7 @@ int test_insights_honesty() {
     const char* jsonl =
         R"({"event":"request_start","server_instance_id":"a","timestamp_unix_ms":1000,"request":{"request_id":1,"enable_thinking":true,"tool_count":0,"requested_output_tokens":8}})"
         "\n"
-        R"({"event":"request_done","server_instance_id":"a","timestamp_unix_ms":1600,"request":{"request_id":1,"enable_thinking":true,"tool_count":0,"requested_output_tokens":8},"result":{"finish_reason":"output_limit","completion_tokens":8},"timings_seconds":{"prepare":0.01,"prefill":0.02,"decode":0.02,"ttft":0.03,"total":0.1}})"
+        R"({"event":"request_done","server_instance_id":"a","timestamp_unix_ms":1600,"request":{"request_id":1,"enable_thinking":true,"tool_count":0,"requested_output_tokens":8},"result":{"finish_reason":"output_limit","completion_tokens":8},"timings_seconds":{"prepare":0.01,"prefill":0.02,"decode":0.02,"ttft":0.53,"total":0.6},"engine_timing":{"queue_wait_seconds":0.5}})"
         "\n"
         R"({"event":"request_start","server_instance_id":"b","timestamp_unix_ms":2000,"request":{"request_id":1,"enable_thinking":false,"tool_count":0,"requested_output_tokens":16}})"
         "\n"
@@ -2358,8 +2359,55 @@ int test_frontend_host_apply() {
     return f;
 }
 
+int test_client_activity_causes() {
+    using namespace ninfer::supervisor;
+    ClientActivityLog log;
+    int f = 0;
+    log.fold(R"({"event":"server_start","server_instance_id":"a","timestamp_unix_ms":1,"engine":{"prefix_reuse":true}})");
+    log.fold(R"({"event":"request_start","server_instance_id":"a","timestamp_unix_ms":2,"request":{"request_id":1,"client":"Finder","tool_count":0}})");
+    log.fold(R"({"event":"request_start","server_instance_id":"b","timestamp_unix_ms":3,"request":{"request_id":1,"client":"Copilot","tool_count":65}})");
+    log.fold(R"({"event":"request_done","server_instance_id":"a","timestamp_unix_ms":4,"request":{"request_id":1},"result":{"prompt_tokens":100,"prefix_cache_hit_tokens":99,"computed_prefill_tokens":150,"prefix_reuse_path":"shared_stable_prefix"},"timings_seconds":{"ttft":20.1,"prefill":0.1},"engine_timing":{"queue_wait_seconds":20}})");
+    log.fold(R"({"event":"request_error","server_instance_id":"b","timestamp_unix_ms":5,"request":{"request_id":1},"error":{"message":"inference request expired while waiting for admission"}})");
+    auto rows = log.summary().at("clients");
+    auto by_name = [&](std::string_view name) { for (const auto& r : rows) if (r.at("name").get<std::string>() == name) return r; return nlohmann::json(); };
+    const auto finder = by_name("Finder");
+    f += check(finder.at("reuse_percent") == 99.0 && finder.at("computed_tokens") == 150,
+               "cache hits are measured directly, independently of recomputation and replay");
+    f += check(finder.at("queue_ms").at("mean") == 20000.0 && finder.at("prefill_ms").at("mean") == 100.0,
+               "queue pressure is visible beside prefill even on a near-total cache hit");
+    const auto insight = analyze_request_log_jsonl(R"({"event":"request_done","server_instance_id":"a","timestamp_unix_ms":4,"request":{"request_id":1},"result":{},"timings_seconds":{"ttft":20.1,"prefill":0.1,"decode":1,"total":21.1},"first_output_timing":{"engine":{"queue_wait_seconds":20}}})" "\n", "mem");
+    bool observed_queue = false;
+    for (const auto& row : insight.at("insights")) {
+        if (row.at("id") == "latency.queued_behind_concurrency") observed_queue = row.at("evidence").at("mean_queue_wait_s") == 20.0;
+    }
+    f += check(observed_queue, "Troubleshooting uses recorded admission wait, not total subtracted from wall time");
+    const auto copilot = by_name("Copilot");
+    f += check(copilot.at("failed") == 1 && copilot.at("admission_timeouts") == 1 && copilot.at("active") == 0,
+               "colliding IDs from engine runs retain the correct client and terminal failures");
+    f += check(copilot.at("reuse_percent").is_null() && copilot.at("ttft_ms").at("mean").is_null(),
+               "unavailable cache and timing observations are null, not zero");
+    log.fold(R"({"event":"request_done","server_instance_id":"a","timestamp_unix_ms":6,"request":{"request_id":2,"client":"Finder"},"result":{"prompt_tokens":100,"prefix_cache_hit_tokens":0,"computed_prefill_tokens":100,"prefix_reuse_path":"root"},"timings_seconds":{}})");
+    rows = log.summary().at("clients");
+    f += check(by_name("Finder").at("unexplained_full_prefills") == 1,
+               "a root prefill without an admission reason remains unexplained");
+    log.fold(R"({"event":"request_done","server_instance_id":"b","timestamp_unix_ms":7,"request":{"request_id":2,"client":"Copilot"},"result":{"prefix_reuse_path":"root"},"generation":{"admission":{"fallback_reason":"capacity_limit"}}})");
+    rows = log.summary().at("clients");
+    f += check(by_name("Copilot").at("fallbacks").at("capacity_limit") == 1 && by_name("Copilot").at("unexplained_full_prefills") == 0,
+               "explicit capacity fallback is reported without claiming that history changed");
+    log.expire(7);
+    rows = log.summary().at("clients");
+    f += check(rows.size() == 1 && rows[0].at("name") == "Copilot", "expired observations leave the rolling window");
+    log.fold(R"({"event":"request_start","server_instance_id":"b","timestamp_unix_ms":8,"request":{"request_id":3,"client":"Copilot"}})");
+    log.fold(R"({"event":"server_start","server_instance_id":"c","timestamp_unix_ms":9,"engine":{"prefix_reuse":true}})");
+    rows = log.summary().at("clients");
+    f += check(by_name("Copilot").at("interrupted") == 1 && by_name("Copilot").at("active") == 0,
+               "unfinished requests from an ended engine are not reported as in flight");
+    return f;
+}
+
 int main() {
     int failures = 0;
+    failures += test_client_activity_causes();
     failures += test_kv_capacity_adaptation();
     failures += test_loopback();
     failures += test_engine_probe_destination();
