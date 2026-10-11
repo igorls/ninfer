@@ -53,7 +53,7 @@ alongside.
 
 ## Status
 
-Q1 is implemented in source; its Flash-Next bit-identity is unverified until the real cases run.
+**Q1: implemented in source;** Flash-Next bit-identity is unverified until the real cases run.
 
 - [x] `ple_layer_ids` is a list end to end: config (ascending, distinct, GDN layers only), one PLE
   parameter set and table per layer, injection before each listed block, decode and MTP transfers
@@ -72,6 +72,34 @@ Q1 is implemented in source; its Flash-Next bit-identity is unverified until the
   previous build and artifact.
 - [ ] An empty `ple_layer_ids` (a checkpoint without PLE) is still rejected; making PLE optional is
   a Q3-like change if an official checkpoint needs it.
+
+**Q4: source integration done, synthetic-validated, not qualified.** On branch `qwen4/converter`,
+`python -m tools.convert` selects the `qwen4_exp` adapter (`tools/convert/qwen4_exp/build.py`)
+for a Qwen4Exp `config.json`. The adapter shares `config.py` with the v2 upgrade; the upgrade's
+`artifact_id` is pinned in tests, so the shared normalizer cannot change the derivation silently.
+The conversion guide documents the route.
+
+| Deliverable | State |
+|---|---|
+| Config normalizer | Shared with the upgrade. MoE or dense (`intermediate_size`) blocks; `ple_layer_ids` as a list; mixed per-layer blocks rejected |
+| Tensor map | Every official Flash-Next tensor maps to the loader's logical names and Uses. Fused parents are packed in the source. A missing, misshapen or unmapped tensor of a selected component fails |
+| Methods | `nvfp4_expert_maxabs` (one divisor per expert, the MTP bake), `u4z8_maxabs` (`U4Z8_RANGE_RNE_V1`, streamed), `fp8_row_maxabs` with FP32 row multipliers, INT64 `cast_direct`; BF16 stays the default |
+| Recipes | `qwen3_8_flash_next`; `qwen4_allocation` assigns a format per role, so a new checkpoint's recipe is one call |
+| Dense blocks | Converted under the Qwen3.5 dense names `mlp/{gate,up,down}`; not loadable until Q3 |
+| Template | The maintained `qwen3_8.jinja` is the default when the official template's SHA256 is `c3cf9e34...d7a81041`. That digest belongs to the official Qwen3.8 template, which the Qwen3.8-27B and Flash-Next pins share (checked 2026-10-11). Any other template needs `--resource chat_template.jinja=PATH` |
+
+Validated:
+- Synthetic tiny checkpoints with the official names convert end to end: MoE with Vision and MTP
+  through the CLI, and dense text with MTP. Every binding is read back and checked by independent
+  decoders.
+- At Flash-Next geometry, the official headers (1,658 tensors) map to exactly the qualified
+  artifact's 1,668 bindings, 959 Uses, and its object shapes, formats and layouts.
+
+Not validated:
+- No real official checkpoint has been converted.
+- The Flash-Next official-source rebuild is planned on a Colab G4 (about 360 GB in, 102 GiB out).
+  It must pass the transformers oracle gate. Its FP8, NVFP4 and U4Z8 words are encoded from BF16,
+  so they differ from the production artifact's imported words.
 
 ## Template
 

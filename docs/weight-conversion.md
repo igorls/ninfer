@@ -59,6 +59,7 @@ The built-in recipes are ordinary Python functions in
 | `qwen3_8_27b_nvfp4` | Imported NVFP4/FP8, FP8 embedding generated from BF16 | `quantized` |
 | `qwen3_8_27b_nvfp4full` | Imported NVFP4 MLP 0-55, locally encoded NVFP4 attention, GDN and MLP 56-63, nine BF16 exception parents, Q8 vocabulary weights | `quantized`, `calibration` |
 | `qwen3_8_27b_orcarouter_nvfp4` | Imported NVFP4/FP8 from a compressed-tensors `--model`, BF16 embedding and full output head kept | None |
+| `qwen3_8_flash_next` | Qwen4 family (`qwen4_exp`): NVFP4 expert banks, FP8 row-FP32 attention/GDN projections, U4Z8 PLE table, BF16 otherwise; see [below](#qwen4-family-qwen4_exp-from-official-safetensors) | None |
 
 These names select conversion choices. Runtime execution is selected from the architecture,
 configuration and actual bindings stored in the artifact. `--name` sets the public model name;
@@ -200,6 +201,101 @@ as `--source dflash=PATH` or `--source dflash2=PATH`. An artifact may contain se
 components; the Engine loads only the ones selected at startup, including at most one speculative
 backend. Component availability and startup selection are independent.
 
+### Qwen4 family (`qwen4_exp`) from official safetensors
+
+When `config.json` names `Qwen4ExpForConditionalGeneration` or `Qwen4ExpForCausalLM`, the
+converter uses the `qwen4_exp` adapter
+([`tools/convert/qwen4_exp/build.py`](../tools/convert/qwen4_exp/build.py)) instead of the Qwen3.5
+one. Qwen3.8-Flash-Next is the first such checkpoint. The optional components are `vision` and
+`mtp`; there is no proposal head or DFlash companion.
+
+```bash
+python3 -m tools.convert \
+  --model /path/to/Qwen3.8-Flash-Next \
+  --recipe qwen3_8_flash_next \
+  --components text,vision,mtp \
+  --name qwen3.8-flash-next \
+  --out models/qwen3_8_flash_next.ninfer
+```
+
+The adapter normalizes the configuration with the same code as the
+[v2 upgrade](maintainer/qwen3.8-flash-next-artifact.md#1-derivation). The text component is
+`Qwen4ExpForCausalLM`/`qwen4_exp_text`, with `qwen4_exp_vision` and `Qwen4ExpMTP` beside it.
+Every official tensor maps to a logical parameter of the
+[artifact reference](maintainer/qwen3.8-flash-next-artifact.md#5-bindings-and-uses), with one Use
+per mathematical input. The loader binds the fused parents as single parameters, so the adapter
+packs them in the source:
+
+| Logical parameter | Official tensors, in stored row order |
+|---|---|
+| `attention/query_gate_key_value` | `q_proj` (each head `[query, output_gate]`), `k_proj`, `v_proj` |
+| `gdn/query_key_value_z` | `in_proj_qkv`, `in_proj_z` |
+| `gdn/a_b_projection` | `in_proj_a`, `in_proj_b` |
+| `mlp/experts/gate_up`, `mlp/experts/down` | `experts.gate_up_proj` `[E,2I,H]`, `experts.down_proj` `[E,H,I]` |
+| `gdn/convolution`, `ple/convolution` | `conv1d.weight` `[C,1,taps]`, stored `[taps,C]` |
+
+Vision uses the Qwen3.5 tower mapping. PLE shard heights come from the source tensors. A missing
+or misshapen tensor fails the build. So does a source tensor of a selected component that has no
+mapping, because that means the checkpoint has mathematics the adapter does not implement.
+
+Without `--resource chat_template.jinja`, the adapter installs
+[`qwen3_8.jinja`](../tools/chat_templates/qwen3_8.jinja) only if the official template is
+byte-identical to the official Qwen3.8 template. That template has SHA256 `c3cf9e34...d7a81041`;
+the Qwen3.8-27B and Qwen3.8-Flash-Next pins share it. Any other official template stops the
+conversion until you name a template explicitly. Provenance records the decision as
+`chat_template`.
+
+`qwen3_8_flash_next` assigns the allocation of the qualified Flash-Next artifact:
+
+| Parameters | Representation |
+|---|---|
+| Text and MTP expert banks | `nvfp4` banks, `nvfp4_expert_maxabs`, AllowA4 without stored activation divisors |
+| Text attention `query_gate_key_value`/`output`, GDN `query_key_value_z`/`output` | `fp8_e4m3fn_row_fp32`, `fp8_row_maxabs`, AllowA8 |
+| PLE table shards | `u4z8_g16_fp16`, `u4z8_maxabs` |
+| PLE index tables | `int64` |
+| Everything else, including MTP attention, Vision and both vocabulary weights | BF16, A16Only |
+
+The production artifact imported its FP8, NVFP4 and U4Z8 words from third-party quantizations.
+This recipe encodes them from the official BF16 weights, so its words differ.
+
+A recipe for another Qwen4 checkpoint is one `qwen4_allocation` call naming a format per role:
+`mixer`, `experts`, `dense_mlp`, `mtp_mixer`, `mtp_experts`, `mtp_dense_mlp` or `ple`. Roles the
+model lacks are skipped:
+
+```python
+from tools.convert.official_recipes import qwen4_allocation
+
+
+def configure(model, recipe, sources):
+    qwen4_allocation(
+        model,
+        recipe,
+        mixer="fp8_e4m3fn_row_fp32",
+        dense_mlp="fp8_e4m3fn_row_fp32",
+        ple="u4z8_g16_fp16",
+    )
+```
+
+A config without `num_experts` describes dense feed-forward blocks. Its text config records
+`intermediate_size`. Its blocks use the Qwen3.5 dense names `mlp/gate`, `mlp/up` (one packed
+parent) and `mlp/down`, read from `mlp.{gate,up,down}_proj`. **The Engine cannot load dense
+`qwen4_exp` artifacts yet** ([Qwen4 readiness](research/qwen4-readiness.md) Q3). NVFP4 matrices
+other than expert banks need calibrated activation divisors, so put them in a custom recipe.
+
+Validation so far:
+
+- Synthetic tiny checkpoints with the official tensor names are converted end to end. One is MoE
+  with Vision and MTP through the CLI; the other is dense text with MTP. Every binding is read back
+  and checked: BF16 and INT64 bytes exactly, and FP8, NVFP4 banks and U4Z8 by an independent
+  decoder against each encoder's rule.
+- At Flash-Next geometry, the official tensor directory (names, dtypes and shapes of all 1,658
+  tensors, read from the safetensors headers) maps to the qualified artifact's 1,668 bindings and
+  959 Uses. The object shapes, formats and layouts are the same.
+- **Not yet validated:** no real official checkpoint has been converted. Rebuilding Flash-Next from
+  the official sources is planned on a Colab G4. It reads about 360 GB of BF16 safetensors, writes
+  about 102 GiB, and must pass the transformers oracle gate before it can replace the derived
+  artifact.
+
 ## Change part of a recipe
 
 Save the following as `my_recipe.py`:
@@ -269,15 +365,26 @@ The converter currently writes these formats:
 
 | Format | Built-in method for floating-point input | Import of already encoded input |
 |---|---|---|
-| `bf16`, `fp32`, `int32` | `cast_direct` | Direct words through the source reader |
+| `bf16`, `fp32`, `int32`, `int64` | `cast_direct` | Direct words through the source reader |
 | `q4_g64_fp16`, `q5_g64_fp16`, `q6_g64_fp16`, `q8_g32_fp16` | `grouped_absmax` | Supply a custom method/source if needed |
 | `fp8_e4m3fn_row_bf16` | `fp8_row_maxabs` | `import_encoded` |
-| `nvfp4` | `nvfp4_maxabs` (with calibrated activation divisors for A4 Uses) | `import_encoded` |
+| `fp8_e4m3fn_row_fp32` | `fp8_row_maxabs` | Supply a custom method/source if needed |
+| `nvfp4` matrix | `nvfp4_maxabs` (with calibrated activation divisors for A4 Uses) | `import_encoded` |
+| `nvfp4` expert bank `[E,N,K]` | `nvfp4_expert_maxabs` | Supply a custom method/source if needed |
+| `u4z8_g16_fp16` | `u4z8_maxabs` | Supply a custom method/source if needed |
 
 `grouped_absmax` stores one FP16 scale per group and signed integer codes. `fp8_row_maxabs` first
-rounds input values to BF16, then produces E4M3FN codes and one BF16 multiplier per row.
-`import_encoded` preserves compatible code and scale words, including NVFP4's matrix weight divisor.
-It does not dequantize and requantize them.
+rounds input values to BF16, then produces E4M3FN codes and one multiplier per row,
+`binary32(max|w| / 448)`. The multiplier is rounded to BF16 for `fp8_e4m3fn_row_bf16` and kept in
+FP32 for `fp8_e4m3fn_row_fp32`. A rank-three NVFP4 parameter defaults to the expert-bank layout.
+`nvfp4_expert_maxabs` applies `NVFP4_MAXABS_DIVISOR_RNE_V1` to each expert with its own divisor,
+the encoder that baked the Flash-Next MTP banks. Its A4 Uses need no activation divisor, because
+the expert route quantizes activations dynamically. `u4z8_maxabs` implements `U4Z8_RANGE_RNE_V1`
+([numeric formats](maintainer/tensor-formats.md#36-u4z8_g16_fp16)). Each group of 16 gets the
+smallest binary16 multiplier that keeps its positive values within +7 and its negative values
+within -8, plus round-to-nearest-even codes. It reads at least 4 Mi values per chunk because PLE
+tables are tall and narrow. `import_encoded` preserves compatible code and scale words, including
+NVFP4's matrix weight divisor. It does not dequantize and requantize them.
 
 The exact numeric and packing rules are in [numeric formats](maintainer/tensor-formats.md) and
 [storage layouts](maintainer/storage-layouts.md). Source format names alone do not establish
@@ -470,6 +577,8 @@ The official conversion examples select these maintained templates:
 | Qwen3.6 Dense/MoE | [qwen3_6.jinja](../tools/chat_templates/qwen3_6.jinja) | thinking on; closed-turn reasoning omitted |
 | Qwen3.8 | [qwen3_8.jinja](../tools/chat_templates/qwen3_8.jinja) | thinking on; effort `xhigh`; closed-turn reasoning retained |
 
+The `qwen4_exp` adapter installs `qwen3_8.jinja` by default when the official template is the
+official Qwen3.8 one. For any other template it requires an explicit `--resource`.
 Use your own Jinja file to change the artifact's default template. A startup
 [`--chat-template FILE`](cli.md#text-input) overrides the stored template.
 `generation_config.json` is preserved; sampling presets remain determined by the architecture

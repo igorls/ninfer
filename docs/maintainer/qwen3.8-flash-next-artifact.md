@@ -57,6 +57,19 @@ entry SHA256 `0de7b5f6...02282714`) lacks both and is rejected by the current lo
 the upgrade takes about 7 minutes from a local v2 file; on a Colab G4 an unattended `derive` takes
 ~13 minutes (6.5 min download, 6.7 min upgrade) plus ~2 minutes of optional verification.
 
+A native route from the official BF16 safetensors also exists:
+`python -m tools.convert --recipe qwen3_8_flash_next` (see the
+[conversion guide](../weight-conversion.md#qwen4-family-qwen4_exp-from-official-safetensors)). It
+shares this artifact's config normalizer and reproduces its components, Bindings, Uses, object
+shapes, formats and layouts (Sections 2, 3 and 5). It differs in two ways:
+
+- object ids, order and offsets follow the generic converter;
+- FP8, NVFP4 and U4Z8 words are encoded from BF16 rather than imported from the third-party
+  quantizations.
+
+That route is checked only on synthetic checkpoints and against the official tensor headers. It is
+not qualified; the upgrade remains the qualified route.
+
 ## 2. Components and resources
 
 | Component | Config | Target | Resources |
