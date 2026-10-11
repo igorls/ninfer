@@ -31,6 +31,7 @@ R"HTML(<!DOCTYPE html>
   --f-text:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;
   --f-mono:'Cascadia Mono','Cascadia Code',Consolas,monospace;
   --r-glass:7px;--gap:8px;
+  --slew:.38s cubic-bezier(.33,1,.68,1);
   color-scheme:dark;
 }
 :root[data-theme=day]{
@@ -51,7 +52,7 @@ R"HTML(<!DOCTYPE html>
   color-scheme:light;
 }
 /* Keys are hardware: the caps and their legends do not change with the display. */
-:root[data-theme=day] :is(.key,.fkey,.master){--ink:#f1f4f5;--green:#4fd98d;--cyan:#41cdea;--amber:#f5b53d;--red:#ff6257;--off:#76828a;--dim:#a8b2b8}
+:root[data-theme=day] :is(.key,.fkey,.master){--ink:#f1f4f5;--green:#4fd98d;--cyan:#41cdea;--magenta:#ee78de;--amber:#f5b53d;--red:#ff6257;--off:#76828a;--dim:#a8b2b8}
 *{box-sizing:border-box}
 html,body{height:100%}
 body{margin:0;display:flex;flex-direction:column;height:100dvh;background:var(--panel);color:var(--ink);font:13px/1.5 var(--f-text);-webkit-font-smoothing:antialiased;overflow:hidden}
@@ -142,11 +143,11 @@ b,strong{font-weight:600}
 .pad-line{display:flex;align-items:center;gap:10px;padding:6px 12px;background:var(--glass);border-radius:5px;font-size:12.5px;color:var(--ink);box-shadow:0 0 0 1px var(--seam)}
 .pad-line.amber{color:var(--amber);background:var(--amber-glass)}
 .pad-line.red,.pad-line.error{color:var(--red-on-glass);background:var(--red-glass)}
-.pad-action span{flex:1;min-width:0;overflow-wrap:anywhere}
+)HTML"
+R"HTML(.pad-action span{flex:1;min-width:0;overflow-wrap:anywhere}
 .key-tiny{min-height:24px;padding:0 8px;font-size:11px}
 
-)HTML"
-R"HTML(/* Live band: memory and rates stay in view on every page that is not Monitor. */
+/* Live band: memory and rates stay in view on every page that is not Monitor. */
 .live-band{position:relative;display:flex;align-items:center;gap:6px 20px;flex-wrap:wrap;margin:6px var(--gap) 0;padding:6px 12px;background:var(--glass);border-radius:10px;border:4px solid var(--bezel);border-top-color:var(--bezel-top);border-bottom-color:var(--bezel-low);background-clip:padding-box;box-shadow:var(--du-shadow);flex-shrink:0;font-variant-numeric:tabular-nums}
 body.on-monitor .live-band{display:none}
 .band-item{display:flex;align-items:baseline;gap:7px;white-space:nowrap}
@@ -154,7 +155,7 @@ body.on-monitor .live-band{display:none}
 .band-item b{font:600 14px var(--f-panel);font-stretch:87.5%}
 .band-sub{font-size:12px;color:var(--green)}
 .band-bar{align-self:center;width:84px;height:6px;background:var(--track);border-radius:1px;overflow:hidden}
-.band-bar span{display:block;height:100%;background:var(--ink);width:0;transition:width .2s ease-out}
+.band-bar span{display:block;height:100%;background:var(--ink);width:0;transition:width var(--slew)}
 .band-return{margin-left:auto}
 
 /* Cover glass: anti-glare coating catches a little of the room. A specific
@@ -289,10 +290,10 @@ input[readonly]{color:var(--ink)}
 .cdu-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:12px}
 .cdu-tab{display:inline-flex;align-items:center;gap:7px;min-height:30px;padding:0 12px;border:1px solid var(--rule);border-radius:4px;color:var(--cyan);font-size:12px;font-weight:600;text-decoration:none}
 .cdu-tab:hover{background:var(--hover-glass)}
-.cdu-tab[aria-current=page]{color:var(--ink);border-color:var(--ink)}
-.cdu-tab-count{color:var(--faint);font-weight:500}
 )HTML"
-R"HTML(.cdu-subhead{display:flex;align-items:center;gap:10px;margin:16px 0 4px;font-size:12px;font-weight:600;color:var(--ink)}
+R"HTML(.cdu-tab[aria-current=page]{color:var(--ink);border-color:var(--ink)}
+.cdu-tab-count{color:var(--faint);font-weight:500}
+.cdu-subhead{display:flex;align-items:center;gap:10px;margin:16px 0 4px;font-size:12px;font-weight:600;color:var(--ink)}
 .cdu-tag{padding:0 6px;border:1px solid var(--rule);border-radius:3px;font-size:11px;color:var(--dim);font-weight:500}
 .cdu-pre{margin-top:6px;padding:10px 12px;background:var(--glass-2);border:1px solid var(--well-edge);border-radius:4px;font:11.5px/1.7 var(--f-mono);color:var(--well-ink);white-space:pre-wrap;overflow-wrap:anywhere;max-height:40vh;overflow:auto}
 .cdu-facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:0 28px}
@@ -344,7 +345,7 @@ R"HTML(.cdu-subhead{display:flex;align-items:center;gap:10px;margin:16px 0 4px;f
 .mtp-bars{display:flex;gap:14px;max-width:420px;margin-top:8px}
 .mtp-col{flex:1;text-align:center;font-size:11px;color:var(--faint)}
 .mtp-track{position:relative;height:72px;margin-bottom:4px;background:var(--track);border-bottom:1px solid var(--rule)}
-.mtp-bar{position:absolute;inset:0;background:var(--green);transform:scaleY(0);transform-origin:bottom;transition:transform .2s ease-out}
+.mtp-bar{position:absolute;inset:0;background:var(--green);transform:scaleY(0);transform-origin:bottom;transition:transform var(--slew)}
 
 /* API test bench: endpoint index beside the request and its answer; one screen. */
 .view-bench{height:100%}
@@ -394,6 +395,114 @@ button.cdu-tab[aria-pressed=true]{color:var(--ink);border-color:var(--ink)}
 .bench-ev-t{color:var(--faint);text-align:right}
 .bench-ev-n{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
+/* Chat: a message log in the datalink manner. Your messages ride the prompt channel (ice),
+   NInfer's replies the generation channel (green); what a reply measured is white and what
+   it was sent is magenta, the colour of a configured target. One screen; the log scrolls. */
+.view-chat{height:100%}
+.view-chat .cdu{display:flex;flex-direction:column;height:100%;min-height:440px}
+.chat-bar{display:flex;align-items:center;gap:8px 16px;flex-wrap:wrap;padding-bottom:8px;border-bottom:1px solid var(--rule-2)}
+.chat-context{display:flex;align-items:center;gap:8px;flex:1 1 220px;min-width:0}
+.chat-context .cdu-label,.chat-think .cdu-label{margin:0}
+.chat-meter{flex:1;max-width:240px;height:6px;border-radius:1px;background:var(--track);box-shadow:inset 0 0 0 1px var(--track-edge);overflow:hidden}
+.chat-meter span{display:block;width:0;height:100%;background:var(--ink);transition:width var(--slew)}
+.chat-meter .amber-fill{background:var(--amber)}
+.chat-context-text{font:500 13px var(--f-panel);font-stretch:87.5%;font-variant-numeric:tabular-nums;white-space:nowrap}
+.chat-think{display:flex;align-items:center;gap:4px}
+.chat-think .cdu-label{margin-right:4px}
+.chat-think .cdu-tab{min-height:26px;padding:0 9px;font-size:11.5px}
+.chat-param-count{color:var(--magenta)}
+.chat-budget-now{display:flex;align-items:baseline;gap:7px;white-space:nowrap}
+.chat-budget-now .cdu-label{margin:0}
+#chat-budget-now{font:500 13px var(--f-panel);font-stretch:87.5%;font-variant-numeric:tabular-nums;color:var(--magenta)}
+#chat-budget-now.engine{color:var(--ink)}
+.chat-settings{position:relative;flex:0 1 auto;min-height:150px;max-height:46vh;overflow:auto;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:12px 22px;padding:10px 2px 12px 0;border-bottom:1px solid var(--rule)}
+.chat-settings-note{grid-column:1/-1;font-size:12px;color:var(--faint)}
+.chat-back{display:none;grid-column:1/-1;justify-self:start;padding:0;border:0;background:none;font-size:12.5px}
+.chat-group{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 10px;align-content:start;min-width:0;margin:0;padding:0;border:0}
+.chat-group legend{padding:0 0 5px;font:600 11.5px var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--dim)}
+.chat-group-wide{grid-column:1/-1}
+.chat-setting{display:flex;flex-direction:column;min-width:0}
+.chat-setting-wide{grid-column:1/-1}
+.chat-setting .cdu-input,.chat-setting .cfg-select{flex:none;min-height:30px;padding:4px 8px;font-size:13.5px}
+)HTML"
+R"HTML(.chat-settings .cfg-check{flex-direction:row;min-height:28px;font-size:13px}
+.chat-settings .cfg-help{margin-top:0}
+.chat-settings :is(.cdu-input:not(:placeholder-shown),.cfg-select.set){color:var(--magenta)}
+.chat-settings :disabled{opacity:.55;cursor:not-allowed}
+.chat-budget{display:flex;gap:6px}
+.chat-budget .cfg-select{flex:1;min-width:0}
+.chat-text{resize:vertical;min-height:52px;font:13px/1.45 var(--f-text)}
+.chat-code{font:12px/1.5 var(--f-mono)}
+.chat-settings .invalid{border-color:var(--red)}
+.chat-settings .cfg-help.red{color:var(--red)}
+.chat-settings-keys{flex-direction:row}
+.chat-log{position:relative;flex:1;min-height:150px;overflow:auto;display:flex;flex-direction:column;gap:16px;padding:12px 4px 12px 0}
+.chat-log>*{flex-shrink:0}
+.chat-empty{margin:auto;max-width:58ch;text-align:center;font-size:13px;color:var(--dim)}
+.chat-empty-title{margin-bottom:6px;font:600 15px var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--ink)}
+.msg{padding-top:12px;border-top:1px solid var(--rule-2)}
+.chat-log .msg:first-of-type{padding-top:0;border-top:0}
+.msg-dir{font-size:8px;letter-spacing:0;transform:translateY(-1px)}
+.msg-user .msg-dir{color:var(--ice)}
+.msg-model .msg-dir{color:var(--green)}
+.msg-error .msg-dir{color:var(--red)}
+.msg-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;margin-bottom:3px;font:600 11.5px var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
+.msg-who{color:var(--ice)}
+.msg-head time,.msg-live{font-variant-numeric:tabular-nums}
+.msg-model-name{font:11.5px var(--f-mono);letter-spacing:0;text-transform:none}
+.msg-state{color:var(--dim)}
+.msg-live{color:var(--green)}
+.msg-body,.msg-reasoning,.msg-images{max-width:100ch}
+.msg-body{font:14px/1.6 var(--f-text);color:var(--ink);white-space:pre-wrap;overflow-wrap:anywhere}
+.msg-body code{padding:0 3px;border-radius:2px;background:var(--glass-2);font:12.5px var(--f-mono)}
+.msg-code{margin:6px 0;padding:8px 10px;overflow:auto;background:var(--glass-2);border:1px solid var(--well-edge);border-radius:4px;color:var(--well-ink);font:12.5px/1.5 var(--f-mono);white-space:pre}
+.msg-code code{padding:0;background:none}
+.msg-code-lang{display:block;margin-bottom:4px;font:600 10.5px var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
+.msg-h{display:inline-block;margin-top:4px}
+.msg-images{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px}
+.msg-images img{max-width:220px;max-height:140px;border:1px solid var(--rule);border-radius:3px}
+.msg-reasoning{margin:2px 0 6px;color:var(--dim)}
+.msg-reasoning summary{width:fit-content;cursor:pointer;font:600 11.5px var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--cyan)}
+.msg-reasoning-body{max-height:40vh;overflow:auto;margin-top:4px;padding-left:10px;border-left:1px dotted var(--rule);font-size:13px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
+.msg-progress{display:flex;align-items:center;gap:10px;margin:2px 0 4px;font-size:12px;color:var(--ice);font-variant-numeric:tabular-nums}
+.msg-bar{flex:none;width:160px;height:5px;background:var(--track);box-shadow:inset 0 0 0 1px var(--track-edge)}
+.msg-bar span{display:block;height:100%;background:var(--ice);transition:width .25s ease-out}
+.msg-telemetry{display:flex;flex-wrap:wrap;gap:4px 18px;margin-top:8px;padding-top:6px;border-top:1px solid var(--rule-2)}
+.msg-telemetry div{display:flex;flex-direction:column;min-width:0}
+.msg-telemetry dt{font:600 10.5px var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
+.msg-telemetry dd{font:500 13px var(--f-panel);font-stretch:87.5%;font-variant-numeric:tabular-nums;color:var(--ink)}
+.msg-sent{margin-top:5px;font:12px/1.5 var(--f-mono);color:var(--magenta);overflow-wrap:anywhere}
+.msg-sent .cdu-label{display:inline;margin:0 6px 0 0}
+.msg-note{margin-top:4px;font-size:12.5px;color:var(--amber)}
+.msg-telemetry dd.amber{color:var(--amber)}
+.msg-actions{display:flex;gap:16px;margin-top:4px}
+.msg-tokens{font:13px/1.8 var(--f-mono);white-space:pre-wrap;overflow-wrap:anywhere}
+.tok{border-radius:2px}
+.tok:hover{outline:1px solid var(--cyan)}
+.tok-mid{box-shadow:inset 0 -2px 0 var(--amber)}
+.tok-low{background:var(--amber-glass);box-shadow:inset 0 -2px 0 var(--amber);color:var(--amber)}
+.tok-forced{box-shadow:inset 0 -1px 0 var(--magenta);color:var(--magenta)}
+.msg-token-key{margin-top:6px}
+.chat-composer{display:flex;flex-direction:column;gap:6px;padding-top:8px;border-top:1px solid var(--rule)}
+.chat-input{width:100%;min-height:58px;max-height:30vh;resize:vertical;padding:8px 10px;background:var(--glass-2);border:1px solid var(--field-edge);border-radius:4px;color:var(--ink);font:14px/1.5 var(--f-text)}
+.chat-input:hover{border-color:var(--field-edge-hover)}
+.chat-input::placeholder{color:var(--placeholder)}
+.chat-composer.drop .chat-input{border-color:var(--cyan)}
+.chat-keys{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.chat-keys .cfg-status{flex:1}
+.chat-attachments{display:flex;flex-wrap:wrap;gap:8px}
+.chat-thumb{display:flex;flex-direction:column;align-items:flex-start;gap:4px}
+.chat-thumb img{height:64px;border:1px solid var(--rule);border-radius:3px}
+@media (max-width:880px){
+  .chat.params-open :is(.chat-log,.chat-composer,#chat-think-note){display:none!important}
+  .chat.params-open .chat-settings{flex:1 1 auto;max-height:none;border-bottom:0}
+  .chat.params-open .chat-back{display:inline-flex}
+}
+@media (max-width:520px){
+  .chat-group{grid-template-columns:minmax(0,1fr)}
+  .chat-bar{gap:6px 10px}
+}
+
 /* Settings: an index of line-select prompts, then one page per category. */
 .lsk-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 28px}
 .lsk{display:flex;flex-direction:column;gap:1px;padding:9px 0;border-bottom:1px solid var(--rule-2);text-decoration:none;min-width:0}
@@ -429,8 +538,7 @@ button.cdu-tab[aria-pressed=true]{color:var(--ink);border-color:var(--ink)}
 .cfg-check:has(input.dirty){color:var(--amber)}
 .cfg-note{grid-column:1/-1;padding:8px 0 0;border-top:1px solid var(--rule-2);font-size:12px;color:var(--faint);line-height:1.55;max-width:95ch}
 .cfg-token-controls{margin-top:6px}
-)HTML"
-R"HTML(.cfg-token-summary{display:flex;justify-content:space-between;gap:12px;font-size:12px;color:var(--faint)}
+.cfg-token-summary{display:flex;justify-content:space-between;gap:12px;font-size:12px;color:var(--faint)}
 .cfg-token-summary output{font:600 14px var(--f-panel);font-stretch:87.5%;color:var(--ink);font-variant-numeric:tabular-nums}
 .cfg-token-slider,.reserve-slider{display:block;width:100%;height:30px;margin:0;accent-color:var(--magenta);cursor:pointer}
 .cfg-token-slider:disabled{cursor:not-allowed;opacity:.45}
@@ -469,7 +577,8 @@ R"HTML(.cfg-token-summary{display:flex;justify-content:space-between;gap:12px;fo
 .cdu.tmpy .cdu-title h1{color:var(--amber)}
 
 .presets{border:0;margin:0;padding:0;min-width:0}
-.preset{display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:1px 10px;padding:7px 0;border-bottom:1px solid var(--rule-2);cursor:pointer}
+)HTML"
+R"HTML(.preset{display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:1px 10px;padding:7px 0;border-bottom:1px solid var(--rule-2);cursor:pointer}
 .preset input{margin:3px 0 0;width:15px;height:15px}
 .preset-name{font:600 14.5px var(--f-panel);font-stretch:87.5%;color:var(--cyan)}
 .preset-detail{grid-column:2;font-size:12.5px;color:var(--dim)}
@@ -504,7 +613,7 @@ dialog p{margin:12px 0 16px;font-size:13px;color:var(--dim)}
 .ice{color:var(--ice)}
 .dim{color:var(--dim)}
 @media (min-width:1180px){
-  .monitor-grid{grid-template-columns:minmax(0,1.55fr) minmax(380px,1fr);grid-template-rows:minmax(232px,1fr) minmax(206px,1fr);grid-template-areas:"mem side" "rates side"}
+  .monitor-grid{position:relative;grid-template-columns:minmax(0,var(--col-a,1.55fr)) minmax(380px,var(--col-b,1fr));grid-template-rows:minmax(232px,var(--row-a,1fr)) minmax(206px,var(--row-b,1fr));grid-template-areas:"mem side" "rates side"}
   .monitor-side{grid-area:side;display:flex;flex-direction:column;gap:var(--gap);min-height:0}
   .monitor-side .display-traffic{flex:0 1 auto;min-height:118px;max-height:none}
   .monitor-side .display-alerts{flex:1 0 auto}
@@ -512,6 +621,26 @@ dialog p{margin:12px 0 16px;font-size:13px;color:var(--dim)}
   .display-alerts .alert-title,.display-alerts .alert-text{grid-column:2;white-space:normal}
   .display-memory{grid-area:mem}.display-rates{grid-area:rates}
   .display-traffic .traffic-scroll{flex:1}
+}
+/* Seams: the panel gaps between displays, draggable in the wide layout. A short grip shows
+   on hover; the focused seam lights cyan, the colour of what can be selected. */
+.seam{display:none}
+@media (min-width:1180px){
+  body:not(.explain) .seam{display:block;position:absolute;z-index:3;touch-action:none}
+  .seam-col{top:0;bottom:0;width:var(--gap);cursor:col-resize}
+  .seam-row{height:var(--gap);cursor:row-resize}
+  .seam::after{content:'';position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);border-radius:1px;background:var(--on-panel-dim);opacity:.35;transition:opacity .15s ease-out}
+  .seam:is(:focus-visible,.dragging)::before{content:'';position:absolute;background:var(--cyan)}
+  .seam-col:is(:focus-visible,.dragging)::before{left:calc(50% - 1px);top:0;bottom:0;width:2px}
+  .seam-row:is(:focus-visible,.dragging)::before{top:calc(50% - 1px);left:0;right:0;height:2px}
+  .seam-col::after{width:2px;height:32px}
+  .seam-row::after{width:32px;height:2px}
+  .seam:hover::after,.seam.dragging::after{opacity:1}
+  .seam.dragging::after{background:var(--cyan)}
+  .seam:focus-visible{outline:none}
+  .seam:focus-visible::after{opacity:1;background:var(--cyan);box-shadow:0 0 0 2px var(--cyan)}
+  body.resizing-col,body.resizing-col *{cursor:col-resize!important;user-select:none}
+  body.resizing-row,body.resizing-row *{cursor:row-resize!important;user-select:none}
 }
 @media (max-width:880px){
   .view-bench,.view-bench .cdu{height:auto}
@@ -584,7 +713,7 @@ dialog p{margin:12px 0 16px;font-size:13px;color:var(--dim)}
   .alert-list li{font-size:12px}
 }
 @media (max-height:780px) and (min-width:1180px){
-  .monitor-grid{grid-template-rows:minmax(196px,1fr) minmax(176px,1fr)}
+  .monitor-grid{grid-template-rows:minmax(196px,var(--row-a,1fr)) minmax(176px,var(--row-b,1fr))}
 }
 @media (min-width:561px){
   .display-traffic .traffic{table-layout:fixed}
@@ -618,10 +747,10 @@ dialog p{margin:12px 0 16px;font-size:13px;color:var(--dim)}
 </defs></svg>
 
 <header class="glareshield">
-)HTML"
-R"HTML(  <a class="brand" href="#overview" aria-label="NInfer monitor"><span class="brand-mark" aria-hidden="true">n<span>.</span></span><span class="brand-name">NInfer</span></a>
+  <a class="brand" href="#overview" aria-label="NInfer monitor"><span class="brand-mark" aria-hidden="true">n<span>.</span></span><span class="brand-name">NInfer</span></a>
   <nav class="fkeys" aria-label="Main navigation">
     <a class="fkey" href="#overview" data-view="overview" aria-current="page"><span class="fkey-lamp" aria-hidden="true"></span>Monitor</a>
+    <a class="fkey" href="#chat" data-view="chat"><span class="fkey-lamp" aria-hidden="true"></span>Chat</a>
     <a class="fkey" href="#connect" data-view="connect"><span class="fkey-lamp" aria-hidden="true"></span>Connect</a>
     <a class="fkey" href="#api" data-view="api"><span class="fkey-lamp" aria-hidden="true"></span>API</a>
     <a class="fkey" href="#diagnostics" data-view="diagnostics"><span class="fkey-lamp" aria-hidden="true"></span>Diagnose<span id="nav-issues" class="fkey-count" hidden></span></a>
@@ -638,7 +767,8 @@ R"HTML(  <a class="brand" href="#overview" aria-label="NInfer monitor"><span cla
 <section class="fma" aria-label="Engine status">
   <div class="fma-col fma-engine">
     <div class="fma-engine-state">
-      <span class="fma-label">Engine</span>
+)HTML"
+R"HTML(      <span class="fma-label">Engine</span>
       <strong id="kpi-state-badge" class="fma-mode amber" data-annunciate>Connecting</strong>
       <span class="fma-sub">Up <b id="kpi-uptime">—</b></span>
       <span id="fma-armed" class="fma-armed" hidden></span>
@@ -762,6 +892,96 @@ R"HTML(  <a class="brand" href="#overview" aria-label="NInfer monitor"><span cla
       <ul id="alert-list" class="alert-list"><li class="alert-quiet">Findings appear as the engine records activity.</li></ul>
     </section>
     </div>
+    <div id="seam-col" class="seam seam-col" role="separator" tabindex="0" aria-orientation="vertical" aria-label="Width of memory and rates against calling apps and alerts" aria-valuemin="0" aria-valuemax="100" title="Drag to resize · double-click to restore"></div>
+    <div id="seam-row" class="seam seam-row" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="Height of memory against rates" aria-valuemin="0" aria-valuemax="100" title="Drag to resize · double-click to restore"></div>
+  </div>
+</section>
+
+<section id="view-chat" class="view view-cdu view-chat" aria-labelledby="chat-title" hidden>
+  <div class="cdu cdu-wide chat">
+    <header class="cdu-title"><h1 id="chat-title">Chat</h1><span id="chat-model" class="cdu-page">Checking the model…</span></header>
+    <div class="chat-bar">
+      <div class="chat-context" title="Tokens the conversation holds, against the model's context limit">
+        <span class="cdu-label">Context</span>
+        <span class="chat-meter" aria-hidden="true"><span id="chat-meter-fill"></span></span>
+        <span id="chat-context-text" class="chat-context-text">—</span>
+      </div>
+      <div class="chat-think" role="group" aria-label="Thinking">
+        <span class="cdu-label">Thinking</span>
+        <button type="button" class="cdu-tab" data-think="default" aria-pressed="true" title="Use the chat template's default">Default</button>
+        <button type="button" class="cdu-tab" data-think="on" aria-pressed="false">On</button>
+        <button type="button" class="cdu-tab" data-think="off" aria-pressed="false">Off</button>
+      </div>
+      <div class="chat-budget-now" title="The output budget the next request carries"><span class="cdu-label">Output</span><span id="chat-budget-now"></span></div>
+      <button type="button" id="chat-settings-toggle" class="key key-small" aria-expanded="false" aria-controls="chat-settings">Parameters<span id="chat-param-count" class="chat-param-count"></span></button>
+      <button type="button" id="chat-new" class="key key-small">New chat</button>
+    </div>
+    <div id="chat-settings" class="chat-settings" hidden>
+      <button type="button" id="chat-back" class="prompt chat-back">&lt;Chat</button>
+      <p class="chat-settings-note">An empty field sends nothing, so the engine's own default applies. Each reply lists exactly what it sent.</p>
+      <fieldset class="chat-group">
+        <legend>Output</legend>
+        <label class="chat-setting"><span class="cdu-label">Output budget</span>
+          <span class="chat-budget"><select id="chat-budget" class="cfg-select"><option value="unlimited">No limit</option><option value="custom">Custom</option><option value="default">Engine default</option></select><input id="chat-max" class="cdu-input cdu-input-num" type="number" min="0" step="1" placeholder="tokens" aria-label="Output tokens" hidden></span></label>
+)HTML"
+R"HTML(        <p id="chat-budget-help" class="cfg-help chat-setting-wide"></p>
+        <label class="cfg-check chat-setting"><input type="checkbox" id="chat-stream" checked><span>Stream the answer</span></label>
+        <label class="cfg-check chat-setting"><input type="checkbox" id="chat-show-reasoning"><span>Open reasoning while it streams</span></label>
+        <label class="chat-setting chat-setting-wide"><span class="cdu-label">System prompt</span><textarea id="chat-system" class="cdu-input chat-text" rows="2" placeholder="Optional instructions for the whole conversation"></textarea></label>
+        <label class="chat-setting chat-setting-wide"><span class="cdu-label">Stop strings · one per line, up to four</span><textarea id="chat-stops" class="cdu-input chat-text" rows="2" placeholder="None"></textarea></label>
+        <label class="chat-setting"><span class="cdu-label">Response format</span><select id="chat-format" class="cfg-select"><option value="">Free text</option><option value="json_object">JSON object</option><option value="json_schema">JSON schema</option></select></label>
+        <label id="chat-schema-row" class="chat-setting chat-setting-wide" hidden><span class="cdu-label">JSON schema</span><textarea id="chat-schema" class="cdu-input chat-text chat-code" rows="4" spellcheck="false" placeholder='{"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}'></textarea><span id="chat-schema-state" class="cfg-help"></span></label>
+      </fieldset>
+      <fieldset class="chat-group">
+        <legend>Sampling</legend>
+        <label class="chat-setting"><span class="cdu-label">Temperature</span><input data-param="temperature" class="cdu-input" type="number" min="0" max="2" step="0.05" placeholder="Engine default"></label>
+        <label class="chat-setting"><span class="cdu-label">Top p</span><input data-param="top_p" class="cdu-input" type="number" min="0" max="1" step="0.01" placeholder="Engine default"></label>
+        <label class="chat-setting"><span class="cdu-label">Top k · 0 to 20</span><input data-param="top_k" data-int class="cdu-input" type="number" min="0" max="20" step="1" placeholder="Engine default"></label>
+        <label class="chat-setting"><span class="cdu-label">Min p · 0 to 1</span><input data-param="min_p" class="cdu-input" type="number" min="0" max="1" step="0.01" placeholder="Engine default"></label>
+        <label class="chat-setting"><span class="cdu-label">Presence penalty</span><input data-param="presence_penalty" class="cdu-input" type="number" min="-2" max="2" step="0.1" placeholder="Engine default"></label>
+        <label class="chat-setting"><span class="cdu-label">Frequency penalty</span><input data-param="frequency_penalty" class="cdu-input" type="number" min="-2" max="2" step="0.1" placeholder="Engine default"></label>
+        <label class="chat-setting"><span class="cdu-label">Seed</span><input data-param="seed" data-int class="cdu-input" type="number" step="1" placeholder="New each request"></label>
+      </fieldset>
+      <fieldset class="chat-group">
+        <legend>Reasoning</legend>
+        <label class="chat-setting"><span class="cdu-label">Reasoning effort</span><select data-param="reasoning_effort" class="cfg-select"><option value="">Template default</option><option>none</option><option>minimal</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></label>
+        <label class="chat-setting"><span class="cdu-label">Thinking budget · tokens</span><input data-param="thinking_budget_tokens" data-int class="cdu-input" type="number" min="-1" step="1" placeholder="Unbounded"></label>
+        <label class="cfg-check chat-setting"><input type="checkbox" data-param="preserve_thinking" data-bool><span>Keep earlier reasoning in the history</span></label>
+      </fieldset>
+      <fieldset class="chat-group">
+        <legend>NInfer</legend>
+        <label class="cfg-check chat-setting"><input type="checkbox" id="chat-logprobs"><span>Token probabilities</span></label>
+        <label class="chat-setting"><span class="cdu-label">Alternatives per token · 0 to 20</span><input id="chat-top-logprobs" class="cdu-input" type="number" min="0" max="20" step="1" placeholder="0"></label>
+        <p id="chat-logprobs-help" class="cfg-help chat-setting-wide">Answers then arrive whole instead of streaming. Each reply gets a token view that marks the tokens the model was unsure of. Any alternatives turn speculative drafts off for that request.</p>
+        <label class="cfg-check chat-setting chat-setting-wide"><input type="checkbox" data-param="prompt_cache_read_only" data-bool><span>Read the prompt cache without adding to it</span></label>
+        <p class="cfg-help chat-setting-wide">For tests that should not evict other apps' cached conversations. The request still starts from a prefix already in the cache but publishes nothing of its own, so the next turn cannot pick up where this one ended.</p>
+      </fieldset>
+      <fieldset class="chat-group chat-group-wide">
+        <legend>Extra request JSON</legend>
+        <label class="chat-setting chat-setting-wide"><span class="sr-only">Extra request JSON</span><textarea id="chat-extra" class="cdu-input chat-text chat-code" rows="3" spellcheck="false" placeholder='Merged into the request last, so it can set or override any field, for example {"tool_choice": "none"}'></textarea><span id="chat-extra-state" class="cfg-help"></span></label>
+        <div class="chat-setting chat-setting-wide chat-settings-keys"><button type="button" id="chat-params-reset" class="key key-small">Reset to engine defaults</button></div>
+      </fieldset>
+    </div>
+    <p id="chat-think-note" class="pad-line amber" hidden>Changing thinking in the middle of a conversation makes the engine read the whole conversation again instead of reusing it. Keep it the same for a conversation, or start a new chat.</p>
+    <div id="chat-log" class="chat-log" role="log" aria-label="Conversation" tabindex="0">
+      <div id="chat-empty" class="chat-empty">
+        <p class="chat-empty-title">Talk to your model</p>
+        <p>Each reply shows how long it took to start, how fast it generated, how much of the conversation the engine reused instead of reading it again, and the parameters it sent. An answer ends when the model finishes, at a stop string, or at the output budget shown above, which Parameters sets.</p>
+      </div>
+    </div>
+    <form id="chat-form" class="chat-composer" autocomplete="off">
+      <div id="chat-attachments" class="chat-attachments" hidden></div>
+      <label class="sr-only" for="chat-input">Message</label>
+      <textarea id="chat-input" class="chat-input" rows="2" placeholder="Message your model · Enter sends, Shift+Enter adds a line"></textarea>
+      <div class="chat-keys">
+        <button type="button" id="chat-attach" class="key key-small" hidden>Attach image</button>
+        <input type="file" id="chat-file" accept="image/*" multiple hidden>
+        <span id="chat-hint" class="cfg-status"></span>
+        <button type="button" id="chat-inspect" class="key key-small" title="Open this conversation's next request on the API page">Open in API</button>
+        <button type="submit" id="chat-send" class="key key-insert">Send<span aria-hidden="true">&gt;</span></button>
+        <button type="button" id="chat-stop" class="key key-stop" hidden>Stop</button>
+      </div>
+    </form>
   </div>
 </section>
 
@@ -774,8 +994,7 @@ R"HTML(  <a class="brand" href="#overview" aria-label="NInfer monitor"><span cla
       <li class="cdu-line">
         <label class="cdu-label" for="api-address">2 · Base URL</label>
         <span class="cdu-small">Paste it into your app's OpenAI-compatible provider settings.</span>
-)HTML"
-R"HTML(        <span class="cdu-field-row"><input id="api-address" class="cdu-input cdu-input-mono" readonly value="Loading…"><button type="button" class="key" id="copy-address"><svg class="icon"><use href="#i-copy"/></svg>Copy</button></span>
+        <span class="cdu-field-row"><input id="api-address" class="cdu-input cdu-input-mono" readonly value="Loading…"><button type="button" class="key" id="copy-address"><svg class="icon"><use href="#i-copy"/></svg>Copy</button></span>
         <span id="connection-pending" class="cdu-data amber" hidden>Connection settings were saved but may not be active yet. Restart the engine and confirm it is ready before using this address.</span>
         <span class="cdu-small">This is the saved address and works on this computer. Reaching it from another device needs network configuration.</span>
       </li>
@@ -819,7 +1038,8 @@ R"HTML(        <span class="cdu-field-row"><input id="api-address" class="cdu-in
           <div class="bench-line bench-options">
             <div id="bench-examples" class="bench-examples" role="group" aria-label="Examples"></div>
             <label id="bench-stream-wrap" class="cfg-check bench-stream"><input type="checkbox" id="bench-stream"><span>Stream</span></label>
-            <button type="button" id="bench-format" class="key key-small">Format</button>
+)HTML"
+R"HTML(            <button type="button" id="bench-format" class="key key-small">Format</button>
             <button type="button" id="bench-curl" class="key key-small"><svg class="icon"><use href="#i-copy"/></svg>Copy as curl</button>
           </div>
           <label class="sr-only" for="bench-body">Request body (JSON)</label>
@@ -917,8 +1137,7 @@ R"HTML(        <span class="cdu-field-row"><input id="api-address" class="cdu-in
         <li><a class="lsk lsk-r" href="#settings/capacity"><span class="lsk-prompt">Request capacity<span aria-hidden="true">&gt;</span></span><span class="lsk-sum" id="sum-capacity">—</span></a></li>
         <li><a class="lsk lsk-l" href="#settings/api"><span class="lsk-prompt"><span aria-hidden="true">&lt;</span>API &amp; access</span><span class="lsk-sum" id="sum-api">—</span></a></li>
         <li><a class="lsk lsk-r" href="#settings/memory"><span class="lsk-prompt">Memory &amp; precision<span aria-hidden="true">&gt;</span></span><span class="lsk-sum" id="sum-memory">—</span></a></li>
-)HTML"
-R"HTML(        <li><a class="lsk lsk-l" href="#settings/frontends"><span class="lsk-prompt"><span aria-hidden="true">&lt;</span>Web frontends</span><span class="lsk-sum" id="sum-frontends">—</span></a></li>
+        <li><a class="lsk lsk-l" href="#settings/frontends"><span class="lsk-prompt"><span aria-hidden="true">&lt;</span>Web frontends</span><span class="lsk-sum" id="sum-frontends">—</span></a></li>
         <li><a class="lsk lsk-r" href="#settings/features"><span class="lsk-prompt">Model features<span aria-hidden="true">&gt;</span></span><span class="lsk-sum" id="sum-features">—</span></a></li>
         <li><a class="lsk lsk-l" href="#settings/presets"><span class="lsk-prompt"><span aria-hidden="true">&lt;</span>Model presets</span><span class="lsk-sum" id="sum-presets">—</span></a></li>
         <li><a class="lsk lsk-r" href="#settings/reserve"><span class="lsk-prompt">Desktop reserve<span aria-hidden="true">&gt;</span></span><span class="lsk-sum" id="sum-reserve">—</span></a></li>
@@ -956,7 +1175,8 @@ R"HTML(        <li><a class="lsk lsk-l" href="#settings/frontends"><span class="
       <p class="cdu-help">How much GPU memory NInfer leaves free when it starts, on top of what other apps already use. More room helps your desktop and GPU-heavy apps but leaves less for the model's conversations. It is a startup target, not memory locked away.</p>
       <div class="reserve-layout">
         <div class="reserve-entry">
-          <label class="cdu-label" for="reserve-amount">Free memory target</label>
+)HTML"
+R"HTML(          <label class="cdu-label" for="reserve-amount">Free memory target</label>
           <span class="cdu-field-row"><input id="reserve-amount" class="cdu-input cdu-input-num" type="number" min="1" max="64" step="1" value="8" aria-describedby="reserve-preview-note"><span class="cdu-unit">GiB</span></span>
           <input id="reserve-slider" class="reserve-slider" type="range" min="1" max="64" step="1" value="8" aria-label="Free GPU memory target in GiB" aria-describedby="reserve-preview-note">
           <div class="reserve-scale" aria-hidden="true"><span>More engine capacity</span><span>More room for apps</span></div>
@@ -1106,8 +1326,7 @@ R"HTML(        <li><a class="lsk lsk-l" href="#settings/frontends"><span class="
     try { localStorage.setItem('ninfer:display', next); } catch (_) {}
     applyDisplay(next);
   };
-)HTML"
-R"HTML(  if (lightQuery) lightQuery.addEventListener('change', () => { if (document.documentElement.dataset.display === 'auto') applyDisplay('auto'); });
+  if (lightQuery) lightQuery.addEventListener('change', () => { if (document.documentElement.dataset.display === 'auto') applyDisplay('auto'); });
 
   // ---------------------------------------------------------------------
   // Scratchpad messages
@@ -1129,10 +1348,10 @@ R"HTML(  if (lightQuery) lightQuery.addEventListener('change', () => { if (docum
   // ---------------------------------------------------------------------
   // Routing: four function keys, each with its own pages.
   // ---------------------------------------------------------------------
-  const viewNames = ['overview', 'connect', 'api', 'diagnostics', 'settings'];
+  const viewNames = ['overview', 'chat', 'connect', 'api', 'diagnostics', 'settings'];
   const diagPages = ['findings', 'log', 'engine', 'accel'];
   const settingsPages = ['network', 'api', 'frontends', 'capacity', 'memory', 'features', 'raw', 'presets', 'reserve'];
-  const viewLabels = {overview:'Monitor', connect:'Connect', api:'API test bench', diagnostics:'Diagnose', settings:'Settings'};
+  const viewLabels = {overview:'Monitor', chat:'Chat', connect:'Connect', api:'API test bench', diagnostics:'Diagnose', settings:'Settings'};
   const diagLabels = {findings:'Findings', log:'Engine log', engine:'Engine data', accel:'Acceleration'};
   const tabLabels = {network:'Connection', api:'API & access', frontends:'Web frontends', capacity:'Request capacity', memory:'Memory & precision', features:'Model features', raw:'Launch details', presets:'Model presets', reserve:'Desktop reserve'};
 
@@ -1166,6 +1385,8 @@ R"HTML(  if (lightQuery) lightQuery.addEventListener('change', () => { if (docum
       updateTmpy();
     }
     if (activeView === 'api') benchInit();
+)HTML"
+R"HTML(    if (activeView === 'chat') chatInit();
     document.title = title + ' · NInfer';
     if (activeView === 'overview') requestAnimationFrame(drawAll);
   }
@@ -1313,8 +1534,7 @@ R"HTML(  if (lightQuery) lightQuery.addEventListener('change', () => { if (docum
     if (modelBusy) return 'Switch in progress. Other engine changes are paused.';
     if (modelUncertain) return 'The switch result is unknown. Verify completion before reloading this page to enable changes.';
     if (catalogLoading) return 'Checking available files…';
-)HTML"
-R"HTML(    if (!connected) return 'Reconnect to the supervisor before switching.';
+    if (!connected) return 'Reconnect to the supervisor before switching.';
     if (!cfgData || cfgData.manages_engine === false || (lastState || {}).monitor_only) return 'Switch models in the application that starts this engine.';
     if (!cfgData.writable) return 'The supervisor configuration is read-only.';
     if (configBusy || reserveBusy || actionBusy) return 'Wait for the current change to finish.';
@@ -1363,7 +1583,8 @@ R"HTML(    if (!connected) return 'Reconnect to the supervisor before switching.
       };
       const name = document.createElement('span'); name.className = 'preset-name'; name.textContent = model.name || model.id;
       const detail = document.createElement('span'); detail.className = 'preset-detail'; detail.id = 'catalog-detail-' + index;
-      detail.textContent = [model.description, (Number.isFinite(model.size_bytes) && model.size_bytes > 0 ? (model.size_bytes / GiB).toFixed(1) + ' GiB on disk' : 'Artifact size unavailable'), model.available ? '' : 'Unavailable: ' + model.reason].filter(Boolean).join(' · ');
+)HTML"
+R"HTML(      detail.textContent = [model.description, (Number.isFinite(model.size_bytes) && model.size_bytes > 0 ? (model.size_bytes / GiB).toFixed(1) + ' GiB on disk' : 'Artifact size unavailable'), model.available ? '' : 'Unavailable: ' + model.reason].filter(Boolean).join(' · ');
       const artifact = document.createElement('code'); artifact.textContent = model.artifact;
       label.append(input, name);
       if (model.active) { const tag = document.createElement('span'); tag.className = 'preset-tag'; tag.textContent = 'Current launch'; label.append(tag); }
@@ -1503,8 +1724,7 @@ R"HTML(    if (!connected) return 'Reconnect to the supervisor before switching.
     let lo = 0, hi = ts.length - 1;
     if (hi < 0) return -1;
     while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (ts[mid] < t) lo = mid; else hi = mid; }
-)HTML"
-R"HTML(    return Math.abs(ts[lo] - t) <= Math.abs(ts[hi] - t) ? lo : hi;
+    return Math.abs(ts[lo] - t) <= Math.abs(ts[hi] - t) ? lo : hi;
   }
   function relTime(ms) {
     const s = Math.round(ms / 1000);
@@ -1573,6 +1793,42 @@ R"HTML(    return Math.abs(ts[lo] - t) <= Math.abs(ts[hi] - t) ? lo : hi;
   // rolls with the value, so the direction of change shows before the digit flips.
   const drum = {shown: null, from: 0, to: 0, start: 0};
   const reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // Slew: a pointer, a scale or a figure that changes travels to its new reading over 380 ms
+  // on an ease-out, as a damped mechanical pointer does, instead of jumping. Only the travel
+)HTML"
+R"HTML(  // is drawn in between; every reading at rest is the measured value. Reduced motion jumps.
+  const SLEW_MS = 380;
+  const slews = new Map();
+  let slewFrame = 0;
+  const easeOut = p => 1 - Math.pow(1 - p, 3);
+  function slew(key, target) {
+    if (!Number.isFinite(target)) { slews.delete(key); return target; }
+    const now = performance.now();
+    const st = slews.get(key);
+    if (!st || reducedMotion || document.hidden) { slews.set(key, {from: target, to: target, start: now, v: target}); return target; }
+    if (target !== st.to) { st.from = st.v; st.to = target; st.start = now; }
+    const p = Math.min(1, (now - st.start) / SLEW_MS);
+    st.v = p < 1 ? st.from + (st.to - st.from) * easeOut(p) : st.to;
+    if (p < 1 && !slewFrame) slewFrame = requestAnimationFrame(() => { slewFrame = 0; drawAll(); });
+    return st.v;
+  }
+  // The same travel for a figure written as text.
+  function countTo(el, target, fmt) {
+    if (!Number.isFinite(target)) { el._count = null; el.textContent = '—'; return; }
+    const prev = el._count;
+    if (!prev || reducedMotion || document.hidden) { el._count = {v: target, to: target}; el.textContent = fmt(target); return; }
+    if (prev.to === target) { if (!prev.moving) el.textContent = fmt(target); return; }
+    const from = prev.v, start = performance.now();
+    const run = el._count = {v: from, to: target, moving: true};
+    const step = now => {
+      if (el._count !== run) return;
+      const p = Math.min(1, (now - start) / SLEW_MS);
+      run.v = p < 1 ? from + (target - from) * easeOut(p) : target;
+      el.textContent = fmt(run.v);
+      if (p < 1) requestAnimationFrame(step); else run.moving = false;
+    };
+    requestAnimationFrame(step);
+  }
   // Tenths shown on the drum: animates 250 ms toward the new reading, then rests
   // on a whole digit so the neighbours show only as clipped edges.
   function drumTenths(value) {
@@ -1626,7 +1882,7 @@ R"HTML(    return Math.abs(ts[lo] - t) <= Math.abs(ts[hi] - t) ? lo : hi;
     tapeBody(c, W, plotH);
     const stepGiB = niceStep(max / GiB, plotH, 26);
     const nvNow = (s.device_memory || {}).used_bytes;
-    const readY = Number.isFinite(nvNow) ? Math.max(PAD_TOP + 18, Math.min(PAD_TOP + plotH - 18, yOf(nvNow))) : null;
+    const readY = Number.isFinite(nvNow) ? Math.max(PAD_TOP + 18, Math.min(PAD_TOP + plotH - 18, yOf(slew('mem.used', nvNow)))) : null;
     c.font = '500 11px Bahnschrift, sans-serif'; c.textAlign = 'right'; c.textBaseline = 'middle';
     for (let g = 0; g * GiB <= max + 1; g += stepGiB / 2) {
       const y = Math.round(yOf(g * GiB)) + .5;
@@ -1659,7 +1915,7 @@ R"HTML(    return Math.abs(ts[lo] - t) <= Math.abs(ts[hi] - t) ? lo : hi;
     const ser = s.series || {}, u = ser.nvidia_used_bytes || [], t = ser.t_ms || [];
     const used = Number.isFinite(nv.used_bytes) ? nv.used_bytes : u[u.length - 1];
     if (!Number.isFinite(used)) return;
-    const y = Math.max(PAD_TOP + 9, Math.min(PAD_TOP + plotH - 9, yOf(used)));
+    const y = Math.max(PAD_TOP + 9, Math.min(PAD_TOP + plotH - 9, yOf(slew('mem.used', used))));
     if (u.length > 20 && t.length === u.length) {
       const i0 = nearest(t, t[t.length - 1] - 10000);
       const dt = (t[t.length - 1] - t[i0]) / 1000;
@@ -1729,8 +1985,7 @@ R"HTML(    return Math.abs(ts[lo] - t) <= Math.abs(ts[hi] - t) ? lo : hi;
       c.fillStyle = C.reserveLabel; c.fillText('DESKTOP RESERVE', 6, y - 5);
     }
     if (cursorT != null) {
-)HTML"
-R"HTML(      const i = nearest(t, cursorT);
+      const i = nearest(t, cursorT);
       const x = Math.round(xOf(t[i])) + .5;
       c.strokeStyle = C.dim; c.lineWidth = 1;
       c.beginPath(); c.moveTo(x, PAD_TOP); c.lineTo(x, H - PAD_BOTTOM); c.stroke();
@@ -1756,7 +2011,8 @@ R"HTML(      const i = nearest(t, cursorT);
   }
   function rateScales(s, plotH) {
     const ser = s.throughput || {};
-    const dec = ser.decode_tok_s || [], pre = ser.prefill_tok_s || [];
+)HTML"
+R"HTML(    const dec = ser.decode_tok_s || [], pre = ser.prefill_tok_s || [];
     const now = (s.requests || {}).decode_tok_s_total || 0;
     const decRaw = Math.max(40, now, ...dec) * 1.1, preRaw = Math.max(400, ...pre) * 1.1;
     const n = Math.max(2, Math.min(5, Math.floor((plotH || 120) / 26)));
@@ -1769,22 +2025,25 @@ R"HTML(      const i = nearest(t, cursorT);
     const plotH = H - PAD_TOP - PAD_BOTTOM;
     if (plotH <= 10) return;
     const {decMax, steps} = rateScales(s, plotH);
+    // Re-ranging slides the tape: each figure keeps its exact value and travels to its new
+    // place, so a changed scale reads as the same tape moving rather than a new one.
+    const shownMax = slew('rate.decMax', decMax);
     const edge = W - 1.5;
-    const yOf = v => PAD_TOP + plotH - plotH * (Math.max(0, Math.min(v, decMax)) / decMax);
+    const yOf = v => PAD_TOP + plotH - plotH * (Math.max(0, Math.min(v, shownMax)) / shownMax);
     tapeBody(c, W, plotH);
-    const nowRate = (s.requests || {}).decode_tok_s_total || 0;
+    const nowRate = slew('rate.dec', (s.requests || {}).decode_tok_s_total || 0);
     const readY = Math.max(PAD_TOP + 11, Math.min(PAD_TOP + plotH - 11, yOf(nowRate)));
     c.font = '500 11px Bahnschrift, sans-serif'; c.textAlign = 'right'; c.textBaseline = 'middle';
-    for (let k = 0; k <= steps * 2; k++) {
-      const v = decMax * k / (steps * 2), y = Math.round(yOf(v)) + .5, major = k % 2 === 0;
+    const half = decMax / (steps * 2);
+    for (let k = 0; k * half <= shownMax + 1e-6; k++) {
+      const v = half * k, y = Math.round(yOf(v)) + .5, major = k % 2 === 0;
       c.strokeStyle = major ? C.ink : C.dim;
       c.beginPath(); c.moveTo(edge - (major ? 8 : 5), y); c.lineTo(edge, y); c.stroke();
       if (major && Math.abs(y - readY) > 16) { c.fillStyle = C.green; c.fillText(Math.round(v).toLocaleString(), edge - 11, y); }
     }
     const reqs = s.requests || {};
     if (reqs.log_available === false) return;
-    const now = reqs.decode_tok_s_total || 0;
-    readoutWindow(c, W, Math.max(PAD_TOP + 11, Math.min(PAD_TOP + plotH - 11, yOf(now))), rate(now), C.green, false);
+    readoutWindow(c, W, readY, rate(nowRate), C.green, false);
   }
   function drawRateTrace(s, win) {
     const {c, W, H} = prep(rateTrace);
@@ -1798,18 +2057,19 @@ R"HTML(      const i = nearest(t, cursorT);
     $('throughput-empty').textContent = busy ? 'Collecting rate samples…' : 'No rate samples in this window';
     if (!win || W <= 0) { rateTip.style.display = 'none'; return; }
     const plotH = H - PAD_TOP - PAD_BOTTOM;
-    const {decMax, preMax, steps} = rateScales(s, plotH);
+    const scale = rateScales(s, plotH);
+    const decMax = slew('rate.decMax', scale.decMax), preMax = slew('rate.preMax', scale.preMax);
     const PW = W - GUTTER;
     const xOf = tt => 1 + (PW - 2) * ((tt - win.t0) / (win.t1 - win.t0));
+    const yAt = (v, max) => Math.round(PAD_TOP + plotH - plotH * (v / max)) + .5;
     c.font = '500 11px Bahnschrift, sans-serif'; c.textBaseline = 'middle';
-    for (let k = 0; k <= steps; k++) {
-      const y = Math.round(PAD_TOP + plotH - plotH * (k / steps)) + .5;
-      if (k > 0) { c.strokeStyle = C.rule; c.lineWidth = 1; c.setLineDash([1, 4]); c.beginPath(); c.moveTo(0, y); c.lineTo(PW, y); c.stroke(); c.setLineDash([]); }
-      if (k > 0) {
-        const label = Math.round(preMax * k / steps).toLocaleString();
-        c.textAlign = 'right';
-        c.fillStyle = C.ice; c.fillText(label, W - 2, y);
-      }
+    c.strokeStyle = C.rule; c.lineWidth = 1; c.setLineDash([1, 4]);
+    for (let k = 1; k * scale.decStep <= decMax + 1e-6; k++) { const y = yAt(k * scale.decStep, decMax); c.beginPath(); c.moveTo(0, y); c.lineTo(PW, y); c.stroke(); }
+    c.setLineDash([]);
+    c.textAlign = 'right'; c.fillStyle = C.ice;
+    for (let k = 1; k * scale.preStep <= preMax + 1e-6; k++) {
+      const y = yAt(k * scale.preStep, preMax);
+      if (y >= PAD_TOP - .5) c.fillText(Math.round(k * scale.preStep).toLocaleString(), W - 2, y);
     }
     c.textBaseline = 'alphabetic';
     drawTimeAxis(c, PW, H, win, xOf);
@@ -1859,6 +2119,78 @@ R"HTML(      const i = nearest(t, cursorT);
   if (window.ResizeObserver) new ResizeObserver(() => requestAnimationFrame(drawAll)).observe($('view-overview'));
   window.addEventListener('resize', () => requestAnimationFrame(drawAll));
 
+  // Seams: in the wide layout the gaps between the Monitor displays drag (or move with the
+  // arrow keys) to give memory, rates or the side column more room. Double-click or Enter
+  // restores the default split; the split is kept in this browser.
+  const SPLIT_KEY = 'ninfer:monitor-split';
+  const monitorGrid = document.querySelector('.monitor-grid');
+  const memDisplay = document.querySelector('.display-memory'), rateDisplay = document.querySelector('.display-rates');
+  const seams = {col: $('seam-col'), row: $('seam-row')};
+  let split = {col: null, row: null};
+  try { Object.assign(split, JSON.parse(localStorage.getItem(SPLIT_KEY) || '{}')); } catch (_) {}
+  const gridGap = () => parseFloat(getComputedStyle(monitorGrid).columnGap) || 8;
+  function placeSeams() {
+    if (getComputedStyle(seams.col).display === 'none') return;
+    const gr = monitorGrid.getBoundingClientRect(), mr = memDisplay.getBoundingClientRect(), rr = rateDisplay.getBoundingClientRect();
+    const gap = gridGap();
+    seams.col.style.left = (mr.right - gr.left) + 'px';
+    Object.assign(seams.row.style, {top: (mr.bottom - gr.top) + 'px', left: (mr.left - gr.left) + 'px', width: mr.width + 'px'});
+    seams.col.setAttribute('aria-valuenow', String(Math.round(100 * mr.width / Math.max(1, gr.width - gap))));
+    seams.row.setAttribute('aria-valuenow', String(Math.round(100 * mr.height / Math.max(1, rr.bottom - mr.top - gap))));
+  }
+  function applySplit() {
+    const g = monitorGrid.style;
+    [['col', '--col-a', '--col-b'], ['row', '--row-a', '--row-b']].forEach(([k, a, b]) => {
+      if (split[k] != null) { g.setProperty(a, split[k] + 'fr'); g.setProperty(b, (1 - split[k]) + 'fr'); }
+      else { g.removeProperty(a); g.removeProperty(b); }
+    });
+    placeSeams();
+    requestAnimationFrame(drawAll);
+  }
+  function saveSplit() { try { localStorage.setItem(SPLIT_KEY, JSON.stringify(split)); } catch (_) {} }
+  // The split a pointer at (x, y) asks for, kept clear of each side's floor.
+  function splitAt(kind, x, y) {
+    const gr = monitorGrid.getBoundingClientRect(), gap = gridGap();
+    if (kind === 'col') {
+      const avail = gr.width - gap;
+      return Math.min(avail - 380, Math.max(Math.min(520, avail / 2), x - gr.left - gap / 2)) / avail;
+    }
+    const mr = memDisplay.getBoundingClientRect(), rr = rateDisplay.getBoundingClientRect();
+    const avail = rr.bottom - mr.top - gap;
+    return Math.min(avail - 180, Math.max(190, y - mr.top - gap / 2)) / avail;
+  }
+  Object.entries(seams).forEach(([kind, el]) => {
+    const reset = () => { split[kind] = null; applySplit(); saveSplit(); };
+    el.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      el.setPointerCapture(e.pointerId);
+      el.classList.add('dragging'); document.body.classList.add('resizing-' + kind);
+    });
+    el.addEventListener('pointermove', e => {
+      if (!el.classList.contains('dragging')) return;
+      split[kind] = splitAt(kind, e.clientX, e.clientY); applySplit();
+    });
+    const end = () => {
+      if (!el.classList.contains('dragging')) return;
+      el.classList.remove('dragging'); document.body.classList.remove('resizing-' + kind);
+      saveSplit();
+    };
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(type => el.addEventListener(type, end));
+    el.addEventListener('dblclick', reset);
+    el.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); reset(); return; }
+      const dir = (kind === 'col' ? {ArrowLeft: -1, ArrowRight: 1} : {ArrowUp: -1, ArrowDown: 1})[e.key];
+      if (!dir) return;
+      e.preventDefault();
+      const r = el.getBoundingClientRect(), step = (e.shiftKey ? 80 : 16) * dir;
+      split[kind] = splitAt(kind, r.left + r.width / 2 + (kind === 'col' ? step : 0), r.top + r.height / 2 + (kind === 'row' ? step : 0));
+      applySplit(); saveSplit();
+    });
+  });
+  if (window.ResizeObserver) { const ro = new ResizeObserver(placeSeams); ro.observe(monitorGrid); ro.observe(memDisplay); }
+  applySplit();
+
   function cursorFromPointer(canvas, e) {
     const win = lastState && timeWindow(lastState);
     if (!win) return;
@@ -1893,7 +2225,8 @@ R"HTML(      const i = nearest(t, cursorT);
   });
 
   // ---------------------------------------------------------------------
-  // Calling apps: one row per app from the engine's own record. Columns never
+)HTML"
+R"HTML(  // Calling apps: one row per app from the engine's own record. Columns never
   // move; a row under queue pressure earns a caution line, never bigger type.
   // ---------------------------------------------------------------------
   function renderClients(reqs) {
@@ -1927,8 +2260,7 @@ R"HTML(      const i = nearest(t, cursorT);
       counts.innerHTML = `<b>${(c.completed || 0).toLocaleString()}</b> done · ${c.failed || 0} fail · ${c.cancelled || 0} cxl · ${c.interrupted || 0} cut · ${c.active || 0} open`;
       const ev = document.createElement('button');
       ev.type = 'button'; ev.className = 'client-evidence'; ev.dataset.client = key;
-)HTML"
-R"HTML(      ev.setAttribute('aria-expanded', String(expandedClients.has(key)));
+      ev.setAttribute('aria-expanded', String(expandedClients.has(key)));
       ev.textContent = expandedClients.has(key) ? 'Evidence <' : 'Evidence >';
       ev.onclick = () => { if (expandedClients.has(key)) expandedClients.delete(key); else expandedClients.add(key); renderClients((lastState || {}).requests || {}); };
       app.append(name, counts, ev);
@@ -1997,7 +2329,8 @@ R"HTML(      ev.setAttribute('aria-expanded', String(expandedClients.has(key)));
       return {title:'How close you are to the context and memory limits', body:`The largest request used ${pct(req.largest_context_ratio)} of the ${(cfg.max_context || 0).toLocaleString()}-token context limit across ${req.count || 0} requests. Conversation memory peaked at ${pct(kv.utilization_high_water)} of capacity${kv.includes_retained_checkpoints ? ' (including saved conversation state)' : ''}, with up to ${sch.peak_running || 0} of ${cfg.max_concurrency || 0} requests running at once.`, action:actions[e.kind] || ''};
     }
     if (id === 'prefix.reuse_mix') return {title:'Reusing earlier conversation text', body:e.multi_turn_prompt_tokens > 0 ? `${((e.multi_turn_hit_ratio || 0) * 100).toFixed(0)}% of conversation prompt tokens were reused in the available log. Reuse can make follow-up responses start sooner.` : 'No multi-turn prompt samples are available yet. Reuse can make follow-up responses start sooner.'};
-    if (id === 'client.narrated_tool_intent') return {title:'Tool behavior needs a conversation sample', body:'The log records whether tools were provided, but not what the model said. It cannot explain a promised tool action that did not happen.'};
+)HTML"
+R"HTML(    if (id === 'client.narrated_tool_intent') return {title:'Tool behavior needs a conversation sample', body:'The log records whether tools were provided, but not what the model said. It cannot explain a promised tool action that did not happen.'};
     if (id === 'client.content_fields') return {title:'Reply text is not stored in this log', body:'To investigate an empty or unexpected reply, compare the conversation in your app with the engine log.'};
     if (id === 'vram.admin') return {title:'Detailed engine memory data is unavailable', body:'The supervisor could not retrieve the engine’s internal memory report. GPU-wide readings may still be available.', action:'If this persists after the engine is ready, check the API connection and authentication settings.'};
     if (id === 'prefix.reuse_collapsed' || id === 'prefix.multiturn_root') return {title:'Earlier conversation text is being processed again', body:'The logs show repeated work instead of reusing conversation state. Follow-up responses may take longer.', action:'Copy the engine log before restarting so the issue can be investigated.'};
@@ -2029,8 +2362,7 @@ R"HTML(      ev.setAttribute('aria-expanded', String(expandedClients.has(key)));
     // After a start the Supervisor reads the existing request log once before it reports on it.
     const src = rep.source || {};
     const reading = src.request_log === 'reading';
-)HTML"
-R"HTML(    $('insights-count-badge').textContent = reading ? `reading ${src.bytes_total ? Math.floor(100 * src.bytes_read / src.bytes_total) : 0}%` : String(items.length);
+    $('insights-count-badge').textContent = reading ? `reading ${src.bytes_total ? Math.floor(100 * src.bytes_read / src.bytes_total) : 0}%` : String(items.length);
     const problems = items.filter(it => ['critical', 'warning'].includes(it.severity));
     if (!reading) updateMaster(problems);
     const navIssues = $('nav-issues');
@@ -2136,7 +2468,8 @@ R"HTML(    $('insights-count-badge').textContent = reading ? `reading ${src.byte
     if (!ordered.length) { list.textContent = 'Windows reports no dedicated GPU allocations on this card.'; return; }
     const shown = gpuAppsExpanded ? ordered : ordered.slice(0, 5);
     for (const [name, group] of shown) {
-      const item = document.createElement('span'); item.className = 'gpu-app' + (group.own ? ' own' : '');
+)HTML"
+R"HTML(      const item = document.createElement('span'); item.className = 'gpu-app' + (group.own ? ' own' : '');
       item.textContent = name + (group.count > 1 ? ` ×${group.count}` : '');
       const v = document.createElement('b'); v.textContent = appBytes(group.bytes);
       item.append(v); list.append(item);
@@ -2183,8 +2516,7 @@ R"HTML(    $('insights-count-badge').textContent = reading ? `reading ${src.byte
     const managed = managedEngine();
     if (ready && managed && pendingRestartPid != null && eng.pid && eng.pid !== pendingRestartPid) setPendingRestart(null);
     const labels = {Stopped:'Engine is stopped', Starting:'Starting your engine', Stopping:'Stopping your engine', BackingOff:'Waiting to try again', Halted:'Your engine needs attention'};
-)HTML"
-R"HTML(    const guidance = {Stopped:'Start the engine to load your model and connect an app.', Starting:'Your model is loading. The first start can take a little while.', Stopping:'The engine is shutting down. Connected apps stop receiving responses.', BackingOff:'The engine stopped unexpectedly. The supervisor will try to restart it.', Halted:'Automatic restarts have paused. Check Diagnose before starting again.'};
+    const guidance = {Stopped:'Start the engine to load your model and connect an app.', Starting:'Your model is loading. The first start can take a little while.', Stopping:'The engine is shutting down. Connected apps stop receiving responses.', BackingOff:'The engine stopped unexpectedly. The supervisor will try to restart it.', Halted:'Automatic restarts have paused. Check Diagnose before starting again.'};
     let heading = ready ? 'Your engine is ready' : labels[state] || (state === 'Running' ? 'Engine is not ready yet' : 'Checking your engine');
     let guide = ready ? 'Your model is loaded and ready for requests.' : guidance[state] || 'The engine process is running, but its health check has not confirmed readiness. Check Diagnose if this continues.';
     if (!managed && !ready) { heading = 'Engine is not reachable'; guide = 'Check that the engine is running in its original application and that your connection settings match.'; }
@@ -2216,7 +2548,7 @@ R"HTML(    const guidance = {Stopped:'Start the engine to load your model and co
     const freeBytes = totalBytes != null && usedBytes != null ? totalBytes - usedBytes : null;
     const av = s.admin_vram || null;
     const breached = av && av.desktop_reserve && av.desktop_reserve.holding === false;
-    $('kpi-vram-main').textContent = usedBytes == null ? '—' : (usedBytes / GiB).toFixed(2);
+    countTo($('kpi-vram-main'), usedBytes == null ? NaN : usedBytes / GiB, v => v.toFixed(2));
     $('kpi-vram-pct').textContent = usedBytes == null ? 'unavailable' : `GiB · ${(frac * 100).toFixed(1)}%`;
     $('kpi-vram-free').textContent = gib(freeBytes);
     $('kpi-vram-free').className = breached ? 'red' : 'green';
@@ -2257,10 +2589,12 @@ R"HTML(    const guidance = {Stopped:'Start the engine to load your model and co
     const thrTotal = reqs.decode_tok_s_total || 0;
     $('kpi-decode-explainer').textContent = reqs.decode_tok_s_mean > 0 ? `${reqs.decode_tok_s_mean.toFixed(1)} tok/s per response` : 'all requests together';
     // Zero is a reading, not a missing value; only an absent request log is unknown.
-    $('thr-decode').textContent = haveThr ? `${rate(thrTotal)} tok/s` : '—';
-    $('thr-prefill').textContent = haveThr ? `${rate(reqs.prefill_tok_s_total || 0)} tok/s` : '—';
-    $('band-gen').textContent = haveThr ? `${rate(thrTotal)} tok/s` : '—';
-    $('band-read').textContent = haveThr ? `${rate(reqs.prefill_tok_s_total || 0)} tok/s` : '—';
+    const perSecond = v => `${rate(v)} tok/s`;
+    const readTotal = haveThr ? reqs.prefill_tok_s_total || 0 : NaN;
+    countTo($('thr-decode'), haveThr ? thrTotal : NaN, perSecond);
+    countTo($('thr-prefill'), readTotal, perSecond);
+    countTo($('band-gen'), haveThr ? thrTotal : NaN, perSecond);
+    countTo($('band-read'), readTotal, perSecond);
     renderClients(reqs);
     const running = reqs.running_requests || 0;
     const lanes = Number(launchFlags['--max-concurrency']) || null;
@@ -2294,7 +2628,8 @@ R"HTML(    const guidance = {Stopped:'Start the engine to load your model and co
       $('kpi-mtp-fallbacks').textContent = reqs.mtp_fallback_steps || 0;
       $('dt-mtp-rate-badge').textContent = `${ratePct}% accepted`;
       // One bar per configured draft position; extra columns are hidden rather
-      // than drawn empty, which would read as "accepted nothing at position 5".
+)HTML"
+R"HTML(      // than drawn empty, which would read as "accepted nothing at position 5".
       const pos = reqs.mtp_accepted_per_position || [];
       const maxPos = Math.max(1, ...pos);
       const bars = document.querySelectorAll('#mtp-bars-container .mtp-bar');
@@ -2345,8 +2680,7 @@ R"HTML(    const guidance = {Stopped:'Start the engine to load your model and co
     pendingAction = {actionName, btn};
     const restart = actionName === 'restart' || actionName === 'save-restart';
     modalTitle.textContent = restart ? 'Restart your engine?' : 'Stop your engine?';
-)HTML"
-R"HTML(    modalDesc.textContent = restart ? 'Active requests are interrupted while the model reloads. Connected apps can send requests again when the engine is ready.' : 'Active requests are interrupted. Your model is unloaded until you start the engine again.';
+    modalDesc.textContent = restart ? 'Active requests are interrupted while the model reloads. Connected apps can send requests again when the engine is ready.' : 'Active requests are interrupted. Your model is unloaded until you start the engine again.';
     modalConfirmBtn.firstChild.textContent = actionName === 'save-restart' ? 'Insert and restart' : restart ? 'Restart engine' : 'Stop engine';
     confirmModal.showModal();
     modalCancelBtn.focus();
@@ -2507,7 +2841,8 @@ R"HTML(    modalDesc.textContent = restart ? 'Active requests are interrupted wh
       note = ctx.kind === 'num'
         ? 'Auto sizes the shared pool from free GPU memory at startup. Each request is still limited to ' + shortTokens(ctx.n) + '. Up to 8 requests can be active; that 8 is the Engine lane cap, not a memory estimate.'
         : 'Auto sizes the shared pool from free GPU memory at startup. Up to 8 requests can be active; that 8 is the Engine lane cap, not a memory estimate.';
-    } else if (kv.kind === 'default') {
+)HTML"
+R"HTML(    } else if (kv.kind === 'default') {
       note = 'The pool follows max context, so one full-length request fills it. Extra concurrent requests share that length. ' + (lanes.explicit ? lanes.n + ' of 8 Engine lanes are enabled.' : 'Omitting max concurrency uses 1 of 8 Engine lanes.');
       marks.push('fit');
       for (let i = 1; i < lanes.n; i++) marks.push('share');
@@ -2541,8 +2876,7 @@ R"HTML(    modalDesc.textContent = restart ? 'Active requests are interrupted wh
       if (clamp) { capacityPairBusy = true; ctxEl.value = String(kv.n); ctxEl.oninput(); capacityPairBusy = false; }
       else if (sourceId === 'param-max_context') ctxEl.setCustomValidity('Max context cannot exceed the KV pool (' + kv.n.toLocaleString() + ' tokens). Enlarge the pool first.');
       else if (sourceId === 'param-kv_capacity') kvEl.setCustomValidity('KV pool must cover max context (' + ctx.n.toLocaleString() + ' tokens).');
-)HTML"
-R"HTML(    } else if (kv.kind === 'num' && poolCap != null && kv.n > poolCap) {
+    } else if (kv.kind === 'num' && poolCap != null && kv.n > poolCap) {
       if (clamp) { capacityPairBusy = true; kvEl.value = String(poolCap); kvEl.oninput(); capacityPairBusy = false; }
       else kvEl.setCustomValidity('KV pool cannot exceed ' + lanes.n + ' × max context (' + poolCap.toLocaleString() + ' tokens). Raise max context or max concurrency.');
     }
@@ -2679,7 +3013,8 @@ R"HTML(    } else if (kv.kind === 'num' && poolCap != null && kv.n > poolCap) {
     if (spec.key === 'draft_tokens' || spec.key === 'lm_head_draft') input.disabled = !backend;
     label.id = input.id + '-label';
     input.setAttribute('aria-labelledby', label.id);
-    input.setAttribute('aria-describedby', input.id + '-help');
+)HTML"
+R"HTML(    input.setAttribute('aria-describedby', input.id + '-help');
     input.classList.toggle('dirty', Object.prototype.hasOwnProperty.call(cfgEdits.params, spec.key));
     if (spec.key === 'max_context' || spec.key === 'kv_capacity') wrap.appendChild(capacitySlider(spec, input));
     help.id = input.id + '-help';
@@ -2718,8 +3053,7 @@ R"HTML(    } else if (kv.kind === 'num' && poolCap != null && kv.n > poolCap) {
       else input.oninput = () => {
         const v = opts.type === 'int' ? parseInt(input.value, 10) : input.value;
         cfgEdit(section, key, v, original);
-)HTML"
-R"HTML(        input.classList.toggle('dirty', String(input.value) !== String(original == null ? '' : original));
+        input.classList.toggle('dirty', String(input.value) !== String(original == null ? '' : original));
       };
       wrap.appendChild(input);
     }
@@ -2851,7 +3185,8 @@ R"HTML(        input.classList.toggle('dirty', String(input.value) !== String(or
     document.querySelector('[data-settings-page="config"] .cfg-actions').hidden = cfgTab === 'frontends' || cfgTab === 'raw';
     $('settings-section-title').textContent = tabLabels[cfgTab];
     $('settings-section-help').textContent = help;
-    const eng = cfgData.engine || {}, sup = cfgData.supervisor || {};
+)HTML"
+R"HTML(    const eng = cfgData.engine || {}, sup = cfgData.supervisor || {};
     if (cfgTab === 'frontends') { renderFrontendEditor(); renderSettingsIndex(); return; }
     if (cfgTab === 'network') {
       cfgBody.appendChild(plainField('engine', 'engine_host', 'Engine host', eng.engine_host, {help: 'Address the engine listens on. The supervisor polls health here.'}));
@@ -2871,8 +3206,7 @@ R"HTML(        input.classList.toggle('dirty', String(input.value) !== String(or
       cfgBody.appendChild(plainField('engine', 'api_key_file', 'API key file', eng.api_key_file, {help: eng.api_key_present ? 'A key was read from this file. The key itself is never sent to this page.' : 'No key could be read from this path, so the engine accepts unauthenticated requests.'}));
       cfgBody.appendChild(plainField('engine', 'request_log', 'Request log path', eng.request_log, {help: 'Per-request JSONL. This is what fills the rates, calling apps, reuse and speculation readings.'}));
       (cfgData.schema || []).filter(x => x.group === 'api').forEach(spec => cfgBody.appendChild(fieldRow(spec, (cfgData.params || {})[spec.key])));
-)HTML"
-R"HTML(      cfgBody.appendChild(cfgNote('The API key is read from the file above by the supervisor and handed to the engine. It never appears on this page, in /api/config, or in the launch command.'));
+      cfgBody.appendChild(cfgNote('The API key is read from the file above by the supervisor and handed to the engine. It never appears on this page, in /api/config, or in the launch command.'));
     } else if (cfgTab === 'raw') {
       cfgBody.appendChild(plainField('engine', '_executable', 'Executable', eng.executable, {readonly: true, hint: 'file-only', help: 'Not editable here by design: this decides which binary runs.'}));
       cfgBody.appendChild(plainField('engine', '_workdir', 'Working directory', eng.workdir, {readonly: true, hint: 'file-only'}));
@@ -2995,7 +3329,8 @@ R"HTML(      cfgBody.appendChild(cfgNote('The API key is read from the file abov
     const host = d.engine.engine_host;
     const localHost = ['0.0.0.0', '::', 'localhost', '127.0.0.1', '::1'].includes(host) ? '127.0.0.1' : host;
     const apiUrl = 'http://' + (localHost.includes(':') ? '[' + localHost + ']' : localHost) + ':' + d.engine.engine_port + '/v1';
-    $('api-address').value = apiUrl;
+)HTML"
+R"HTML(    $('api-address').value = apiUrl;
     $('overview-endpoint').textContent = apiUrl.replace(/^http:\/\//, '');
     $('fma-api-copy').title = 'Copy ' + apiUrl;
     annunciate($('model-label'), modelDisplayName(d.engine));
@@ -3026,8 +3361,7 @@ R"HTML(      cfgBody.appendChild(cfgNote('The API key is read from the file abov
       {name: 'Basic', body: () => ({model: benchModel(), messages: chatMessages(), max_tokens: 128})},
       {name: 'Streaming', body: () => ({model: benchModel(), messages: chatMessages(), max_tokens: 256, stream: true, stream_options: {include_usage: true}})},
       {name: 'No thinking', body: () => ({model: benchModel(), messages: chatMessages(), max_tokens: 128, chat_template_kwargs: {enable_thinking: false}})},
-)HTML"
-R"HTML(      {name: 'JSON schema', body: () => ({model: benchModel(), messages: [{role: 'user', content: 'Name a city and its country.'}], max_tokens: 128, response_format: {type: 'json_schema', json_schema: {name: 'place', schema: {type: 'object', properties: {city: {type: 'string'}, country: {type: 'string'}}, required: ['city', 'country']}}}})},
+      {name: 'JSON schema', body: () => ({model: benchModel(), messages: [{role: 'user', content: 'Name a city and its country.'}], max_tokens: 128, response_format: {type: 'json_schema', json_schema: {name: 'place', schema: {type: 'object', properties: {city: {type: 'string'}, country: {type: 'string'}}, required: ['city', 'country']}}}})},
       {name: 'Choice', body: () => ({model: benchModel(), messages: [{role: 'user', content: 'Is the sky blue on a clear day? Answer yes or no.'}], max_tokens: 4, structured_outputs: {choice: ['yes', 'no']}})},
       {name: 'Logprobs', body: () => ({model: benchModel(), messages: [{role: 'user', content: 'Say hello.'}], max_tokens: 8, logprobs: true, top_logprobs: 3})},
       {name: 'Tool call', body: () => ({model: benchModel(), messages: [{role: 'user', content: 'What is the weather in Lisbon?'}], max_tokens: 256, tools: [{type: 'function', function: {name: 'get_weather', description: 'Current weather for a city', parameters: {type: 'object', properties: {city: {type: 'string'}}, required: ['city']}}}]})}]}),
@@ -3120,7 +3454,8 @@ R"HTML(      {name: 'JSON schema', body: () => ({model: benchModel(), messages: 
   }
   benchBody.addEventListener('input', benchValidate);
   benchBody.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); benchSend(); } });
-  benchPath.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); benchSend(); } });
+)HTML"
+R"HTML(  benchPath.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); benchSend(); } });
   $('bench-stream').onchange = () => {
     let v = {};
     try { v = JSON.parse(benchBody.value || '{}'); } catch (_) { return; }
@@ -3164,8 +3499,7 @@ R"HTML(      {name: 'JSON schema', body: () => ({model: benchModel(), messages: 
   }
   // The readable answer of a finished, non-streamed call, when the shape is a known one.
   function benchTextOf(json) {
-)HTML"
-R"HTML(    if (!json || typeof json !== 'object') return null;
+    if (!json || typeof json !== 'object') return null;
     if (Array.isArray(json.choices) && json.choices[0] && json.choices[0].message) {
       const m = json.choices[0].message;
       return {reasoning: m.reasoning_content || '', text: m.content || '', tools: m.tool_calls ? JSON.stringify(m.tool_calls, null, 2) : ''};
@@ -3299,7 +3633,8 @@ R"HTML(    if (!json || typeof json !== 'object') return null;
         let parsed = null;
         if (benchView.kind === 'json') { try { parsed = JSON.parse(text); } catch (_) {} }
         benchView.text = benchTextOf(parsed);
-        if (benchTab === 'events' || (benchTab === 'text' && !benchView.text)) benchTab = 'body';
+)HTML"
+R"HTML(        if (benchTab === 'events' || (benchTab === 'text' && !benchView.text)) benchTab = 'body';
       }
       benchView.timing = timing();
     } catch (err) {
@@ -3358,8 +3693,545 @@ R"HTML(    if (!json || typeof json !== 'object') return null;
   function renderBenchAuth() {
     const el = $('bench-auth');
     if (!cfgData) { el.textContent = 'Checking authentication…'; return; }
+    el.textContent = cfgData.engine && cfgData.engine.api_key_present ? 'The supervisor adds the engine’s API key' : 'No API key configured';
+  }
+
+  // ---------------------------------------------------------------------
+  // Chat: a plain conversation with the served model through the bench route,
+  // with what NInfer measured about each reply: time to start, prompt reading,
+  // generation rate, exact reused prefix and speculative drafts.
+  // ---------------------------------------------------------------------
+  const chatLog = $('chat-log'), chatInput = $('chat-input');
+  let chatReady = false, chatAbort = null, chatVision = false, chatCtx = 0;
+  let chat = {messages: [], think: 'default', system: '', thinkUsed: null};
+  try { const saved = JSON.parse(sessionStorage.getItem('ninfer:chat') || 'null'); if (saved && Array.isArray(saved.messages)) chat = Object.assign(chat, saved); } catch (_) {}
+  let chatPending = [];
+  function chatSave() {
+    // Images and token probabilities stay out of storage; the message keeps how many images
+    // it carried and its confidence summary.
+    const slim = Object.assign({}, chat, {messages: chat.messages.map(m => Object.assign({}, m, {images: undefined, tokens: undefined, tokenView: undefined, imageCount: (m.images || []).length || m.imageCount || 0}))});
+    try { sessionStorage.setItem('ninfer:chat', JSON.stringify(slim)); } catch (_) {}
+  }
+  // A small, safe markdown subset: everything is escaped first; code fences, inline code,
+  // bold, headings and bullets are then marked up. Links stay plain text.
+  function chatMarkdown(text) {
+    return String(text || '').split('```').map((seg, i) => {
+      if (i % 2 === 1) {
+        const nl = seg.indexOf('\n');
+        const lang = nl >= 0 ? seg.slice(0, nl).trim() : '';
+        const code = (nl >= 0 ? seg.slice(nl + 1) : seg).replace(/\n$/, '');
+        return `<pre class="msg-code">${lang ? `<span class="msg-code-lang">${esc(lang)}</span>` : ''}<code>${esc(code)}</code></pre>`;
+      }
+      return esc(seg)
+        .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+        .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/^#{1,6}\s+(.+)$/gm, '<strong class="msg-h">$1</strong>')
+        .replace(/^(\s*)[-*]\s+/gm, '$1• ');
+    }).join('');
+  }
+  function chatTime(d) { return new Date(d).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'}); }
+  function chatPct(a, b) { return b > 0 ? Math.round(100 * a / b) + '%' : '—'; }
+  function chatTelemetry(st, m) {
+    if (!st) return '';
+    const items = [];
+    const add = (label, value, title, cls) => items.push(`<div${title ? ` title="${esc(title)}"` : ''}><dt>${esc(label)}</dt><dd${cls ? ` class="${cls}"` : ''}>${esc(value)}</dd></div>`);
+    if (Number.isFinite(st.ttft)) {
+      if (st.whole) add('Response', duration(st.ttft), 'Measured in the browser from sending to the complete answer, including queue time');
+      else add('First token', duration(st.ttft), 'Measured in the browser from sending to the first visible token, including queue time');
+    }
+    const t = st.timings || {}, u = st.usage || {};
+    if (Number.isFinite(t.prompt_ms)) add('Prompt read', duration(t.prompt_ms), 'Engine time from admission to the first output token');
+    if (Number.isFinite(t.predicted_per_second) && t.predicted_n > 1) add('Generating', rate(t.predicted_per_second) + ' tok/s');
+    const out = u.completion_tokens != null ? u.completion_tokens : t.predicted_n;
+    if (out != null) {
+      const reasoning = (u.completion_tokens_details || {}).reasoning_tokens;
+      add('Output', `${Number(out).toLocaleString()} tokens${reasoning ? ` · ${reasoning.toLocaleString()} reasoning` : ''}`);
+    }
+    const prompt = u.prompt_tokens != null ? u.prompt_tokens : (t.cache_n || 0) + (t.prompt_n || 0);
+    if (prompt) add('Prompt', `${prompt.toLocaleString()} · ${(t.cache_n || 0).toLocaleString()} reused (${chatPct(t.cache_n || 0, prompt)})`, 'Reused is the exact prefix the engine kept from earlier turns instead of reading it again');
+    if (t.draft_n > 0) add('Drafts', `${(t.draft_n_accepted || 0).toLocaleString()} of ${t.draft_n.toLocaleString()} accepted (${chatPct(t.draft_n_accepted || 0, t.draft_n)})`, 'Speculative decoding: drafted tokens the model accepted');
+    if (st.finish === 'length') {
+      const sent = new Map((m && m.sent) || []);
+      const limit = sent.has('max_tokens') ? sent.get('max_tokens') : sent.get('max_completion_tokens');
+      add('Finish', limit === -1 ? 'context full' : limit != null ? `output budget of ${Number(limit).toLocaleString()} reached` : 'engine default budget reached',
+          limit === -1 ? 'With no limit an answer ends when the conversation fills the context' : 'Raise the budget under Parameters, or choose No limit', 'amber');
+    } else if (st.finish) add('Finish', st.finish === 'stop' ? 'complete' : st.finish);
+    if (st.confidence) add('Confidence', `mean ${(100 * st.confidence.mean).toFixed(1)}% · ${st.confidence.unsure.toLocaleString()} of ${st.confidence.n.toLocaleString()} under 50%`, 'Mean probability the model gave each token it produced, read before any sampling adjustment');
+    return items.length ? `<dl class="msg-telemetry">${items.join('')}</dl>` : '';
+  }
+  // Sent: the request's own parameters, so a test always shows what produced it.
+  function chatSentLine(m) {
+    if (!m.sent) return '';
+    return `<p class="msg-sent"><span class="cdu-label">Sent</span> ${m.sent.length ? esc(chatParamText(m.sent)) : 'engine defaults only'}</p>`;
+  }
+  // Token view: each generated token with its probability; unsure tokens are marked and the
+  // alternatives are on the token's tooltip.
+  const chatProb = lp => (Number.isFinite(lp) && lp > -9999 ? Math.exp(lp) : 0);
+  function chatConfidence(tokens) {
+    const real = tokens.filter(t => !t.forced);
+    if (!real.length) return null;
+    const ps = real.map(t => chatProb(t.logprob));
+    return {n: ps.length, mean: ps.reduce((a, b) => a + b, 0) / ps.length, unsure: ps.filter(p => p < .5).length};
+  }
+  function chatTokenView(tokens) {
+    return tokens.map(t => {
+      const p = chatProb(t.logprob);
+      const band = t.forced ? 'tok-forced' : p < .2 ? 'tok-low' : p < .5 ? 'tok-mid' : '';
+      const alts = (t.top_logprobs || []).map(a => `${JSON.stringify(a.token)} ${(100 * chatProb(a.logprob)).toFixed(1)}%`).join('\n');
+      const tip = t.forced ? 'Inserted by the thinking budget' : `${(100 * p).toFixed(1)}%${alts ? '\n' + alts : ''}`;
+      return `<span class="tok ${band}" title="${esc(tip)}">${esc(t.token)}</span>`;
+    }).join('');
+  }
+  const CHAT_STATES = {waiting: 'Waiting for the engine…', reading: 'Reading the prompt…', thinking: 'Thinking…', generating: 'Writing…', whole: 'Writing the whole answer…', stopped: 'Stopped', error: 'Failed'};
+  const CHAT_LIVE = new Set(['waiting', 'reading', 'thinking', 'generating', 'whole']);
+  function chatHead(m) {
+    const who = m.role === 'user' ? '<span class="msg-dir" aria-hidden="true">▲</span><span class="msg-who">You</span>'
+      : `<span class="msg-dir" aria-hidden="true">▼</span><span class="msg-who green">NInfer</span><span class="msg-model-name">${esc(m.model || '')}</span>`;
+    return `<header class="msg-head">${who}<time>${esc(chatTime(m.time))}</time>`;
+  }
+  // The live skeleton of a reply being written: its text grows by appended deltas, so a long
+  // answer costs only its new text per paint, stays selectable, and the reasoning box keeps
+  // its scroll position.
+  function chatLiveMessage(m, el) {
+    el.innerHTML = `${chatHead(m)}<span class="msg-state"></span><span class="msg-live"></span></header><div class="msg-progress" hidden><span class="msg-bar"><span></span></span><span></span></div><details class="msg-reasoning" hidden${m.reasoningOpen ? ' open' : ''}><summary>Reasoning</summary><div class="msg-reasoning-body"></div></details><div class="msg-body"></div>`;
+    const det = el.querySelector('.msg-reasoning');
+    det.addEventListener('toggle', () => { m.reasoningOpen = det.open; });
+    const rtext = document.createTextNode(''), ctext = document.createTextNode('');
+    el.querySelector('.msg-reasoning-body').append(rtext);
+    el.querySelector('.msg-body').append(ctext);
+    const prog = el.querySelector('.msg-progress');
+    el._live = {state: el.querySelector('.msg-state'), rate: el.querySelector('.msg-live'), prog, bar: prog.firstChild.firstChild, ptext: prog.lastChild, det, rbody: det.lastChild, rtext, ctext, rLen: 0, cLen: 0};
+    chatLiveUpdate(m, el);
+    return el;
+  }
+  function chatLiveUpdate(m, el) {
+    const v = el._live, st = m.stats || {};
+    v.state.textContent = CHAT_STATES[m.state] || '';
+    v.rate.textContent = m.state === 'generating' && Number.isFinite(st.liveRate) ? rate(st.liveRate) + ' tok/s' : '';
+    const pr = m.state === 'reading' ? st.progress : null;
+    v.prog.hidden = !pr;
+    if (pr) {
+      v.bar.style.width = Math.min(100, 100 * (pr.processed || 0) / Math.max(1, pr.total || 1)) + '%';
 )HTML"
-R"HTML(    el.textContent = cfgData.engine && cfgData.engine.api_key_present ? 'The supervisor adds the engine’s API key' : 'No API key configured';
+R"HTML(      v.ptext.textContent = `Reading prompt ${(pr.processed || 0).toLocaleString()} / ${(pr.total || 0).toLocaleString()}${pr.cache ? ` · ${pr.cache.toLocaleString()} reused` : ''}`;
+    }
+    if (m.reasoning.length > v.rLen) {
+      v.det.hidden = false;
+      const pinned = v.rbody.scrollTop + v.rbody.clientHeight >= v.rbody.scrollHeight - 12;
+      v.rtext.appendData(m.reasoning.slice(v.rLen)); v.rLen = m.reasoning.length;
+      if (pinned) v.rbody.scrollTop = v.rbody.scrollHeight;
+    }
+    if (m.content.length > v.cLen) { v.ctext.appendData(m.content.slice(v.cLen)); v.cLen = m.content.length; }
+  }
+  function chatRenderMessage(m, i) {
+    const el = document.createElement('article');
+    el.className = 'msg ' + (m.role === 'user' ? 'msg-user' : 'msg-model') + (m.error ? ' msg-error' : '');
+    el.dataset.index = i;
+    if (m.role === 'user') {
+      const imgs = (m.images || []).map(src => `<img src="${esc(src)}" alt="Attached image">`).join('');
+      const lost = !m.images && m.imageCount ? `<span class="cdu-small">${m.imageCount} image${m.imageCount === 1 ? '' : 's'} attached (not kept after reload)</span>` : '';
+      el.innerHTML = `${chatHead(m)}</header>${imgs || lost ? `<div class="msg-images">${imgs}${lost}</div>` : ''}<div class="msg-body">${chatMarkdown(m.content)}</div>`;
+      return el;
+    }
+    if (CHAT_LIVE.has(m.state)) return chatLiveMessage(m, el);
+    const st = m.stats || {};
+    const state = CHAT_STATES[m.state] || '';
+    const reasoning = m.reasoning ? `<details class="msg-reasoning"${m.reasoningOpen ? ' open' : ''}><summary>Reasoning${st.usage && st.usage.completion_tokens_details && st.usage.completion_tokens_details.reasoning_tokens ? ' · ' + st.usage.completion_tokens_details.reasoning_tokens.toLocaleString() + ' tokens' : ''}</summary><div class="msg-reasoning-body">${chatMarkdown(m.reasoning)}</div></details>` : '';
+    const ended = m.state === 'done' || m.state === 'stopped' || m.state === 'error';
+    const tokenKey = m.tokens && m.tokens.length ? `<button type="button" class="client-evidence" data-act="tokens" aria-pressed="${m.tokenView ? 'true' : 'false'}">${m.tokenView ? 'Text view' : 'Token view'}</button>` : '';
+    const actions = ended ? `<div class="msg-actions"><button type="button" class="client-evidence" data-act="copy">Copy</button>${tokenKey}${i === chat.messages.length - 1 ? '<button type="button" class="client-evidence" data-act="regen">Regenerate</button>' : ''}</div>` : '';
+    const body = m.error ? `<span class="red">${esc(m.error)}</span>`
+      : m.tokenView && m.tokens ? `<div class="msg-tokens">${chatTokenView(m.tokens)}</div><p class="cdu-small msg-token-key"><span class="tok tok-mid">under 50%</span> <span class="tok tok-low">under 20%</span> · hover a token for its probability and alternatives; reasoning tokens come first</p>`
+      : chatMarkdown(m.content);
+    if (m.tokens && !st.confidence) st.confidence = chatConfidence(m.tokens);
+    el.innerHTML = `${chatHead(m)}${state ? `<span class="msg-state${m.state === 'error' ? ' red' : m.state === 'stopped' ? ' amber' : ''}">${esc(state)}</span>` : ''}</header>${m.tokenView ? '' : reasoning}<div class="msg-body">${body}</div>${m.note ? `<p class="msg-note">${esc(m.note)}</p>` : ''}${m.state === 'done' || m.state === 'stopped' ? chatTelemetry(st, m) : ''}${ended ? chatSentLine(m) : ''}${actions}`;
+    const det = el.querySelector('.msg-reasoning');
+    if (det) det.addEventListener('toggle', () => { m.reasoningOpen = det.open; });
+    el.querySelectorAll('[data-act]').forEach(b => {
+      b.onclick = () => {
+        if (b.dataset.act === 'copy') copyText(b, m.content || '', b.firstChild);
+        else if (b.dataset.act === 'tokens') { m.tokenView = !m.tokenView; chatRender(i); }
+        else if (b.dataset.act === 'regen') chatRegenerate();
+      };
+    });
+    return el;
+  }
+  function chatRender(only) {
+    $('chat-empty').hidden = chat.messages.length > 0;
+    const stick = chatLog.scrollTop + chatLog.clientHeight >= chatLog.scrollHeight - 24;
+    if (only != null) {
+      const old = chatLog.querySelector(`.msg[data-index="${only}"]`);
+      const next = chatRenderMessage(chat.messages[only], only);
+      if (old) old.replaceWith(next); else chatLog.append(next);
+    } else {
+      chatLog.querySelectorAll('.msg').forEach(n => n.remove());
+      chat.messages.forEach((m, i) => chatLog.append(chatRenderMessage(m, i)));
+    }
+    if (stick || only == null) chatLog.scrollTop = chatLog.scrollHeight;
+    const last = [...chat.messages].reverse().find(m => m.stats && m.stats.usage);
+    const used = last ? (last.stats.usage.prompt_tokens || 0) + (last.stats.usage.completion_tokens || 0) : 0;
+    $('chat-context-text').textContent = chatCtx ? `${used.toLocaleString()} / ${chatCtx.toLocaleString()}` : used ? used.toLocaleString() : '—';
+    $('chat-meter-fill').style.width = chatCtx ? Math.min(100, 100 * used / chatCtx) + '%' : '0';
+    $('chat-meter-fill').className = chatCtx && used / chatCtx > .9 ? 'amber-fill' : '';
+    $('chat-think-note').hidden = !(chat.thinkUsed != null && chat.thinkUsed !== chat.think && chat.messages.length);
+    document.querySelectorAll('[data-think]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.think === chat.think)));
+  }
+  // Parameters: an empty field is omitted from the request, so the engine's own default
+  // applies. They persist in this browser; the conversation stays in the tab.
+  const PARAMS_KEY = 'ninfer:chat-params';
+  const chatFields = () => [...document.querySelectorAll('#chat-settings [data-param]')];
+  function chatSaveParams() {
+    const v = {budget: $('chat-budget').value, max: $('chat-max').value, stream: $('chat-stream').checked, stops: $('chat-stops').value,
+      format: $('chat-format').value, schema: $('chat-schema').value, logprobs: $('chat-logprobs').checked, top: $('chat-top-logprobs').value, extra: $('chat-extra').value};
+    chatFields().forEach(el => { v['p:' + el.dataset.param] = el.type === 'checkbox' ? el.checked : el.value; });
+    try { localStorage.setItem(PARAMS_KEY, JSON.stringify(v)); } catch (_) {}
+  }
+  function chatLoadParams() {
+    let v = {};
+    try { v = JSON.parse(localStorage.getItem(PARAMS_KEY) || '{}') || {}; } catch (_) {}
+    $('chat-budget').value = ['default', 'custom', 'unlimited'].includes(v.budget) ? v.budget : 'unlimited';
+    $('chat-max').value = v.max || '';
+    $('chat-stream').checked = v.stream !== false;
+    $('chat-stops').value = v.stops || '';
+    $('chat-format').value = ['', 'json_object', 'json_schema'].includes(v.format) ? v.format : '';
+    $('chat-schema').value = v.schema || '';
+    $('chat-logprobs').checked = !!v.logprobs;
+    $('chat-top-logprobs').value = v.top || '';
+    $('chat-extra').value = v.extra || '';
+    chatFields().forEach(el => { const x = v['p:' + el.dataset.param]; if (el.type === 'checkbox') el.checked = !!x; else el.value = x == null ? '' : x; });
+    chatParamsUi();
+  }
+  // The engine's limit for a request that names none: known when the Supervisor launched it.
+  function chatDefaultBudget() {
+    const flag = Number(launchFlags['--default-max-tokens']);
+    return Number.isInteger(flag) && flag > 0 ? {n: flag, known: true} : {n: 8192, known: false};
+  }
+  function chatJsonField(id, stateId, wantObject) {
+    const raw = $(id).value.trim();
+    let r = {ok: true, value: undefined};
+    if (raw) {
+      try {
+        const v = JSON.parse(raw);
+        r = !wantObject || (v && typeof v === 'object' && !Array.isArray(v)) ? {ok: true, value: v} : {ok: false, error: 'must be a JSON object'};
+      } catch (e) { r = {ok: false, error: e.message}; }
+    }
+    const state = $(stateId);
+    state.textContent = !raw ? '' : r.ok ? (wantObject ? `Valid · ${Object.keys(r.value).length} field${Object.keys(r.value).length === 1 ? '' : 's'}` : 'Valid') : 'Not valid JSON: ' + r.error;
+    state.classList.toggle('red', !r.ok);
+    $(id).classList.toggle('invalid', !r.ok);
+    return r;
+  }
+  function chatParamsUi() {
+    const mode = $('chat-budget').value;
+    $('chat-max').hidden = mode !== 'custom';
+    const def = chatDefaultBudget();
+    const defText = def.known ? `${def.n.toLocaleString()} tokens` : `${def.n.toLocaleString()} tokens unless the engine was started with another value`;
+    $('chat-budget-help').textContent = mode === 'default' ? `Sends no limit, so the engine applies its --default-max-tokens: ${defText}, reasoning included. This is the limit chat apps hit when they leave it out.`
+      : mode === 'unlimited' ? 'Sends max_tokens -1. The answer ends only at a stop condition or when the conversation fills the context.'
+      : 'The whole output budget, reasoning included. 0 reads the prompt without generating.';
+    const now = $('chat-budget-now'), max = Number($('chat-max').value);
+    now.textContent = mode === 'unlimited' ? 'No limit' : mode === 'custom' ? ($('chat-max').value !== '' && Number.isInteger(max) && max >= 0 ? max.toLocaleString() + ' tokens' : 'Enter a budget') : `Engine default${def.known ? ' · ' + def.n.toLocaleString() : ''}`;
+    now.className = mode === 'default' ? 'engine' : '';
+    now.parentElement.title = mode === 'default' && !def.known ? 'The engine was started elsewhere, so its --default-max-tokens is not known here; 8,192 is the engine default' : 'The output budget the next request carries';
+    $('chat-schema-row').hidden = $('chat-format').value !== 'json_schema';
+    const lp = $('chat-logprobs').checked;
+    $('chat-top-logprobs').disabled = !lp;
+    $('chat-stream').disabled = lp;
+    const schema = chatJsonField('chat-schema', 'chat-schema-state', true);
+    if ($('chat-format').value === 'json_schema' && schema.ok && schema.value === undefined) {
+      $('chat-schema-state').textContent = 'Enter the schema the answer must follow';
+      $('chat-schema').classList.add('invalid');
+    }
+    chatJsonField('chat-extra', 'chat-extra-state', true);
+    document.querySelectorAll('#chat-settings select').forEach(s => s.classList.toggle('set', s.value !== '' && s.value !== 'default'));
+    const sent = chatSentParams(chatRequestBody());
+    $('chat-param-count').textContent = sent.length ? ' · ' + sent.length : '';
+  }
+  // The parameters a request sets beyond the conversation and the page's own observations.
+  const CHAT_PLUMBING = new Set(['model', 'messages', 'stream_options', 'return_progress', 'timings_per_token']);
+  function chatSentParams(body) {
+    return Object.keys(body).filter(k => !CHAT_PLUMBING.has(k) && body[k] !== undefined && !(k === 'stream' && body.stream === true))
+      .map(k => [k, body[k]]);
+  }
+  function chatRequestBody() {
+    const msgs = [];
+    const system = $('chat-system').value.trim();
+    if (system) msgs.push({role: 'system', content: system});
+    // A turn whose reply failed or came back empty stays out of the history, question and all,
+    // so the next request never carries two questions in a row. Replies carry their reasoning;
+    // the template decides whether to keep it (preserve_thinking).
+    const dropped = m => m && m.role === 'assistant' && (m.error || (!m.content && !CHAT_LIVE.has(m.state)));
+    chat.messages.forEach((m, i) => {
+      if (m.role === 'assistant') {
+        if (m.content && !m.error) msgs.push(Object.assign({role: 'assistant', content: m.content}, m.reasoning ? {reasoning_content: m.reasoning} : {}));
+        return;
+      }
+      if (dropped(chat.messages[i + 1])) return;
+      if (m.images && m.images.length) msgs.push({role: 'user', content: [{type: 'text', text: m.content || ''}, ...m.images.map(url => ({type: 'image_url', image_url: {url}}))]});
+      else msgs.push({role: 'user', content: m.content || ''});
+    });
+    const logprobs = $('chat-logprobs').checked;
+    // Log probabilities are reported on whole answers only.
+    const stream = !logprobs && $('chat-stream').checked;
+    const body = {model: benchServedModel || undefined, messages: msgs, stream};
+)HTML"
+R"HTML(    if (stream) Object.assign(body, {stream_options: {include_usage: true}, return_progress: true, timings_per_token: true});
+    const budget = $('chat-budget').value, max = Number($('chat-max').value);
+    if (budget === 'unlimited') body.max_tokens = -1;
+    else if (budget === 'custom' && $('chat-max').value !== '' && Number.isInteger(max) && max >= 0) body.max_tokens = max;
+    chatFields().forEach(el => {
+      const key = el.dataset.param;
+      if (el.type === 'checkbox') { if (el.checked) body[key] = true; return; }
+      if (el.value === '') return;
+      if (el.tagName === 'SELECT') { body[key] = el.value; return; }
+      const n = Number(el.value);
+      if (Number.isFinite(n)) body[key] = el.hasAttribute('data-int') ? Math.trunc(n) : n;
+    });
+    const stops = $('chat-stops').value.split('\n').filter(x => x.length).slice(0, 4);
+    if (stops.length) body.stop = stops;
+    const format = $('chat-format').value;
+    if (format === 'json_object') body.response_format = {type: 'json_object'};
+    else if (format === 'json_schema') {
+      let schema;
+      try { schema = JSON.parse($('chat-schema').value); } catch (_) {}
+      if (schema && typeof schema === 'object') body.response_format = {type: 'json_schema', json_schema: {name: 'chat', schema}};
+    }
+    if (logprobs) {
+      body.logprobs = true;
+      const top = Number($('chat-top-logprobs').value);
+      if (Number.isInteger(top) && top > 0) body.top_logprobs = Math.min(20, top);
+    }
+    if (chat.think !== 'default') body.chat_template_kwargs = {enable_thinking: chat.think === 'on'};
+    let extra;
+    try { extra = $('chat-extra').value.trim() ? JSON.parse($('chat-extra').value) : null; } catch (_) {}
+    if (extra && typeof extra === 'object' && !Array.isArray(extra)) Object.assign(body, extra);
+    return body;
+  }
+  function chatParamText(entries) {
+    return entries.map(([k, v]) => `${k} ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`).join(' · ');
+  }
+  async function chatSend(text) {
+    if (chatAbort) return;
+    const content = (text != null ? text : chatInput.value).trim();
+    if (!content && !chatPending.length && text == null) return;
+    const bad = $('chat-extra').classList.contains('invalid') ? 'chat-extra'
+      : $('chat-format').value === 'json_schema' && $('chat-schema').classList.contains('invalid') ? 'chat-schema' : null;
+    if (bad) {
+      chatShowParams(true);
+      $(bad).focus(); $('chat-hint').textContent = 'Fix the JSON under Parameters first';
+      return;
+    }
+    if (text == null) {
+      chat.messages.push({role: 'user', content, images: chatPending.slice(), time: Date.now()});
+      chatPending = []; renderChatAttachments();
+      chatInput.value = '';
+    }
+    const reply = {role: 'assistant', content: '', reasoning: '', model: benchServedModel, time: Date.now(), state: 'waiting', stats: {}, reasoningOpen: $('chat-show-reasoning').checked};
+    chat.messages.push(reply);
+    const index = chat.messages.length - 1;
+    const body = chatRequestBody();
+    reply.sent = chatSentParams(body);
+    chat.thinkUsed = chat.thinkUsed == null ? chat.think : chat.thinkUsed;
+    chatRender();
+    const ctl = new AbortController();
+    chatAbort = ctl;
+    $('chat-send').hidden = true; $('chat-stop').hidden = false;
+    const t0 = performance.now();
+    let last = 0;
+    const paint = force => {
+      const now = performance.now();
+      if (!force && now - last <= 60) return;
+      last = now;
+      if (chat.messages[index] !== reply) return;
+      const el = chatLog.querySelector(`.msg[data-index="${index}"]`);
+      if (!el || !el._live) { chatRender(index); return; }
+      const stick = chatLog.scrollTop + chatLog.clientHeight >= chatLog.scrollHeight - 24;
+      chatLiveUpdate(reply, el);
+      if (stick) chatLog.scrollTop = chatLog.scrollHeight;
+    };
+    try {
+      const res = await fetch('/api/engine/v1/chat/completions', {method: 'POST', signal: ctl.signal, headers: {'Content-Type': 'application/json', 'X-NInfer-Supervisor': '1'}, body: JSON.stringify(body)});
+      const streamed = (res.headers.get('content-type') || '').includes('text/event-stream');
+      if (!res.ok) {
+        let message = 'HTTP ' + res.status;
+        try { const j = await res.json(); message = (j.error && (j.error.message || j.error)) || j.detail || message; } catch (_) {}
+        throw new Error(typeof message === 'string' ? message : JSON.stringify(message));
+      }
+      if (!streamed) {
+        reply.state = 'whole'; paint(true);
+        const j = await res.json();
+        const ch = (j.choices || [])[0] || {};
+        const msg = ch.message || {};
+        reply.stats.ttft = performance.now() - t0;
+        reply.content = msg.content || '';
+        reply.reasoning = msg.reasoning_content || msg.reasoning || '';
+        if (msg.tool_calls) reply.content += (reply.content ? '\n\n' : '') + '```json\n' + JSON.stringify(msg.tool_calls, null, 2) + '\n```';
+        reply.stats.finish = ch.finish_reason; reply.stats.usage = j.usage; reply.stats.timings = j.timings;
+        reply.stats.whole = true;
+        if (ch.logprobs && Array.isArray(ch.logprobs.content)) reply.tokens = ch.logprobs.content;
+      } else await readSse(res, (name, payload) => {
+        if (!payload || payload === '[DONE]') return;
+        let d;
+        try { d = JSON.parse(payload); } catch (_) { return; }
+        if (d.error) throw new Error((d.error && d.error.message) || JSON.stringify(d.error));
+        if (d.prompt_progress) { reply.state = 'reading'; reply.stats.progress = d.prompt_progress; paint(); }
+        const ch = d.choices && d.choices[0];
+        const delta = ch && ch.delta;
+        if (delta && (delta.content || delta.reasoning_content)) {
+          if (!Number.isFinite(reply.stats.ttft)) reply.stats.ttft = performance.now() - t0;
+          if (delta.reasoning_content) { reply.reasoning += delta.reasoning_content; reply.state = 'thinking'; }
+          if (delta.content) { reply.content += delta.content; reply.state = 'generating'; }
+        }
+        if (ch && ch.finish_reason) reply.stats.finish = ch.finish_reason;
+        if (d.timings) { reply.stats.timings = d.timings; if (Number.isFinite(d.timings.predicted_per_second) && d.timings.predicted_n > 1) reply.stats.liveRate = d.timings.predicted_per_second; }
+        if (d.usage) reply.stats.usage = d.usage;
+        paint();
+      });
+      if (reply.stats.finish) reply.state = 'done';
+      else { reply.state = 'stopped'; reply.note = 'The answer ended without a finish reason, so it may be incomplete.'; }
+    } catch (err) {
+      if (err.name === 'AbortError') reply.state = 'stopped';
+      else {
+        ctl.abort();
+        reply.state = 'error';
+        reply.error = 'The model did not answer: ' + err.message;
+        reply.note = 'This turn stays out of the conversation; Regenerate sends it again.';
+      }
+    } finally {
+      chatAbort = null;
+      $('chat-send').hidden = false; $('chat-stop').hidden = true;
+      chatRender(); chatSave();
+      chatInput.focus();
+    }
+  }
+  // Server-sent events from a fetch response, one callback per event.
+  async function readSse(res, onEvent) {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for (;;) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream: true}).replace(/\r\n/g, '\n');
+      let cut;
+      while ((cut = buffer.indexOf('\n\n')) >= 0) {
+        const block = buffer.slice(0, cut); buffer = buffer.slice(cut + 2);
+        let name = 'message'; const data = [];
+        block.split('\n').forEach(line => {
+          if (line.startsWith(':')) name = 'comment';
+          else if (line.startsWith('event:')) name = line.slice(6).trim();
+          else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+        });
+        if (name !== 'comment') onEvent(name, data.join('\n'));
+      }
+    }
+  }
+  function chatRegenerate() {
+    if (chatAbort) return;
+    while (chat.messages.length && chat.messages[chat.messages.length - 1].role === 'assistant') chat.messages.pop();
+    if (!chat.messages.length) return;
+    chatSend('');
+  }
+  $('chat-form').onsubmit = e => { e.preventDefault(); chatSend(); };
+  chatInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); chatSend(); } });
+  $('chat-stop').onclick = () => { if (chatAbort) chatAbort.abort(); };
+  $('chat-new').onclick = () => {
+    if (chatAbort) chatAbort.abort();
+    chat.messages = []; chat.thinkUsed = null; chatPending = []; renderChatAttachments();
+    chatSave(); chatRender(); chatInput.focus();
+  };
+  function chatShowParams(open) {
+    $('chat-settings').hidden = !open;
+    $('chat-settings-toggle').setAttribute('aria-expanded', String(open));
+    $('view-chat').querySelector('.chat').classList.toggle('params-open', open);
+    if (open) chatParamsUi();
+  }
+  $('chat-settings-toggle').onclick = () => chatShowParams($('chat-settings').hidden);
+  $('chat-back').onclick = () => { chatShowParams(false); chatInput.focus(); };
+  ['input', 'change'].forEach(type => $('chat-settings').addEventListener(type, e => {
+    if (e.target.id === 'chat-system') return;
+    chatParamsUi(); chatSaveParams();
+    $('chat-hint').textContent = '';
+  }));
+  $('chat-params-reset').onclick = () => { try { localStorage.removeItem(PARAMS_KEY); } catch (_) {} chatLoadParams(); };
+  $('chat-system').addEventListener('input', () => { chat.system = $('chat-system').value; chatSave(); chatParamsUi(); });
+  document.querySelectorAll('[data-think]').forEach(b => { b.onclick = () => { chat.think = b.dataset.think; chatSave(); chatRender(); }; });
+  $('chat-inspect').onclick = () => {
+    const body = chatRequestBody();
+    const draft = chatInput.value.trim();
+    if (draft) body.messages.push({role: 'user', content: draft});
+    location.hash = '#api';
+    setTimeout(() => {
+      const ep = benchEndpoints.find(e => e.path === '/v1/chat/completions');
+      benchSelect(ep, 1);
+      benchSetBody(body);
+    }, 0);
+  };
+
+  // Images: attach, paste or drop. Large images are scaled to 1600 px on the long side,
+  // which keeps the request small without changing what the model can read.
+  async function chatImage(file) {
+    if (!file || !file.type.startsWith('image/')) return;
+    const url = await new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = reject; r.readAsDataURL(file); });
+    const img = await new Promise((resolve, reject) => { const i = new Image(); i.onload = () => resolve(i); i.onerror = reject; i.src = url; });
+    const scale = Math.min(1, 1600 / Math.max(img.width, img.height));
+    if (scale >= 1 && file.size < 2_000_000) { chatPending.push(url); return; }
+    const c = document.createElement('canvas');
+    c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    chatPending.push(c.toDataURL('image/jpeg', 0.9));
+  }
+  async function chatAddFiles(files) {
+    for (const f of files) { try { await chatImage(f); } catch (_) {} }
+    renderChatAttachments();
+  }
+  function renderChatAttachments() {
+    const box = $('chat-attachments');
+    box.hidden = !chatPending.length;
+    box.replaceChildren(...chatPending.map((src, i) => {
+      const wrap = document.createElement('span'); wrap.className = 'chat-thumb';
+      const img = document.createElement('img'); img.src = src; img.alt = 'Image to send';
+      const rm = document.createElement('button'); rm.type = 'button'; rm.className = 'key key-tiny'; rm.textContent = 'Remove';
+      rm.onclick = () => { chatPending.splice(i, 1); renderChatAttachments(); };
+      wrap.append(img, rm); return wrap;
+    }));
+    $('chat-hint').textContent = chatPending.length ? `${chatPending.length} image${chatPending.length === 1 ? '' : 's'} attached` : '';
+  }
+)HTML"
+R"HTML(  $('chat-attach').onclick = () => $('chat-file').click();
+  $('chat-file').onchange = e => { chatAddFiles([...e.target.files]); e.target.value = ''; };
+  chatInput.addEventListener('paste', e => { const files = [...(e.clipboardData || {}).files || []].filter(f => f.type.startsWith('image/')); if (files.length && chatVision) { e.preventDefault(); chatAddFiles(files); } });
+  ['dragover', 'dragleave', 'drop'].forEach(type => $('chat-form').addEventListener(type, e => {
+    if (!chatVision) return;
+    e.preventDefault();
+    $('chat-form').classList.toggle('drop', type === 'dragover');
+    if (type === 'drop') chatAddFiles([...e.dataTransfer.files]);
+  }));
+
+  async function chatInit() {
+    if (!chatReady) {
+      chatReady = true;
+      $('chat-system').value = chat.system || '';
+      chatLoadParams();
+      chatRender();
+    } else chatParamsUi();
+    chatInput.focus();
+    // Asked again on each visit until the engine answers: it may start after the page.
+    if (benchServedModel && chatCtx) return;
+    try {
+      const props = await (await fetch('/api/engine/props', {headers: {'X-NInfer-Supervisor': '1'}})).json();
+      chatVision = !!(props.modalities && props.modalities.vision);
+      chatCtx = (props.default_generation_settings || {}).n_ctx || 0;
+    } catch (_) {}
+    if (!benchServedModel) {
+      try {
+        const data = await (await fetch('/api/engine/v1/models', {headers: {'X-NInfer-Supervisor': '1'}})).json();
+        if (data && Array.isArray(data.data) && data.data[0]) benchServedModel = data.data[0].id;
+      } catch (_) {}
+    }
+    $('chat-attach').hidden = !chatVision;
+    $('chat-model').textContent = benchServedModel ? benchServedModel + (chatVision ? ' · text and images' : '') : 'Model not reachable';
+    chatRender();
   }
 
   fetch('/api/config').then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).then(d => {

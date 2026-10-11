@@ -105,9 +105,13 @@ plan and the API address (select it to copy). **Monitor** holds the live reading
 scrolling: GPU memory as a scale tape and history with the desktop reserve drawn as a red-striped
 band, generation and prompt-reading rates on separate scales, the calling apps, and the cautions
 from the findings. Pointing at either history, or using the arrow keys on it, reads both at the
-same moment. The other pages keep a one-line memory and rate band in view.
+same moment. In a wide window the gaps between the Monitor displays can be dragged, or moved with
+the arrow keys, to give memory, rates or the calling apps more room; double-click or Enter restores
+the default split, and the split is kept in the browser. Readings travel briefly to each new value
+instead of jumping; with Windows animation effects turned off they change at once. The other pages
+keep a one-line memory and rate band in view.
 
-**Connect**, **API**, **Diagnose** (findings, engine log, engine data, acceleration) and **Settings**
+**Chat**, **Connect**, **API**, **Diagnose** (findings, engine log, engine data, acceleration) and **Settings**
 are pages of one control display. The Settings index shows each page's current values; model presets
 and the desktop reserve have their own pages there. Edits are staged as a temporary revision,
 shown in amber, until **Insert** saves them or **Erase** discards them; a staged edit also shows
@@ -116,6 +120,21 @@ lights for a caution or warning finding that has not been acknowledged in this b
 it acknowledges the current findings and opens Diagnose.
 The display-mode key switches between **Auto**, which follows the Windows app theme, **Day** and
 **Night**; the choice is kept in the browser.
+
+**Chat** talks to the served model. Each reply shows how long it took to start, its prompt-reading
+time and generation rate, how much of the conversation the engine reused instead of reading it
+again, speculative-draft acceptance, why it finished, and a **Sent** line with exactly the
+parameters the request set. The page imposes no output limit of its own: by default it leaves the
+limit out, so the engine's `--default-max-tokens` applies (8192 unless the launch sets another
+value), and **Parameters** sets a custom budget or no limit (`max_tokens` `-1`, which ends the
+answer only at a stop condition or a full context). Parameters also hold the sampling and reasoning
+fields the engine accepts, stop strings, a response format or JSON schema, token probabilities
+(answers then arrive whole, and a token view marks the tokens the model was unsure of), read-only
+prompt-cache participation for tests that should not evict other apps' cached conversations, and
+extra request JSON merged into the request last. A field left empty sends nothing. Images can be
+attached, pasted or dropped when the model reads them, and **Open in API** carries the next request
+to the API page. The conversation lasts as long as the browser tab; the parameters are kept in the
+browser.
 
 **API** is a test bench for every route the engine exposes (status, OpenAI, Anthropic, NInfer and
 admin) and for the Supervisor's own read routes. Each route has ready examples; the answer shows

@@ -250,6 +250,36 @@ components:
     typography: "{typography.mono}"
     rounded: "{rounded.key}"
     padding: "8px 10px"
+  chat-sender-user:
+    textColor: "{colors.reading-ice}"
+  chat-sender-model:
+    textColor: "{colors.engaged-green}"
+  chat-message-body:
+    textColor: "{colors.measured-white}"
+    typography: "{typography.body}"
+  chat-sent-line:
+    textColor: "{colors.target-magenta}"
+    typography: "{typography.mono}"
+  chat-parameter-set:
+    backgroundColor: "{colors.display-glass-inset}"
+    textColor: "{colors.target-magenta}"
+    rounded: "{rounded.key}"
+    padding: "4px 8px"
+    height: "30px"
+  chat-budget-readout:
+    textColor: "{colors.target-magenta}"
+    typography: "{typography.value}"
+  chat-budget-readout-default:
+    textColor: "{colors.measured-white}"
+  token-unsure-low:
+    backgroundColor: "{colors.caution-glass}"
+    textColor: "{colors.caution-amber}"
+    typography: "{typography.mono}"
+    rounded: "{rounded.lamp}"
+  token-forced:
+    textColor: "{colors.target-magenta}"
+    typography: "{typography.mono}"
+    rounded: "{rounded.lamp}"
 ---
 
 # Design System: NInfer Supervisor
@@ -258,7 +288,7 @@ components:
 
 **Creative North Star: "The Glass Cockpit"**
 
-The Supervisor is a flight deck of electronic displays, not a web dashboard and not glassmorphism. A panel-gray instrument panel carries black display glass set in raised bezel rings; every label, key legend and annunciation is lettered in condensed DIN capitals; colour is a code with fixed meanings, never decoration. The layout copies the cockpit split: a primary display band that is always in view for the glance, and one paged control-display unit (CDU) for everything visited rarely: connecting, testing the API, diagnosing, changing settings.
+The Supervisor is a flight deck of electronic displays, not a web dashboard and not glassmorphism. A panel-gray instrument panel carries black display glass set in raised bezel rings; every label, key legend and annunciation is lettered in condensed DIN capitals; colour is a code with fixed meanings, never decoration. The layout copies the cockpit split: a primary display band that is always in view for the glance, and one paged control-display unit (CDU) for everything else: talking to the served model, connecting, testing the API, diagnosing, changing settings.
 
 The panel has two lighting modes. Night is black glass in a dark-gray bezel; Day is white glass in a cool light-gray bezel, the way cockpit displays read in daylight. Auto, the default, follows the operating system's colour scheme. Only the displays and the panel change between modes; the keys are hardware and stay dark-capped with their night legends.
 
@@ -267,28 +297,28 @@ It is dense on purpose. A narrow side window has to show readiness, memory, thro
 **Key Characteristics:**
 - Night: panel-gray bezel, black display glass, a faint cover-glass sheen on the glass only. Day: white glass in a light-gray bezel, no sheen. Auto follows the OS.
 - Bahnschrift at 87.5% width in caps for all panel lettering; Segoe UI Variable Text for sentences; Cascadia Mono for machine text.
-- Semantic avionics colour: white measured, green engaged, cyan selectable, magenta target, amber caution or staged, red warning, ice blue prompt reading.
-- A glareshield row and a mode-annunciator row on every page; Monitor is four displays; every other page (Connect, API, Diagnose, Settings) is a CDU page.
-- Changes are announced, not animated: a white box for ten seconds, an amber TEMPORARY revision, a Master Caution light.
+- Semantic avionics colour: white measured, green engaged, cyan selectable, magenta target, amber caution or staged, red warning, ice blue prompt channel.
+- A glareshield row and a mode-annunciator row on every page; Monitor is four displays; every other page (Chat, Connect, API, Diagnose, Settings) is a CDU page.
+- Changes are announced, not decorated: a white box for ten seconds, an amber TEMPORARY revision, a Master Caution light. Pointers and figures slew to a new reading the way instruments do, and at rest always show the measured value.
 
 ## Colors
 
 Two neutral materials (panel and glass) and seven signal colours, each with exactly one meaning, in two lighting modes that share one code. Every colour is a custom property on the root; Day overrides the same properties, and the canvases read their palette from them, so a mode change repaints the instruments too.
 
 ### Primary
-- **Engaged Green** (engaged-green): the engine is ready, a mode is as configured, the generation channel (its trace, tape scale and readout), the current page lamp on a function key, the supervisor's own process in the GPU app list, a saved status.
+- **Engaged Green** (engaged-green): the engine is ready, a mode is as configured, the generation channel (its trace, tape scale and readout), the current page lamp on a function key, the supervisor's own process in the GPU app list, a saved status. In Chat it is the reply: the model's direction mark and sender label.
 - **Selectable Cyan** (selectable-cyan): anything the user can act on or edit. `<PROMPT` and `PROMPT>` lines, links, editable input values, toggled keys, INSERT, the armed line under the engine mode, and the focus ring.
 
 ### Secondary
-- **Target Magenta** (target-magenta): configured targets, never measurements. The desktop-reserve bug on the memory tape, the reserve readout, and the capacity sliders' accent.
-- **Caution Amber** (caution-amber): caution findings and anything staged but not saved. The TEMPORARY tag, the amber CDU title and ring, staged fields, the UNSAVED tag on the Settings key, the alert count, a lit Master Caution, a supervisor-reduced plan. Caution Glass (caution-glass) is its background tint for caution rows and lines.
+- **Target Magenta** (target-magenta): configured targets, never measurements. The desktop-reserve bug on the memory tape, the reserve readout, and the capacity sliders' accent. In Chat: the Sent line under a reply (the parameters that request carried), every value typed or chosen in Parameters, the parameter count on the Parameters key, the output budget readout when the page sets the budget, and tokens forced by the thinking budget.
+- **Caution Amber** (caution-amber): caution findings and anything staged but not saved. The TEMPORARY tag, the amber CDU title and ring, staged fields, the UNSAVED tag on the Settings key, the alert count, a lit Master Caution, a supervisor-reduced plan, a chat context meter near its limit, and tokens the model was unsure of (an amber underline; the least likely also amber on caution glass). Caution Glass (caution-glass) is its background tint for caution rows and lines.
 - **Warning Red** (warning-red): warnings and the desktop-reserve limit, drawn as a red-and-dark barber pole on the memory tape and in the reserve preview. Warning Red Text (warning-red-text) is the readable tint for red copy on Warning Glass (warning-glass) and for the Stop key legend.
 
 ### Tertiary
-- **Reading Ice** (reading-ice): the prompt-reading channel only: its trace, its right-hand scale and its readout. It exists so two rates can share a display on separate scales without being confused.
+- **Reading Ice** (reading-ice): the prompt channel only: the prompt-reading rate (its trace, its right-hand scale and its readout, and the prompt-reading progress bar in Chat) and the prompt the user writes (the user's direction mark and sender label in Chat). It exists so two channels can share a display or a log without being confused (amended 2026-10-11).
 
 ### Neutral
-- **Measured White** (measured-white): measured values and primary text. Memory used, card total, readout figures, the memory trace.
+- **Measured White** (measured-white): measured values and primary text. Memory used, card total, readout figures, the memory trace, chat message text and a reply's telemetry line, and the output budget readout when the engine default applies.
 - **Secondary Gray** (secondary-gray), **Legend Gray** (legend-gray), **Inactive Gray** (inactive-gray): sources and units; field legends and axis labels; disabled keys and unavailable presets, in that order.
 - **Panel Gray** (panel-gray) and **Glareshield Gray** (glareshield-gray): the instrument panel the displays sit in, and the darker strip that carries the function keys. Panel Seam (panel-seam) is the 1px cut between panel parts.
 - **Bezel Ring** (bezel-ring, bezel-ring-top, bezel-ring-low): the 4px ring around each display, lit from above. Bezel Glint (bezel-glint) is the 1px lower highlight that cuts the ring from the panel.
@@ -302,7 +332,7 @@ The Day set (`day-` tokens) replaces the panel and glass materials and darkens e
 - **Day Measured Ink** (day-measured-ink) takes Measured White's role; Day Secondary, Legend and Inactive Gray keep the same three-step order.
 - **Day signal colours** (day-engaged-green, day-selectable-cyan, day-target-magenta, day-caution-amber, day-warning-red, day-reading-ice): the night hues, darkened for white glass. Day Warning Red Text, Day Caution Glass and Day Warning Glass are the readable red copy and the pale caution and warning tints. Day Log Text (day-log-text) is the ink of wells and logs.
 - **Barber pole:** red and dark (pole-dark) at night, red and white (day-pole-light) by day.
-- **Physical keys** (function keys, panel keys, the Master lights) keep the night key face, legends and signal legends in Day.
+- **Physical keys** (function keys, panel keys, the Master lights) keep the night key face, legends and signal legends in Day, magenta included.
 
 ### Named Rules
 **The One Meaning Rule.** Each signal colour carries one meaning across every page. A colour is never chosen because it looks good next to another; if an element's meaning has no colour in the code, it is white or gray.
@@ -313,7 +343,7 @@ The Day set (`day-` tokens) replaces the panel and glass materials and darkens e
 
 **The One Code In Daylight Rule.** Day and Night are the same colour code under different light. A mode changes a signal colour's lightness, never its meaning, and no colour exists in only one mode.
 
-**The Keys Are Hardware Rule.** Keys do not change with the display. Function keys, panel keys and the Master lights keep their dark caps and night legends in every mode; only glass and panel follow the display mode.
+**The Keys Are Hardware Rule.** Keys do not change with the display. Function keys, panel keys and the Master lights keep their dark caps and night legends in every mode, and every signal legend on a cap keeps its night value (night magenta for the Parameters key's count, amended 2026-10-11); only glass and panel follow the display mode.
 
 ## Typography
 
@@ -331,8 +361,8 @@ The Day set (`day-` tokens) replaces the panel and glass materials and darkens e
 - **Readout** (600, 17px, tabular figures): display readouts beside the traces; 15px in the calling-apps table and for memory's secondary lines.
 - **Key** (600, 12.5px, caps, 0.06em): function keys, keys, prompts (prompts are 11.5-14px).
 - **Label** (400-600, 11px, caps, 0.06em, legend gray): field legends above values, table headers, bench group legends, display titles at 12px.
-- **Body** (400, 13px/1.5 Segoe): prose; help text at 12-12.5px, kept to 88-95ch.
-- **Mono** (11.5px/1.7 Cascadia): logs, the launch command, file names, flags and addresses; 12-13px for API paths, request bodies and responses.
+- **Body** (400, 13px/1.5 Segoe): prose; help text at 12-12.5px, kept to 88-95ch. Chat message text is 14px/1.6, kept to 100ch.
+- **Mono** (11.5px/1.7 Cascadia): logs, the launch command, file names, flags and addresses; 12-13px for API paths, request bodies and responses, chat code blocks, the Sent line and the token view.
 
 ### Named Rules
 **The Lettering Rule.** Panel lettering is DIN in caps; sentences are Segoe in sentence case. A sentence is never set in caps, and a label is never set in Segoe.
@@ -343,9 +373,10 @@ The Day set (`day-` tokens) replaces the panel and glass materials and darkens e
 
 The page is a fixed-height column (`100dvh`, body never scrolls): the glareshield strip, the mode-annunciator row, an optional scratchpad line, then the workspace. The glareshield and annunciator rows appear on every page.
 
-- **Monitor** is a grid of four display units on an 8px gap. At 1180px and wider: memory over rates on the left (memory column 1.55fr), and one flex column on the right (at least 380px) where calling apps size to their rows and alerts take the remaining height with their full text wrapped. Narrower, the four stack.
+- **Monitor** is a grid of four display units on an 8px gap. At 1180px and wider: memory over rates on the left (memory column 1.55fr), and one flex column on the right (at least 380px) where calling apps size to their rows and alerts take the remaining height with their full text wrapped. Narrower, the four stack. At 1180px and wider both splits are adjustable (see Seams under Display units); the chosen column and row fractions are kept per browser.
 - **Memory and rates bodies** are size containers in the fixed-height layout (821px and wider, Explain off), so the readout column compacts as a display gets short (steps at 190px and 150px body height) instead of clipping. Both traces keep a 40px right gutter that holds the prompt-reading scale, clear of the plot.
 - **CDU pages** centre one unit (max 980px; 1240px wide variant) with 34px side margins, and keep the one-line live band (memory, generating, reading, running, `<MONITOR`) in view above them.
+- **Chat** fills the CDU height: the chat bar (context meter, thinking choice, output budget readout, Parameters and New chat keys), the message log scrolling inside the glass, then the composer. In wide windows Parameters opens as a grid panel between the bar and the log (groups at least 300px wide, up to 46vh, scrolling inside); at 880px and narrower it takes the page over, with a `<CHAT` prompt back.
 - **API test bench** fills the CDU height with two panes: the endpoint index (220-280px) behind a faint rule, and the request over the response. At 880px and narrower the panes stack, the index list caps at 30vh and the page scrolls.
 - **No page scroll** on Monitor or any CDU page at 1440x900, 960x1000 and 1280x720. Tables, logs and finding lists scroll inside their glass. Explain mode deliberately grows the page and scrolls.
 - **Short screens** (max-height 780px, wider than 820px) tighten readouts and drop readout sub-lines.
@@ -369,14 +400,14 @@ Depth is physical, not floating. The panel is flat; each display is recessed gla
 
 ## Shapes
 
-Hard-edged hardware with softened corners. Display units have 10px outer corners on a 4px bezel; keys and inputs 4px; tags and the cursor readout 3px; lamps 2px; bars, slot strips and tape bodies 1px. Instrument marks are drawn, not iconified: the readout window is a box with a pointer notch and a taller drum slot for the last digit, the reserve bug is a magenta pentagon on the tape edge, and the reserve limit is a 45-degree barber pole. The few icons (copy, open, explain, display mode) are 14px inline SVG strokes at 1.4px.
+Hard-edged hardware with softened corners. Display units have 10px outer corners on a 4px bezel; keys and inputs 4px; tags and the cursor readout 3px; lamps 2px; bars, slot strips and tape bodies 1px. Instrument marks are drawn, not iconified: the readout window is a box with a pointer notch and a taller drum slot for the last digit, the reserve bug is a magenta pentagon on the tape edge, and the reserve limit is a 45-degree barber pole. The few icons (copy, open, explain, display mode) are 14px inline SVG strokes at 1.4px. The chat's uplink and downlink marks (▲ before the user's message, ▼ before the reply) are typographic direction marks in the datalink manner, 8px in the message head; they mark message direction only and are not an icon set.
 
 ## Components
 
 ### Buttons (keys)
 Physical panel keys, never flat web buttons.
 - **Shape:** 4px corners, 1px near-black border with a lighter top edge, 32px tall (30px engine keys, 28px small, 24px tiny).
-- **Function keys:** Monitor, Connect, API, Diagnose, Settings on the glareshield, in that order (API amended 2026-10-11). A 2px lamp bar at the top lights green on the current page. A count chip (amber) or UNSAVED tag (amber outline) can sit inside.
+- **Function keys:** Monitor, Chat, Connect, API, Diagnose, Settings on the glareshield, in that order (API and Chat amended 2026-10-11). A 2px lamp bar at the top lights green on the current page. A count chip (amber) or UNSAVED tag (amber outline) can sit inside.
 - **Hover / Focus:** face darkens one step and the legend goes white (0.15s ease-out); pressed keys drop 1px; focus is the 2px cyan ring offset 2px.
 - **Variants:** Start in green, Stop in red text, INSERT and SEND in cyan, toggles pressed show a cyan legend and cyan top edge, disabled keys go inactive gray.
 - **Display-mode key:** a small glareshield key (28px) beside Master Caution that cycles Auto, Day, Night and annunciates the resolved mode (`AUTO · NIGHT`, `DAY`). The choice is stored per browser and resolved before first paint, so the page never flashes the other mode (amended 2026-10-11).
@@ -392,6 +423,7 @@ Four columns on glass, present on every page: engine (mode, uptime, armed line, 
 - **Background:** display glass with the cover-glass sheen (Night), plain white glass (Day).
 - **Head:** caps title in white, source in gray, range at the right in legend gray.
 - **Memory and rates:** a vertical scale tape (66px) at left, a trace in the middle, readouts at right (156px). The rates display carries generation (green, left scale) and prompt reading (ice, scale in the trace's right gutter) on separate scales. Memory's secondary readouts are single label-value lines under the major readout. An empty rates trace says `Collecting rate samples…` while the engine is busy and `No rate samples in this window` otherwise.
+- **Seams:** at 1180px and wider (Explain off), the gap between memory and the right column and the gap between memory and rates are draggable separators. At rest a seam shows a faint 2px by 32px grip (dim panel ink at 35%); hover shows the grip at full strength; focus or a drag lights the whole seam as a 2px cyan line. Drag, the arrow keys (Shift for larger steps), and Enter or double-click to restore the default split; each side keeps its floor (380px for the right column).
 - **Calling apps:** above phone widths an app name stays on one line with an ellipsis, while its counts and sub-lines wrap.
 
 ### Inputs / Fields
@@ -401,6 +433,15 @@ Four columns on glass, present on every page: engine (mode, uptime, armed line, 
 
 ### Navigation
 Function keys are the top level. Settings opens a CDU index of line-select prompts in two columns, left prompts `<NAME` and right prompts `NAME>`, each with a one-line summary; at 821px and wider, small blank line-select keys sit in the bezel beside each line and light a cyan top edge on hover or focus. Diagnose uses outlined CDU tabs (cyan; current tab white).
+
+### Chat
+A CDU page for a plain conversation with the served model, drawn as a datalink message log (amended 2026-10-11).
+- **Messages:** no cards, fills or side stripes. Each message has a DIN caps head (11.5px, legend gray) carrying its direction mark and sender label in the channel colour (▲ YOU in ice, ▼ NINFER in green, then the model name in mono), its time and live state; a faint glass hairline (glass-rule-faint) parts one message from the next. Text is Segoe on the glass; code blocks sit in mono glass wells under a caps language legend.
+- **Under a reply:** a telemetry line of caps legends over white tabular figures (what the reply measured), then the magenta Sent line in mono (what the request carried, or `engine defaults only`). Reasoning folds behind a cyan caps summary with a dotted left rule.
+- **Token view:** with token probabilities on, a reply shows its tokens in mono: unsure tokens get a 2px amber underline, the least likely also amber text on caution glass, tokens forced by the thinking budget a 1px magenta underline and magenta text; hover outlines a token in cyan.
+- **Chat bar:** the context meter (white fill, amber near the limit), the thinking choice as small outlined tabs, the Output budget readout (magenta when the page sets the budget, white when the engine default applies; the page default is No limit, sent as `max_tokens: -1`), then the Parameters key (with a magenta count of set parameters) and New chat.
+- **Parameters:** grouped CDU fields; a field the user filled, or a select set away from its default, shows its value in magenta, the configured-target colour.
+- **Streaming:** a reply grows by appending text as it arrives and renders its markdown once, when it ends; prompt reading shows an ice progress bar until the first token.
 
 ### API test bench
 A CDU page for calling every exposed route by hand (amended 2026-10-11).
@@ -414,6 +455,7 @@ A CDU page for calling every exposed route by hand (amended 2026-10-11).
 - **Temporary revision:** a staged edit turns the CDU amber: TEMPORARY tag at the title's left, amber title and ring, amber status line in the sticky INSERT/ERASE bar, UNSAVED on the Settings key, `Settings staged` under the engine mode. INSERT saves, ERASE discards.
 - **Shared time cursor:** one cursor reads both traces at once, with a small readout box listing the time and every value.
 - **Rolling drum:** the memory readout window's last digit rolls on a drum over 250ms (ease-out cubic) and always rests on a whole digit. Reduced motion jumps straight to the value.
+- **Slew:** pointers on the tape and traces, the rate scale when it re-ranges, and readout figures written as text travel 380ms on an ease-out cubic (1-(1-p)^3) to each new reading; bars use the same travel in CSS (.38s cubic-bezier(.33,1,.68,1)). At rest every figure is the measured value; reduced motion and a hidden page jump straight to it.
 - **Master Caution / Warning:** dark amber at rest; lights amber for unacknowledged caution findings and red for warnings. Pressing it acknowledges, and acknowledgement is stored per browser.
 - **Scratchpad:** one-line messages under the annunciator row (amber caution, red-tinted error) cleared with CLR.
 
@@ -424,11 +466,12 @@ A CDU page for calling every exposed route by hand (amended 2026-10-11).
 - **Do** take every colour from the root tokens, in markup and in canvases, so Day and Night stay one system.
 - **Do** keep keys dark-capped with night legends in every display mode.
 - **Do** letter every label, key and annunciation in Bahnschrift caps at 87.5% width, and keep sentences in Segoe UI Variable Text.
-- **Do** colour by meaning: white measured, green engaged, cyan selectable, magenta configured target, amber caution or staged, red warning, ice blue prompt reading.
+- **Do** colour by meaning: white measured, green engaged or generated, cyan selectable, magenta configured target, amber caution or staged, red warning, ice blue prompt.
 - **Do** put controls beside the state they change, as the engine keys sit beside the engine mode.
 - **Do** stage settings as an amber temporary revision that ends only in INSERT or ERASE.
 - **Do** keep Monitor and every CDU page free of page scroll at 1440x900, 960x1000 and 1280x720; scroll inside the glass instead.
 - **Do** show unavailable readings as a dash, never as zero.
+- **Do** let a pointer or figure slew to a new reading (380ms, ease-out) and rest on the measured value; jump under reduced motion.
 
 ### Don't:
 - **Don't** read "glass" as glassmorphism: no frosted blur, translucent panels or glow.
