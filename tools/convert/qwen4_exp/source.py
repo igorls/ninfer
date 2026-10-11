@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 V2_REPOSITORY = "igorls/Qwen3.8-Flash-Next-mixed-NInfer"
 V2_REVISION = "5f0ee7e24279cbadf8d4a90c93c2ff5ea6b00688"
 V2_FILENAME = "qwen3_8_flash_next_mixed.ninfer"
@@ -17,6 +20,24 @@ SOURCE_CONFIG_REVISION = "de4b8e4d43b917e7706784d8bb445c9af86a3540"
 
 # The v2 artifact's frontend resources are the official ones (chat template c3cf9e34...).
 CHAT_TEMPLATE_SHA256 = "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
+
+# v3 carries the maintained template instead. The official Flash-Next template is byte-identical
+# to the official Qwen3.8-27B template, which rejects developer messages, later system messages
+# and tool histories without a user turn; tools/chat_templates/qwen3_8.jinja accepts them.
+TEMPLATE_OBJECT = "frontend/chat_template.jinja"
+MAINTAINED_TEMPLATE = "tools/chat_templates/qwen3_8.jinja"
+MAINTAINED_TEMPLATE_SHA256 = "1080e714707a3a47815f1affa79772996b7c13436cf32ddaa21f21184059ac9e"
+
+
+def maintained_template() -> bytes:
+    """The maintained template's committed (LF) bytes, whatever the checkout's line endings."""
+
+    data = (Path(__file__).resolve().parents[3] / MAINTAINED_TEMPLATE).read_bytes()
+    data = data.replace(b"\r\n", b"\n")
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != MAINTAINED_TEMPLATE_SHA256:
+        raise ValueError(f"{MAINTAINED_TEMPLATE} {digest} != {MAINTAINED_TEMPLATE_SHA256}")
+    return data
 
 # MTP expert banks baked from the v2 BF16 banks. Each digest equals the SHA256 of the
 # device buffer the v2 loader quantizes at startup (`ninfer_quantize_mtp` at 87812bc8 on G4).

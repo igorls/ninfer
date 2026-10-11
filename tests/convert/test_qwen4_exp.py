@@ -18,6 +18,11 @@ from tools.artifact.schema import ResourceSpec, TensorSpec, plan_objects
 from tools.artifact.writer import ArtifactWriter
 from tools.convert.qwen4_exp.config import load_source, text_config, vision_config
 from tools.convert.qwen4_exp.inventory import Plan, V2Object, expected_tensors, plan_upgrade
+from tools.convert.qwen4_exp.source import (
+    MAINTAINED_TEMPLATE_SHA256,
+    TEMPLATE_OBJECT,
+    maintained_template,
+)
 from tools.convert.qwen4_exp.upgrade import artifact_id, stream_upgrade
 from tools.convert.quantization.nvfp4 import encode_rows, weight_divisor
 
@@ -40,11 +45,22 @@ def test_published_v2_directory_maps_to_the_closed_v3_inventory():
         "resource": 6,
     }
     objects = plan_objects(plan.specs)
-    assert objects[-1].offset + objects[-1].bytes == 109_680_552_704
+    assert objects[-1].offset + objects[-1].bytes == 109_680_553_472
+    # v3 stores the maintained chat template in place of v2's official one.
+    template = maintained_template()
+    assert hashlib.sha256(template).hexdigest() == MAINTAINED_TEMPLATE_SHA256
+    assert 13 not in template and b"developer" in template
+    assert next(s for s in plan.specs if s.id == TEMPLATE_OBJECT).bytes == len(template)
+    assert plan.provenance["chat_template"]["sha256"] == MAINTAINED_TEMPLATE_SHA256
     by_id = {obj.id: obj for obj in objects}
-    # Objects ahead of the MTP banks keep their v2 offsets; the 342 behind them move down.
-    moved = [o for o in objects if plan.sources[o.id].offset != o.offset]
-    assert len(moved) == 343 and by_id["mtp/layer/mlp/experts/down"] in moved
+    # Objects ahead of the replaced template keep their v2 offsets; the larger template and the
+    # baked MTP banks move the objects behind them.
+    order = [o.id for o in objects]
+    ahead = order[: order.index(TEMPLATE_OBJECT)]
+    assert ahead and all(by_id[i].offset == plan.sources[i].offset for i in ahead)
+    assert by_id["mtp/layer/mlp/experts/down"].offset != plan.sources[
+        "mtp/layer/mlp/experts/down"
+    ].offset
 
     text = plan.components["text"]["config"]
     assert text["architectures"] == ["Qwen4ExpForCausalLM"]

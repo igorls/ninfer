@@ -4,7 +4,8 @@
 
 Every object is opened through ``tools.artifact.reader.Artifact`` (which checks framing, the
 directory, part headers and each object's encoded size and alignment) and hashed. Unchanged
-objects must equal the v2 object digests recorded by the upgrade; the two baked MTP banks must
+objects must equal the v2 object digests recorded by the upgrade; the chat template must be the
+pinned maintained template; the two baked MTP banks must
 equal the upgrade's bank digests and the pinned loader-oracle digests. ``--file-digests`` also
 hashes every file of the set, reports the digests and compares them with the pinned qualified
 digests when ``source.V3_FILE_SHA256`` pins any.
@@ -25,7 +26,13 @@ from tools.artifact.file_io import READ_FLAGS, pread
 from tools.artifact.reader import Artifact
 
 from .inventory import V2_OBJECTS
-from .source import MTP_BANK_SHA256, MTP_BANKS, V3_FILE_SHA256
+from .source import (
+    MAINTAINED_TEMPLATE_SHA256,
+    MTP_BANK_SHA256,
+    MTP_BANKS,
+    TEMPLATE_OBJECT,
+    V3_FILE_SHA256,
+)
 
 READ_BYTES = 16 * 1024 * 1024
 
@@ -71,6 +78,9 @@ def verify(path: Path, report: dict, *, file_digests: bool = False) -> dict:
                 wanted = {banks[object_id]["sha256"], MTP_BANK_SHA256.get(object_id, digest)}
                 if wanted != {digest}:
                     failures.append(f"{object_id}: bank digest {digest} != {sorted(wanted)}")
+            elif object_id == TEMPLATE_OBJECT:
+                if digest != MAINTAINED_TEMPLATE_SHA256:
+                    failures.append(f"{object_id}: {digest} is not the maintained template")
             elif digest != expected.get(object_id):
                 failures.append(f"{object_id}: v3 bytes differ from the v2 object")
         files = [path] + [path.parent / f.path for f in artifact.directory.files[1:]]
@@ -91,7 +101,9 @@ def verify(path: Path, report: dict, *, file_digests: bool = False) -> dict:
             failures.append("file digests differ from the pinned qualified v3 artifact")
     summary.update(
         unchanged_objects_equal_v2=sum(
-            1 for i in ids if i not in MTP_BANKS and digests[i] == expected.get(i)
+            1
+            for i in ids
+            if i not in MTP_BANKS and i != TEMPLATE_OBJECT and digests[i] == expected.get(i)
         ),
         object_seconds=round(object_seconds, 3),
         seconds=round(time.perf_counter() - started, 3),

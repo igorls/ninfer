@@ -16,6 +16,8 @@ from tools.artifact.schema import ResourceSpec, TensorSpec
 
 from .config import MTP_CONFIG, load_source, text_config, vision_config
 from .source import (
+    MAINTAINED_TEMPLATE,
+    MAINTAINED_TEMPLATE_SHA256,
     MTP_BANKS,
     SOURCE_CONFIG_REPOSITORY,
     SOURCE_CONFIG_REVISION,
@@ -25,6 +27,8 @@ from .source import (
     V2_REVISION,
     V2_SHA256,
     V2_WEIGHTS_ID,
+    TEMPLATE_OBJECT,
+    maintained_template,
 )
 
 V2_OBJECTS = 1566
@@ -352,7 +356,8 @@ def plan_upgrade(directory: dict) -> Plan:
         if obj.kind == "resource":
             if obj.name not in resources:
                 raise ValueError(f"{obj.name}: unexpected v2 resource")
-            specs.append(ResourceSpec(obj.name, obj.bytes))
+            size = len(maintained_template()) if obj.name == TEMPLATE_OBJECT else obj.bytes
+            specs.append(ResourceSpec(obj.name, size))
             continue
         want_format, want_shape = expected[obj.name]
         if (obj.format, obj.shape) != (want_format, want_shape):
@@ -451,6 +456,12 @@ def plan_upgrade(directory: dict) -> Plan:
             "ple": "primitive-ai/Qwen3.8-Flash-Next-PLE-quant@"
             "da8b39586016d8325ac619be28ad77d6296625ec (ples_int4)",
             "recipe": "qwen3_8_flash_next_mixed-v1",
+        },
+        "chat_template": {
+            "object": TEMPLATE_OBJECT,
+            "source": MAINTAINED_TEMPLATE,
+            "sha256": MAINTAINED_TEMPLATE_SHA256,
+            "replaces": "the official Flash-Next template carried by v2",
         },
         "mtp_expert_banks": {
             "objects": list(MTP_BANKS),

@@ -49,17 +49,12 @@ The published qualified derivation is `artifact_id 1e7e026e9f634926ae26b80f0fc85
 (entry), `e5d74e6a4874ef270f000799db5e171786dd685fb4c0d14c0baa075cae13cda8`,
 `67a30b1e718f2205d45ed22235ea93d1c0f9f0bf7cba963155002b5bccbf7baa` and
 `8bc02c7328ff27ce22858ce447afeb5a60d4d01f1f3a12955f9e2a5220780565` (parts 1 to 3). It predates the
-text config's `eos_token_id` (Section 2). The current upgrade writes that key, so it yields a
-different artifact id; `source.V3_FILE_SHA256` stays empty, and `verify --file-digests` reports the
-file digests without comparing them, until that derivation is qualified and pinned. On a Colab G4
+text config's `eos_token_id` and the maintained chat template (Section 2), so the current loader
+rejects it. The current upgrade writes both and yields a different artifact id;
+`source.V3_FILE_SHA256` stays empty, and `verify --file-digests` reports the file digests without
+comparing them, until that derivation is qualified and pinned. On a Colab G4
 an unattended `derive` takes ~13 minutes (6.5 min download, 6.7 min upgrade) plus ~2 minutes of
 optional verification.
-
-The loader still accepts the published derivation: a text config without `eos_token_id` takes the
-PLE boundary from the source config its provenance names (`Qwen/Qwen3.8-Flash-Next` at
-`de4b8e4d43b917e7706784d8bb445c9af86a3540`, whose `text_config.eos_token_id` is 248044), and any
-other artifact without the key is rejected. Remove that rule once the published artifact is
-re-derived.
 
 ## 2. Components and resources
 
@@ -81,14 +76,13 @@ list the same way). Flash-Next's `[2]` places its PLE weights and injection at 0
 listed layer owns a table, projections, norms and convolution under `text/layers/{l}/ple/`; the
 converter's closed v2 inventory holds only layer 1's.
 
-The six resources are the v2 artifact's frontend files, unchanged. The chat template is
-Flash-Next's official template (8,952 bytes, SHA256 `c3cf9e34abf4...d7a81041`), not the maintained
-`tools/chat_templates/qwen3_8.jinja`.
-The official template is byte-identical to the official Qwen3.8-27B template, which the maintained one
-derives from. It rejects `developer` messages (including the leading turn that Responses
-`instructions` become), system messages after the first turn and tool-result histories without a
-user turn. Serve the artifact with `--chat-template` naming the maintained `qwen3_8.jinja` to accept
-them; the Windows installer ships it in `chat-templates`.
+Five resources are the v2 artifact's frontend files, unchanged. The chat template is the maintained
+`tools/chat_templates/qwen3_8.jinja` with LF line endings (SHA256 `1080e714707a...21184059ac9e`),
+which replaces v2's official Flash-Next template (8,952 bytes, SHA256 `c3cf9e34abf4...d7a81041`);
+the upgrade checks the official input and records the replacement in the provenance. The official
+template is byte-identical to the official Qwen3.8-27B template, which the maintained one derives
+from; it rejects `developer` messages (including the leading turn that Responses `instructions`
+become), system messages after the first turn and tool-result histories without a user turn.
 
 ## 3. Objects
 

@@ -4,7 +4,8 @@
 
 Every v2 byte is read once, in order. That pass hashes the whole input (checked against the
 pinned v2 SHA256) and every v2 object range, copies each object's payload into the v3 file set,
-and bakes the two BF16 MTP expert banks into NVFP4 expert banks with the repository's
+stores the maintained chat template in place of the official one, and bakes the two BF16 MTP
+expert banks into NVFP4 expert banks with the repository's
 ``NVFP4_MAXABS_DIVISOR_RNE_V1`` encoder, one divisor per expert. ``--release-input`` punches
 the consumed input range out of the v2 file (Linux), so peak disk stays one artifact.
 
@@ -38,6 +39,8 @@ from tools.convert.quantization.nvfp4 import encode_rows, weight_divisor
 from .inventory import Plan, plan_upgrade
 from .source import (
     CHAT_TEMPLATE_SHA256,
+    TEMPLATE_OBJECT,
+    maintained_template,
     MTP_BANK_SHA256,
     MTP_BANKS,
     V2_BYTES,
@@ -202,8 +205,8 @@ def upgrade(
                 release_input=release_input,
                 mtp_reference=mtp_reference,
             )
-            # Decision 1: the official Flash-Next template is the one carried into v3.
-            template = result["v2_objects"]["frontend/chat_template.jinja"]
+            # The input must carry the official template; v3 stores the maintained one instead.
+            template = result["v2_objects"][TEMPLATE_OBJECT]
             if template != CHAT_TEMPLATE_SHA256:
                 raise ValueError(f"chat template {template} != {CHAT_TEMPLATE_SHA256}")
     finally:
@@ -248,6 +251,7 @@ def stream_upgrade(
     object_hashes = {name: hashlib.sha256() for *_, name in spans}
     whole = hashlib.sha256()
     bakers = {name: _BankBaker(name, plan.sources[name].shape) for name in banks}
+    template = maintained_template()
     releaser = _Releaser(fd) if release_input else None
     timings = {"read_wait": 0.0, "write": 0.0, "hash_wait": 0.0}
     bank_reports: dict[str, dict] = {}
@@ -283,6 +287,11 @@ def stream_upgrade(
             pieces_done = pool.submit(hash_pieces, pieces)
             clock = time.perf_counter()
             for name, offset, piece in pieces:
+                if name == TEMPLATE_OBJECT:
+                    # Hashed above as the v2 object; v3 stores the maintained template.
+                    if offset == 0:
+                        writer.write_region(name, 0, memoryview(template))
+                    continue
                 baker = bakers.get(name)
                 if baker is None:
                     writer.write_region(name, offset, piece)
@@ -328,6 +337,7 @@ def stream_upgrade(
         "v2_sha256": digest,
         "v2_objects": {name: h.hexdigest() for name, h in object_hashes.items()},
         "mtp_banks": bank_reports,
+        "chat_template": hashlib.sha256(template).hexdigest(),
         "timings": {key: round(value, 3) for key, value in timings.items()},
     }
 
