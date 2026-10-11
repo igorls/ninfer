@@ -387,6 +387,7 @@ were produced with recipe overrides and are not committed recipes.
 | Continued final assistant turn (`737b570a`) | rendered without a think block | rendered behind the empty think block the generation prompt carries (thinking off) | `/v1/score` text form and assistant prefill are conditioned like a generated answer |
 | Request model names (`d17f6a52`) | the public model id only | `--model-alias NAME` (repeatable) adds names that `GET /v1/models` lists; every server also accepts `default`; responses report the public id | One client configuration keeps working across artifacts and renamed ids. Added 2026-10-11 |
 | Chat Completions `allowed_tools` entries (`d17f6a52`) | flat `{"type":"function","name":...}` only | also OpenAI's documented `{"type":"function","function":{"name":...}}` | The documented shape returned HTTP 400 `function name must be a string`; worth offering upstream |
+| Engine-discovered shared prefix on first sighting (`493b78c4`) | saved whenever its coverage budget allows, ahead of the request's deeper points | takes free space only until another request crosses it; then ordinary repeated-demand admission | As a fallback it shrank the same request's turn-closure budget to the tokens between them, so with a full context cache a plain multi-turn chat resumed only from the system prefix. Flash-Next v3 with a full cache (Host context 9.49 of 9.52 GB): turns 2 to 4 of a 5.2K-token-system chat reused 5,182 tokens each before and 5,189 / 5,226 / 5,263 after; with ~500-token answers turn 5 reused 5,182 of 7,292 before and 6,892 of 7,480 after. New real case `conversation chain survives a full cache`; Flash-Next reuse cases and the 27B `prefix_real` and native-transaction tests pass. Proposed upstream |
 | `POST /v1/rerank` | no rerank route | Jina-shaped rerank scored by an in-process System One Choice; `GET /v1/models` advertises `ninfer-choice-rerank-v1`; missing or wrong API key is HTTP 401 with the OpenAI error object | Added 2026-10-02. `return_documents` defaults to true. Choice labels stay off the public response |
 
 ## Dropped
@@ -525,16 +526,6 @@ row-256 KV are the supported cache representations.
 
 ## Open qualification questions
 
-- Once the context cache is full, a plain multi-turn chat (thinking off, closed-turn reasoning
-  dropped from history) reuses only the engine-added checkpoint at the end of the system message.
-  Each turn's turn-closure input point is an optional save without demand evidence. Its admission
-  budget is its coverage over the deepest surviving fallback, which includes the system point the
-  same request has just published, and that budget stays below every victim's recovery loss. On
-  Flash-Next v3 at `27cd69b2` with a full cache, turns 2 to 5 of a conversation with a
-  5.2K-token system message reused 5,182 tokens each while their prompts grew to 7,292 tokens.
-  Tool loops are unaffected because their generation endpoint stays a prefix. The rule and its
-  protecting test (`test_inherited_owner_heat_cannot_spend_a_full_other_continuation`) are
-  upstream's; changing it needs a retention-policy decision.
 
 - Before the October 8 runtime sync, `prefix_real`'s Host-restore check failed on the
   Qwen3.8-27B NVFP4 artifact identically on the
