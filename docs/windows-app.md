@@ -40,23 +40,24 @@ paths for any other auxiliary resources in custom arguments.
 | Engine and request logs | `%LOCALAPPDATA%\NInfer\logs` |
 | Application shortcuts | Start menu → NInfer |
 
-The dashboard's request figures and its Troubleshooting findings come from the request log. The
+The dashboard's request figures and its Diagnose findings come from the request log. The
 log is never trimmed, so the Supervisor reads an existing one once, in the background, when it
 starts (about 8 s for 750 MiB) and the findings show that progress until it finishes; after that
 it reads only the records the engine appends.
 
-**Client activity** reports observed requests over a rolling 15-minute window, grouped by
+**Calling apps** on Monitor reports observed requests over a rolling 15-minute window, grouped by
 User-Agent. Completed, cancelled, failed, unfinished-at-restart and awaiting-outcome requests are separate; admission
 timeouts are counted explicitly. First-token, queue and prefill timings include means,
-p95 values and sample counts. Queue timing is labelled as first-output or whole-request
-according to the recorded boundary. Missing measurements remain unavailable.
+p95 values; an app whose queue wait averages a second or more is shown in amber, and requests
+that expired before admission add a caution line. Queue timing is labelled as first-output or
+whole-request according to the recorded boundary. Missing measurements remain unavailable.
 
 Reuse is the recorded cache-hit token count divided by prompt tokens; computed tokens
 include new input and recovery work. Full prefills do not diagnose changed conversations
 or tool definitions. The evidence disclosure reports explicit admission fallback reasons,
-disabled reuse, unrecorded causes and engine-instance boundaries. Requests are joined by
+disabled reuse, sample counts, unrecorded causes and engine-instance boundaries. Requests are joined by
 engine instance and request ID, so restarting the engine cannot mix client attribution.
-Troubleshooting also uses recorded queue timings; request total already includes queue
+Diagnose also uses recorded queue timings; request total already includes queue
 wait and must not be subtracted from start/done wall time to infer it.
 
 The installed configuration is the active authority. Changes to the original source JSON do not
@@ -96,6 +97,24 @@ For local command-line operations:
 `stop` stops the managed engine while leaving the tray/dashboard available. `start` launches the
 installed app if needed, or starts its engine. Dashboard controls provide the same engine actions.
 
+## Dashboard
+
+The dashboard is built to stay open in a narrow window beside other work. A mode row at the top
+of every page shows the engine state with its Start, Restart and Stop keys, the model, the running
+plan and the API address (select it to copy). **Monitor** holds the live readings without
+scrolling: GPU memory as a scale tape and history with the desktop reserve drawn as a red-striped
+band, generation and prompt-reading rates on separate scales, the calling apps, and the cautions
+from the findings. Pointing at either history, or using the arrow keys on it, reads both at the
+same moment. The other pages keep a one-line memory and rate band in view.
+
+**Connect**, **Diagnose** (findings, engine log, engine data, acceleration) and **Settings** are
+pages of one control display. The Settings index shows each page's current values; model presets
+and the desktop reserve have their own pages there. Edits are staged as a temporary revision,
+shown in amber, until **Insert** saves them or **Erase** discards them; a staged edit also shows
+under the engine mode. **Explain** shows plain-language notes on every page. **Master caution**
+lights for a caution or warning finding that has not been acknowledged in this browser; pressing
+it acknowledges the current findings and opens Diagnose.
+
 ## Web frontends
 
 The Supervisor can serve static web apps, such as llama.cpp's web UI, beside the engine. Each
@@ -103,8 +122,8 @@ frontend gets its own loopback port, and so its own browser origin, which also s
 API. A page there needs neither `--cors` nor the engine's API key, and several frontends can run
 side by side without sharing browser storage.
 
-Add, change or remove frontends in the dashboard under **Settings > Web frontends**: give each a name,
-the folder of a built app and a port, then **Save and apply**. The Supervisor saves the list to its
+Add, change or remove frontends in the dashboard under **Settings › Web frontends**: give each a name,
+the folder of a built app and a port, then **Insert and apply**. The Supervisor saves the list to its
 configuration and starts or stops the listeners right away, while the engine keeps running.
 Removing or changing a frontend ends the chats open in it, and saving an unchanged entry that is
 not serving retries it, for example after its files were copied in. The list is stored in the
@@ -118,7 +137,7 @@ configuration file as:
 
 `dir` holds a built app with `index.html` at its root. llama.cpp publishes prebuilt web UI assets on
 Hugging Face (`ggml-org/llama-ui`), or build `tools/ui` from the llama.cpp sources. Open a frontend
-from the tray's **Open** entry or from the dashboard's **Connect an app** page.
+from the tray's **Open** entry or from the dashboard's **Connect** page.
 
 On a frontend port, the Supervisor:
 
@@ -154,8 +173,8 @@ Settings → Request capacity sizes three related Engine startup values:
 An explicit pool must cover one full-length request and cannot exceed
 `max concurrency × max context`. The live preview shows how many full-length requests the pool
 can hold against the configured lane count. Extra lanes share the pool and must use shorter
-requests. Save does not restart the engine; use Save & restart or Overview when the new
-capacity should take effect.
+requests. **Insert** does not restart the engine; use **Insert + restart**, or **Restart** beside the
+engine mode, when the new capacity should take effect.
 
 To update, rebuild Release and rerun `install.ps1` without `-ConfigPath`. The installer validates
 runtime dependencies before stopping the installed app, replaces the binaries, retains one previous
