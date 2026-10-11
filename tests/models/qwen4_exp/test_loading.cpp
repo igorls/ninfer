@@ -70,19 +70,11 @@ Json flash_next_text() {
             {"ple_layer_ids", {2}}};
 }
 
-// The provenance of the published Flash-Next derivation, which names its source config.
-Json published_provenance() {
-    return {{"config",
-             {{"repository", "Qwen/Qwen3.8-Flash-Next"},
-              {"revision", "de4b8e4d43b917e7706784d8bb445c9af86a3540"}}}};
-}
-
-q4::Config parse(const Json& text, const Json& provenance = Json::object(),
-                 LoadOptions options = {}, const std::optional<Json>& mtp = std::nullopt,
+q4::Config parse(const Json& text, LoadOptions options = {},
+                 const std::optional<Json>& mtp    = std::nullopt,
                  const std::optional<Json>& vision = std::nullopt) {
     artifact::Directory directory;
     directory.components["text"].config = text;
-    directory.provenance                = provenance;
     if (mtp) {
         auto& component  = directory.components["mtp"];
         component.config = *mtp;
@@ -97,29 +89,23 @@ q4::Config parse(const Json& text, const Json& provenance = Json::object(),
 }
 
 void published_flash_next_config() {
-    const auto config = parse(flash_next_text(), published_provenance()).text;
-    const auto& ple   = config.ple;
+    auto text            = flash_next_text();
+    text["eos_token_id"] = 248044;
+    const auto config    = parse(text).text;
+    const auto& ple      = config.ple;
     require(ple.layers == std::vector<std::uint32_t>{1}, "ple_layer_ids [2] is not layer 1");
-    require(ple.boundary_token == 248044,
-            "the published derivation lost its source eos_token_id boundary");
+    require(ple.boundary_token == 248044, "eos_token_id is not the PLE boundary");
     require(ple.heads() == 16 && ple.head_width() == 160 && ple.code_row_bytes() == 80 &&
                 ple.scale_row_bytes() == 20 && ple.history_columns() == 9,
             "Flash-Next PLE row or history geometry changed");
     q4::execution::require_supported_ple(config);
 
-    // The explicit key is authoritative; the provenance rule covers only its absence.
     auto explicit_eos            = flash_next_text();
     explicit_eos["eos_token_id"] = 248046;
-    require(parse(explicit_eos).text.ple.boundary_token == 248046 &&
-                parse(explicit_eos, published_provenance()).text.ple.boundary_token == 248046,
+    require(parse(explicit_eos).text.ple.boundary_token == 248046,
             "eos_token_id did not select the PLE boundary");
 
-    rejects([&] { (void)parse(flash_next_text()); },
-            "a config without eos_token_id outside the published derivation was accepted");
-    auto other_revision                  = published_provenance();
-    other_revision["config"]["revision"] = "0123456789abcdef0123456789abcdef01234567";
-    rejects([&] { (void)parse(flash_next_text(), other_revision); },
-            "another source config revision inherited the published boundary token");
+    rejects([&] { (void)parse(flash_next_text()); }, "a config without eos_token_id was accepted");
     explicit_eos["eos_token_id"] = 248320;
     rejects([&] { (void)parse(explicit_eos); }, "a boundary outside the vocabulary was accepted");
     explicit_eos["eos_token_id"] = -1;
@@ -171,9 +157,9 @@ void companions_and_dense_configs() {
     auto text            = flash_next_text();
     text["eos_token_id"] = 248044;
     const LoadOptions mtp{.speculative = SpeculativeBackend::Mtp};
-    require(parse(text, {}, mtp, Json{{"architectures", {"Qwen4ExpMTP"}}}).mtp,
+    require(parse(text, mtp, Json{{"architectures", {"Qwen4ExpMTP"}}}).mtp,
             "the Qwen4ExpMTP companion was not selected");
-    rejects([&] { (void)parse(text, {}, mtp, Json{{"architectures", {"Qwen3_5MTP"}}}); },
+    rejects([&] { (void)parse(text, mtp, Json{{"architectures", {"Qwen3_5MTP"}}}); },
             "an MTP companion of other mathematics was accepted");
     const Json vision{{"model_type", "qwen4_exp_vision"},
                       {"depth", 1},
@@ -185,11 +171,11 @@ void companions_and_dense_configs() {
                       {"spatial_merge_size", 2},
                       {"num_position_embeddings", 16},
                       {"out_hidden_size", 2560}};
-    require(parse(text, {}, {.vision = true}, std::nullopt, vision).vision.has_value(),
+    require(parse(text, {.vision = true}, std::nullopt, vision).vision.has_value(),
             "the qwen4_exp_vision companion was not selected");
     auto other_vision          = vision;
     other_vision["model_type"] = "qwen3_5_vision";
-    rejects([&] { (void)parse(text, {}, {.vision = true}, std::nullopt, other_vision); },
+    rejects([&] { (void)parse(text, {.vision = true}, std::nullopt, other_vision); },
             "a Vision companion of another model_type was accepted");
 
     // Dense FFN blocks are not executable yet: a config without the MoE keys is rejected.

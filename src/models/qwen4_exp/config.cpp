@@ -11,13 +11,6 @@
 namespace ninfer::models::qwen4_exp {
 namespace {
 
-// The published Flash-Next derivation (artifact 1e7e026e...) predates the normalized
-// eos_token_id. Its provenance names the pinned source config, whose text_config.eos_token_id
-// is the PLE boundary below. No other artifact may omit the key.
-constexpr std::string_view kPinnedSourceRepository = "Qwen/Qwen3.8-Flash-Next";
-constexpr std::string_view kPinnedSourceRevision   = "de4b8e4d43b917e7706784d8bb445c9af86a3540";
-constexpr std::int32_t kPinnedSourceEosToken       = 248044;
-
 using artifact::ArtifactError;
 using artifact::Json;
 using artifact::require_members;
@@ -87,21 +80,13 @@ std::vector<std::uint32_t> ple_layers(const Json& value,
 }
 
 // The PLE segment boundary is the source text config's eos_token_id, which the converter keeps.
-std::int32_t ple_boundary_token(const Json& text, const Json& provenance,
-                                std::uint32_t vocab_size) {
-    std::uint64_t token = 0;
-    if (const auto found = text.find("eos_token_id"); found != text.end()) {
-        token = artifact::require_u64(*found, "eos_token_id");
-    } else {
-        const auto source = provenance.is_object() ? provenance.find("config") : provenance.end();
-        if (source == provenance.end() || !source->is_object() ||
-            source->value("repository", std::string()) != kPinnedSourceRepository ||
-            source->value("revision", std::string()) != kPinnedSourceRevision) {
-            throw ArtifactError("text config lacks eos_token_id, the PLE n-gram boundary; "
-                                "re-derive the artifact with tools/convert/qwen4_exp");
-        }
-        token = kPinnedSourceEosToken;
+std::int32_t ple_boundary_token(const Json& text, std::uint32_t vocab_size) {
+    const auto found = text.find("eos_token_id");
+    if (found == text.end()) {
+        throw ArtifactError("text config lacks eos_token_id, the PLE n-gram boundary; "
+                            "re-derive the artifact with tools/convert/qwen4_exp");
     }
+    const std::uint64_t token = artifact::require_u64(*found, "eos_token_id");
     if (token >= vocab_size ||
         token > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max())) {
         throw ArtifactError("PLE boundary token is outside the vocabulary");
@@ -148,7 +133,7 @@ RopeConfig rope(const Json& value, std::uint32_t head_dim) {
     return out;
 }
 
-TextConfig text(const Json& value, const Json& provenance) {
+TextConfig text(const Json& value) {
     require_members(value,
                     {"architectures",
                      "model_type",
@@ -248,7 +233,7 @@ TextConfig text(const Json& value, const Json& provenance) {
                dimension(value, "ngram_size"),
                dimension(value, "heads_per_ngram"),
                dimension(value, "split_ngram_parts"),
-               ple_boundary_token(value, provenance, out.vocab_size)};
+               ple_boundary_token(value, out.vocab_size)};
     if (out.ple.ngram_size < 2 || out.ple.embed_dim % out.ple.heads()) {
         throw ArtifactError("PLE heads must be n-grams of two or more tokens dividing its width");
     }
@@ -309,7 +294,7 @@ Config parse_config(const artifact::Directory& directory, const LoadOptions& opt
         }
         Config out;
         out.mtp  = options.mtp();
-        out.text = text(directory.component("text").config, directory.provenance);
+        out.text = text(directory.component("text").config);
         if (options.vision) {
             out.vision = vision(companion(directory, "vision").config, out.text);
         }
