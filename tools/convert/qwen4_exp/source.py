@@ -51,8 +51,12 @@ MTP_BANK_SHA256 = {
     ),
 }
 
-# SHA256 of every file of the qualified v3 derivation, in `files` order (entry, part-0001,
-# part-0002, part-0003). Empty until the derivation that writes text eos_token_id is qualified:
-# the published derivation (artifact_id 1e7e026e9f634926ae26b80f0fc8591e) predates that key, so
-# this upgrade no longer reproduces its bytes.
-V3_FILE_SHA256: tuple[str, ...] = ()
+# SHA256 of every file of the v3 derivation (artifact_id 3cade505298b575e009fe78877b76a33, with
+# text eos_token_id and the maintained chat template), in `files` order (entry, part-0001,
+# part-0002, part-0003).
+V3_FILE_SHA256: tuple[str, ...] = (
+    "f05abe459b4062af844e6c4ba6585feb97b8e3c9f016bac02815d483e2d51797",
+    "69425b82468c039cb837335289daa9c9eaea17216c957dae3f633bdc7aa92ea3",
+    "a39946035aa14f8f9e910ba371662b1dfb33d6f3df27af41ec31b875a8e8216e",
+    "1deec0ae25095afcd18f2e8c8e8471bf2dda631fc506960304b791d60a477be4",
+)

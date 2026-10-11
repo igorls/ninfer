@@ -44,17 +44,18 @@ a hole-punched file keeps its length and would pass a resumed download as comple
 
 The generic `tools/upgrade_ninfer_v2_to_v3.py` rejects the Flash-Next identity and points here.
 
-The published qualified derivation is `artifact_id 1e7e026e9f634926ae26b80f0fc8591e`: four files,
-109,681,105,664 bytes, with SHA256 `0de7b5f6c3ac9719e1c6e5811a765fda15fb4618444343502fc798dff2282714`
-(entry), `e5d74e6a4874ef270f000799db5e171786dd685fb4c0d14c0baa075cae13cda8`,
-`67a30b1e718f2205d45ed22235ea93d1c0f9f0bf7cba963155002b5bccbf7baa` and
-`8bc02c7328ff27ce22858ce447afeb5a60d4d01f1f3a12955f9e2a5220780565` (parts 1 to 3). It predates the
-text config's `eos_token_id` and the maintained chat template (Section 2), so the current loader
-rejects it. The current upgrade writes both and yields a different artifact id;
-`source.V3_FILE_SHA256` stays empty, and `verify --file-digests` reports the file digests without
-comparing them, until that derivation is qualified and pinned. On a Colab G4
-an unattended `derive` takes ~13 minutes (6.5 min download, 6.7 min upgrade) plus ~2 minutes of
-optional verification.
+The current derivation is `artifact_id 3cade505298b575e009fe78877b76a33`: four files,
+109,681,106,432 bytes (payload 109,680,553,472), with SHA256
+`f05abe459b4062af844e6c4ba6585feb97b8e3c9f016bac02815d483e2d51797` (entry),
+`69425b82468c039cb837335289daa9c9eaea17216c957dae3f633bdc7aa92ea3`,
+`a39946035aa14f8f9e910ba371662b1dfb33d6f3df27af41ec31b875a8e8216e` and
+`1deec0ae25095afcd18f2e8c8e8471bf2dda631fc506960304b791d60a477be4` (parts 1 to 3), pinned in
+`source.V3_FILE_SHA256` and checked by `verify --file-digests`. It carries the text config's
+`eos_token_id` and the maintained chat template (Section 2); 1,563 of its 1,566 objects equal the
+v2 objects. The earlier published derivation (`artifact_id 1e7e026e9f634926ae26b80f0fc8591e`,
+entry SHA256 `0de7b5f6...02282714`) lacks both and is rejected by the current loader. On Windows
+the upgrade takes about 7 minutes from a local v2 file; on a Colab G4 an unattended `derive` takes
+~13 minutes (6.5 min download, 6.7 min upgrade) plus ~2 minutes of optional verification.
 
 ## 2. Components and resources
 
