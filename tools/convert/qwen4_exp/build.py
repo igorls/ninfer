@@ -39,6 +39,7 @@ from ..resources import load_resources
 from ..sources.logical import concat_sources, transpose_source
 from ..sources.safetensors import SafetensorsSource, tensor_source
 from .config import MTP_CONFIG, accepts, source_text, text_config, vision_config
+from .source import CHAT_TEMPLATE_SHA256
 
 COMPONENTS = ("text", "vision", "mtp")
 TEMPLATE_DIRECTORY = Path(__file__).resolve().parents[2] / "chat_templates"
@@ -46,12 +47,7 @@ TEMPLATE_DIRECTORY = Path(__file__).resolve().parents[2] / "chat_templates"
 # and Qwen/Qwen3.8-Flash-Next@de4b8e4d43b917e7706784d8bb445c9af86a3540 ship byte-identical
 # chat_template.jinja files (8,952 bytes, checked 2026-10-11). An official template with this
 # digest is replaced by the maintained derivative; any other needs an explicit template.
-MAINTAINED_TEMPLATES = {
-    "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041": (
-        "qwen3.8",
-        "qwen3_8.jinja",
-    ),
-}
+MAINTAINED_TEMPLATES = {CHAT_TEMPLATE_SHA256: ("qwen3.8", "qwen3_8.jinja")}
 
 __all__ = ["COMPONENTS", "MAINTAINED_TEMPLATES", "accepts", "build_model", "select_chat_template"]
 
@@ -62,12 +58,12 @@ def _sha256(path: Path) -> str:
 
 def select_chat_template(
     model_dir: Path, overrides: Mapping[str, str | Path]
-) -> tuple[dict[str, Path], dict]:
+) -> tuple[dict[str, Path | bytes], dict]:
     """Resource overrides with the chat template decided, and the decision's provenance record.
 
     An explicit ``chat_template.jinja`` override wins. Otherwise the official template must be a
-    known official Qwen template, which installs its maintained derivative from
-    ``tools/chat_templates``.
+    known official Qwen template, which installs the committed (LF) bytes of its maintained
+    derivative from ``tools/chat_templates``, whatever the checkout's line endings.
     """
     result = {role: Path(path) for role, path in overrides.items()}
     if "chat_template.jinja" in result:
@@ -84,14 +80,14 @@ def select_chat_template(
             "select one with --resource chat_template.jinja=PATH"
         )
     family, name = MAINTAINED_TEMPLATES[digest]
-    maintained = TEMPLATE_DIRECTORY / name
+    maintained = (TEMPLATE_DIRECTORY / name).read_bytes().replace(b"\r\n", b"\n")
     result["chat_template.jinja"] = maintained
     return result, {
         "selection": "maintained",
         "official": family,
         "official_sha256": digest,
         "installed": f"tools/chat_templates/{name}",
-        "sha256": _sha256(maintained),
+        "sha256": hashlib.sha256(maintained).hexdigest(),
     }
 
 

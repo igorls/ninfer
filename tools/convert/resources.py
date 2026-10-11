@@ -67,8 +67,9 @@ def load_resources(
     *,
     vocab_size: int,
     vision_config: Mapping[str, int] | None = None,
-    overrides: Mapping[str, str | Path] | None = None,
+    overrides: Mapping[str, str | Path | bytes] | None = None,
 ) -> tuple[dict[str, dict[str, str]], dict[str, bytes], int, tuple[int, ...]]:
+    """Resources of the selected components; an override is a file path or the resource bytes."""
     overrides = {} if overrides is None else dict(overrides)
     roles = {"text": TEXT_RESOURCES}
     if vision_config is not None:
@@ -84,8 +85,9 @@ def load_resources(
     for component, names in roles.items():
         references[component] = {}
         for role in names:
-            path = Path(overrides[role]) if role in overrides else model_dir / role
-            data = path.read_bytes()
+            source = overrides.get(role, model_dir / role)
+            path = role if isinstance(source, bytes) else Path(source)
+            data = source if isinstance(source, bytes) else path.read_bytes()
             if not data:
                 raise ValueError(f"{path}: resource is empty")
             text = data.decode("utf-8")

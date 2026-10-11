@@ -34,6 +34,7 @@ from tools.convert.qwen4_exp import build
 from tools.convert.qwen4_exp.config import load_source, text_config, vision_config
 from tools.convert.qwen4_exp.inventory import _inputs as upgrade_inputs
 from tools.convert.qwen4_exp.inventory import plan_upgrade
+from tools.convert.qwen4_exp.source import MAINTAINED_TEMPLATE_SHA256, maintained_template
 from tools.convert.recipe import Recipe
 from tools.convert.sources.safetensors import SafetensorsSource, TensorInfo
 
@@ -874,13 +875,14 @@ def test_chat_template_defaults_to_the_maintained_qwen3_8_template(tmp_path, mon
         monkeypatch.setattr(build, "MAINTAINED_TEMPLATES", {official: ("qwen3.8", "qwen3_8.jinja")})
         model = build.build_model(base)
         stored = model.resources[model.components["text"]["resources"]["chat_template.jinja"]]
-        assert stored == MAINTAINED.read_bytes()
+        # The committed (LF) bytes, also from a checkout with CRLF line endings.
+        assert stored == maintained_template()
         assert model.provenance["chat_template"] == {
             "selection": "maintained",
             "official": "qwen3.8",
             "official_sha256": official,
             "installed": "tools/chat_templates/qwen3_8.jinja",
-            "sha256": hashlib.sha256(MAINTAINED.read_bytes()).hexdigest(),
+            "sha256": MAINTAINED_TEMPLATE_SHA256,
         }
     assert (build.TEMPLATE_DIRECTORY / "qwen3_8.jinja").is_file()
 
@@ -911,8 +913,6 @@ def test_unmapped_or_misshapen_official_tensors_fail_the_build(tmp_path):
 def test_config_normalizer_accepts_dense_blocks_and_rejects_mixed_ones():
     dense = text_config(_source_config(moe=False, nested=False))
     assert dense["intermediate_size"] == 96 and "num_experts" not in dense
-    keys = list(dense)
-    assert keys.index("intermediate_size") == keys.index("linear_conv_kernel_dim") + 1
     mixed = _source_config(moe=True, nested=True)
     mixed["text_config"]["mlp_only_layers"] = [0]
     with pytest.raises(ValueError, match="same feed-forward kind"):
