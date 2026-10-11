@@ -3,6 +3,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdio>
@@ -180,16 +181,27 @@ void apply_openai_prompt_cache_policy(GenerationRequest& request, OpenAIPromptCa
         policy.automatic != OpenAIPromptCacheAutomatic::Disabled;
 }
 
-std::string make_models_list(const std::string& model_id, std::int64_t created,
+bool ServedModelNames::accepts(std::string_view name) const {
+    return name == id || name == kDefaultModelName ||
+           std::find(aliases.begin(), aliases.end(), name) != aliases.end();
+}
+
+std::string make_models_list(const ServedModelNames& names, std::int64_t created,
                              std::uint32_t max_model_len) {
     // vLLM/llama.cpp-compatible discovery metadata for the configured per-request context limit.
-    const Json payload = {{"object", "list"},
-                          {"data", Json::array({Json{{"id", model_id},
-                                                     {"object", "model"},
-                                                     {"created", created},
-                                                     {"owned_by", "ninfer"},
-                                                     {"max_model_len", max_model_len}}})}};
-    return payload.dump();
+    // Each alias is its own entry, as vLLM lists every served model name, so a client that checks
+    // its configured name against this list finds it.
+    Json data        = Json::array();
+    const auto entry = [&](const std::string& model_id) {
+        data.push_back(Json{{"id", model_id},
+                            {"object", "model"},
+                            {"created", created},
+                            {"owned_by", "ninfer"},
+                            {"max_model_len", max_model_len}});
+    };
+    entry(names.id);
+    for (const std::string& alias : names.aliases) { entry(alias); }
+    return Json{{"object", "list"}, {"data", std::move(data)}}.dump();
 }
 
 std::string make_model_object(const std::string& model_id, std::int64_t created,
@@ -216,8 +228,8 @@ std::int64_t unix_time_now() {
         .count();
 }
 
-void validate_openai_model(std::string_view requested, std::string_view available) {
-    if (requested == available) { return; }
+const std::string& resolve_openai_model(std::string_view requested, const ServedModelNames& names) {
+    if (names.accepts(requested)) { return names.id; }
     ApiError error;
     error.status  = 404;
     error.type    = "invalid_request_error";

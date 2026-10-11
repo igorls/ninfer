@@ -508,6 +508,19 @@ int test_tools() {
                           prompt(allowed).options.tool_jsons.size() == 2,
                       "allowed_tools preserves declarations and selects callable names");
 
+    // OpenAI's Chat Completions reference spells the entries with a nested function object.
+    body["tool_choice"] =
+        Json{{"type", "allowed_tools"},
+             {"allowed_tools",
+              Json{{"mode", "required"},
+                   {"tools", Json::array({Json{{"type", "function"},
+                                               {"function", Json{{"name", "search"}}}}})}}}};
+    const GenerationRequest nested_allowed = parse(body).generation;
+    failures +=
+        check(nested_allowed.tool_choice.allowed_names == std::vector<std::string>{"search"} &&
+                  nested_allowed.tool_choice.mode == ToolChoiceMode::Required,
+              "allowed_tools rejects the documented nested function entry");
+
     body["tool_choice"] =
         Json{{"type", "allowed_tools"},
              {"mode", "auto"},
@@ -1057,10 +1070,30 @@ int test_stream_observations() {
 
 int test_common_objects() {
     int failures      = 0;
-    const Json models = Json::parse(make_models_list("qwen", 7, 240000));
+    const Json models = Json::parse(make_models_list(ServedModelNames{.id = "qwen"}, 7, 240000));
     failures +=
         check(models["data"][0]["id"] == "qwen" && models["data"][0]["max_model_len"] == 240000,
               "models list advertises the configured context limit");
+    const ServedModelNames aliased{.id = "qwen3.8-flash-next", .aliases = {"flash-next-v3"}};
+    const Json listed = Json::parse(make_models_list(aliased, 7, 1024));
+    failures +=
+        check(listed["data"].size() == 2 && listed["data"][0]["id"] == "qwen3.8-flash-next" &&
+                  listed["data"][1]["id"] == "flash-next-v3" &&
+                  listed["data"][1]["max_model_len"] == 1024,
+              "models list does not list each alias after the model id");
+    failures +=
+        check(resolve_openai_model("flash-next-v3", aliased) == "qwen3.8-flash-next" &&
+                  resolve_openai_model("default", aliased) == "qwen3.8-flash-next" &&
+                  resolve_openai_model("qwen3.8-flash-next", aliased) == "qwen3.8-flash-next",
+              "an alias or 'default' does not resolve to the model id");
+    bool unknown_rejected = false;
+    try {
+        (void)resolve_openai_model("qwen3.8-27b", aliased);
+    } catch (const ApiException& exception) {
+        unknown_rejected =
+            exception.error().status == 404 && exception.error().code == "model_not_found";
+    }
+    failures += check(unknown_rejected, "an unconfigured model name was accepted");
     const Json model = Json::parse(make_model_object("qwen", 7, 240000));
     failures += check(model["max_model_len"] == 240000,
                       "model lookup advertises the configured context limit");

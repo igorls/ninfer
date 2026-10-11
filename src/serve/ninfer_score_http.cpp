@@ -133,8 +133,8 @@ void HttpServer::handle_score(const httplib::Request& req, httplib::Response& re
         if (!body.contains("model") || !body.at("model").is_string()) {
             score_bad_request("model must be a string", "model");
         }
-        model = body.at("model").get<std::string>();
-        validate_openai_model(model, public_model_id_);
+        model = resolve_openai_model(body.at("model").get_ref<const std::string&>(),
+                                     served_model_names_);
         if (!body.contains("messages") || !body.at("messages").is_array() ||
             body.at("messages").empty()) {
             score_bad_request("messages must be a nonempty array holding the shared prefix",

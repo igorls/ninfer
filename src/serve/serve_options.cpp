@@ -2,6 +2,7 @@
 #include "serve/typesafe_systemone.h"
 #include "product/speculative_options.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
@@ -151,7 +152,8 @@ std::string read_api_key_file(const std::string& path) {
 std::string serve_usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
            " <model.ninfer> [--host H] [--port N] [--api-key KEY] [--api-key-file PATH] "
-           "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
+           "[--model-id ID] [--model-alias NAME]... [--max-context N] [--kv-capacity N|auto] "
+           "[--max-concurrency N] "
            "[--clamp-concurrency-to-pool] [--kv-slack-floor-mib N] "
            "[--desktop-reserve-gib N] [--desktop-reserve-mib N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
@@ -187,6 +189,8 @@ std::string serve_usage_text(const char* argv0) {
            "       --api-key-file reads the key from a file, keeping it off the command line\n"
            "       --request-log-jsonl appends full-precision server/request records\n"
            "       --model-id overrides the artifact metadata.name reported by the server\n"
+           "       --model-alias adds a request name for the served model (repeatable); "
+           "responses report the model id, and every server also accepts the name 'default'\n"
            "       --rerank-model-id defaults to ninfer-choice-rerank-v1; "
            "--rerank-max-documents defaults to 256; relevance weights default to "
            "1, 0.6, 0.25 and 0\n"
@@ -261,6 +265,17 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.model_id_override = require_value("--model-id");
             if (options.model_id_override->empty()) {
                 throw std::invalid_argument("--model-id must not be empty");
+            }
+        } else if (arg == "--model-alias") {
+            std::string alias = require_value("--model-alias");
+            if (alias.empty()) { throw std::invalid_argument("--model-alias must not be empty"); }
+            if (alias == kDefaultModelName) {
+                throw std::invalid_argument(
+                    "--model-alias default is accepted by every server and is not configured");
+            }
+            if (std::find(options.model_aliases.begin(), options.model_aliases.end(), alias) ==
+                options.model_aliases.end()) {
+                options.model_aliases.push_back(std::move(alias));
             }
         } else if (arg == "--max-context") {
             options.max_context = static_cast<std::uint32_t>(

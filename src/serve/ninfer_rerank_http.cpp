@@ -12,9 +12,9 @@ namespace {
 
 using Json = nlohmann::ordered_json;
 
-RerankSettings rerank_settings(const ServeOptions& options, const std::string& served_model_id) {
+RerankSettings rerank_settings(const ServeOptions& options, const ServedModelNames& served) {
     return RerankSettings{
-        .served_model_id     = served_model_id,
+        .served              = served,
         .advertised_model_id = options.rerank_model_id,
         .max_documents       = options.rerank_max_documents,
         .weight_exact        = options.rerank_weight_exact,
@@ -29,7 +29,7 @@ RerankSettings rerank_settings(const ServeOptions& options, const std::string& s
 // Failures propagate to the server's exception handler, which writes the OpenAI error object for
 // this path and records 5xx failures in the operational log under the response's request id.
 void HttpServer::handle_rerank(const httplib::Request& req, httplib::Response& res) {
-    const RerankSettings settings = rerank_settings(options_, public_model_id_);
+    const RerankSettings settings = rerank_settings(options_, served_model_names_);
     const RerankRequest request   = parse_rerank_request(parse_json_body(req), settings);
 
     // Read-only: the prefix the documents share is only the short query, so publishing it would

@@ -111,7 +111,7 @@ SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request
     limits.default_max_tokens = options_.default_max_tokens;
     const auto branch_request = [&](Json messages, Json candidates, bool publish) {
         return parse_chat_completion_request(
-            Json{{"model", public_model_id_},
+            Json{{"model", served_model_names_.id},
                  {"messages", std::move(messages)},
                  {"max_tokens", 1},
                  {"temperature", 0},
@@ -316,14 +316,14 @@ SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request
             // declared letter, is mixed into the distribution. Any other outcome keeps it.
             SystemOneLetterPrompt rendered = build_letter_prompt(request, question, 0, false);
             OpenAIChatRequest thinking     = parse_chat_completion_request(
-                Json{{"model", public_model_id_},
-                     {"messages", std::move(rendered.messages)},
-                     {"max_tokens", policy.reasoning_budget + 256U},
-                     {"temperature", 0},
-                     {"prompt_cache_read_only", true},
-                     {"prompt_cache_options", Json{{"mode", "implicit"}}},
-                     {"chat_template_kwargs", Json{{"enable_thinking", true}}},
-                     {"thinking_budget_tokens", policy.reasoning_budget}},
+                Json{{"model", served_model_names_.id},
+                         {"messages", std::move(rendered.messages)},
+                         {"max_tokens", policy.reasoning_budget + 256U},
+                         {"temperature", 0},
+                         {"prompt_cache_read_only", true},
+                         {"prompt_cache_options", Json{{"mode", "implicit"}}},
+                         {"chat_template_kwargs", Json{{"enable_thinking", true}}},
+                         {"thinking_budget_tokens", policy.reasoning_budget}},
                 limits);
             const GenerationOutcome outcome = run_chat(thinking);
             usage.input_tokens += systemone_billed_input_tokens(
@@ -369,8 +369,8 @@ void HttpServer::handle_systemone(const httplib::Request& req, httplib::Response
     }
 
     const Json payload = make_systemone_response_json(
-        request, systemone_executed_model(public_model_id_, request.temperature), execution.answers,
-        execution.usage);
+        request, systemone_executed_model(served_model_names_.id, request.temperature),
+        execution.answers, execution.usage);
     if (execution.lifetime) {
         set_owned_json_content(res, payload.dump(), execution.lifetime);
     } else {

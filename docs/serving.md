@@ -39,7 +39,11 @@ concurrency, prefix reuse, and image/video request surfaces. It may remain combi
 
 When `--model-id` is omitted, the server advertises and accepts the artifact's `metadata.name`,
 falling back to its architecture name when no name is stored. An explicit `--model-id` is a public
-HTTP alias override and does not select or alter model execution.
+HTTP alias override and does not select or alter model execution. Each `--model-alias NAME`
+(repeatable) adds another name requests may use; `GET /v1/models` lists it after the model id, and
+responses report the model id. Every server also accepts the request model name `default` for
+whichever model it serves, so a client configured with `default` works against any NInfer server;
+`default` is not listed and cannot be configured as an alias.
 
 Vision is disabled by default: its weights and Vision-specific unified-workspace extent are not
 allocated, and media requests and token-count requests fail with HTTP 400 `vision_disabled`. Add
@@ -57,8 +61,8 @@ selected for this process.
 |---|---|
 | `GET /health` | Engine readiness |
 | `GET /metrics` | Prometheus counters, gauges and latency histograms |
-| `GET /v1/models` | configured OpenAI model alias, advertised rerank id, and effective `max_model_len` |
-| `GET /v1/models/{id}` | lookup of the configured alias or advertised rerank id, and effective `max_model_len` |
+| `GET /v1/models` | public model id, each `--model-alias`, advertised rerank id, and effective `max_model_len` |
+| `GET /v1/models/{id}` | lookup of the model id, an alias, `default` or the advertised rerank id, and effective `max_model_len` |
 | `GET /props` | llama.cpp-compatible server properties for llama.cpp's web UI |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
 | `POST /v1/score` | closed-set scoring of isolated questions against one shared prefix |
@@ -119,8 +123,9 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 
 The endpoint supports:
 
-- `model` naming the configured public model ID; an omitted or null `model` selects it, as
-  llama.cpp does, and any other name is `model_not_found`;
+- `model` naming the public model ID, a configured alias or `default`; an omitted or null `model`
+  selects it, as llama.cpp does, and any other name is `model_not_found`. Responses report the
+  model ID;
 - `system`, `developer`, `user`, `assistant`, and `tool` history, plus legacy `function` history;
 - string content and ordered text/refusal parts; adjacent parts are preserved without inserted
   separators, and empty wire content remains an empty turn;
@@ -370,8 +375,9 @@ relabeled as client input errors. When the chat template itself rejects a reques
 the template's own `raise_exception` text (or the interpreter's cause) after the template's source
 name, without a template trace.
 
-The request `model` must equal the public model ID: the artifact `metadata.name` by default
-(falling back to its architecture name when absent), or the explicit `--model-id` override.
+The request `model` must be the public model ID (the artifact `metadata.name` by default, falling
+back to its architecture name when absent, or the explicit `--model-id` override), a configured
+`--model-alias`, or `default`.
 Reasoning is returned separately as `reasoning_content`; answer text remains in `content`.
 
 For non-strict tools, a direct top-level tool-parameter
@@ -403,7 +409,9 @@ The three protocols share one constrained tool implementation:
 | Anthropic named `tool` | One or more calls to that tool |
 | OpenAI `parallel_tool_calls:false` / Anthropic `disable_parallel_tool_use:true` | At most one call; exactly one when a call is required |
 
-OpenAI `allowed_tools` supports `auto` and `required`. Selection changes generation permissions,
+OpenAI `allowed_tools` supports `auto` and `required`. Chat Completions entries use the documented
+`{"type":"function","function":{"name":...}}` shape; the flat `{"type":"function","name":...}`
+spelling of the Responses API is accepted too. Selection changes generation permissions,
 while all declarations retain their original order in the prompt. Requests with tools enable
 **basic structural constraints by default**, including ordinary `auto` calls without `strict`.
 The model can answer normally or start a tool call; a call must use the model's tool framing and a
@@ -731,7 +739,7 @@ wire response contains typed `output` Items.
 
 | Field | NInfer Responses Core contract |
 |---|---|
-| `model` | required non-empty string; must equal the artifact-derived public model ID or explicit `--model-id` override |
+| `model` | required non-empty string: the public model ID (artifact-derived or `--model-id`), a `--model-alias`, or `default`; the Response reports the model ID |
 | `input` | string or typed Item array; it may be omitted or empty only when `previous_response_id` already supplies a user query |
 | `instructions` | optional string, inserted before the reconstructed conversation for this request only |
 | `previous_response_id` | optional ID of a retained local Response |
@@ -1306,10 +1314,10 @@ TYPESAFE_API_KEY=local-secret   # the server's --api-key; any printable value wh
 
 `GET /v1/models` answers both SDK families from one body: `data` for OpenAI clients and `models`
 (`name`, `description`, `release_date`) for TypeSafe's `models.list()`, listing the served id and
-the `jev-latest` and `jev-preview` aliases. `data` lists the served model first and then the
+the `jev-latest` and `jev-preview` aliases. `data` lists the served model first, then each `--model-alias`, then the
 advertised rerank id (`ninfer-choice-rerank-v1` unless `--rerank-model-id` replaces it) when that
-id differs from the served model; a client that discovers the chat model reads `data[0]`.
-`GET /v1/models/{id}` resolves either id.
+id is not already listed; a client that discovers the chat model reads `data[0]`.
+`GET /v1/models/{id}` resolves any listed id and `default`.
 
 #### cURL
 
@@ -1406,8 +1414,9 @@ string or an object with a nonempty `text` string. Other fields on a document ob
 An empty string is HTTP 400.
 
 `model` is optional, and `null` counts as omitted, as on `POST /v1/chat/completions`. Any other
-value must be a nonempty string equal to the served model id or the advertised rerank id
-(`--rerank-model-id`, `ninfer-choice-rerank-v1` by default). Either name runs the loaded model. An
+value must be a nonempty string naming the served model (its id, an alias or `default`) or the
+advertised rerank id (`--rerank-model-id`, `ninfer-choice-rerank-v1` by default). Every name runs
+the loaded model. An
 empty string or a non-string value is HTTP 400. Any other id is HTTP 404 `model_not_found`.
 
 `top_n` is an optional integer. Omitted or `null`, it equals the document count. Any integer
@@ -1476,6 +1485,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--api-key KEY` | required bearer or `x-api-key` value | unset |
 | `--api-key-file PATH` | read the required key from a file | unset |
 | `--model-id ID` | override the public OpenAI model alias | artifact `identity.model_id` |
+| `--model-alias NAME` | another request name for the served model; repeatable; listed by `GET /v1/models` | none |
 | `--rerank-model-id ID` | model id advertised for `POST /v1/rerank` and accepted beside the served id | `ninfer-choice-rerank-v1` |
 | `--rerank-max-documents N` | maximum `documents` array length for `POST /v1/rerank` | `256` |
 | `--rerank-weight-exact F` | relevance weight of the exact-match Choice option | `1` |

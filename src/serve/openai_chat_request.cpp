@@ -674,7 +674,12 @@ void apply_allowed_tools(const Json& config, GenerationRequest& output) {
                 "custom tool output",
                 "tool_choice", "tool_type_not_supported");
         }
-        const std::string name = require_function_name(item, "tool_choice");
+        // Chat Completions documents {"type":"function","function":{"name":...}}; the flat
+        // {"type":"function","name":...} spelling of the Responses API is accepted as well.
+        const Json& named      = item.contains("function") && item.at("function").is_object()
+                                     ? item.at("function")
+                                     : item;
+        const std::string name = require_function_name(named, "tool_choice");
         const bool declared =
             std::any_of(output.tools.begin(), output.tools.end(),
                         [&](const ToolDefinition& tool) { return tool.name == name; });

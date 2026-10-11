@@ -716,7 +716,7 @@ void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& r
 
     nlohmann::json body = {
         {"schema_version", 1},
-        {"model_id", public_model_id_},
+        {"model_id", served_model_names_.id},
         // Non-zero when the engine was busy and this payload reports the previous
         // reading rather than blocking behind execution to take a fresh one.
         {"memory_age_ms", memory_age_ms},
@@ -880,14 +880,16 @@ void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) 
     // One body serves OpenAI clients (`data`) and TypeSafe SDKs (`models`), which both request
     // this path and ignore the other's key. `data` also lists the advertised rerank id.
     const nlohmann::ordered_json payload =
-        make_service_models_list(public_model_id_, options_.rerank_model_id, unix_time_now(),
+        make_service_models_list(served_model_names_, options_.rerank_model_id, unix_time_now(),
                                  loaded_unix_seconds_, options_.max_context);
     res.set_content(payload.dump(), "application/json");
 }
 
 void HttpServer::handle_model(const httplib::Request& req, httplib::Response& res) const {
     const std::string id = req.matches.size() > 1 ? req.matches[1].str() : std::string();
-    if (id != public_model_id_ && id != options_.rerank_model_id) {
+    // Any accepted name resolves, including the reserved `default`, so a client can retrieve
+    // the model it is configured with before using it.
+    if (!served_model_names_.accepts(id) && id != options_.rerank_model_id) {
         ApiError error;
         error.status  = 404;
         error.type    = "invalid_request_error";
@@ -905,7 +907,7 @@ void HttpServer::handle_props(const httplib::Request&, httplib::Response& res) c
     const ninfer::EngineOptions& engine = service_->engine_options();
     res.set_content(
         make_llamacpp_props(
-            {.model_alias   = public_model_id_,
+            {.model_alias   = served_model_names_.id,
              .model_path    = std::filesystem::path(options_.artifact_path).filename().string(),
              .n_ctx         = engine.max_context,
              .total_slots   = engine.max_concurrency,
@@ -924,17 +926,23 @@ void HttpServer::attach(GenerationService& service) {
     // memory_summary waits for the completed worker boundary, including warmup publication.
     const ninfer::MemorySummary memory  = service.memory_summary();
     const ninfer::RuntimeStats baseline = service.runtime_stats();
-    public_model_id_                    = resolve_public_model_id(options_, load.model_name);
+    served_model_names_.id              = resolve_public_model_id(options_, load.model_name);
+    served_model_names_.aliases.clear();
+    for (const std::string& alias : options_.model_aliases) {
+        // An alias equal to an artifact-derived id adds no name.
+        if (alias != served_model_names_.id) { served_model_names_.aliases.push_back(alias); }
+    }
     service_                            = &service;
-    metrics_.configure(public_model_id_, service.engine_options(), memory, baseline);
+    metrics_.configure(served_model_names_.id, service.engine_options(), memory, baseline);
     loaded_unix_seconds_ = unix_time_now();
     request_jsonl_.write_server_start(options_, service.engine_options(),
-                                      service.sampling_defaults(), public_model_id_, load, memory);
+                                      service.sampling_defaults(), served_model_names_.id, load,
+                                      memory);
 }
 
 bool HttpServer::listen() {
     if (service_ == nullptr) { throw std::logic_error("HTTP generation service is not attached"); }
-    if (public_model_id_.empty()) {
+    if (served_model_names_.id.empty()) {
         throw std::logic_error("HTTP public model id is not resolved");
     }
     if (options_.log_stats_interval_ms != 0) {

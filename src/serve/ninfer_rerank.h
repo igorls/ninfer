@@ -1,5 +1,6 @@
 #pragma once
 
+#include "serve/openai_common.h"
 #include "serve/serve_options.h"
 #include "serve/typesafe_systemone.h"
 
@@ -17,7 +18,7 @@ namespace ninfer::serve {
 // whose option labels never appear on this response.
 
 struct RerankSettings {
-    std::string served_model_id;
+    ServedModelNames served;
     std::string advertised_model_id = kDefaultRerankModelId;
     std::size_t max_documents       = kDefaultRerankMaxDocuments;
     double weight_exact             = kDefaultRerankWeightExact;
@@ -66,12 +67,12 @@ struct RerankHit {
                                                          std::string_view advertised_model_id,
                                                          std::int64_t total_tokens);
 
-// OpenAI `data` plus TypeSafe `models`. The advertised rerank id is a second `data` entry when
-// it differs from the served id. The TypeSafe list is unchanged.
-[[nodiscard]] nlohmann::ordered_json make_service_models_list(std::string_view served_model_id,
-                                                             std::string_view rerank_model_id,
-                                                             std::int64_t created,
-                                                             std::int64_t loaded_unix_seconds,
-                                                             std::uint32_t max_model_len);
+// OpenAI `data` plus TypeSafe `models`. `data` lists the served id, its aliases, then the
+// advertised rerank id unless that is already one of them. The TypeSafe list is unchanged.
+[[nodiscard]] nlohmann::ordered_json make_service_models_list(const ServedModelNames& served,
+                                                              std::string_view rerank_model_id,
+                                                              std::int64_t created,
+                                                              std::int64_t loaded_unix_seconds,
+                                                              std::uint32_t max_model_len);
 
 } // namespace ninfer::serve

@@ -2,6 +2,7 @@
 
 #include "serve/generation_service.h"
 #include "serve/metrics.h"
+#include "serve/openai_common.h"
 #include "serve/operational_log.h"
 #include "serve/openai_responses_store.h"
 #include "serve/request_log.h"
@@ -56,7 +57,9 @@ public:
     bool listen();
     void stop();
 
-    [[nodiscard]] const std::string& public_model_id() const noexcept { return public_model_id_; }
+    [[nodiscard]] const std::string& public_model_id() const noexcept {
+        return served_model_names_.id;
+    }
 
 private:
     class RequestLifecycle {
@@ -140,7 +143,7 @@ private:
 
     GenerationService* service_ = nullptr;
     ServeOptions options_;
-    std::string public_model_id_;
+    ServedModelNames served_model_names_; // id is the public model id; aliases from --model-alias
     std::int64_t loaded_unix_seconds_ = 0;
     std::unordered_set<std::string> handler_authenticated_posts_;
     OpenAIResponsesStore openai_responses_store_;

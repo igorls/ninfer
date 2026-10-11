@@ -74,7 +74,7 @@ RerankRequest parse_rerank_request(const Json& body, const RerankSettings& setti
         const std::string& model = body.at("model").get_ref<const std::string&>();
         if (model.empty()) { bad_request("model must be a nonempty string", "model"); }
         if (model != settings.advertised_model_id) {
-            validate_openai_model(model, settings.served_model_id);
+            static_cast<void>(resolve_openai_model(model, settings.served));
         }
     }
 
@@ -172,19 +172,22 @@ nlohmann::ordered_json make_rerank_response(const RerankRequest& request,
                 {"usage", Json{{"total_tokens", total_tokens}}}};
 }
 
-nlohmann::ordered_json make_service_models_list(std::string_view served_model_id,
+nlohmann::ordered_json make_service_models_list(const ServedModelNames& served,
                                                 std::string_view rerank_model_id,
                                                 std::int64_t created,
                                                 std::int64_t loaded_unix_seconds,
                                                 std::uint32_t max_model_len) {
-    Json payload = Json::parse(make_models_list(std::string(served_model_id), created, max_model_len));
-    if (!rerank_model_id.empty() && rerank_model_id != served_model_id) {
+    Json payload      = Json::parse(make_models_list(served, created, max_model_len));
+    const bool listed = rerank_model_id == served.id ||
+                        std::find(served.aliases.begin(), served.aliases.end(), rerank_model_id) !=
+                            served.aliases.end();
+    if (!rerank_model_id.empty() && !listed) {
         // The served entry is first; the rerank entry differs from it only by id.
         Json rerank_entry  = payload["data"].front();
         rerank_entry["id"] = std::string(rerank_model_id);
         payload["data"].push_back(std::move(rerank_entry));
     }
-    payload["models"] = systemone_model_entries(served_model_id, loaded_unix_seconds);
+    payload["models"] = systemone_model_entries(served.id, loaded_unix_seconds);
     return payload;
 }
 

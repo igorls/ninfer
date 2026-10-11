@@ -27,6 +27,8 @@ inline constexpr double kDefaultRerankWeightComplement  = 0.25;
 inline constexpr double kDefaultRerankWeightIrrelevant  = 0.0;
 inline constexpr std::size_t kDefaultRerankMaxDocuments = 256;
 inline constexpr char kDefaultRerankModelId[]           = "ninfer-choice-rerank-v1";
+// Every server accepts this request model name for whichever model it serves.
+inline constexpr std::string_view kDefaultModelName = "default";
 
 struct ServeOptions {
     bool help_requested = false;
@@ -36,6 +38,7 @@ struct ServeOptions {
     int port         = 8080;
     std::string api_key;                          // empty => no auth
     std::optional<std::string> model_id_override; // unset => artifact metadata.name
+    std::vector<std::string> model_aliases;       // further request names for the served model
     std::string request_log_jsonl;                // empty => structured request logging disabled
     std::uint32_t max_context          = 8192;
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(8192);

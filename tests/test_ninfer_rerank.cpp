@@ -27,8 +27,8 @@ bool close_to(double left, double right, double eps = 1e-12) {
 
 RerankSettings settings_for(std::size_t max_documents = kDefaultRerankMaxDocuments) {
     RerankSettings settings;
-    settings.served_model_id = "qwen3.8-27b";
-    settings.max_documents   = max_documents;
+    settings.served        = ServedModelNames{.id = "qwen3.8-27b", .aliases = {"team-model"}};
+    settings.max_documents = max_documents;
     return settings;
 }
 
@@ -121,6 +121,12 @@ int main() {
             Json{{"model", nullptr}, {"query", "q"}, {"documents", Json::array({"a"})}}, settings);
         failures += check(null_model.documents.size() == 1,
                           "a null model was not treated as omitted, as on chat completions");
+        for (const char* name : {"team-model", "default"}) {
+            const RerankRequest named = parse_rerank_request(
+                Json{{"model", name}, {"query", "q"}, {"documents", Json::array({"a"})}}, settings);
+            failures += check(named.documents.size() == 1,
+                              std::string("rerank rejected the accepted model name ") + name);
+        }
     }
 
     {
@@ -262,8 +268,8 @@ int main() {
     }
 
     {
-        const Json models = make_service_models_list("qwen3.8-27b", kDefaultRerankModelId, 100,
-                                                     100, 8192);
+        const Json models = make_service_models_list(ServedModelNames{.id = "qwen3.8-27b"},
+                                                     kDefaultRerankModelId, 100, 100, 8192);
         failures += check(models.at("data").size() == 2 && models.at("data")[0].at("id") == "qwen3.8-27b" &&
                               models.at("data")[1].at("id") == kDefaultRerankModelId &&
                               models.at("data")[1].at("object") == "model" &&
@@ -276,7 +282,8 @@ int main() {
         }
         failures += check(!rerank_in_typesafe && models.at("models").size() == 3,
                           "the rerank id was added to the TypeSafe model list");
-        const Json same = make_service_models_list("qwen3.8-27b", "qwen3.8-27b", 100, 100, 8192);
+        const Json same = make_service_models_list(ServedModelNames{.id = "qwen3.8-27b"},
+                                                   "qwen3.8-27b", 100, 100, 8192);
         failures += check(same.at("data").size() == 1 && same.at("data")[0].at("id") == "qwen3.8-27b",
                           "a rerank id equal to the served id was duplicated");
     }

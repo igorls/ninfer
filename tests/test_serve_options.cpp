@@ -220,6 +220,22 @@ int main() {
     } catch (const std::invalid_argument&) { empty_model_id_rejected = true; }
     failures += check(empty_model_id_rejected, "empty --model-id was accepted");
 
+    const ServeOptions aliases =
+        parse({"ninfer-serve", "model.ninfer", "--model-alias", "flash-next-v3", "--model-alias",
+               "team-model", "--model-alias", "flash-next-v3"});
+    failures +=
+        check(aliases.model_aliases == std::vector<std::string>{"flash-next-v3", "team-model"},
+              "--model-alias did not collect repeated aliases once each in order");
+    failures += check(defaults.model_aliases.empty(), "aliases are configured by default");
+    for (const char* rejected : {"", "default"}) {
+        bool alias_rejected = false;
+        try {
+            (void)parse({"ninfer-serve", "model.ninfer", "--model-alias", rejected});
+        } catch (const std::invalid_argument&) { alias_rejected = true; }
+        failures += check(alias_rejected,
+                          (std::string("--model-alias '") + rejected + "' was accepted").c_str());
+    }
+
     const ServeOptions rerank = parse({"ninfer-serve", "model.ninfer", "--rerank-weight-exact", "0.5",
                                        "--rerank-weight-substitute", "0.4", "--rerank-weight-complement",
                                        "0.1", "--rerank-weight-irrelevant", "-0.2",
