@@ -11,6 +11,30 @@
 namespace ninfer::ops {
 
 /**
+ * Model geometry consumed by ple_ngram_decode(), ple_ngram() and ple_ngram_snapshot().
+ *
+ * stream_width is the hidden width of one residual stream, streams the number of streams that
+ * share the value, row_width the decoded n-gram head width (K of the packed u4z8_g16 rows), taps
+ * the causal convolution kernel size, dilation the distance between its taps (the history keeps
+ * (taps - 1) * dilation columns) and epsilon the RMSNorm epsilon of the three norms.
+ */
+struct PleNgramGeometry {
+    std::uint32_t stream_width = 0;
+    std::uint32_t streams      = 0;
+    std::uint32_t row_width    = 0;
+    std::uint32_t taps         = 0;
+    std::uint32_t dilation     = 0;
+    float epsilon              = 0;
+};
+
+/**
+ * Throws std::invalid_argument unless this implementation executes `geometry`. It currently
+ * executes stream_width 2560, streams 4, row_width 160, taps 4, dilation 3 and epsilon
+ * binary32(1e-6). Native preparation calls it so an unsupported model fails at load.
+ */
+void require_ple_ngram_geometry(const PleNgramGeometry& geometry);
+
+/**
  * Op: decode of gathered u4z8_g16_fp16 per-layer-embedding rows.
  *
  * Math / indexing:

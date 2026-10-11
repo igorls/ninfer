@@ -67,6 +67,22 @@ void require_output_disjoint(const Tensor& out, std::initializer_list<const Tens
 
 } // namespace
 
+void require_ple_ngram_geometry(const PleNgramGeometry& geometry) {
+    if (geometry.stream_width != static_cast<std::uint32_t>(kStreamWidth) ||
+        geometry.streams != static_cast<std::uint32_t>(kWidth / kStreamWidth) ||
+        geometry.row_width != static_cast<std::uint32_t>(kRowWidth) || geometry.taps != 4 ||
+        geometry.dilation != 3 || geometry.epsilon != 1.0e-6F) {
+        throw std::invalid_argument(
+            "ple_ngram executes stream width 2560, 4 streams, n-gram head width 160, a 4-tap "
+            "dilation-3 convolution and RMSNorm epsilon 1e-6; the model's PLE geometry is "
+            "stream width " +
+            std::to_string(geometry.stream_width) + ", " + std::to_string(geometry.streams) +
+            " streams, head width " + std::to_string(geometry.row_width) + ", " +
+            std::to_string(geometry.taps) + " taps at dilation " +
+            std::to_string(geometry.dilation) + ", epsilon " + std::to_string(geometry.epsilon));
+    }
+}
+
 void ple_ngram_decode(const Tensor& codes, const Tensor& scales, Tensor& out,
                       cudaStream_t stream) {
     constexpr const char* op = "ple_ngram_decode";

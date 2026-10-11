@@ -358,8 +358,50 @@ int run_snapshot(const Weights& w, std::int32_t W, std::int32_t B, bool ragged, 
     return failures;
 }
 
+// require_ple_ngram_geometry admits exactly the model geometry these kernels execute.
+int run_geometry() {
+    const ops::PleNgramGeometry supported{.stream_width = 2560,
+                                          .streams      = 4,
+                                          .row_width    = 160,
+                                          .taps         = 4,
+                                          .dilation     = 3,
+                                          .epsilon      = 1.0e-6F};
+    int failures      = 0;
+    const auto accept = [&](const ops::PleNgramGeometry& geometry, const char* label) {
+        bool accepted = true;
+        try {
+            ops::require_ple_ngram_geometry(geometry);
+        } catch (const std::invalid_argument&) { accepted = false; }
+        if (accepted != (label == nullptr)) {
+            std::cerr << "ple_ngram geometry: " << (label ? label : "supported geometry")
+                      << (accepted ? " was accepted\n" : " was rejected\n");
+            ++failures;
+        }
+    };
+    accept(supported, nullptr);
+    auto changed         = supported;
+    changed.stream_width = 5120;
+    accept(changed, "stream width 5120");
+    changed         = supported;
+    changed.streams = 2;
+    accept(changed, "two streams");
+    changed           = supported;
+    changed.row_width = 320;
+    accept(changed, "head width 320");
+    changed      = supported;
+    changed.taps = 3;
+    accept(changed, "three taps");
+    changed          = supported;
+    changed.dilation = 4;
+    accept(changed, "dilation 4");
+    changed         = supported;
+    changed.epsilon = 1.0e-5F;
+    accept(changed, "epsilon 1e-5");
+    return failures;
+}
+
 int run_ple_ngram() {
-    int failures = 0;
+    int failures = run_geometry();
     for (std::int64_t rows : {1, 16, 16 * 7, 16 * 4096}) failures += run_decode(rows);
     const Weights weights;
     for (std::int32_t T : {1, 2, 8, 9, 10, 17, 256, 8192})
