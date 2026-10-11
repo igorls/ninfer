@@ -1427,12 +1427,13 @@ private:
                 capture->frontier,
                 instance_.program->capture_is_input(*request->sequence) &&
                     !capture->shortage.main_kv_pages && !capture->shortage.backend_kv_pages);
-            // A shared prefix only the Engine discovered is published after its second sighting.
+            // A shared prefix only the Engine discovered is published from its second sighting.
             // On its first it takes free space only: as a fallback it would shrink the budget of
             // this request's own deeper points (the turn closure the next turn resumes from) to
             // the few tokens between them, so a full cache could never keep a conversation chain.
-            if (!admission.demand.reused &&
-                instance_.program->capture_is_discovered_prefix(*request->sequence)) {
+            if (instance_.program->capture_is_discovered_prefix(*request->sequence) &&
+                !resources_.sighted_by_another(*request->base_plan, capture->frontier,
+                                               request->id)) {
                 instance_.program->skip_capture(*request->sequence);
                 decision.reset();
                 continue;

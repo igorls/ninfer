@@ -1434,6 +1434,23 @@ void test_committed_repeated_demand_admits_a_new_short_working_set() {
             "publishing the newly learned Shared point lost its actual demand evidence");
 }
 
+void test_a_second_request_sights_a_crossed_frontier() {
+    Fixture f(0);
+    const Base incoming{.tokens = tokens(3, 1000), .captures = {2}};
+    require(!f.cache.sighted_by_another(incoming, 2, 7), "an uncrossed frontier was sighted");
+    f.cache.observe_committed(incoming, 7, 0, 3);
+    require(!f.cache.sighted_by_another(incoming, 2, 7),
+            "a request's own crossing counted as another sighting");
+    require(f.cache.sighted_by_another(incoming, 2, 8),
+            "the second request did not sight a frontier the first one crossed");
+    require(!f.cache.capture_admission(f.program, 0, incoming, 2, false).demand.reused,
+            "a sighting before the second request's commit qualified repeated demand");
+    f.cache.observe_committed(incoming, 8, 0, 3);
+    require(f.cache.sighted_by_another(incoming, 2, 7) &&
+                f.cache.sighted_by_another(incoming, 2, 8),
+            "repeated demand stopped counting as a sighting for its own requests");
+}
+
 void test_optional_capture_budget_spans_host_and_device_actions() {
     Fixture f(64);
     const auto host = f.program.add(tokens(60, 1000), {f.program.host_block(64)});
@@ -1901,6 +1918,7 @@ int main() {
         test_optional_capture_does_not_inherit_required_eviction_rights();
         test_physical_host_alias_uses_all_holders_priority();
         test_committed_repeated_demand_admits_a_new_short_working_set();
+        test_a_second_request_sights_a_crossed_frontier();
         test_cold_writeback_protects_reused_history();
         test_host_preflight_counts_aliases_and_has_no_partial_deletion();
         test_candidates_keep_all_frontiers_and_independent_contents();

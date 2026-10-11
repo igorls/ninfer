@@ -325,7 +325,8 @@ bool reuse_survives_catalog_turnover() {
 // A plain chat as Chat Completions sends it (thinking off, closed-turn reasoning dropped, the
 // automatic marker on the last user part, no session key) resumes each turn from the previous
 // turn's closure even once the context cache is full of unrelated conversations. The Engine's
-// own system-prefix candidate must not take the budget of the request's turn checkpoint.
+// own system-prefix candidate must not take the budget of the request's turn checkpoint, and
+// the request that sights that prefix for the second time publishes it for later questions.
 bool conversation_chain_survives_a_full_cache() {
     ninfer::EngineOptions options             = base_options();
     options.max_context                       = 8192;
@@ -365,8 +366,10 @@ bool conversation_chain_survives_a_full_cache() {
             message(ninfer::ChatRole::System, system),
             message(ninfer::ChatRole::User, "How many boxes does Entry 3 hold?")};
         std::uint32_t previous_prompt = 0;
+        std::uint32_t first_prompt    = 0;
         for (const char* followup : {"And Entry 4?", "And Entry 5?", ""}) {
             const auto reply = engine.generate(engine.prepare(chat(history)), reply_request);
+            if (first_prompt == 0) { first_prompt = reply.prompt.prompt_tokens; }
             if (previous_prompt != 0) {
                 // The previous turn's closure precedes only its template closing tokens and the
                 // new assistant header; the system prefix alone is far shallower.
@@ -381,6 +384,24 @@ bool conversation_chain_survives_a_full_cache() {
             if (*followup == '\0') { break; }
             history.push_back(message(ninfer::ChatRole::Assistant, reply.content));
             history.push_back(message(ninfer::ChatRole::User, followup));
+        }
+        // The conversation's first turn was the system prefix's first sighting; turns resumed
+        // past it. Another client's question sights it again and publishes it, so a third
+        // question resumes from it instead of prefilling the whole system message.
+        std::uint32_t system_reuse = 0;
+        for (const char* question :
+             {"How many boxes does Entry 7 hold?", "Which shelf holds Entry 9?"}) {
+            system_reuse =
+                engine
+                    .generate(engine.prepare(chat({message(ninfer::ChatRole::System, system),
+                                                   message(ninfer::ChatRole::User, question)})),
+                              greedy(4))
+                    .reused_prompt_tokens;
+        }
+        std::cout << "a third question reused " << system_reuse << " of the first turn's "
+                  << first_prompt << " prompt tokens\n";
+        if (system_reuse + 48U < first_prompt) {
+            return fail("a system prefix sighted by a second request was not published");
         }
         return true;
     });

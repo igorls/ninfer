@@ -474,6 +474,18 @@ public:
         return {.priority = priority, .demand = demand, .base = &base, .frontier = frontier};
     }
 
+    // A capture runs before its own request's crossing is observed, so a frontier that another
+    // request has already crossed is being sighted for at least the second time.
+    [[nodiscard]] bool sighted_by_another(const Base& base, std::uint32_t frontier,
+                                          std::uint64_t request_id) const {
+        const auto key = base.prefix_shortlist_key(frontier);
+        if (!key) { return false; }
+        const auto found = std::find_if(demand_.begin(), demand_.end(),
+                                        [&](const auto& entry) { return entry.key == *key; });
+        return found != demand_.end() &&
+               (found->priority.reused || found->request_id != request_id);
+    }
+
     [[nodiscard]] ReclaimCursor begin_reclaim(Program& program,
                                               std::optional<Admission> admission = std::nullopt,
                                               ReclaimRights rights               = {}) {
