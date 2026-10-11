@@ -348,8 +348,20 @@ w_hat[n,k] = binary32(binary32(q[n,k]) * s32)
 ```
 
 This is an affine unsigned-code contract, not the signed two's-complement `q4_g64_fp16`; the
-fixed zero point belongs to the identity. NInfer owns no encoder for it: the Flash-Next recipe
-preserves the selected packed codes and FP16 multipliers of the pinned PLE source.
+fixed zero point belongs to the identity. The derived Flash-Next artifact preserves the packed
+codes and FP16 multipliers of the pinned PLE source. For floating-point tables, the converter's
+`u4z8_maxabs` method implements the encoder profile `U4Z8_RANGE_RNE_V1`. For each group of 16
+binary32 source values `x`:
+
+```text
+p = max(0, max x),  m = max(0, max -x)
+s = binary16_RNE(binary32(max(p / 7, m / 8)))       (+0 for an all-zero group)
+u = 8 + clamp(RNE(binary32(x / s)), -8, 7)          (u = 8 when s = +0)
+```
+
+The multiplier is the smallest that keeps positive values within `+7` and negative values within
+`-8`. Values whose multiplier underflows binary16 encode as zero, and an extreme value pushed out of
+range by a subnormal multiplier saturates.
 
 ## 4. Grouped signed-integer tensor model
 

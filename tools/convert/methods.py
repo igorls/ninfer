@@ -21,13 +21,15 @@ from tools.artifact.formats import (
     get_format,
     valid_positive_fp32_word,
 )
+from tools.artifact.layouts import EXPERT_BLOCK_SCALE_K16_M128X4_V1
 from tools.artifact.schema import TensorSpec
 from tools.artifact.tensor_output import TensorOutput
 
-from .quantization.fp8_row import quantize_bf16_rows
+from .quantization.fp8_row import quantize_bf16_rows, quantize_bf16_rows_fp32_scale
 from .quantization.groupwise import quantize_matrix
 from .quantization.nvfp4 import encode_rows as encode_nvfp4_rows
 from .quantization.nvfp4 import weight_divisor as nvfp4_weight_divisor
+from .quantization.u4z8 import encode_rows as encode_u4z8_rows
 from .sources.logical import EncodedRows, LogicalSource
 
 UseKey = tuple[str, str]
@@ -147,7 +149,18 @@ class PrepareRequest:
 
 
 Method = Callable[[PrepareRequest], PreparedMethod]
-_DIRECT_DTYPES = {"bf16": torch.bfloat16, "fp32": torch.float32, "int32": torch.int32}
+_DIRECT_DTYPES = {
+    "bf16": torch.bfloat16,
+    "fp32": torch.float32,
+    "int32": torch.int32,
+    "int64": torch.int64,
+}
+_FP8_ROW_QUANTIZERS = {
+    "fp8_e4m3fn_row_bf16": quantize_bf16_rows,
+    "fp8_e4m3fn_row_fp32": quantize_bf16_rows_fp32_scale,
+}
+# Tall, narrow tables (PLE shards are [2.5M,160]) read at least this many values per chunk.
+_MIN_CHUNK_VALUES = 1 << 22
 
 
 def _preflight(request: PrepareRequest, *, values: bool = True) -> None:
@@ -169,7 +182,7 @@ def _preflight(request: PrepareRequest, *, values: bool = True) -> None:
 
 
 def cast_direct(request: PrepareRequest) -> PreparedMethod:
-    """Convert values at the explicit target BF16/FP32/INT32 boundary."""
+    """Convert values at the explicit target BF16/FP32/INT32/INT64 boundary."""
     if not isinstance(get_format(request.target.format), DirectFormat):
         raise ValueError("cast_direct requires a direct target format")
     _preflight(request)
@@ -222,9 +235,14 @@ def grouped_absmax(request: PrepareRequest) -> PreparedMethod:
 
 
 def fp8_row_maxabs(request: PrepareRequest) -> PreparedMethod:
-    """Round inputs to BF16, then quantize to FP8 codes with BF16 row scales."""
-    if request.target.format != "fp8_e4m3fn_row_bf16" or len(request.target.shape) != 2:
-        raise ValueError("fp8_row_maxabs requires the row-scaled FP8 matrix format")
+    """Round inputs to BF16, then quantize to E4M3FN codes with one multiplier per row.
+
+    The multiplier is ``binary32(max|w| / 448)``, rounded to BF16 for ``fp8_e4m3fn_row_bf16``
+    and kept as FP32 for ``fp8_e4m3fn_row_fp32``.
+    """
+    quantize = _FP8_ROW_QUANTIZERS.get(request.target.format)
+    if quantize is None or len(request.target.shape) != 2:
+        raise ValueError("fp8_row_maxabs requires a row-scaled FP8 matrix format")
     _preflight(request)
     n, k = request.target.shape
 
@@ -236,7 +254,7 @@ def fp8_row_maxabs(request: PrepareRequest) -> PreparedMethod:
                 .reshape(end - begin, k)
                 .to(torch.bfloat16)
             )
-            encoded = quantize_bf16_rows(values)
+            encoded = quantize(values)
             output.write_codes(begin, encoded.codes, encoded.scales)
 
     return request.job(produce=produce)
@@ -336,10 +354,76 @@ def nvfp4_maxabs(request: PrepareRequest) -> PreparedMethod:
     return request.job(produce=produce, auxiliaries=auxiliaries)
 
 
+def _supplied_divisors(request: PrepareRequest) -> dict:
+    """Recipe-supplied activation divisors of the inputs' Uses, stored as given."""
+    result = {}
+    for item in request.inputs:
+        for use in item.uses:
+            key = (*use, "activation_input_divisor")
+            if key in request.auxiliary_overrides:
+                result[key] = request.auxiliary_overrides[key]
+    return result
+
+
+def nvfp4_expert_maxabs(request: PrepareRequest) -> PreparedMethod:
+    """Encode an ``[E,N,K]`` NVFP4 expert bank with NVFP4_MAXABS_DIVISOR_RNE_V1 per expert.
+
+    Expert ``e`` gets the divisor ``binary32(2688 / max|W_e|)`` of its complete ``[N,K]``
+    matrix, so a fused gate/up bank shares one divisor between an expert's gate and up rows.
+    This is the encoder that bakes the Flash-Next MTP banks. An AllowA4 Use needs no activation
+    divisor: the expert-bank A4 route quantizes activations dynamically. A recipe-supplied
+    divisor is stored as given.
+    """
+    target = request.target
+    if (
+        target.format != "nvfp4"
+        or len(target.shape) != 3
+        or target.layout != EXPERT_BLOCK_SCALE_K16_M128X4_V1.name
+    ):
+        raise ValueError("nvfp4_expert_maxabs requires an NVFP4 expert-bank target")
+    _preflight(request)
+    experts, n, k = target.shape
+    size = n * k
+
+    def produce(output):
+        for expert in range(experts):
+            values = request.values(expert * size, (expert + 1) * size).reshape(n, k)
+            magnitude = values.float().abs()
+            if not bool(torch.isfinite(magnitude).all()):
+                raise ValueError(f"expert {expert}: NVFP4 source contains NaN or infinity")
+            divisor = nvfp4_weight_divisor(float(magnitude.max()))
+            codes, scales = encode_nvfp4_rows(values.to(request.device), divisor)
+            output.write_expert(expert, codes.cpu(), scales.cpu(), divisor)
+
+    return request.job(produce=produce, auxiliaries=_supplied_divisors(request))
+
+
+def u4z8_maxabs(request: PrepareRequest) -> PreparedMethod:
+    """Encode a table with U4Z8_RANGE_RNE_V1: per 16 values, the smallest binary16 multiplier
+    that keeps positive values within +7 and negative values within -8, and round-to-nearest-even
+    codes around the fixed zero point 8. Chunks hold at least 4 Mi values."""
+    if request.target.format != "u4z8_g16_fp16" or len(request.target.shape) != 2:
+        raise ValueError("u4z8_maxabs requires a U4Z8 matrix target")
+    _preflight(request)
+    n, k = request.target.shape
+    rows = max(request.rows_per_chunk, -(-_MIN_CHUNK_VALUES // k))
+
+    def produce(output):
+        for begin in range(0, n, rows):
+            end = min(n, begin + rows)
+            values = request.values(begin * k, end * k).reshape(end - begin, k)
+            codes, scales = encode_u4z8_rows(values.to(request.device))
+            output.write_codes(begin, codes.cpu(), scales.cpu())
+
+    return request.job(produce=produce)
+
+
 METHODS: dict[str, Method] = {
     "cast_direct": cast_direct,
     "grouped_absmax": grouped_absmax,
     "fp8_row_maxabs": fp8_row_maxabs,
     "import_encoded": import_encoded,
     "nvfp4_maxabs": nvfp4_maxabs,
+    "nvfp4_expert_maxabs": nvfp4_expert_maxabs,
+    "u4z8_maxabs": u4z8_maxabs,
 }

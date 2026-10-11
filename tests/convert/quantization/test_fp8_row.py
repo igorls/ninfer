@@ -39,6 +39,27 @@ def test_fp8_quantization_zero_rows_ties_and_signed_zero() -> None:
     assert torch.equal(scales.view(torch.int16), quantized.scales.view(torch.int16))
 
 
+def test_fp32_row_multipliers_skip_the_bf16_rounding() -> None:
+    source = torch.tensor(
+        ((448.0, 1.0625, -1.1875, 0.0), (3.0, -1.5, 0.75, -0.0), (0.0, 0.0, 0.0, 0.0)),
+        dtype=torch.bfloat16,
+    )
+    quantized = fp8_row.quantize_bf16_rows_fp32_scale(source)
+    reference = fp8_row.quantize_bf16_rows(source)
+    assert quantized.scales.dtype == torch.float32
+    # 3 / 448 is not a BF16 value: the FP32 multiplier keeps binary32(3 / 448).
+    assert quantized.scales.tolist() == [1.0, struct.unpack("<f", struct.pack("<f", 3 / 448))[0], 0.0]
+    assert float(reference.scales[1]) != float(quantized.scales[1])
+    assert torch.equal(quantized.codes[0], reference.codes[0])
+    assert quantized.codes[1, 0] == 0x7E  # the row maximum maps to 448
+    assert quantized.codes[2].eq(0).all()
+    payload = encode_fp8_row_scaled(
+        quantized.codes, quantized.scales, source.shape, "fp8_e4m3fn_row_fp32"
+    )
+    codes, scales = decode_fp8_row_scaled_words(payload, source.shape, "fp8_e4m3fn_row_fp32")
+    assert torch.equal(codes, quantized.codes) and torch.equal(scales, quantized.scales)
+
+
 def test_streamed_fp8_conversion_matches_known_words(tmp_path) -> None:
     name = "model.language_model.embed_tokens.weight"
     source = torch.tensor(

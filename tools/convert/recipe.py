@@ -8,7 +8,7 @@ from fnmatch import fnmatchcase
 from math import prod
 from typing import Sequence
 
-from tools.artifact.layouts import encoded_size
+from tools.artifact.layouts import EXPERT_BLOCK_SCALE_K16_M128X4_V1, encoded_size
 from tools.artifact.formats import (
     DirectFormat,
     Fp8RowFormat,
@@ -28,6 +28,7 @@ from .methods import (
     fp8_row_maxabs,
     import_encoded,
     nvfp4_maxabs,
+    u4z8_maxabs,
 )
 from .model import Model
 from .sources.logical import LogicalSource, select_rows
@@ -62,14 +63,19 @@ class PreparedRecipe:
     auxiliaries: tuple[tuple[TensorSpec, bytes], ...]
 
 
-def default_layout(format: str) -> str:
+def default_layout(format: str, rank: int = 2) -> str:
     kind = get_format(format)
     if isinstance(kind, DirectFormat):
         return "contiguous_le_v1"
     if isinstance(kind, Fp8RowFormat):
         return "row_scale_v1" if kind.scale_bytes == 2 else "row_scale_fp32_v1"
     if isinstance(kind, Nvfp4Format):
-        return "block_scale_k16_m128x4_v1"
+        # A rank-three NVFP4 parent is an [E,N,K] expert bank with one divisor per expert.
+        return (
+            EXPERT_BLOCK_SCALE_K16_M128X4_V1.name
+            if rank == 3
+            else "block_scale_k16_m128x4_v1"
+        )
     if isinstance(kind, U4Z8Format):
         return "packed_u4_g16_v1"
     return "row_split_k128_v1"
@@ -296,9 +302,15 @@ class Recipe:
                     raise ValueError("explicit parent shape changes its element count")
                 return chosen, sources
             first = sources[0].shape
-            direct = isinstance(get_format(items[0][1].format), DirectFormat)
+            selection = items[0][1]
+            direct = isinstance(get_format(selection.format), DirectFormat)
+            bank = (
+                selection.format == "nvfp4"
+                and len(first) == 3
+                and selection.layout in (None, EXPERT_BLOCK_SCALE_K16_M128X4_V1.name)
+            )
             if len(sources) == 1:
-                if direct or len(first) == 2:
+                if direct or len(first) == 2 or bank:
                     return first, sources
                 return (prod(first[:-1]), first[-1]) if first else (1, 1), sources
             if all(len(source.shape) == 1 for source in sources):
@@ -323,7 +335,7 @@ class Recipe:
                 )
             dims, sources = parent_shape(items, chosen)
             selection = items[0][1]
-            layout = selection.layout or default_layout(selection.format)
+            layout = selection.layout or default_layout(selection.format, len(dims))
             encoded_size(layout, selection.format, dims)
             spec = TensorSpec(
                 f"weight/{len(weights):06d}", dims, selection.format, layout
@@ -390,7 +402,14 @@ class Recipe:
             used.update(names)
         # Built-in methods that encode a multi-input parent as one matrix. nvfp4_maxabs derives
         # its weight divisor from the complete parent, so grouped inputs share it by construction.
-        standard = (cast_direct, grouped_absmax, fp8_row_maxabs, import_encoded, nvfp4_maxabs)
+        standard = (
+            cast_direct,
+            grouped_absmax,
+            fp8_row_maxabs,
+            import_encoded,
+            nvfp4_maxabs,
+            u4z8_maxabs,
+        )
         for names in self.model.packing_groups:
             if any(
                 name in used or name in self.aliases or name in self.separate_parameters

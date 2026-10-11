@@ -6,21 +6,28 @@ ArtifactWriter owns file placement, sharding, write coverage, and publication.
 
 from __future__ import annotations
 
+import struct
+
 import torch
 
 from .codecs.direct import encode_direct
 from .codecs.fp8_row import encode_fp8_row_scaled
-from .codecs.nvfp4 import encode_nvfp4
+from .codecs.nvfp4 import encode_nvfp4, encode_nvfp4_expert_bank
+from .codecs.packed_u4 import encode_u4z8_g16
 from .codecs.row_split import encode_row_split, split_row_planes
 from .formats import (
     DirectFormat,
     Fp8RowFormat,
     Nvfp4Format,
     QuantFormat,
+    U4Z8Format,
     get_format,
 )
 from .layouts import (
+    EXPERT_BLOCK_SCALE_K16_M128X4_V1,
     block_scale_geometry,
+    expert_block_scale_geometry,
+    packed_u4_geometry,
     row_scale_geometry,
     row_split_geometry,
 )
@@ -65,7 +72,13 @@ class TensorOutput:
             g = row_scale_geometry(self.format, obj.shape)
             gaps = ((g.code_plane_bytes, g.scale_plane_offset),)
         elif isinstance(self.format, Nvfp4Format):
-            g = block_scale_geometry(self.format, obj.shape)
+            if obj.layout == EXPERT_BLOCK_SCALE_K16_M128X4_V1.name:
+                g = expert_block_scale_geometry(self.format, obj.shape)
+            else:
+                g = block_scale_geometry(self.format, obj.shape)
+            gaps = ((g.code_plane_bytes, g.scale_plane_offset),)
+        elif isinstance(self.format, U4Z8Format):
+            g = packed_u4_geometry(self.format, obj.shape)
             gaps = ((g.code_plane_bytes, g.scale_plane_offset),)
         else:
             gaps = ()
@@ -82,6 +95,8 @@ class TensorOutput:
         weight_divisor: bytes | None = None,
     ) -> None:
         obj = self.object
+        if obj.layout == EXPERT_BLOCK_SCALE_K16_M128X4_V1.name:
+            raise TypeError(f"{obj.id}: write an NVFP4 expert bank one expert at a time")
         if len(obj.shape) != 2 or not 0 <= row_begin < obj.shape[0]:
             raise ValueError(f"{obj.id}: invalid encoded row origin {row_begin}")
         rows, k = codes.shape[0], obj.shape[1]
@@ -126,5 +141,48 @@ class TensorOutput:
                 self._divisor = bytes(weight_divisor)
             elif self._divisor != weight_divisor:
                 raise ValueError(f"{obj.id}: weight divisor changed between row blocks")
+        elif isinstance(self.format, U4Z8Format):
+            g = packed_u4_geometry(self.format, obj.shape)
+            local = packed_u4_geometry(self.format, (rows, k))
+            block = memoryview(encode_u4z8_g16(codes, scales, (rows, k)))
+            self.write_bytes(row_begin * g.code_row_bytes, block[: local.code_plane_bytes])
+            self.write_bytes(
+                g.scale_plane_offset + row_begin * g.scale_row_bytes,
+                block[local.scale_plane_offset :],
+            )
         else:
             raise TypeError(f"{obj.id}: {self.format.name} has no row-code encoder")
+
+    def write_expert(
+        self,
+        expert: int,
+        codes: torch.Tensor,
+        scales: torch.Tensor,
+        weight_divisor: bytes,
+    ) -> None:
+        """Write one expert of an NVFP4 expert bank: packed ``[N,K/2]`` codes, natural
+        ``[N,K/16]`` scale words and its FP32 divisor word."""
+        obj = self.object
+        if obj.layout != EXPERT_BLOCK_SCALE_K16_M128X4_V1.name:
+            raise TypeError(f"{obj.id}: expected an NVFP4 expert bank")
+        g = expert_block_scale_geometry(self.format, obj.shape)
+        if type(expert) is not int or not 0 <= expert < g.experts:
+            raise ValueError(f"{obj.id}: expert {expert} is outside the bank")
+        if len(weight_divisor) != 4:
+            raise ValueError(f"{obj.id}: expert divisor must be one FP32 word")
+        self._padding()
+        # One expert is a one-expert bank; the codec owns the scale swizzle and validation.
+        single = (1, g.n, g.k)
+        local = expert_block_scale_geometry(self.format, single)
+        divisor = torch.tensor(struct.unpack("<f", bytes(weight_divisor)), dtype=torch.float32)
+        block = memoryview(
+            encode_nvfp4_expert_bank(codes.unsqueeze(0), scales.unsqueeze(0), divisor, single)
+        )
+        self.write_bytes(expert * g.expert_code_bytes, block[: local.code_plane_bytes])
+        self.write_bytes(
+            g.scale_plane_offset + expert * g.expert_scale_bytes,
+            block[local.scale_plane_offset : local.weight_divisor_offset],
+        )
+        self.write_bytes(
+            g.weight_divisor_offset + 4 * expert, block[local.weight_divisor_offset :]
+        )

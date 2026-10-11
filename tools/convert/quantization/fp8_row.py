@@ -70,7 +70,13 @@ def _round_e4m3fn_rne(values: np.ndarray) -> np.ndarray:
     return words
 
 
-def _quantize_host_rows(host: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _quantize_host_rows(
+    host: np.ndarray, *, bf16_scales: bool = True
+) -> tuple[np.ndarray, np.ndarray]:
+    """Codes and row multipliers ``binary32(max|w| / 448)``, rounded to BF16 when requested.
+
+    Returns BF16 scale words (uint16) for BF16 multipliers and binary32 values otherwise.
+    """
     if host.dtype != np.float32 or host.ndim != 2:
         raise TypeError("FP8 quantization rows must be a rank-two binary32 array")
     if not np.isfinite(host).all():
@@ -80,11 +86,15 @@ def _quantize_host_rows(host: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     zero_rows = max_abs == np.float32(0.0)
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         raw_scale = (max_abs.astype(np.float64) / float(_E4M3FN_MAX)).astype(np.float32)
-    scale_words = _bf16_rne_words(raw_scale)
-    underflow = (scale_words == 0) & ~zero_rows
-    scale_words[underflow] = _BF16_MIN_SUBNORMAL_WORD
-
-    scale32 = _bf16_words_to_float32(scale_words)
+    if bf16_scales:
+        scale_words = _bf16_rne_words(raw_scale)
+        underflow = (scale_words == 0) & ~zero_rows
+        scale_words[underflow] = _BF16_MIN_SUBNORMAL_WORD
+        scale32 = _bf16_words_to_float32(scale_words)
+    else:
+        # A nonzero BF16 maximum divided by 448 stays a positive binary32 value.
+        scale32 = raw_scale
+        scale_words = scale32
     invalid_scale = (~zero_rows) & (
         ~np.isfinite(scale32) | (scale32 <= np.float32(0.0))
     )
@@ -119,3 +129,20 @@ def quantize_bf16_rows(weight: torch.Tensor) -> RowScaledFp8Words:
     codes = torch.from_numpy(code_words.copy())
     signed_scales = torch.from_numpy(scale_words.view(np.int16).copy())
     return RowScaledFp8Words(codes, signed_scales.view(torch.bfloat16))
+
+
+def quantize_bf16_rows_fp32_scale(weight: torch.Tensor) -> RowScaledFp8Words:
+    """Quantize BF16 ``[N,K]`` values to E4M3FN codes and FP32 row multipliers.
+
+    The same rule as ``quantize_bf16_rows`` without rounding the multiplier to BF16.
+    """
+
+    if weight.dtype != torch.bfloat16 or weight.dim() != 2:
+        raise TypeError("FP8 quantization source must be a rank-two BF16 tensor")
+    if any(dim <= 0 for dim in weight.shape):
+        raise ValueError("FP8 quantization source dimensions must be positive")
+    host = weight.detach().to(device="cpu", dtype=torch.float32).numpy()
+    code_words, scales = _quantize_host_rows(host, bf16_scales=False)
+    return RowScaledFp8Words(
+        torch.from_numpy(code_words.copy()), torch.from_numpy(scales.astype(np.float32))
+    )
