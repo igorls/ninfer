@@ -447,6 +447,8 @@ public:
                   std::uint32_t resume_tokens   = 1);
     [[nodiscard]] bool start_capture(SequenceHandle sequence);
     [[nodiscard]] bool capture_is_input(SequenceHandle sequence) const;
+    // The next capture is a shared prefix that only the Engine's structural discovery offered.
+    [[nodiscard]] bool capture_is_discovered_prefix(SequenceHandle sequence) const;
     [[nodiscard]] std::optional<CapturePreparation> prepare_capture(SequenceHandle sequence);
     void skip_capture(SequenceHandle sequence);
     // Finite physical actions, each including every optional holder needed for its release.

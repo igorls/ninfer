@@ -220,6 +220,10 @@ bool Program::start_capture(SequenceHandle h) { return impl_->start_capture(h); 
 
 bool Program::capture_is_input(SequenceHandle h) const { return impl_->capture_is_input(h); }
 
+bool Program::capture_is_discovered_prefix(SequenceHandle h) const {
+    return impl_->capture_is_discovered_prefix(h);
+}
+
 std::optional<CapturePreparation> Program::prepare_capture(SequenceHandle h) {
     return impl_->prepare_capture(h);
 }

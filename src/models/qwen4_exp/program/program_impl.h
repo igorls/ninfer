@@ -48,6 +48,8 @@ struct CaptureGroup {
     PrefixShortlistKey key;
     std::uint32_t frontier = 0;
     std::vector<runtime::CheckpointRole> roles;
+    // Evidence of the SharedPrefix opportunities merged into this group.
+    SharedCandidateEvidence shared_evidence = SharedCandidateEvidence::None;
 };
 
 struct RequestBasePlanImpl {
@@ -294,6 +296,7 @@ public:
                                                    ExecutionUnitKind, std::uint32_t);
     [[nodiscard]] bool start_capture(SequenceHandle);
     [[nodiscard]] bool capture_is_input(SequenceHandle) const;
+    [[nodiscard]] bool capture_is_discovered_prefix(SequenceHandle) const;
     [[nodiscard]] std::optional<CapturePreparation> prepare_capture(SequenceHandle);
     void skip_capture(SequenceHandle);
     [[nodiscard]] ContextReclaimPlan plan_reclaim(std::span<const CheckpointHandle>,

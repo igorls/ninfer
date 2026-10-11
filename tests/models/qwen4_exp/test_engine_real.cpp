@@ -322,6 +322,70 @@ bool reuse_survives_catalog_turnover() {
     });
 }
 
+// A plain chat as Chat Completions sends it (thinking off, closed-turn reasoning dropped, the
+// automatic marker on the last user part, no session key) resumes each turn from the previous
+// turn's closure even once the context cache is full of unrelated conversations. The Engine's
+// own system-prefix candidate must not take the budget of the request's turn checkpoint.
+bool conversation_chain_survives_a_full_cache() {
+    ninfer::EngineOptions options             = base_options();
+    options.max_context                       = 8192;
+    options.kv_capacity                       = ninfer::KvCapacityPolicy::explicit_capacity(8192);
+    options.context_cache.device_state_slots  = 1;
+    options.context_cache.host_capacity_bytes = 1ULL << 30U;
+    const auto chat                           = [](std::vector<ninfer::ChatMessage> messages) {
+        ninfer::PromptInput input;
+        input.messages                = std::move(messages);
+        input.options.enable_thinking = false;
+        input.context_cache.markers.push_back(ninfer::PromptCacheMarker{
+                                      .after_message_count      = static_cast<std::uint32_t>(input.messages.size()),
+                                      .kind                     = ninfer::PromptCacheMarkerKind::SharedStablePrefix,
+                                      .evidence                 = ninfer::SharedCandidateEvidence::DefaultAutomatic,
+                                      .location                 = ninfer::PromptCacheMarkerLocation::MessagePartBoundary,
+                                      .after_message_part_count = 1,
+        });
+        return input;
+    };
+    return with_engine(options, [&](ninfer::Engine& engine) {
+        auto reply_request                        = greedy(24);
+        reply_request.stop.include_model_defaults = true;
+        for (int i = 0; i < 24; ++i) {
+            (void)engine.generate(
+                engine.prepare(
+                    chat({message(ninfer::ChatRole::User,
+                                  "Filler " + std::to_string(i) + ": " +
+                                      prompts()[static_cast<std::size_t>(i) % prompts().size()])})),
+                greedy(4));
+        }
+        std::string system = "You answer questions about the following inventory log.\n";
+        for (int i = 0; i < 120; ++i) {
+            system += "Entry " + std::to_string(i) + ": shelf " + std::to_string(i % 17) +
+                      " holds " + std::to_string((i * 37) % 500) + " boxes. ";
+        }
+        std::vector<ninfer::ChatMessage> history{
+            message(ninfer::ChatRole::System, system),
+            message(ninfer::ChatRole::User, "How many boxes does Entry 3 hold?")};
+        std::uint32_t previous_prompt = 0;
+        for (const char* followup : {"And Entry 4?", "And Entry 5?", ""}) {
+            const auto reply = engine.generate(engine.prepare(chat(history)), reply_request);
+            if (previous_prompt != 0) {
+                // The previous turn's closure precedes only its template closing tokens and the
+                // new assistant header; the system prefix alone is far shallower.
+                std::cout << "turn reused " << reply.reused_prompt_tokens << " of the previous "
+                          << previous_prompt << " prompt tokens\n";
+                if (reply.reused_prompt_tokens + 16U < previous_prompt) {
+                    return fail("a turn did not resume from the previous turn's closure in a "
+                                "full context cache");
+                }
+            }
+            previous_prompt = reply.prompt.prompt_tokens;
+            if (*followup == '\0') { break; }
+            history.push_back(message(ninfer::ChatRole::Assistant, reply.content));
+            history.push_back(message(ninfer::ChatRole::User, followup));
+        }
+        return true;
+    });
+}
+
 bool logprobs_and_structured_output(bool mtp = false) {
     ninfer::EngineOptions options = base_options();
     if (mtp) {
@@ -1115,6 +1179,7 @@ int main() {
             {"host round trip", [] { return host_round_trip_is_exact(); }},
             {"mtp host round trip", [] { return host_round_trip_is_exact(true); }},
             {"reuse survives catalog turnover", reuse_survives_catalog_turnover},
+            {"conversation chain survives a full cache", conversation_chain_survives_a_full_cache},
             {"logprobs and structured output", [] { return logprobs_and_structured_output(); }},
             {"mtp logprobs and structured output",
              [] { return logprobs_and_structured_output(true); }},

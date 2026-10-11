@@ -174,7 +174,8 @@ RequestBasePlan ProgramImpl::plan_request(PreparedPromptData&& prompt,
         backing->ledger      = prepared.token_ids;
         backing->prefix_identity.assign(prepared);
         base->capture_backing = std::move(backing);
-        const auto add        = [&](std::uint32_t frontier, runtime::CheckpointRole role) {
+        const auto add        = [&](std::uint32_t frontier, runtime::CheckpointRole role,
+                             SharedCandidateEvidence evidence = SharedCandidateEvidence::None) {
             if (!base->accepts_capture(frontier)) { return; }
             auto it =
                 std::find_if(base->capture_groups.begin(), base->capture_groups.end(),
@@ -186,14 +187,18 @@ RequestBasePlan ProgramImpl::plan_request(PreparedPromptData&& prompt,
             if (std::find(it->roles.begin(), it->roles.end(), role) == it->roles.end()) {
                 it->roles.push_back(role);
             }
+            it->shared_evidence |= evidence;
         };
         const auto& rewrite = prepared.identity.rewrite_checkpoint;
         add(rewrite ? rewrite->recovery_frontier : base->summary.prompt_tokens,
             runtime::CheckpointRole::InputReplay);
         for (const auto& opportunity : prepared.context_cache.opportunities) {
-            add(opportunity.frontier, opportunity.kind == PromptCacheMarkerKind::PrivateLongAnchor
-                                          ? runtime::CheckpointRole::LongAnchor
-                                          : runtime::CheckpointRole::SharedPrefix);
+            if (opportunity.kind == PromptCacheMarkerKind::PrivateLongAnchor) {
+                add(opportunity.frontier, runtime::CheckpointRole::LongAnchor);
+            } else {
+                add(opportunity.frontier, runtime::CheckpointRole::SharedPrefix,
+                    opportunity.evidence);
+            }
         }
         std::sort(base->capture_groups.begin(), base->capture_groups.end(),
                   [](const auto& a, const auto& b) { return a.frontier < b.frontier; });

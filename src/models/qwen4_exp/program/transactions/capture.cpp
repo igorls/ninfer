@@ -190,6 +190,17 @@ bool ProgramImpl::capture_is_input(SequenceHandle handle) const {
             (request.permit && group.frontier <= request.permit->main_frontier));
 }
 
+bool ProgramImpl::capture_is_discovered_prefix(SequenceHandle handle) const {
+    if (!valid_sequence(handle)) { throw std::logic_error("capture has a stale lane"); }
+    const auto& request = requests[ContractAccess::lane(handle).value];
+    if (request.next_capture >= request.capture_groups.size()) { return false; }
+    const auto& group = request.capture_groups[request.next_capture];
+    // Only the engine offered this point: no request marker, private input or anchor shares it.
+    return group.roles.size() == 1 &&
+           group.roles.front() == runtime::CheckpointRole::SharedPrefix &&
+           group.shared_evidence == SharedCandidateEvidence::EngineStructural;
+}
+
 bool ProgramImpl::start_capture(SequenceHandle handle) {
     if (context_transaction_ || pending_transaction_) { return false; }
     if (!valid_sequence(handle)) { throw std::logic_error("capture has a stale lane"); }
