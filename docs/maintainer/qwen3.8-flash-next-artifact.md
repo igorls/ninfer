@@ -6,10 +6,32 @@ architecture package. Framing, numeric semantics and layouts are defined by
 [`artifact-container.md`](artifact-container.md), [`tensor-formats.md`](tensor-formats.md) and
 [`storage-layouts.md`](storage-layouts.md).
 
-## 1. Derivation
+## 1. Download and derivation
 
-The v3 artifact is derived, never distributed: every consumer rebuilds it from the published v2
-artifact with [`tools/convert/qwen4_exp`](../../tools/convert/qwen4_exp).
+The current v3 artifact is published on
+[Hugging Face](https://huggingface.co/igorls/Qwen3.8-Flash-Next-mixed-NInfer#ninfer-v3-artifact-re-derived-2026-10-11)
+at revision `ef61b3c856f91e58a58e41a5a6269b6c8648d266`. Download the v3 entry and all three
+part files; keep them in one directory and load the entry file:
+
+```bash
+hf download igorls/Qwen3.8-Flash-Next-mixed-NInfer \
+  --revision ef61b3c856f91e58a58e41a5a6269b6c8648d266 \
+  qwen3_8_flash_next_mixed.v3.ninfer \
+  qwen3_8_flash_next_mixed.v3.ninfer.part-0001 \
+  qwen3_8_flash_next_mixed.v3.ninfer.part-0002 \
+  qwen3_8_flash_next_mixed.v3.ninfer.part-0003 \
+  SHA256SUMS.v3 artifact-manifest.v3.json \
+  --local-dir models/flash-next
+```
+
+The entry is `qwen3_8_flash_next_mixed.v3.ninfer`, with `.part-0001`, `.part-0002`, and
+`.part-0003` beside it. This is the October 11 derivation with `eos_token_id` and the maintained
+chat template; the earlier October 10 v3 upload is rejected by the current loader. The published
+manifest's artifact ID and four file digests match the pins below and in `source.V3_FILE_SHA256`.
+
+For reproducible derivation from the pinned v2 input, use
+[`tools/convert/qwen4_exp`](../../tools/convert/qwen4_exp). A local upgrade is optional when
+downloading the current published v3 artifact.
 
 | Input | Pin |
 |---|---|
@@ -68,7 +90,7 @@ shapes, formats and layouts (Sections 2, 3 and 5). It differs in two ways:
   quantizations.
 
 That route is checked only on synthetic checkpoints and against the official tensor headers. It is
-not qualified; the upgrade remains the qualified route.
+not qualified; the published v3 artifact and its pinned v2 derivation remain the qualified routes.
 
 ## 2. Components and resources
 

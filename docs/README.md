@@ -12,7 +12,7 @@ run the CLI or HTTP server.
 | [Demos](index.html) | Arena Duel, Tetris, chess, Kitchen Rush, Beacon Runner, the cube speed run, the decision analyzer, and the dual-purpose readout |
 | [Decision arcade](decision-arcade.md) | real-time Arena Duel combat, Tetris, chess, Kitchen Rush, Beacon Runner and Cube, with reproducible decision evaluation |
 | [Windows app](windows-app.md) | install the standalone Supervisor, launch at sign-in, update, and uninstall |
-| [Performance](performance.md) | RTX 5090 measurement coverage, per-model serving results, methodology, and publication rules |
+| [Performance](performance.md) | RTX 5090 and RTX PRO 6000 measurement coverage, per-model results, methodology, and publication rules |
 | [Weight conversion](weight-conversion.md) | official recipes, custom formats and sources, conversion methods, optional components and artifact output |
 | [Perplexity](perplexity.md) | fixed-corpus and custom-text causal perplexity, comparison rules, progress, and reports |
 | [CLI examples](../examples/cli/) | committed text, multimodal, thinking, long-decode, and long-context inputs |
@@ -21,13 +21,20 @@ The executable `--help` output is the exact source for command-line option spell
 
 ## Model artifacts
 
-| Model | Weights | Download | Versioned model card source |
+| Model | Weights | Download / preparation | Model card / reference |
 |---|---|---|---|
+| Qwen3.8-Flash-Next | Mixed NVFP4 / FP8 / INT4 PLE, BF16 elsewhere | [Hugging Face v3](https://huggingface.co/igorls/Qwen3.8-Flash-Next-mixed-NInfer#ninfer-v3-artifact-re-derived-2026-10-11), [download instructions](maintainer/qwen3.8-flash-next-artifact.md#1-download-and-derivation) | [Artifact contract](maintainer/qwen3.8-flash-next-artifact.md), [qualification](maintainer/upstream-ports.md#flash-next-v3) |
 | Qwen3.6-27B | `groupwise-int` | [Hugging Face](https://huggingface.co/neroued/Qwen3.6-27B-NInfer) | [model card](../model-cards/Qwen3.6-27B-NInfer/README.md) |
 | Qwen3.6-27B | `nvfp4` | [Hugging Face](https://huggingface.co/neroued/Qwen3.6-27B-nvfp4-NInfer) | [model card](../model-cards/Qwen3.6-27B-nvfp4-NInfer/README.md) |
 | Qwen3.8-27B | `groupwise-int` | [Hugging Face](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | [model card](../model-cards/Qwen3.8-27B-NInfer/README.md) |
 | Qwen3.8-27B | `nvfp4` | [Hugging Face](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) | [model card](../model-cards/Qwen3.8-27B-nvfp4-NInfer/README.md) |
 | Qwen3.6-35B-A3B | `groupwise-int` | [Hugging Face](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer) | [model card](../model-cards/Qwen3.6-35B-A3B-NInfer/README.md) |
+| Qwen3.8-27B OrcaRouter Uncensored | NVFP4, BF16 embedding and full head | [Hugging Face v3](https://huggingface.co/igorls/Qwen3.8-27B-Uncensored-NVFP4-NInfer) | [Model card](../model-cards/Qwen3.8-27B-Uncensored-NVFP4-NInfer/README.md) |
+
+The engine requires v3, and all models in this table have published v3 downloads. Only existing
+v2 files need the [upgrade workflows](weight-conversion.md#upgrade-an-existing-v2-artifact).
+The experimental [Qwen3.8-27B `nvfp4full` recipe](weight-conversion.md#qwen38-27b-nvfp4full)
+is not qualified for production.
 
 ## Repository-local guides
 

@@ -1,426 +1,211 @@
-# NInfer — workstation fork
+# NInfer
 
-> Specialized single-GPU inference for long-running agents and structured application workloads.
+A C++/CUDA inference engine for local, single-GPU text and vision workloads. This is
+[igorls/ninfer](https://github.com/igorls/ninfer), the workstation fork of
+[Neroued/ninfer](https://github.com/Neroued/ninfer), with native Windows support, a Supervisor app,
+and application-serving extensions.
 
-This is [igorls/ninfer](https://github.com/igorls/ninfer), a fork of
-[Neroued/ninfer](https://github.com/Neroued/ninfer). It builds on upstream's from-scratch C++/CUDA
-engine and `.ninfer` v3 artifacts, and focuses on native Windows operation, the NVIDIA RTX PRO 6000
-Blackwell workstation, and application serving. Qwen3.8-Flash-Next now has a native v3 architecture
-package for text, MTP and Vision; focused Colab G4 tests pass, but full numerical qualification
-remains incomplete. See the
-[artifact and execution guide](docs/maintainer/qwen3.8-flash-next-artifact.md) for supported options
-and the [port status](docs/maintainer/upstream-ports.md#flash-next-v3) for remaining acceptance work.
+The engine targets **`sm_120a` only**. The fork targets an **RTX PRO 6000 Blackwell, 96 GB**;
+upstream measurements use an **RTX 5090**.
 
-The intended product is a dependable local inference service: efficient prefill and decode,
-correct continuation reuse across long agent sessions, constrained JSON responses for applications,
-and operational visibility into latency, memory pressure and failures. Performance changes must
-preserve model semantics and improve the workload they claim to improve.
+[Models](#models) · [Quick start](#quick-start) · [Performance and evaluation](#performance-and-evaluation) · [Documentation](docs/README.md)
 
 ## What this fork adds
 
-- **Native Windows builds, a Windows Supervisor and an installer.** A tray application and browser
-  dashboard manage engine startup, shutdown and restart, inspect health and device-wide GPU memory,
-  edit configuration, hold a desktop memory reserve, adapt KV capacity to the reservation the
-  engine can get, and switch between configured model artifacts. The dashboard shows
-  request/client activity, prefix reuse, speculative acceptance and context pressure. The
-  Supervisor also serves web frontends such as llama.cpp's web UI, each on its own local origin
-  with the engine API forwarded, so a browser chat needs no proxy setup.
-- **Native structured output.** JSON-object mode, a supported JSON Schema subset and
-  `tool_choice: "required"`, constrained during generation through XGrammar, with MTP drafting kept
-  under the constraint. OpenAI Chat Completions, Responses and Anthropic Messages translate their
-  documented formats into the same engine contract.
-- **Native decision readout.** Chat Completions returns token log probabilities read from the
-  model's logits before any sampling adjustment, with `top_logprobs` alternatives, the
-  distribution over a caller-supplied closed set of candidates (`logprob_candidates`, up to 1,024
-  options, renormalised over the set and reported beside the vocabulary-wide value), and log
-  probabilities at chosen prompt positions for scoring a given continuation. `POST /v1/score` scores
-  up to 256 isolated questions against one shared prefix in a single call, in single-token and
-  multi-token candidate forms. Without `top_logprobs` alternatives the readout runs on the device and
-  speculative decoding stays on.
-- **TypeSafe System One drop-in.** `POST /v1/systemone` serves TypeSafe's Noul, Choice and Score
-  decisions from next-token probabilities with Jev's request, answer and error contract, so an
-  application built on the official TypeSafe SDKs switches with its base URL alone. The
-  [decision arcade](docs/decision-arcade.md) exercises it interactively.
-- **Document rerank.** `POST /v1/rerank` is a Jina-shaped rerank route. It scores each document
-  with an in-process System One Choice and returns relevance scores under the stable model id
-  `ninfer-choice-rerank-v1`, which `GET /v1/models` advertises. `return_documents` defaults to true.
-- **Read-only cache participation.** `prompt_cache_read_only` lets a one-shot request start from a
-  published prefix while capturing no checkpoint and publishing nothing, so bursts of classification
-  requests cannot evict other conversations' cached state; such a request prefills in one pass.
-- **Operations.** API-key files, device-wide memory sizing with a desktop reserve, `/admin/vram`,
-  `/admin/stats` and `/admin/quiesce` that never wait on execution, request JSONL logs with client
-  attribution and tool-block fingerprints, and a cache that stays useful under a full checkpoint
-  pool.
-- **Research readouts.** `ExecutionOptions::capture_reasoning_features` returns the hidden row at
-  the reasoning frontier; `ninfer-reasoning-collect` and `tools/bench/jevbench/reasoning_router.py`
-  train a learned reasoning router from it. `CausalScoreReadout::capture_hidden_rows` returns the
-  final-normalized hidden row of every scored position, and `ninfer-hidden-export` writes those
-  rows for token sequences as a safetensors file ([perplexity guide](docs/perplexity.md#hidden-row-export)).
-- **More artifacts.** A conversion recipe for the OrcaRouter Qwen3.8-27B NVFP4 derivative, which
-  keeps BF16 embeddings and a BF16 full output head (native BF16 Linear and LinearTopK paths).
+- **Windows Supervisor:** tray app, browser dashboard, installer, model switching, desktop memory
+  reserve, and request/cache/GPU diagnostics. It can also host llama.cpp's browser chat UI.
+- **Application APIs:** OpenAI Chat Completions and Responses Core, Anthropic Messages, streaming,
+  tool calls, constrained JSON with a supported JSON Schema subset, and token log probabilities.
+- **Decision and scoring APIs:** `/v1/score`, TypeSafe-compatible `/v1/systemone`, and Jina-shaped
+  `/v1/rerank`, plus offline causal scoring and hidden-row export.
+- **Long-session reuse:** exact-prefix caching with Device/Host retention, read-only cache
+  participation, and pressure-driven pause/resume through snapshots or token replay.
+- **Native Flash-Next:** a v3 architecture package for text, MTP, Vision, scoring, and prefix reuse.
 
-These capabilities are implemented in this branch. Application-specific quality qualification is
-separate: valid JSON and fast inference do not establish correct legal analysis or reliable behavior
-on every agent workload.
+## Models
 
-## Direction and boundaries
+The engine loads **v3 `.ninfer` artifacts**. All models below have published v3 downloads on
+Hugging Face; no local upgrade is needed for those files.
 
-The priorities are sustained agent-session reliability, measured prefill/decode improvements on our
-hardware, complete supported API behavior, and evaluation through real application workflows. The
-fork follows upstream by merging it; upstream changes that regress this workstation are reverted or
-device-gated with measurements.
+| Model | Weight profiles | Get the artifact | Optional components |
+|---|---|---|---|
+| Qwen3.8-Flash-Next | Mixed NVFP4 / FP8 / INT4 PLE, BF16 elsewhere | [Download v3](https://huggingface.co/igorls/Qwen3.8-Flash-Next-mixed-NInfer#ninfer-v3-artifact-re-derived-2026-10-11) (four files) | Vision; MTP with full output head |
+| Qwen3.8-27B | `groupwise-int`, `nvfp4` | [Groupwise](https://huggingface.co/neroued/Qwen3.8-27B-NInfer), [NVFP4](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) | Vision; MTP; DFlash2 with companion weights |
+| Qwen3.6-27B | `groupwise-int`, `nvfp4` | [Groupwise](https://huggingface.co/neroued/Qwen3.6-27B-NInfer), [NVFP4](https://huggingface.co/neroued/Qwen3.6-27B-nvfp4-NInfer) | Vision; MTP |
+| Qwen3.6-35B-A3B | `groupwise-int` | [Download](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer) | Vision; MTP; DFlash with companion weights |
+| Qwen3.8-27B OrcaRouter Uncensored | NVFP4, BF16 embedding and full head | [Download v3](https://huggingface.co/igorls/Qwen3.8-27B-Uncensored-NVFP4-NInfer) | Vision; MTP; DFlash2 |
 
-The engine remains specialized: one GPU and one resident model per Engine, with one to eight active
-requests configured at startup and bounded FIFO admission. Supervisor model switching replaces the
-resident engine; it does not provide simultaneous model residency. Resource pressure can pause
-requests and restore them from a snapshot or token replay. Multi-GPU/distributed serving and
-priority scheduling are outside the current implementation.
+Flash-Next supports BF16 or FP8 KV and MTP draft counts 1–5. It uses the full stored output head:
+**omit `--lm-head-draft`**. Its PLE table stays host-resident, and the artifact is about 102 GiB
+across four files. See the [artifact guide](docs/maintainer/qwen3.8-flash-next-artifact.md) for
+storage, memory, and execution requirements.
 
-The build targets **`sm_120a` only**. This fork's primary workstation is the **RTX PRO 6000
-Blackwell 96 GB**. Upstream's published measurements below use the **RTX 5090**; they are not
-measurements of this fork's workstation.
+The experimental Qwen3.8-27B [`nvfp4full` recipe](docs/weight-conversion.md#qwen38-27b-nvfp4full)
+is also available; it is **not qualified for production**. For custom weight mixtures and sources,
+see [weight conversion](docs/weight-conversion.md).
 
-## Build on Windows
+## Quick start
 
-Use a 64-bit Visual Studio C++ environment with CUDA 13.3; the qualified local toolchain is
-Visual Studio 2026 (MSVC 19.51), CUDA 13.3 and CMake 4.3. FFmpeg and libcurl are required: point
-`FFMPEG_ROOT` at a shared FFmpeg distribution and `CURL_ROOT` at a libcurl (>= 7.85) install, each
-with `include/`, `lib/` and `bin/`. Ship only an LGPL FFmpeg; a GPL distribution is for local
-development builds.
+Build from source, prepare a v3 artifact, then start the server. The example uses Qwen3.8-27B NVFP4.
 
-```powershell
+```bash
 git clone https://github.com/igorls/ninfer.git
 cd ninfer
+```
 
+### Build on Windows
+
+Use Windows 11, a 64-bit Visual Studio 2026 C++ environment (MSVC 19.51), CUDA 13.3, and CMake.
+FFmpeg and libcurl (>= 7.85) need headers, MSVC import libraries, and runtime DLLs in their
+`include/`, `lib/`, and `bin/` directories. Release packages bundle only LGPL FFmpeg.
+
+```powershell
 cmake -S . -B build-win -G "Visual Studio 18 2026" -A x64 `
   -DFFMPEG_ROOT=C:/deps/ffmpeg-lgpl-shared -DCURL_ROOT=C:/deps/curl
 cmake --build build-win --config Release -j
 ```
 
-The CLI and HTTP engine are under `build-win/apps/Release/`; the Supervisor is under
-`build-win/apps/ninfer-supervisor/Release/`. Put the FFmpeg, libcurl and CUDA runtime DLLs on
-`PATH` to run them from the build tree. Add `-DBUILD_TESTING=ON` for the test suite, which CTest
-runs with those directories already on its `PATH`.
+The CLI and server are in `build-win/apps/Release/`. Put the FFmpeg, libcurl, and CUDA runtime
+DLLs on `PATH` when running from the build tree. For build options and tests, see the
+[build guide](docs/maintainer/build-system.md#windows-msvc).
 
-Official v2 downloads upgrade in place without downloading the weights again:
+### Build on Linux
 
-```powershell
-python tools\upgrade_ninfer_v2_to_v3.py models\qwen3_8_27b_nvfp4.ninfer models\v3\qwen3_8_27b_nvfp4.ninfer
+Use 64-bit Linux, a CUDA toolkit supporting `sm_120a`, CMake >= 3.28, a C++20 host compiler, Ninja,
+`pkg-config`, FFmpeg development libraries (`libavformat`, `libavcodec`, `libavutil`, `libswscale`),
+and libcurl >= 7.85. Upstream validates CUDA 13.1; the fork also builds with CUDA 13.3.
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
 ```
 
-### Windows Supervisor
+Run binaries from the source build tree. Tests and benchmarks are excluded by default;
+[developer presets and targets](docs/maintainer/build-system.md) enable them.
 
-Edit a copy of the [example configuration](apps/ninfer-supervisor/supervisor.example.json) with
-your executable, artifact, working directory and API-key paths, then install the Windows app:
+### Download the model
+
+Use the Hugging Face CLI to download the current v3 artifact:
+
+```bash
+hf download neroued/Qwen3.8-27B-nvfp4-NInfer qwen3_8_27b_nvfp4.ninfer --local-dir models
+```
+
+For **Flash-Next**, use the [v3 download command](docs/maintainer/qwen3.8-flash-next-artifact.md#1-download-and-derivation)
+to fetch the entry file and all three parts. Keep them in one directory and load
+`qwen3_8_flash_next_mixed.v3.ninfer`. Existing v2 files have separate
+[upgrade instructions](docs/weight-conversion.md#upgrade-an-existing-v2-artifact).
+
+### Start the server
+
+On Windows:
+
+```powershell
+.\build-win\apps\Release\ninfer-serve.exe models/qwen3_8_27b_nvfp4.ninfer `
+  --max-context 32768 --kv-capacity 65536 --max-concurrency 2 `
+  --kv-dtype fp8 --desktop-reserve-gib 6 `
+  --spec mtp --draft-tokens 3 --lm-head-draft --preserve-thinking
+```
+
+On Linux:
+
+```bash
+./build/apps/ninfer-serve models/qwen3_8_27b_nvfp4.ninfer \
+  --max-context 32768 --kv-capacity 65536 --max-concurrency 2 \
+  --kv-dtype fp8 --desktop-reserve-gib 6 \
+  --spec mtp --draft-tokens 3 --lm-head-draft --preserve-thinking
+```
+
+This gives each request a 32,768-token limit, two execution lanes, and a shared 65,536-token
+KV pool, while reserving 6 GiB for the desktop. These are example settings; longer contexts and
+retained prefixes need more capacity. See [server options](docs/serving.md#server-options).
+Add `--vision` at startup for image/video input; speculative and Vision residency are fixed
+for the process lifetime.
+
+### Send a request
+
+Point an OpenAI client at `http://127.0.0.1:8080/v1` with model `default`, or use HTTP directly.
+For PowerShell:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8080/v1/chat/completions `
+  -Method Post -ContentType 'application/json' `
+  -Body '{"model":"default","messages":[{"role":"user","content":"Reply with one short sentence."}],"max_tokens":64}'
+```
+
+For Bash:
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"default","messages":[{"role":"user","content":"Reply with one short sentence."}],"max_tokens":64}'
+```
+
+For one-shot generation, use `ninfer` instead of `ninfer-serve`; the [CLI guide](docs/cli.md)
+covers prompts, chat histories, image/video input, and output streams.
+
+### Windows app and Docker
+
+To install the Supervisor, edit a copy of the
+[example configuration](apps/ninfer-supervisor/supervisor.example.json) with your executable,
+v3 artifact, working directory, and API-key paths, then run:
 
 ```powershell
 .\scripts\windows\install.ps1 -ConfigPath .\supervisor.local.json
 ```
 
-This installs binaries and runtime DLLs under `%LOCALAPPDATA%\Programs\NInfer`, adds a **NInfer**
-Start menu entry and an **Installed apps** entry, and enables startup at sign-in. Configuration and
-logs live under `%LOCALAPPDATA%\NInfer`; models stay in their existing directories. The dashboard
-listens at `http://127.0.0.1:8099`. See [Windows app operations](docs/windows-app.md) for updates,
-removal and the installer build.
+The per-user app includes a tray icon and a dashboard at `http://127.0.0.1:8099`.
+See [Windows app operations](docs/windows-app.md) for configuration, updates, and removal,
+or [Docker serving](docs/serving.md#docker) for the container workflow.
 
-## Models
+## Performance and evaluation
 
-Upstream publishes five official artifacts; the quick-start commands use Qwen3.8-27B NVFP4.
+Results are recorded by **model, hardware, and workload**. The upstream serving corpus runs on
+an RTX 5090; the fork's workstation and Colab G4 records use RTX PRO 6000 Blackwell variants.
+These are separate measurements. Full tables, run conditions, and limitations live in the linked
+references.
 
-| Model | Weights | Artifact | Download and model card |
-|---|---|---|---|
-| Qwen3.6-27B | `groupwise-int` | `qwen3_6_27b.ninfer` | [Qwen3.6-27B](https://huggingface.co/neroued/Qwen3.6-27B-NInfer) |
-| Qwen3.6-27B | `nvfp4` | `qwen3_6_27b_nvfp4.ninfer` | [Qwen3.6-27B NVFP4](https://huggingface.co/neroued/Qwen3.6-27B-nvfp4-NInfer) |
-| Qwen3.8-27B | `groupwise-int` | `qwen3_8_27b.ninfer` | [Qwen3.8-27B](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) |
-| Qwen3.8-27B | `nvfp4` | `qwen3_8_27b_nvfp4.ninfer` | [Qwen3.8-27B NVFP4](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) |
-| Qwen3.6-35B-A3B | `groupwise-int` | `qwen3_6_35b_a3b.ninfer` | [Qwen3.6-35B-A3B](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer) |
-| Qwen3.8-27B OrcaRouter Uncensored | `nvfp4`, BF16 embedding and head | converted locally with recipe `qwen3_8_27b_orcarouter_nvfp4` | [conversion](docs/weight-conversion.md), [v2 release card](model-cards/Qwen3.8-27B-Uncensored-NVFP4-NInfer/README.md) |
-| Qwen3.8-27B | `nvfp4full`: NVFP4 attention, GDN and MLP, Q8 vocabulary weights | converted locally with recipe `qwen3_8_27b_nvfp4full`; not qualified for production | [conversion](docs/weight-conversion.md#qwen38-27b-nvfp4full), [measurements](docs/performance/rtx-pro-6000.md#qwen38-27b-nvfp4full-against-the-production-profile-2026-09-28) |
+| Model | Performance records | Capability evaluation |
+|---|---|---|
+| Qwen3.8-Flash-Next mixed | [Windows serving](docs/performance.md#windows-serving-mtp-draft-count-2026-10-11), [G4 Engine and concurrency](docs/performance.md#flash-next-v3-on-colab-g4-2026-10-04) | No published capability scores; [numerical and runtime qualification](docs/maintainer/upstream-ports.md#flash-next-v3) |
+| Qwen3.8-27B | [RTX 5090: groupwise-int and NVFP4](docs/performance/qwen3.8-27b.md) | [Groupwise](model-cards/Qwen3.8-27B-NInfer/README.md#evaluation), [NVFP4](model-cards/Qwen3.8-27B-nvfp4-NInfer/README.md#evaluation) |
+| Qwen3.6-27B | [RTX 5090: groupwise-int and NVFP4](docs/performance/qwen3.6-27b.md) | [Groupwise](model-cards/Qwen3.6-27B-NInfer/README.md#evaluation), [NVFP4](model-cards/Qwen3.6-27B-nvfp4-NInfer/README.md#evaluation) |
+| Qwen3.6-35B-A3B | [RTX 5090: groupwise-int](docs/performance/qwen3.6-35b-a3b.md) | [Model card](model-cards/Qwen3.6-35B-A3B-NInfer/README.md#evaluation) |
+| Qwen3.8-27B OrcaRouter | [Historical workstation results](docs/performance/rtx-pro-6000.md) | [Model card](model-cards/Qwen3.8-27B-Uncensored-NVFP4-NInfer/README.md) |
 
-Each v3 `.ninfer` artifact carries model configuration, encoded weights, logical bindings and
-frontend resources. Runtime execution uses those facts with the implemented model and Op
-capabilities. You can also [convert your own weights](docs/weight-conversion.md), reuse an official
-recipe or choose another supported mixture of formats.
+Flash-Next has recorded Windows and Linux text/MTP/Vision checks. Numerical acceptance was recorded
+on October 6 with one independent-oracle metric failure retained; end-to-end v2 parity was not
+accepted. The October 11 Windows Engine run still has an open non-speculative concurrent-reuse
+failure (`cudaErrorAlreadyMapped`). The [port record](docs/maintainer/upstream-ports.md#flash-next-v3)
+keeps the full qualification scope and exceptions.
 
-The current engine requires v3 artifacts. Existing official v2 downloads can be
-[upgraded locally](docs/weight-conversion.md#upgrade-an-existing-v2-artifact) without downloading
-the weights again.
+MTP gains depend on the workload: the Windows serving study also records slowdowns for
+`top_logprobs` and concurrent low-acceptance chat. See the [measurement rules](docs/performance/methodology.md),
+[capability evaluation workflow](eval/README.md), and [JevBench adapter](tools/bench/jevbench/)
+for interpretation and reproduction.
 
-## Quick start on Linux
+## Limits and documentation
 
-NInfer requires 64-bit Linux, an `sm_120a` GPU (RTX 5090 or RTX PRO 6000 Blackwell), a CUDA
-toolkit supporting `sm_120a`,
-CMake 3.28 or newer, a C++20 host compiler, Ninja, `pkg-config`, FFmpeg development libraries
-(`libavformat`, `libavcodec`, `libavutil`, and `libswscale`), and `libcurl >= 7.85`.
-CUDA 13.1 is upstream's validated toolkit and this fork builds with CUDA 13.3; CMake does not
-impose a CUDA version floor.
-The build rejects CUDA architectures other than `sm_120a`.
+One GPU and one resident model per Engine, with 1–8 execution lanes and bounded FIFO admission.
+Supervisor model switching replaces the engine. Multi-GPU/distributed serving and priority/QoS
+are outside the current implementation. Tool calls are returned to clients; NInfer does not execute
+them. The in-tree C++ headers are not an installed SDK.
 
-Build the product binaries:
+- [Documentation index](docs/README.md): user guides, model/artifact references, and maintainer contracts.
+- [HTTP serving](docs/serving.md): protocol behavior, authentication, structured output, scoring, and telemetry.
+- [Context reuse and scheduling](docs/maintainer/resource-scheduling-and-context-cache.md): retention and pressure recovery.
+- [Performance index](docs/performance.md): all published coverage, including experimental profiles.
+- [Contributing](CONTRIBUTING.md): development and review workflow.
 
-```bash
-git clone https://github.com/igorls/ninfer.git
-cd ninfer
-
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-```
-
-Tests and benchmarks are excluded from the default build. `cmake --preset release` configures
-the same product build; `cmake --preset dev` also enables tests and benchmarks and finds a
-Python 3 interpreter. Both presets use `build/` and explicitly reset the build options.
-Machine-specific compiler and Python paths belong in the ignored `CMakeUserPresets.json`.
-See [build organization and configuration](docs/maintainer/build-system.md) for details.
-
-There is no Linux install target or packaged binary distribution; run NInfer from its source build
-tree. The Windows app installer packages a local Release build.
-Python tools run independently of CMake; the standalone HBM probe has its own
-[build command](tools/README.md#standalone-hbm-probe).
-
-Download the artifact used by this example with the Hugging Face CLI:
-
-```bash
-hf download neroued/Qwen3.8-27B-nvfp4-NInfer \
-  qwen3_8_27b_nvfp4.ninfer \
-  --local-dir models
-```
-
-Start a long-running text/agent server with two execution lanes and prefix caching:
-
-```bash
-./build/apps/ninfer-serve models/qwen3_8_27b_nvfp4.ninfer \
-  --max-context 240000 \
-  --kv-capacity 240000 \
-  --max-concurrency 2 \
-  --kv-dtype fp8 \
-  --device-state-slots 2 \
-  --spec mtp --draft-tokens 3 \
-  --lm-head-draft \
-  --preserve-thinking
-```
-
-Each request has a 240,000-token logical ceiling. A shared 240,000-token Device KV pool serves
-resident requests and retained prefixes. Requests acquire KV pages as execution advances; under
-pressure, the scheduler can pause a request and resume it later. The profile provides two extra
-Device StateImages and the default shared pinned Host budget: 8 GiB plus eight model StateImages,
-used for retained state, KV and pause snapshots.
-
-Send an OpenAI-style request:
-
-```bash
-curl http://127.0.0.1:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "qwen3.8-27b",
-    "messages": [{"role": "user", "content": "Reply with one short sentence."}],
-    "max_tokens": 64
-  }'
-```
-
-Run a one-shot CLI request with a 32,768-token allocation:
-
-```bash
-./build/apps/ninfer models/qwen3_8_27b_nvfp4.ninfer \
-  --prompt "Explain prefill and decode, then give a concise conclusion." \
-  --max-context 32768 \
-  --max-new 8192 \
-  --kv-dtype fp8 \
-  --spec mtp --draft-tokens 3 \
-  --lm-head-draft
-```
-
-Answer content is written to stdout. Human-readable startup/runtime diagnostics and the CLI-owned
-reasoning, timing, throughput, memory, and speculative-decoding report are written to stderr;
-reasoning and the result report remain unprefixed product output. On a terminal, weight
-materialization uses one transient progress line followed by a compact Engine-ready summary.
-Redirected stderr receives persistent readable progress without terminal control sequences. Use
-`--log-level debug` for complete startup detail. Option and local input errors remain direct command
-diagnostics. Use `--messages FILE` and `--vision` for structured image/video input; see the
-[CLI guide](docs/cli.md) and [committed examples](examples/cli/).
-
-## Resource-aware long-context reuse
-
-A reusable checkpoint combines KV with the complete continuation state at an exact token frontier.
-The engine retains completed conversation endpoints and stable input boundaries for multi-turn and
-agent reuse. Inactive checkpoints share Device and pinned Host capacity; pressure reclaims retained
-resources before pausing resident requests. Paused requests resume from a snapshot or rebuild their
-state by replaying already committed tokens.
-
-See [Resource scheduling and context cache](docs/maintainer/resource-scheduling-and-context-cache.md)
-for the algorithm and [Serve TTFT benchmark](tools/bench/ttft/) for public-HTTP coverage of hot
-reuse, Host resume, eviction, shared prefixes, scheduling boundaries, and multimodal load.
-
-## Performance
-
-Published measurements use an RTX 5090. The [performance index](docs/performance.md) links to
-per-model run records and the [measurement rules](docs/performance/methodology.md). The tables
-below are excerpts from those detailed results. Qwen3.8 uses FP8 E4M3 row-256 KV;
-Qwen3.6 uses INT8 group-64 KV.
-
-### Concurrent MTP3 decode
-
-Saturated decode used CUDA Graphs, MTP3, and one 8,192-token generation per active
-request. Throughput uses aggregate committed decode tokens from complete intervals whose actual
-decode batch equaled the configured concurrency. Acceptance covers the complete request wave;
-these rates are steady decode (tok/s).
-
-| Model profile | C=1 tok/s / accept | C=2 tok/s / accept | C=4 tok/s / accept | C=8 tok/s / accept |
-|---|---:|---:|---:|---:|
-| [Qwen3.6-27B](docs/performance/qwen3.6-27b.md#decode-saturation) `groupwise-int` | 185.8 / 68.2% | 247.0 / 69.0% | 309.5 / 68.4% | 535.0 / 68.3% |
-| [Qwen3.6-27B](docs/performance/qwen3.6-27b.md#decode-saturation) `nvfp4` | 202.4 / 69.3% | 399.7 / 71.4% | 699.7 / 69.3% | 1,146.9 / 68.6% |
-| [Qwen3.6-35B-A3B](docs/performance/qwen3.6-35b-a3b.md#decode-saturation) `groupwise-int` | 642.5 / 68.6% | 907.2 / 66.3% | 1,213.5 / 69.6% | 1,380.7 / 68.0% |
-| [Qwen3.8-27B](docs/performance/qwen3.8-27b.md#decode-saturation) `groupwise-int` | 136.5 / 44.4% | 253.3 / 45.2% | 398.1 / 46.1% | 582.4 / 46.4% |
-| [Qwen3.8-27B](docs/performance/qwen3.8-27b.md#decode-saturation) `nvfp4` | 147.7 / 46.2% | 291.0 / 48.7% | 522.2 / 45.8% | 922.4 / 46.1% |
-
-### Single-request serving
-
-The serial serving corpus used CUDA Graphs, a 1,024-token prefill chunk, and five
-fixed seeds after warm-up. The table keeps one short-prefill, one extreme-prefill, and one
-structured-output MTP3 point for each published profile; the full context and scenario matrices are
-linked from each model below.
-
-| Model profile | 7,680-token prefill | 260,096-token prefill | Structured MTP3 decode |
-|---|---:|---:|---:|
-| [Qwen3.6-35B-A3B](docs/performance/qwen3.6-35b-a3b.md#single-request-speculative-decode) `groupwise-int` | 17,705.4 tok/s | 5,247.0 tok/s | 779.6 tok/s |
-| [Qwen3.6-27B](docs/performance/qwen3.6-27b.md#single-request-speculative-decode) `groupwise-int` | 3,218.1 tok/s | 1,614.8 tok/s | 193.0 tok/s |
-| [Qwen3.6-27B](docs/performance/qwen3.6-27b.md#single-request-speculative-decode) `nvfp4` | 11,191.5 tok/s | 2,510.6 tok/s | 252.2 tok/s |
-| [Qwen3.8-27B](docs/performance/qwen3.8-27b.md#single-request-speculative-decode) `groupwise-int` | 3,331.9 tok/s | 2,139.4 tok/s | 214.7 tok/s |
-| [Qwen3.8-27B](docs/performance/qwen3.8-27b.md#single-request-speculative-decode) `nvfp4` | 12,819.1 tok/s | 4,016.4 tok/s | 231.7 tok/s |
-
-## Evaluation
-
-Capability scores were measured through NInfer's OpenAI-compatible serving route with thinking
-enabled, MTP3, and EvalScope 1.9.0 (0-shot, rule scoring, one sample per problem):
-
-| Model profile | AIME 2025 | AIME 2026 | GPQA-Diamond | ERQA | RealWorldQA |
-|---|---:|---:|---:|---:|---:|
-| [Qwen3.6-27B groupwise-int](model-cards/Qwen3.6-27B-NInfer/README.md) | 86.67% | 93.33% | 86.87% | — | — |
-| [Qwen3.6-27B NVFP4](model-cards/Qwen3.6-27B-nvfp4-NInfer/README.md) | 93.33% | 93.33% | 84.34% | — | — |
-| [Qwen3.6-35B-A3B groupwise-int](model-cards/Qwen3.6-35B-A3B-NInfer/README.md) | 90.00% | 90.00% | 85.35% | — | — |
-| [Qwen3.8-27B groupwise-int](model-cards/Qwen3.8-27B-NInfer/README.md) | 96.67% | 96.67% | 87.37% | 66.25% | 82.22% |
-| [Qwen3.8-27B NVFP4](model-cards/Qwen3.8-27B-nvfp4-NInfer/README.md) | 96.67% | 96.67% | 90.40% | 66.25% | 83.53% |
-
-The Qwen3.6 rows used temperature 0.6 and presence penalty 1.0; the Qwen3.8 rows used temperature
-1.0 and presence penalty 0.0. Multimodal evaluation used `--vision` and an 81,920-token context
-limit. Text evaluation used 262,144 tokens except Qwen3.8-27B NVFP4, which used 252,928 tokens to
-fit the RTX 5090 after weights. Each score is one sample per problem; model cards contain the
-correct/total counts and evaluation notes.
-
-[JevBench](https://github.com/fstandhartinger/jevbench) measures decision models: state and rubric
-in, a probability per option out, scored on accuracy, calibration, latency and cost.
-[`tools/bench/jevbench/`](tools/bench/jevbench/) holds an adapter in that repository's contract, a
-TypeSafe-wire-format shim so its stock adapter runs unchanged, and a driver that runs the 231
-public decisions and scores them with the board's own formula. On the public items, the fork's
-pre-v3 Linux build on an RTX PRO 6000 answered 100 / 97.2 / 66.7 % of the easy / standard / hard
-tiers with Qwen3.8-27B NVFP4 at a 0.033 s median decision (2026-09-21); Jev 1.13.0 scores
-100 / 98.6 / 73.0 % on the same items. Half the benchmark is held out, so the official rows come
-only from the maintainer's own run; the submission is
-[issue #12](https://github.com/fstandhartinger/jevbench/issues/12).
-
-## Startup notes
-
-GPU residency is fixed at process startup. `--spec` selects speculative decoding residency, and
-`--vision` independently selects Vision residency. Qwen3.6-35B-A3B DFlash can be combined with
-Vision; it accelerates generated-text decode after multimodal prefill, not Vision encode itself.
-
-## Docker
-
-Build the runtime image on a host with the NVIDIA Container Toolkit:
-
-```bash
-docker build --tag ninfer:local .
-```
-
-Mount the downloaded model and run the same example server profile:
-
-```bash
-docker run --rm \
-  --gpus '"device=0"' \
-  --publish 8080:8080 \
-  --volume "$PWD/models:/models:ro" \
-  ninfer:local \
-  ninfer-serve /models/qwen3_8_27b_nvfp4.ninfer \
-  --host 0.0.0.0 \
-  --max-context 240000 \
-  --kv-capacity 240000 \
-  --max-concurrency 2 \
-  --kv-dtype fp8 \
-  --device-state-slots 2 \
-  --spec mtp --draft-tokens 3 \
-  --lm-head-draft \
-  --preserve-thinking
-```
-
-## Capabilities and limits
-
-The official artifacts provide the following capabilities, with optional components enabled at startup:
-
-- text generation with thinking and non-thinking prompt modes;
-- image, multi-image, video, and mixed multimodal messages;
-- chunked prefill, exact-batch CUDA Graph decode, and startup-bounded batched decode;
-- MTP speculative decoding with draft windows from one to five;
-- BF16, INT8, FP8, NVFP4, and K8V4 KV storage;
-- offline causal-perplexity scoring;
-- private and shared exact-prefix reuse with Device/Host State and KV retention;
-- model-aware sampling defaults and explicit sampler overrides;
-- OpenAI Responses Core, OpenAI Chat Completions, and Anthropic Messages, including streaming,
-  tools, local response state, token counting, and usage accounting.
-
-The 35B-A3B target additionally supports DFlash with draft windows from one to fifteen for Text and
-image/video Vision prompts. Qwen3.8-27B artifacts with the DFlash2 companion weights support
-`--spec dflash2 --draft-tokens 7` for the same Text/Vision Engine path, with draft counts 1..15
-and either full or optimized proposal heads.
-
-The product boundary remains intentionally small:
-
-- one `sm_120a` GPU and one resident model per Engine;
-- one to eight resident execution lanes with bounded FIFO ingress;
-- resource-pressure preemption with snapshot or token-replay recovery;
-- no priority/QoS, weight offload, multi-GPU, or distributed serving;
-- one shared startup-fixed KV pool across active requests and retained prefixes;
-- model architectures and format/shape combinations use explicitly implemented native paths;
-- parsed tool calls are returned to the client; NInfer does not execute tools;
-- the in-tree C++ headers are not distributed as an installed SDK.
-
-`--max-context` is each sequence's logical limit. `--kv-capacity` sizes the shared Main Text KV pool
-used by active requests and retained prefixes; `auto` resolves the largest legal capacity at
-startup from the memory remaining after weights while keeping 1 GiB of sizing headroom. Explicit
-capacities remain fixed for the process lifetime.
-
-## Documentation
-
-- [Documentation index](docs/README.md)
-- [CLI](docs/cli.md)
-- [HTTP serving](docs/serving.md), including TypeSafe System One
-- [Decision arcade](docs/decision-arcade.md)
-- [Windows app](docs/windows-app.md)
-- [Performance](docs/performance.md)
-- [Perplexity evaluation](docs/perplexity.md)
-- [Weight conversion and custom recipes](docs/weight-conversion.md)
-- [Resource scheduling and context cache](docs/maintainer/resource-scheduling-and-context-cache.md)
-- [Serve TTFT benchmark](tools/bench/ttft/)
-- [CLI examples](examples/cli/)
-- [Contributing](CONTRIBUTING.md)
-
-Run the relevant `--help` for the exact current option contract.
+Run the relevant executable's `--help` for exact options and defaults.
 
 ## Upstream and licensing
 
-The original inference engine and its published Qwen artifacts are the work of
-[Neroued/ninfer](https://github.com/Neroued/ninfer) and its contributors; upstream's own README
-describes how to support that project. This repository maintains the workstation and
-application-serving changes described above; upstream benchmarks and model cards retain their own
-provenance.
+The original engine and upstream Qwen artifacts are the work of
+[Neroued/ninfer](https://github.com/Neroued/ninfer) and its contributors. This fork maintains the
+Windows, workstation, Flash-Next, and application-serving additions; upstream measurements retain
+their own provenance.
 
-NInfer is licensed under the [Apache License 2.0](LICENSE).
-
-The published artifacts are derived from
-[Qwen/Qwen3.6-27B](https://huggingface.co/Qwen/Qwen3.6-27B),
-[Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B), and
-[Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B). The Qwen3.6-27B NVFP4 artifact
-also uses the fixed packed weights from
-[rdtand/Qwen3.6-27B-PrismaSCOUT-Blackwell-NVFP4-BF16-vllm](https://huggingface.co/rdtand/Qwen3.6-27B-PrismaSCOUT-Blackwell-NVFP4-BF16-vllm).
-The Qwen3.8-27B NVFP4 artifact also uses the fixed mixed FP8/NVFP4 weights from
-[unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4). These source
-repositories are distributed under Apache-2.0. Vendored dependencies retain their own license files
-under `third_party/`.
+NInfer is licensed under [Apache-2.0](LICENSE). Model artifacts retain their source licenses and
+provenance; see their model cards and conversion references. Vendored dependencies retain their
+license files under `third_party/`.

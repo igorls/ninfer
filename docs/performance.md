@@ -49,11 +49,12 @@ and [Qwen3.8 completion outcomes](performance/qwen3.8-27b.md#completion-outcomes
 - [Serving benchmark runners](../tools/bench/README.md#serving-corpus-benchmark): usage and local report files.
 - [Engine and Op benchmarks](../bench/README.md): their separate measurement scopes and commands.
 - [Capability evaluation](../eval/README.md): evaluation workflow; published scores live in the
-  [model cards](README.md#model-artifacts), with a [README summary](../README.md#evaluation).
+  [model cards](README.md#model-artifacts), with a [README results index](../README.md#performance-and-evaluation).
 - [Perplexity](perplexity.md): offline causal-scoring measurement and comparison rules.
 
-Model pages are the detailed result authority. README and model-card performance tables are
-excerpts linked to those pages; update them together when replacing an applicable measurement.
+Model pages are the detailed result authority. Model-card performance tables are excerpts linked
+to those pages; update them together when replacing an applicable measurement. The README links
+to the result records and their qualification scope.
 
 ## Flash-Next v3 on Colab G4 (2026-10-04)
 
