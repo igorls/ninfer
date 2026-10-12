@@ -517,17 +517,59 @@ button.cdu-tab[aria-pressed=true]{color:var(--ink);border-color:var(--ink)}
 .msg-state{color:var(--dim)}
 .msg-live{color:var(--green)}
 .msg-body,.msg-reasoning,.msg-images{max-width:100ch}
-.msg-body{font:14px/1.6 var(--f-text);color:var(--ink);white-space:pre-wrap;overflow-wrap:anywhere}
-.msg-body code{padding:0 3px;border-radius:2px;background:var(--glass-2);font:12.5px var(--f-mono)}
-.msg-code{margin:6px 0;padding:8px 10px;overflow:auto;background:var(--glass-2);border:1px solid var(--well-edge);border-radius:4px;color:var(--well-ink);font:12.5px/1.5 var(--f-mono);white-space:pre}
-.msg-code code{padding:0;background:none}
-.msg-code-lang{display:block;margin-bottom:4px;font:600 10.5px var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
-.msg-h{display:inline-block;margin-top:4px}
+.msg-body{font:14px/1.6 var(--f-text);color:var(--ink);overflow-wrap:anywhere}
+/* Markdown inside a message (.md): blocks are separated by one small gap, never by blank lines.
+   Gaps are in em so they follow the text size of the body (14px) and the reasoning (13px). */
+.md>*{margin:0}
+.md>*+*{margin-top:.5em}
+.md-user p{white-space:pre-wrap}
+.md strong{font-weight:700}
+.md del{color:var(--dim);text-decoration-thickness:1px}
+.md a{color:var(--cyan);text-decoration-thickness:1px;text-underline-offset:2px}
+.md code{font-family:var(--f-mono);font-size:.89em;padding:.05em .3em;border-radius:3px;background:var(--glass-2);box-shadow:inset 0 0 0 1px var(--well-edge)}
+.md-h{font-weight:650;line-height:1.3;color:var(--ink)}
+.md>.md-h{margin-top:.85em}
+.md>.md-h:first-child{margin-top:0}
+.md>.md-h+*{margin-top:.3em}
+.md>.md-h+.md-h{margin-top:.5em}
+.md-h1{font-size:1.4em}
+.md-h2{font-size:1.2em}
+.md-h3{font-size:1.07em}
+.md-h5,.md-h6{font-size:.93em}
+.md-h6{color:var(--dim)}
+.md ul,.md ol{padding-left:1.45em}
+.md ul{list-style:disc}
+.md ul ul{list-style:circle}
+.md ul ul ul{list-style:square}
+.md ol{list-style:decimal}
+.md li::marker{color:var(--faint)}
+.md ol>li::marker{font-variant-numeric:tabular-nums}
+.md li+li{margin-top:.2em}
+.md li>*+*{margin-top:.3em}
+.md li>ul,.md li>ol{margin-top:.2em}
+.md li.md-task-item{position:relative;list-style:none}
+.md-task{position:absolute;left:-1.45em;top:.3em;width:.95em;height:.95em;border:1.5px solid var(--faint);border-radius:2px}
+.md-task.done::after{content:"";position:absolute;left:.25em;top:.02em;width:.28em;height:.55em;border:solid var(--ink);border-width:0 1.6px 1.6px 0;transform:rotate(40deg)}
+:where(.md) blockquote{margin:0}
+.md blockquote{padding-left:11px;border-left:2px solid var(--faint);color:var(--dim)}
+.md blockquote>*+*{margin-top:.5em}
+.md hr{height:0;margin:.8em 0;border:0;border-top:1px solid var(--rule)}
+.md-code{background:var(--glass-2);border:1px solid var(--well-edge);border-radius:4px;color:var(--well-ink)}
+.md-code-lang{display:block;padding:4px 10px 0;font:600 10.5px/1.2 var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
+.md-code pre{margin:0;padding:6px 10px 8px;overflow-x:auto;font:12.5px/1.5 var(--f-mono);white-space:pre;overflow-wrap:normal;tab-size:4}
+.md-code code{padding:0;border-radius:0;background:none;box-shadow:none;font:inherit}
+.md-table{max-width:100%;overflow-x:auto}
+.md-table table{border-collapse:collapse;font-size:13px;line-height:1.45;font-variant-numeric:tabular-nums;overflow-wrap:normal;word-break:normal}
+.md-table th,.md-table td{padding:3px 14px 3px 0;border-bottom:1px solid var(--rule-2);text-align:left;vertical-align:top}
+.md-table th{font-weight:650;border-bottom-color:var(--rule)}
+.md-table :is(th,td):last-child{padding-right:2px}
+.md-table .md-al-r{text-align:right}
+.md-table .md-al-c{text-align:center}
 .msg-images{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px}
 .msg-images img{max-width:220px;max-height:140px;border:1px solid var(--rule);border-radius:3px}
 .msg-reasoning{margin:2px 0 6px;color:var(--dim)}
 .msg-reasoning summary{width:fit-content;cursor:pointer;font:600 11.5px var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--cyan)}
-.msg-reasoning-body{max-height:40vh;overflow:auto;margin-top:4px;padding-left:10px;border-left:1px dotted var(--rule);font-size:13px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
+.msg-reasoning-body{max-height:40vh;overflow:auto;margin-top:4px;padding-left:10px;border-left:1px dotted var(--rule);font-size:13px;line-height:1.55;overflow-wrap:anywhere}
 .msg-progress{display:flex;align-items:center;gap:10px;margin:2px 0 4px;font-size:12px;color:var(--ice);font-variant-numeric:tabular-nums}
 .msg-bar{flex:none;width:160px;height:5px;background:var(--track);box-shadow:inset 0 0 0 1px var(--track-edge)}
 .msg-bar span{display:block;height:100%;background:var(--ice);transition:width .25s ease-out}
@@ -554,7 +596,8 @@ button.cdu-tab[aria-pressed=true]{color:var(--ink);border-color:var(--ink)}
 .chat-composer.drop .chat-input{border-color:var(--cyan)}
 .chat-keys{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .chat-keys .cfg-status{flex:1}
-.chat-attachments{display:flex;flex-wrap:wrap;gap:8px}
+)HTML"
+R"HTML(.chat-attachments{display:flex;flex-wrap:wrap;gap:8px}
 .chat-thumb{display:flex;flex-direction:column;align-items:flex-start;gap:4px}
 .chat-thumb img{height:64px;border:1px solid var(--rule);border-radius:3px}
 @media (max-width:880px){
@@ -588,8 +631,7 @@ button.cdu-tab[aria-pressed=true]{color:var(--ink);border-color:var(--ink)}
 .cfg-field{min-width:0}
 .cfg-field-top{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:4px}
 .cfg-label{font-size:11.5px;font-weight:600;color:var(--ink);text-transform:uppercase;letter-spacing:.05em}
-)HTML"
-R"HTML(.cfg-flag{font:11px var(--f-mono);color:var(--faint);overflow-wrap:anywhere;max-width:50%;text-align:right}
+.cfg-flag{font:11px var(--f-mono);color:var(--faint);overflow-wrap:anywhere;max-width:50%;text-align:right}
 .cfg-input,.cfg-select{width:100%}
 .cfg-select{color:var(--cyan)}
 .cfg-select option{background:var(--glass-2);color:var(--ink)}
@@ -719,7 +761,8 @@ dialog p{margin:12px 0 16px;font-size:13px;color:var(--dim)}
   .lsk-l::before,.lsk-r::after{display:none}
   .glareshield{flex-wrap:wrap;gap:8px 10px;padding:7px 8px}
   .brand-name{display:none}
-  .fkeys{order:3;flex-basis:100%;gap:4px}
+)HTML"
+R"HTML(  .fkeys{order:3;flex-basis:100%;gap:4px}
   .fkeys .fkey{flex:1;padding:0 6px}
   .fma{grid-template-columns:repeat(2,minmax(0,1fr))}
   .fma-col{border-left:0;border-top:1px solid var(--rule)}
@@ -756,8 +799,7 @@ dialog p{margin:12px 0 16px;font-size:13px;color:var(--dim)}
   .alert-title,.alert-text{grid-column:2;white-space:normal}
   .traffic .s,.traffic .v{white-space:normal}
   .gpu-apps{flex-direction:column;gap:2px}
-)HTML"
-R"HTML(  .finding,.finding.compact{grid-template-columns:1fr}
+  .finding,.finding.compact{grid-template-columns:1fr}
   .finding-sev{grid-row:auto}
   .finding.compact .finding-body{white-space:normal}
   .cdu{padding:10px 12px 14px}
@@ -905,7 +947,8 @@ R"HTML(  .finding,.finding.compact{grid-template-columns:1fr}
       <p id="memory-guidance" class="pad-line amber" hidden></p>
     </section>
 
-    <section class="display display-rates" aria-labelledby="throughput-title">
+)HTML"
+R"HTML(    <section class="display display-rates" aria-labelledby="throughput-title">
       <header class="display-head">
         <h2 id="throughput-title">Rates</h2>
         <span id="kpi-thr-window" class="display-source">—</span>
@@ -935,8 +978,7 @@ R"HTML(  .finding,.finding.compact{grid-template-columns:1fr}
       <header class="display-head">
         <h2 id="clients-title">Calling apps</h2>
         <span id="clients-sub" class="display-source">No requests observed yet</span>
-)HTML"
-R"HTML(        <span id="clients-count" class="display-range">—</span>
+        <span id="clients-count" class="display-range">—</span>
       </header>
       <div class="traffic-scroll">
         <table class="traffic">
@@ -1022,7 +1064,8 @@ R"HTML(        <span id="clients-count" class="display-range">—</span>
       </fieldset>
       <fieldset class="chat-group chat-group-wide">
         <legend>Extra request JSON</legend>
-        <label class="chat-setting chat-setting-wide"><span class="sr-only">Extra request JSON</span><textarea id="chat-extra" class="cdu-input chat-text chat-code" rows="3" spellcheck="false" placeholder='Merged into the request last, so it can set or override any field, for example {"tool_choice": "none"}'></textarea><span id="chat-extra-state" class="cfg-help"></span></label>
+)HTML"
+R"HTML(        <label class="chat-setting chat-setting-wide"><span class="sr-only">Extra request JSON</span><textarea id="chat-extra" class="cdu-input chat-text chat-code" rows="3" spellcheck="false" placeholder='Merged into the request last, so it can set or override any field, for example {"tool_choice": "none"}'></textarea><span id="chat-extra-state" class="cfg-help"></span></label>
         <div class="chat-setting chat-setting-wide chat-settings-keys"><button type="button" id="chat-params-reset" class="key key-small">Reset to engine defaults</button></div>
       </fieldset>
     </div>
@@ -1043,8 +1086,7 @@ R"HTML(        <span id="clients-count" class="display-range">—</span>
         <span id="chat-hint" class="cfg-status"></span>
         <button type="button" id="chat-inspect" class="key key-small" title="Open this conversation's next request on the API page">Open in API</button>
         <button type="submit" id="chat-send" class="key key-insert">Send<span aria-hidden="true">&gt;</span></button>
-)HTML"
-R"HTML(        <button type="button" id="chat-stop" class="key key-stop" hidden>Stop</button>
+        <button type="button" id="chat-stop" class="key key-stop" hidden>Stop</button>
       </div>
     </form>
   </div>
@@ -1173,7 +1215,8 @@ R"HTML(        <button type="button" id="chat-stop" class="key key-stop" hidden>
       <pre id="dt-capacity-text" class="cdu-pre">No capacity report is available yet.</pre>
     </section>
 
-    <section class="diag-page" data-diag-page="accel" aria-label="Generation acceleration" hidden>
+)HTML"
+R"HTML(    <section class="diag-page" data-diag-page="accel" aria-label="Generation acceleration" hidden>
       <p class="cdu-help">Speculative decoding drafts tokens ahead and checks them against the model. It is optional; a disabled backend is not an error.</p>
       <dl class="cdu-facts">
         <div><dt>Backend</dt><dd id="dt-mtp-backend">—</dd></div>
@@ -1191,8 +1234,7 @@ R"HTML(        <button type="button" id="chat-stop" class="key key-stop" hidden>
 
     <section class="diag-page diag-experts" data-diag-page="experts" aria-labelledby="experts-title" hidden>
       <h2 id="experts-title" class="sr-only">Expert use</h2>
-)HTML"
-R"HTML(      <p class="cdu-help explain-only">Each text layer of the model holds a pool of experts, small sub-networks, and every token is sent to only the few best suited in each layer. This map shows how busy each expert has been lately: brighter is busier, scaled inside its own layer, and the counts fade with the half-life shown so the picture follows what the engine is doing now. Decode is the engine writing answers, including the speculative drafts and their checks; Prefill is it reading prompts. By expert keeps every expert in its own column, so a bright column is an expert that stays busy. Sorted lines each layer up from busiest to quietest, so the slope shows how lopsided the use is: a steep fall means a few experts do most of the work. The bars at the right give, per layer, how many experts it takes to cover 80% of that layer's activity.</p>
+      <p class="cdu-help explain-only">Each text layer of the model holds a pool of experts, small sub-networks, and every token is sent to only the few best suited in each layer. This map shows how busy each expert has been lately: brighter is busier, scaled inside its own layer, and the counts fade with the half-life shown so the picture follows what the engine is doing now. Decode is the engine writing answers, including the speculative drafts and their checks; Prefill is it reading prompts. By expert keeps every expert in its own column, so a bright column is an expert that stays busy. Sorted lines each layer up from busiest to quietest, so the slope shows how lopsided the use is: a steep fall means a few experts do most of the work. The bars at the right give, per layer, how many experts it takes to cover 80% of that layer's activity.</p>
       <div id="ex-live" class="ex-live" hidden>
         <div class="ex-bar">
           <div class="ex-tabs" role="group" aria-label="Activity shown">
@@ -1291,7 +1333,8 @@ R"HTML(      <p class="cdu-help explain-only">Each text layer of the model holds
     <section class="settings-page" data-settings-page="presets" id="model-catalog" aria-labelledby="catalog-title" hidden>
       <header class="page-head"><a class="prompt" href="#settings"><span aria-hidden="true">&lt;</span>Index</a><h2 id="catalog-title">Model presets</h2><button id="catalog-refresh" class="key key-small">Refresh</button></header>
       <p id="catalog-current" class="cdu-help">Checking the current model…</p>
-      <fieldset id="catalog-options" class="presets" aria-label="Model to load"></fieldset>
+)HTML"
+R"HTML(      <fieldset id="catalog-options" class="presets" aria-label="Model to load"></fieldset>
       <p class="cdu-small">Artifact size is disk space, not GPU memory use. A file can be available and still need different launch settings.</p>
       <div class="cfg-actions">
         <span id="catalog-hint" class="cfg-status"></span>
@@ -1309,8 +1352,7 @@ R"HTML(      <p class="cdu-help explain-only">Each text layer of the model holds
           <span class="cdu-field-row"><input id="reserve-amount" class="cdu-input cdu-input-num" type="number" min="1" max="64" step="1" value="8" aria-describedby="reserve-preview-note"><span class="cdu-unit">GiB</span></span>
           <input id="reserve-slider" class="reserve-slider" type="range" min="1" max="64" step="1" value="8" aria-label="Free GPU memory target in GiB" aria-describedby="reserve-preview-note">
           <div class="reserve-scale" aria-hidden="true"><span>More engine capacity</span><span>More room for apps</span></div>
-)HTML"
-R"HTML(          <div class="reserve-preview" aria-hidden="true"><span id="reserve-engine-preview"></span><span id="reserve-free-preview"></span></div>
+          <div class="reserve-preview" aria-hidden="true"><span id="reserve-engine-preview"></span><span id="reserve-free-preview"></span></div>
         </div>
         <div class="reserve-facts">
           <p id="reserve-current" class="cdu-data">Checking the running reserve…</p>
@@ -1496,7 +1538,8 @@ R"HTML(          <div class="reserve-preview" aria-hidden="true"><span id="reser
     document.body.classList.toggle('on-monitor', activeView === 'overview');
     let title = viewLabels[activeView];
     if (activeView === 'diagnostics') {
-      diagPage = diagPages.includes(sub) ? sub : 'findings';
+)HTML"
+R"HTML(      diagPage = diagPages.includes(sub) ? sub : 'findings';
       document.querySelectorAll('[data-diag-page]').forEach(el => { el.hidden = el.dataset.diagPage !== diagPage; });
       document.querySelectorAll('[data-diag]').forEach(el => {
         if (el.dataset.diag === diagPage) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
@@ -1530,8 +1573,7 @@ R"HTML(          <div class="reserve-preview" aria-hidden="true"><span id="reser
   // ---------------------------------------------------------------------
   // Connection and engine controls
   // ---------------------------------------------------------------------
-)HTML"
-R"HTML(  function setConnection(value) {
+  function setConnection(value) {
     connected = value;
     liveDot.className = 'lamp' + (value ? '' : ' offline');
     liveLabel.textContent = value ? 'Live' : 'Reconnecting…';
@@ -1698,7 +1740,8 @@ R"HTML(  function setConnection(value) {
     if (!data.models.length) {
       const none = document.createElement('p'); none.className = 'cdu-small';
       none.textContent = 'No presets are configured. Add model presets to the supervisor configuration to switch models here.';
-      catalogOptions.append(none);
+)HTML"
+R"HTML(      catalogOptions.append(none);
     }
     data.models.forEach((model, index) => {
       const label = document.createElement('label');
@@ -1721,8 +1764,7 @@ R"HTML(  function setConnection(value) {
       label.append(detail, artifact);
       catalogOptions.append(label);
     });
-)HTML"
-R"HTML(    // The catalog describes launch args; health and saved active_model do not prove model identity.
+    // The catalog describes launch args; health and saved active_model do not prove model identity.
     const active = data.models.filter(m => m.active).map(m => m.name || m.id).join(', ');
     $('catalog-current').textContent = 'Current launch: ' + (active || data.active_artifact_label || 'not identified') + '. Select another preset, then load it.';
     $('sum-presets').textContent = active || data.active_artifact_label || 'not identified';
@@ -1904,7 +1946,8 @@ R"HTML(    // The catalog describes launch args; health and saved active_model d
   }
 
   function memoryScale(s) {
-    const total = (s.device_memory || {}).total_bytes || 0;
+)HTML"
+R"HTML(    const total = (s.device_memory || {}).total_bytes || 0;
     let max = total;
     const used = (s.series || {}).nvidia_used_bytes || [];
     for (const u of used) if (u > max) max = u;
@@ -1937,8 +1980,7 @@ R"HTML(    // The catalog describes launch args; health and saved active_model d
     const st = slews.get(key);
     if (!st || reducedMotion || document.hidden) { slews.set(key, {from: target, to: target, start: now, v: target}); return target; }
     if (target !== st.to) { st.from = st.v; st.to = target; st.start = now; }
-)HTML"
-R"HTML(    const p = Math.min(1, (now - st.start) / SLEW_MS);
+    const p = Math.min(1, (now - st.start) / SLEW_MS);
     st.v = p < 1 ? st.from + (st.to - st.from) * easeOut(p) : st.to;
     if (p < 1 && !slewFrame) slewFrame = requestAnimationFrame(() => { slewFrame = 0; drawAll(); });
     return st.v;
@@ -2122,7 +2164,8 @@ R"HTML(    const p = Math.min(1, (now - st.start) / SLEW_MS);
       c.beginPath(); c.moveTo(x, PAD_TOP); c.lineTo(x, H - PAD_BOTTOM); c.stroke();
       c.fillStyle = C.ink; c.beginPath(); c.arc(x, yOf(u[i]), 3.5, 0, Math.PI * 2); c.fill();
       const ev = eventNear(ser, cursorT, win.t1 - win.t0);
-      memTip.innerHTML = `<span class="t">${esc(relTime(win.t1 - t[i]))}</span> · ${esc(gib(u[i]))}${ev ? ` · <span class="${/up/.test(ev.kind) ? 'green' : 'amber'}">${esc(ev.label || ev.kind)}</span>` : ''}`;
+)HTML"
+R"HTML(      memTip.innerHTML = `<span class="t">${esc(relTime(win.t1 - t[i]))}</span> · ${esc(gib(u[i]))}${ev ? ` · <span class="${/up/.test(ev.kind) ? 'green' : 'amber'}">${esc(ev.label || ev.kind)}</span>` : ''}`;
       memTip.style.display = 'block';
       memTip.style.left = (x > W * .6 ? Math.max(4, x - memTip.offsetWidth - 10) : x + 10) + 'px';
     } else memTip.style.display = 'none';
@@ -2154,8 +2197,7 @@ R"HTML(    const p = Math.min(1, (now - st.start) / SLEW_MS);
     const {c, W, H} = prep(rateTape);
     const plotH = H - PAD_TOP - PAD_BOTTOM;
     if (plotH <= 10) return;
-)HTML"
-R"HTML(    const {decMax, steps} = rateScales(s, plotH);
+    const {decMax, steps} = rateScales(s, plotH);
     // Re-ranging slides the tape: each figure keeps its exact value and travels to its new
     // place, so a changed scale reads as the same tape moving rather than a new one.
     const shownMax = slew('rate.decMax', decMax);
@@ -2335,7 +2377,8 @@ R"HTML(    const {decMax, steps} = rateScales(s, plotH);
     canvas.addEventListener('mouseleave', () => { cursorT = null; drawAll(); });
     canvas.addEventListener('keydown', e => {
       const win = lastState && timeWindow(lastState);
-      if (!win) return;
+)HTML"
+R"HTML(      if (!win) return;
       const step = (win.t1 - win.t0) / 100;
       if (cursorT == null) cursorT = win.t1;
       if (e.key === 'ArrowLeft') cursorT = Math.max(win.t0, cursorT - step);
@@ -2365,8 +2408,7 @@ R"HTML(    const {decMax, steps} = rateScales(s, plotH);
     const focused = document.activeElement && document.activeElement.matches('.client-evidence') ? document.activeElement.dataset.client : null;
     const mins = reqs.clients_window_minutes || 15;
     const restarts = reqs.client_engine_starts || 0;
-)HTML"
-R"HTML(    $('clients-count').textContent = clients.length ? `${clients.length} app${clients.length === 1 ? '' : 's'}` : '—';
+    $('clients-count').textContent = clients.length ? `${clients.length} app${clients.length === 1 ? '' : 's'}` : '—';
     $('clients-sub').textContent = `Last ${mins} min${restarts ? ` · ${restarts} engine start${restarts === 1 ? '' : 's'}` : ''}${reqs.client_window_limited ? ' · observation limit reached' : ''}`;
     if (!clients.length) {
       list.innerHTML = '<tr class="traffic-empty"><td colspan="5">No app has sent a request in the last ' + mins + ' minutes. Apps appear here as they call the engine.</td></tr>';
@@ -2457,14 +2499,14 @@ R"HTML(    $('clients-count').textContent = clients.length ? `${clients.length} 
       const cfg = e.config || {}, req = e.requests || {}, kv = e.kv || {}, sch = e.scheduler || {};
       if (it.availability === 'unavailable') return {title:'Capacity limits are not measurable yet', body:cfg.max_context ? 'The engine has not reported its memory use yet. This appears after the first activity sample.' : 'The log does not record this engine start, so traffic cannot be compared with its limits.'};
       const actions = {large_prompt:'A request came within 10% of the context limit. Raise Max context in Request capacity if GPU memory allows, or shorten long conversations.', kv_admission:'Requests waited because the conversation memory was full. Raise KV capacity if GPU memory allows, otherwise lower Max context to bound memory growth per request.', lanes_full:'Requests waited because every concurrent slot was busy. Raise Max concurrency only if KV capacity and GPU memory leave room for another request.', cache_churn:'KV pages moved to host memory to make room. Restoring them adds transfer work. Raise KV capacity if GPU memory allows.', preempted:'Requests were paused to make room and needed recovery. Raise KV capacity if GPU memory allows, or reduce concurrent demand.'};
-      return {title:'How close you are to the context and memory limits', body:`The largest request used ${pct(req.largest_context_ratio)} of the ${(cfg.max_context || 0).toLocaleString()}-token context limit across ${req.count || 0} requests. Conversation memory peaked at ${pct(kv.utilization_high_water)} of capacity${kv.includes_retained_checkpoints ? ' (including saved conversation state)' : ''}, with up to ${sch.peak_running || 0} of ${cfg.max_concurrency || 0} requests running at once.`, action:actions[e.kind] || ''};
+)HTML"
+R"HTML(      return {title:'How close you are to the context and memory limits', body:`The largest request used ${pct(req.largest_context_ratio)} of the ${(cfg.max_context || 0).toLocaleString()}-token context limit across ${req.count || 0} requests. Conversation memory peaked at ${pct(kv.utilization_high_water)} of capacity${kv.includes_retained_checkpoints ? ' (including saved conversation state)' : ''}, with up to ${sch.peak_running || 0} of ${cfg.max_concurrency || 0} requests running at once.`, action:actions[e.kind] || ''};
     }
     if (id === 'prefix.reuse_mix') return {title:'Reusing earlier conversation text', body:e.multi_turn_prompt_tokens > 0 ? `${((e.multi_turn_hit_ratio || 0) * 100).toFixed(0)}% of conversation prompt tokens were reused in the available log. Reuse can make follow-up responses start sooner.` : 'No multi-turn prompt samples are available yet. Reuse can make follow-up responses start sooner.'};
     if (id === 'client.narrated_tool_intent') return {title:'Tool behavior needs a conversation sample', body:'The log records whether tools were provided, but not what the model said. It cannot explain a promised tool action that did not happen.'};
     if (id === 'client.content_fields') return {title:'Reply text is not stored in this log', body:'To investigate an empty or unexpected reply, compare the conversation in your app with the engine log.'};
     if (id === 'vram.admin') return {title:'Detailed engine memory data is unavailable', body:'The supervisor could not retrieve the engine’s internal memory report. GPU-wide readings may still be available.', action:'If this persists after the engine is ready, check the API connection and authentication settings.'};
-)HTML"
-R"HTML(    if (id === 'prefix.reuse_collapsed' || id === 'prefix.multiturn_root') return {title:'Earlier conversation text is being processed again', body:'The logs show repeated work instead of reusing conversation state. Follow-up responses may take longer.', action:'Copy the engine log before restarting so the issue can be investigated.'};
+    if (id === 'prefix.reuse_collapsed' || id === 'prefix.multiturn_root') return {title:'Earlier conversation text is being processed again', body:'The logs show repeated work instead of reusing conversation state. Follow-up responses may take longer.', action:'Copy the engine log before restarting so the issue can be investigated.'};
     if (id === 'client.output_limit_while_thinking') return {title:'Some responses reached their length limit', body:'Requests with reasoning enabled stopped at the output limit. The log cannot confirm whether your app received a visible answer.', action:'Try a higher response-token limit in your app and compare the result.'};
     return fallback;
   }
@@ -2585,7 +2627,8 @@ R"HTML(    if (id === 'prefix.reuse_collapsed' || id === 'prefix.multiturn_root'
     const key = JSON.stringify([processes, (s.engine || {}).pid, gpuAppsExpanded]);
     if (key === gpuAppsKey) return;
     gpuAppsKey = key;
-    const list = $('gpu-app-list');
+)HTML"
+R"HTML(    const list = $('gpu-app-list');
     list.replaceChildren();
     if (!processes.ok) { list.textContent = processes.error || 'Waiting for Windows GPU readings…'; return; }
     const groups = new Map();
@@ -2613,8 +2656,7 @@ R"HTML(    if (id === 'prefix.reuse_collapsed' || id === 'prefix.multiturn_root'
     }
   }
   function changeReserve(value) { reserveDraft = value; renderMemoryControls(lastState || {}); updateModelControls(); drawAll(); }
-)HTML"
-R"HTML(  reserveSlider.oninput = () => { reserveAmount.value = reserveSlider.value; changeReserve(Number(reserveSlider.value)); };
+  reserveSlider.oninput = () => { reserveAmount.value = reserveSlider.value; changeReserve(Number(reserveSlider.value)); };
   reserveAmount.oninput = () => changeReserve(reserveAmount.value === '' ? NaN : Number(reserveAmount.value));
   $('reserve-default').onclick = () => changeReserve(0);
   $('reserve-discard').onclick = () => { reserveDraft = null; renderMemoryControls(lastState || {}); updateModelControls(); drawAll(); };
@@ -2747,7 +2789,8 @@ R"HTML(  reserveSlider.oninput = () => { reserveAmount.value = reserveSlider.val
     $('dt-mtp-window').textContent = reqs.mtp_draft_window ? `${reqs.mtp_draft_window} draft token${reqs.mtp_draft_window === 1 ? '' : 's'}` : '—';
     $('kpi-mtp-badge').textContent = specOff ? 'Off' : specBackend.toUpperCase();
     if (specOff) {
-      $('kpi-mtp-pct').textContent = '—'; $('kpi-mtp-ratio').textContent = 'not configured'; $('kpi-mtp-fallbacks').textContent = '—'; $('dt-mtp-rate-badge').textContent = 'Off';
+)HTML"
+R"HTML(      $('kpi-mtp-pct').textContent = '—'; $('kpi-mtp-ratio').textContent = 'not configured'; $('kpi-mtp-fallbacks').textContent = '—'; $('dt-mtp-rate-badge').textContent = 'Off';
     } else if (!reqs.mtp_drafted) {
       $('kpi-mtp-pct').textContent = '—'; $('kpi-mtp-ratio').textContent = 'no drafts yet'; $('kpi-mtp-fallbacks').textContent = '—'; $('dt-mtp-rate-badge').textContent = 'Idle';
     }
@@ -2770,8 +2813,7 @@ R"HTML(  reserveSlider.oninput = () => { reserveAmount.value = reserveSlider.val
         bars[idx].parentElement.title = `Position ${idx + 1}: ${pVal} accepted (${((pVal / (reqs.mtp_accepted || 1)) * 100).toFixed(0)}%)`;
       });
     }
-)HTML"
-R"HTML(    $('dt-reuse-mix').textContent = `Seed ${reqs.reuse_seed || 0} · Append ${reqs.reuse_append || 0} · Reset ${reqs.reuse_full_reset || 0}`;
+    $('dt-reuse-mix').textContent = `Seed ${reqs.reuse_seed || 0} · Append ${reqs.reuse_append || 0} · Reset ${reqs.reuse_full_reset || 0}`;
 
     // Preserve selection and scroll position when the log has not changed.
     const nextLog = s.log_tail || '';
@@ -2957,7 +2999,8 @@ R"HTML(    $('dt-reuse-mix').textContent = `Seed ${reqs.reuse_seed || 0} · Appe
     const raw = el ? el.value : ((cfgData && cfgData.params || {}).max_concurrency || '');
     if (el && el.value === '') return {n: 1, explicit: false};
     if (/^\d+$/.test(String(raw))) { const n = Number(raw); if (n >= 1 && n <= 8) return {n, explicit: true}; }
-    return {n: 1, explicit: false};
+)HTML"
+R"HTML(    return {n: 1, explicit: false};
   }
   let capacityPairBusy = false;
   function updateCapacityPreview() {
@@ -2982,8 +3025,7 @@ R"HTML(    $('dt-reuse-mix').textContent = `Seed ${reqs.reuse_seed || 0} · Appe
       const usable = Math.min(fit, lanes.n);
       for (let i = 0; i < usable; i++) marks.push('fit');
       for (let i = usable; i < lanes.n; i++) marks.push('share');
-)HTML"
-R"HTML(      if (fit < 1) note = 'This pool cannot hold one request at ' + shortTokens(ctx.n) + ' tokens. Raise KV capacity or lower max context.';
+      if (fit < 1) note = 'This pool cannot hold one request at ' + shortTokens(ctx.n) + ' tokens. Raise KV capacity or lower max context.';
       else if (fit >= lanes.n) note = 'This pool holds ' + fit + ' full-length request' + (fit === 1 ? '' : 's') + ' at ' + shortTokens(ctx.n) + '. ' + laneWords + ' can each take a full-length request. 8 is the Engine maximum, not GPU memory.';
       else note = 'This pool holds ' + fit + ' full-length request' + (fit === 1 ? '' : 's') + ' at ' + shortTokens(ctx.n) + '. ' + laneWords + ' share the pool, so extra concurrent requests must be shorter. 8 is the Engine maximum.';
     } else if (kv.kind === 'num') {
@@ -3127,7 +3169,8 @@ R"HTML(      if (fit < 1) note = 'This pool cannot hold one request at ' + short
             if (!draft || Number(draft) > limit) cfgEdit('params', 'draft_tokens', String(input.value === 'mtp' ? limit : 7), (cfgData.params || {}).draft_tokens || '');
           }
           renderConfig();
-          $('param-spec').focus();
+)HTML"
+R"HTML(          $('param-spec').focus();
         }
       };
       wrap.appendChild(input);
@@ -3152,8 +3195,7 @@ R"HTML(      if (fit < 1) note = 'This pool cannot hold one request at ' + short
     help.textContent = (spec.kind === 'int' || spec.kind === 'int_or_auto') ? spec.help + ' Range ' + spec.min + '-' + spec.max + '.' : spec.help;
     if (spec.key === 'max_context' || spec.key === 'kv_capacity') {
       help.textContent += ' Pick a common size or enter an exact count. K = 1,024 tokens; M = 1,048,576.';
-)HTML"
-R"HTML(      help.textContent += spec.key === 'kv_capacity' ? ' This is the shared pool. It must cover one full-length request and cannot exceed max concurrency × max context. Engine default omits the flag and follows max context. Auto sizes from free memory.' : ' Cannot exceed an explicit KV pool; enlarge the pool first.';
+      help.textContent += spec.key === 'kv_capacity' ? ' This is the shared pool. It must cover one full-length request and cannot exceed max concurrency × max context. Engine default omits the flag and follows max context. Auto sizes from free memory.' : ' Cannot exceed an explicit KV pool; enlarge the pool first.';
     }
     wrap.appendChild(help);
     return wrap;
@@ -3313,7 +3355,8 @@ R"HTML(      help.textContent += spec.key === 'kv_capacity' ? ' This is the shar
   function renderConfig() {
     if (!cfgData || activeView !== 'settings' || !tabLabels[cfgTab] || cfgTab === 'presets' || cfgTab === 'reserve') { renderSettingsIndex(); return; }
     cfgBody.innerHTML = '';
-    const help = {network:'Set the address apps use to reach your engine. Most local setups keep these values.', api:'Control API authentication and request logging.', capacity:'Size the shared KV pool first. Max context is how long one request may be inside that pool. Max concurrency chooses how many of the Engine’s 8 lanes may be active.', memory:'Advanced: these settings can change both memory use and generated responses.', features:'Advanced: available options depend on the model and engine build.', raw:'Read-only information about the model and the command used to launch it.', frontends:'Serve a web app, such as llama.cpp’s web UI, on its own local port beside your engine’s API. Inserting applies the change right away; the engine keeps running.'}[cfgTab];
+)HTML"
+R"HTML(    const help = {network:'Set the address apps use to reach your engine. Most local setups keep these values.', api:'Control API authentication and request logging.', capacity:'Size the shared KV pool first. Max context is how long one request may be inside that pool. Max concurrency chooses how many of the Engine’s 8 lanes may be active.', memory:'Advanced: these settings can change both memory use and generated responses.', features:'Advanced: available options depend on the model and engine build.', raw:'Read-only information about the model and the command used to launch it.', frontends:'Serve a web app, such as llama.cpp’s web UI, on its own local port beside your engine’s API. Inserting applies the change right away; the engine keeps running.'}[cfgTab];
     document.querySelector('[data-settings-page="config"] .cfg-actions').hidden = cfgTab === 'frontends' || cfgTab === 'raw';
     $('settings-section-title').textContent = tabLabels[cfgTab];
     $('settings-section-help').textContent = help;
@@ -3322,8 +3365,7 @@ R"HTML(      help.textContent += spec.key === 'kv_capacity' ? ' This is the shar
     if (cfgTab === 'network') {
       cfgBody.appendChild(plainField('engine', 'engine_host', 'Engine host', eng.engine_host, {help: 'Address the engine listens on. The supervisor polls health here.'}));
       cfgBody.appendChild(plainField('engine', 'engine_port', 'Engine port', eng.engine_port, {type: 'int', help: 'Port the engine serves its OpenAI-compatible API on.'}));
-)HTML"
-R"HTML(      cfgBody.appendChild(plainField('engine', 'device', 'GPU device index', eng.device, {type: 'int', help: 'Which CUDA device the engine runs on.'}));
+      cfgBody.appendChild(plainField('engine', 'device', 'GPU device index', eng.device, {type: 'int', help: 'Which CUDA device the engine runs on.'}));
       cfgBody.appendChild(plainField('supervisor', 'port', 'Dashboard port', sup.port, {type: 'int', help: 'This page. Changing it needs the supervisor restarted, not just the engine.'}));
       cfgBody.appendChild(plainField('supervisor', 'host', 'Dashboard host', sup.host, {help: 'Must be a loopback address unless binding beyond loopback is enabled.'}));
       cfgBody.appendChild(plainField('supervisor', 'bind_any', 'Bind beyond loopback', sup.bind_any, {type: 'bool', help: 'Exposes engine start, stop and this configuration form to your network.'}));
@@ -3444,7 +3486,8 @@ R"HTML(      cfgBody.appendChild(plainField('engine', 'device', 'GPU device inde
         if (!restart.ok) throw new Error('Settings were inserted, but the engine could not restart. Try Restart on the mode row.');
         cfgStatus.textContent = 'Inserted. Restart requested; wait for the engine to become ready.';
       }
-    } catch (err) { showCfgErrors([err.message || 'Could not save settings. Check the connection and try again.']); }
+)HTML"
+R"HTML(    } catch (err) { showCfgErrors([err.message || 'Could not save settings. Check the connection and try again.']); }
     finally {
       configBusy = false; cfgBody.inert = false;
       cfgRevert.disabled = !cfgDirtyCount();
@@ -3466,8 +3509,7 @@ R"HTML(      cfgBody.appendChild(plainField('engine', 'device', 'GPU device inde
     $('fma-api-copy').title = 'Copy ' + apiUrl;
     annunciate($('model-label'), modelDisplayName(d.engine));
     $('model-label').title = (modelCatalog && modelCatalog.active_artifact_label) || d.engine.artifact || '';
-)HTML"
-R"HTML(    $('auth-guidance').textContent = d.engine.api_key_present ? 'Required. Enter the key configured for this engine into your app. The dashboard never displays or copies that key.' : 'None configured. If your app insists on an API key, enter a placeholder such as local; this does not enable authentication.';
+    $('auth-guidance').textContent = d.engine.api_key_present ? 'Required. Enter the key configured for this engine into your app. The dashboard never displays or copies that key.' : 'None configured. If your app insists on an API key, enter a placeholder such as local; this does not enable authentication.';
   }
 
   // ---------------------------------------------------------------------
@@ -3565,7 +3607,8 @@ R"HTML(    $('auth-guidance').textContent = d.engine.api_key_present ? 'Required
     e.examples.forEach((x, i) => {
       const k = document.createElement('button');
       k.type = 'button'; k.className = 'cdu-tab'; k.textContent = x.name;
-      k.setAttribute('aria-pressed', String(i === exampleIndex));
+)HTML"
+R"HTML(      k.setAttribute('aria-pressed', String(i === exampleIndex));
       k.onclick = () => benchSelect(e, i);
       exBox.append(k);
     });
@@ -3587,8 +3630,7 @@ R"HTML(    $('auth-guidance').textContent = d.engine.api_key_present ? 'Required
   }
   benchBody.addEventListener('input', benchValidate);
   benchBody.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); benchSend(); } });
-)HTML"
-R"HTML(  benchPath.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); benchSend(); } });
+  benchPath.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); benchSend(); } });
   $('bench-stream').onchange = () => {
     let v = {};
     try { v = JSON.parse(benchBody.value || '{}'); } catch (_) { return; }
@@ -3746,7 +3788,8 @@ R"HTML(  benchPath.addEventListener('keydown', e => { if (e.key === 'Enter') { e
             block.split('\n').forEach(line => {
               if (line.startsWith(':')) { name = 'comment'; data.push(line.slice(1).trim()); }
               else if (line.startsWith('event:')) name = line.slice(6).trim();
-              else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+)HTML"
+R"HTML(              else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
             });
             const payload = data.join('\n');
             if (!tFirst && name !== 'comment') tFirst = performance.now() - t0;
@@ -3766,8 +3809,7 @@ R"HTML(  benchPath.addEventListener('keydown', e => { if (e.key === 'Enter') { e
         let parsed = null;
         if (benchView.kind === 'json') { try { parsed = JSON.parse(text); } catch (_) {} }
         benchView.text = benchTextOf(parsed);
-)HTML"
-R"HTML(        if (benchTab === 'events' || (benchTab === 'text' && !benchView.text)) benchTab = 'body';
+        if (benchTab === 'events' || (benchTab === 'text' && !benchView.text)) benchTab = 'body';
       }
       benchView.timing = timing();
     } catch (err) {
@@ -3845,23 +3887,451 @@ R"HTML(        if (benchTab === 'events' || (benchTab === 'text' && !benchView.t
     const slim = Object.assign({}, chat, {messages: chat.messages.map(m => Object.assign({}, m, {images: undefined, tokens: undefined, tokenView: undefined, imageCount: (m.images || []).length || m.imageCount || 0}))});
     try { sessionStorage.setItem('ninfer:chat', JSON.stringify(slim)); } catch (_) {}
   }
-  // A small, safe markdown subset: everything is escaped first; code fences, inline code,
-  // bold, headings and bullets are then marked up. Links stay plain text.
-  function chatMarkdown(text) {
-    return String(text || '').split('```').map((seg, i) => {
-      if (i % 2 === 1) {
-        const nl = seg.indexOf('\n');
-        const lang = nl >= 0 ? seg.slice(0, nl).trim() : '';
-        const code = (nl >= 0 ? seg.slice(nl + 1) : seg).replace(/\n$/, '');
-        return `<pre class="msg-code">${lang ? `<span class="msg-code-lang">${esc(lang)}</span>` : ''}<code>${esc(code)}</code></pre>`;
+  // <markdown>
+  // Chat markdown: a small, dependency-free subset of CommonMark and GFM. Model text is never
+  // passed through as HTML: every character of it is escaped, and the only tags in the output
+  // are the ones generated here. Links are made only for http, https and mailto addresses;
+  // images are never fetched (an image becomes a link to its address). Blocks are paragraphs,
+  // ATX headings, lists (nested, ordered with a start number, task items), block quotes, fenced
+  // code, thematic breaks and GFM tables. Inline: code spans, strong, emphasis, strike, links,
+  // bare addresses, escapes and <br>. Parsing is one left-to-right pass per block; nesting,
+  // delimiter and link scans are bounded, so no input costs more than a few times its length.
+  // blocks() returns one HTML string per top-level block with the character offset where it
+  // starts, and live() uses that to re-parse only the end of a growing reply: all but the last
+  // two blocks are final once more text has arrived after them.
+  const MD = (() => {
+    const MAX_DEPTH = 8, MAX_OPEN = 32, MAX_LINK_TEXT = 1000, MAX_URL = 2000;
+    const RE_FENCE = /^( {0,3})(`{3,}|~{3,})[ \t]*(.*)$/;
+    const RE_ATX = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
+    const RE_HR = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+    const RE_QUOTE = /^ {0,3}>[ \t]?(.*)$/;
+    const RE_BULLET = /^( *)([-*+])([ \t]+)(\S.*)$/;
+    const RE_ORDERED = /^( *)(\d{1,9})([.)])([ \t]+)(\S.*)$/;
+    const RE_CELL_SEP = /^:?-+:?$/;
+    const RE_PUNCT = /[\p{P}\p{S}]/u, RE_SPACE = /\s/, RE_ALNUM = /[\p{L}\p{N}]/u;
+    const RE_SPECIAL = /[\\`\[<*_~!]|https?:\/\//gi;
+    const RE_BR = /<br[ \t]*\/?>/iy, RE_AUTOLINK = /<((?:https?:\/\/|mailto:)[^\s<>]+)>/iy;
+    const RE_URL = new RegExp('https?:\\/\\/[^\\s<>`]{1,' + MAX_URL + '}', 'iy');
+    const RE_SAFE_URL = /^(?:https?:\/\/[^\s\u0000-\u001f\u007f]+|mailto:[^\s\u0000-\u001f\u007f]+)$/i;
+
+    const isBlank = l => l.trim() === '';
+    const indentOf = l => { let n = 0; while (n < l.length && l.charCodeAt(n) === 32) n++; return n; };
+    const normalize = t => String(t == null ? '' : t).replace(/\r\n?/g, '\n');
+    const gapOf = ws => ws.indexOf('\t') >= 0 || ws.length > 4 ? 1 : ws.length;
+
+    function fenceOpen(line) {
+      const m = RE_FENCE.exec(line);
+      return m && !(m[2][0] === '`' && m[3].indexOf('`') >= 0) ? m : null;
+    }
+    // Tracks whether a line sits inside an open fence (no lazy continuation there).
+    function fenceStep(fence, line) {
+      if (!fence) { const m = fenceOpen(line); return m ? {ch: m[2][0], len: m[2].length} : null; }
+      const m = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+      return m && m[1][0] === fence.ch && m[1].length >= fence.len ? null : fence;
+    }
+    function matchItem(line) {
+      let m = RE_BULLET.exec(line);
+      if (m) return {ordered: false, indent: m[1].length, mark: 1, gap: gapOf(m[3]), text: m[4], num: 1};
+      m = RE_ORDERED.exec(line);
+      return m ? {ordered: true, indent: m[1].length, mark: m[2].length + 1, gap: gapOf(m[4]), text: m[5], num: +m[2]} : null;
+    }
+
+    // ---- tables -------------------------------------------------------------------
+    function splitRow(line) {
+      let s = line.trim();
+      if (s[0] === '|') s = s.slice(1);
+      if (s.length && s[s.length - 1] === '|' && s[s.length - 2] !== '\\') s = s.slice(0, -1);
+      const cells = [];
+      let cur = '';
+      for (let i = 0; i < s.length; i++) {
+        const c = s[i];
+        if (c === '\\' && s[i + 1] === '|') { cur += '|'; i++; }
+        else if (c === '\\' && s[i + 1] === '\\') { cur += '\\\\'; i++; }
+        else if (c === '|') { cells.push(cur.trim()); cur = ''; }
+        else cur += c;
       }
-      return esc(seg)
-        .replace(/`([^`\n]+)`/g, '<code>$1</code>')
-        .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
-        .replace(/^#{1,6}\s+(.+)$/gm, '<strong class="msg-h">$1</strong>')
-        .replace(/^(\s*)[-*]\s+/gm, '$1• ');
-    }).join('');
-  }
+      cells.push(cur.trim());
+      return cells;
+    }
+    function tableAligns(line, columns) {
+      if (line == null || line.indexOf('|') < 0) return null;
+      const cells = splitRow(line);
+      if (cells.length !== columns || !cells.every(c => RE_CELL_SEP.test(c))) return null;
+      return cells.map(c => c[0] === ':' ? (c[c.length - 1] === ':' ? 'c' : 'l') : c[c.length - 1] === ':' ? 'r' : '');
+    }
+    function parseTable(lines, i) {
+      const head = splitRow(lines[i]);
+      const aligns = tableAligns(lines[i + 1], head.length);
+      if (!aligns) return null;
+      const cell = (tag, text, k) => `<${tag}${aligns[k] ? ` class="md-al-${aligns[k]}"` : ''}>${inline(text, false)}</${tag}>`;
+      let html = '<div class="md-table"><table><thead><tr>' + head.map((c, k) => cell('th', c, k)).join('') + '</tr></thead><tbody>';
+      let j = i + 2;
+      for (; j < lines.length; j++) {
+        const l = lines[j];
+        if (isBlank(l) || l.indexOf('|') < 0 || /^ {0,3}(?:>|#{1,6}[ \t]|`{3}|~{3})/.test(l)) break;
+        const row = splitRow(l);
+        html += '<tr>' + head.map((_, k) => cell('td', row[k] || '', k)).join('') + '</tr>';
+      }
+      return [html + '</tbody></table></div>', j];
+    }
+
+    // ---- blocks -------------------------------------------------------------------
+    // Would this line end the paragraph above it?
+    function interrupts(line, next, depth) {
+      if (fenceOpen(line) || RE_HR.test(line)) return true;
+      const h = RE_ATX.exec(line);
+      if (h && h[2]) return true;
+      if (depth >= MAX_DEPTH) return false;
+      if (RE_QUOTE.test(line)) return true;
+      const it = matchItem(line);
+      if (it && it.indent <= 3 && (!it.ordered || it.num === 1)) return true;
+      return line.indexOf('|') >= 0 && next != null && tableAligns(next, splitRow(line).length) != null;
+    }
+    function codeBlock(info, code) {
+      const lang = (info.split(/\s+/)[0] || '').replace(/^\{\.?/, '').replace(/[^\w.+#-]/g, '').slice(0, 24);
+      return `<div class="md-code">${lang ? `<span class="md-code-lang">${esc(lang)}</span>` : ''}<pre><code>${esc(code)}</code></pre></div>`;
+    }
+    function parseFence(lines, i, m) {
+      const indent = m[1].length, ch = m[2][0], len = m[2].length;
+      const close = new RegExp('^ {0,3}' + (ch === '`' ? '`' : '~') + '{' + len + ',}[ \\t]*$');
+      const strip = indent ? new RegExp('^ {1,' + indent + '}') : null;
+      const body = [];
+      let j = i + 1;
+      for (; j < lines.length && !close.test(lines[j]); j++) body.push(strip ? lines[j].replace(strip, '') : lines[j]);
+      while (body.length && isBlank(body[body.length - 1])) body.pop();
+      return [codeBlock(m[3].trim(), body.join('\n')), j < lines.length ? j + 1 : j];
+    }
+    function parseQuote(lines, i, o, depth) {
+      const inner = [];
+      let fence = null, j = i;
+)HTML"
+R"HTML(      for (; j < lines.length; j++) {
+        const l = lines[j], q = RE_QUOTE.exec(l);
+        if (q) { inner.push(q[1]); fence = fenceStep(fence, q[1]); continue; }
+        const last = inner[inner.length - 1];
+        if (isBlank(l) || fence || isBlank(last) || RE_HR.test(last) || (RE_ATX.exec(last) || [])[2] || interrupts(l, lines[j + 1], depth)) break;
+        inner.push(l.trim());
+      }
+      const kids = [];
+      parseBlocks(inner, o, depth + 1, kids, null);
+      return ['<blockquote>' + kids.map(b => b.html).join('') + '</blockquote>', j];
+    }
+    function parseList(lines, i, o, depth) {
+      const first = matchItem(lines[i]), n = lines.length, items = [];
+      let j = i;
+      while (j < n) {
+        const it = matchItem(lines[j]);
+        if (!it || it.ordered !== first.ordered || it.indent >= first.indent + 2 || RE_HR.test(lines[j])) break;
+        const thr = it.indent + 2, cin = it.indent + it.mark + it.gap;   // child threshold, content column
+        const body = [it.text];
+        let fence = fenceStep(null, it.text), k = j + 1;
+        while (k < n) {
+          const l = lines[k];
+          if (isBlank(l)) {
+            let p = k;
+            while (p < n && isBlank(lines[p])) p++;
+            if (p < n && indentOf(lines[p]) >= thr) { for (; k < p; k++) body.push(''); continue; }
+            break;
+          }
+          const ind = indentOf(l);
+          if (ind >= thr) { const t = l.slice(Math.min(ind, cin)); body.push(t); fence = fenceStep(fence, t); k++; continue; }
+          if (!fence && !isBlank(body[body.length - 1]) && !matchItem(l) && !interrupts(l, lines[k + 1], depth)) { body.push(l.trim()); k++; continue; }
+          break;
+        }
+        const task = /^\[([ xX])\][ \t]+(?=\S)/.exec(body[0]);
+        if (task) body[0] = body[0].slice(task[0].length);
+        const kids = [];
+        parseBlocks(body, o, depth + 1, kids, null);
+        items.push('<li' + (task ? ' class="md-task-item"' : '') + '>' +
+          (task ? `<span class="md-task${task[1] === ' ' ? '' : ' done'}" role="img" aria-label="${task[1] === ' ' ? 'Not done' : 'Done'}"></span>` : '') +
+          kids.map(b => b.html).join('') + '</li>');
+        j = k;
+        let p = j;
+        while (p < n && isBlank(lines[p])) p++;
+        if (p < n && p > j) {
+          const nx = matchItem(lines[p]);
+          if (nx && nx.ordered === first.ordered && nx.indent < first.indent + 2 && !RE_HR.test(lines[p])) j = p; else break;
+        }
+      }
+      const tag = first.ordered ? 'ol' : 'ul';
+      return [`<${tag}${first.ordered && first.num !== 1 ? ` start="${first.num}"` : ''}>` + items.join('') + `</${tag}>`, j];
+    }
+    function parseParagraph(lines, i, o, depth) {
+      const part = l => o.pre ? l : l.trim();
+      const parts = [part(lines[i])];
+      let j = i + 1;
+      for (; j < lines.length; j++) {
+        if (isBlank(lines[j]) || interrupts(lines[j], lines[j + 1], depth)) break;
+        parts.push(part(lines[j]));
+      }
+      let html = inline(parts.join('\n'), false);
+      if (!o.pre) html = html.replace(/\n/g, '<br>');
+      return ['<p>' + html + '</p>', j];
+    }
+    // offs: character offset of each line, kept for the top level only.
+    function parseBlocks(lines, o, depth, out, offs) {
+      const n = lines.length;
+      let i = 0;
+      while (i < n) {
+        const line = lines[i];
+        if (isBlank(line)) { i++; continue; }
+        let m, r = null;
+        if ((m = fenceOpen(line))) r = parseFence(lines, i, m);
+        else if ((m = RE_ATX.exec(line)) && m[2]) { const lv = m[1].length; r = [`<div class="md-h md-h${lv}" role="heading" aria-level="${Math.min(6, lv + 2)}">${inline(m[2], false)}</div>`, i + 1]; }
+        else if (RE_HR.test(line)) r = ['<hr>', i + 1];
+        else if (depth < MAX_DEPTH && RE_QUOTE.test(line)) r = parseQuote(lines, i, o, depth);
+        else if (depth < MAX_DEPTH && matchItem(line)) r = parseList(lines, i, o, depth);
+        else if (line.indexOf('|') >= 0) r = parseTable(lines, i);
+        if (!r) r = parseParagraph(lines, i, o, depth);
+        out.push({html: r[0], at: offs ? offs[i] : 0});
+        i = r[1];
+      }
+    }
+    function blocks(text, o) {
+      const src = normalize(text), out = [];
+      if (!src.trim()) return out;
+      const lines = src.split('\n'), offs = new Array(lines.length);
+      let at = 0;
+      for (let i = 0; i < lines.length; i++) {
+        offs[i] = at;
+        at += lines[i].length + 1;
+        if (lines[i].indexOf('\t') >= 0) lines[i] = lines[i].replace(/^[ \t]+/, w => w.replace(/\t/g, '    '));
+      }
+      parseBlocks(lines, o || {}, 0, out, offs);
+      return out;
+    }
+
+    // ---- inline -------------------------------------------------------------------
+    function linkHtml(url, innerHtml) {
+      const web = url[0] === 'h' || url[0] === 'H';
+      return `<a href="${esc(url)}"${web ? ' target="_blank"' : ''} rel="noopener noreferrer" title="${esc(url)}">${innerHtml}</a>`;
+    }
+    // [text](destination "title"): the link, or null when it is not a link to a safe address.
+    function parseLink(src, open, ctx) {
+      const limit = Math.min(src.length, open + 1 + MAX_LINK_TEXT);
+      let depth = 0, p = open + 1;
+      for (; p < limit; p++) {
+        const c = src.charCodeAt(p);
+        if (c === 92) { p++; continue; }
+        if (c === 96) {
+          let k = 1;
+          while (src.charCodeAt(p + k) === 96) k++;
+          const cl = ctx.tick(k, p + k);
+          p = (cl >= 0 && cl < limit ? cl + k : p + k) - 1;
+          continue;
+        }
+        if (c === 91) depth++;
+        else if (c === 93) { if (depth === 0) break; depth--; }
+      }
+      ctx.budget -= p - open;
+      if (p >= limit || ctx.budget < 0 || src[p] !== ']' || src[p + 1] !== '(') return null;
+      let q = p + 2;
+      while (q < src.length && /[ \t\n]/.test(src[q])) q++;
+      let url;
+      if (src[q] === '<') {
+        const e = src.indexOf('>', q);
+        if (e < 0 || e - q > MAX_URL) return null;
+        url = src.slice(q + 1, e); q = e + 1;
+      } else {
+        const s = q;
+        let d = 0;
+        for (; q < src.length && q - s <= MAX_URL; q++) {
+          const c = src[q];
+          if (c === '\\' && q + 1 < src.length) { q++; continue; }
+          if (c === '(') d++;
+          else if (c === ')') { if (d === 0) break; d--; }
+          else if (/\s/.test(c)) break;
+        }
+        url = src.slice(s, q);
+      }
+      url = url.replace(/\\([!-\/:-@\[-`{-~])/g, '$1');
+      while (q < src.length && /[ \t\n]/.test(src[q])) q++;
+      const quote = src[q];
+      if (quote === '"' || quote === "'" || quote === '(') {
+        const end = quote === '(' ? ')' : quote;
+        let e = q + 1;
+        while (e < src.length && e - q < 300 && src[e] !== end) e += src[e] === '\\' ? 2 : 1;
+        if (src[e] !== end) return null;
+        q = e + 1;
+        while (q < src.length && /[ \t\n]/.test(src[q])) q++;
+      }
+      if (src[q] !== ')' || !RE_SAFE_URL.test(url)) return null;
+      return {text: src.slice(open + 1, p), url, end: q + 1};
+    }
+    // Delimiter runs of * _ ~ that can open or close emphasis: the CommonMark flanking rules,
+    // plus two chat-friendly exceptions so arithmetic (2*3*4) and file globs (src/*.js) stay literal.
+    function runFlags(src, i, k, ch) {
+      const prev = i > 0 ? src[i - 1] : ' ', next = i + k < src.length ? src[i + k] : ' ';
+      const pw = RE_SPACE.test(prev), nw = RE_SPACE.test(next), pp = RE_PUNCT.test(prev), np = RE_PUNCT.test(next);
+      const left = !nw && (!np || pw || pp), right = !pw && (!pp || nw || np);
+      let open = left, close = right;
+      if (ch === '_') { open = left && (!right || pp); close = right && (!left || np); }
+      if (ch === '*' && k === 1) {
+        if (RE_ALNUM.test(prev) && RE_ALNUM.test(next)) open = close = false;
+        else if (!pw && /^[.\/\\]\w/.test(src.slice(i + 1, i + 3))) open = close = false;
+      }
+      return {open, close};
+    }
+    // Pairs delimiter runs into <em>, <strong> and <del> (CommonMark's process-emphasis, with the
+    // search for an opener capped so a long run of unmatched markers stays linear).
+    function emphasis(nodes) {
+      const out = [], stack = [];
+      for (const nd of nodes) {
+        if (nd.t !== 'd') { out.push(nd); continue; }
+        let n = nd.n;
+        if (nd.close) {
+          while (n > 0) {
+            let f = -1;
+            for (let s = stack.length - 1, steps = 0; s >= 0 && steps < 50; s--, steps++) {
+              const o = stack[s];
+              if (o.ch !== nd.ch || !o.count) continue;
+              if ((o.close || nd.open) && (o.orig + nd.n) % 3 === 0 && !(o.orig % 3 === 0 && nd.n % 3 === 0)) continue;
+              f = s; break;
+            }
+            if (f < 0) break;
+            const o = stack[f];
+            const use = nd.ch === '~' ? 2 : (o.count >= 2 && n >= 2 ? 2 : 1);
+            const children = out.splice(o.pos + 1);
+            o.count -= use; n -= use;
+            out[o.pos].s = o.ch.repeat(o.count);
+            out.push({t: 'e', tag: nd.ch === '~' ? 'del' : use === 2 ? 'strong' : 'em', c: children});
+            stack.length = f + 1;
+            if (!o.count) stack.pop();
+          }
+        }
+        if (n > 0) {
+          out.push({t: 't', s: nd.ch.repeat(n)});
+          if (nd.open && stack.length < MAX_OPEN) stack.push({ch: nd.ch, count: n, orig: nd.n, close: nd.close, pos: out.length - 1});
+        }
+      }
+      return out;
+    }
+    const nodesHtml = list => {
+      let s = '';
+      for (const nd of list) s += nd.t === 't' ? esc(nd.s) : nd.t === 'h' ? nd.s : '<' + nd.tag + '>' + nodesHtml(nd.c) + '</' + nd.tag + '>';
+      return s;
+    };
+    // A bare address ends before trailing punctuation and an unbalanced closing bracket.
+    function trimUrl(u) {
+      for (;;) {
+        const last = u[u.length - 1];
+        if (/[.,;:!?*_~'"’”]/.test(last)) u = u.slice(0, -1);
+        else if (last === ')' || last === ']') {
+          const open = last === ')' ? '(' : '[';
+          if (u.split(last).length > u.split(open).length) u = u.slice(0, -1); else return u;
+        } else return u;
+      }
+    }
+    function inline(src, nolink) {
+      const nodes = [], runs = {};
+      let buf = '', i = 0;
+      const flush = () => { if (buf) { nodes.push({t: 't', s: buf}); buf = ''; } };
+      if (src.indexOf('`') >= 0) {
+        const re = /`+/g;
+        let m;
+        while ((m = re.exec(src))) (runs[m[0].length] || (runs[m[0].length] = [])).push(m.index);
+      }
+      // First backtick run of exactly this length that starts at or after `from`.
+      const tick = (k, from) => {
+        const a = runs[k];
+        if (!a) return -1;
+        let lo = 0, hi = a.length;
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (a[mid] < from) lo = mid + 1; else hi = mid; }
+        return lo < a.length ? a[lo] : -1;
+      };
+      const ctx = {tick, budget: 4096 + 8 * src.length};
+      while (i < src.length) {
+        RE_SPECIAL.lastIndex = i;
+        const m = RE_SPECIAL.exec(src);
+        if (!m) { buf += src.slice(i); break; }
+        if (m.index > i) buf += src.slice(i, m.index);
+        i = m.index;
+        const c = src[i];
+        if (c === '\\') {
+          const nx = src[i + 1];
+          // Brackets and braces keep their backslash: \( x \) and \[ x \] are LaTeX, shown as typed.
+          if (nx !== undefined && /[!-\/:-@\\^-`|~]/.test(nx) && !/[()\[\]{}]/.test(nx)) { buf += nx; i += 2; }
+          else { if (nx !== '\n') buf += '\\'; i += 1; }
+        } else if (c === '`') {
+          let k = 1;
+          while (src[i + k] === '`') k++;
+          const close = tick(k, i + k);
+          if (close >= 0) {
+            let code = src.slice(i + k, close).replace(/\n/g, ' ');
+            if (code.length > 2 && code[0] === ' ' && code[code.length - 1] === ' ' && code.trim()) code = code.slice(1, -1);
+            flush(); nodes.push({t: 'h', s: '<code>' + esc(code) + '</code>'});
+            i = close + k;
+)HTML"
+R"HTML(          } else { buf += '`'.repeat(k); i += k; }
+        } else if (c === '[' || (c === '!' && src[i + 1] === '[')) {
+          const image = c === '!', open = image ? i + 1 : i;
+          const lk = nolink || ctx.budget < 0 ? null : parseLink(src, open, ctx);
+          if (lk) {
+            flush();
+            nodes.push({t: 'h', s: linkHtml(lk.url, image ? esc('Image: ' + (lk.text.trim() || lk.url)) : inline(lk.text, true))});
+            i = lk.end;
+          } else { buf += c; i += 1; }
+        } else if (c === '<') {
+          RE_BR.lastIndex = i; RE_AUTOLINK.lastIndex = i;
+          let a;
+          if (RE_BR.exec(src)) { flush(); nodes.push({t: 'h', s: '<br>'}); i = RE_BR.lastIndex; }
+          else if (!nolink && (a = RE_AUTOLINK.exec(src))) { flush(); nodes.push({t: 'h', s: linkHtml(a[1], esc(a[1]))}); i = RE_AUTOLINK.lastIndex; }
+          else { buf += '<'; i += 1; }
+        } else if (c === '*' || c === '_' || c === '~') {
+          let k = 1;
+          while (src[i + k] === c) k++;
+          const f = c === '~' && k !== 2 ? {open: false, close: false} : runFlags(src, i, k, c);
+          if (f.open || f.close) { flush(); nodes.push({t: 'd', ch: c, n: k, open: f.open, close: f.close}); }
+          else buf += src.slice(i, i + k);
+          i += k;
+        } else if (c === '!') { buf += '!'; i += 1; }
+        else {   // http:// or https://
+          let u = null;
+          if (!nolink && !(i > 0 && RE_ALNUM.test(src[i - 1]))) {
+            RE_URL.lastIndex = i;
+            const mm = RE_URL.exec(src);
+            if (mm) { u = trimUrl(mm[0]); if (!/^https?:\/\/[^:\/]/i.test(u)) u = null; }
+          }
+          if (u) { flush(); nodes.push({t: 'h', s: linkHtml(u, esc(u))}); i += u.length; }
+          else { buf += m[0]; i += m[0].length; }
+        }
+      }
+      flush();
+      return nodesHtml(emphasis(nodes));
+    }
+
+    // ---- public -------------------------------------------------------------------
+    function render(text, o) { return blocks(text, o).map(b => b.html).join(''); }
+    // A growing reply inside `container`: only the blocks at its end are parsed and replaced.
+    function live(container, o) {
+      let text = '', list = [], nodes = [];
+      return {
+        update(raw) {
+          const t = normalize(raw);
+          if (t === text) return;
+          const keep = t.startsWith(text) ? Math.max(0, list.length - 2) : 0;
+          const off = keep ? list[keep].at : 0;
+          const fresh = blocks(off ? t.slice(off) : t, o).map(b => ({html: b.html, at: b.at + off}));
+          const next = list.slice(0, keep).concat(fresh);
+          let i = keep;
+          while (i < next.length && i < list.length && list[i].html === next[i].html) i++;
+          for (let k = nodes.length - 1; k >= i; k--) nodes[k].remove();
+          nodes.length = Math.min(nodes.length, i);
+          if (i < next.length) {
+            const tpl = document.createElement('template');
+            tpl.innerHTML = next.slice(i).map(b => b.html).join('');
+            const added = [...tpl.content.children];
+            if (added.length === next.length - i) { container.append(...added); nodes.push(...added); }
+            else { container.innerHTML = next.map(b => b.html).join(''); nodes = [...container.children]; }
+          }
+          list = next; text = t;
+        }
+      };
+    }
+    return {blocks, render, live};
+  })();
+  function chatMarkdown(text, opts) { return MD.render(text, opts); }
+  // </markdown>
   function chatTime(d) { return new Date(d).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'}); }
   function chatPct(a, b) { return b > 0 ? Math.round(100 * a / b) + '%' : '—'; }
   function chatTelemetry(st, m) {
@@ -3926,14 +4396,12 @@ R"HTML(        if (benchTab === 'events' || (benchTab === 'text' && !benchView.t
   // answer costs only its new text per paint, stays selectable, and the reasoning box keeps
   // its scroll position.
   function chatLiveMessage(m, el) {
-    el.innerHTML = `${chatHead(m)}<span class="msg-state"></span><span class="msg-live"></span></header><div class="msg-progress" hidden><span class="msg-bar"><span></span></span><span></span></div><details class="msg-reasoning" hidden${m.reasoningOpen ? ' open' : ''}><summary>Reasoning</summary><div class="msg-reasoning-body"></div></details><div class="msg-body"></div>`;
+    el.innerHTML = `${chatHead(m)}<span class="msg-state"></span><span class="msg-live"></span></header><div class="msg-progress" hidden><span class="msg-bar"><span></span></span><span></span></div><details class="msg-reasoning" hidden${m.reasoningOpen ? ' open' : ''}><summary>Reasoning</summary><div class="msg-reasoning-body md"></div></details><div class="msg-body md"></div>`;
     const det = el.querySelector('.msg-reasoning');
     det.addEventListener('toggle', () => { m.reasoningOpen = det.open; });
-    const rtext = document.createTextNode(''), ctext = document.createTextNode('');
-    el.querySelector('.msg-reasoning-body').append(rtext);
-    el.querySelector('.msg-body').append(ctext);
-    const prog = el.querySelector('.msg-progress');
-    el._live = {state: el.querySelector('.msg-state'), rate: el.querySelector('.msg-live'), prog, bar: prog.firstChild.firstChild, ptext: prog.lastChild, det, rbody: det.lastChild, rtext, ctext, rLen: 0, cLen: 0};
+    const prog = el.querySelector('.msg-progress'), rbody = det.lastChild;
+    el._live = {state: el.querySelector('.msg-state'), rate: el.querySelector('.msg-live'), prog, bar: prog.firstChild.firstChild, ptext: prog.lastChild, det, rbody,
+      rview: MD.live(rbody), cview: MD.live(el.querySelector('.msg-body')), rLen: 0, cLen: 0};
     chatLiveUpdate(m, el);
     return el;
   }
@@ -3945,16 +4413,15 @@ R"HTML(        if (benchTab === 'events' || (benchTab === 'text' && !benchView.t
     v.prog.hidden = !pr;
     if (pr) {
       v.bar.style.width = Math.min(100, 100 * (pr.processed || 0) / Math.max(1, pr.total || 1)) + '%';
-)HTML"
-R"HTML(      v.ptext.textContent = `Reading prompt ${(pr.processed || 0).toLocaleString()} / ${(pr.total || 0).toLocaleString()}${pr.cache ? ` · ${pr.cache.toLocaleString()} reused` : ''}`;
+      v.ptext.textContent = `Reading prompt ${(pr.processed || 0).toLocaleString()} / ${(pr.total || 0).toLocaleString()}${pr.cache ? ` · ${pr.cache.toLocaleString()} reused` : ''}`;
     }
     if (m.reasoning.length > v.rLen) {
       v.det.hidden = false;
       const pinned = v.rbody.scrollTop + v.rbody.clientHeight >= v.rbody.scrollHeight - 12;
-      v.rtext.appendData(m.reasoning.slice(v.rLen)); v.rLen = m.reasoning.length;
+      v.rview.update(m.reasoning); v.rLen = m.reasoning.length;
       if (pinned) v.rbody.scrollTop = v.rbody.scrollHeight;
     }
-    if (m.content.length > v.cLen) { v.ctext.appendData(m.content.slice(v.cLen)); v.cLen = m.content.length; }
+    if (m.content.length > v.cLen) { v.cview.update(m.content); v.cLen = m.content.length; }
   }
   function chatRenderMessage(m, i) {
     const el = document.createElement('article');
@@ -3963,21 +4430,22 @@ R"HTML(      v.ptext.textContent = `Reading prompt ${(pr.processed || 0).toLocal
     if (m.role === 'user') {
       const imgs = (m.images || []).map(src => `<img src="${esc(src)}" alt="Attached image">`).join('');
       const lost = !m.images && m.imageCount ? `<span class="cdu-small">${m.imageCount} image${m.imageCount === 1 ? '' : 's'} attached (not kept after reload)</span>` : '';
-      el.innerHTML = `${chatHead(m)}</header>${imgs || lost ? `<div class="msg-images">${imgs}${lost}</div>` : ''}<div class="msg-body">${chatMarkdown(m.content)}</div>`;
+      el.innerHTML = `${chatHead(m)}</header>${imgs || lost ? `<div class="msg-images">${imgs}${lost}</div>` : ''}<div class="msg-body md md-user">${chatMarkdown(m.content, {pre: true})}</div>`;
       return el;
     }
     if (CHAT_LIVE.has(m.state)) return chatLiveMessage(m, el);
     const st = m.stats || {};
     const state = CHAT_STATES[m.state] || '';
-    const reasoning = m.reasoning ? `<details class="msg-reasoning"${m.reasoningOpen ? ' open' : ''}><summary>Reasoning${st.usage && st.usage.completion_tokens_details && st.usage.completion_tokens_details.reasoning_tokens ? ' · ' + st.usage.completion_tokens_details.reasoning_tokens.toLocaleString() + ' tokens' : ''}</summary><div class="msg-reasoning-body">${chatMarkdown(m.reasoning)}</div></details>` : '';
-    const ended = m.state === 'done' || m.state === 'stopped' || m.state === 'error';
+    const reasoning = m.reasoning ? `<details class="msg-reasoning"${m.reasoningOpen ? ' open' : ''}><summary>Reasoning${st.usage && st.usage.completion_tokens_details && st.usage.completion_tokens_details.reasoning_tokens ? ' · ' + st.usage.completion_tokens_details.reasoning_tokens.toLocaleString() + ' tokens' : ''}</summary><div class="msg-reasoning-body md">${chatMarkdown(m.reasoning)}</div></details>` : '';
+)HTML"
+R"HTML(    const ended = m.state === 'done' || m.state === 'stopped' || m.state === 'error';
     const tokenKey = m.tokens && m.tokens.length ? `<button type="button" class="client-evidence" data-act="tokens" aria-pressed="${m.tokenView ? 'true' : 'false'}">${m.tokenView ? 'Text view' : 'Token view'}</button>` : '';
     const actions = ended ? `<div class="msg-actions"><button type="button" class="client-evidence" data-act="copy">Copy</button>${tokenKey}${i === chat.messages.length - 1 ? '<button type="button" class="client-evidence" data-act="regen">Regenerate</button>' : ''}</div>` : '';
     const body = m.error ? `<span class="red">${esc(m.error)}</span>`
       : m.tokenView && m.tokens ? `<div class="msg-tokens">${chatTokenView(m.tokens)}</div><p class="cdu-small msg-token-key"><span class="tok tok-mid">under 50%</span> <span class="tok tok-low">under 20%</span> · hover a token for its probability and alternatives; reasoning tokens come first</p>`
       : chatMarkdown(m.content);
     if (m.tokens && !st.confidence) st.confidence = chatConfidence(m.tokens);
-    el.innerHTML = `${chatHead(m)}${state ? `<span class="msg-state${m.state === 'error' ? ' red' : m.state === 'stopped' ? ' amber' : ''}">${esc(state)}</span>` : ''}</header>${m.tokenView ? '' : reasoning}<div class="msg-body">${body}</div>${m.note ? `<p class="msg-note">${esc(m.note)}</p>` : ''}${m.state === 'done' || m.state === 'stopped' ? chatTelemetry(st, m) : ''}${ended ? chatSentLine(m) : ''}${actions}`;
+    el.innerHTML = `${chatHead(m)}${state ? `<span class="msg-state${m.state === 'error' ? ' red' : m.state === 'stopped' ? ' amber' : ''}">${esc(state)}</span>` : ''}</header>${m.tokenView ? '' : reasoning}<div class="msg-body md">${body}</div>${m.note ? `<p class="msg-note">${esc(m.note)}</p>` : ''}${m.state === 'done' || m.state === 'stopped' ? chatTelemetry(st, m) : ''}${ended ? chatSentLine(m) : ''}${actions}`;
     const det = el.querySelector('.msg-reasoning');
     if (det) det.addEventListener('toggle', () => { m.reasoningOpen = det.open; });
     el.querySelectorAll('[data-act]').forEach(b => {
@@ -4107,8 +4575,7 @@ R"HTML(      v.ptext.textContent = `Reading prompt ${(pr.processed || 0).toLocal
     // Log probabilities are reported on whole answers only.
     const stream = !logprobs && $('chat-stream').checked;
     const body = {model: benchServedModel || undefined, messages: msgs, stream};
-)HTML"
-R"HTML(    if (stream) Object.assign(body, {stream_options: {include_usage: true}, return_progress: true, timings_per_token: true});
+    if (stream) Object.assign(body, {stream_options: {include_usage: true}, return_progress: true, timings_per_token: true});
     const budget = $('chat-budget').value, max = Number($('chat-max').value);
     if (budget === 'unlimited') body.max_tokens = -1;
     else if (budget === 'custom' && $('chat-max').value !== '' && Number.isInteger(max) && max >= 0) body.max_tokens = max;
@@ -4141,7 +4608,8 @@ R"HTML(    if (stream) Object.assign(body, {stream_options: {include_usage: true
     return body;
   }
   function chatParamText(entries) {
-    return entries.map(([k, v]) => `${k} ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`).join(' · ');
+)HTML"
+R"HTML(    return entries.map(([k, v]) => `${k} ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`).join(' · ');
   }
   async function chatSend(text) {
     if (chatAbort) return;
@@ -4330,8 +4798,7 @@ R"HTML(    if (stream) Object.assign(body, {stream_options: {include_usage: true
     }));
     $('chat-hint').textContent = chatPending.length ? `${chatPending.length} image${chatPending.length === 1 ? '' : 's'} attached` : '';
   }
-)HTML"
-R"HTML(  $('chat-attach').onclick = () => $('chat-file').click();
+  $('chat-attach').onclick = () => $('chat-file').click();
   $('chat-file').onchange = e => { chatAddFiles([...e.target.files]); e.target.value = ''; };
   chatInput.addEventListener('paste', e => { const files = [...(e.clipboardData || {}).files || []].filter(f => f.type.startsWith('image/')); if (files.length && chatVision) { e.preventDefault(); chatAddFiles(files); } });
   ['dragover', 'dragleave', 'drop'].forEach(type => $('chat-form').addEventListener(type, e => {
@@ -4368,7 +4835,8 @@ R"HTML(  $('chat-attach').onclick = () => $('chat-file').click();
   }
 
   // ---------------------------------------------------------------------
-  // Diagnose > Experts. The engine counts how often each routed expert is chosen
+)HTML"
+R"HTML(  // Diagnose > Experts. The engine counts how often each routed expert is chosen
   // (GET /admin/experts, present only when it was started with --expert-stats). While the
   // page is on screen it asks every 2 s and draws one map: a row per layer, a column per
   // expert, colour = heat scaled inside its own row. Decode is the generation channel
@@ -4566,8 +5034,7 @@ R"HTML(  $('chat-attach').onclick = () => $('chat-file').click();
     const lay = exLayout(rect.width, rect.height, dpr, f), kind = exKind(f), kd = exDerive(f, kind), sel = ex.cur;
     const key = [ex.version, cw, ch, kind, ex.order, C.glass2, C.green, C.ice].join('|');
     if (ex.imgKey !== key) { ex.img = exBuildImage(f, lay, ex.shown, kind); ex.imgKey = key; }
-)HTML"
-R"HTML(    c.putImageData(ex.img, lay.X0, lay.Y0);
+    c.putImageData(ex.img, lay.X0, lay.Y0);
     c.setTransform(dpr, 0, 0, dpr, 0, 0);
     const d = v => v / dpr, sep = r => (lay.ye[r] - lay.ys[r] >= 4 ? 1 : 0);
     const barOf = r => kd.cover[r] == null ? 0 : lay.barW * kd.cover[r] / f.E;
@@ -4597,7 +5064,8 @@ R"HTML(    c.putImageData(ex.img, lay.X0, lay.Y0);
     // Axes.
     const ay = Math.round(lay.bottom) + 3.5;
     c.strokeStyle = C.axis; c.lineWidth = 1; c.fillStyle = C.faint; c.font = '500 10.5px Bahnschrift, sans-serif';
-    const ticks = ex.order === 'sorted' ? [1, f.E / 8, f.E / 4, f.E / 2, f.E] : [0, f.E / 4, f.E / 2, 3 * f.E / 4, f.E - 1];
+)HTML"
+R"HTML(    const ticks = ex.order === 'sorted' ? [1, f.E / 8, f.E / 4, f.E / 2, f.E] : [0, f.E / 4, f.E / 2, 3 * f.E / 4, f.E - 1];
     ticks.forEach((v, i) => {
       v = Math.round(v);
       const x = Math.round(lay.plotX + (ex.order === 'sorted' ? v - .5 : v + .5) / f.E * lay.plotW) + .5;
@@ -4766,8 +5234,7 @@ R"HTML(    c.putImageData(ex.img, lay.X0, lay.Y0);
   function exSetCursor(cur, announce) {
     const same = (!cur && !ex.cur) || (cur && ex.cur && cur.row === ex.cur.row && cur.col === ex.cur.col);
     if (same) return;
-)HTML"
-R"HTML(    ex.cur = cur; exReadout(announce); exDraw();
+    ex.cur = cur; exReadout(announce); exDraw();
   }
   function exPoint(e) {
     const f = ex.frame, lay = ex.lay;
@@ -4807,7 +5274,8 @@ R"HTML(    ex.cur = cur; exReadout(announce); exDraw();
   });
 
   document.querySelectorAll('[data-ex-kind],[data-ex-order]').forEach(btn => btn.addEventListener('click', () => {
-    const f = ex.frame, c = ex.cur;
+)HTML"
+R"HTML(    const f = ex.frame, c = ex.cur;
     if (btn.dataset.exKind) ex.kind = btn.dataset.exKind;
     if (btn.dataset.exOrder && btn.dataset.exOrder !== ex.order) {
       // Keep the pointed expert when the columns change meaning (id <-> rank).

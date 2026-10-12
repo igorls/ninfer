@@ -257,6 +257,12 @@ components:
   chat-message-body:
     textColor: "{colors.measured-white}"
     typography: "{typography.body}"
+  chat-code-block:
+    backgroundColor: "{colors.display-glass-inset}"
+    textColor: "{colors.log-text}"
+    typography: "{typography.mono}"
+    rounded: "{rounded.key}"
+    padding: "6px 10px 8px"
   chat-sent-line:
     textColor: "{colors.target-magenta}"
     typography: "{typography.mono}"
@@ -437,11 +443,18 @@ Function keys are the top level. Settings opens a CDU index of line-select promp
 ### Chat
 A CDU page for a plain conversation with the served model, drawn as a datalink message log (amended 2026-10-11).
 - **Messages:** no cards, fills or side stripes. Each message has a DIN caps head (11.5px, legend gray) carrying its direction mark and sender label in the channel colour (▲ YOU in ice, ▼ NINFER in green, then the model name in mono), its time and live state; a faint glass hairline (glass-rule-faint) parts one message from the next. Text is Segoe on the glass; code blocks sit in mono glass wells under a caps language legend.
+- **Markdown** (amended 2026-10-12): a reply, its reasoning and the user's own message (which keeps its line breaks and indentation as typed) render a safe CommonMark and GFM subset: paragraphs, headings, nested lists, task lists, quotes, fenced code, rules, tables and inline code, strong, emphasis, strike and links. Model text is escaped and never becomes HTML; only http, https and mailto addresses become links, and images are never fetched. Blocks are separated by one small gap, never by blank lines; the rhythm is set in em so the 14px reply and the 13px reasoning share it.
+  - **Gaps:** 0.5em between blocks (7px at 14px), 0.2em between list items, 0.3em between blocks inside an item, a rule 0.8em above and below. A heading has 0.85em above and 0.3em below (0.5em when another heading follows), and none above the first block. The first and last block of a message add nothing.
+  - **Headings:** Segoe at weight 650, never caps, never DIN, no rules and no hue: h1 1.4em, h2 1.2em, h3 1.07em, h4 1em, h5 and h6 0.93em (h6 in Secondary Gray). Size and weight carry the hierarchy so no colour is spent on it.
+  - **Lists:** 1.45em indent, discs, then circles, then squares; ordered lists keep their start number and tabular figures; markers in Legend Gray. A task item is a drawn 0.95em box, ticked in the ink colour when done, static.
+  - **Code:** inline code in mono at 0.89em on a glass-inset chip with a 1px well edge; a block is a glass-inset well, 4px corners, mono 12.5px/1.5 with 6px 10px 8px padding, a 10.5px caps language legend in Legend Gray, and its own horizontal scroll so the well always follows the message column.
+  - **Quotes:** a 2px Legend Gray rule with 11px padding and Secondary Gray text (gray, so no signal colour is spent). Links are Selectable Cyan and underlined.
+  - **Tables:** 13px/1.45 Segoe with tabular figures, a Glass Rule under the header and Glass Rule Faint between rows, no fills and no vertical rules, alignment from the delimiter row; a wide table scrolls inside the message and never widens the page.
 - **Under a reply:** a telemetry line of caps legends over white tabular figures (what the reply measured), then the magenta Sent line in mono (what the request carried, or `engine defaults only`). Reasoning folds behind a cyan caps summary with a dotted left rule.
 - **Token view:** with token probabilities on, a reply shows its tokens in mono: unsure tokens get a 2px amber underline, the least likely also amber text on caution glass, tokens forced by the thinking budget a 1px magenta underline and magenta text; hover outlines a token in cyan.
 - **Chat bar:** the context meter (white fill, amber near the limit), the thinking choice as small outlined tabs, the Output budget readout (magenta when the page sets the budget, white when the engine default applies; the page default is No limit, sent as `max_tokens: -1`), then the Parameters key (with a magenta count of set parameters) and New chat.
 - **Parameters:** grouped CDU fields; a field the user filled, or a select set away from its default, shows its value in magenta, the configured-target colour.
-- **Streaming:** a reply grows by appending text as it arrives and renders its markdown once, when it ends; prompt reading shows an ice progress bar until the first token.
+- **Streaming:** a reply is formatted as it arrives: only the last two blocks are parsed again for each paint, so the cost does not grow with the reply, and an unclosed code fence shows as a code block that fills in. Prompt reading shows an ice progress bar until the first token.
 
 ### API test bench
 A CDU page for calling every exposed route by hand (amended 2026-10-11).
