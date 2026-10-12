@@ -10,11 +10,11 @@
 namespace ninfer::serve {
 namespace {
 
-constexpr char kMagic[8]              = {'N', 'X', 'T', 'R', 'A', 'C', 'E', '1'};
-constexpr std::uint32_t kRecordMarker = 0x43525452U;
+constexpr char kMagic[8]                     = {'N', 'X', 'T', 'R', 'A', 'C', 'E', '1'};
+constexpr std::uint32_t kRecordMarker        = 0x43525452U;
 constexpr std::uint8_t kPrefillHistogramKind = 5;
-constexpr const char* kKindNames[5]   = {"unknown", "prefill", "decode", "mtp_proposal",
-                                         "mtp_verify"};
+constexpr const char* kKindNames[5]          = {"unknown", "prefill", "decode", "mtp_proposal",
+                                                "mtp_verify"};
 
 template <class T>
 void put(std::vector<std::byte>& out, T value) {
@@ -206,11 +206,11 @@ void ExpertRouteRecorder::expert_route(const ExpertRouteRecord& record) noexcept
         // A prefill chunk whose ids outnumber one count per expert is written as a per-layer
         // histogram: its streaming cost and its prompt's experts need counts, not token order.
         const std::uint32_t experts = experts_per_layer_;
-        const bool histogram =
-            record.kind == ExpertRouteKind::Prefill && experts != 0 && columns * per_layer > experts;
-        const std::size_t payload =
-            histogram ? static_cast<std::size_t>(record.layer_count) * experts
-                      : record.experts.size();
+        const bool histogram        = record.kind == ExpertRouteKind::Prefill && experts != 0 &&
+                               columns * per_layer > experts;
+        const std::size_t payload = histogram
+                                        ? static_cast<std::size_t>(record.layer_count) * experts
+                                        : record.experts.size();
         bytes.reserve(24 + (histogram ? 1 : columns) * 16 + payload * 2);
         put<std::uint32_t>(bytes, kRecordMarker);
         put<std::uint8_t>(bytes, histogram ? kPrefillHistogramKind
