@@ -111,7 +111,7 @@ the default split, and the split is kept in the browser. Readings travel briefly
 instead of jumping; with Windows animation effects turned off they change at once. The other pages
 keep a one-line memory and rate band in view.
 
-**Chat**, **Connect**, **API**, **Diagnose** (findings, engine log, engine data, acceleration) and **Settings**
+**Chat**, **Connect**, **API**, **Diagnose** (findings, engine log, engine data, acceleration, expert use) and **Settings**
 are pages of one control display. The Settings index shows each page's current values; model presets
 and the desktop reserve have their own pages there. Edits are staged as a temporary revision,
 shown in amber, until **Insert** saves them or **Erase** discards them; a staged edit also shows
@@ -145,6 +145,32 @@ API key and streams each answer as the engine writes it. That route forwards eng
 and accepts only loopback callers that send the `X-NInfer-Supervisor` header, like the engine
 controls. Unlike a web frontend it can call the engine's admin writes; the page asks before it
 sends `POST /admin/quiesce`, which holds incoming requests while it runs.
+
+**Diagnose › Experts** shows how busy the model's routed experts have been, for an engine started
+with `--expert-stats` (or `--expert-trace` with a folder, which also writes a trace file). The map has one
+row per text layer and one column per expert, with the speculative-decoding layer, when there is one,
+set apart below. Brightness is each row's own scale, so a layer's busiest expert is always the
+brightest; counts fade with a 60-second half-life, so the picture follows what the engine is doing
+now. **Decode** (green, like the generation rate) covers answers, including drafts and their checks;
+**Prefill** (blue, like the prompt-reading rate) covers prompts. **By expert** keeps every expert in
+its own column, which shows which experts stay busy; **Sorted** lines each layer up from busiest to
+quietest, so the slope shows how lopsided the use is. Pointing at the map, or using the arrow keys
+on it, reads out the layer, expert, rank, heat, its share of the layer and the share held by the
+experts up to it. The bars at the right give, per layer, how many experts it takes to cover 80% of
+that layer's activity, and a line under the map gives the smallest, median and largest. The counters
+line shows steps and tokens per kind, uptime, the half-life and the trace file (its size, what is
+queued, and how many records were dropped, in amber when any were).
+
+The **Expert VRAM budget** control asks how much of the recent decode activity the busiest experts
+would cover. It takes a size in experts or GiB (one expert is 2,764,808 bytes; the text layers hold
+24,576, 63.3 GiB) and reports two shares: the hottest experts across all layers, and an even split
+with the same number in every layer. Both are upper bounds for a fixed set chosen from the traffic
+on screen, not measured hit rates, and the speculative layer's experts are left out. In Sorted order
+magenta marks show where each choice would cut. The page asks the engine's `/admin/experts` through the
+Supervisor every two seconds while it is open and visible, and stops otherwise. Without the engine
+option it explains how to turn it on. The Supervisor has no setting for it, so the flag goes in the
+engine arguments of its configuration file, where flags it does not describe are passed through
+unchanged; Settings › Launch details shows the arguments the engine runs with.
 
 ## Web frontends
 

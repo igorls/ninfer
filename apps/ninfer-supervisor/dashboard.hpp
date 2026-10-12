@@ -331,8 +331,8 @@ R"HTML(.cdu-tab[aria-current=page]{color:var(--ink);border-color:var(--ink)}
 .finding.compact.open details{grid-column:2/-1}
 
 .diag-log{display:flex;flex-direction:column}
-.view-cdu:has(.diag-log:not([hidden])){height:100%}
-.view-cdu:has(.diag-log:not([hidden])) .cdu{display:flex;flex-direction:column;height:100%;min-height:420px}
+.view-cdu:has(:is(.diag-log,.diag-experts):not([hidden])){height:100%}
+.view-cdu:has(:is(.diag-log,.diag-experts):not([hidden])) .cdu{display:flex;flex-direction:column;height:100%;min-height:420px}
 .diag-log:not([hidden]){flex:1;min-height:0}
 .log-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:8px}
 .log-filters{display:flex;gap:4px;flex-wrap:wrap}
@@ -346,6 +346,70 @@ R"HTML(.cdu-tab[aria-current=page]{color:var(--ink);border-color:var(--ink)}
 .mtp-col{flex:1;text-align:center;font-size:11px;color:var(--faint)}
 .mtp-track{position:relative;height:72px;margin-bottom:4px;background:var(--track);border-bottom:1px solid var(--rule)}
 .mtp-bar{position:absolute;inset:0;background:var(--green);transform:scaleY(0);transform-origin:bottom;transition:transform var(--slew)}
+
+/* Expert use: one row per text layer, one column per expert, on display glass. The map is
+   the generation channel (green) for decode and the prompt channel (ice) for prefill, drawn
+   from the root tokens; the bars at its right are measured (white); the budget is a target
+   (magenta). One screen; the map takes the height the rest leaves. */
+.view-cdu:has(.diag-experts:not([hidden])) .cdu{min-height:470px}
+.diag-experts:not([hidden]){flex:1;min-height:0;display:flex;flex-direction:column}
+.ex-live{flex:1;min-height:0;display:flex;flex-direction:column;gap:8px}
+.ex-bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px}
+.ex-tabs{display:flex;gap:4px}
+.ex-bar .cdu-tab{min-height:26px;padding:0 10px;font-size:11.5px}
+.ex-scale{display:flex;align-items:center;gap:6px;font:600 10.5px var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);white-space:nowrap}
+.ex-scale canvas{display:block;width:96px;height:10px;border-radius:1px;box-shadow:0 0 0 1px var(--rule-2)}
+.ex-read{display:flex;align-items:baseline;flex-wrap:wrap;gap:0 10px;flex:1 1 300px;max-width:640px;min-width:0;margin-left:auto;min-height:26px;padding:3px 9px;border:1px solid var(--rule-2);border-radius:3px;font:500 12.5px/1.4 var(--f-panel);font-stretch:87.5%;font-variant-numeric:tabular-nums;color:var(--ink)}
+.ex-read.live{border-color:var(--rule)}
+.ex-read i{font-style:normal;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin-right:4px}
+.ex-hint{font:12px var(--f-text);font-stretch:normal;color:var(--faint)}
+.ex-facts{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 22px;font-variant-numeric:tabular-nums}
+.ex-facts>div{display:flex;align-items:baseline;gap:7px;min-width:0}
+.ex-facts dt{font:600 11px var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
+.ex-facts dd{font:500 13.5px var(--f-panel);font-stretch:87.5%;color:var(--ink);overflow-wrap:anywhere}
+.ex-file{font:11.5px var(--f-mono);font-stretch:normal;color:var(--dim);overflow-wrap:anywhere}
+.ex-facts .ex-bad{color:var(--amber)}
+.ex-tag{padding:1px 7px;border:1px solid var(--amber);border-radius:3px;color:var(--amber);font:600 11.5px var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase}
+.ex-map{position:relative;flex:1;min-height:150px}
+.ex-map canvas{position:absolute;inset:0;width:100%;height:100%;display:block;border-radius:3px;transition:opacity var(--slew)}
+.ex-map canvas:focus-visible{outline-offset:-2px}
+.ex-map.stale canvas{opacity:.4}
+.ex-skew{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 16px;font-variant-numeric:tabular-nums}
+.ex-skew i,.ex-lg{font:600 11px var(--f-panel);font-stretch:87.5%;font-style:normal;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
+.ex-skew i{margin-right:6px}
+.ex-skew b{font:600 15px var(--f-panel);font-stretch:87.5%;color:var(--ink)}
+.ex-sub{font-size:12px;color:var(--faint)}
+.ex-budget{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:6px 28px;align-items:end;padding-top:8px;border-top:1px solid var(--rule-2)}
+.ex-budget-set{min-width:0}
+.ex-budget-row{display:flex;align-items:center;gap:6px 8px;flex-wrap:wrap}
+.ex-budget .cdu-input{min-height:30px;padding:3px 8px;color:var(--magenta)}
+.ex-slider{flex:1 1 150px;width:auto;min-width:120px}
+.ex-budget-of{margin-left:10px;font:400 12px var(--f-text);letter-spacing:0;text-transform:none;color:var(--faint)}
+.ex-budget-note{grid-column:1/-1;max-width:none}
+.ex-out{display:flex;flex-wrap:wrap;gap:4px 26px}
+.ex-out .ro dd b{font-size:22px;line-height:1.1}
+.ex-out .ro dt{font-size:11px}
+.ex-out .ro dt b{font:600 11px var(--f-panel);font-stretch:87.5%;color:var(--magenta)}
+.ex-state{max-width:76ch;padding:6px 2px}
+.ex-state .cdu-subhead{margin-top:6px}
+.ex-state code{font:12px var(--f-mono);color:var(--well-ink)}
+body.explain .view-cdu:has(.diag-experts:not([hidden])){height:auto}
+body.explain .view-cdu:has(.diag-experts:not([hidden])) .cdu{height:auto}
+body.explain .diag-experts:not([hidden]){flex:none}
+body.explain .ex-live{flex:none}
+body.explain .ex-map{flex:none;height:clamp(300px,52vh,460px)}
+@media (max-height:780px) and (min-width:821px){
+  .ex-live{gap:5px}
+  .ex-budget{padding-top:5px;gap:3px 28px}
+  .ex-budget .cdu-input{min-height:26px}
+  .ex-out .ro dd b{font-size:19px}
+  .ex-out .ro dt{font-size:10.5px}
+  .ex-bar .cdu-tab{min-height:24px}
+}
+@media (max-width:820px){
+  .ex-budget{grid-template-columns:minmax(0,1fr)}
+  .ex-read{flex-basis:100%;max-width:none;margin-left:0}
+}
 
 /* API test bench: endpoint index beside the request and its answer; one screen. */
 .view-bench{height:100%}
@@ -373,7 +437,8 @@ R"HTML(.cdu-tab[aria-current=page]{color:var(--ink);border-color:var(--ink)}
 .bench-line #bench-path{flex:1 1 280px}
 .bench-options{gap:6px 10px}
 .bench-examples{display:flex;flex-wrap:wrap;gap:4px;margin-right:auto}
-button.cdu-tab{background:none;cursor:pointer;font-family:var(--f-panel);font-stretch:87.5%;text-transform:uppercase;letter-spacing:.06em}
+)HTML"
+R"HTML(button.cdu-tab{background:none;cursor:pointer;font-family:var(--f-panel);font-stretch:87.5%;text-transform:uppercase;letter-spacing:.06em}
 button.cdu-tab[aria-pressed=true]{color:var(--ink);border-color:var(--ink)}
 .bench-stream{min-height:28px;font-size:13px}
 .bench-body{width:100%;height:clamp(96px,22vh,280px);resize:vertical;padding:8px 10px;background:var(--glass-2);border:1px solid var(--field-edge);border-radius:4px;color:var(--ink);font:12.5px/1.55 var(--f-mono);tab-size:2;white-space:pre}
@@ -424,8 +489,7 @@ button.cdu-tab[aria-pressed=true]{color:var(--ink);border-color:var(--ink)}
 .chat-setting{display:flex;flex-direction:column;min-width:0}
 .chat-setting-wide{grid-column:1/-1}
 .chat-setting .cdu-input,.chat-setting .cfg-select{flex:none;min-height:30px;padding:4px 8px;font-size:13.5px}
-)HTML"
-R"HTML(.chat-settings .cfg-check{flex-direction:row;min-height:28px;font-size:13px}
+.chat-settings .cfg-check{flex-direction:row;min-height:28px;font-size:13px}
 .chat-settings .cfg-help{margin-top:0}
 .chat-settings :is(.cdu-input:not(:placeholder-shown),.cfg-select.set){color:var(--magenta)}
 .chat-settings :disabled{opacity:.55;cursor:not-allowed}
@@ -524,7 +588,8 @@ R"HTML(.chat-settings .cfg-check{flex-direction:row;min-height:28px;font-size:13
 .cfg-field{min-width:0}
 .cfg-field-top{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:4px}
 .cfg-label{font-size:11.5px;font-weight:600;color:var(--ink);text-transform:uppercase;letter-spacing:.05em}
-.cfg-flag{font:11px var(--f-mono);color:var(--faint);overflow-wrap:anywhere;max-width:50%;text-align:right}
+)HTML"
+R"HTML(.cfg-flag{font:11px var(--f-mono);color:var(--faint);overflow-wrap:anywhere;max-width:50%;text-align:right}
 .cfg-input,.cfg-select{width:100%}
 .cfg-select{color:var(--cyan)}
 .cfg-select option{background:var(--glass-2);color:var(--ink)}
@@ -577,8 +642,7 @@ R"HTML(.chat-settings .cfg-check{flex-direction:row;min-height:28px;font-size:13
 .cdu.tmpy .cdu-title h1{color:var(--amber)}
 
 .presets{border:0;margin:0;padding:0;min-width:0}
-)HTML"
-R"HTML(.preset{display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:1px 10px;padding:7px 0;border-bottom:1px solid var(--rule-2);cursor:pointer}
+.preset{display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:1px 10px;padding:7px 0;border-bottom:1px solid var(--rule-2);cursor:pointer}
 .preset input{margin:3px 0 0;width:15px;height:15px}
 .preset-name{font:600 14.5px var(--f-panel);font-stretch:87.5%;color:var(--cyan)}
 .preset-detail{grid-column:2;font-size:12.5px;color:var(--dim)}
@@ -692,7 +756,8 @@ dialog p{margin:12px 0 16px;font-size:13px;color:var(--dim)}
   .alert-title,.alert-text{grid-column:2;white-space:normal}
   .traffic .s,.traffic .v{white-space:normal}
   .gpu-apps{flex-direction:column;gap:2px}
-  .finding,.finding.compact{grid-template-columns:1fr}
+)HTML"
+R"HTML(  .finding,.finding.compact{grid-template-columns:1fr}
   .finding-sev{grid-row:auto}
   .finding.compact .finding-body{white-space:normal}
   .cdu{padding:10px 12px 14px}
@@ -767,8 +832,7 @@ dialog p{margin:12px 0 16px;font-size:13px;color:var(--dim)}
 <section class="fma" aria-label="Engine status">
   <div class="fma-col fma-engine">
     <div class="fma-engine-state">
-)HTML"
-R"HTML(      <span class="fma-label">Engine</span>
+      <span class="fma-label">Engine</span>
       <strong id="kpi-state-badge" class="fma-mode amber" data-annunciate>Connecting</strong>
       <span class="fma-sub">Up <b id="kpi-uptime">—</b></span>
       <span id="fma-armed" class="fma-armed" hidden></span>
@@ -871,7 +935,8 @@ R"HTML(      <span class="fma-label">Engine</span>
       <header class="display-head">
         <h2 id="clients-title">Calling apps</h2>
         <span id="clients-sub" class="display-source">No requests observed yet</span>
-        <span id="clients-count" class="display-range">—</span>
+)HTML"
+R"HTML(        <span id="clients-count" class="display-range">—</span>
       </header>
       <div class="traffic-scroll">
         <table class="traffic">
@@ -923,8 +988,7 @@ R"HTML(      <span class="fma-label">Engine</span>
         <legend>Output</legend>
         <label class="chat-setting"><span class="cdu-label">Output budget</span>
           <span class="chat-budget"><select id="chat-budget" class="cfg-select"><option value="unlimited">No limit</option><option value="custom">Custom</option><option value="default">Engine default</option></select><input id="chat-max" class="cdu-input cdu-input-num" type="number" min="0" step="1" placeholder="tokens" aria-label="Output tokens" hidden></span></label>
-)HTML"
-R"HTML(        <p id="chat-budget-help" class="cfg-help chat-setting-wide"></p>
+        <p id="chat-budget-help" class="cfg-help chat-setting-wide"></p>
         <label class="cfg-check chat-setting"><input type="checkbox" id="chat-stream" checked><span>Stream the answer</span></label>
         <label class="cfg-check chat-setting"><input type="checkbox" id="chat-show-reasoning"><span>Open reasoning while it streams</span></label>
         <label class="chat-setting chat-setting-wide"><span class="cdu-label">System prompt</span><textarea id="chat-system" class="cdu-input chat-text" rows="2" placeholder="Optional instructions for the whole conversation"></textarea></label>
@@ -979,7 +1043,8 @@ R"HTML(        <p id="chat-budget-help" class="cfg-help chat-setting-wide"></p>
         <span id="chat-hint" class="cfg-status"></span>
         <button type="button" id="chat-inspect" class="key key-small" title="Open this conversation's next request on the API page">Open in API</button>
         <button type="submit" id="chat-send" class="key key-insert">Send<span aria-hidden="true">&gt;</span></button>
-        <button type="button" id="chat-stop" class="key key-stop" hidden>Stop</button>
+)HTML"
+R"HTML(        <button type="button" id="chat-stop" class="key key-stop" hidden>Stop</button>
       </div>
     </form>
   </div>
@@ -1038,8 +1103,7 @@ R"HTML(        <p id="chat-budget-help" class="cfg-help chat-setting-wide"></p>
           <div class="bench-line bench-options">
             <div id="bench-examples" class="bench-examples" role="group" aria-label="Examples"></div>
             <label id="bench-stream-wrap" class="cfg-check bench-stream"><input type="checkbox" id="bench-stream"><span>Stream</span></label>
-)HTML"
-R"HTML(            <button type="button" id="bench-format" class="key key-small">Format</button>
+            <button type="button" id="bench-format" class="key key-small">Format</button>
             <button type="button" id="bench-curl" class="key key-small"><svg class="icon"><use href="#i-copy"/></svg>Copy as curl</button>
           </div>
           <label class="sr-only" for="bench-body">Request body (JSON)</label>
@@ -1073,6 +1137,7 @@ R"HTML(            <button type="button" id="bench-format" class="key key-small"
       <a href="#diagnostics/log" data-diag="log" class="cdu-tab">Engine log</a>
       <a href="#diagnostics/engine" data-diag="engine" class="cdu-tab">Engine data</a>
       <a href="#diagnostics/accel" data-diag="accel" class="cdu-tab">Acceleration</a>
+      <a href="#diagnostics/experts" data-diag="experts" class="cdu-tab">Experts</a>
     </nav>
 
     <section class="diag-page" data-diag-page="findings" aria-label="Findings">
@@ -1122,6 +1187,71 @@ R"HTML(            <button type="button" id="bench-format" class="key key-small"
       <h2 class="cdu-subhead">Accepted tokens by draft position <span id="dt-mtp-rate-badge" class="cdu-tag">—</span></h2>
       <div id="mtp-bars-container" class="mtp-bars"><div class="mtp-col"><div class="mtp-track"><div class="mtp-bar"></div></div><span>P1</span></div><div class="mtp-col"><div class="mtp-track"><div class="mtp-bar"></div></div><span>P2</span></div><div class="mtp-col"><div class="mtp-track"><div class="mtp-bar"></div></div><span>P3</span></div><div class="mtp-col"><div class="mtp-track"><div class="mtp-bar"></div></div><span>P4</span></div><div class="mtp-col"><div class="mtp-track"><div class="mtp-bar"></div></div><span>P5</span></div></div>
       <p class="cdu-small">Conversation-prefix reuse can avoid processing the same opening text again. Seed, append and reset describe how the engine reused that state.</p>
+    </section>
+
+    <section class="diag-page diag-experts" data-diag-page="experts" aria-labelledby="experts-title" hidden>
+      <h2 id="experts-title" class="sr-only">Expert use</h2>
+)HTML"
+R"HTML(      <p class="cdu-help explain-only">Each text layer of the model holds a pool of experts, small sub-networks, and every token is sent to only the few best suited in each layer. This map shows how busy each expert has been lately: brighter is busier, scaled inside its own layer, and the counts fade with the half-life shown so the picture follows what the engine is doing now. Decode is the engine writing answers, including the speculative drafts and their checks; Prefill is it reading prompts. By expert keeps every expert in its own column, so a bright column is an expert that stays busy. Sorted lines each layer up from busiest to quietest, so the slope shows how lopsided the use is: a steep fall means a few experts do most of the work. The bars at the right give, per layer, how many experts it takes to cover 80% of that layer's activity.</p>
+      <div id="ex-live" class="ex-live" hidden>
+        <div class="ex-bar">
+          <div class="ex-tabs" role="group" aria-label="Activity shown">
+            <button type="button" class="cdu-tab" data-ex-kind="decode" aria-pressed="true">Decode</button>
+            <button type="button" class="cdu-tab" data-ex-kind="prefill" aria-pressed="false">Prefill</button>
+          </div>
+          <div class="ex-tabs" role="group" aria-label="Order of experts">
+            <button type="button" class="cdu-tab" data-ex-order="id" aria-pressed="true">By expert</button>
+            <button type="button" class="cdu-tab" data-ex-order="sorted" aria-pressed="false">Sorted</button>
+          </div>
+          <span class="ex-scale" aria-hidden="true"><span>0</span><canvas id="ex-key" width="96" height="10"></canvas><span>Row peak</span></span>
+          <output id="ex-read" class="ex-read" aria-live="off"></output>
+        </div>
+        <dl class="ex-facts" aria-label="Counters">
+          <div><dt>Decode</dt><dd id="ex-f-decode">—</dd></div>
+          <div><dt>Prefill</dt><dd id="ex-f-prefill">—</dd></div>
+          <div id="ex-f-draft-wrap"><dt>Draft</dt><dd id="ex-f-draft">—</dd></div>
+          <div id="ex-f-verify-wrap"><dt>Verify</dt><dd id="ex-f-verify">—</dd></div>
+          <div><dt>Up</dt><dd id="ex-f-up">—</dd></div>
+          <div><dt>Half-life</dt><dd id="ex-f-half">—</dd></div>
+          <div><dt>Trace</dt><dd id="ex-f-trace">—</dd></div>
+          <span id="ex-stale" class="ex-tag" hidden></span>
+        </dl>
+        <p class="note">Steps are passes of the model over a batch of tokens and tokens are the positions in them; the counts are since the engine started. Draft is the cheap speculative step that guesses ahead and Verify is the check of its guesses; both feed the Decode map. The trace file records every routing choice for later analysis; dropped means the writer fell behind and skipped some records.</p>
+        <div id="ex-map" class="ex-map">
+          <canvas id="ex-canvas" tabindex="0" role="img" aria-label="Expert use map. Rows are layers and columns are experts. Use the arrow keys to move between experts and layers, Home and End to jump along a layer, Escape to clear."></canvas>
+          <div id="ex-idle" class="trace-empty" hidden>No expert activity in the recent window</div>
+        </div>
+        <p id="ex-skew" class="ex-skew">
+          <span class="ex-lg">Experts for 80%</span>
+          <span><i>min</i><b id="ex-sk-min">—</b></span>
+          <span><i>median</i><b id="ex-sk-med">—</b></span>
+          <span><i>max</i><b id="ex-sk-max">—</b></span>
+          <span class="ex-sub">of <span id="ex-sk-of">512</span> per text layer</span>
+          <span id="ex-sk-mtp-wrap"><i>MTP layer</i><b id="ex-sk-mtp">—</b></span>
+        </p>
+        <div class="ex-budget">
+          <div class="ex-budget-set">
+            <label class="cdu-label" for="ex-n">Expert VRAM budget<span id="ex-budget-of" class="ex-budget-of">of all 24,576 text-layer experts · 63.3 GiB</span></label>
+            <div class="ex-budget-row">
+              <input id="ex-slider" class="reserve-slider ex-slider" type="range" min="0" max="24576" step="48" value="8192" aria-label="Expert budget in experts" aria-describedby="ex-budget-note">
+              <input id="ex-n" class="cdu-input cdu-input-num" type="number" min="0" max="24576" step="48" value="8192" inputmode="numeric"><span class="cdu-unit">experts</span>
+              <input id="ex-gib" class="cdu-input cdu-input-num" type="number" min="0" max="63.3" step="0.1" value="21.1" inputmode="decimal" aria-label="Expert budget in GiB"><span class="cdu-unit">GiB</span>
+            </div>
+          </div>
+          <dl class="ex-out">
+            <div class="ro ro-major"><dt id="ex-dt-global">Hottest experts anywhere</dt><dd><b id="ex-share-global">—</b></dd></div>
+            <div class="ro ro-major"><dt id="ex-dt-even">Even per layer</dt><dd><b id="ex-share-even">—</b></dd></div>
+          </dl>
+          <p id="ex-budget-note" class="cdu-small ex-budget-note">Share of recent decode activations those experts hold: an upper bound for a fixed set chosen from today's traffic, not a measured hit rate.</p>
+        </div>
+        <p class="note">The budget asks how much of the recent decode work a limited set of experts would cover if only they lived in GPU memory. Hottest anywhere picks the busiest experts across all layers; Even per layer gives every layer the same number. Both are best cases for a fixed set picked from the traffic on screen, so a cache that must adapt does worse. The MTP layer's experts are left out of the budget. In Sorted order the magenta marks show where each choice would cut: a line per layer for the global pick, a dashed line for the even one.</p>
+      </div>
+      <div id="ex-state" class="ex-state" role="status">
+        <h3 id="ex-state-title" class="cdu-subhead">Reading expert use…</h3>
+        <p id="ex-state-text" class="cdu-help">Asking the engine for its expert counters.</p>
+        <p id="ex-state-how" class="cdu-small" hidden></p>
+        <a id="ex-state-link" class="prompt" href="#settings/raw" hidden>Launch details<span aria-hidden="true">&gt;</span></a>
+      </div>
     </section>
   </div>
 </section>
@@ -1175,12 +1305,12 @@ R"HTML(            <button type="button" id="bench-format" class="key key-small"
       <p class="cdu-help">How much GPU memory NInfer leaves free when it starts, on top of what other apps already use. More room helps your desktop and GPU-heavy apps but leaves less for the model's conversations. It is a startup target, not memory locked away.</p>
       <div class="reserve-layout">
         <div class="reserve-entry">
-)HTML"
-R"HTML(          <label class="cdu-label" for="reserve-amount">Free memory target</label>
+          <label class="cdu-label" for="reserve-amount">Free memory target</label>
           <span class="cdu-field-row"><input id="reserve-amount" class="cdu-input cdu-input-num" type="number" min="1" max="64" step="1" value="8" aria-describedby="reserve-preview-note"><span class="cdu-unit">GiB</span></span>
           <input id="reserve-slider" class="reserve-slider" type="range" min="1" max="64" step="1" value="8" aria-label="Free GPU memory target in GiB" aria-describedby="reserve-preview-note">
           <div class="reserve-scale" aria-hidden="true"><span>More engine capacity</span><span>More room for apps</span></div>
-          <div class="reserve-preview" aria-hidden="true"><span id="reserve-engine-preview"></span><span id="reserve-free-preview"></span></div>
+)HTML"
+R"HTML(          <div class="reserve-preview" aria-hidden="true"><span id="reserve-engine-preview"></span><span id="reserve-free-preview"></span></div>
         </div>
         <div class="reserve-facts">
           <p id="reserve-current" class="cdu-data">Checking the running reserve…</p>
@@ -1319,7 +1449,7 @@ R"HTML(          <label class="cdu-label" for="reserve-amount">Free memory targe
     $('display-mode-label').textContent = mode === 'auto' ? 'Auto · ' + displayNames[r.dataset.theme] : displayNames[mode];
     displayKey.setAttribute('aria-label', `Display mode: ${displayNames[mode]}${mode === 'auto' ? ', following Windows (' + displayNames[r.dataset.theme] + ')' : ''}. Press to change.`);
     readPalette();
-    requestAnimationFrame(drawAll);
+    requestAnimationFrame(() => { drawAll(); if (ex.frame) { exDrawKey(exKind(ex.frame)); exDraw(); } });
   }
   displayKey.onclick = () => {
     const next = {auto: 'day', day: 'night', night: 'auto'}[document.documentElement.dataset.display] || 'auto';
@@ -1349,10 +1479,10 @@ R"HTML(          <label class="cdu-label" for="reserve-amount">Free memory targe
   // Routing: four function keys, each with its own pages.
   // ---------------------------------------------------------------------
   const viewNames = ['overview', 'chat', 'connect', 'api', 'diagnostics', 'settings'];
-  const diagPages = ['findings', 'log', 'engine', 'accel'];
+  const diagPages = ['findings', 'log', 'engine', 'accel', 'experts'];
   const settingsPages = ['network', 'api', 'frontends', 'capacity', 'memory', 'features', 'raw', 'presets', 'reserve'];
   const viewLabels = {overview:'Monitor', chat:'Chat', connect:'Connect', api:'API test bench', diagnostics:'Diagnose', settings:'Settings'};
-  const diagLabels = {findings:'Findings', log:'Engine log', engine:'Engine data', accel:'Acceleration'};
+  const diagLabels = {findings:'Findings', log:'Engine log', engine:'Engine data', accel:'Acceleration', experts:'Experts'};
   const tabLabels = {network:'Connection', api:'API & access', frontends:'Web frontends', capacity:'Request capacity', memory:'Memory & precision', features:'Model features', raw:'Launch details', presets:'Model presets', reserve:'Desktop reserve'};
 
   function selectView() {
@@ -1385,8 +1515,8 @@ R"HTML(          <label class="cdu-label" for="reserve-amount">Free memory targe
       updateTmpy();
     }
     if (activeView === 'api') benchInit();
-)HTML"
-R"HTML(    if (activeView === 'chat') chatInit();
+    if (activeView === 'chat') chatInit();
+    exSync();
     document.title = title + ' · NInfer';
     if (activeView === 'overview') requestAnimationFrame(drawAll);
   }
@@ -1400,7 +1530,8 @@ R"HTML(    if (activeView === 'chat') chatInit();
   // ---------------------------------------------------------------------
   // Connection and engine controls
   // ---------------------------------------------------------------------
-  function setConnection(value) {
+)HTML"
+R"HTML(  function setConnection(value) {
     connected = value;
     liveDot.className = 'lamp' + (value ? '' : ' offline');
     liveLabel.textContent = value ? 'Live' : 'Reconnecting…';
@@ -1583,15 +1714,15 @@ R"HTML(    if (activeView === 'chat') chatInit();
       };
       const name = document.createElement('span'); name.className = 'preset-name'; name.textContent = model.name || model.id;
       const detail = document.createElement('span'); detail.className = 'preset-detail'; detail.id = 'catalog-detail-' + index;
-)HTML"
-R"HTML(      detail.textContent = [model.description, (Number.isFinite(model.size_bytes) && model.size_bytes > 0 ? (model.size_bytes / GiB).toFixed(1) + ' GiB on disk' : 'Artifact size unavailable'), model.available ? '' : 'Unavailable: ' + model.reason].filter(Boolean).join(' · ');
+      detail.textContent = [model.description, (Number.isFinite(model.size_bytes) && model.size_bytes > 0 ? (model.size_bytes / GiB).toFixed(1) + ' GiB on disk' : 'Artifact size unavailable'), model.available ? '' : 'Unavailable: ' + model.reason].filter(Boolean).join(' · ');
       const artifact = document.createElement('code'); artifact.textContent = model.artifact;
       label.append(input, name);
       if (model.active) { const tag = document.createElement('span'); tag.className = 'preset-tag'; tag.textContent = 'Current launch'; label.append(tag); }
       label.append(detail, artifact);
       catalogOptions.append(label);
     });
-    // The catalog describes launch args; health and saved active_model do not prove model identity.
+)HTML"
+R"HTML(    // The catalog describes launch args; health and saved active_model do not prove model identity.
     const active = data.models.filter(m => m.active).map(m => m.name || m.id).join(', ');
     $('catalog-current').textContent = 'Current launch: ' + (active || data.active_artifact_label || 'not identified') + '. Select another preset, then load it.';
     $('sum-presets').textContent = active || data.active_artifact_label || 'not identified';
@@ -1682,7 +1813,7 @@ R"HTML(      detail.textContent = [model.description, (Number.isFinite(model.siz
     const cs = getComputedStyle(document.documentElement);
     const v = name => cs.getPropertyValue(name).trim();
     Object.assign(C, {ink: v('--ink'), dim: v('--dim'), faint: v('--faint'), rule: v('--rule'), rule2: v('--rule-2'), green: v('--green'), ice: v('--ice'),
-      magenta: v('--magenta'), red: v('--red'), amber: v('--amber'), glass: v('--glass'), tapeBody: v('--tape-body'), tick: v('--tick'), axis: v('--axis'),
+      magenta: v('--magenta'), red: v('--red'), amber: v('--amber'), glass: v('--glass'), glass2: v('--glass-2'), tapeBody: v('--tape-body'), tick: v('--tick'), axis: v('--axis'),
       envelope: v('--envelope'), traceFill: v('--trace-fill'), genFill: v('--gen-fill'), reserveLabel: v('--reserve-label'), poleDark: v('--pole-dark')});
   }
   readPalette();
@@ -1795,8 +1926,7 @@ R"HTML(      detail.textContent = [model.description, (Number.isFinite(model.siz
   const reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   // Slew: a pointer, a scale or a figure that changes travels to its new reading over 380 ms
   // on an ease-out, as a damped mechanical pointer does, instead of jumping. Only the travel
-)HTML"
-R"HTML(  // is drawn in between; every reading at rest is the measured value. Reduced motion jumps.
+  // is drawn in between; every reading at rest is the measured value. Reduced motion jumps.
   const SLEW_MS = 380;
   const slews = new Map();
   let slewFrame = 0;
@@ -1807,7 +1937,8 @@ R"HTML(  // is drawn in between; every reading at rest is the measured value. Re
     const st = slews.get(key);
     if (!st || reducedMotion || document.hidden) { slews.set(key, {from: target, to: target, start: now, v: target}); return target; }
     if (target !== st.to) { st.from = st.v; st.to = target; st.start = now; }
-    const p = Math.min(1, (now - st.start) / SLEW_MS);
+)HTML"
+R"HTML(    const p = Math.min(1, (now - st.start) / SLEW_MS);
     st.v = p < 1 ? st.from + (st.to - st.from) * easeOut(p) : st.to;
     if (p < 1 && !slewFrame) slewFrame = requestAnimationFrame(() => { slewFrame = 0; drawAll(); });
     return st.v;
@@ -2011,8 +2142,7 @@ R"HTML(  // is drawn in between; every reading at rest is the measured value. Re
   }
   function rateScales(s, plotH) {
     const ser = s.throughput || {};
-)HTML"
-R"HTML(    const dec = ser.decode_tok_s || [], pre = ser.prefill_tok_s || [];
+    const dec = ser.decode_tok_s || [], pre = ser.prefill_tok_s || [];
     const now = (s.requests || {}).decode_tok_s_total || 0;
     const decRaw = Math.max(40, now, ...dec) * 1.1, preRaw = Math.max(400, ...pre) * 1.1;
     const n = Math.max(2, Math.min(5, Math.floor((plotH || 120) / 26)));
@@ -2024,7 +2154,8 @@ R"HTML(    const dec = ser.decode_tok_s || [], pre = ser.prefill_tok_s || [];
     const {c, W, H} = prep(rateTape);
     const plotH = H - PAD_TOP - PAD_BOTTOM;
     if (plotH <= 10) return;
-    const {decMax, steps} = rateScales(s, plotH);
+)HTML"
+R"HTML(    const {decMax, steps} = rateScales(s, plotH);
     // Re-ranging slides the tape: each figure keeps its exact value and travels to its new
     // place, so a changed scale reads as the same tape moving rather than a new one.
     const shownMax = slew('rate.decMax', decMax);
@@ -2225,8 +2356,7 @@ R"HTML(    const dec = ser.decode_tok_s || [], pre = ser.prefill_tok_s || [];
   });
 
   // ---------------------------------------------------------------------
-)HTML"
-R"HTML(  // Calling apps: one row per app from the engine's own record. Columns never
+  // Calling apps: one row per app from the engine's own record. Columns never
   // move; a row under queue pressure earns a caution line, never bigger type.
   // ---------------------------------------------------------------------
   function renderClients(reqs) {
@@ -2235,7 +2365,8 @@ R"HTML(  // Calling apps: one row per app from the engine's own record. Columns 
     const focused = document.activeElement && document.activeElement.matches('.client-evidence') ? document.activeElement.dataset.client : null;
     const mins = reqs.clients_window_minutes || 15;
     const restarts = reqs.client_engine_starts || 0;
-    $('clients-count').textContent = clients.length ? `${clients.length} app${clients.length === 1 ? '' : 's'}` : '—';
+)HTML"
+R"HTML(    $('clients-count').textContent = clients.length ? `${clients.length} app${clients.length === 1 ? '' : 's'}` : '—';
     $('clients-sub').textContent = `Last ${mins} min${restarts ? ` · ${restarts} engine start${restarts === 1 ? '' : 's'}` : ''}${reqs.client_window_limited ? ' · observation limit reached' : ''}`;
     if (!clients.length) {
       list.innerHTML = '<tr class="traffic-empty"><td colspan="5">No app has sent a request in the last ' + mins + ' minutes. Apps appear here as they call the engine.</td></tr>';
@@ -2329,11 +2460,11 @@ R"HTML(  // Calling apps: one row per app from the engine's own record. Columns 
       return {title:'How close you are to the context and memory limits', body:`The largest request used ${pct(req.largest_context_ratio)} of the ${(cfg.max_context || 0).toLocaleString()}-token context limit across ${req.count || 0} requests. Conversation memory peaked at ${pct(kv.utilization_high_water)} of capacity${kv.includes_retained_checkpoints ? ' (including saved conversation state)' : ''}, with up to ${sch.peak_running || 0} of ${cfg.max_concurrency || 0} requests running at once.`, action:actions[e.kind] || ''};
     }
     if (id === 'prefix.reuse_mix') return {title:'Reusing earlier conversation text', body:e.multi_turn_prompt_tokens > 0 ? `${((e.multi_turn_hit_ratio || 0) * 100).toFixed(0)}% of conversation prompt tokens were reused in the available log. Reuse can make follow-up responses start sooner.` : 'No multi-turn prompt samples are available yet. Reuse can make follow-up responses start sooner.'};
-)HTML"
-R"HTML(    if (id === 'client.narrated_tool_intent') return {title:'Tool behavior needs a conversation sample', body:'The log records whether tools were provided, but not what the model said. It cannot explain a promised tool action that did not happen.'};
+    if (id === 'client.narrated_tool_intent') return {title:'Tool behavior needs a conversation sample', body:'The log records whether tools were provided, but not what the model said. It cannot explain a promised tool action that did not happen.'};
     if (id === 'client.content_fields') return {title:'Reply text is not stored in this log', body:'To investigate an empty or unexpected reply, compare the conversation in your app with the engine log.'};
     if (id === 'vram.admin') return {title:'Detailed engine memory data is unavailable', body:'The supervisor could not retrieve the engine’s internal memory report. GPU-wide readings may still be available.', action:'If this persists after the engine is ready, check the API connection and authentication settings.'};
-    if (id === 'prefix.reuse_collapsed' || id === 'prefix.multiturn_root') return {title:'Earlier conversation text is being processed again', body:'The logs show repeated work instead of reusing conversation state. Follow-up responses may take longer.', action:'Copy the engine log before restarting so the issue can be investigated.'};
+)HTML"
+R"HTML(    if (id === 'prefix.reuse_collapsed' || id === 'prefix.multiturn_root') return {title:'Earlier conversation text is being processed again', body:'The logs show repeated work instead of reusing conversation state. Follow-up responses may take longer.', action:'Copy the engine log before restarting so the issue can be investigated.'};
     if (id === 'client.output_limit_while_thinking') return {title:'Some responses reached their length limit', body:'Requests with reasoning enabled stopped at the output limit. The log cannot confirm whether your app received a visible answer.', action:'Try a higher response-token limit in your app and compare the result.'};
     return fallback;
   }
@@ -2468,8 +2599,7 @@ R"HTML(    if (id === 'client.narrated_tool_intent') return {title:'Tool behavio
     if (!ordered.length) { list.textContent = 'Windows reports no dedicated GPU allocations on this card.'; return; }
     const shown = gpuAppsExpanded ? ordered : ordered.slice(0, 5);
     for (const [name, group] of shown) {
-)HTML"
-R"HTML(      const item = document.createElement('span'); item.className = 'gpu-app' + (group.own ? ' own' : '');
+      const item = document.createElement('span'); item.className = 'gpu-app' + (group.own ? ' own' : '');
       item.textContent = name + (group.count > 1 ? ` ×${group.count}` : '');
       const v = document.createElement('b'); v.textContent = appBytes(group.bytes);
       item.append(v); list.append(item);
@@ -2483,7 +2613,8 @@ R"HTML(      const item = document.createElement('span'); item.className = 'gpu-
     }
   }
   function changeReserve(value) { reserveDraft = value; renderMemoryControls(lastState || {}); updateModelControls(); drawAll(); }
-  reserveSlider.oninput = () => { reserveAmount.value = reserveSlider.value; changeReserve(Number(reserveSlider.value)); };
+)HTML"
+R"HTML(  reserveSlider.oninput = () => { reserveAmount.value = reserveSlider.value; changeReserve(Number(reserveSlider.value)); };
   reserveAmount.oninput = () => changeReserve(reserveAmount.value === '' ? NaN : Number(reserveAmount.value));
   $('reserve-default').onclick = () => changeReserve(0);
   $('reserve-discard').onclick = () => { reserveDraft = null; renderMemoryControls(lastState || {}); updateModelControls(); drawAll(); };
@@ -2628,8 +2759,7 @@ R"HTML(      const item = document.createElement('span'); item.className = 'gpu-
       $('kpi-mtp-fallbacks').textContent = reqs.mtp_fallback_steps || 0;
       $('dt-mtp-rate-badge').textContent = `${ratePct}% accepted`;
       // One bar per configured draft position; extra columns are hidden rather
-)HTML"
-R"HTML(      // than drawn empty, which would read as "accepted nothing at position 5".
+      // than drawn empty, which would read as "accepted nothing at position 5".
       const pos = reqs.mtp_accepted_per_position || [];
       const maxPos = Math.max(1, ...pos);
       const bars = document.querySelectorAll('#mtp-bars-container .mtp-bar');
@@ -2640,7 +2770,8 @@ R"HTML(      // than drawn empty, which would read as "accepted nothing at posit
         bars[idx].parentElement.title = `Position ${idx + 1}: ${pVal} accepted (${((pVal / (reqs.mtp_accepted || 1)) * 100).toFixed(0)}%)`;
       });
     }
-    $('dt-reuse-mix').textContent = `Seed ${reqs.reuse_seed || 0} · Append ${reqs.reuse_append || 0} · Reset ${reqs.reuse_full_reset || 0}`;
+)HTML"
+R"HTML(    $('dt-reuse-mix').textContent = `Seed ${reqs.reuse_seed || 0} · Append ${reqs.reuse_append || 0} · Reset ${reqs.reuse_full_reset || 0}`;
 
     // Preserve selection and scroll position when the log has not changed.
     const nextLog = s.log_tail || '';
@@ -2739,6 +2870,7 @@ R"HTML(      // than drawn empty, which would read as "accepted nothing at posit
 
   document.addEventListener('visibilitychange', () => {
     isDocumentVisible = !document.hidden;
+    exSync();
     if (isDocumentVisible) fetch('/api/state').then(r => { if (!r.ok) throw new Error(); return r.json(); }).then(s => { setConnection(true); render(s); }).catch(() => setConnection(false));
   });
 
@@ -2841,8 +2973,7 @@ R"HTML(      // than drawn empty, which would read as "accepted nothing at posit
       note = ctx.kind === 'num'
         ? 'Auto sizes the shared pool from free GPU memory at startup. Each request is still limited to ' + shortTokens(ctx.n) + '. Up to 8 requests can be active; that 8 is the Engine lane cap, not a memory estimate.'
         : 'Auto sizes the shared pool from free GPU memory at startup. Up to 8 requests can be active; that 8 is the Engine lane cap, not a memory estimate.';
-)HTML"
-R"HTML(    } else if (kv.kind === 'default') {
+    } else if (kv.kind === 'default') {
       note = 'The pool follows max context, so one full-length request fills it. Extra concurrent requests share that length. ' + (lanes.explicit ? lanes.n + ' of 8 Engine lanes are enabled.' : 'Omitting max concurrency uses 1 of 8 Engine lanes.');
       marks.push('fit');
       for (let i = 1; i < lanes.n; i++) marks.push('share');
@@ -2851,7 +2982,8 @@ R"HTML(    } else if (kv.kind === 'default') {
       const usable = Math.min(fit, lanes.n);
       for (let i = 0; i < usable; i++) marks.push('fit');
       for (let i = usable; i < lanes.n; i++) marks.push('share');
-      if (fit < 1) note = 'This pool cannot hold one request at ' + shortTokens(ctx.n) + ' tokens. Raise KV capacity or lower max context.';
+)HTML"
+R"HTML(      if (fit < 1) note = 'This pool cannot hold one request at ' + shortTokens(ctx.n) + ' tokens. Raise KV capacity or lower max context.';
       else if (fit >= lanes.n) note = 'This pool holds ' + fit + ' full-length request' + (fit === 1 ? '' : 's') + ' at ' + shortTokens(ctx.n) + '. ' + laneWords + ' can each take a full-length request. 8 is the Engine maximum, not GPU memory.';
       else note = 'This pool holds ' + fit + ' full-length request' + (fit === 1 ? '' : 's') + ' at ' + shortTokens(ctx.n) + '. ' + laneWords + ' share the pool, so extra concurrent requests must be shorter. 8 is the Engine maximum.';
     } else if (kv.kind === 'num') {
@@ -3013,15 +3145,15 @@ R"HTML(    } else if (kv.kind === 'default') {
     if (spec.key === 'draft_tokens' || spec.key === 'lm_head_draft') input.disabled = !backend;
     label.id = input.id + '-label';
     input.setAttribute('aria-labelledby', label.id);
-)HTML"
-R"HTML(    input.setAttribute('aria-describedby', input.id + '-help');
+    input.setAttribute('aria-describedby', input.id + '-help');
     input.classList.toggle('dirty', Object.prototype.hasOwnProperty.call(cfgEdits.params, spec.key));
     if (spec.key === 'max_context' || spec.key === 'kv_capacity') wrap.appendChild(capacitySlider(spec, input));
     help.id = input.id + '-help';
     help.textContent = (spec.kind === 'int' || spec.kind === 'int_or_auto') ? spec.help + ' Range ' + spec.min + '-' + spec.max + '.' : spec.help;
     if (spec.key === 'max_context' || spec.key === 'kv_capacity') {
       help.textContent += ' Pick a common size or enter an exact count. K = 1,024 tokens; M = 1,048,576.';
-      help.textContent += spec.key === 'kv_capacity' ? ' This is the shared pool. It must cover one full-length request and cannot exceed max concurrency × max context. Engine default omits the flag and follows max context. Auto sizes from free memory.' : ' Cannot exceed an explicit KV pool; enlarge the pool first.';
+)HTML"
+R"HTML(      help.textContent += spec.key === 'kv_capacity' ? ' This is the shared pool. It must cover one full-length request and cannot exceed max concurrency × max context. Engine default omits the flag and follows max context. Auto sizes from free memory.' : ' Cannot exceed an explicit KV pool; enlarge the pool first.';
     }
     wrap.appendChild(help);
     return wrap;
@@ -3185,13 +3317,13 @@ R"HTML(    input.setAttribute('aria-describedby', input.id + '-help');
     document.querySelector('[data-settings-page="config"] .cfg-actions').hidden = cfgTab === 'frontends' || cfgTab === 'raw';
     $('settings-section-title').textContent = tabLabels[cfgTab];
     $('settings-section-help').textContent = help;
-)HTML"
-R"HTML(    const eng = cfgData.engine || {}, sup = cfgData.supervisor || {};
+    const eng = cfgData.engine || {}, sup = cfgData.supervisor || {};
     if (cfgTab === 'frontends') { renderFrontendEditor(); renderSettingsIndex(); return; }
     if (cfgTab === 'network') {
       cfgBody.appendChild(plainField('engine', 'engine_host', 'Engine host', eng.engine_host, {help: 'Address the engine listens on. The supervisor polls health here.'}));
       cfgBody.appendChild(plainField('engine', 'engine_port', 'Engine port', eng.engine_port, {type: 'int', help: 'Port the engine serves its OpenAI-compatible API on.'}));
-      cfgBody.appendChild(plainField('engine', 'device', 'GPU device index', eng.device, {type: 'int', help: 'Which CUDA device the engine runs on.'}));
+)HTML"
+R"HTML(      cfgBody.appendChild(plainField('engine', 'device', 'GPU device index', eng.device, {type: 'int', help: 'Which CUDA device the engine runs on.'}));
       cfgBody.appendChild(plainField('supervisor', 'port', 'Dashboard port', sup.port, {type: 'int', help: 'This page. Changing it needs the supervisor restarted, not just the engine.'}));
       cfgBody.appendChild(plainField('supervisor', 'host', 'Dashboard host', sup.host, {help: 'Must be a loopback address unless binding beyond loopback is enabled.'}));
       cfgBody.appendChild(plainField('supervisor', 'bind_any', 'Bind beyond loopback', sup.bind_any, {type: 'bool', help: 'Exposes engine start, stop and this configuration form to your network.'}));
@@ -3329,13 +3461,13 @@ R"HTML(    const eng = cfgData.engine || {}, sup = cfgData.supervisor || {};
     const host = d.engine.engine_host;
     const localHost = ['0.0.0.0', '::', 'localhost', '127.0.0.1', '::1'].includes(host) ? '127.0.0.1' : host;
     const apiUrl = 'http://' + (localHost.includes(':') ? '[' + localHost + ']' : localHost) + ':' + d.engine.engine_port + '/v1';
-)HTML"
-R"HTML(    $('api-address').value = apiUrl;
+    $('api-address').value = apiUrl;
     $('overview-endpoint').textContent = apiUrl.replace(/^http:\/\//, '');
     $('fma-api-copy').title = 'Copy ' + apiUrl;
     annunciate($('model-label'), modelDisplayName(d.engine));
     $('model-label').title = (modelCatalog && modelCatalog.active_artifact_label) || d.engine.artifact || '';
-    $('auth-guidance').textContent = d.engine.api_key_present ? 'Required. Enter the key configured for this engine into your app. The dashboard never displays or copies that key.' : 'None configured. If your app insists on an API key, enter a placeholder such as local; this does not enable authentication.';
+)HTML"
+R"HTML(    $('auth-guidance').textContent = d.engine.api_key_present ? 'Required. Enter the key configured for this engine into your app. The dashboard never displays or copies that key.' : 'None configured. If your app insists on an API key, enter a placeholder such as local; this does not enable authentication.';
   }
 
   // ---------------------------------------------------------------------
@@ -3384,6 +3516,7 @@ R"HTML(    $('api-address').value = apiUrl;
     ep('NInfer', 'POST', '/v1/systemone', 'System One decisions', {note: 'Structured decisions read from next-token probabilities; no text is generated. POST /systemone is the same route.', examples: [{name: 'Ticket triage', body: () => ({model: 'jev-latest', state: "Customer: 'I was charged twice for order #9482. Please refund immediately!'", questions: {is_urgent: {type: 'noul', instructions: 'Is this customer inquiry urgent?'}, department: {type: 'choice', instructions: 'Which department should handle this ticket?', criteria: {billing: 'Charges and refunds', shipping: 'Delivery', general: null}}, frustration: {type: 'score', instructions: 'How frustrated is the customer?', criteria: ['Calm', 'Mildly annoyed', 'Very upset']}}})}]}),
     ep('Admin', 'GET', '/admin/vram', 'Memory plan and device memory'),
     ep('Admin', 'GET', '/admin/stats', 'Runtime counters'),
+    ep('Admin', 'GET', '/admin/experts', 'Expert use', {note: 'How often each routed expert was chosen, per layer, decayed with a half-life. Answers 404 expert_stats_disabled unless the engine was started with --expert-stats. Add ?totals=1 for the counts since start.'}),
     ep('Admin', 'POST', '/admin/quiesce', 'Quiesce', {disruptive: true, note: 'Diagnostic: stops admission, drains active requests and holds the engine idle, then resumes. Your apps’ requests wait while it runs.', examples: [{name: 'Hold 0 ms', body: () => ({hold_ms: 0})}]}),
     ep('Supervisor', 'GET', '/api/state', 'Supervisor state', {local: true, note: 'This dashboard’s own state, as Monitor reads it every second.'}),
     ep('Supervisor', 'GET', '/api/insights', 'Findings report', {local: true}),
@@ -4232,6 +4365,569 @@ R"HTML(  $('chat-attach').onclick = () => $('chat-file').click();
     $('chat-attach').hidden = !chatVision;
     $('chat-model').textContent = benchServedModel ? benchServedModel + (chatVision ? ' · text and images' : '') : 'Model not reachable';
     chatRender();
+  }
+
+  // ---------------------------------------------------------------------
+  // Diagnose > Experts. The engine counts how often each routed expert is chosen
+  // (GET /admin/experts, present only when it was started with --expert-stats). While the
+  // page is on screen it asks every 2 s and draws one map: a row per layer, a column per
+  // expert, colour = heat scaled inside its own row. Decode is the generation channel
+  // (green), prefill the prompt channel (ice); the bars are measured (white); the budget
+  // and its cut marks are a target (magenta). Nothing here is polled while it is hidden.
+  // ---------------------------------------------------------------------
+  const EXPERT_BYTES = 2764808;            // one routed expert of this model, packed
+  const EX_POLL_MS = 2000;
+  const EX_VIEW_KEY = 'ninfer:experts-view', EX_BUDGET_KEY = 'ninfer:expert-budget';
+  const EX_LEFT = 36, EX_TOP = 17, EX_BOTTOM = 19, EX_GAP = 8;
+  const exCanvas = $('ex-canvas'), exMap = $('ex-map'), exKeyCanvas = $('ex-key');
+  const ex = {frame: null, kind: 'decode', order: 'id', budget: 8192, cur: null, at: 0, target: null, shown: null,
+    from: null, animStart: 0, raf: 0, version: 0, lay: null, img: null, imgKey: '', cuts: null, lut: null, lutKey: '', cfgKey: ''};
+  let exTimer = 0, exBusy = false, exSeq = 0, exAbort = null;
+  try {
+    const v = JSON.parse(localStorage.getItem(EX_VIEW_KEY) || '{}');
+    if (v.kind === 'prefill') ex.kind = 'prefill';
+    if (v.order === 'sorted') ex.order = 'sorted';
+    const b = parseInt(localStorage.getItem(EX_BUDGET_KEY), 10);
+    if (Number.isFinite(b) && b >= 0) ex.budget = b;
+  } catch (_) {}
+
+  const exInt = n => Number.isFinite(n) ? Math.round(n).toLocaleString() : '—';
+  const exPct = x => !Number.isFinite(x) ? '—' : (x >= 0.1 ? (x * 100).toFixed(1) : (x * 100).toFixed(2)) + '%';
+  function exBytes(n) {
+    if (!Number.isFinite(n)) return '—';
+    if (n >= GiB) return (n / GiB).toFixed(2) + ' GiB';
+    if (n >= MiB) return (n / MiB).toFixed(1) + ' MiB';
+    if (n >= 1024) return (n / 1024).toFixed(1) + ' KiB';
+    return Math.round(n) + ' B';
+  }
+  const exKind = f => f.kinds[ex.kind] ? ex.kind : 'decode';
+
+  // The reply, as typed arrays: one flat row-major [row][expert] table per kind.
+  function exIngest(d) {
+    const g = d.geometry || {};
+    const L = g.text_layers | 0, E = g.experts | 0, K = g.top_k | 0;
+    const R = L + (Number.isInteger(g.mtp_layer) ? 1 : 0);
+    if (!(L > 0 && E > 1 && E <= 65536)) throw new Error('geometry');
+    const f = {L, E, K, R, mtp: R > L, uptime: d.uptime_seconds, half: d.half_life_seconds, records: d.records || {}, columns: d.columns || {}, trace: d.trace || null, engine80: null, kinds: {}};
+    for (const kind of ['decode', 'prefill']) {
+      const rows = d[kind] && d[kind].heat;
+      if (!Array.isArray(rows) || rows.length !== R) { if (kind === 'decode') throw new Error('heat'); continue; }
+      const heat = new Float64Array(R * E);
+      for (let r = 0; r < R; r++) {
+        const row = rows[r];
+        if (!Array.isArray(row) || row.length !== E) throw new Error('row');
+        for (let i = 0; i < E; i++) heat[r * E + i] = row[i] > 0 ? +row[i] : 0;
+      }
+      f.kinds[kind] = {heat, derived: null};
+    }
+    const e80 = d.decode.experts_for_80_percent;
+    if (Array.isArray(e80) && e80.length === R) f.engine80 = e80;
+    return f;
+  }
+
+  // Order, prefix sums and coverage per row; the busiest text cells overall for the budget.
+  function exDerive(f, kind) {
+    const kd = f.kinds[kind] || f.kinds.decode;
+    if (kd.derived) return kd.derived;
+    const {L, E, R} = f, heat = kd.heat;
+    const order = new Uint16Array(R * E), rank = new Uint16Array(R * E), prefix = new Float64Array(R * (E + 1));
+    const sum = new Float64Array(R), peak = new Float64Array(R), cover = new Array(R).fill(null);
+    const idx = new Uint16Array(E);
+    for (let r = 0; r < R; r++) {
+      const base = r * E, pb = r * (E + 1);
+      for (let i = 0; i < E; i++) idx[i] = i;
+      idx.sort((a, b) => heat[base + b] - heat[base + a] || a - b);
+      order.set(idx, base);
+      let acc = 0;
+      for (let i = 0; i < E; i++) { rank[base + idx[i]] = i; acc += heat[base + idx[i]]; prefix[pb + i + 1] = acc; }
+      sum[r] = acc; peak[r] = heat[base + idx[0]];
+      if (acc > 0) {
+        const goal = acc * 0.8 * (1 - 1e-12);
+        let k = 1;
+        while (k < E && prefix[pb + k] < goal) k++;
+        cover[r] = k;
+      }
+    }
+    if (kind === 'decode' && f.engine80) f.engine80.forEach((v, r) => { cover[r] = Number.isInteger(v) ? v : null; });
+    let gAsc = null, gPrefix = null, textSum = 0;
+    if (kind === 'decode') {
+      const n = L * E;
+      gAsc = heat.slice(0, n).sort();
+      gPrefix = new Float64Array(n + 1);
+      for (let i = 0; i < n; i++) gPrefix[i + 1] = gPrefix[i] + gAsc[n - 1 - i];
+      textSum = gPrefix[n];
+    }
+    return kd.derived = {order, rank, prefix, sum, peak, cover, gAsc, gPrefix, textSum};
+  }
+
+  // What the map shows: each row's heat on a square-root scale of its own peak, in the chosen order.
+  function exMatrix(f, kind, order) {
+    const d = exDerive(f, kind), heat = (f.kinds[kind] || f.kinds.decode).heat, E = f.E;
+    const m = new Float32Array(f.R * E);
+    for (let r = 0; r < f.R; r++) {
+      const base = r * E, pk = d.peak[r];
+      if (!(pk > 0)) continue;
+      for (let i = 0; i < E; i++) {
+        const h = order === 'sorted' ? heat[base + d.order[base + i]] : heat[base + i];
+        m[base + i] = h > 0 ? Math.sqrt(h / pk) : 0;
+      }
+    }
+    return m;
+  }
+
+  function rgbOf(css) {
+    css = String(css).trim();
+    let m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(css);
+    if (m) {
+      let h = m[1];
+      if (h.length === 3) h = h.replace(/./g, '$&$&');
+      const n = parseInt(h, 16);
+      return [n >> 16 & 255, n >> 8 & 255, n & 255];
+    }
+    m = /rgba?\(([^)]+)\)/.exec(css);
+    if (m) { const p = m[1].split(',').map(Number); return [p[0] | 0, p[1] | 0, p[2] | 0]; }
+    return [128, 128, 128];
+  }
+  // 256 steps from the empty well to the channel colour; any activity is lifted off the floor.
+  function exLut(kind) {
+    const chan = kind === 'prefill' ? C.ice : C.green, key = chan + '|' + C.glass2;
+    if (ex.lutKey === key) return ex.lut;
+    const a = rgbOf(C.glass2), b = rgbOf(chan), lut = new Uint32Array(256);
+    for (let k = 0; k < 256; k++) {
+      const w = k === 0 ? 0 : 0.14 + 0.86 * ((k - 1) / 254);
+      const r = Math.round(a[0] + (b[0] - a[0]) * w), g = Math.round(a[1] + (b[1] - a[1]) * w), bl = Math.round(a[2] + (b[2] - a[2]) * w);
+      lut[k] = ((255 << 24) | (bl << 16) | (g << 8) | r) >>> 0;
+    }
+    ex.lutKey = key;
+    return ex.lut = lut;
+  }
+  function exDrawKey(kind) {
+    const dpr = window.devicePixelRatio || 1, w = Math.round(96 * dpr), h = Math.round(10 * dpr);
+    if (exKeyCanvas.width !== w || exKeyCanvas.height !== h) { exKeyCanvas.width = w; exKeyCanvas.height = h; }
+    const c = exKeyCanvas.getContext('2d'), lut = exLut(kind), img = c.createImageData(w, h), px = new Uint32Array(img.data.buffer);
+    for (let x = 0; x < w; x++) {
+      const t = x / (w - 1), v = lut[t > 0 ? 1 + ((t * 254 + .5) | 0) : 0];
+      for (let y = 0; y < h; y++) px[y * w + x] = v;
+    }
+    c.putImageData(img, 0, 0);
+  }
+
+  // Geometry in CSS pixels for the layout, in device pixels for the cells, so a cell edge is never blurred.
+  function exLayout(W, H, dpr, f) {
+    const key = [W, H, dpr, f.R, f.L, f.E].join('|');
+    if (ex.lay && ex.lay.key === key) return ex.lay;
+    const barW = W < 560 ? 52 : 76, barGap = 10;
+    const plotX = EX_LEFT, plotW = Math.max(60, W - EX_LEFT - barGap - barW - 2);
+    const gap = f.mtp ? EX_GAP : 0;
+    const plotH = Math.max(f.R, H - EX_TOP - EX_BOTTOM - gap);
+    const rowH = plotH / f.R;
+    const X0 = Math.round(plotX * dpr), PW = Math.max(1, Math.round(plotW * dpr));
+    const ys = new Int32Array(f.R), ye = new Int32Array(f.R);
+    for (let r = 0; r < f.R; r++) {
+      const top = EX_TOP + r * rowH + (r >= f.L ? gap : 0);
+      ys[r] = Math.round(top * dpr); ye[r] = Math.round((top + rowH) * dpr);
+    }
+    const Y0 = ys[0], PH = ye[f.R - 1] - Y0;
+    const colLo = new Uint16Array(PW), colHi = new Uint16Array(PW);
+    for (let x = 0; x < PW; x++) {
+      const lo = Math.floor(x * f.E / PW);
+      colLo[x] = lo; colHi[x] = Math.max(lo + 1, Math.floor((x + 1) * f.E / PW));
+    }
+    return ex.lay = {key, W, H, dpr, plotX, plotW, barX: plotX + plotW + barGap, barW, gap, rowH, X0, PW, Y0, PH, ys, ye, colLo, colHi, bottom: (Y0 + PH) / dpr};
+  }
+  // More experts than pixels: each pixel column shows the busiest expert under it.
+  function exBuildImage(f, lay, m, kind) {
+    const lut = exLut(kind), E = f.E, PW = lay.PW;
+    const img = new ImageData(PW, lay.PH), px = new Uint32Array(img.data.buffer), line = new Uint32Array(PW);
+    for (let r = 0; r < f.R; r++) {
+      const base = r * E;
+      for (let x = 0; x < PW; x++) {
+        let t = 0;
+        for (let e = lay.colLo[x], e1 = lay.colHi[x]; e < e1; e++) { const v = m[base + e]; if (v > t) t = v; }
+        line[x] = lut[t > 0 ? 1 + ((t * 254 + .5) | 0) : 0];
+      }
+      const y0 = lay.ys[r] - lay.Y0, y1 = lay.ye[r] - lay.Y0 - (lay.ye[r] - lay.ys[r] >= 4 ? 1 : 0);
+      for (let y = y0; y < y1; y++) px.set(line, y * PW);
+    }
+    return img;
+  }
+
+  function exDraw() {
+    const f = ex.frame;
+    if (!f || $('ex-live').hidden || !ex.shown) return;
+    const rect = exCanvas.getBoundingClientRect();
+    if (rect.width < 120 || rect.height < 60) return;
+    const dpr = window.devicePixelRatio || 1;
+    const cw = Math.round(rect.width * dpr), ch = Math.round(rect.height * dpr);
+    if (exCanvas.width !== cw || exCanvas.height !== ch) { exCanvas.width = cw; exCanvas.height = ch; ex.imgKey = ''; }
+    const c = exCanvas.getContext('2d');
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.clearRect(0, 0, cw, ch);
+    const lay = exLayout(rect.width, rect.height, dpr, f), kind = exKind(f), kd = exDerive(f, kind), sel = ex.cur;
+    const key = [ex.version, cw, ch, kind, ex.order, C.glass2, C.green, C.ice].join('|');
+    if (ex.imgKey !== key) { ex.img = exBuildImage(f, lay, ex.shown, kind); ex.imgKey = key; }
+)HTML"
+R"HTML(    c.putImageData(ex.img, lay.X0, lay.Y0);
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const d = v => v / dpr, sep = r => (lay.ye[r] - lay.ys[r] >= 4 ? 1 : 0);
+    const barOf = r => kd.cover[r] == null ? 0 : lay.barW * kd.cover[r] / f.E;
+
+    // Layer labels, sparse enough to read at any row height; the pointed layer is always named.
+    const step = lay.rowH >= 11 ? 2 : lay.rowH >= 6 ? 4 : 8;
+    c.font = '500 10.5px Bahnschrift, sans-serif'; c.textBaseline = 'alphabetic'; c.textAlign = 'right';
+    for (let r = 0; r < f.R; r++) {
+      const on = sel && sel.row === r, mtp = r >= f.L;
+      if (!(mtp || r % step === 0 || on)) continue;
+      if (!on && sel && sel.row < f.L && Math.abs(r - sel.row) * lay.rowH < 11) continue;   // the pointed layer's label has the room
+      c.fillStyle = on ? C.ink : C.faint;
+      c.fillText(mtp ? 'MTP' : String(r), EX_LEFT - 6, d(lay.ys[r] + lay.ye[r]) / 2 + 3.5);
+    }
+    c.font = '600 10.5px Bahnschrift, sans-serif'; c.fillStyle = C.faint;
+    c.textAlign = 'right'; c.fillText('LAYER', EX_LEFT - 6, EX_TOP - 6);
+    c.textAlign = 'left'; c.fillText(ex.order === 'sorted' ? 'RANK, BUSIEST FIRST' : 'EXPERT NUMBER', lay.plotX + 6, EX_TOP - 6);
+    c.fillText('80% IN', lay.barX, EX_TOP - 6);
+
+    // Per-row bars: how many experts cover 80% of that row's activity, on a 0..E track.
+    for (let r = 0; r < f.R; r++) {
+      const y = d(lay.ys[r]), h = d(lay.ye[r] - lay.ys[r] - sep(r)), on = sel && sel.row === r;
+      c.fillStyle = C.rule2; c.fillRect(lay.barX, y, lay.barW, h);
+      if (kd.cover[r] != null) { c.globalAlpha = on ? 1 : .78; c.fillStyle = C.ink; c.fillRect(lay.barX, y, barOf(r), h); c.globalAlpha = 1; }
+    }
+
+    // Axes.
+    const ay = Math.round(lay.bottom) + 3.5;
+    c.strokeStyle = C.axis; c.lineWidth = 1; c.fillStyle = C.faint; c.font = '500 10.5px Bahnschrift, sans-serif';
+    const ticks = ex.order === 'sorted' ? [1, f.E / 8, f.E / 4, f.E / 2, f.E] : [0, f.E / 4, f.E / 2, 3 * f.E / 4, f.E - 1];
+    ticks.forEach((v, i) => {
+      v = Math.round(v);
+      const x = Math.round(lay.plotX + (ex.order === 'sorted' ? v - .5 : v + .5) / f.E * lay.plotW) + .5;
+      c.beginPath(); c.moveTo(x, ay); c.lineTo(x, ay + 3); c.stroke();
+      c.textAlign = i === 0 ? 'left' : i === ticks.length - 1 ? 'right' : 'center';
+      c.fillText(String(v), i === 0 ? x - .5 : i === ticks.length - 1 ? x + .5 : x, ay + 14);
+    });
+    c.beginPath(); c.moveTo(lay.plotX, ay); c.lineTo(lay.plotX + lay.plotW, ay); c.moveTo(lay.barX, ay); c.lineTo(lay.barX + lay.barW, ay); c.stroke();
+    c.textAlign = 'left'; c.fillText('0', lay.barX, ay + 14);
+    c.textAlign = 'right'; c.fillText(String(f.E), lay.barX + lay.barW, ay + 14);
+
+    // The budget's cuts, in sorted decode order only: each layer's own cut for the global pick
+    // (solid), the one rank every layer would get under the even split (dashed).
+    if (ex.order === 'sorted' && kind === 'decode' && ex.cuts) {
+      c.fillStyle = C.magenta;
+      if (ex.cuts.perRow) {
+        for (let r = 0; r < f.L; r++) {
+          const p = ex.cuts.perRow[r];
+          if (p <= 0 || p >= f.E) continue;
+          c.fillRect(d(lay.X0 + Math.round(p / f.E * lay.PW) - 1), d(lay.ys[r]), d(2), d(lay.ye[r] - lay.ys[r] - sep(r)));
+        }
+      }
+      if (ex.cuts.even > 0 && ex.cuts.even < f.E) {
+        const x = d(lay.X0 + Math.round(ex.cuts.even / f.E * lay.PW)) + .5;
+        c.strokeStyle = C.magenta; c.lineWidth = 1; c.setLineDash([4, 3]);
+        c.beginPath(); c.moveTo(x, EX_TOP - 2); c.lineTo(x, d(lay.ye[f.L - 1]) + 2); c.stroke(); c.setLineDash([]);
+      }
+    }
+
+    // The pointed cell: a white box (measured), with the row bracketed so a thin row is findable.
+    if (sel && sel.row < f.R) {
+      const ys = lay.ys[sel.row], ye = lay.ye[sel.row];
+      const x0 = lay.X0 + Math.floor(sel.col * lay.PW / f.E), x1 = lay.X0 + Math.max(Math.floor(sel.col * lay.PW / f.E) + 1, Math.floor((sel.col + 1) * lay.PW / f.E));
+      const half = Math.max((x1 - x0) / 2, 1.5 * dpr), cx = (x0 + x1) / 2;
+      c.strokeStyle = C.dim; c.lineWidth = 1; c.globalAlpha = .7;
+      c.beginPath();
+      c.moveTo(lay.plotX, d(ys) - .5); c.lineTo(lay.plotX + lay.plotW, d(ys) - .5);
+      c.moveTo(lay.plotX, d(ye) + .5); c.lineTo(lay.plotX + lay.plotW, d(ye) + .5);
+      c.stroke(); c.globalAlpha = 1;
+      c.strokeStyle = C.ink; c.lineWidth = 1.5;
+      c.strokeRect(d(cx - half), d(ys) - 1, d(2 * half), d(ye - ys) + 2);
+    }
+  }
+
+  // Slew: after each reading the map travels to the new values like every other instrument,
+  // and rests on the measured ones. Reduced motion and a hidden page jump.
+  function exSetTarget(jump) {
+    const f = ex.frame;
+    if (!f) return;
+    const t = exMatrix(f, exKind(f), ex.order);
+    const keep = ex.shown && ex.target && ex.target.length === t.length && !jump && !reducedMotion && !document.hidden;
+    const from = keep ? ex.shown.slice() : null;
+    if (ex.raf) { cancelAnimationFrame(ex.raf); ex.raf = 0; }
+    ex.target = t;
+    const idle = !f.kinds[exKind(f)] || !exDerive(f, exKind(f)).sum.some(v => v > 0);
+    $('ex-idle').hidden = !idle;
+    if (!from) { ex.shown = t; ex.version++; exDraw(); return; }
+    ex.from = from; ex.shown = new Float32Array(t.length); ex.animStart = performance.now();
+    exStep();
+  }
+  function exStep() {
+    const p = Math.min(1, (performance.now() - ex.animStart) / SLEW_MS), e = easeOut(p);
+    if (p >= 1) ex.shown = ex.target;
+    else for (let i = 0; i < ex.shown.length; i++) ex.shown[i] = ex.from[i] + (ex.target[i] - ex.from[i]) * e;
+    ex.version++; exDraw();
+    ex.raf = p < 1 ? requestAnimationFrame(exStep) : 0;
+  }
+
+  function exPaintFacts() {
+    const f = ex.frame, rec = f.records, col = f.columns;
+    const pair = k => `${exInt(rec[k])} steps · ${exInt(col[k])} tokens`;
+    $('ex-f-decode').textContent = pair('decode');
+    $('ex-f-prefill').textContent = pair('prefill');
+    const mtpOn = f.mtp || rec.mtp_proposal > 0 || rec.mtp_verify > 0;
+    $('ex-f-draft-wrap').hidden = $('ex-f-verify-wrap').hidden = !mtpOn;
+    $('ex-f-draft').textContent = pair('mtp_proposal');
+    $('ex-f-verify').textContent = pair('mtp_verify');
+    $('ex-f-up').textContent = formatUptime(f.uptime);
+    $('ex-f-half').textContent = Number.isFinite(f.half) ? `${f.half} s` : '—';
+    const t = f.trace;
+    $('ex-f-trace').innerHTML = !t ? '<span class="dim">Not recording</span>'
+      : `<span class="ex-file">${esc(t.file)}</span> ${esc(exBytes(t.bytes_written))} written · ${esc(exBytes(t.bytes_queued))} queued · <span class="${t.records_dropped > 0 ? 'ex-bad' : ''}">${esc(exInt(t.records_dropped))} dropped</span>`;
+  }
+  function exPaintSkew() {
+    const f = ex.frame, kind = exKind(f), d = exDerive(f, kind);
+    const v = [];
+    for (let r = 0; r < f.L; r++) if (d.cover[r] != null) v.push(d.cover[r]);
+    v.sort((a, b) => a - b);
+    const n = v.length, med = !n ? NaN : n % 2 ? v[(n - 1) / 2] : Math.round((v[n / 2 - 1] + v[n / 2]) / 2);
+    const put = (id, x) => countTo($(id), x, q => String(Math.round(q)));
+    put('ex-sk-min', n ? v[0] : NaN); put('ex-sk-med', med); put('ex-sk-max', n ? v[n - 1] : NaN);
+    $('ex-sk-mtp-wrap').hidden = !f.mtp;
+    put('ex-sk-mtp', f.mtp && d.cover[f.L] != null ? d.cover[f.L] : NaN);
+    $('ex-sk-of').textContent = String(f.E);
+    document.querySelector('#ex-skew .ex-lg').textContent = `Experts for 80% · ${kind}`;
+  }
+
+  // Budget: the hottest N text-layer experts against the decayed decode activations on screen,
+  // as one pool (global) and as an even N/layers per layer. Both are best cases for a static
+  // set chosen from this traffic, never a measured hit rate.
+  function exBudgetSync(from) {
+    const f = ex.frame, max = f ? f.L * f.E : 24576;
+    const n = Math.max(0, Math.min(max, Math.round(ex.budget)));
+    ex.budget = n;
+    if (from !== 'slider') $('ex-slider').value = n;
+    if (from !== 'n') $('ex-n').value = n;
+    if (from !== 'gib') $('ex-gib').value = (n * EXPERT_BYTES / GiB).toFixed(1);
+  }
+  function exBudgetUpdate() {
+    const f = ex.frame;
+    if (!f) return;
+    const d = exDerive(f, 'decode'), n = Math.min(ex.budget, f.L * f.E), k = Math.min(f.E, Math.round(n / f.L));
+    $('ex-dt-global').innerHTML = `Hottest <b>${n.toLocaleString()}</b> anywhere`;
+    $('ex-dt-even').innerHTML = `Even <b>${k}</b> per layer`;
+    $('ex-dt-even').title = `${k} per layer is ${(k * f.L).toLocaleString()} experts (${(k * f.L * EXPERT_BYTES / GiB).toFixed(1)} GiB)`;
+    const gEl = $('ex-share-global'), eEl = $('ex-share-even'), fmt = v => v.toFixed(1) + '%';
+    if (!(d.textSum > 0)) { countTo(gEl, NaN, fmt); countTo(eEl, NaN, fmt); ex.cuts = null; return; }
+    let even = 0;
+    for (let r = 0; r < f.L; r++) even += d.prefix[r * (f.E + 1) + k];
+    countTo(gEl, 100 * d.gPrefix[n] / d.textSum, fmt);
+    countTo(eEl, 100 * even / d.textSum, fmt);
+    // Where the global pick cuts each layer; ties at the threshold are shared out evenly.
+    let perRow = null;
+    if (n > 0 && n < f.L * f.E) {
+      const heat = f.kinds.decode.heat, T = d.gAsc[d.gAsc.length - n];
+      const gt = new Int32Array(f.L), eq = new Int32Array(f.L);
+      let gtSum = 0, eqSum = 0;
+      for (let r = 0; r < f.L; r++) {
+        const base = r * f.E;
+        for (let p = 0; p < f.E; p++) {
+          const h = heat[base + d.order[base + p]];
+          if (h > T) gt[r]++; else if (h === T) eq[r]++; else break;
+        }
+        gtSum += gt[r]; eqSum += eq[r];
+      }
+      const share = eqSum > 0 ? (n - gtSum) / eqSum : 0;
+      perRow = new Int32Array(f.L);
+      for (let r = 0; r < f.L; r++) perRow[r] = gt[r] + Math.round(eq[r] * share);
+    }
+    ex.cuts = {perRow, even: k};
+  }
+  function exBudgetSet(n, from) {
+    ex.budget = n;
+    exBudgetSync(from);
+    try { localStorage.setItem(EX_BUDGET_KEY, String(ex.budget)); } catch (_) {}
+    exBudgetUpdate(); exDraw();
+  }
+  $('ex-slider').addEventListener('input', e => exBudgetSet(+e.target.value, 'slider'));
+  $('ex-n').addEventListener('input', e => { if (e.target.value !== '' && Number.isFinite(+e.target.value)) exBudgetSet(+e.target.value, 'n'); });
+  $('ex-gib').addEventListener('input', e => { if (e.target.value !== '' && Number.isFinite(+e.target.value)) exBudgetSet(+e.target.value * GiB / EXPERT_BYTES, 'gib'); });
+  ['ex-n', 'ex-gib'].forEach(id => $(id).addEventListener('change', () => exBudgetSet(ex.budget, '')));
+
+  // What the pointer or the arrow keys are on: layer, expert, rank, heat, share of the layer.
+  function exReadout(announce) {
+    const el = $('ex-read'), f = ex.frame, c = ex.cur;
+    if (!f || !c) { el.className = 'ex-read'; el.innerHTML = '<span class="ex-hint">Point at the map, or focus it and use the arrow keys.</span>'; return; }
+    const kind = exKind(f), d = exDerive(f, kind), base = c.row * f.E;
+    const id = ex.order === 'sorted' ? d.order[base + c.col] : c.col, rank = d.rank[base + id];
+    const h = f.kinds[kind].heat[base + id], sum = d.sum[c.row];
+    const layer = c.row < f.L ? String(c.row) : 'MTP', cover = d.cover[c.row];
+    const share = sum > 0 ? h / sum : NaN, cum = sum > 0 ? d.prefix[c.row * (f.E + 1) + rank + 1] / sum : NaN;
+    el.className = 'ex-read live';
+    el.innerHTML = `<span><i>Layer</i>${esc(layer)}</span><span><i>Expert</i>${id}</span><span><i>Rank</i>${rank + 1}</span><span><i>Heat</i>${esc(exInt(h))}</span><span><i>Share</i>${esc(exPct(share))}</span><span><i>Cumulative</i>${esc(exPct(cum))}</span>${cover != null ? `<span><i>80% in</i>${cover}</span>` : ''}`;
+    if (announce) a11yLive.textContent = `${c.row < f.L ? 'Layer ' + layer : 'MTP layer'}, expert ${id}, rank ${rank + 1}, heat ${exInt(h)}, ${exPct(share)} of the layer, cumulative ${exPct(cum)}${cover != null ? ', 80 percent of the layer in ' + cover + ' experts' : ''}.`;
+  }
+  function exSetCursor(cur, announce) {
+    const same = (!cur && !ex.cur) || (cur && ex.cur && cur.row === ex.cur.row && cur.col === ex.cur.col);
+    if (same) return;
+)HTML"
+R"HTML(    ex.cur = cur; exReadout(announce); exDraw();
+  }
+  function exPoint(e) {
+    const f = ex.frame, lay = ex.lay;
+    if (!f || !lay || !ex.target) return null;
+    const r = exCanvas.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+    if (mx < lay.plotX || mx >= lay.plotX + lay.plotW || my < EX_TOP) return null;
+    const y = my - EX_TOP, textH = f.L * lay.rowH;
+    let row;
+    if (y < textH) row = Math.floor(y / lay.rowH);
+    else if (f.mtp && y >= textH + lay.gap && y < textH + lay.gap + lay.rowH) row = f.L;
+    else return null;
+    const x = Math.min(lay.PW - 1, Math.max(0, Math.floor((mx - lay.plotX) * lay.dpr)));
+    let col = lay.colLo[x], best = -1;
+    for (let q = lay.colLo[x]; q < lay.colHi[x]; q++) { const v = ex.target[row * f.E + q]; if (v > best) { best = v; col = q; } }
+    return {row, col};
+  }
+  exCanvas.addEventListener('mousemove', e => exSetCursor(exPoint(e), false));
+  exCanvas.addEventListener('mouseleave', () => exSetCursor(null));
+  exCanvas.addEventListener('blur', () => exSetCursor(null));
+  exCanvas.addEventListener('keydown', e => {
+    const f = ex.frame;
+    if (!f) return;
+    if (e.key === 'Escape') { exSetCursor(null); return; }
+    const big = e.shiftKey ? 16 : 1;
+    let {row, col} = ex.cur || {row: 0, col: 0};
+    if (e.key === 'ArrowLeft') col -= big;
+    else if (e.key === 'ArrowRight') col += big;
+    else if (e.key === 'ArrowUp') row -= e.shiftKey ? 8 : 1;
+    else if (e.key === 'ArrowDown') row += e.shiftKey ? 8 : 1;
+    else if (e.key === 'Home') col = 0;
+    else if (e.key === 'End') col = f.E - 1;
+    else return;
+    e.preventDefault();
+    row = Math.max(0, Math.min(f.R - 1, row)); col = Math.max(0, Math.min(f.E - 1, col));
+    ex.cur = null;
+    exSetCursor({row, col}, true);
+  });
+
+  document.querySelectorAll('[data-ex-kind],[data-ex-order]').forEach(btn => btn.addEventListener('click', () => {
+    const f = ex.frame, c = ex.cur;
+    if (btn.dataset.exKind) ex.kind = btn.dataset.exKind;
+    if (btn.dataset.exOrder && btn.dataset.exOrder !== ex.order) {
+      // Keep the pointed expert when the columns change meaning (id <-> rank).
+      if (f && c) {
+        const d = exDerive(f, exKind(f)), base = c.row * f.E;
+        ex.cur = {row: c.row, col: btn.dataset.exOrder === 'sorted' ? d.rank[base + c.col] : d.order[base + c.col]};
+      }
+      ex.order = btn.dataset.exOrder;
+    }
+    document.querySelectorAll('[data-ex-kind]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.exKind === ex.kind)));
+    document.querySelectorAll('[data-ex-order]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.exOrder === ex.order)));
+    try { localStorage.setItem(EX_VIEW_KEY, JSON.stringify({kind: ex.kind, order: ex.order})); } catch (_) {}
+    if (!f) return;
+    exDrawKey(exKind(f)); exSetTarget(true); exPaintSkew(); exReadout();
+  }));
+  document.querySelectorAll('[data-ex-kind]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.exKind === ex.kind)));
+  document.querySelectorAll('[data-ex-order]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.exOrder === ex.order)));
+  if (window.ResizeObserver) new ResizeObserver(() => requestAnimationFrame(exDraw)).observe(exMap);
+
+  // States other than a reading. Last good values stay (dimmed, tagged) through a short outage;
+  // anything else replaces the map, because a reading that no longer applies is worse than none.
+  function exStateFor(kind) {
+    const engineState = (lastState && lastState.engine && lastState.engine.state) || '';
+    const configFile = cfgData && cfgData.config_path;
+    if (kind === 'disabled') {
+      return {title: 'Expert counters are off',
+        text: 'The engine is not counting which experts it uses. Start it with --expert-stats to see live use here, or with --expert-trace and a folder to count and also record every routing choice to a file for later analysis.',
+        how: managedEngine()
+          ? 'The Supervisor passes engine arguments it has no setting for straight through: add the flag to the engine arguments in its configuration file' + (configFile ? ' (' + configFile + ')' : '') + ', then restart the engine. Launch details shows the arguments the engine runs with today.'
+          : 'This dashboard only watches an engine started elsewhere. Add the flag where that engine is launched, then restart it. Launch details shows the arguments this dashboard knows of.',
+        link: true};
+    }
+    if (kind === 'absent') return {title: 'This engine does not report expert use', text: 'It answered, but has no expert counters. They need a build of the engine that has the --expert-stats option.', link: false};
+    if (kind === 'waiting') return {title: 'No request has run yet', text: 'Expert counters are on, but the engine has not routed anything since it started. This page fills in with the first request.', link: false};
+    if (kind === 'denied') return {title: 'The engine refused the request', text: 'It answered with an access error. Check the API key under Settings, API and access.', link: false};
+    if (kind === 'error') return {title: 'Unexpected answer', text: 'The engine answered, but not with expert counters. Try again; the page keeps asking every 2 seconds.', link: false};
+    const why = !connected ? 'The dashboard lost its connection to the Supervisor and is reconnecting.'
+      : !managedEngine() && engineState !== 'Running' ? 'The engine is not reachable.'
+      : {Stopped: 'The engine is stopped.', Starting: 'The engine is starting; the model is still loading.', Stopping: 'The engine is shutting down.', BackingOff: 'The engine stopped unexpectedly and will be restarted.', Halted: 'Automatic restarts have paused. Check Diagnose.'}[engineState] || 'The engine did not answer.';
+    return {title: 'Engine not reachable', text: why + ' Expert use appears here once the engine is ready.', link: false};
+  }
+  function exSetStale(on) {
+    exMap.classList.toggle('stale', on);
+    const tag = $('ex-stale');
+    tag.hidden = !on;
+    if (on) tag.textContent = `Engine not answering · last reading ${formatUptime((Date.now() - ex.at) / 1000)} ago`;
+  }
+  function exApply(o) {
+    const live = $('ex-live'), box = $('ex-state');
+    if (o.kind === 'data') {
+      const first = !ex.frame || ex.frame.R !== o.frame.R || ex.frame.E !== o.frame.E;
+      ex.frame = o.frame; ex.at = Date.now();
+      live.hidden = false; box.hidden = true;
+      exSetStale(false);
+      const total = o.frame.L * o.frame.E, key = total + '|' + o.frame.R;
+      if (ex.cfgKey !== key) {
+        ex.cfgKey = key; ex.cur = null;
+        const gMax = (total * EXPERT_BYTES / GiB).toFixed(1);
+        ['ex-slider', 'ex-n'].forEach(id => { $(id).max = total; });
+        $('ex-gib').max = gMax;
+        $('ex-budget-of').textContent = `of all ${total.toLocaleString()} text-layer experts · ${gMax} GiB`;
+        exBudgetSync('');
+      }
+      exPaintFacts();
+      exBudgetUpdate();
+      exDrawKey(exKind(o.frame));
+      exSetTarget(first);
+      exPaintSkew();
+      exReadout();
+      return;
+    }
+    if (o.kind === 'down' && ex.frame) { exSetStale(true); return; }
+    ex.frame = null; ex.target = ex.shown = null; ex.cur = null;
+    live.hidden = true; box.hidden = false;
+    const s = exStateFor(o.kind);
+    $('ex-state-title').textContent = s.title;
+    $('ex-state-text').textContent = s.text;
+    $('ex-state-how').textContent = s.how || '';
+    $('ex-state-how').hidden = !s.how;
+    $('ex-state-link').hidden = !s.link;
+  }
+
+  async function exPoll() {
+    const mine = ++exSeq, ctl = new AbortController();
+    exBusy = true; exAbort = ctl;
+    let outcome;
+    try {
+      const res = await fetch('/api/engine/admin/experts', {headers: {'X-NInfer-Supervisor': '1'}, signal: ctl.signal, cache: 'no-store'});
+      const text = await res.text();
+      let body = null;
+      try { body = JSON.parse(text); } catch (_) {}
+      if (res.status === 200 && body && body.object === 'expert_utilization') {
+        if (body.enabled === false) outcome = {kind: 'waiting'};
+        else { try { outcome = {kind: 'data', frame: exIngest(body)}; } catch (_) { outcome = {kind: 'error'}; } }
+      } else if (res.status === 404) {
+        const code = body && ((body.error && body.error.code) || body.code);
+        outcome = {kind: code === 'expert_stats_disabled' ? 'disabled' : 'absent'};
+      } else if (res.status === 401 || res.status === 403) outcome = {kind: 'denied'};
+      else if (res.status === 502 || res.status === 503 || res.status === 504) outcome = {kind: 'down'};
+      else outcome = {kind: 'error'};
+    } catch (err) {
+      if (mine !== exSeq) return;
+      outcome = {kind: 'down'};
+    }
+    if (mine !== exSeq) return;
+    exBusy = false; exAbort = null;
+    exApply(outcome);
+    if (exWanted()) exTimer = setTimeout(() => { exTimer = 0; exSync(); }, EX_POLL_MS);
+  }
+  const exWanted = () => activeView === 'diagnostics' && diagPage === 'experts' && isDocumentVisible;
+  function exStop() {
+    exSeq++;
+    clearTimeout(exTimer); exTimer = 0;
+    if (exAbort) exAbort.abort();
+    exAbort = null; exBusy = false;
+    if (ex.raf) { cancelAnimationFrame(ex.raf); ex.raf = 0; if (ex.target) { ex.shown = ex.target; ex.version++; } }
+  }
+  function exSync() {
+    if (exWanted()) { if (!exTimer && !exBusy) exPoll(); }
+    else if (exTimer || exBusy || exAbort) exStop();
   }
 
   fetch('/api/config').then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).then(d => {
