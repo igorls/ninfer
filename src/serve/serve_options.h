@@ -40,6 +40,8 @@ struct ServeOptions {
     std::optional<std::string> model_id_override; // unset => artifact metadata.name
     std::vector<std::string> model_aliases;       // further request names for the served model
     std::string request_log_jsonl;                // empty => structured request logging disabled
+    std::filesystem::path expert_trace_directory; // empty => no routed-expert trace file
+    bool expert_stats                  = false;   // live routed-expert counts (/admin/experts)
     std::uint32_t max_context          = 8192;
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(8192);
     std::uint32_t max_concurrency      = 1;

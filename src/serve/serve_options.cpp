@@ -162,7 +162,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--max-request-mib N] [--media-cache-mib N] [--media-live-mib N] "
            "[--media-preprocess-threads N] "
            "[--device-state-slots N] [--host-context-mib N] "
-           "[--request-log-jsonl FILE] "
+           "[--request-log-jsonl FILE] [--expert-stats] [--expert-trace DIR] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
@@ -188,6 +188,9 @@ std::string serve_usage_text(const char* argv0) {
            "       --media-preprocess-threads defaults to 0 (auto, at most 16 workers)\n"
            "       --api-key-file reads the key from a file, keeping it off the command line\n"
            "       --request-log-jsonl appends full-precision server/request records\n"
+           "       --expert-stats keeps live routed-expert counts for GET /admin/experts; "
+           "--expert-trace also writes every routed selection to "
+           "DIR/expert-trace-<server instance>.nxtr (models with routed experts only)\n"
            "       --model-id overrides the artifact metadata.name reported by the server\n"
            "       --model-alias adds a request name for the served model (repeatable); "
            "responses report the model id, and every server also accepts the name 'default'\n"
@@ -348,6 +351,14 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--host-context-mib") {
             options.context_cache.host_capacity_bytes =
                 parse_host_context_mib(require_value("--host-context-mib"));
+        } else if (arg == "--expert-stats") {
+            options.expert_stats = true;
+        } else if (arg == "--expert-trace") {
+            options.expert_trace_directory = require_value("--expert-trace");
+            if (options.expert_trace_directory.empty()) {
+                throw std::invalid_argument("--expert-trace must not be empty");
+            }
+            options.expert_stats = true;
         } else if (arg == "--request-log-jsonl") {
             options.request_log_jsonl = require_value("--request-log-jsonl");
             if (options.request_log_jsonl.empty()) {

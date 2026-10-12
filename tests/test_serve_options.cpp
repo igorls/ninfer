@@ -577,6 +577,23 @@ int main() {
     failures +=
         check(serve_usage_text("ninfer-serve").find("--request-log-jsonl") != std::string::npos,
               "serve help omits --request-log-jsonl");
+
+    failures += check(!defaults.expert_stats && defaults.expert_trace_directory.empty(),
+                      "routed-expert statistics are on by default");
+    const ServeOptions expert_stats = parse({"ninfer-serve", "model.ninfer", "--expert-stats"});
+    failures += check(expert_stats.expert_stats && expert_stats.expert_trace_directory.empty(),
+                      "--expert-stats did not enable live counts alone");
+    const ServeOptions expert_trace =
+        parse({"ninfer-serve", "model.ninfer", "--expert-trace", "traces"});
+    failures += check(expert_trace.expert_stats && expert_trace.expert_trace_directory == "traces",
+                      "--expert-trace did not keep its directory and imply --expert-stats");
+    bool empty_trace_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--expert-trace", ""});
+    } catch (const std::invalid_argument&) { empty_trace_rejected = true; }
+    failures += check(empty_trace_rejected, "an empty --expert-trace directory was accepted");
+    failures += check(serve_usage_text("ninfer-serve").find("--expert-trace") != std::string::npos,
+                      "serve help omits --expert-trace");
     bool secret_present    = false;
     bool redaction_present = false;
     for (const std::string& argument : logged.startup_argv) {

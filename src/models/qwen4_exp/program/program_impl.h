@@ -415,6 +415,13 @@ public:
     std::byte* ordinary_host_ple_codes                      = nullptr;
     std::byte* ordinary_host_ple_scales                     = nullptr;
     qwen4_exp::OrdinaryDecodeEgress* ordinary_host_egress   = nullptr;
+    // Routed-expert trace (pinned mirror and device slices), present only when planned.
+    std::optional<PinnedHostBuffer> route_trace_host;
+    std::optional<execution::RouteTrace> route_trace;
+
+    [[nodiscard]] execution::RouteTrace* traced_route() noexcept {
+        return route_trace ? &*route_trace : nullptr;
+    }
 
     std::size_t workspace_logical_peak_bytes = 0;
 
@@ -596,6 +603,22 @@ public:
     [[nodiscard]] std::span<const TokenLogprobs> round_token_logprobs(std::uint32_t lane) const;
     [[nodiscard]] std::span<const TokenLogprobs> prompt_token_logprobs(std::uint32_t lane) const;
     [[nodiscard]] std::span<const float> reasoning_features(std::uint32_t lane) const;
+
+    // Records of every traced unit executed since the previous call, oldest first.
+    [[nodiscard]] std::vector<execution::RouteTraceRecord> take_route_trace() noexcept {
+        return route_trace ? route_trace->take() : std::vector<execution::RouteTraceRecord>{};
+    }
+
+    [[nodiscard]] std::optional<ExpertRouteGeometry> expert_route_geometry() const noexcept {
+        if (!route_trace) { return std::nullopt; }
+        const auto layers = static_cast<std::uint16_t>(route_trace->text_layers());
+        return ExpertRouteGeometry{.text_layers = layers,
+                                   .mtp_layer   = speculative_backend == SpeculativeBackend::Mtp
+                                                      ? std::optional<std::uint16_t>(layers)
+                                                      : std::nullopt,
+                                   .experts     = 512,
+                                   .top_k = static_cast<std::uint16_t>(execution::kRouteTraceTopK)};
+    }
 
 private:
     void set_device_i32(Tensor& tensor, std::int32_t value);

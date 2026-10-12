@@ -2,6 +2,7 @@
 #include "ninfer/types.h"
 #include "runtime/contract/execution.h"
 #include "runtime/contract/resources.h"
+#include "models/qwen4_exp/execution/route_trace.h"
 #include "models/qwen4_exp/frontend.h"
 #include <array>
 #include <cstddef>
@@ -502,6 +503,11 @@ public:
     [[nodiscard]] std::span<const TokenLogprobs> prompt_token_logprobs(runtime::LaneId lane) const;
     // Reasoning feature row of the lane's request, complete once its prefill has finished.
     [[nodiscard]] std::span<const float> reasoning_features(runtime::LaneId lane) const;
+    // Routed-layer geometry of the trace; empty unless EngineOptions::expert_route_observer was
+    // set at startup.
+    [[nodiscard]] std::optional<ExpertRouteGeometry> expert_route_geometry() const noexcept;
+    // Routed-expert records of every traced unit executed since the previous call, oldest first.
+    [[nodiscard]] std::vector<execution::RouteTraceRecord> take_route_trace() noexcept;
 
 private:
     explicit Program(std::unique_ptr<detail::ProgramImpl> impl) noexcept;

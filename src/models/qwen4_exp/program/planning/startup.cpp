@@ -176,6 +176,18 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
             builder, DType::FP32, {static_cast<std::int32_t>(kLogprobPromptReadoutFloats), lanes},
             "prompt logprob readout");
     }
+    if (plan.route_trace) {
+        // The widest traced unit: a prefill chunk, an MTP verification or an ordinary round.
+        const auto columns = std::max<std::int32_t>(
+            effective_prefill_chunk,
+            static_cast<std::int32_t>(plan.max_concurrency * (plan.draft_window + 1)));
+        const auto slices = static_cast<std::int32_t>(
+            config.num_hidden_layers +
+            (plan.speculative_backend == SpeculativeBackend::Mtp ? 1U : 0U));
+        out.route_trace =
+            add_tensor(builder, DType::I32, {execution::kRouteTraceTopK * columns, slices},
+                       "routed expert trace");
+    }
     out.bytes            = builder.finish(kArenaAlign, "persistent layout");
     out.kv_payload_bytes = out.decoder.kv_payload_bytes();
     return out;
@@ -491,6 +503,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->features             = inputs.features;
     impl->use_cuda_graph       = inputs.use_cuda_graph;
     impl->causal_scoring       = inputs.causal_scoring;
+    impl->route_trace          = inputs.route_trace;
     impl->device               = inputs.device;
     impl->context_cache        = inputs.context_cache;
     impl->kv_storage           = inputs.kv_storage;
@@ -549,6 +562,9 @@ void require_supported_engine_options(const EngineOptions& options) {
         throw std::invalid_argument(
             "Qwen3.8-Flash-Next supports the BF16 and FP8 row-scaled KV caches");
     }
+    if (options.expert_route_observer != nullptr && options.purpose != EnginePurpose::Generation) {
+        throw std::invalid_argument("routed-expert observation requires a Generation Engine");
+    }
 }
 
 } // namespace ninfer::models::qwen4_exp
@@ -570,6 +586,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .features             = models::load_options(options),
         .use_cuda_graph       = options.use_cuda_graph,
         .causal_scoring       = options.purpose == EnginePurpose::CausalScoring,
+        .route_trace          = options.expert_route_observer != nullptr,
         .device               = options.device,
         .multiprocessor_count = device.multiprocessor_count(),
         .context_cache        = options.context_cache,

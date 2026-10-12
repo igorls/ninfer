@@ -2,6 +2,7 @@
 
 #include "ninfer/ops/sparse_moe.h"
 
+#include "core/device.h"
 #include "core/layout.h"
 #include "core/nvtx.h"
 #include "ops/sparse_moe/nvfp4_bank/nvfp4_bank_moe.h"
@@ -146,7 +147,7 @@ std::size_t sparse_moe_workspace_capacity_bytes(LinearPolicy gate_up_policy,
 
 void sparse_moe(const Tensor& x, const SparseMoeNvfp4BankWeights& weights,
                 SparseMoeEpilogue epilogue, Tensor& destination, WorkspaceArena& workspace,
-                cudaStream_t stream) {
+                cudaStream_t stream, Tensor* selected_experts) {
     if (epilogue != SparseMoeEpilogue::Store) {
         throw std::invalid_argument("sparse_moe: the NVFP4-bank profile supports only Store");
     }
@@ -168,6 +169,17 @@ void sparse_moe(const Tensor& x, const SparseMoeNvfp4BankWeights& weights,
                  ranges);
     require_bank(weights.gate_up, 2 * kNvfp4MoeIntermediate, kNvfp4MoeHidden, "gate_up", ranges);
     require_bank(weights.down, kNvfp4MoeHidden, kNvfp4MoeIntermediate, "down", ranges);
+    if (selected_experts != nullptr) {
+        if (selected_experts->dtype != DType::I32 ||
+            selected_experts->ne[0] != detail::kNvfp4MoeTopK || selected_experts->ne[1] != tokens ||
+            selected_experts->ne[2] != 1 || selected_experts->ne[3] != 1 ||
+            !selected_experts->is_contiguous() || selected_experts->data == nullptr) {
+            throw std::invalid_argument(
+                "sparse_moe: selected_experts must be a contiguous I32 [10,T] tensor");
+        }
+        ranges.push_back(
+            address_range(selected_experts->data, selected_experts->bytes(), "selected_experts"));
+    }
 
     const bool a4              = allows_bank_a4(weights.gate_up.policy, weights.down.policy);
     const Nvfp4MoeRoute route  = detail::resolve_nvfp4_moe_route(tokens, a4);
@@ -190,6 +202,12 @@ void sparse_moe(const Tensor& x, const SparseMoeNvfp4BankWeights& weights,
         detail::nvfp4_moe_decode(x, weights, views, destination, stream);
     } else {
         detail::nvfp4_moe_grouped(x, weights, views, route, destination, stream);
+    }
+    // Every route leaves the final selection in the ids workspace (decode writes it inside the
+    // gate/up kernel), so one copy after the last expert kernel publishes it.
+    if (selected_experts != nullptr) {
+        CUDA_CHECK(cudaMemcpyAsync(selected_experts->data, views.ids.data, views.ids.bytes(),
+                                   cudaMemcpyDeviceToDevice, stream));
     }
 }
 

@@ -177,6 +177,18 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
         grammar_masks_device = plan.persistent.grammar_masks->bind(backing);
         grammar_masks_host.emplace(grammar_masks_device.bytes());
     }
+    if (plan.persistent.route_trace) {
+        const Tensor slices         = plan.persistent.route_trace->bind(backing);
+        const std::uint32_t layers  = parameters.model.config().text.num_hidden_layers;
+        const bool mtp              = speculative_backend == SpeculativeBackend::Mtp;
+        const auto proposal_columns = static_cast<std::int32_t>(kMaximumConcurrency);
+        const std::size_t host_ids  = execution::route_trace_host_ids(
+            slices.ne[0] / execution::kRouteTraceTopK, static_cast<std::uint32_t>(slices.ne[1]),
+            kMtpMaximumDrafts, proposal_columns);
+        route_trace_host.emplace(host_ids * sizeof(std::int32_t));
+        route_trace.emplace(slices, static_cast<std::int32_t*>(route_trace_host->data()), layers,
+                            mtp, kMtpMaximumDrafts, proposal_columns);
+    }
     for (std::uint32_t lane = 0; lane < max_concurrency; ++lane) {
         lane_epochs[lane]    = 1;
         sequences[lane].lane = lane;

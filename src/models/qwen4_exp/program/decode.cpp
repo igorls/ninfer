@@ -11,6 +11,7 @@
 #include "ninfer/ops/scatter.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <cstddef>
@@ -40,6 +41,7 @@ auto ordinary_batch_body(OrdinaryBatchContext& state, std::int32_t batch_size,
                          state.execution.ple, {}, state.execution.state, state.execution.io,
                          state.execution.prefill_hidden, state.execution.prefill_chunk, 0,
                          &state.text_cache);
+        card.set_route_trace(state.execution.route_trace);
         const OrdinaryDecodeInputs inputs{
             .ids                     = ordinary.tokens(batch_size),
             .cache_positions         = ordinary.cache_positions(batch_size),
@@ -468,7 +470,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_ordinary_batch(
 
         execution::OrdinaryBatchContext schedule_state{{device, parameters, work, *state_images,
                                                         *ple_gather, io, prefill_hidden,
-                                                        prefill_chunk},
+                                                        prefill_chunk, traced_route()},
                                                        decoder->text_kv,
                                                        *io.ordinary,
                                                        *ordinary_host_ingress,
@@ -478,6 +480,9 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_ordinary_batch(
         mark_workspace_usage(workspace_plan.ordinary_round);
         execution::ordinary_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
                                          envelope, executable);
+        if (route_trace) {
+            route_trace->download_text(static_cast<std::int32_t>(batch), device.stream);
+        }
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             RequestControl& request = requests[lanes[row]];
             if (!request.logprobs_device_readout) { continue; }
@@ -497,6 +502,15 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_ordinary_batch(
         timing.end_wait();
 
         const double seconds = std::chrono::duration<double>(Clock::now() - start).count();
+        if (route_trace) {
+            std::array<execution::RouteTraceColumn, kMaximumConcurrency> columns{};
+            for (std::size_t row = 0; row < lanes.size(); ++row) {
+                columns[row] = {.lane     = lanes[row],
+                                .position = active_sequence(lanes[row]).execution_frontier};
+            }
+            route_trace->record_text(ExpertRouteKind::Decode,
+                                     std::span(columns.data(), lanes.size()));
+        }
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence    = active_sequence(lanes[row]);
             RequestControl& request    = requests[lanes[row]];

@@ -16,6 +16,7 @@
 #include <span>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace ninfer::models::qwen4_exp::execution {
 
@@ -38,9 +39,18 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
     card.set_first_token_logit_capture(state.first_token_logits_host);
     card.set_first_token_readout(state.first_token_readout);
     card.set_prompt_readout(state.prompt_readout);
+    card.set_route_trace(state.execution.route_trace);
     const std::span<const int> prompt(ids.data(), ids.size());
-    return card.prefill_chunk(prompt, state.text_kv_base, nominal_length, finalize_at_end,
-                              state.prompt, state.vision);
+    auto result = card.prefill_chunk(prompt, state.text_kv_base, nominal_length, finalize_at_end,
+                                     state.prompt, state.vision);
+    if (state.execution.route_trace != nullptr) {
+        std::vector<RouteTraceColumn> columns(result.processed_tokens);
+        for (std::uint32_t column = 0; column < result.processed_tokens; ++column) {
+            columns[column] = {.lane = state.trace_lane, .position = state.text_kv_base + column};
+        }
+        state.execution.route_trace->record_text(ExpertRouteKind::Prefill, columns);
+    }
+    return result;
 }
 
 void sample_from_hidden(PrefillContext& state, const Tensor& streams,
@@ -211,7 +221,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
         }
         execution::PrefillContext schedule_state{
             .execution  = {device, parameters, work, *state_images, *ple_gather, io, prefill_hidden,
-                           prefill_chunk},
+                           prefill_chunk, traced_route()},
             .text_kv    = text_kv_view(sequence),
             .text_cache = decoder->text_kv,
             .text_kv_base = staged.cursor,
@@ -225,6 +235,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             .vision                    = staged.vision.get(),
             .mtp_kv                    = mtp_kv_view(sequence),
             .rope_delta                = sequence.rope_delta,
+            .trace_lane                = sequence.lane,
         };
         schedule_state.prefill_gpu_timer           = &prefill_gpu_timer_;
         const execution::FirstTokenReadout readout = first_token_readout(sequence, request);

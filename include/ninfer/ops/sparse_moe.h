@@ -173,9 +173,12 @@ void sparse_moe(const Tensor& x, const SparseMoeWeights& weights, SparseMoeEpilo
  *   the 10th and 11th scores differ only by FP32 rounding.
  *
  * Effects:
- *   destination is the only observable mutation: it is overwritten with BF16(moe(x)) and its
- *   incoming value is not read. x, weights and banks are unchanged. x, destination, every weight
- *   plane and the live workspace are pairwise non-overlapping.
+ *   destination is overwritten with BF16(moe(x)) and its incoming value is not read. When
+ *   selected_experts is non-null it is overwritten with S of every column as contiguous I32
+ *   [10,T]: column t holds its ten expert ids in rank order (largest score first, the lower id
+ *   first at an exact tie), the same selection that produced destination. These are the only
+ *   observable mutations. x, weights and banks are unchanged. x, destination, selected_experts,
+ *   every weight plane and the live workspace are pairwise non-overlapping.
  *
  * Workspace:
  *   Caller-owned transient storage sized by the NVFP4-bank sparse_moe_workspace_capacity_bytes()
@@ -188,6 +191,6 @@ void sparse_moe(const Tensor& x, const SparseMoeWeights& weights, SparseMoeEpilo
  */
 void sparse_moe(const Tensor& x, const SparseMoeNvfp4BankWeights& weights,
                 SparseMoeEpilogue epilogue, Tensor& destination, WorkspaceArena& workspace,
-                cudaStream_t stream);
+                cudaStream_t stream, Tensor* selected_experts = nullptr);
 
 } // namespace ninfer::ops

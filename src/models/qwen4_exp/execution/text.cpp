@@ -335,8 +335,11 @@ void TextContext::run_layers(workspace::LayerRoots& roots, const Tensor& ple_cod
                 auto scope = work_.scope();
                 WorkspaceArena scratch(work_.alloc_bytes(ops::sparse_moe_workspace_capacity_bytes(
                     block.moe.gate_up.policy, block.moe.down.policy, tokens, tokens)));
+                Tensor selected;
+                if (route_trace_ != nullptr) { selected = route_trace_->slice(layer, tokens); }
                 ops::sparse_moe(roots.block_input, block.moe, ops::SparseMoeEpilogue::Store,
-                                roots.block_output, scratch, s);
+                                roots.block_output, scratch, s,
+                                route_trace_ != nullptr ? &selected : nullptr);
             }
             ops::hyper_connection_inject(roots.block_output, roots.injection, roots.hidden, s);
         } catch (const std::exception& error) {
@@ -428,8 +431,13 @@ void TextContext::mtp_forward(const Tensor& embedding, const Tensor& previous_st
                 auto stage = work_.scope();
                 WorkspaceArena scratch(work_.alloc_bytes(ops::sparse_moe_workspace_capacity_bytes(
                     block.moe.gate_up.policy, block.moe.down.policy, tokens, tokens)));
+                Tensor selected;
+                if (route_trace_ != nullptr) {
+                    selected = route_trace_->slice(route_trace_->mtp_layer(), tokens);
+                }
                 ops::sparse_moe(roots.block_input, block.moe, ops::SparseMoeEpilogue::Store,
-                                roots.block_output, scratch, stream);
+                                roots.block_output, scratch, stream,
+                                route_trace_ != nullptr ? &selected : nullptr);
             }
             ops::hyper_connection_inject(roots.block_output, roots.injection, roots.hidden, stream);
             if (logits != nullptr) {
@@ -722,6 +730,7 @@ PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std
         rope_positions_ = nullptr;
     }
     prefill_split_frontier_ = -1;
+    if (route_trace_ != nullptr) { route_trace_->download_text(len, s); }
     if (prefill_gpu_timer_) { prefill_gpu_timer_->record_stop(); }
     timing.begin_wait();
     ctx_.synchronize();

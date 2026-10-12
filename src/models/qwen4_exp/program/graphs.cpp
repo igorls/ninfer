@@ -205,13 +205,14 @@ void ProgramImpl::prepare_graphs() {
     const auto selected      = config.indexer.budget / config.indexer.compress_ratio;
     const auto profiles      = ordinary_graph_profiles(capacity, indexer_block, selected);
     validate_graph_profiles(profiles, capacity - 1, "ordinary");
-    execution::OrdinaryBatchContext ordinary_state{
-        {device, parameters, work, *state_images, *ple_gather, io, prefill_hidden, prefill_chunk},
-        decoder->text_kv,
-        *io.ordinary,
-        *ordinary_host_ingress,
-        *ordinary_host_egress,
-        state_images->continuation_hidden_store()};
+    execution::OrdinaryBatchContext ordinary_state{{device, parameters, work, *state_images,
+                                                    *ple_gather, io, prefill_hidden, prefill_chunk,
+                                                    traced_route()},
+                                                   decoder->text_kv,
+                                                   *io.ordinary,
+                                                   *ordinary_host_ingress,
+                                                   *ordinary_host_egress,
+                                                   state_images->continuation_hidden_store()};
     // One eager traversal loads every module before the first capture.
     const GraphExecutionProfile code_warm = profiles.front();
     prepare_representative(code_warm.min, 1);

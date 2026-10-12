@@ -276,7 +276,8 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
             request.stream ? GenerationConsumerMode::Streaming : GenerationConsumerMode::Aggregate,
             {.phase_timings = true,
              .scheduling    = scheduling_observer(req_id, metadata.http_request_id),
-             .first_token   = first_token_observer()},
+             .first_token   = first_token_observer(),
+             .route_tag     = req_id},
             [&req] { return client_disconnected(req); }, std::move(resolved.cache_hints));
     } catch (const ApiException& exception) {
         const ApiError error = responses_error(exception.error());

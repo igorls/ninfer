@@ -297,10 +297,10 @@ void HttpServer::handle_score(const httplib::Request& req, httplib::Response& re
             .model = request.model, .stream = false, .output_tokens_explicit = true};
         PreparedRequest prepared;
         try {
-            prepared =
-                service_->prepare(request.generation, GenerationConsumerMode::Aggregate,
-                                  ninfer::GenerationObservationOptions{.phase_timings = true},
-                                  [&req] { return client_disconnected(req); });
+            prepared = service_->prepare(
+                request.generation, GenerationConsumerMode::Aggregate,
+                ninfer::GenerationObservationOptions{.phase_timings = true, .route_tag = req_id},
+                [&req] { return client_disconnected(req); });
         } catch (const ApiException& exception) {
             record_request_rejected(make_request_rejection_log_context(
                 req_id, "ninfer_score", request.generation, metadata, exception.error()));

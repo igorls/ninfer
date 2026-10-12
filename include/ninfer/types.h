@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -150,6 +151,48 @@ struct ContextCostOptions {
     std::filesystem::path preset_path;
 };
 
+// Diagnostic record of the routed experts one executed forward unit selected. Columns are the
+// unit's token columns in execution order; experts holds layer_count x top_k ids per column, in
+// [column][layer][rank] order with rank 0 the largest router score. Published only while
+// EngineOptions::expert_route_observer is set; observation never changes execution or output.
+enum class ExpertRouteKind : std::uint8_t {
+    Prefill     = 1,
+    Decode      = 2,
+    MtpProposal = 3,
+    MtpVerify   = 4,
+};
+
+struct ExpertRouteColumn {
+    std::uint64_t request_tag = 0; // GenerationObservationOptions::route_tag of the request
+    std::uint32_t position    = 0; // absolute position of the column's token in its sequence
+};
+
+struct ExpertRouteRecord {
+    ExpertRouteKind kind      = ExpertRouteKind::Decode;
+    std::uint16_t first_layer = 0;
+    std::uint16_t layer_count = 0;
+    std::uint16_t top_k       = 0;
+    std::span<const ExpertRouteColumn> columns;
+    std::span<const std::uint16_t> experts;
+};
+
+// Routed-layer geometry, reported once before the first record. Text layers have indices
+// [0, text_layers); an MTP layer, when present, has index mtp_layer.
+struct ExpertRouteGeometry {
+    std::uint16_t text_layers = 0;
+    std::optional<std::uint16_t> mtp_layer;
+    std::uint16_t experts = 0;
+    std::uint16_t top_k   = 0;
+};
+
+class ExpertRouteObserver {
+public:
+    virtual ~ExpertRouteObserver()                                         = default;
+    virtual void expert_route_started(const ExpertRouteGeometry& geometry) = 0;
+    // Called on the Engine worker after each executed unit; it must return quickly.
+    virtual void expert_route(const ExpertRouteRecord& record) noexcept = 0;
+};
+
 struct EngineOptions {
     std::filesystem::path artifact_path;
     std::filesystem::path chat_template_path;
@@ -183,6 +226,9 @@ struct EngineOptions {
     // supervised server exits here so its supervisor restarts it; unset, the Engine stays
     // unavailable (Engine::is_available() is false).
     std::function<void(std::exception_ptr, const std::string&)> on_fatal_error;
+    // Routed-expert observation. Startup reserves the trace buffers only when it is set, and a
+    // model without routed experts rejects it.
+    std::shared_ptr<ExpertRouteObserver> expert_route_observer;
 };
 
 enum class SamplingMode : std::uint8_t {
@@ -842,6 +888,8 @@ struct GenerationObservationOptions {
     // Optional for either consumer mode. No scheduling events are retained when unset.
     GenerationSchedulingObserver scheduling;
     GenerationFirstTokenObserver first_token;
+    // Opaque tag copied into this request's ExpertRouteColumn::request_tag.
+    std::uint64_t route_tag = 0;
 };
 
 class CancellationView {

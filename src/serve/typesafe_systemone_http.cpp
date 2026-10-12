@@ -228,9 +228,10 @@ SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request
             .model = chat.model, .stream = false, .output_tokens_explicit = true};
         PreparedRequest prepared;
         try {
-            prepared = service_->prepare(chat.generation, GenerationConsumerMode::Aggregate,
-                                         ninfer::GenerationObservationOptions{.phase_timings = true},
-                                         [&req] { return client_disconnected(req); });
+            prepared = service_->prepare(
+                chat.generation, GenerationConsumerMode::Aggregate,
+                ninfer::GenerationObservationOptions{.phase_timings = true, .route_tag = req_id},
+                [&req] { return client_disconnected(req); });
         } catch (const ApiException& exception) {
             record_request_rejected(make_request_rejection_log_context(
                 req_id, protocol, chat.generation, metadata, exception.error()));

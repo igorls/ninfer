@@ -4,6 +4,7 @@
 // adapters normalize before this layer and render IDs, usage, and response events after it.
 
 #include "ninfer/engine.h"
+#include "serve/expert_route_recorder.h"
 #include "serve/request.h"
 #include "serve/serve_options.h"
 
@@ -143,6 +144,11 @@ public:
 
     [[nodiscard]] const ServeOptions& options() const noexcept { return options_; }
 
+    // Present when --expert-stats or --expert-trace is set.
+    [[nodiscard]] ExpertRouteRecorder* expert_route_recorder() const noexcept {
+        return expert_route_recorder_.get();
+    }
+
     // Engine owns the once-normalized startup configuration. Serving diagnostics must use this
     // value instead of reinterpreting optional defaults from ServeOptions.
     [[nodiscard]] const ninfer::EngineOptions& engine_options() const { return engine_->options(); }
@@ -219,6 +225,7 @@ private:
     acquire_request_lifetime(DeadlinePolicy deadline_policy) const;
 
     ServeOptions options_;
+    std::shared_ptr<ExpertRouteRecorder> expert_route_recorder_;
     std::unique_ptr<ninfer::Engine> engine_;
     std::shared_ptr<RequestCapacity> request_capacity_;
 };

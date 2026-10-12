@@ -329,6 +329,11 @@ GenerationService::GenerationService(ServeOptions options, StartupObserver start
     engine_options.media_live_bytes         = options_.media_live_bytes;
     engine_options.media_preprocess_threads = options_.media_preprocess_threads;
     engine_options.startup_observer         = std::move(startup_observer);
+    if (options_.expert_stats) {
+        expert_route_recorder_ =
+            std::make_shared<ExpertRouteRecorder>(options_.expert_trace_directory);
+        engine_options.expert_route_observer = expert_route_recorder_;
+    }
     // A server whose Engine failed cannot serve again; exit so the supervisor restarts it instead
     // of leaving a process that holds the port and the GPU while answering nothing.
     engine_options.on_fatal_error = [](std::exception_ptr, const std::string& message) {

@@ -14,6 +14,9 @@
 #include <iterator>
 #include <iostream>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -402,6 +405,139 @@ bool conversation_chain_survives_a_full_cache() {
                   << first_prompt << " prompt tokens\n";
         if (system_reuse + 48U < first_prompt) {
             return fail("a system prefix sighted by a second request was not published");
+        }
+        return true;
+    });
+}
+
+class RouteCollector final : public ninfer::ExpertRouteObserver {
+public:
+    struct Record {
+        ninfer::ExpertRouteKind kind;
+        std::uint16_t first_layer;
+        std::uint16_t layer_count;
+        std::uint16_t top_k;
+        std::vector<ninfer::ExpertRouteColumn> columns;
+        std::vector<std::uint16_t> experts;
+    };
+
+    void expert_route_started(const ninfer::ExpertRouteGeometry& value) override {
+        geometry = value;
+    }
+
+    void expert_route(const ninfer::ExpertRouteRecord& record) noexcept override {
+        std::lock_guard lock(mutex);
+        records.push_back(Record{record.kind,
+                                 record.first_layer,
+                                 record.layer_count,
+                                 record.top_k,
+                                 {record.columns.begin(), record.columns.end()},
+                                 {record.experts.begin(), record.experts.end()}});
+    }
+
+    std::optional<ninfer::ExpertRouteGeometry> geometry;
+    std::mutex mutex;
+    std::vector<Record> records;
+};
+
+// The routed-expert trace reports every executed unit with the request's tag, consecutive
+// positions and valid top-10 selections, and observing it does not change greedy output.
+bool expert_route_trace(bool mtp) {
+    ninfer::EngineOptions options = base_options();
+    if (mtp) {
+        options.speculative.backend      = ninfer::SpeculativeBackend::Mtp;
+        options.speculative.draft_tokens = 3;
+    }
+    const auto input = [] { return user_prompt(prompts()[1]); };
+    std::vector<ninfer::TokenId> reference;
+    if (!with_engine(options, [&](ninfer::Engine& engine) {
+            reference =
+                engine.generate(engine.prepare(input()), greedy(48, false)).generated_token_ids;
+            return true;
+        })) {
+        return false;
+    }
+    auto collector                = std::make_shared<RouteCollector>();
+    options.expert_route_observer = collector;
+    return with_engine(options, [&](ninfer::Engine& engine) {
+        ninfer::GenerationObservationOptions observation;
+        observation.route_tag = 4242;
+        const auto result     = engine
+                                .submit(engine.prepare(input()), greedy(48, false),
+                                        ninfer::OutputConsumerMode::Aggregate, observation)
+                                .wait();
+        if (result.generated_token_ids != reference) {
+            return fail("routed-expert observation changed the greedy output");
+        }
+        const auto& geometry = collector->geometry;
+        if (!geometry || geometry->text_layers != 48 || geometry->experts != 512 ||
+            geometry->top_k != 10 || geometry->mtp_layer.has_value() != mtp ||
+            (mtp && *geometry->mtp_layer != 48)) {
+            return fail("routed-expert geometry is not the Flash-Next text/MTP layout");
+        }
+        std::lock_guard lock(collector->mutex);
+        std::uint32_t prefill_end = 0;
+        std::uint32_t next_decode = result.prompt.prompt_tokens;
+        std::size_t decodes = 0, proposals = 0, verifies = 0;
+        for (const auto& record : collector->records) {
+            if (record.top_k != 10 || record.columns.empty() ||
+                record.experts.size() != record.columns.size() * record.layer_count * 10U) {
+                return fail("routed-expert record has an inconsistent shape");
+            }
+            for (std::size_t c = 0; c < record.columns.size(); ++c) {
+                if (record.columns[c].request_tag != 4242) {
+                    return fail("routed-expert column lost its request tag");
+                }
+                for (std::uint32_t layer = 0; layer < record.layer_count; ++layer) {
+                    const auto* ids = record.experts.data() + (c * record.layer_count + layer) * 10;
+                    for (int r = 0; r < 10; ++r) {
+                        if (ids[r] >= 512 || std::count(ids, ids + 10, ids[r]) != 1) {
+                            return fail("routed-expert selection is not ten distinct experts");
+                        }
+                    }
+                }
+            }
+            const bool text = record.first_layer == 0 && record.layer_count == 48;
+            switch (record.kind) {
+            case ninfer::ExpertRouteKind::Prefill:
+                if (!text) { return fail("prefill record does not cover the text layers"); }
+                for (const auto& column : record.columns) {
+                    if (column.position != prefill_end++) {
+                        return fail("prefill record positions are not consecutive");
+                    }
+                }
+                break;
+            case ninfer::ExpertRouteKind::Decode:
+                if (mtp || !text || record.columns.size() != 1 ||
+                    record.columns.front().position != next_decode++) {
+                    return fail("decode record is not one column at the next position");
+                }
+                ++decodes;
+                break;
+            case ninfer::ExpertRouteKind::MtpProposal:
+                if (!mtp || record.first_layer != 48 || record.layer_count != 1) {
+                    return fail("MTP proposal record is not the MTP layer");
+                }
+                ++proposals;
+                break;
+            case ninfer::ExpertRouteKind::MtpVerify:
+                if (!mtp || !text || record.columns.size() != 4) {
+                    return fail("MTP verify record is not four text columns");
+                }
+                ++verifies;
+                break;
+            }
+        }
+        std::cout << "route records: prefill columns " << prefill_end << ", decode " << decodes
+                  << ", proposals " << proposals << ", verify " << verifies << '\n';
+        if (prefill_end != result.prompt.prompt_tokens) {
+            return fail("prefill records do not cover the prompt");
+        }
+        if (!mtp && decodes + 1 != result.generated_token_ids.size()) {
+            return fail("decode records do not match the decoded tokens");
+        }
+        if (mtp && (proposals == 0 || verifies == 0 || proposals != 3 * verifies)) {
+            return fail("MTP rounds did not report three proposals per verification");
         }
         return true;
     });
@@ -1201,6 +1337,8 @@ int main() {
             {"mtp host round trip", [] { return host_round_trip_is_exact(true); }},
             {"reuse survives catalog turnover", reuse_survives_catalog_turnover},
             {"conversation chain survives a full cache", conversation_chain_survives_a_full_cache},
+            {"expert route trace", [] { return expert_route_trace(false); }},
+            {"mtp expert route trace", [] { return expert_route_trace(true); }},
             {"logprobs and structured output", [] { return logprobs_and_structured_output(); }},
             {"mtp logprobs and structured output",
              [] { return logprobs_and_structured_output(true); }},

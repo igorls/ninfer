@@ -312,6 +312,14 @@ std::span<const TokenLogprobs> Program::prompt_token_logprobs(runtime::LaneId la
     return impl_->prompt_token_logprobs(lane.value);
 }
 
+std::optional<ExpertRouteGeometry> Program::expert_route_geometry() const noexcept {
+    return impl_->expert_route_geometry();
+}
+
+std::vector<execution::RouteTraceRecord> Program::take_route_trace() noexcept {
+    return impl_->take_route_trace();
+}
+
 std::span<const float> Program::reasoning_features(runtime::LaneId lane) const {
     return impl_->reasoning_features(lane.value);
 }

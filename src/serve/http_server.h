@@ -128,6 +128,7 @@ private:
     // behaviour can be exercised against a real engine rather than a fake.
     void handle_admin_quiesce(const httplib::Request& req, httplib::Response& res) const;
     void handle_admin_stats(const httplib::Request& req, httplib::Response& res) const;
+    void handle_admin_experts(const httplib::Request& req, httplib::Response& res) const;
 
     void record_request_start(const RequestLogContext& context);
     [[nodiscard]] ninfer::GenerationSchedulingObserver

@@ -51,6 +51,8 @@ struct PersistentLayout {
     std::optional<TensorLayout> logprob_readout;
     std::optional<TensorLayout> logprob_prompt_next_ids;
     std::optional<TensorLayout> logprob_prompt_readout;
+    // Routed-expert trace slices I32 [10 * columns, text layers (+1 MTP)].
+    std::optional<TensorLayout> route_trace;
     std::size_t bytes            = 0;
     std::size_t kv_payload_bytes = 0;
 };
@@ -76,6 +78,7 @@ struct SequencePlanningInputs {
     models::LoadOptions features;
     bool use_cuda_graph               = true;
     bool causal_scoring               = false;
+    bool route_trace                  = false;
     int device                        = 0;
     std::int32_t multiprocessor_count = 0;
     ContextCacheOptions context_cache;
@@ -94,6 +97,7 @@ struct SequencePlanImpl {
     models::LoadOptions features;
     bool use_cuda_graph               = true;
     bool causal_scoring               = false;
+    bool route_trace                  = false;
     int device                        = 0;
     std::int32_t multiprocessor_count = 0;
     ContextCacheOptions context_cache;

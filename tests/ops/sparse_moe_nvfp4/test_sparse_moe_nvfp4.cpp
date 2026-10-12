@@ -232,6 +232,7 @@ struct Pattern {
     std::vector<double> x;
     std::vector<double> reference; // FP64 moe(x), [2560]
     double boundary_gap = 0.0;     // s[9] - s[10] of the FP64 ranking
+    std::array<std::int32_t, 10> selected{}; // FP64 top-10 in rank order, lower id first at ties
 };
 
 class Fixture {
@@ -331,6 +332,8 @@ private:
             }
         }
 
+        for (int r = 0; r < kTopK; ++r) { pattern.selected[r] = order[r]; }
+
         // FP64 oracle: softmax over the ten selected scores equals the renormalized top-10.
         const double top   = scores[order[0]];
         double denominator = 0.0;
@@ -394,10 +397,13 @@ int run_case(const Fixture& fixture, const Profile& profile, const Case& c) {
                               (c.graph_replay ? " graph" : "");
     std::vector<std::uint16_t> input(static_cast<std::size_t>(kHidden) * tokens);
     std::vector<double> reference(input.size());
+    std::vector<std::int32_t> expected_selection(static_cast<std::size_t>(kTopK) * tokens);
     for (std::int32_t t = 0; t < tokens; ++t) {
         // Stride 7 is coprime with 64: every run of 64 consecutive tokens covers every pattern,
         // and pattern 0 (the exact tie) appears at t = 0.
         const Pattern& pattern = fixture.pattern((t * 7) % kPatterns);
+        std::copy(pattern.selected.begin(), pattern.selected.end(),
+                  expected_selection.begin() + static_cast<std::ptrdiff_t>(t) * kTopK);
         std::copy(pattern.x_bits.begin(), pattern.x_bits.end(),
                   input.begin() + static_cast<std::ptrdiff_t>(t) * kHidden);
         std::copy(pattern.reference.begin(), pattern.reference.end(),
@@ -410,6 +416,9 @@ int run_case(const Fixture& fixture, const Profile& profile, const Case& c) {
     const auto weights = fixture.weights(profile.policy);
     Tensor x(device_input.p, DType::BF16, {kHidden, tokens});
     Tensor destination(output.data(), DType::BF16, {kHidden, tokens});
+    GuardedDeviceBuffer selection(expected_selection.size() * sizeof(std::int32_t));
+    selection.fill(0xff); // -1: every id must be overwritten
+    Tensor selected(selection.data(), DType::I32, {kTopK, tokens});
     const std::size_t capacity =
         ops::sparse_moe_workspace_capacity_bytes(profile.policy, profile.policy, tokens, tokens);
     WorkspaceArena workspace(capacity);
@@ -420,19 +429,22 @@ int run_case(const Fixture& fixture, const Profile& profile, const Case& c) {
         cudaGraphExec_t exec = nullptr;
         cuda_check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "graph stream");
         cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal), "begin capture");
-        ops::sparse_moe(x, weights, ops::SparseMoeEpilogue::Store, destination, workspace, stream);
+        ops::sparse_moe(x, weights, ops::SparseMoeEpilogue::Store, destination, workspace, stream,
+                        &selected);
         cuda_check(cudaStreamEndCapture(stream, &graph), "end capture");
         cuda_check(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0), "instantiate");
         cuda_check(cudaGraphLaunch(exec, stream), "launch");
         cuda_check(cudaStreamSynchronize(stream), "synchronize launch");
         output.fill(0xff);
+        selection.fill(0xff);
         cuda_check(cudaGraphLaunch(exec, stream), "replay");
         cuda_check(cudaStreamSynchronize(stream), "synchronize replay");
         cuda_check(cudaGraphExecDestroy(exec), "destroy exec");
         cuda_check(cudaGraphDestroy(graph), "destroy graph");
         cuda_check(cudaStreamDestroy(stream), "destroy stream");
     } else {
-        ops::sparse_moe(x, weights, ops::SparseMoeEpilogue::Store, destination, workspace, nullptr);
+        ops::sparse_moe(x, weights, ops::SparseMoeEpilogue::Store, destination, workspace, nullptr,
+                        &selected);
         cuda_synchronize();
     }
 
@@ -461,6 +473,13 @@ int run_case(const Fixture& fixture, const Profile& profile, const Case& c) {
         }
     }
     failures += output.verify_guards(label);
+    // Selection is semantic and every pattern's top-10 boundary is separated (or an exact tie
+    // ordered by id), so the published ids equal the oracle's exactly.
+    std::vector<std::int32_t> actual_selection(expected_selection.size());
+    selection.copy_to_host(actual_selection.data(), actual_selection.size() * sizeof(std::int32_t));
+    failures +=
+        verify_exact((label + " selected experts").c_str(), actual_selection, expected_selection);
+    failures += selection.verify_guards(label + " selected experts");
     failures += verify_exact((label + " input preserved").c_str(),
                              from_device<std::uint16_t>(device_input, input.size()), input);
     if (workspace.used() != 0 || workspace.peak_used() != capacity) {

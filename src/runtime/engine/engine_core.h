@@ -92,10 +92,19 @@ public:
                            options.max_pending_requests),
           pending_timeout_(std::chrono::milliseconds(options.pending_timeout_ms)),
           resources_(options.context_cache.enabled, std::move(context_cost)),
-          on_fatal_error_(options.on_fatal_error) {
+          on_fatal_error_(options.on_fatal_error), route_observer_(options.expert_route_observer) {
         if (max_concurrency_ == 0 || max_concurrency_ > kMaximumConcurrency ||
             options.max_pending_requests == 0 || pending_timeout_.count() <= 0) {
             throw std::invalid_argument("Engine core bounds are invalid");
+        }
+        if (route_observer_) {
+            if constexpr (requires { instance_.program->expert_route_geometry(); }) {
+                const auto geometry = instance_.program->expert_route_geometry();
+                if (!geometry) {
+                    throw std::logic_error("routed-expert observation has no planned trace");
+                }
+                route_observer_->expert_route_started(*geometry);
+            }
         }
         paused_.reserve(max_outstanding_);
         std::promise<void> startup;
@@ -1556,11 +1565,42 @@ private:
         auto progress = instance_.program->advance_prefill(*request->sequence,
                                                            &program_call.failed_timing(), provider);
         program_call.finish(progress.timing);
+        publish_route_trace();
         if (!request->first_output_timing) {
             record_execution_work(request->prefill_work, progress.timing);
         }
         resolve_prefill_progress(request, std::move(progress), cancelled_at_unit_start);
         publish_runtime_stats();
+    }
+
+    // Publishes the Program's routed-expert records of the units just executed, stamping each
+    // column with its request's route tag while the lane still holds that request. Observation
+    // is diagnostic: a failure here drops records instead of failing requests.
+    void publish_route_trace() noexcept {
+        if constexpr (requires { instance_.program->take_route_trace(); }) {
+            if (!route_observer_) { return; }
+            try {
+                for (const auto& record : instance_.program->take_route_trace()) {
+                    if (record.columns.empty() || record.layer_count == 0) { continue; }
+                    route_columns_.clear();
+                    for (const auto& column : record.columns) {
+                        const Request* request =
+                            column.lane < slots_.size() ? slots_[column.lane].get() : nullptr;
+                        route_columns_.push_back(
+                            {.request_tag = request != nullptr ? request->observation.route_tag : 0,
+                             .position    = column.position});
+                    }
+                    route_observer_->expert_route(ExpertRouteRecord{
+                        .kind        = record.kind,
+                        .first_layer = record.first_layer,
+                        .layer_count = record.layer_count,
+                        .top_k       = static_cast<std::uint16_t>(
+                            record.experts.size() / (record.columns.size() * record.layer_count)),
+                        .columns = route_columns_,
+                        .experts = record.experts});
+                }
+            } catch (...) { route_columns_.clear(); }
+        }
     }
 
     void ensure_base_plan(const std::shared_ptr<Request>& request) {
@@ -2255,6 +2295,7 @@ private:
             membership.sequence_span(), membership.budget_span(), &program_call.failed_timing(),
             constrained ? &masks : nullptr);
         program_call.finish(pending.execution_timing());
+        publish_route_trace();
         commit_pending(std::move(pending), membership.lane_span(), true, cancelled_at_unit_start);
         publish_runtime_stats();
     }
@@ -2342,6 +2383,7 @@ private:
                                                               membership.size),
                 &program_call.failed_timing());
             program_call.finish(timing);
+            publish_route_trace();
             phase.resume_range();
         } catch (...) {
             rollback_generated();
@@ -2559,6 +2601,7 @@ private:
                         auto progress = instance_.program->advance_replay(*request->sequence,
                                                                           &call.failed_timing());
                         call.finish(progress.timing);
+                        publish_route_trace();
                         if (!request->first_output_timing) {
                             record_execution_work(request->replay_work, progress.timing);
                         }
@@ -2616,6 +2659,8 @@ private:
     const std::chrono::milliseconds pending_timeout_;
     ResourceManagement resources_;
     const std::function<void(std::exception_ptr, const std::string&)> on_fatal_error_;
+    const std::shared_ptr<ExpertRouteObserver> route_observer_;
+    std::vector<ExpertRouteColumn> route_columns_;
 
     // A quiescence request: work that must run with the engine holding still.
     //

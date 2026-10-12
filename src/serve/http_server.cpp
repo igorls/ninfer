@@ -539,6 +539,9 @@ void HttpServer::register_routes() {
     server_.Get("/admin/stats", [this](const httplib::Request& req, httplib::Response& res) {
         handle_admin_stats(req, res);
     });
+    server_.Get("/admin/experts", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_admin_experts(req, res);
+    });
     post("/admin/quiesce", &HttpServer::handle_admin_quiesce);
 }
 
@@ -750,6 +753,21 @@ void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& r
     res.set_content(body.dump(), "application/json");
 }
 
+void HttpServer::handle_admin_experts(const httplib::Request& req, httplib::Response& res) const {
+    const ExpertRouteRecorder* recorder =
+        service_ != nullptr ? service_->expert_route_recorder() : nullptr;
+    if (recorder == nullptr) {
+        ApiError error;
+        error.status  = 404;
+        error.type    = "not_found";
+        error.code    = "expert_stats_disabled";
+        error.message = "routed-expert statistics are off; start the server with --expert-stats";
+        write_openai_error(res, error);
+        return;
+    }
+    res.set_content(recorder->snapshot(req.has_param("totals")).dump(), "application/json");
+}
+
 void HttpServer::handle_admin_stats(const httplib::Request&, httplib::Response& res) const {
     if (service_ == nullptr) {
         ApiError error;
@@ -938,6 +956,10 @@ void HttpServer::attach(GenerationService& service) {
     request_jsonl_.write_server_start(options_, service.engine_options(),
                                       service.sampling_defaults(), served_model_names_.id, load,
                                       memory);
+    if (ExpertRouteRecorder* recorder = service.expert_route_recorder()) {
+        recorder->configure(request_jsonl_.server_instance_id(), served_model_names_.id,
+                            options_.artifact_path);
+    }
 }
 
 bool HttpServer::listen() {

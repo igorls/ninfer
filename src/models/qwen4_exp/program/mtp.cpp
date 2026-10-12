@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstring>
 #include <stdexcept>
+#include <vector>
 
 namespace ninfer::models::qwen4_exp::detail {
 namespace {
@@ -74,6 +75,7 @@ void ProgramImpl::mtp_proposal_body(std::int32_t batch, ops::QsaIndexerSelectEnv
     execution::TextContext card(device, parameters, work, *ple_gather, {}, *state_images, io,
                                 prefill_hidden, prefill_chunk, 0, &decoder->text_kv);
     card.set_mtp_cache({}, decoder->mtp_cache());
+    card.set_route_trace(traced_route());
     work.reset();
     auto embedded = frame.embedding.slice(1, 0, batch);
     ops::embedding(frame.proposal_ids, parameters.mtp->token_embedding, embedded, device.stream);
@@ -100,6 +102,7 @@ void ProgramImpl::mtp_verify_body(std::int32_t batch, ops::QsaIndexerSelectEnvel
     auto logits = frame.logits.view({frame.logits.ne[0], frame.width * batch});
     execution::TextContext card(device, parameters, work, *ple_gather, {}, *state_images, io,
                                 prefill_hidden, prefill_chunk, 0, &decoder->text_kv);
+    card.set_route_trace(traced_route());
     card.verify_batch(inputs, hidden, logits);
 }
 
@@ -215,6 +218,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
         } else {
             mtp_proposal_body(batch, envelope);
         }
+        if (route_trace) { route_trace->download_proposal(step, batch, device.stream); }
         CUDA_CHECK(cudaMemcpy2DAsync(static_cast<std::int32_t*>(frame.drafts.data) + step,
                                      (width - 1) * sizeof(std::int32_t), frame.proposal_ids.data,
                                      sizeof(std::int32_t), sizeof(std::int32_t), batch,
@@ -226,6 +230,19 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
     device.synchronize();
     timing.end_wait();
     timing.resume_submit();
+    if (route_trace && width > 1) {
+        std::vector<execution::RouteTraceColumn> proposed(
+            static_cast<std::size_t>((width - 1) * batch));
+        for (std::int32_t step = 0; step < width - 1; ++step) {
+            for (std::int32_t row = 0; row < batch; ++row) {
+                const auto at = static_cast<std::size_t>(step * batch + row);
+                proposed[at]  = {.lane = lanes[row],
+                                 .position =
+                                     static_cast<std::uint32_t>(host.proposal_positions[at])};
+            }
+        }
+        route_trace->record_proposals(width - 1, batch, proposed);
+    }
     // PLE's large stored table is host mapped. Gather exactly the rows addressed by the proposed
     // ledger, and preview grammar transitions before verification mutates any canonical state.
     for (std::int32_t row = 0; row < batch; ++row) {
@@ -271,6 +288,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
     } else {
         mtp_verify_body(batch, envelope);
     }
+    if (route_trace) { route_trace->download_text(columns, device.stream); }
     // Teacher MTP keys at position p use target streams at p and token embedding at p+1.
     // The first preceding stream/position comes from the saved continuation, including MRoPE.
     for (std::int32_t row = 0; row < batch; ++row) {
@@ -337,6 +355,15 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
     timing.begin_wait();
     device.synchronize();
     timing.end_wait();
+    if (route_trace) {
+        std::vector<execution::RouteTraceColumn> verified(static_cast<std::size_t>(columns));
+        for (std::int32_t column = 0; column < columns; ++column) {
+            verified[static_cast<std::size_t>(column)] = {
+                .lane     = lanes[column / width],
+                .position = static_cast<std::uint32_t>(host.positions[column])};
+        }
+        route_trace->record_text(ExpertRouteKind::MtpVerify, verified);
+    }
     for (std::int32_t row = 0; row < batch; ++row) {
         auto& sequence      = active_sequence(lanes[row]);
         auto& request       = requests[lanes[row]];

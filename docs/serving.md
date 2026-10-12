@@ -78,6 +78,7 @@ selected for this process.
 | `POST /systemone` | alias for `POST /v1/systemone` |
 | `GET /admin/vram` | Engine memory plan beside cached device-wide memory diagnostics |
 | `GET /admin/stats` | cumulative runtime and Host-work statistics |
+| `GET /admin/experts` | live routed-expert counts (with `--expert-stats`) |
 | `POST /admin/quiesce` | hold the Engine still at an execution boundary (diagnostic) |
 
 `GET /health` returns HTTP 200 with `{"status":"ok"}` while the Engine can accept work. After an
@@ -1510,6 +1511,8 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--media-live-mib N` | all live prepared BF16 media payloads | `2048` |
 | `--media-preprocess-threads N` | bounded media preprocessing workers; `0` selects at most 16 from host concurrency | `0` |
 | `--request-log-jsonl FILE` | append full-precision server/request records | disabled |
+| `--expert-stats` | keep live routed-expert counts for `GET /admin/experts` | off |
+| `--expert-trace DIR` | also write every routed selection to `DIR/expert-trace-<server instance>.nxtr`; implies `--expert-stats` | off |
 | `--response-store-max-records N` | maximum locally retained Responses objects | `1024` |
 | `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |
 | `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
@@ -1615,6 +1618,31 @@ rate(ninfer_spec_decode_accepted_tokens_total[1m])
 The handler copies published snapshots and formats them outside the Engine worker. Scraping does
 not reset counters or initiate device work. Detailed per-request records remain available through
 the JSONL log. Monitoring tools with engine-specific metric names need an NInfer adapter.
+
+## Routed-expert statistics and trace
+
+For models with routed experts (Qwen3.8-Flash-Next), `--expert-stats` records which experts every
+executed unit selected: prefill chunks, decode rounds, MTP proposal steps and MTP verifications.
+Startup reserves a device slice per routed layer for the widest unit (`10 x max(prefill chunk,
+concurrency x (drafts + 1)) x 4` bytes per layer, about 16 MB at an 8192-token chunk) and a pinned
+mirror of the same size. Each MoE call copies its final top-10 selection into its slice, and the
+round copies the slices to the host before its existing synchronization. Generated text, logits
+and scheduling are unchanged. A model without routed experts rejects the options at startup.
+
+`GET /admin/experts` returns live counts as JSON: `geometry` (text layers, the MTP layer index or
+`null`, experts per layer, top-k), unit and column counts per kind, and `decode.heat` and
+`prefill.heat`, one row of 512 activation counts per routed layer (text layers, then the MTP
+layer), decayed with a 60-second half-life. Decode heat counts decode rounds, MTP verifications and
+MTP proposals; `decode.experts_for_80_percent` gives, per layer, the fewest experts holding 80% of
+the decayed decode activations. `?totals=1` adds the undecayed counts since start. Without
+`--expert-stats` the route answers HTTP 404 `expert_stats_disabled`.
+
+`--expert-trace DIR` also appends every record to `DIR/expert-trace-<server instance>.nxtr`, named
+by the request log's `server_instance_id` (a timestamp when the request log is off). Each column
+carries the request-log `request_id` of its request and the absolute token position. The file is
+written by a background thread through a 64 MiB queue; a full queue drops records and counts them
+under `trace.records_dropped` instead of delaying the Engine. The format and the cache simulator
+that replays it are documented in `tools/bench/expert_trace/README.md`.
 
 ## Structured request log
 

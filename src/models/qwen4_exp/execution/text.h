@@ -8,6 +8,7 @@
 #include "models/qwen4_exp/frontend.h"
 #include "models/qwen3_5/execution/vision.h"
 #include "models/qwen4_exp/execution/ple.h"
+#include "models/qwen4_exp/execution/route_trace.h"
 #include "models/qwen4_exp/execution/workspace.h"
 #include "models/qwen4_exp/program/round_buffers.h"
 #include "models/qwen4_exp/state/decoder_state.h"
@@ -120,6 +121,10 @@ public:
 
     void set_prompt_readout(const PromptReadout* readout) noexcept { prompt_readout_ = readout; }
 
+    // Every MoE call writes its selection into the trace's layer slice; a prefill chunk also
+    // mirrors its text slices into pinned host memory before its synchronization. Null disables.
+    void set_route_trace(const RouteTrace* trace) noexcept { route_trace_ = trace; }
+
     void set_prefill_split_frontier(std::int64_t position) noexcept {
         prefill_split_frontier_ = position;
     }
@@ -209,6 +214,7 @@ private:
     std::uint16_t* first_token_logits_host_         = nullptr;
     const FirstTokenReadout* first_token_readout_   = nullptr;
     const PromptReadout* prompt_readout_            = nullptr;
+    const RouteTrace* route_trace_                  = nullptr;
 };
 
 } // namespace ninfer::models::qwen4_exp::execution

@@ -232,7 +232,12 @@ void require_weight_headroom(const DeviceContext& device, std::uint64_t weight_b
 
 // Qwen3.5 validates its options while planning; Qwen4Exp rejects unavailable backends before
 // the weight upload.
-void require_supported(Qwen3_5Package, const EngineOptions&) {}
+void require_supported(Qwen3_5Package, const EngineOptions& options) {
+    if (options.expert_route_observer != nullptr) {
+        throw std::invalid_argument(
+            "routed-expert observation requires a model with routed experts");
+    }
+}
 
 void require_supported(Qwen4ExpPackage, const EngineOptions& options) {
     models::qwen4_exp::require_supported_engine_options(options);

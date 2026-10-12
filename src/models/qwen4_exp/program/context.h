@@ -27,6 +27,8 @@ struct ExecutionCore {
     qwen4_exp::RoundState& io;
     Tensor& prefill_hidden;
     std::uint32_t prefill_chunk;
+    // Routed-expert trace of traced units, or null.
+    RouteTrace* route_trace = nullptr;
 };
 
 struct PrefillContext {
@@ -47,6 +49,8 @@ struct PrefillContext {
     qwen4_exp::PagedKVCacheView mtp_kv;
     std::int32_t rope_delta           = 0;
     CudaEventTimer* prefill_gpu_timer = nullptr;
+    // Lane whose sequence the chunk extends, for its routed-expert trace record.
+    std::uint32_t trace_lane = 0;
 };
 
 struct OrdinaryBatchContext {
