@@ -555,8 +555,12 @@ button.cdu-tab[aria-pressed=true]{color:var(--ink);border-color:var(--ink)}
 .md blockquote>*+*{margin-top:.5em}
 .md hr{height:0;margin:.8em 0;border:0;border-top:1px solid var(--rule)}
 .md-code{background:var(--glass-2);border:1px solid var(--well-edge);border-radius:4px;color:var(--well-ink)}
-.md-code-lang{display:block;padding:4px 10px 0;font:600 10.5px/1.2 var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
-.md-code pre{margin:0;padding:6px 10px 8px;overflow-x:auto;font:12.5px/1.5 var(--f-mono);white-space:pre;overflow-wrap:normal;tab-size:4}
+.md-code-head{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:20px;padding:2px 8px 0 10px}
+.md-code-lang{font:600 10.5px/1.2 var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
+.md-copy{flex:none;width:46px;margin-left:auto;padding:0;border:0;background:none;color:var(--cyan);font:600 10.5px/1.2 var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-align:right;text-transform:uppercase;white-space:nowrap;user-select:none}
+.md-copy:hover{text-decoration:underline;text-underline-offset:3px}
+.md-copy.failed{color:var(--amber)}
+.md-code pre{margin:0;padding:3px 10px 8px;overflow-x:auto;font:12.5px/1.5 var(--f-mono);white-space:pre;overflow-wrap:normal;tab-size:4}
 .md-code code{padding:0;border-radius:0;background:none;box-shadow:none;font:inherit}
 .md-table{max-width:100%;overflow-x:auto}
 .md-table table{border-collapse:collapse;font-size:13px;line-height:1.45;font-variant-numeric:tabular-nums;overflow-wrap:normal;word-break:normal}
@@ -590,14 +594,14 @@ button.cdu-tab[aria-pressed=true]{color:var(--ink);border-color:var(--ink)}
 .tok-forced{box-shadow:inset 0 -1px 0 var(--magenta);color:var(--magenta)}
 .msg-token-key{margin-top:6px}
 .chat-composer{display:flex;flex-direction:column;gap:6px;padding-top:8px;border-top:1px solid var(--rule)}
-.chat-input{width:100%;min-height:58px;max-height:30vh;resize:vertical;padding:8px 10px;background:var(--glass-2);border:1px solid var(--field-edge);border-radius:4px;color:var(--ink);font:14px/1.5 var(--f-text)}
+)HTML"
+R"HTML(.chat-input{width:100%;min-height:58px;max-height:30vh;resize:vertical;padding:8px 10px;background:var(--glass-2);border:1px solid var(--field-edge);border-radius:4px;color:var(--ink);font:14px/1.5 var(--f-text)}
 .chat-input:hover{border-color:var(--field-edge-hover)}
 .chat-input::placeholder{color:var(--placeholder)}
 .chat-composer.drop .chat-input{border-color:var(--cyan)}
 .chat-keys{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .chat-keys .cfg-status{flex:1}
-)HTML"
-R"HTML(.chat-attachments{display:flex;flex-wrap:wrap;gap:8px}
+.chat-attachments{display:flex;flex-wrap:wrap;gap:8px}
 .chat-thumb{display:flex;flex-direction:column;align-items:flex-start;gap:4px}
 .chat-thumb img{height:64px;border:1px solid var(--rule);border-radius:3px}
 @media (max-width:880px){
@@ -750,7 +754,8 @@ dialog p{margin:12px 0 16px;font-size:13px;color:var(--dim)}
 }
 @media (max-width:880px){
   .view-bench,.view-bench .cdu{height:auto}
-  .bench-panes{grid-template-columns:minmax(0,1fr)}
+)HTML"
+R"HTML(  .bench-panes{grid-template-columns:minmax(0,1fr)}
   .bench-index{padding-right:0;border-right:0;padding-bottom:8px;border-bottom:1px solid var(--rule-2)}
   .bench-list{max-height:30vh}
   .bench-out{min-height:260px}
@@ -761,8 +766,7 @@ dialog p{margin:12px 0 16px;font-size:13px;color:var(--dim)}
   .lsk-l::before,.lsk-r::after{display:none}
   .glareshield{flex-wrap:wrap;gap:8px 10px;padding:7px 8px}
   .brand-name{display:none}
-)HTML"
-R"HTML(  .fkeys{order:3;flex-basis:100%;gap:4px}
+  .fkeys{order:3;flex-basis:100%;gap:4px}
   .fkeys .fkey{flex:1;padding:0 6px}
   .fma{grid-template-columns:repeat(2,minmax(0,1fr))}
   .fma-col{border-left:0;border-top:1px solid var(--rule)}
@@ -943,12 +947,12 @@ R"HTML(  .fkeys{order:3;flex-basis:100%;gap:4px}
         </dl>
       </div>
       <div class="gpu-apps"><span class="display-label">Using the card</span><div id="gpu-app-list" class="gpu-app-list">Waiting for app readings…</div></div>
-      <p class="note">A loaded model holds GPU memory even while idle, so high usage alone is not a problem. The red-striped band is the desktop reserve: memory NInfer leaves free for your other apps when it starts. Windows reports each app's dedicated memory; shared allocations appear in several apps, so the list does not add up to the card total.</p>
+)HTML"
+R"HTML(      <p class="note">A loaded model holds GPU memory even while idle, so high usage alone is not a problem. The red-striped band is the desktop reserve: memory NInfer leaves free for your other apps when it starts. Windows reports each app's dedicated memory; shared allocations appear in several apps, so the list does not add up to the card total.</p>
       <p id="memory-guidance" class="pad-line amber" hidden></p>
     </section>
 
-)HTML"
-R"HTML(    <section class="display display-rates" aria-labelledby="throughput-title">
+    <section class="display display-rates" aria-labelledby="throughput-title">
       <header class="display-head">
         <h2 id="throughput-title">Rates</h2>
         <span id="kpi-thr-window" class="display-source">—</span>
@@ -1059,13 +1063,13 @@ R"HTML(    <section class="display display-rates" aria-labelledby="throughput-ti
         <label class="cfg-check chat-setting"><input type="checkbox" id="chat-logprobs"><span>Token probabilities</span></label>
         <label class="chat-setting"><span class="cdu-label">Alternatives per token · 0 to 20</span><input id="chat-top-logprobs" class="cdu-input" type="number" min="0" max="20" step="1" placeholder="0"></label>
         <p id="chat-logprobs-help" class="cfg-help chat-setting-wide">Answers then arrive whole instead of streaming. Each reply gets a token view that marks the tokens the model was unsure of. Any alternatives turn speculative drafts off for that request.</p>
-        <label class="cfg-check chat-setting chat-setting-wide"><input type="checkbox" data-param="prompt_cache_read_only" data-bool><span>Read the prompt cache without adding to it</span></label>
+)HTML"
+R"HTML(        <label class="cfg-check chat-setting chat-setting-wide"><input type="checkbox" data-param="prompt_cache_read_only" data-bool><span>Read the prompt cache without adding to it</span></label>
         <p class="cfg-help chat-setting-wide">For tests that should not evict other apps' cached conversations. The request still starts from a prefix already in the cache but publishes nothing of its own, so the next turn cannot pick up where this one ended.</p>
       </fieldset>
       <fieldset class="chat-group chat-group-wide">
         <legend>Extra request JSON</legend>
-)HTML"
-R"HTML(        <label class="chat-setting chat-setting-wide"><span class="sr-only">Extra request JSON</span><textarea id="chat-extra" class="cdu-input chat-text chat-code" rows="3" spellcheck="false" placeholder='Merged into the request last, so it can set or override any field, for example {"tool_choice": "none"}'></textarea><span id="chat-extra-state" class="cfg-help"></span></label>
+        <label class="chat-setting chat-setting-wide"><span class="sr-only">Extra request JSON</span><textarea id="chat-extra" class="cdu-input chat-text chat-code" rows="3" spellcheck="false" placeholder='Merged into the request last, so it can set or override any field, for example {"tool_choice": "none"}'></textarea><span id="chat-extra-state" class="cfg-help"></span></label>
         <div class="chat-setting chat-setting-wide chat-settings-keys"><button type="button" id="chat-params-reset" class="key key-small">Reset to engine defaults</button></div>
       </fieldset>
     </div>
@@ -1205,7 +1209,8 @@ R"HTML(        <label class="chat-setting chat-setting-wide"><span class="sr-onl
         <div><dt>API port</dt><dd id="kpi-engine-port">—</dd></div>
         <div><dt>Health response</dt><dd id="dt-health-check">—</dd></div>
         <div><dt>Last engine event</dt><dd id="dt-last-event">—</dd></div>
-        <div><dt>Memory reserved for your desktop</dt><dd id="dt-reserve">—</dd></div>
+)HTML"
+R"HTML(        <div><dt>Memory reserved for your desktop</dt><dd id="dt-reserve">—</dd></div>
         <div><dt>Engine memory plan</dt><dd id="dt-reservation">—</dd></div>
         <div><dt>KV capacity</dt><dd id="dt-kv-capacity">—</dd></div>
       </dl>
@@ -1215,8 +1220,7 @@ R"HTML(        <label class="chat-setting chat-setting-wide"><span class="sr-onl
       <pre id="dt-capacity-text" class="cdu-pre">No capacity report is available yet.</pre>
     </section>
 
-)HTML"
-R"HTML(    <section class="diag-page" data-diag-page="accel" aria-label="Generation acceleration" hidden>
+    <section class="diag-page" data-diag-page="accel" aria-label="Generation acceleration" hidden>
       <p class="cdu-help">Speculative decoding drafts tokens ahead and checks them against the model. It is optional; a disabled backend is not an error.</p>
       <dl class="cdu-facts">
         <div><dt>Backend</dt><dd id="dt-mtp-backend">—</dd></div>
@@ -1326,15 +1330,15 @@ R"HTML(    <section class="diag-page" data-diag-page="accel" aria-label="Generat
         <button id="cfg-revert" class="key" disabled><span aria-hidden="true">&lt;</span>Erase</button>
         <span id="cfg-status" class="cfg-status" role="status">No unsaved changes</span>
         <button id="cfg-save" class="key key-insert" disabled>Insert<span aria-hidden="true">&gt;</span></button>
-        <button id="cfg-save-restart" class="key" disabled>Insert + restart<span aria-hidden="true">&gt;</span></button>
+)HTML"
+R"HTML(        <button id="cfg-save-restart" class="key" disabled>Insert + restart<span aria-hidden="true">&gt;</span></button>
       </div>
     </section>
 
     <section class="settings-page" data-settings-page="presets" id="model-catalog" aria-labelledby="catalog-title" hidden>
       <header class="page-head"><a class="prompt" href="#settings"><span aria-hidden="true">&lt;</span>Index</a><h2 id="catalog-title">Model presets</h2><button id="catalog-refresh" class="key key-small">Refresh</button></header>
       <p id="catalog-current" class="cdu-help">Checking the current model…</p>
-)HTML"
-R"HTML(      <fieldset id="catalog-options" class="presets" aria-label="Model to load"></fieldset>
+      <fieldset id="catalog-options" class="presets" aria-label="Model to load"></fieldset>
       <p class="cdu-small">Artifact size is disk space, not GPU memory use. A file can be available and still need different launch settings.</p>
       <div class="cfg-actions">
         <span id="catalog-hint" class="cfg-status"></span>
@@ -1529,7 +1533,8 @@ R"HTML(      <fieldset id="catalog-options" class="presets" aria-label="Model to
 
   function selectView() {
     if (location.hash === '#main') { $('main').focus(); return; }
-    const [head, sub] = location.hash.slice(1).split('/');
+)HTML"
+R"HTML(    const [head, sub] = location.hash.slice(1).split('/');
     activeView = viewNames.includes(head) ? head : 'overview';
     document.querySelectorAll('.view').forEach(el => { el.hidden = el.id !== 'view-' + activeView; });
     document.querySelectorAll('[data-view]').forEach(el => {
@@ -1538,8 +1543,7 @@ R"HTML(      <fieldset id="catalog-options" class="presets" aria-label="Model to
     document.body.classList.toggle('on-monitor', activeView === 'overview');
     let title = viewLabels[activeView];
     if (activeView === 'diagnostics') {
-)HTML"
-R"HTML(      diagPage = diagPages.includes(sub) ? sub : 'findings';
+      diagPage = diagPages.includes(sub) ? sub : 'findings';
       document.querySelectorAll('[data-diag-page]').forEach(el => { el.hidden = el.dataset.diagPage !== diagPage; });
       document.querySelectorAll('[data-diag]').forEach(el => {
         if (el.dataset.diag === diagPage) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
@@ -1730,7 +1734,8 @@ R"HTML(      diagPage = diagPages.includes(sub) ? sub : 'findings';
     if (active) return active.name || active.id;
     if (modelCatalog && modelCatalog.active_artifact_label) return modelCatalog.active_artifact_label;
     const artifact = engine && engine.artifact;
-    return artifact ? artifact.split(/[\\/]/).pop().replace(/\.ninfer$/, '').replace(/_/g, ' ') : 'Local model';
+)HTML"
+R"HTML(    return artifact ? artifact.split(/[\\/]/).pop().replace(/\.ninfer$/, '').replace(/_/g, ' ') : 'Local model';
   }
   function renderModelCatalog(data) {
     modelCatalog = data;
@@ -1740,8 +1745,7 @@ R"HTML(      diagPage = diagPages.includes(sub) ? sub : 'findings';
     if (!data.models.length) {
       const none = document.createElement('p'); none.className = 'cdu-small';
       none.textContent = 'No presets are configured. Add model presets to the supervisor configuration to switch models here.';
-)HTML"
-R"HTML(      catalogOptions.append(none);
+      catalogOptions.append(none);
     }
     data.models.forEach((model, index) => {
       const label = document.createElement('label');
@@ -1932,7 +1936,8 @@ R"HTML(      catalogOptions.append(none);
       if (ev.t_ms < win.t0 || ev.t_ms > win.t1) return;
       const x = Math.round(xOf(ev.t_ms)) + .5;
       const col = /up/.test(ev.kind) ? C.green : /stop/.test(ev.kind) ? C.ink : C.amber;
-      c.strokeStyle = col; c.globalAlpha = .55; c.lineWidth = 1; c.setLineDash([2, 3]);
+)HTML"
+R"HTML(      c.strokeStyle = col; c.globalAlpha = .55; c.lineWidth = 1; c.setLineDash([2, 3]);
       c.beginPath(); c.moveTo(x, PAD_TOP + 6); c.lineTo(x, H - PAD_BOTTOM); c.stroke();
       c.setLineDash([]); c.globalAlpha = 1;
       c.fillStyle = col;
@@ -1946,8 +1951,7 @@ R"HTML(      catalogOptions.append(none);
   }
 
   function memoryScale(s) {
-)HTML"
-R"HTML(    const total = (s.device_memory || {}).total_bytes || 0;
+    const total = (s.device_memory || {}).total_bytes || 0;
     let max = total;
     const used = (s.series || {}).nvidia_used_bytes || [];
     for (const u of used) if (u > max) max = u;
@@ -2153,7 +2157,8 @@ R"HTML(    const total = (s.device_memory || {}).total_bytes || 0;
     if (floor > 0 && total > 0) {
       const y = Math.round(yOf(total - floor)) + .5;
       c.font = '600 11px Bahnschrift, sans-serif'; c.textAlign = 'left'; c.textBaseline = 'alphabetic';
-      const w = c.measureText('DESKTOP RESERVE').width;
+)HTML"
+R"HTML(      const w = c.measureText('DESKTOP RESERVE').width;
       c.fillStyle = C.glass; c.fillRect(3, y - 15, w + 6, 12);
       c.fillStyle = C.reserveLabel; c.fillText('DESKTOP RESERVE', 6, y - 5);
     }
@@ -2164,8 +2169,7 @@ R"HTML(    const total = (s.device_memory || {}).total_bytes || 0;
       c.beginPath(); c.moveTo(x, PAD_TOP); c.lineTo(x, H - PAD_BOTTOM); c.stroke();
       c.fillStyle = C.ink; c.beginPath(); c.arc(x, yOf(u[i]), 3.5, 0, Math.PI * 2); c.fill();
       const ev = eventNear(ser, cursorT, win.t1 - win.t0);
-)HTML"
-R"HTML(      memTip.innerHTML = `<span class="t">${esc(relTime(win.t1 - t[i]))}</span> · ${esc(gib(u[i]))}${ev ? ` · <span class="${/up/.test(ev.kind) ? 'green' : 'amber'}">${esc(ev.label || ev.kind)}</span>` : ''}`;
+      memTip.innerHTML = `<span class="t">${esc(relTime(win.t1 - t[i]))}</span> · ${esc(gib(u[i]))}${ev ? ` · <span class="${/up/.test(ev.kind) ? 'green' : 'amber'}">${esc(ev.label || ev.kind)}</span>` : ''}`;
       memTip.style.display = 'block';
       memTip.style.left = (x > W * .6 ? Math.max(4, x - memTip.offsetWidth - 10) : x + 10) + 'px';
     } else memTip.style.display = 'none';
@@ -2364,7 +2368,8 @@ R"HTML(      memTip.innerHTML = `<span class="t">${esc(relTime(win.t1 - t[i]))}<
   if (window.ResizeObserver) { const ro = new ResizeObserver(placeSeams); ro.observe(monitorGrid); ro.observe(memDisplay); }
   applySplit();
 
-  function cursorFromPointer(canvas, e) {
+)HTML"
+R"HTML(  function cursorFromPointer(canvas, e) {
     const win = lastState && timeWindow(lastState);
     if (!win) return;
     const r = canvas.getBoundingClientRect();
@@ -2377,8 +2382,7 @@ R"HTML(      memTip.innerHTML = `<span class="t">${esc(relTime(win.t1 - t[i]))}<
     canvas.addEventListener('mouseleave', () => { cursorT = null; drawAll(); });
     canvas.addEventListener('keydown', e => {
       const win = lastState && timeWindow(lastState);
-)HTML"
-R"HTML(      if (!win) return;
+      if (!win) return;
       const step = (win.t1 - win.t0) / 100;
       if (cursorT == null) cursorT = win.t1;
       if (e.key === 'ArrowLeft') cursorT = Math.max(win.t0, cursorT - step);
@@ -2498,9 +2502,9 @@ R"HTML(      if (!win) return;
       const pct = r => Math.round((r || 0) * 100) + '%';
       const cfg = e.config || {}, req = e.requests || {}, kv = e.kv || {}, sch = e.scheduler || {};
       if (it.availability === 'unavailable') return {title:'Capacity limits are not measurable yet', body:cfg.max_context ? 'The engine has not reported its memory use yet. This appears after the first activity sample.' : 'The log does not record this engine start, so traffic cannot be compared with its limits.'};
-      const actions = {large_prompt:'A request came within 10% of the context limit. Raise Max context in Request capacity if GPU memory allows, or shorten long conversations.', kv_admission:'Requests waited because the conversation memory was full. Raise KV capacity if GPU memory allows, otherwise lower Max context to bound memory growth per request.', lanes_full:'Requests waited because every concurrent slot was busy. Raise Max concurrency only if KV capacity and GPU memory leave room for another request.', cache_churn:'KV pages moved to host memory to make room. Restoring them adds transfer work. Raise KV capacity if GPU memory allows.', preempted:'Requests were paused to make room and needed recovery. Raise KV capacity if GPU memory allows, or reduce concurrent demand.'};
 )HTML"
-R"HTML(      return {title:'How close you are to the context and memory limits', body:`The largest request used ${pct(req.largest_context_ratio)} of the ${(cfg.max_context || 0).toLocaleString()}-token context limit across ${req.count || 0} requests. Conversation memory peaked at ${pct(kv.utilization_high_water)} of capacity${kv.includes_retained_checkpoints ? ' (including saved conversation state)' : ''}, with up to ${sch.peak_running || 0} of ${cfg.max_concurrency || 0} requests running at once.`, action:actions[e.kind] || ''};
+R"HTML(      const actions = {large_prompt:'A request came within 10% of the context limit. Raise Max context in Request capacity if GPU memory allows, or shorten long conversations.', kv_admission:'Requests waited because the conversation memory was full. Raise KV capacity if GPU memory allows, otherwise lower Max context to bound memory growth per request.', lanes_full:'Requests waited because every concurrent slot was busy. Raise Max concurrency only if KV capacity and GPU memory leave room for another request.', cache_churn:'KV pages moved to host memory to make room. Restoring them adds transfer work. Raise KV capacity if GPU memory allows.', preempted:'Requests were paused to make room and needed recovery. Raise KV capacity if GPU memory allows, or reduce concurrent demand.'};
+      return {title:'How close you are to the context and memory limits', body:`The largest request used ${pct(req.largest_context_ratio)} of the ${(cfg.max_context || 0).toLocaleString()}-token context limit across ${req.count || 0} requests. Conversation memory peaked at ${pct(kv.utilization_high_water)} of capacity${kv.includes_retained_checkpoints ? ' (including saved conversation state)' : ''}, with up to ${sch.peak_running || 0} of ${cfg.max_concurrency || 0} requests running at once.`, action:actions[e.kind] || ''};
     }
     if (id === 'prefix.reuse_mix') return {title:'Reusing earlier conversation text', body:e.multi_turn_prompt_tokens > 0 ? `${((e.multi_turn_hit_ratio || 0) * 100).toFixed(0)}% of conversation prompt tokens were reused in the available log. Reuse can make follow-up responses start sooner.` : 'No multi-turn prompt samples are available yet. Reuse can make follow-up responses start sooner.'};
     if (id === 'client.narrated_tool_intent') return {title:'Tool behavior needs a conversation sample', body:'The log records whether tools were provided, but not what the model said. It cannot explain a promised tool action that did not happen.'};
@@ -2615,7 +2619,8 @@ R"HTML(      return {title:'How close you are to the context and memory limits',
     status.textContent = info.pinned ? 'This target is set in MiB in your launch configuration. Edit that configuration to change it.' : s.monitor_only ? 'Change the reserve in the application that starts this engine.' : !budget.ok ? budget.reason || 'Waiting for a model memory plan.' : value > max ? `This ${value} GiB target exceeds the current ${max} GiB limit. Lower it before saving or restarting.` : reserveBusy ? 'Saving reserve…' : reserveDraft != null ? 'Temporary revision. Inserting keeps your engine running; it applies at the next start.' : pending ? 'Saved. Restart the engine when convenient to apply this target.' : 'Changes take effect on the next engine start.';
     status.className = 'cdu-data' + (value > max && budget.ok ? ' red' : reserveDraft != null ? ' amber' : '');
     const ro = $('ro-reserve');
-    ro.textContent = active && running ? `${(active.configured_bytes / GiB).toFixed(0)} GiB` : `${saved} GiB`;
+)HTML"
+R"HTML(    ro.textContent = active && running ? `${(active.configured_bytes / GiB).toFixed(0)} GiB` : `${saved} GiB`;
     ro.title = `Running ${active && running ? (active.configured_bytes / GiB).toFixed(1) + ' GiB' : 'unavailable'}; next start ${saved} GiB`;
     $('sum-reserve').textContent = (reserveDraft != null ? `staged ${value} GiB · ` : '') + `${saved} GiB next start` + (active && running ? ` · ${(active.configured_bytes / GiB).toFixed(1)} GiB running` : '');
     $('sum-reserve').className = 'lsk-sum' + (reserveDraft != null ? ' amber' : '');
@@ -2627,8 +2632,7 @@ R"HTML(      return {title:'How close you are to the context and memory limits',
     const key = JSON.stringify([processes, (s.engine || {}).pid, gpuAppsExpanded]);
     if (key === gpuAppsKey) return;
     gpuAppsKey = key;
-)HTML"
-R"HTML(    const list = $('gpu-app-list');
+    const list = $('gpu-app-list');
     list.replaceChildren();
     if (!processes.ok) { list.textContent = processes.error || 'Waiting for Windows GPU readings…'; return; }
     const groups = new Map();
@@ -2779,7 +2783,8 @@ R"HTML(    const list = $('gpu-app-list');
     $('kpi-thr-window').className = 'display-source' + (running > 0 ? ' green' : '');
     $('band-run').textContent = `${running}${lanes ? ' / ' + lanes : ''}`;
     $('kpi-ttft').textContent = Number.isFinite(reqs.ttft_ms_mean) ? duration(reqs.ttft_ms_mean) : 'No data yet';
-    $('kpi-done').textContent = reqs.done != null ? reqs.done.toLocaleString() : '—';
+)HTML"
+R"HTML(    $('kpi-done').textContent = reqs.done != null ? reqs.done.toLocaleString() : '—';
 
     // Speculative telemetry. A configured backend with no drafts yet is a
     // different state from no backend at all, and neither is an acceptance of 0.
@@ -2789,8 +2794,7 @@ R"HTML(    const list = $('gpu-app-list');
     $('dt-mtp-window').textContent = reqs.mtp_draft_window ? `${reqs.mtp_draft_window} draft token${reqs.mtp_draft_window === 1 ? '' : 's'}` : '—';
     $('kpi-mtp-badge').textContent = specOff ? 'Off' : specBackend.toUpperCase();
     if (specOff) {
-)HTML"
-R"HTML(      $('kpi-mtp-pct').textContent = '—'; $('kpi-mtp-ratio').textContent = 'not configured'; $('kpi-mtp-fallbacks').textContent = '—'; $('dt-mtp-rate-badge').textContent = 'Off';
+      $('kpi-mtp-pct').textContent = '—'; $('kpi-mtp-ratio').textContent = 'not configured'; $('kpi-mtp-fallbacks').textContent = '—'; $('dt-mtp-rate-badge').textContent = 'Off';
     } else if (!reqs.mtp_drafted) {
       $('kpi-mtp-pct').textContent = '—'; $('kpi-mtp-ratio').textContent = 'no drafts yet'; $('kpi-mtp-fallbacks').textContent = '—'; $('dt-mtp-rate-badge').textContent = 'Idle';
     }
@@ -2983,7 +2987,8 @@ R"HTML(      $('kpi-mtp-pct').textContent = '—'; $('kpi-mtp-ratio').textConten
     // reflects what would actually change rather than what was touched.
     const same = typeof original === 'boolean' ? value === original : String(value) === String(original == null ? '' : original);
     if (same) delete cfgEdits[section][key]; else cfgEdits[section][key] = value;
-    cfgSetDirtyUi();
+)HTML"
+R"HTML(    cfgSetDirtyUi();
   }
 
   function tokenFieldValue(el) {
@@ -2999,8 +3004,7 @@ R"HTML(      $('kpi-mtp-pct').textContent = '—'; $('kpi-mtp-ratio').textConten
     const raw = el ? el.value : ((cfgData && cfgData.params || {}).max_concurrency || '');
     if (el && el.value === '') return {n: 1, explicit: false};
     if (/^\d+$/.test(String(raw))) { const n = Number(raw); if (n >= 1 && n <= 8) return {n, explicit: true}; }
-)HTML"
-R"HTML(    return {n: 1, explicit: false};
+    return {n: 1, explicit: false};
   }
   let capacityPairBusy = false;
   function updateCapacityPreview() {
@@ -3159,7 +3163,8 @@ R"HTML(    return {n: 1, explicit: false};
       input.onchange = () => {
         cfgEdit('params', spec.key, input.value, original || '');
         input.classList.toggle('dirty', input.value !== (original || ''));
-        if (spec.key === 'spec') {
+)HTML"
+R"HTML(        if (spec.key === 'spec') {
           if (!input.value) {
             cfgEdit('params', 'draft_tokens', '', (cfgData.params || {}).draft_tokens || '');
             cfgEdit('params', 'lm_head_draft', false, (cfgData.params || {}).lm_head_draft === 'true');
@@ -3169,8 +3174,7 @@ R"HTML(    return {n: 1, explicit: false};
             if (!draft || Number(draft) > limit) cfgEdit('params', 'draft_tokens', String(input.value === 'mtp' ? limit : 7), (cfgData.params || {}).draft_tokens || '');
           }
           renderConfig();
-)HTML"
-R"HTML(          $('param-spec').focus();
+          $('param-spec').focus();
         }
       };
       wrap.appendChild(input);
@@ -3341,7 +3345,8 @@ R"HTML(          $('param-spec').focus();
       if (!res.ok) { showCfgErrors(body.details || [body.error || ('HTTP ' + res.status)]); status.textContent = 'Not inserted'; return; }
       cfgData.frontends = body.frontends || [];
       if (lastState) lastState.frontends = body.status || [];
-      feDraft = null;
+)HTML"
+R"HTML(      feDraft = null;
       renderConfig();
       renderFrontends((lastState || {}).frontends || []);
       $('fe-status').textContent = 'Inserted and applied. The engine kept running.';
@@ -3355,8 +3360,7 @@ R"HTML(          $('param-spec').focus();
   function renderConfig() {
     if (!cfgData || activeView !== 'settings' || !tabLabels[cfgTab] || cfgTab === 'presets' || cfgTab === 'reserve') { renderSettingsIndex(); return; }
     cfgBody.innerHTML = '';
-)HTML"
-R"HTML(    const help = {network:'Set the address apps use to reach your engine. Most local setups keep these values.', api:'Control API authentication and request logging.', capacity:'Size the shared KV pool first. Max context is how long one request may be inside that pool. Max concurrency chooses how many of the Engine’s 8 lanes may be active.', memory:'Advanced: these settings can change both memory use and generated responses.', features:'Advanced: available options depend on the model and engine build.', raw:'Read-only information about the model and the command used to launch it.', frontends:'Serve a web app, such as llama.cpp’s web UI, on its own local port beside your engine’s API. Inserting applies the change right away; the engine keeps running.'}[cfgTab];
+    const help = {network:'Set the address apps use to reach your engine. Most local setups keep these values.', api:'Control API authentication and request logging.', capacity:'Size the shared KV pool first. Max context is how long one request may be inside that pool. Max concurrency chooses how many of the Engine’s 8 lanes may be active.', memory:'Advanced: these settings can change both memory use and generated responses.', features:'Advanced: available options depend on the model and engine build.', raw:'Read-only information about the model and the command used to launch it.', frontends:'Serve a web app, such as llama.cpp’s web UI, on its own local port beside your engine’s API. Inserting applies the change right away; the engine keeps running.'}[cfgTab];
     document.querySelector('[data-settings-page="config"] .cfg-actions').hidden = cfgTab === 'frontends' || cfgTab === 'raw';
     $('settings-section-title').textContent = tabLabels[cfgTab];
     $('settings-section-help').textContent = help;
@@ -3478,7 +3482,8 @@ R"HTML(    const help = {network:'Set the address apps use to reach your engine.
       renderConfig();
       cfgStatus.className = 'cfg-status saved';
       const needsEngine = r.body.engine_restart_required, needsSup = r.body.supervisor_restart_required;
-      cfgStatus.textContent = 'Inserted' + (needsEngine ? ' · takes effect when the engine restarts' : '') + (needsSup ? ' · dashboard host or port needs the supervisor restarted' : '');
+)HTML"
+R"HTML(      cfgStatus.textContent = 'Inserted' + (needsEngine ? ' · takes effect when the engine restarts' : '') + (needsSup ? ' · dashboard host or port needs the supervisor restarted' : '');
       if (needsEngine) setPendingRestart(((lastState || {}).engine || {}).pid || 0);
       if (needsEngine || needsSup) notify('Settings inserted. Some changes need a restart before they take effect.');
       if (thenRestart && needsEngine) {
@@ -3486,8 +3491,7 @@ R"HTML(    const help = {network:'Set the address apps use to reach your engine.
         if (!restart.ok) throw new Error('Settings were inserted, but the engine could not restart. Try Restart on the mode row.');
         cfgStatus.textContent = 'Inserted. Restart requested; wait for the engine to become ready.';
       }
-)HTML"
-R"HTML(    } catch (err) { showCfgErrors([err.message || 'Could not save settings. Check the connection and try again.']); }
+    } catch (err) { showCfgErrors([err.message || 'Could not save settings. Check the connection and try again.']); }
     finally {
       configBusy = false; cfgBody.inert = false;
       cfgRevert.disabled = !cfgDirtyCount();
@@ -3589,7 +3593,8 @@ R"HTML(    } catch (err) { showCfgErrors([err.message || 'Could not save setting
       b.onclick = () => benchSelect(e, 0);
       list.append(b);
     });
-    if (!list.children.length) list.innerHTML = '<p class="cdu-small">No endpoint matches this filter.</p>';
+)HTML"
+R"HTML(    if (!list.children.length) list.innerHTML = '<p class="cdu-small">No endpoint matches this filter.</p>';
   }
   function benchSetBody(obj) {
     benchBody.value = obj == null ? '' : JSON.stringify(obj, null, 2);
@@ -3607,8 +3612,7 @@ R"HTML(    } catch (err) { showCfgErrors([err.message || 'Could not save setting
     e.examples.forEach((x, i) => {
       const k = document.createElement('button');
       k.type = 'button'; k.className = 'cdu-tab'; k.textContent = x.name;
-)HTML"
-R"HTML(      k.setAttribute('aria-pressed', String(i === exampleIndex));
+      k.setAttribute('aria-pressed', String(i === exampleIndex));
       k.onclick = () => benchSelect(e, i);
       exBox.append(k);
     });
@@ -3772,7 +3776,8 @@ R"HTML(      k.setAttribute('aria-pressed', String(i === exampleIndex));
       if (type.includes('text/event-stream') && res.body) {
         const acc = {reasoning: '', text: '', tools: ''};
         benchView.text = acc; benchView.kind = 'sse';
-        if (benchTab === 'body') benchTab = 'text';
+)HTML"
+R"HTML(        if (benchTab === 'body') benchTab = 'text';
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '', last = 0;
@@ -3788,8 +3793,7 @@ R"HTML(      k.setAttribute('aria-pressed', String(i === exampleIndex));
             block.split('\n').forEach(line => {
               if (line.startsWith(':')) { name = 'comment'; data.push(line.slice(1).trim()); }
               else if (line.startsWith('event:')) name = line.slice(6).trim();
-)HTML"
-R"HTML(              else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+              else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
             });
             const payload = data.join('\n');
             if (!tFirst && name !== 'comment') tFirst = performance.now() - t0;
@@ -3915,21 +3919,40 @@ R"HTML(              else if (line.startsWith('data:')) data.push(line.slice(5).
     const RE_SAFE_URL = /^(?:https?:\/\/[^\s\u0000-\u001f\u007f]+|mailto:[^\s\u0000-\u001f\u007f]+)$/i;
 
     const isBlank = l => l.trim() === '';
-    const indentOf = l => { let n = 0; while (n < l.length && l.charCodeAt(n) === 32) n++; return n; };
+    // Lines keep their own tabs (code is shown and copied as written). Structure is read from
+    // norm(line), which has the leading whitespace expanded to spaces at tab stops of four.
+    const indentOf = l => {
+      let n = 0;
+      for (let i = 0; i < l.length; i++) { const c = l.charCodeAt(i); if (c === 32) n++; else if (c === 9) n += 4 - n % 4; else break; }
+      return n;
+    };
+    const norm = l => { const c = l.charCodeAt(0); return c === 9 || (c === 32 && /^ +\t/.test(l)) ? ' '.repeat(indentOf(l)) + l.replace(/^[ \t]+/, '') : l; };
+    // Removes up to `cols` columns of leading whitespace; a tab that straddles the cut leaves its remainder as spaces.
+    function stripIndent(l, cols) {
+      let col = 0, i = 0;
+      while (i < l.length && col < cols) {
+        const c = l.charCodeAt(i);
+        if (c === 32) { col++; i++; }
+        else if (c === 9) { const w = 4 - col % 4; if (col + w > cols) return ' '.repeat(col + w - cols) + l.slice(i + 1); col += w; i++; }
+        else break;
+      }
+      return l.slice(i);
+    }
     const normalize = t => String(t == null ? '' : t).replace(/\r\n?/g, '\n');
     const gapOf = ws => ws.indexOf('\t') >= 0 || ws.length > 4 ? 1 : ws.length;
 
     function fenceOpen(line) {
-      const m = RE_FENCE.exec(line);
+      const m = RE_FENCE.exec(norm(line));
       return m && !(m[2][0] === '`' && m[3].indexOf('`') >= 0) ? m : null;
     }
     // Tracks whether a line sits inside an open fence (no lazy continuation there).
     function fenceStep(fence, line) {
       if (!fence) { const m = fenceOpen(line); return m ? {ch: m[2][0], len: m[2].length} : null; }
-      const m = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+      const m = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(norm(line));
       return m && m[1][0] === fence.ch && m[1].length >= fence.len ? null : fence;
     }
     function matchItem(line) {
+      line = norm(line);
       let m = RE_BULLET.exec(line);
       if (m) return {ordered: false, indent: m[1].length, mark: 1, gap: gapOf(m[3]), text: m[4], num: 1};
       m = RE_ORDERED.exec(line);
@@ -3969,7 +3992,8 @@ R"HTML(              else if (line.startsWith('data:')) data.push(line.slice(5).
       for (; j < lines.length; j++) {
         const l = lines[j];
         if (isBlank(l) || l.indexOf('|') < 0 || /^ {0,3}(?:>|#{1,6}[ \t]|`{3}|~{3})/.test(l)) break;
-        const row = splitRow(l);
+)HTML"
+R"HTML(        const row = splitRow(l);
         html += '<tr>' + head.map((_, k) => cell('td', row[k] || '', k)).join('') + '</tr>';
       }
       return [html + '</tbody></table></div>', j];
@@ -3978,7 +4002,9 @@ R"HTML(              else if (line.startsWith('data:')) data.push(line.slice(5).
     // ---- blocks -------------------------------------------------------------------
     // Would this line end the paragraph above it?
     function interrupts(line, next, depth) {
-      if (fenceOpen(line) || RE_HR.test(line)) return true;
+      if (fenceOpen(line)) return true;
+      line = norm(line);
+      if (RE_HR.test(line)) return true;
       const h = RE_ATX.exec(line);
       if (h && h[2]) return true;
       if (depth >= MAX_DEPTH) return false;
@@ -3987,29 +4013,33 @@ R"HTML(              else if (line.startsWith('data:')) data.push(line.slice(5).
       if (it && it.indent <= 3 && (!it.ordered || it.num === 1)) return true;
       return line.indexOf('|') >= 0 && next != null && tableAligns(next, splitRow(line).length) != null;
     }
+    // A code block: a header row (language legend, Copy key) over the code. The Copy key reads the
+    // text of its own <code> element, which is the block's source exactly as it is displayed.
+    // `code` is returned with the HTML so a block that is still filling in can be updated in place.
     function codeBlock(info, code) {
       const lang = (info.split(/\s+/)[0] || '').replace(/^\{\.?/, '').replace(/[^\w.+#-]/g, '').slice(0, 24);
-      return `<div class="md-code">${lang ? `<span class="md-code-lang">${esc(lang)}</span>` : ''}<pre><code>${esc(code)}</code></pre></div>`;
+      const html = '<div class="md-code"><div class="md-code-head">' + (lang ? `<span class="md-code-lang">${esc(lang)}</span>` : '') +
+        `<button type="button" class="md-copy" aria-label="Copy ${lang ? esc(lang) + ' ' : ''}code">Copy</button></div><pre><code>${esc(code)}</code></pre></div>`;
+      return [html, {lang, text: code}];
     }
     function parseFence(lines, i, m) {
       const indent = m[1].length, ch = m[2][0], len = m[2].length;
       const close = new RegExp('^ {0,3}' + (ch === '`' ? '`' : '~') + '{' + len + ',}[ \\t]*$');
-      const strip = indent ? new RegExp('^ {1,' + indent + '}') : null;
       const body = [];
       let j = i + 1;
-      for (; j < lines.length && !close.test(lines[j]); j++) body.push(strip ? lines[j].replace(strip, '') : lines[j]);
+      for (; j < lines.length && !close.test(norm(lines[j])); j++) body.push(indent ? stripIndent(lines[j], indent) : lines[j]);
       while (body.length && isBlank(body[body.length - 1])) body.pop();
-      return [codeBlock(m[3].trim(), body.join('\n')), j < lines.length ? j + 1 : j];
+      const block = codeBlock(m[3].trim(), body.join('\n'));
+      return [block[0], j < lines.length ? j + 1 : j, block[1]];
     }
     function parseQuote(lines, i, o, depth) {
       const inner = [];
       let fence = null, j = i;
-)HTML"
-R"HTML(      for (; j < lines.length; j++) {
-        const l = lines[j], q = RE_QUOTE.exec(l);
+      for (; j < lines.length; j++) {
+        const l = lines[j], q = RE_QUOTE.exec(norm(l));
         if (q) { inner.push(q[1]); fence = fenceStep(fence, q[1]); continue; }
         const last = inner[inner.length - 1];
-        if (isBlank(l) || fence || isBlank(last) || RE_HR.test(last) || (RE_ATX.exec(last) || [])[2] || interrupts(l, lines[j + 1], depth)) break;
+        if (isBlank(l) || fence || isBlank(last) || RE_HR.test(norm(last)) || (RE_ATX.exec(norm(last)) || [])[2] || interrupts(l, lines[j + 1], depth)) break;
         inner.push(l.trim());
       }
       const kids = [];
@@ -4021,7 +4051,7 @@ R"HTML(      for (; j < lines.length; j++) {
       let j = i;
       while (j < n) {
         const it = matchItem(lines[j]);
-        if (!it || it.ordered !== first.ordered || it.indent >= first.indent + 2 || RE_HR.test(lines[j])) break;
+        if (!it || it.ordered !== first.ordered || it.indent >= first.indent + 2 || RE_HR.test(norm(lines[j]))) break;
         const thr = it.indent + 2, cin = it.indent + it.mark + it.gap;   // child threshold, content column
         const body = [it.text];
         let fence = fenceStep(null, it.text), k = j + 1;
@@ -4034,7 +4064,7 @@ R"HTML(      for (; j < lines.length; j++) {
             break;
           }
           const ind = indentOf(l);
-          if (ind >= thr) { const t = l.slice(Math.min(ind, cin)); body.push(t); fence = fenceStep(fence, t); k++; continue; }
+          if (ind >= thr) { const t = stripIndent(l, Math.min(ind, cin)); body.push(t); fence = fenceStep(fence, t); k++; continue; }
           if (!fence && !isBlank(body[body.length - 1]) && !matchItem(l) && !interrupts(l, lines[k + 1], depth)) { body.push(l.trim()); k++; continue; }
           break;
         }
@@ -4050,7 +4080,7 @@ R"HTML(      for (; j < lines.length; j++) {
         while (p < n && isBlank(lines[p])) p++;
         if (p < n && p > j) {
           const nx = matchItem(lines[p]);
-          if (nx && nx.ordered === first.ordered && nx.indent < first.indent + 2 && !RE_HR.test(lines[p])) j = p; else break;
+          if (nx && nx.ordered === first.ordered && nx.indent < first.indent + 2 && !RE_HR.test(norm(lines[p]))) j = p; else break;
         }
       }
       const tag = first.ordered ? 'ol' : 'ul';
@@ -4075,15 +4105,16 @@ R"HTML(      for (; j < lines.length; j++) {
       while (i < n) {
         const line = lines[i];
         if (isBlank(line)) { i++; continue; }
+        const nl = norm(line);
         let m, r = null;
         if ((m = fenceOpen(line))) r = parseFence(lines, i, m);
-        else if ((m = RE_ATX.exec(line)) && m[2]) { const lv = m[1].length; r = [`<div class="md-h md-h${lv}" role="heading" aria-level="${Math.min(6, lv + 2)}">${inline(m[2], false)}</div>`, i + 1]; }
-        else if (RE_HR.test(line)) r = ['<hr>', i + 1];
-        else if (depth < MAX_DEPTH && RE_QUOTE.test(line)) r = parseQuote(lines, i, o, depth);
+        else if ((m = RE_ATX.exec(nl)) && m[2]) { const lv = m[1].length; r = [`<div class="md-h md-h${lv}" role="heading" aria-level="${Math.min(6, lv + 2)}">${inline(m[2], false)}</div>`, i + 1]; }
+        else if (RE_HR.test(nl)) r = ['<hr>', i + 1];
+        else if (depth < MAX_DEPTH && RE_QUOTE.test(nl)) r = parseQuote(lines, i, o, depth);
         else if (depth < MAX_DEPTH && matchItem(line)) r = parseList(lines, i, o, depth);
         else if (line.indexOf('|') >= 0) r = parseTable(lines, i);
         if (!r) r = parseParagraph(lines, i, o, depth);
-        out.push({html: r[0], at: offs ? offs[i] : 0});
+        out.push({html: r[0], at: offs ? offs[i] : 0, code: r[2]});
         i = r[1];
       }
     }
@@ -4095,7 +4126,6 @@ R"HTML(      for (; j < lines.length; j++) {
       for (let i = 0; i < lines.length; i++) {
         offs[i] = at;
         at += lines[i].length + 1;
-        if (lines[i].indexOf('\t') >= 0) lines[i] = lines[i].replace(/^[ \t]+/, w => w.replace(/\t/g, '    '));
       }
       parseBlocks(lines, o || {}, 0, out, offs);
       return out;
@@ -4211,7 +4241,8 @@ R"HTML(      for (; j < lines.length; j++) {
       for (const nd of list) s += nd.t === 't' ? esc(nd.s) : nd.t === 'h' ? nd.s : '<' + nd.tag + '>' + nodesHtml(nd.c) + '</' + nd.tag + '>';
       return s;
     };
-    // A bare address ends before trailing punctuation and an unbalanced closing bracket.
+)HTML"
+R"HTML(    // A bare address ends before trailing punctuation and an unbalanced closing bracket.
     function trimUrl(u) {
       for (;;) {
         const last = u[u.length - 1];
@@ -4261,8 +4292,7 @@ R"HTML(      for (; j < lines.length; j++) {
             if (code.length > 2 && code[0] === ' ' && code[code.length - 1] === ' ' && code.trim()) code = code.slice(1, -1);
             flush(); nodes.push({t: 'h', s: '<code>' + esc(code) + '</code>'});
             i = close + k;
-)HTML"
-R"HTML(          } else { buf += '`'.repeat(k); i += k; }
+          } else { buf += '`'.repeat(k); i += k; }
         } else if (c === '[' || (c === '!' && src[i + 1] === '[')) {
           const image = c === '!', open = image ? i + 1 : i;
           const lk = nolink || ctx.budget < 0 ? null : parseLink(src, open, ctx);
@@ -4311,10 +4341,19 @@ R"HTML(          } else { buf += '`'.repeat(k); i += k; }
           if (t === text) return;
           const keep = t.startsWith(text) ? Math.max(0, list.length - 2) : 0;
           const off = keep ? list[keep].at : 0;
-          const fresh = blocks(off ? t.slice(off) : t, o).map(b => ({html: b.html, at: b.at + off}));
+          const fresh = blocks(off ? t.slice(off) : t, o).map(b => ({html: b.html, at: b.at + off, code: b.code}));
           const next = list.slice(0, keep).concat(fresh);
           let i = keep;
-          while (i < next.length && i < list.length && list[i].html === next[i].html) i++;
+          while (i < next.length && i < list.length) {
+            const a = list[i], b = next[i];
+            if (a.html !== b.html) {
+              // A code block that is still filling in keeps its node, so its Copy key keeps its
+              // feedback and the block keeps its scroll position.
+              if (!(a.code && b.code && a.code.lang === b.code.lang && nodes[i])) break;
+              nodes[i].querySelector('code').textContent = b.code.text;
+            }
+            i++;
+          }
           for (let k = nodes.length - 1; k >= i; k--) nodes[k].remove();
           nodes.length = Math.min(nodes.length, i);
           if (i < next.length) {
@@ -4332,6 +4371,38 @@ R"HTML(          } else { buf += '`'.repeat(k); i += k; }
   })();
   function chatMarkdown(text, opts) { return MD.render(text, opts); }
   // </markdown>
+  // The Copy key of a code block. One listener on the log serves every block, so it keeps
+  // working when a block is re-rendered while the reply streams. It copies the text of the
+  // block's own <code> element, which is the code exactly as displayed (never HTML).
+  async function writeClipboard(text) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(text); return true; }
+    } catch (_) { /* denied or unfocused: try the selection route */ }
+    // A page served over plain http from another address has no async clipboard.
+    const area = document.createElement('textarea'), active = document.activeElement;
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.setAttribute('aria-hidden', 'true');
+    area.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;pointer-events:none';
+    document.body.append(area);
+    area.select();
+    area.setSelectionRange(0, text.length);
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (_) {}
+    area.remove();
+    if (active && active.focus) active.focus();
+    return ok;
+  }
+  chatLog.addEventListener('click', async e => {
+    const key = e.target.closest && e.target.closest('.md-copy');
+    const block = key && key.closest('.md-code');
+    if (!key || !block || !chatLog.contains(key)) return;
+    const ok = await writeClipboard(block.querySelector('code').textContent);
+    clearTimeout(key._reset);
+    key.textContent = ok ? 'Copied' : 'Failed';
+    key.classList.toggle('failed', !ok);
+    key._reset = setTimeout(() => { key.textContent = 'Copy'; key.classList.remove('failed'); }, 1500);
+  });
   function chatTime(d) { return new Date(d).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'}); }
   function chatPct(a, b) { return b > 0 ? Math.round(100 * a / b) + '%' : '—'; }
   function chatTelemetry(st, m) {
@@ -4381,7 +4452,8 @@ R"HTML(          } else { buf += '`'.repeat(k); i += k; }
       const p = chatProb(t.logprob);
       const band = t.forced ? 'tok-forced' : p < .2 ? 'tok-low' : p < .5 ? 'tok-mid' : '';
       const alts = (t.top_logprobs || []).map(a => `${JSON.stringify(a.token)} ${(100 * chatProb(a.logprob)).toFixed(1)}%`).join('\n');
-      const tip = t.forced ? 'Inserted by the thinking budget' : `${(100 * p).toFixed(1)}%${alts ? '\n' + alts : ''}`;
+)HTML"
+R"HTML(      const tip = t.forced ? 'Inserted by the thinking budget' : `${(100 * p).toFixed(1)}%${alts ? '\n' + alts : ''}`;
       return `<span class="tok ${band}" title="${esc(tip)}">${esc(t.token)}</span>`;
     }).join('');
   }
@@ -4437,8 +4509,7 @@ R"HTML(          } else { buf += '`'.repeat(k); i += k; }
     const st = m.stats || {};
     const state = CHAT_STATES[m.state] || '';
     const reasoning = m.reasoning ? `<details class="msg-reasoning"${m.reasoningOpen ? ' open' : ''}><summary>Reasoning${st.usage && st.usage.completion_tokens_details && st.usage.completion_tokens_details.reasoning_tokens ? ' · ' + st.usage.completion_tokens_details.reasoning_tokens.toLocaleString() + ' tokens' : ''}</summary><div class="msg-reasoning-body md">${chatMarkdown(m.reasoning)}</div></details>` : '';
-)HTML"
-R"HTML(    const ended = m.state === 'done' || m.state === 'stopped' || m.state === 'error';
+    const ended = m.state === 'done' || m.state === 'stopped' || m.state === 'error';
     const tokenKey = m.tokens && m.tokens.length ? `<button type="button" class="client-evidence" data-act="tokens" aria-pressed="${m.tokenView ? 'true' : 'false'}">${m.tokenView ? 'Text view' : 'Token view'}</button>` : '';
     const actions = ended ? `<div class="msg-actions"><button type="button" class="client-evidence" data-act="copy">Copy</button>${tokenKey}${i === chat.messages.length - 1 ? '<button type="button" class="client-evidence" data-act="regen">Regenerate</button>' : ''}</div>` : '';
     const body = m.error ? `<span class="red">${esc(m.error)}</span>`
@@ -4536,7 +4607,8 @@ R"HTML(    const ended = m.state === 'done' || m.state === 'stopped' || m.state 
     now.parentElement.title = mode === 'default' && !def.known ? 'The engine was started elsewhere, so its --default-max-tokens is not known here; 8,192 is the engine default' : 'The output budget the next request carries';
     $('chat-schema-row').hidden = $('chat-format').value !== 'json_schema';
     const lp = $('chat-logprobs').checked;
-    $('chat-top-logprobs').disabled = !lp;
+)HTML"
+R"HTML(    $('chat-top-logprobs').disabled = !lp;
     $('chat-stream').disabled = lp;
     const schema = chatJsonField('chat-schema', 'chat-schema-state', true);
     if ($('chat-format').value === 'json_schema' && schema.ok && schema.value === undefined) {
@@ -4608,8 +4680,7 @@ R"HTML(    const ended = m.state === 'done' || m.state === 'stopped' || m.state 
     return body;
   }
   function chatParamText(entries) {
-)HTML"
-R"HTML(    return entries.map(([k, v]) => `${k} ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`).join(' · ');
+    return entries.map(([k, v]) => `${k} ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`).join(' · ');
   }
   async function chatSend(text) {
     if (chatAbort) return;
@@ -4755,7 +4826,8 @@ R"HTML(    return entries.map(([k, v]) => `${k} ${typeof v === 'object' ? JSON.s
     $('chat-hint').textContent = '';
   }));
   $('chat-params-reset').onclick = () => { try { localStorage.removeItem(PARAMS_KEY); } catch (_) {} chatLoadParams(); };
-  $('chat-system').addEventListener('input', () => { chat.system = $('chat-system').value; chatSave(); chatParamsUi(); });
+)HTML"
+R"HTML(  $('chat-system').addEventListener('input', () => { chat.system = $('chat-system').value; chatSave(); chatParamsUi(); });
   document.querySelectorAll('[data-think]').forEach(b => { b.onclick = () => { chat.think = b.dataset.think; chatSave(); chatRender(); }; });
   $('chat-inspect').onclick = () => {
     const body = chatRequestBody();
@@ -4835,8 +4907,7 @@ R"HTML(    return entries.map(([k, v]) => `${k} ${typeof v === 'object' ? JSON.s
   }
 
   // ---------------------------------------------------------------------
-)HTML"
-R"HTML(  // Diagnose > Experts. The engine counts how often each routed expert is chosen
+  // Diagnose > Experts. The engine counts how often each routed expert is chosen
   // (GET /admin/experts, present only when it was started with --expert-stats). While the
   // page is on screen it asks every 2 s and draws one map: a row per layer, a column per
   // expert, colour = heat scaled inside its own row. Decode is the generation channel
@@ -4987,7 +5058,8 @@ R"HTML(  // Diagnose > Experts. The engine counts how often each routed expert i
     const barW = W < 560 ? 52 : 76, barGap = 10;
     const plotX = EX_LEFT, plotW = Math.max(60, W - EX_LEFT - barGap - barW - 2);
     const gap = f.mtp ? EX_GAP : 0;
-    const plotH = Math.max(f.R, H - EX_TOP - EX_BOTTOM - gap);
+)HTML"
+R"HTML(    const plotH = Math.max(f.R, H - EX_TOP - EX_BOTTOM - gap);
     const rowH = plotH / f.R;
     const X0 = Math.round(plotX * dpr), PW = Math.max(1, Math.round(plotW * dpr));
     const ys = new Int32Array(f.R), ye = new Int32Array(f.R);
@@ -5064,8 +5136,7 @@ R"HTML(  // Diagnose > Experts. The engine counts how often each routed expert i
     // Axes.
     const ay = Math.round(lay.bottom) + 3.5;
     c.strokeStyle = C.axis; c.lineWidth = 1; c.fillStyle = C.faint; c.font = '500 10.5px Bahnschrift, sans-serif';
-)HTML"
-R"HTML(    const ticks = ex.order === 'sorted' ? [1, f.E / 8, f.E / 4, f.E / 2, f.E] : [0, f.E / 4, f.E / 2, 3 * f.E / 4, f.E - 1];
+    const ticks = ex.order === 'sorted' ? [1, f.E / 8, f.E / 4, f.E / 2, f.E] : [0, f.E / 4, f.E / 2, 3 * f.E / 4, f.E - 1];
     ticks.forEach((v, i) => {
       v = Math.round(v);
       const x = Math.round(lay.plotX + (ex.order === 'sorted' ? v - .5 : v + .5) / f.E * lay.plotW) + .5;
@@ -5201,7 +5272,8 @@ R"HTML(    const ticks = ex.order === 'sorted' ? [1, f.E / 8, f.E / 4, f.E / 2, 
         }
         gtSum += gt[r]; eqSum += eq[r];
       }
-      const share = eqSum > 0 ? (n - gtSum) / eqSum : 0;
+)HTML"
+R"HTML(      const share = eqSum > 0 ? (n - gtSum) / eqSum : 0;
       perRow = new Int32Array(f.L);
       for (let r = 0; r < f.L; r++) perRow[r] = gt[r] + Math.round(eq[r] * share);
     }
@@ -5274,8 +5346,7 @@ R"HTML(    const ticks = ex.order === 'sorted' ? [1, f.E / 8, f.E / 4, f.E / 2, 
   });
 
   document.querySelectorAll('[data-ex-kind],[data-ex-order]').forEach(btn => btn.addEventListener('click', () => {
-)HTML"
-R"HTML(    const f = ex.frame, c = ex.cur;
+    const f = ex.frame, c = ex.cur;
     if (btn.dataset.exKind) ex.kind = btn.dataset.exKind;
     if (btn.dataset.exOrder && btn.dataset.exOrder !== ex.order) {
       // Keep the pointed expert when the columns change meaning (id <-> rank).
@@ -5399,7 +5470,8 @@ R"HTML(    const f = ex.frame, c = ex.cur;
   }
 
   fetch('/api/config').then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).then(d => {
-    cfgData = d;
+)HTML"
+R"HTML(    cfgData = d;
     updateEngineControls();
     updateConnectionGuide(d);
     cfgPath.textContent = d.config_path ? d.config_path.split(/[\\/]/).pop() : 'no config file';
