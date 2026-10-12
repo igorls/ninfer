@@ -330,8 +330,8 @@ GenerationService::GenerationService(ServeOptions options, StartupObserver start
     engine_options.media_preprocess_threads = options_.media_preprocess_threads;
     engine_options.startup_observer         = std::move(startup_observer);
     if (options_.expert_stats) {
-        expert_route_recorder_ =
-            std::make_shared<ExpertRouteRecorder>(options_.expert_trace_directory);
+        expert_route_recorder_ = std::make_shared<ExpertRouteRecorder>(
+            options_.expert_trace_directory, options_.expert_trace_max_bytes);
         engine_options.expert_route_observer = expert_route_recorder_;
     }
     // A server whose Engine failed cannot serve again; exit so the supervisor restarts it instead

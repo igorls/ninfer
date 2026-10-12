@@ -1540,6 +1540,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--request-log-jsonl FILE` | append full-precision server/request records | disabled |
 | `--expert-stats` | keep live routed-expert counts for `GET /admin/experts` | off |
 | `--expert-trace DIR` | also write every routed selection to `DIR/expert-trace-<server instance>.nxtr`; implies `--expert-stats` | off |
+| `--expert-trace-max-gib N` | stop growing one trace file at N GiB (later records are counted as dropped) | `16` |
 | `--response-store-max-records N` | maximum locally retained Responses objects | `1024` |
 | `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |
 | `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
@@ -1667,8 +1668,11 @@ the decayed decode activations. `?totals=1` adds the undecayed counts since star
 `--expert-trace DIR` also appends every record to `DIR/expert-trace-<server instance>.nxtr`, named
 by the request log's `server_instance_id` (a timestamp when the request log is off). Each column
 carries the request-log `request_id` of its request and the absolute token position. The file is
-written by a background thread through a 64 MiB queue; a full queue drops records and counts them
-under `trace.records_dropped` instead of delaying the Engine. The format and the cache simulator
+written by a background thread through a 64 MiB queue; a full queue, or a file at its
+`--expert-trace-max-gib` limit, drops records and counts them under `trace.records_dropped`
+instead of delaying the Engine. Decode rounds and MTP units keep one row per token column; a
+prefill chunk of 52 or more tokens is stored as one per-layer histogram of expert counts (about
+49 KB for 48 layers instead of about 1 KB per token). The format and the cache simulator
 that replays it are documented in `tools/bench/expert_trace/README.md`.
 
 ## Structured request log

@@ -42,6 +42,7 @@ struct ServeOptions {
     std::string request_log_jsonl;                // empty => structured request logging disabled
     std::filesystem::path expert_trace_directory; // empty => no routed-expert trace file
     bool expert_stats                  = false;   // live routed-expert counts (/admin/experts)
+    std::uint64_t expert_trace_max_bytes = 16ULL << 30; // one trace file stops growing here
     std::uint32_t max_context          = 8192;
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(8192);
     std::uint32_t max_concurrency      = 1;

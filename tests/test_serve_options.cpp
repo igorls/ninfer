@@ -594,6 +594,12 @@ int main() {
     failures += check(empty_trace_rejected, "an empty --expert-trace directory was accepted");
     failures += check(serve_usage_text("ninfer-serve").find("--expert-trace") != std::string::npos,
                       "serve help omits --expert-trace");
+    failures += check(expert_trace.expert_trace_max_bytes == (16ULL << 30),
+                      "the expert trace file limit is not 16 GiB by default");
+    const ServeOptions small_trace = parse({"ninfer-serve", "model.ninfer", "--expert-trace",
+                                            "traces", "--expert-trace-max-gib", "3"});
+    failures += check(small_trace.expert_trace_max_bytes == (3ULL << 30),
+                      "--expert-trace-max-gib did not set the limit");
     bool secret_present    = false;
     bool redaction_present = false;
     for (const std::string& argument : logged.startup_argv) {

@@ -12,6 +12,7 @@ namespace {
 
 constexpr char kMagic[8]              = {'N', 'X', 'T', 'R', 'A', 'C', 'E', '1'};
 constexpr std::uint32_t kRecordMarker = 0x43525452U;
+constexpr std::uint8_t kPrefillHistogramKind = 5;
 constexpr const char* kKindNames[5]   = {"unknown", "prefill", "decode", "mtp_proposal",
                                          "mtp_verify"};
 
@@ -75,9 +76,10 @@ nlohmann::json coverage_80(const std::vector<double>& values, std::uint32_t slic
 
 } // namespace
 
-ExpertRouteRecorder::ExpertRouteRecorder(std::filesystem::path trace_directory)
-    : directory_(std::move(trace_directory)), started_(std::chrono::steady_clock::now()),
-      last_decay_(started_) {
+ExpertRouteRecorder::ExpertRouteRecorder(std::filesystem::path trace_directory,
+                                         std::uint64_t max_file_bytes)
+    : directory_(std::move(trace_directory)), max_file_bytes_(max_file_bytes),
+      started_(std::chrono::steady_clock::now()), last_decay_(started_) {
     if (!directory_.empty()) {
         writer_ = std::thread([this] { write_loop(); });
     }
@@ -99,6 +101,7 @@ void ExpertRouteRecorder::expert_route_started(const ExpertRouteGeometry& geomet
     }
     std::lock_guard lock(mutex_);
     geometry_          = geometry;
+    experts_per_layer_ = geometry.experts;
     slices_            = geometry.text_layers + (geometry.mtp_layer ? 1U : 0U);
     const auto entries = static_cast<std::size_t>(slices_) * geometry.experts;
     decode_.decayed.assign(entries, 0.0);
@@ -200,22 +203,52 @@ void ExpertRouteRecorder::expert_route(const ExpertRouteRecord& record) noexcept
             if (file_ == nullptr) { return; }
         }
         std::vector<std::byte> bytes;
-        bytes.reserve(24 + columns * 16 + record.experts.size() * 2);
+        // A prefill chunk whose ids outnumber one count per expert is written as a per-layer
+        // histogram: its streaming cost and its prompt's experts need counts, not token order.
+        const std::uint32_t experts = experts_per_layer_;
+        const bool histogram =
+            record.kind == ExpertRouteKind::Prefill && experts != 0 && columns * per_layer > experts;
+        const std::size_t payload =
+            histogram ? static_cast<std::size_t>(record.layer_count) * experts
+                      : record.experts.size();
+        bytes.reserve(24 + (histogram ? 1 : columns) * 16 + payload * 2);
         put<std::uint32_t>(bytes, kRecordMarker);
-        put<std::uint8_t>(bytes, static_cast<std::uint8_t>(record.kind));
+        put<std::uint8_t>(bytes, histogram ? kPrefillHistogramKind
+                                           : static_cast<std::uint8_t>(record.kind));
         put<std::uint8_t>(bytes, 0);
         put<std::uint16_t>(bytes, record.layer_count);
         put<std::uint16_t>(bytes, record.first_layer);
         put<std::uint16_t>(bytes, 0);
-        put<std::uint32_t>(bytes, static_cast<std::uint32_t>(columns));
+        put<std::uint32_t>(bytes, histogram ? 1U : static_cast<std::uint32_t>(columns));
         put<std::uint64_t>(bytes, unix_micros());
-        for (const ExpertRouteColumn& column : record.columns) {
-            put<std::uint64_t>(bytes, column.request_tag);
-            put<std::uint32_t>(bytes, column.position);
-            put<std::uint32_t>(bytes, 0);
+        if (histogram) {
+            // One summary column: the request, the chunk's first position and its token count.
+            put<std::uint64_t>(bytes, record.columns.front().request_tag);
+            put<std::uint32_t>(bytes, record.columns.front().position);
+            put<std::uint32_t>(bytes, static_cast<std::uint32_t>(columns));
+            std::vector<std::uint16_t> counts(payload, 0);
+            for (std::size_t column = 0; column < columns; ++column) {
+                for (std::uint32_t layer = 0; layer < record.layer_count; ++layer) {
+                    const std::uint16_t* ids =
+                        record.experts.data() + (column * record.layer_count + layer) * per_layer;
+                    for (std::size_t rank = 0; rank < per_layer; ++rank) {
+                        if (ids[rank] >= experts) { continue; }
+                        std::uint16_t& count = counts[layer * experts + ids[rank]];
+                        if (count != UINT16_MAX) { ++count; }
+                    }
+                }
+            }
+            const auto* data = reinterpret_cast<const std::byte*>(counts.data());
+            bytes.insert(bytes.end(), data, data + counts.size() * sizeof(std::uint16_t));
+        } else {
+            for (const ExpertRouteColumn& column : record.columns) {
+                put<std::uint64_t>(bytes, column.request_tag);
+                put<std::uint32_t>(bytes, column.position);
+                put<std::uint32_t>(bytes, 0);
+            }
+            const auto* ids = reinterpret_cast<const std::byte*>(record.experts.data());
+            bytes.insert(bytes.end(), ids, ids + record.experts.size() * sizeof(std::uint16_t));
         }
-        const auto* ids = reinterpret_cast<const std::byte*>(record.experts.data());
-        bytes.insert(bytes.end(), ids, ids + record.experts.size() * sizeof(std::uint16_t));
         enqueue(std::move(bytes));
     } catch (...) {
         std::lock_guard lock(queue_mutex_);
@@ -226,7 +259,8 @@ void ExpertRouteRecorder::expert_route(const ExpertRouteRecord& record) noexcept
 void ExpertRouteRecorder::enqueue(std::vector<std::byte>&& bytes) {
     {
         std::lock_guard lock(queue_mutex_);
-        if (queued_bytes_ + bytes.size() > kQueueLimitBytes) {
+        if (queued_bytes_ + bytes.size() > kQueueLimitBytes ||
+            written_bytes_ + queued_bytes_ + bytes.size() > max_file_bytes_) {
             ++dropped_records_;
             return;
         }
@@ -310,6 +344,7 @@ nlohmann::json ExpertRouteRecorder::snapshot(bool totals) const {
         body["trace"] = {{"file", file_path_.filename().string()},
                          {"bytes_written", written_bytes_},
                          {"bytes_queued", queued_bytes_},
+                         {"max_bytes", max_file_bytes_},
                          {"records_dropped", dropped_records_}};
     }
     return body;

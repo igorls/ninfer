@@ -506,6 +506,7 @@ std::string format_server_start_json(
              {"request_log_jsonl", options.request_log_jsonl},
              {"expert_stats", options.expert_stats},
              {"expert_trace_directory", options.expert_trace_directory.string()},
+             {"expert_trace_max_bytes", options.expert_trace_max_bytes},
              {"default_output_tokens", options.default_max_tokens},
              {"default_thinking",
               options.enable_thinking ? Json(*options.enable_thinking) : Json(nullptr)},

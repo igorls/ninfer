@@ -163,6 +163,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--media-preprocess-threads N] "
            "[--device-state-slots N] [--host-context-mib N] "
            "[--request-log-jsonl FILE] [--expert-stats] [--expert-trace DIR] "
+           "[--expert-trace-max-gib N] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
@@ -190,7 +191,8 @@ std::string serve_usage_text(const char* argv0) {
            "       --request-log-jsonl appends full-precision server/request records\n"
            "       --expert-stats keeps live routed-expert counts for GET /admin/experts; "
            "--expert-trace also writes every routed selection to "
-           "DIR/expert-trace-<server instance>.nxtr (models with routed experts only)\n"
+           "DIR/expert-trace-<server instance>.nxtr (models with routed experts only); "
+           "--expert-trace-max-gib bounds one trace file (default 16)\n"
            "       --model-id overrides the artifact metadata.name reported by the server\n"
            "       --model-alias adds a request name for the served model (repeatable); "
            "responses report the model id, and every server also accepts the name 'default'\n"
@@ -359,6 +361,13 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 throw std::invalid_argument("--expert-trace must not be empty");
             }
             options.expert_stats = true;
+        } else if (arg == "--expert-trace-max-gib") {
+            const int gib = parse_nonnegative_int(require_value("--expert-trace-max-gib"),
+                                                  "expert-trace-max-gib");
+            if (gib == 0) {
+                throw std::invalid_argument("--expert-trace-max-gib must be positive");
+            }
+            options.expert_trace_max_bytes = static_cast<std::uint64_t>(gib) << 30;
         } else if (arg == "--request-log-jsonl") {
             options.request_log_jsonl = require_value("--request-log-jsonl");
             if (options.request_log_jsonl.empty()) {

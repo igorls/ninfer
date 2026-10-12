@@ -87,6 +87,24 @@ int main() {
                                .top_k       = 10,
                                .columns     = proposal,
                                .experts     = proposal_ids});
+        // A 60-token prefill chunk has more ids than one count per expert: it is stored as a
+        // per-layer histogram with one summary column.
+        std::vector<ninfer::ExpertRouteColumn> chunk_columns;
+        std::vector<std::uint16_t> chunk_ids;
+        for (std::uint32_t column = 0; column < 60; ++column) {
+            chunk_columns.push_back({.request_tag = 77, .position = 500 + column});
+            for (std::uint32_t layer = 0; layer < 2; ++layer) {
+                for (std::uint32_t rank = 0; rank < 10; ++rank) {
+                    chunk_ids.push_back(static_cast<std::uint16_t>((column + rank + layer) % 512));
+                }
+            }
+        }
+        recorder.expert_route({.kind        = ninfer::ExpertRouteKind::Prefill,
+                               .first_layer = 0,
+                               .layer_count = 2,
+                               .top_k       = 10,
+                               .columns     = chunk_columns,
+                               .experts     = chunk_ids});
         // A malformed record (ids do not match the shape) is ignored.
         recorder.expert_route({.kind        = ninfer::ExpertRouteKind::Decode,
                                .first_layer = 0,
@@ -98,15 +116,15 @@ int main() {
         const nlohmann::json live = recorder.snapshot(true);
         failures += check(live.at("enabled") == true, "a configured recorder reported disabled");
         failures += check(
-            live.at("records").at("decode") == 1 && live.at("records").at("prefill") == 1 &&
+            live.at("records").at("decode") == 1 && live.at("records").at("prefill") == 2 &&
                 live.at("records").at("mtp_proposal") == 1 && live.at("columns").at("decode") == 2,
             "unit and column counts are wrong");
         const auto& decode = live.at("decode").at("total");
         failures += check(decode.size() == 3 && decode.at(0).at(7) == 2 &&
                               decode.at(1).at(100) == 2 && decode.at(2).at(511) == 1,
                           "decode totals did not count every slice and the MTP row");
-        failures += check(live.at("prefill").at("total").at(0).at(0) == 1,
-                          "prefill totals did not count the early record");
+        failures += check(live.at("prefill").at("total").at(0).at(0) == 2,
+                          "prefill totals did not count the early record and the chunk");
         failures += check(live.at("decode").at("experts_for_80_percent").size() == 3,
                           "per-slice coverage is missing");
         for (int attempt = 0; attempt < 100; ++attempt) {
@@ -153,8 +171,50 @@ int main() {
                               read_at<std::uint16_t>(bytes, offset + 24 + 16) == 511,
                           "MTP proposal record is wrong");
         offset += 24 + 16 + 10 * 2;
+        // Prefill histogram: kind 5, one summary column (tag, first position, token count), then
+        // 2 x 512 counts. Each layer's counts add up to 60 tokens x 10 ranks.
+        failures += check(read_at<std::uint8_t>(bytes, offset + 4) == 5 &&
+                              read_at<std::uint16_t>(bytes, offset + 6) == 2 &&
+                              read_at<std::uint32_t>(bytes, offset + 12) == 1 &&
+                              read_at<std::uint64_t>(bytes, offset + 24) == 77 &&
+                              read_at<std::uint32_t>(bytes, offset + 32) == 500 &&
+                              read_at<std::uint32_t>(bytes, offset + 36) == 60,
+                          "prefill histogram header is wrong");
+        std::uint64_t layer_sums[2] = {0, 0};
+        for (std::uint32_t layer = 0; layer < 2; ++layer) {
+            for (std::uint32_t expert = 0; expert < 512; ++expert) {
+                layer_sums[layer] += read_at<std::uint16_t>(
+                    bytes, offset + 40 + (static_cast<std::size_t>(layer) * 512 + expert) * 2);
+            }
+        }
+        failures += check(layer_sums[0] == 600 && layer_sums[1] == 600 &&
+                              read_at<std::uint16_t>(bytes, offset + 40 + 0 * 2) == 1 &&
+                              read_at<std::uint16_t>(bytes, offset + 40 + 9 * 2) == 10,
+                          "prefill histogram counts are wrong");
+        offset += 24 + 16 + 2 * 512 * 2;
         failures += check(offset == bytes.size(),
                           "the trace holds records it should not (early or malformed)");
+    }
+    // A file at its byte limit drops later records and counts them.
+    {
+        ninfer::serve::ExpertRouteRecorder capped(directory / "capped", 512);
+        capped.expert_route_started({.text_layers = 1, .experts = 512, .top_k = 10});
+        capped.configure("serve-test-cap", "test-model", "model.ninfer");
+        std::array<ninfer::ExpertRouteColumn, 1> one{{{.request_tag = 5, .position = 0}}};
+        std::vector<std::uint16_t> ids{0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+        for (int i = 0; i < 20; ++i) {
+            capped.expert_route({.kind        = ninfer::ExpertRouteKind::Decode,
+                                 .first_layer = 0,
+                                 .layer_count = 1,
+                                 .top_k       = 10,
+                                 .columns     = one,
+                                 .experts     = ids});
+        }
+        const nlohmann::json live = capped.snapshot(false);
+        failures += check(live.at("records").at("decode") == 20 &&
+                              live.at("trace").at("records_dropped").get<int>() > 0 &&
+                              live.at("trace").at("max_bytes") == 512,
+                          "a capped trace did not drop and count the overflow");
     }
     std::error_code ignored;
     std::filesystem::remove_all(directory, ignored);
