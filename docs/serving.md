@@ -55,6 +55,31 @@ and prefill remain outside speculative acceleration. A later request cannot enab
 omitted at startup. The artifact need only contain the Text backbone and the optional components
 selected for this process.
 
+## Docker
+
+Build the runtime image on a host with the NVIDIA Container Toolkit:
+
+```bash
+docker build --tag ninfer:local .
+```
+
+Download the v3 artifact on the host using the [quick start](../README.md#download-the-model),
+then mount the model directory, including any artifact part files. This example uses the same
+two-lane Qwen3.8-27B NVFP4 profile as the README:
+
+```bash
+docker run --rm \
+  --gpus '"device=0"' \
+  --publish 8080:8080 \
+  --volume "$PWD/models:/models:ro" \
+  ninfer:local \
+  ninfer-serve /models/qwen3_8_27b_nvfp4.ninfer \
+  --host 0.0.0.0 \
+  --max-context 32768 --kv-capacity 65536 --max-concurrency 2 \
+  --kv-dtype fp8 --desktop-reserve-gib 6 \
+  --spec mtp --draft-tokens 3 --lm-head-draft --preserve-thinking
+```
+
 ## Endpoints
 
 | Method and path | Behavior |
@@ -158,6 +183,8 @@ behavior. This includes nonzero `logit_bias`, requested log probabilities,
 audio/file input or audio output, explicit low/high image detail, web search,
 moderation, low/high verbosity, stored Chat Completions, and non-empty legacy `functions`.
 Each capability rejection identifies the affected field and the guarantee NInfer cannot provide.
+
+### Structured output
 
 JSON mode and JSON Schema use the standard protocol fields:
 

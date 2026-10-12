@@ -9,8 +9,9 @@ Run the commands below from the repository root.
 
 ## Upgrade an existing v2 artifact
 
-The offline upgrade tool supports the official Qwen3.6/3.8-27B groupwise-int and NVFP4 artifacts,
-and Qwen3.6-35B-A3B groupwise-int. Update your checkout to the current `master` and
+Current Hugging Face downloads are already v3 and need no upgrade. For an existing v2 file,
+the offline upgrade tool supports the official Qwen3.6/3.8-27B groupwise-int and NVFP4 artifacts,
+and Qwen3.6-35B-A3B groupwise-int. Update your checkout to the current fork source and
 [rebuild NInfer](../README.md#quick-start), then run with Python 3.11:
 
 ```bash
@@ -23,6 +24,10 @@ The output must use a new path. After upgrading, use it directly or rename it to
 original file. Stored weight values and formats are preserved. The upgrade also installs the
 matching template from `tools/chat_templates/`. Published SHA-256 checksums apply only to
 downloaded files.
+
+Flash-Next uses its [separate v3 download and derivation workflow](maintainer/qwen3.8-flash-next-artifact.md#1-download-and-derivation).
+OrcaRouter's v3 artifact is [published directly](https://huggingface.co/igorls/Qwen3.8-27B-Uncensored-NVFP4-NInfer);
+its old v2 file requires re-conversion rather than this upgrade tool.
 
 ## Start with an official recipe
 
@@ -219,7 +224,7 @@ python3 -m tools.convert \
 ```
 
 The adapter normalizes the configuration with the same code as the
-[v2 upgrade](maintainer/qwen3.8-flash-next-artifact.md#1-derivation). The text component is
+[v2 upgrade](maintainer/qwen3.8-flash-next-artifact.md#1-download-and-derivation). The text component is
 `Qwen4ExpForCausalLM`/`qwen4_exp_text`, with `qwen4_exp_vision` and `Qwen4ExpMTP` beside it.
 Every official tensor maps to a logical parameter of the
 [artifact reference](maintainer/qwen3.8-flash-next-artifact.md#5-bindings-and-uses), with one Use
