@@ -19,7 +19,15 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .requestlog import UNJOINED, UNTAGGED
-from .trace import KIND_DECODE, KIND_MTP_VERIFY, KIND_PREFILL, TraceFormatError, TraceMetadata, TraceRecord
+from .trace import (
+    KIND_DECODE,
+    KIND_MTP_VERIFY,
+    PREFILL_KINDS,
+    HistogramRecord,
+    TraceFormatError,
+    TraceMetadata,
+    TraceRecord,
+)
 
 MAX_COUNT = 65535
 MIXED = -2  # `rec_client` value for records whose columns belong to several clients
@@ -88,6 +96,11 @@ class CompiledTrace:
             return self.n_records
         return int(self.req_first_rec[n_train])
 
+    @property
+    def is_prefill(self) -> np.ndarray:
+        """Records that are prefill chunks, per-token (kind 1) or histogram (kind 5)."""
+        return np.isin(self.kinds, PREFILL_KINDS)
+
     def pools(self) -> list[PoolData]:
         return [self.text] + ([self.mtp] if self.mtp is not None else [])
 
@@ -139,15 +152,19 @@ class _EntryBuilder:
         self._counts: list[np.ndarray] = []
         self._lens: list[tuple[np.ndarray, np.ndarray]] = []
 
+    def add_unique(self, rec: int, items: np.ndarray, counts: np.ndarray) -> None:
+        """Add a record whose items are already unique and ascending (a histogram)."""
+        self._flush()
+        self._items.append(items.astype(self.dtype))
+        self._counts.append(np.minimum(counts, MAX_COUNT).astype(np.uint16))
+        self._lens.append((np.asarray([rec], dtype=np.int64), np.asarray([items.size], dtype=np.int64)))
+
     def add(self, rec: int, raw: np.ndarray) -> None:
         if raw.size > self.DIRECT_ITEMS:
             # prefill-sized records: a histogram is far cheaper than sorting millions of keys
-            self._flush()
             hist = np.bincount(raw, minlength=self.n_items)
             nz = np.flatnonzero(hist)
-            self._items.append(nz.astype(self.dtype))
-            self._counts.append(np.minimum(hist[nz], MAX_COUNT).astype(np.uint16))
-            self._lens.append((np.asarray([rec], dtype=np.int64), np.asarray([nz.size], dtype=np.int64)))
+            self.add_unique(rec, nz, hist[nz])
             return
         self._raw.append(raw)
         self._recs.append(rec)
@@ -187,7 +204,7 @@ def _unique_counts(raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def compile_trace(
-    records: Iterable[TraceRecord],
+    records: Iterable[TraceRecord | HistogramRecord],
     meta: TraceMetadata,
     *,
     client_lookup: ClientLookup | None = None,
@@ -218,12 +235,18 @@ def compile_trace(
         r = len(kinds)
         if max_records is not None and r >= max_records:
             break
+        histogram = isinstance(record, HistogramRecord)
         cols = record.columns
         lo = record.first_layer
         hi = lo + record.layer_count
-        ids = record.ids
-        if ids.size and int(ids.max()) >= experts:
-            raise TraceFormatError(f"record {r}: expert id {int(ids.max())} >= experts {experts}")
+        if histogram:
+            ids = None
+            req = np.asarray([record.request_id], dtype=np.uint64)
+        else:
+            ids = record.ids
+            req = record.request_ids
+            if ids.size and int(ids.max()) >= experts:
+                raise TraceFormatError(f"record {r}: expert id {int(ids.max())} >= experts {experts}")
         text_hi = min(hi, text_layers)
         has_text = lo < text_hi
         has_mtp = mtp_layer is not None and lo <= mtp_layer < hi
@@ -237,22 +260,33 @@ def compile_trace(
         first_layers.append(lo)
         layer_counts.append(record.layer_count)
         stamps.append(record.timestamp_us)
-        ncols_l.append(cols)
+        ncols_l.append(record.tokens if histogram else cols)  # a histogram chunk counts its tokens
         committed.append(0)
 
-        req = record.request_ids
         uniq_req = np.unique(req) if cols > 1 else req
         for u in uniq_req.tolist():
             if u not in req_first:
                 req_first[u] = r
 
         raw_text2d = None
-        if has_text:
-            layer_ids = np.arange(lo, text_hi, dtype=np.int32) * experts
-            raw_text2d = (ids[:, : text_hi - lo, :].astype(np.int32) + layer_ids[None, :, None]).reshape(cols, -1)
-            text_builder.add(r, raw_text2d.reshape(-1))
-        if has_mtp:
-            mtp_builder.add(r, ids[:, mtp_layer - lo, :].astype(np.int32).reshape(-1))
+        hist_items = hist_counts = None  # histogram chunk: text-pool items and their counts
+        if histogram:
+            if has_text:
+                rows = record.counts[: text_hi - lo].reshape(-1)
+                nz = np.flatnonzero(rows)
+                hist_items, hist_counts = nz + lo * experts, rows[nz].astype(np.int64)
+                text_builder.add_unique(r, hist_items, hist_counts)
+            if has_mtp:
+                row = record.counts[mtp_layer - lo]
+                nz = np.flatnonzero(row)
+                mtp_builder.add_unique(r, nz, row[nz].astype(np.int64))
+        else:
+            if has_text:
+                layer_ids = np.arange(lo, text_hi, dtype=np.int32) * experts
+                raw_text2d = (ids[:, : text_hi - lo, :].astype(np.int32) + layer_ids[None, :, None]).reshape(cols, -1)
+                text_builder.add(r, raw_text2d.reshape(-1))
+            if has_mtp:
+                mtp_builder.add(r, ids[:, mtp_layer - lo, :].astype(np.int32).reshape(-1))
 
         # clients
         if client_lookup is None:
@@ -274,16 +308,19 @@ def compile_trace(
 
         if not has_text:
             continue
-        positions = record.positions
-        if record.kind == KIND_PREFILL and prefill_topk > 0:
+        positions = None if histogram else record.positions
+        if record.kind in PREFILL_KINDS and prefill_topk > 0:
             for u in uniq_req.tolist():
-                rows = raw_text2d if cols == 1 or uniq_req.size == 1 else raw_text2d[req == u]
                 acc = prefill_acc.get(u)
                 if acc is None:
                     acc = prefill_acc[u] = np.zeros(text_items, dtype=np.uint32)
                     if len(prefill_acc) > 64:
                         prefill_acc.pop(next(iter(prefill_acc)))
-                acc += np.bincount(rows.reshape(-1), minlength=text_items).astype(np.uint32)
+                if histogram:
+                    acc[hist_items] += hist_counts.astype(np.uint32)
+                else:
+                    rows = raw_text2d if cols == 1 or uniq_req.size == 1 else raw_text2d[req == u]
+                    acc += np.bincount(rows.reshape(-1), minlength=text_items).astype(np.uint32)
         elif record.kind in (KIND_DECODE, KIND_MTP_VERIFY):
             if cols == 1 or uniq_req.size == 1:
                 groups = [(int(uniq_req[0]), int(positions.min()), cols)]

@@ -25,6 +25,7 @@ import argparse
 import json
 from collections import deque
 from collections.abc import Iterator
+from typing import NamedTuple
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -35,7 +36,9 @@ from .trace import (
     KIND_MTP_PROPOSAL,
     KIND_MTP_VERIFY,
     KIND_PREFILL,
+    KIND_PREFILL_HISTOGRAM,
     TraceWriter,
+    ids_to_histogram,
     make_metadata,
 )
 
@@ -63,11 +66,25 @@ class SyntheticConfig:
     prompt_len: tuple[int, int] = (128, 1024)
     decode_len: tuple[int, int] = (48, 256)
     prefill_chunk: int = 512
+    prefill_histograms: bool = True  # chunks with tokens * top_k > experts become kind 5, as in the server
     max_batch: int = 4
     arrival_gap_rounds: float = 12.0
     seed: int = 0
     server_instance_id: str = "synthetic-0"
     created_unix_ms: int = 1_790_000_000_000
+
+
+class SyntheticRecord(NamedTuple):
+    """One generated record. For kind 5, `ids` holds the [layers, experts] counts, `positions` the
+    first position and `tokens` the chunk's token count."""
+
+    kind: int
+    first_layer: int
+    request_ids: np.ndarray
+    positions: np.ndarray
+    ids: np.ndarray
+    timestamp_us: int
+    tokens: int = 0
 
 
 @dataclass
@@ -111,8 +128,13 @@ class SyntheticTrace:
 
     def write(self, path: str | Path) -> int:
         with TraceWriter(path, self.metadata()) as writer:
-            for kind, first_layer, req_ids, positions, ids, ts in self.records():
-                writer.write_record(kind, req_ids, positions, ids, first_layer=first_layer, timestamp_us=ts)
+            for rec in self.records():
+                if rec.kind == KIND_PREFILL_HISTOGRAM:
+                    writer.write_histogram(int(rec.request_ids[0]), int(rec.positions[0]), rec.tokens, rec.ids,
+                                           first_layer=rec.first_layer, timestamp_us=rec.timestamp_us)
+                else:
+                    writer.write_record(rec.kind, rec.request_ids, rec.positions, rec.ids,
+                                        first_layer=rec.first_layer, timestamp_us=rec.timestamp_us)
             return writer.records_written
 
     def request_log_lines(self, decoy_instance: str | None = "serve-other-1") -> list[str]:
@@ -151,8 +173,8 @@ class SyntheticTrace:
 
     # ----------------------------------------------------------------------------- schedule
 
-    def records(self) -> Iterator[tuple[int, int, np.ndarray, np.ndarray, np.ndarray, int]]:
-        """Yield (kind, first_layer, request_ids, positions, ids, timestamp_us) in engine order."""
+    def records(self) -> Iterator[SyntheticRecord]:
+        """Yield the records in engine order."""
         c = self.config
         rng = np.random.default_rng(c.seed + 1)
         layers = c.text_layers + (1 if c.mtp else 0)
@@ -166,7 +188,7 @@ class SyntheticTrace:
                 request = queue.popleft()
                 for rec in self._prefill(request, rng, layers):
                     clock_us += 90_000
-                    yield (*rec, clock_us)
+                    yield rec._replace(timestamp_us=clock_us)
                 active.append(request)
             if not active:
                 round_no = queue[0].arrival
@@ -176,13 +198,13 @@ class SyntheticTrace:
                     pos = np.array([r.pos + 1 + step for r in active], dtype=np.uint32)
                     ids = self._sample(active, rng, layers, rows=slice(c.text_layers, layers), noise=c.noise)
                     clock_us += 3_000
-                    yield (KIND_MTP_PROPOSAL, c.text_layers, self._ids(active), pos, ids, clock_us)
+                    yield SyntheticRecord(KIND_MTP_PROPOSAL, c.text_layers, self._ids(active), pos, ids, clock_us)
                 width = c.draft_window + 1
                 req_ids = np.repeat(self._ids(active), width)
                 positions = np.concatenate([np.arange(r.pos, r.pos + width) for r in active]).astype(np.uint32)
                 ids = self._sample(active, rng, layers, rows=slice(0, c.text_layers), noise=c.noise, repeat=width)
                 clock_us += 28_000
-                yield (KIND_MTP_VERIFY, 0, req_ids, positions, ids, clock_us)
+                yield SyntheticRecord(KIND_MTP_VERIFY, 0, req_ids, positions, ids, clock_us)
                 for r in active:
                     accepted = 0
                     while accepted < c.draft_window and rng.random() < c.accept_rate:
@@ -192,7 +214,7 @@ class SyntheticTrace:
                 pos = np.array([r.pos for r in active], dtype=np.uint32)
                 ids = self._sample(active, rng, layers, rows=slice(0, c.text_layers), noise=c.noise)
                 clock_us += 22_000
-                yield (KIND_DECODE, 0, self._ids(active), pos, ids, clock_us)
+                yield SyntheticRecord(KIND_DECODE, 0, self._ids(active), pos, ids, clock_us)
                 for r in active:
                     self._advance(r, 1, rng, layers)
             active = [r for r in active if r.produced < r.decode_len]
@@ -259,7 +281,12 @@ class SyntheticTrace:
                 parts.append(self._topk(base, rng, c.prefill_noise))
             ids = np.concatenate(parts)
             positions = np.arange(done, done + n, dtype=np.uint32)
-            yield (KIND_PREFILL, 0, np.full(n, request.request_id, dtype=np.uint64), positions, ids)
+            if c.prefill_histograms and n * c.top_k > c.experts:
+                counts = ids_to_histogram(ids, c.experts)
+                yield SyntheticRecord(KIND_PREFILL_HISTOGRAM, 0, np.asarray([request.request_id], dtype=np.uint64),
+                                      positions[:1], counts, 0, n)
+            else:
+                yield SyntheticRecord(KIND_PREFILL, 0, np.full(n, request.request_id, dtype=np.uint64), positions, ids, 0)
             done += n
         request.pos = request.prompt_len
 

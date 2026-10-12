@@ -5,7 +5,8 @@ from __future__ import annotations
 import numpy as np
 
 from .compiled import MIXED, CompiledTrace, PoolData
-from .policies import _blocks, decode_records, flat_entry_index
+from .policies import _blocks, decode_records, flat_entry_index, prefill_records
+from .trace import KIND_NAMES, PREFILL_KINDS
 
 
 def _usage(pool: PoolData, recs: np.ndarray, limit: int = 1 << 23) -> np.ndarray:
@@ -27,6 +28,60 @@ def _quantile_from_hist(hist: np.ndarray, q: float) -> int:
     if total == 0:
         return 0
     return int(np.searchsorted(np.cumsum(hist), q * total, side="left"))
+
+
+def _distinct_per_record_layer(comp: CompiledTrace, pool: PoolData, recs: np.ndarray, group_values: np.ndarray, label) -> dict:
+    """Distribution of distinct experts per (record, layer) over `recs`, overall and grouped by
+    `label(group_values[record])` (at most the 8 largest groups)."""
+    layers, experts = pool.n_layers, pool.experts
+    hist = np.zeros(experts + 1, dtype=np.int64)
+    by_group: dict[int, np.ndarray] = {}
+    layer_sum = np.zeros(layers, dtype=np.float64)
+    layer_cells = np.zeros(layers, dtype=np.float64)
+    off = pool.entries.offsets
+    lo_layer = comp.first_layer.astype(np.int64) - pool.layer_lo
+    hi_layer = lo_layer + comp.layer_count.astype(np.int64)
+    for a, b in _blocks(off[recs + 1] - off[recs], 1 << 22):
+        block = recs[a:b]
+        idx, lens = flat_entry_index(off, block)
+        layer = pool.entries.items[idx].astype(np.int64) // experts
+        seg = np.repeat(np.arange(len(block)), lens)
+        matrix = np.bincount(seg * layers + layer, minlength=len(block) * layers).reshape(len(block), layers)
+        lane = np.arange(layers)[None, :]
+        covered = (lane >= lo_layer[block][:, None]) & (lane < hi_layer[block][:, None])
+        hist += np.bincount(matrix[covered], minlength=experts + 1)
+        layer_sum += np.where(covered, matrix, 0).sum(axis=0)
+        layer_cells += covered.sum(axis=0)
+        groups = group_values[block]
+        for g in np.unique(groups).tolist():
+            sel = groups == g
+            h = by_group.setdefault(int(g), np.zeros(experts + 1, dtype=np.int64))
+            h += np.bincount(matrix[sel][covered[sel]], minlength=experts + 1)
+    cells = int(hist.sum())
+    mean_all = float((hist * np.arange(experts + 1)).sum() / cells) if cells else 0.0
+    per_layer_mean = np.divide(layer_sum, layer_cells, out=np.zeros(layers), where=layer_cells > 0)
+    distinct = {
+        "mean": mean_all,
+        "median": _quantile_from_hist(hist, 0.5),
+        "p95": _quantile_from_hist(hist, 0.95),
+        "max": int(np.flatnonzero(hist).max()) if cells else 0,
+        "per_layer_mean": {
+            "min": float(per_layer_mean.min()),
+            "median": float(np.median(per_layer_mean)),
+            "max": float(per_layer_mean.max()),
+        },
+        "by_group": {},
+    }
+    ranked = sorted(by_group.items(), key=lambda kv: -int(kv[1].sum()))[:8]
+    for g, h in sorted(ranked):
+        n = int(h.sum())
+        distinct["by_group"][label(g)] = {
+            "cells": n,
+            "mean": float((h * np.arange(experts + 1)).sum() / n),
+            "median": _quantile_from_hist(h, 0.5),
+            "p95": _quantile_from_hist(h, 0.95),
+        }
+    return distinct
 
 
 def skew_report(comp: CompiledTrace, coverage=(0.5, 0.8, 0.95)) -> dict[str, dict]:
@@ -55,61 +110,41 @@ def skew_report(comp: CompiledTrace, coverage=(0.5, 0.8, 0.95)) -> dict[str, dic
                 "per_layer": need.tolist(),
             }
 
-        # distinct experts per (record, layer)
-        hist = np.zeros(experts + 1, dtype=np.int64)
-        by_cols: dict[int, np.ndarray] = {}
-        layer_sum = np.zeros(layers, dtype=np.float64)
-        layer_cells = np.zeros(layers, dtype=np.float64)
-        off = pool.entries.offsets
-        lo_layer = comp.first_layer.astype(np.int64) - pool.layer_lo
-        hi_layer = lo_layer + comp.layer_count.astype(np.int64)
-        for a, b in _blocks(off[recs + 1] - off[recs], 1 << 22):
-            block = recs[a:b]
-            idx, lens = flat_entry_index(off, block)
-            layer = pool.entries.items[idx].astype(np.int64) // experts
-            seg = np.repeat(np.arange(len(block)), lens)
-            matrix = np.bincount(seg * layers + layer, minlength=len(block) * layers).reshape(len(block), layers)
-            lane = np.arange(layers)[None, :]
-            covered = (lane >= lo_layer[block][:, None]) & (lane < hi_layer[block][:, None])
-            values = matrix[covered]
-            hist += np.bincount(values, minlength=experts + 1)
-            layer_sum += np.where(covered, matrix, 0).sum(axis=0)
-            layer_cells += covered.sum(axis=0)
-            cols = comp.ncols[block]
-            for g in np.unique(cols).tolist():
-                sel = cols == g
-                h = by_cols.setdefault(int(g), np.zeros(experts + 1, dtype=np.int64))
-                h += np.bincount(matrix[sel][covered[sel]], minlength=experts + 1)
-        cells = int(hist.sum())
-        mean_all = float((hist * np.arange(experts + 1)).sum() / cells) if cells else 0.0
-        per_layer_mean = np.divide(layer_sum, layer_cells, out=np.zeros(layers), where=layer_cells > 0)
-        distinct = {
-            "mean": mean_all,
-            "median": _quantile_from_hist(hist, 0.5),
-            "p95": _quantile_from_hist(hist, 0.95),
-            "max": int(np.flatnonzero(hist).max()) if cells else 0,
-            "per_layer_mean": {
-                "min": float(per_layer_mean.min()),
-                "median": float(np.median(per_layer_mean)),
-                "max": float(per_layer_mean.max()),
-            },
-            "by_columns": {},
-        }
-        ranked = sorted(by_cols.items(), key=lambda kv: -int(kv[1].sum()))[:8]
-        for g, h in sorted(ranked):
-            n = int(h.sum())
-            distinct["by_columns"][str(g)] = {
-                "cells": n,
-                "mean": float((h * np.arange(experts + 1)).sum() / n),
-                "median": _quantile_from_hist(h, 0.5),
-                "p95": _quantile_from_hist(h, 0.95),
-            }
+        distinct = _distinct_per_record_layer(comp, pool, recs, comp.ncols, str)
+        distinct["by_columns"] = distinct.pop("by_group")
         out[pool.name] = {
             "records": int(len(recs)),
             "activations": float(totals.sum()),
             "coverage": cover,
             "distinct_per_record_layer": distinct,
         }
+    return out
+
+
+def prefill_report(comp: CompiledTrace) -> dict[str, dict]:
+    """Per pool: prefill chunks by kind (per-token rows or histogram) and the distinct experts
+    each chunk touches per layer, which is what streaming a chunk from host memory has to move."""
+    out: dict[str, dict] = {}
+    for pool in comp.pools():
+        recs = prefill_records(comp, pool)
+        if len(recs) == 0:
+            continue
+        kinds = comp.kinds[recs]
+        distinct = _distinct_per_record_layer(
+            comp, pool, recs, comp.kinds, lambda kind: KIND_NAMES.get(int(kind), f"kind{kind}")
+        )
+        out[pool.name] = {
+            "chunks": int(len(recs)),
+            "tokens": int(comp.ncols[recs].sum()),
+            "by_kind": {
+                KIND_NAMES[k]: {"chunks": int((kinds == k).sum()), "tokens": int(comp.ncols[recs][kinds == k].sum())}
+                for k in PREFILL_KINDS
+                if (kinds == k).any()
+            },
+            "distinct_per_record_layer": {**distinct, "by_kind": distinct["by_group"]},
+            "experts_per_layer": pool.experts,
+        }
+        del out[pool.name]["distinct_per_record_layer"]["by_group"]
     return out
 
 

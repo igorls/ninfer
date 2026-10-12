@@ -6,6 +6,7 @@ import itertools
 import json
 import random
 from collections import Counter, OrderedDict
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -20,10 +21,13 @@ from tools.bench.expert_trace.trace import (
     KIND_MTP_PROPOSAL,
     KIND_MTP_VERIFY,
     KIND_PREFILL,
+    KIND_PREFILL_HISTOGRAM,
     RECORD_HEADER,
+    HistogramRecord,
     TraceFormatError,
     TraceReader,
     TraceWriter,
+    ids_to_histogram,
     make_metadata,
     read_trace,
 )
@@ -41,8 +45,22 @@ def write_trace(path: Path, records, *, text_layers=1, experts=4, top_k=1, mtp_l
     )
     with TraceWriter(path, meta) as writer:
         for rec in records:
-            writer.write_record(**rec)
+            if rec["kind"] == KIND_PREFILL_HISTOGRAM:
+                writer.write_histogram(**{k: v for k, v in rec.items() if k != "kind"})
+            else:
+                writer.write_record(**rec)
     return path
+
+
+def prefill_pair(request, first_position, ids, experts):
+    """The same prefill chunk as per-token rows (kind 1) and as a histogram (kind 5)."""
+    ids = np.asarray(ids)
+    tokens = ids.shape[0]
+    rows = dict(kind=KIND_PREFILL, request_ids=[request] * tokens,
+                positions=range(first_position, first_position + tokens), ids=ids)
+    summary = dict(kind=KIND_PREFILL_HISTOGRAM, request_id=request, first_position=first_position, tokens=tokens,
+                   counts=ids_to_histogram(ids, experts))
+    return rows, summary
 
 
 def decode(request, position, *experts, kind=KIND_DECODE, first_layer=0, ts=0):
@@ -315,9 +333,10 @@ def test_adaptive_swaps_a_cold_resident_for_a_hot_candidate(tmp_path):
     assert [entry[2] for entry in log] == [0, 0, 0, 0, 1, 1, 1, 1]
 
 
-def test_prefill_informed_promotes_what_the_prompt_used(tmp_path):
-    prefill = dict(kind=KIND_PREFILL, request_ids=[1] * 6, positions=range(6),
-                   ids=np.array([[[10, 11]]] * 6))
+@pytest.mark.parametrize("histogram", [False, True])
+def test_prefill_informed_promotes_what_the_prompt_used(tmp_path, histogram):
+    rows, summary = prefill_pair(1, 0, np.array([[[10, 11]]] * 6), 16)
+    prefill = summary if histogram else rows
     decodes = [decode(1, 6 + i, 10, 11) for i in range(5)]
     comp = compile_path(write_trace(tmp_path / "t.nxtr", [prefill, *decodes], experts=16, top_k=2), prefill_topk=2)
     assert list(comp.prefill_lists) == [1]
@@ -327,6 +346,7 @@ def test_prefill_informed_promotes_what_the_prompt_used(tmp_path):
     assert (informed["hits"], informed["needed"], informed["swaps"]) == (10, 10, 2)
     # the streamed prefill itself is measured against the resident set at that time
     assert informed["prefill"]["needed"] == 2 and informed["prefill"]["missing"] == 2
+    assert informed["prefill"]["columns"] == 6  # tokens, whichever form the chunk has
 
 
 def test_client_profile_locks_the_active_clients_experts(tmp_path):
@@ -602,6 +622,148 @@ def test_untagged_columns_are_their_own_client(tmp_path):
     assert (tally.client_needed[app], tally.client_hits[app]) == (2, 0)
 
 
+# ------------------------------------------------------------------------ prefill histograms
+
+
+def test_histogram_round_trip(tmp_path):
+    rng = np.random.default_rng(5)
+    ids = rng.integers(0, 16, size=(9, 3, 4))
+    counts = ids_to_histogram(ids, 16)
+    assert counts.dtype == np.uint16 and counts.shape == (3, 16) and (counts.sum(axis=1) == 9 * 4).all()
+    path = tmp_path / "t.nxtr"
+    meta = make_metadata(text_layers=3, experts=16, top_k=4, mtp_layer=None, server_instance_id=SERVER)
+    with TraceWriter(path, meta) as writer:
+        writer.write_record(KIND_DECODE, [7], [3], ids[:1], timestamp_us=10)
+        writer.write_histogram(77, 1000, 9, counts, timestamp_us=20)
+        writer.write_histogram(0, 4, 2, counts[1:], first_layer=1, timestamp_us=30)
+        writer.write_record(KIND_DECODE, [7], [4], ids[1:2], timestamp_us=40)
+    _meta, records, reader = read_trace(path)
+    assert reader.status == "complete" and [r.kind for r in records] == [KIND_DECODE, 5, 5, KIND_DECODE]
+    first, second = records[1], records[2]
+    assert isinstance(first, HistogramRecord)
+    assert (first.request_id, first.first_position, first.tokens, first.first_layer, first.timestamp_us) == (77, 1000, 9, 0, 20)
+    assert first.columns == 1 and first.layer_count == 3 and first.kind_name == "prefill-histogram"
+    np.testing.assert_array_equal(first.counts, counts)
+    assert (second.request_id, second.first_layer, second.layer_count) == (0, 1, 2)
+    np.testing.assert_array_equal(second.counts, counts[1:])
+    np.testing.assert_array_equal(records[3].ids, ids[1:2])  # the per-token record after it still parses
+
+
+def test_histogram_counts_saturate_at_u16():
+    ids = np.zeros((70000, 1, 1), dtype=np.uint16)
+    assert ids_to_histogram(ids, 4).tolist() == [[65535, 0, 0, 0]]
+
+
+def test_writer_rejects_malformed_histograms(tmp_path):
+    with TraceWriter(tmp_path / "t.nxtr", make_metadata(text_layers=1, experts=4, top_k=1)) as writer:
+        with pytest.raises(TraceFormatError):
+            writer.write_histogram(1, 0, 3, np.zeros((1, 5)))  # wrong expert axis
+        with pytest.raises(TraceFormatError):
+            writer.write_histogram(1, 0, 3, np.full((1, 4), 70000))  # does not fit u16
+
+
+def test_truncated_histogram_tail_is_tolerated(tmp_path):
+    ids = np.array([[[1, 2]], [[2, 3]], [[0, 3]]])
+    _rows, summary = prefill_pair(4, 10, ids, 8)
+    path = write_trace(tmp_path / "t.nxtr", [decode(4, 9, 1, 2), summary], experts=8, top_k=2)
+    data = path.read_bytes()
+    record_size = 24 + 16 + 1 * 8 * 2
+    for cut in (1, 12, 24, 30, 40, record_size - 1):  # inside the header, the summary column, the counts
+        short = tmp_path / f"cut{cut}.nxtr"
+        short.write_bytes(data[: len(data) - record_size + cut])
+        _meta, records, reader = read_trace(short)
+        assert [r.kind for r in records] == [KIND_DECODE], cut
+        assert reader.status == "truncated" and "1 complete records" in reader.status_detail
+    assert read_trace(path)[2].status == "complete"
+    # a histogram that claims several summary columns is corrupt, not truncated
+    bad = bytearray(data)
+    bad[len(data) - record_size + 12 : len(data) - record_size + 16] = (2).to_bytes(4, "little")
+    corrupt = tmp_path / "corrupt.nxtr"
+    corrupt.write_bytes(bytes(bad))
+    _meta, records, reader = read_trace(corrupt)
+    assert len(records) == 1 and reader.status == "corrupt"
+
+
+def chunked_trace(tmp_path, name, *, histogram):
+    """Four requests, each prefilled (request 2 in two chunks) and then decoded. Layers 0..1 are
+    text layers and layer 2 the MTP layer, which the first chunk of every request also covers."""
+    rng = np.random.default_rng(11)
+    records = []
+    position = {}
+    for request in (1, 2, 3, 4):
+        for chunk in range(2 if request == 2 else 1):
+            n = int(rng.integers(6, 14))
+            ids = rng.integers(0, 16, size=(n, 3 if chunk == 0 else 2, 3))
+            rows, summary = prefill_pair(request, position.get(request, 0), ids, 16)
+            records.append(summary if histogram else rows)
+            position[request] = position.get(request, 0) + n
+        for step in range(5):
+            experts = rng.integers(0, 16, size=3).tolist()
+            records.append(decode(request, position[request] + step, *experts))
+    return compile_path(
+        write_trace(tmp_path / name, records, text_layers=2, experts=16, top_k=3, mtp_layer=2),
+        mapping={1: "app-a", 2: "app-b", 3: "app-a", 4: "app-b"}, prefill_topk=6,
+    )
+
+
+def test_histogram_chunk_equals_the_per_token_chunk(tmp_path):
+    rows = chunked_trace(tmp_path, "rows.nxtr", histogram=False)
+    summary = chunked_trace(tmp_path, "hist.nxtr", histogram=True)
+    for pool in ("text", "mtp"):
+        a, b = getattr(rows, pool), getattr(summary, pool)
+        np.testing.assert_array_equal(a.entries.offsets, b.entries.offsets)
+        np.testing.assert_array_equal(a.entries.items, b.entries.items)
+        np.testing.assert_array_equal(a.entries.counts, b.entries.counts)
+    np.testing.assert_array_equal(rows.ncols, summary.ncols)  # a histogram chunk counts its tokens
+    np.testing.assert_array_equal(rows.rec_client, summary.rec_client)
+    np.testing.assert_array_equal(rows.committed, summary.committed)
+    assert rows.prefill_lists.keys() == summary.prefill_lists.keys() and rows.prefill_lists
+    for r, expected in rows.prefill_lists.items():
+        for (items_a, counts_a), (items_b, counts_b) in zip(expected, summary.prefill_lists[r]):
+            np.testing.assert_array_equal(items_a, items_b)
+            np.testing.assert_array_equal(counts_a, counts_b)
+    kwargs = dict(budgets=[8, 20], policies=list(sim.POLICY_ORDER), train_fraction=0.4, slots=("global", "per-layer"),
+                  interval=2, min_count=1.0, prefill_promote=6)
+    result_rows, result_summary = run(rows, **kwargs), run(summary, **kwargs)
+    assert result_rows == result_summary
+    text = result_rows["budgets"][0]["pools"]["text"]["policies"]
+    streaming = text["static-oracle"]["prefill"]
+    assert streaming["records"] > 0 and streaming["needed"] > 0 and streaming["missing"] > 0
+    informed = text["prefill-informed"]
+    assert informed["swaps"] > 0 and set(informed["per_client"]) == {"app-a", "app-b"}
+    assert all(c["prefill_tokens"] > 0 and c["prefill_needed"] > 0 for c in informed["per_client"].values())
+
+
+def test_synthetic_prefill_histograms_do_not_change_any_result(tmp_path):
+    def compiled(histograms):
+        config = replace(synthetic_config(), requests=14, prefill_histograms=histograms)
+        path = tmp_path / f"s{histograms}.nxtr"
+        build_synthetic(config).write(path)
+        return synthetic_compiled(path), read_trace(path)[1]
+
+    (with_hist, records_hist), (with_rows, records_rows) = compiled(True), compiled(False)
+    kinds_hist, kinds_rows = Counter(r.kind for r in records_hist), Counter(r.kind for r in records_rows)
+    assert kinds_hist[KIND_PREFILL_HISTOGRAM] > 0 and kinds_rows[KIND_PREFILL_HISTOGRAM] == 0
+    assert kinds_hist[KIND_PREFILL] + kinds_hist[KIND_PREFILL_HISTOGRAM] == kinds_rows[KIND_PREFILL]
+    kwargs = dict(budgets=[32, 64], policies=list(sim.POLICY_ORDER), train_fraction=0.3, slots=("global", "per-layer"),
+                  prefill_promote=16)
+    assert run(with_hist, **kwargs) == run(with_rows, **kwargs)
+    assert analysis.prefill_report(with_hist)["text"]["tokens"] == analysis.prefill_report(with_rows)["text"]["tokens"]
+
+
+def test_prefill_report_covers_both_kinds(synthetic_path):
+    report = analysis.prefill_report(synthetic_compiled(synthetic_path))
+    text = report["text"]
+    assert set(text["by_kind"]) == {"prefill", "prefill-histogram"}
+    assert text["chunks"] == sum(v["chunks"] for v in text["by_kind"].values())
+    assert text["tokens"] == sum(v["tokens"] for v in text["by_kind"].values())
+    distinct = text["distinct_per_record_layer"]
+    assert set(distinct["by_kind"]) == {"prefill", "prefill-histogram"}
+    # a long chunk touches more experts per layer than a short tail does
+    assert distinct["by_kind"]["prefill-histogram"]["mean"] > distinct["by_kind"]["prefill"]["mean"]
+    assert distinct["max"] <= text["experts_per_layer"]
+
+
 # --------------------------------------------------------------------------- synthetic traces
 
 
@@ -624,13 +786,20 @@ def test_synthetic_trace_is_well_formed_and_repeatable(synthetic_path, tmp_path)
     metadata, records, reader = read_trace(synthetic_path)
     assert reader.status == "complete" and metadata.mtp_layer == 4
     kinds = Counter(r.kind for r in records)
-    assert set(kinds) == {KIND_PREFILL, KIND_MTP_PROPOSAL, KIND_MTP_VERIFY}
+    # long prompt chunks (tokens * top_k > experts) are histograms, short tails stay per-token rows
+    assert set(kinds) == {KIND_PREFILL, KIND_PREFILL_HISTOGRAM, KIND_MTP_PROPOSAL, KIND_MTP_VERIFY}
     for rec in records:
         if rec.kind == KIND_MTP_PROPOSAL:
             assert (rec.first_layer, rec.layer_count) == (4, 1)
         else:
             assert (rec.first_layer, rec.layer_count) == (0, 4)
+        if rec.kind == KIND_PREFILL_HISTOGRAM:
+            assert isinstance(rec, HistogramRecord) and rec.tokens * 4 > 32
+            assert (rec.counts.sum(axis=1) == rec.tokens * 4).all()  # every token picked top_k experts per layer
+            continue
         assert rec.ids.max() < 32
+        if rec.kind == KIND_PREFILL:
+            assert rec.columns * 4 <= 32
         assert all(len(set(row)) == 4 for row in rec.ids.reshape(-1, 4).tolist())  # distinct experts per token and layer
     again = tmp_path / "again.nxtr"
     build_synthetic(synthetic_config()).write(again)

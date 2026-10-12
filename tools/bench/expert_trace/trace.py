@@ -11,6 +11,12 @@ Layout (little-endian):
         request_id is the request-log request.request_id of the column's request, 0 when untagged
     expert ids:   columns x layer_count x top_k  u16, order [column][layer][rank]
 
+Kind 5 (prefill histogram) replaces the per-token rows of a long prefill chunk: columns is 1 and
+the single summary column is { u64 request_id, u32 position = the chunk's first absolute position,
+u32 flags = the number of tokens N it covered }, followed by layer_count x experts u16 counts in
+order [layer][expert]: how many of the chunk's tokens selected that expert in that layer (saturating
+at 65535; the counts of a layer sum to N x top_k).
+
 A truncated or corrupt tail (an engine crash) ends the stream at the last complete record; the
 reader reports that through `status` instead of raising.
 """
@@ -36,12 +42,15 @@ KIND_PREFILL = 1
 KIND_DECODE = 2
 KIND_MTP_PROPOSAL = 3
 KIND_MTP_VERIFY = 4
+KIND_PREFILL_HISTOGRAM = 5
 KIND_NAMES = {
     KIND_PREFILL: "prefill",
     KIND_DECODE: "decode",
     KIND_MTP_PROPOSAL: "mtp-proposal",
     KIND_MTP_VERIFY: "mtp-verify",
+    KIND_PREFILL_HISTOGRAM: "prefill-histogram",
 }
+PREFILL_KINDS = (KIND_PREFILL, KIND_PREFILL_HISTOGRAM)
 
 RECORD_HEADER = struct.Struct("<IBBHHHIQ")
 COLUMN_DTYPE = np.dtype([("request_id", "<u8"), ("position", "<u4"), ("flags", "<u4")])
@@ -179,8 +188,48 @@ class TraceRecord:
         return KIND_NAMES.get(self.kind, f"kind{self.kind}")
 
 
+@dataclass(slots=True)
+class HistogramRecord:
+    """A kind-5 prefill chunk: per-(layer, expert) selection counts instead of per-token rows.
+
+    `counts` is `uint16[layer_count, experts]`; `tokens` is the number of prompt tokens the chunk
+    covered and `first_position` the absolute position of the first of them.
+    """
+
+    first_layer: int
+    timestamp_us: int
+    request_id: int
+    first_position: int
+    tokens: int
+    counts: np.ndarray  # uint16[layer_count, experts]
+    kind: int = KIND_PREFILL_HISTOGRAM
+
+    @property
+    def columns(self) -> int:
+        return 1
+
+    @property
+    def layer_count(self) -> int:
+        return int(self.counts.shape[0])
+
+    @property
+    def kind_name(self) -> str:
+        return KIND_NAMES[self.kind]
+
+
+def ids_to_histogram(ids: np.ndarray, experts: int) -> np.ndarray:
+    """Selection counts `uint16[layers, experts]` of per-token ids `[columns, layers, top_k]`,
+    saturating at 65535: the kind-5 form of a kind-1 chunk."""
+    ids = np.asarray(ids)
+    layers = ids.shape[1]
+    flat = (ids.astype(np.int64) + (np.arange(layers) * experts)[None, :, None]).reshape(-1)
+    counts = np.bincount(flat, minlength=layers * experts)
+    return np.minimum(counts, 0xFFFF).astype("<u2").reshape(layers, experts)
+
+
 class TraceReader:
-    """Streaming reader. Iterate it (or call `records()`) to get `TraceRecord`s.
+    """Streaming reader. Iterate it (or call `records()`) to get `TraceRecord`s (and
+    `HistogramRecord`s for kind-5 prefill chunks).
 
     After iteration `status` is "complete", "truncated" (the file ends inside a record) or
     "corrupt" (a record header with a bad sentinel); `status_detail` explains and
@@ -230,12 +279,13 @@ class TraceReader:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
-    def __iter__(self) -> Iterator[TraceRecord]:
+    def __iter__(self) -> Iterator[TraceRecord | HistogramRecord]:
         return self.records()
 
-    def records(self) -> Iterator[TraceRecord]:
+    def records(self) -> Iterator[TraceRecord | HistogramRecord]:
         f = self._file
         top_k = self.metadata.top_k
+        experts = self.metadata.experts
         size = self.file_size
         while True:
             start = f.tell()
@@ -251,12 +301,31 @@ class TraceReader:
                 self._stop("corrupt", start, f"bad record sentinel 0x{sentinel:08x}")
                 return
             table_bytes = columns * COLUMN_DTYPE.itemsize
-            ids_bytes = columns * layer_count * top_k * ID_DTYPE.itemsize
+            if kind == KIND_PREFILL_HISTOGRAM:
+                if columns != 1:
+                    self._stop("corrupt", start, f"prefill histogram with {columns} summary columns")
+                    return
+                ids_bytes = layer_count * experts * ID_DTYPE.itemsize
+            else:
+                ids_bytes = columns * layer_count * top_k * ID_DTYPE.itemsize
             if start + RECORD_HEADER.size + table_bytes + ids_bytes > size:
                 self._stop("truncated", start, "record body extends past the end of the file")
                 return
             table = np.frombuffer(f.read(table_bytes), dtype=COLUMN_DTYPE)
             raw_ids = np.frombuffer(f.read(ids_bytes), dtype=ID_DTYPE)
+            if kind == KIND_PREFILL_HISTOGRAM:
+                record = HistogramRecord(
+                    first_layer=first_layer,
+                    timestamp_us=ts_us,
+                    request_id=int(table["request_id"][0]),
+                    first_position=int(table["position"][0]),
+                    tokens=int(table["flags"][0]),
+                    counts=raw_ids.reshape(layer_count, experts),
+                )
+                self.records_read += 1
+                self.valid_bytes = f.tell()
+                yield record
+                continue
             record = TraceRecord(
                 kind=kind,
                 first_layer=first_layer,
@@ -275,7 +344,7 @@ class TraceReader:
         self.status_detail = f"{detail} at byte {offset} (after {self.records_read} complete records)"
 
 
-def read_trace(path: str | os.PathLike[str]) -> tuple[TraceMetadata, list[TraceRecord], TraceReader]:
+def read_trace(path: str | os.PathLike[str]) -> tuple[TraceMetadata, list[TraceRecord | HistogramRecord], TraceReader]:
     """Load a whole trace into memory (tests and small traces). The reader carries the status."""
     reader = TraceReader(path)
     try:
@@ -333,6 +402,34 @@ class TraceWriter:
         f.write(RECORD_HEADER.pack(SENTINEL, kind, 0, layer_count, first_layer, 0, columns, timestamp_us))
         f.write(table.tobytes())
         f.write(np.ascontiguousarray(ids, dtype=ID_DTYPE).tobytes())
+        self.records_written += 1
+
+    def write_histogram(
+        self,
+        request_id: int,
+        first_position: int,
+        tokens: int,
+        counts: np.ndarray,
+        *,
+        first_layer: int = 0,
+        timestamp_us: int = 0,
+    ) -> None:
+        """Write a kind-5 prefill chunk summarised as `counts[layer, expert]`."""
+        counts = np.asarray(counts)
+        if counts.ndim != 2 or counts.shape[1] != self.metadata.experts:
+            raise TraceFormatError(f"counts must have shape [layers, experts={self.metadata.experts}], got {counts.shape}")
+        if counts.size and (int(counts.min()) < 0 or int(counts.max()) > 0xFFFF):
+            raise TraceFormatError("histogram counts must fit in u16")
+        if counts.shape[0] >= 1 << 16 or first_layer >= 1 << 16 or tokens >= 1 << 32 or first_position >= 1 << 32:
+            raise TraceFormatError("record geometry does not fit the v1 header")
+        table = np.zeros(1, dtype=COLUMN_DTYPE)
+        table["request_id"] = request_id
+        table["position"] = first_position
+        table["flags"] = tokens
+        f = self._file
+        f.write(RECORD_HEADER.pack(SENTINEL, KIND_PREFILL_HISTOGRAM, 0, counts.shape[0], first_layer, 0, 1, timestamp_us))
+        f.write(table.tobytes())
+        f.write(np.ascontiguousarray(counts, dtype=ID_DTYPE).tobytes())
         self.records_written += 1
 
     def close(self) -> None:

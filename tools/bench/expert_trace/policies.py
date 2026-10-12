@@ -20,7 +20,6 @@ from dataclasses import dataclass
 import numpy as np
 
 from .compiled import MIXED, CompiledTrace, PoolData
-from .trace import KIND_PREFILL
 
 NEG_INF = float("-inf")
 POS_INF = float("inf")
@@ -131,14 +130,14 @@ def decode_records(comp: CompiledTrace, pool: PoolData, lo: int = 0, hi: int | N
     """Record indices (decode, verify and MTP proposal) that touch the pool, within [lo, hi)."""
     lens = pool.entries.lengths()
     hi = comp.n_records if hi is None else hi
-    sel = (lens > 0) & (comp.kinds != KIND_PREFILL)
+    sel = (lens > 0) & ~comp.is_prefill
     sel[:lo] = False
     sel[hi:] = False
     return np.flatnonzero(sel)
 
 
 def prefill_records(comp: CompiledTrace, pool: PoolData, lo: int = 0) -> np.ndarray:
-    sel = (pool.entries.lengths() > 0) & (comp.kinds == KIND_PREFILL)
+    sel = (pool.entries.lengths() > 0) & comp.is_prefill
     sel[:lo] = False
     return np.flatnonzero(sel)
 
@@ -162,6 +161,9 @@ class Tally:
         self.client_columns = np.zeros(n_clients, dtype=np.int64)
         self.client_needed = np.zeros(n_clients, dtype=np.int64)
         self.client_hits = np.zeros(n_clients, dtype=np.int64)
+        self.client_pf_tokens = np.zeros(n_clients, dtype=np.int64)
+        self.client_pf_needed = np.zeros(n_clients, dtype=np.int64)
+        self.client_pf_missing = np.zeros(n_clients, dtype=np.int64)
 
     @property
     def misses(self) -> int:
@@ -173,7 +175,7 @@ class _Recorder:
 
     def __init__(self, comp: CompiledTrace, pool: PoolData, split: int, tally: Tally):
         self.ncols = comp.ncols.tolist()
-        self.kinds = comp.kinds.tolist()
+        self.is_prefill = comp.is_prefill.tolist()
         self.client = comp.rec_client.tolist()
         self.mixed = pool.mixed
         self.split = split
@@ -201,14 +203,26 @@ class _Recorder:
                     t.client_needed[cc] += len(items)
                     t.client_hits[cc] += int(np.count_nonzero(resident[items]))
 
-    def prefill(self, r: int, hits: int, needed: int) -> None:
+    def prefill(self, r: int, resident: np.ndarray, hits: int, needed: int) -> None:
         if r < self.split:
             return
         t = self.tally
+        tokens = self.ncols[r]
         t.prefill_records += 1
-        t.prefill_columns += self.ncols[r]
+        t.prefill_columns += tokens
         t.prefill_needed += needed
         t.prefill_missing += needed - hits
+        if self.has_clients:
+            c = self.client[r]
+            if c >= 0:
+                t.client_pf_tokens[c] += tokens
+                t.client_pf_needed[c] += needed
+                t.client_pf_missing[c] += needed - hits
+            elif c == MIXED and r in self.mixed:
+                for cc, items, _counts, ccols in self.mixed[r]:
+                    t.client_pf_tokens[cc] += ccols
+                    t.client_pf_needed[cc] += len(items)
+                    t.client_pf_missing[cc] += len(items) - int(np.count_nonzero(resident[items]))
 
 
 # ----------------------------------------------------------------------------------- static
@@ -216,7 +230,8 @@ class _Recorder:
 
 def run_static(comp: CompiledTrace, pool: PoolData, resident: np.ndarray, split: int) -> Tally:
     """A fixed resident set, evaluated vectorised over the evaluation window."""
-    tally = Tally(len(comp.client_names))
+    nc = len(comp.client_names)
+    tally = Tally(nc)
     dec = decode_records(comp, pool, split)
     if len(dec):
         hits, needed = record_hits(pool, resident, dec)
@@ -224,7 +239,6 @@ def run_static(comp: CompiledTrace, pool: PoolData, resident: np.ndarray, split:
         tally.decode_columns = int(comp.ncols[dec].sum())
         tally.needed = int(needed.sum())
         tally.hits = int(hits.sum())
-        nc = len(comp.client_names)
         if nc:
             rc = comp.rec_client[dec].astype(np.int64)
             single = rc >= 0
@@ -246,6 +260,18 @@ def run_static(comp: CompiledTrace, pool: PoolData, resident: np.ndarray, split:
         tally.prefill_columns = int(comp.ncols[pre].sum())
         tally.prefill_needed = int(needed.sum())
         tally.prefill_missing = int((needed - hits).sum())
+        if nc:
+            rc = comp.rec_client[pre].astype(np.int64)
+            single = rc >= 0
+            if single.any():
+                tally.client_pf_tokens += np.bincount(rc[single], weights=comp.ncols[pre][single], minlength=nc).astype(np.int64)
+                tally.client_pf_needed += np.bincount(rc[single], weights=needed[single], minlength=nc).astype(np.int64)
+                tally.client_pf_missing += np.bincount(rc[single], weights=(needed - hits)[single], minlength=nc).astype(np.int64)
+            for r in pre[rc == MIXED].tolist():
+                for c, items, _counts, ccols in pool.mixed.get(r, ()):
+                    tally.client_pf_tokens[c] += ccols
+                    tally.client_pf_needed[c] += len(items)
+                    tally.client_pf_missing[c] += len(items) - int(np.count_nonzero(resident[items]))
     return tally
 
 
@@ -413,8 +439,8 @@ def run_lru(comp: CompiledTrace, pool: PoolData, layout: SlotLayout, split: int)
         hit = resident[items]
         n_hit = int(np.count_nonzero(hit))
         needed = b - a
-        if rec.kinds[r] == KIND_PREFILL:
-            rec.prefill(r, n_hit, needed)
+        if rec.is_prefill[r]:
+            rec.prefill(r, resident, n_hit, needed)
             continue
         rec.decode(r, resident, n_hit, needed)
         miss = items[~hit].astype(np.int64) if n_hit < needed else np.empty(0, np.int64)
@@ -553,9 +579,9 @@ def run_adaptive(
         a, b = off[r], off[r + 1]
         items = items_all[a:b]
         needed = b - a
-        if rec.kinds[r] == KIND_PREFILL:
+        if rec.is_prefill[r]:
             n_hit = int(np.count_nonzero(resident[items]))
-            rec.prefill(r, n_hit, needed)
+            rec.prefill(r, resident, n_hit, needed)
             continue
 
         activate(round_no)
@@ -644,8 +670,8 @@ def run_belady(comp: CompiledTrace, pool: PoolData, layout: SlotLayout, split: i
         hit = resident[items]
         n_hit = int(np.count_nonzero(hit))
         needed = b - a
-        if rec.kinds[r] == KIND_PREFILL:
-            rec.prefill(r, n_hit, needed)
+        if rec.is_prefill[r]:
+            rec.prefill(r, resident, n_hit, needed)
             continue
         rec.decode(r, resident, n_hit, needed)
         use = nxt[a:b]

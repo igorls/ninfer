@@ -25,14 +25,26 @@ Metadata carries `format: "ninfer-expert-trace"`, `version: 1`, `server_instance
 (10) and `created_unix_ms`.
 
 Record header, 24 bytes: `u32 sentinel 0x43525452 | u8 kind | u8 reserved | u16 layer_count |
-u16 first_layer | u16 reserved | u32 columns | u64 timestamp_unix_us`. Kinds: 1 prefill chunk, 2
-ordinary decode round, 3 MTP proposal step, 4 MTP verify. The layer range is read from the header
-(`first_layer`, `layer_count`); text records normally cover layers 0..47 and MTP proposals layer 48.
+u16 first_layer | u16 reserved | u32 columns | u64 timestamp_unix_us`. Kinds: 1 prefill chunk (one
+row per token), 2 ordinary decode round, 3 MTP proposal step, 4 MTP verify, 5 prefill histogram. The
+layer range is read from the header (`first_layer`, `layer_count`); text records normally cover
+layers 0..47 and MTP proposals layer 48.
 
 Then `columns` x 16 bytes `{u64 request_id, u32 position, u32 flags}` (`request_id`: the request-log
 `request.request_id` of the column's request, 0 when untagged), then `columns x layer_count x
 top_k` `u16` expert ids in `[column][layer][rank]` order, rank 0 being the best router score. All
 columns of a record ran in one forward unit.
+
+**Kind 5, prefill histogram.** A prefill chunk with `columns * top_k > experts` (52 tokens or more
+for top-10 over 512 experts) is written as kind 5 instead of kind 1, because per-token rows cost
+about 1 KB per token. The header has `columns = 1`, followed by one summary column
+`{u64 request_id, u32 position = the chunk's first absolute position, u32 flags = the number of
+tokens N the chunk covered}` and then `layer_count x experts` `u16` counts in `[layer][expert]`
+order: how many of the chunk's tokens selected that expert in that layer (saturating at 65535; a
+layer's counts sum to `N x top_k`). Shorter chunks keep kind 1. The reader yields kind 5 as a
+`HistogramRecord` (`counts`, `tokens`, `first_position`, `request_id`); the simulator treats it as
+the equivalent kind-1 chunk: an expert counts as touched when its count is above 0, its counts are
+the prompt's expert frequencies for `prefill-informed`, and the chunk's `ncols` is `N`.
 
 A truncated or corrupt final record (a crash) ends the stream at the last complete record; the
 reader reports `status` (`complete`, `truncated`, `corrupt`) and the report prints a warning.
@@ -75,9 +87,10 @@ metadata and need no log.
 * **Tokens:** `tok` is a decode/verify/proposal *column* (an executed position). `ctok` is a
   *committed* token, estimated per request from the progress of the first position between its
   consecutive decode units (clipped to the unit width), so it needs no acceptance data.
-* **Prefill** records never change residency (a large chunk touches almost every expert). They are
-  measured against the resident set at that moment: `pf-miss%` is the share of the experts they
-  touch that are not resident, `pf GiB/chunk` the bytes that would be streamed per chunk.
+* **Prefill** records (kind 1 rows or kind 5 histograms, which are treated identically) never
+  change residency (a large chunk touches almost every expert). They are measured against the
+  resident set at that moment: `pf-miss%` is the share of the (layer, expert) pairs they touch (count
+  above 0) that are not resident, `pf GiB/chunk` the bytes that would be streamed per chunk.
 * **Window:** the first `--train-fraction` of the requests (by first appearance, default 0.3) train
   the static profiles; all policies are evaluated on the remaining records. Dynamic policies still
   run through the training part to warm up. With `--train-fraction 0` the whole trace is evaluated
@@ -95,7 +108,7 @@ metadata and need no log.
 | `static-train` | The same ranking from the training split only. |
 | `lru` | Least recently used per pool (per layer in `per-layer` mode); every miss is admitted, evicting experts the current record does not need. |
 | `adaptive` | Decayed usage counts: every round `count *= --decay` then `+1` per (column, expert) use; every `--interval` rounds at most `--max-swaps` promotions pair the highest-count absent experts with the lowest-count residents (empty slots first) when the candidate count is at least `--min-count` and beats the victim by `--min-gain`. Defaults 0.7, 4, 96, 2.0, 1.5. A promotion decided after round `k` is usable from round `k + 1 + --copy-latency-rounds` (default 0). Seeded from `static-train`. |
-| `prefill-informed` | `adaptive`, plus at a request's first decode round the up-to `--prefill-promote` experts its own prefill used most are promoted, displacing the lowest-count residents the current round does not need (no gain test), usable immediately. Tests whether a prompt predicts its decode experts. |
+| `prefill-informed` | `adaptive`, plus at a request's first decode round the up-to `--prefill-promote` experts its own prefill used most (by selection counts, summed over its chunks, kind 1 or 5) are promoted, displacing the lowest-count residents the current round does not need (no gain test), usable immediately. Tests whether a prompt predicts its decode experts. |
 | `client-profile` | `adaptive`, plus `--lock-fraction` of every layer's slots hold the top experts (summed per-client record frequency from the training split) of the clients active in the last `--client-window` rounds, re-evaluated at each decision; locked experts are never victims. Reports whether it beats `adaptive` (hit rate, swap traffic). |
 | `belady` | Offline farthest-next-use replacement with bypass: after each record keep, among the resident and just-missed experts, those needed soonest. Optimal among demand-admitted caches (verified against exhaustive search), so a lower bound on LRU-class misses over the **whole** run. Policies that preload or prefetch (static, adaptive) are not bounded by it. It is the slowest policy; leave it out with `--no-belady` or `--policies`. |
 
@@ -107,7 +120,9 @@ policy, and the Jaccard overlap of per-layer top-N expert sets between clients (
 first half of traffic against its second half, the ceiling a per-client profile can reach; the
 random-subset expectation is printed for scale). A skew report lists, per layer, the experts needed
 to cover 50/80/95% of decode activations (min/median/max over layers) and the distinct experts per
-record and layer, also by batch width. `--json OUT` holds everything.
+record and layer, also by batch width. A prefill report gives the chunks and tokens per kind and the
+distinct experts a chunk touches per layer. In the JSON, per-client entries also carry the client's
+prefill tokens and streaming misses. `--json OUT` holds everything.
 
 ## Cost
 

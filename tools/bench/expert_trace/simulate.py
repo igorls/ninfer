@@ -140,9 +140,13 @@ def _metrics(t: pol.Tally, comp: CompiledTrace, split: int, expert_bytes: int, p
                 "needed": int(t.client_needed[c]),
                 "hits": int(t.client_hits[c]),
                 "hit_rate": div(int(t.client_hits[c]), int(t.client_needed[c])),
+                "prefill_tokens": int(t.client_pf_tokens[c]),
+                "prefill_needed": int(t.client_pf_needed[c]),
+                "prefill_missing": int(t.client_pf_missing[c]),
+                "prefill_missing_fraction": div(int(t.client_pf_missing[c]), int(t.client_pf_needed[c])),
             }
             for c in range(len(comp.client_names))
-            if t.client_needed[c] > 0
+            if t.client_needed[c] > 0 or t.client_pf_needed[c] > 0
         }
     return out
 
@@ -436,6 +440,18 @@ def render_text(report: dict) -> str:
                 parts = [f"{c} col: {v['mean']:.1f} (p95 {v['p95']})" for c, v in d["by_columns"].items()]
                 lines.append("  by columns per record: " + "; ".join(parts))
 
+    if report.get("prefill"):
+        lines += ["", "== Prefill chunks (whole trace) =="]
+        for pool_name, s in report["prefill"].items():
+            kinds = ", ".join(f"{k}: {v['chunks']} chunks/{v['tokens']} tok" for k, v in s["by_kind"].items())
+            d = s["distinct_per_record_layer"]
+            lines.append(
+                f"[{pool_name}] {s['chunks']} chunks, {s['tokens']} tokens ({kinds}); distinct experts touched per "
+                f"(chunk, layer) of {s['experts_per_layer']}: mean {d['mean']:.1f}, median {d['median']}, p95 {d['p95']}, max {d['max']}"
+            )
+            for k, v in d["by_kind"].items():
+                lines.append(f"  {k}: mean {v['mean']:.1f} (p95 {v['p95']}) over {v['cells']} chunk-layers")
+
     for entry in report["simulation"]["budgets"]:
         header = (
             f"budget {entry['budget_experts']} experts "
@@ -600,6 +616,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.no_skew:
         started = time.perf_counter()
         report["skew"] = analysis.skew_report(comp)
+        report["prefill"] = analysis.prefill_report(comp)
         log(f"skew report: {time.perf_counter() - started:.1f}s")
     if comp.client_names:
         tops = tuple(int(x) for x in args.overlap_top.split(",") if x)
