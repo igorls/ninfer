@@ -209,42 +209,75 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_a16_sl
         const float top_scale    = __shfl_sync(kMask, lane_scale, lane & ~3);
         const float bottom_scale = __shfl_sync(kMask, lane_scale, (lane & ~3) + 1);
 
-#pragma unroll
-        for (int token_mma = 0; token_mma < kTokenMmas; ++token_mma) {
-            float4 sum = make_float4(accumulators[token_mma][0], accumulators[token_mma][1],
-                                     accumulators[token_mma][2], accumulators[token_mma][3]);
+        if constexpr (requires { Epilogue::kRowTokens; }) {
+            static_assert(!RowPolicy::kPaired,
+                          "row-vector finalization does not pair output rows");
+            static_assert(kTokenMmas == 1 && Epilogue::kRowTokens <= 8,
+                          "sliced-K MMA row-vector finalization requires one 8-token MMA tile");
+            float4 sum = make_float4(accumulators[0][0], accumulators[0][1], accumulators[0][2],
+                                     accumulators[0][3]);
 #pragma unroll
             for (int split = 2; split < kWarps; split += 2) {
-                const float4 value =
-                    load_vec<float4>(partial + ((split * kTokenMmas + token_mma) * 32 + lane) * 4);
+                const float4 value = load_vec<float4>(partial + (split * 32 + lane) * 4);
                 sum.x += value.x;
                 sum.y += value.y;
                 sum.z += value.z;
                 sum.w += value.w;
             }
-            const int local_token = token_mma * 8 + 2 * lid;
-            const int token0      = token_begin + local_token;
-            const int row_a       = row_policy.weight_row(row0, gid, operands.rows);
-            const int row_b       = row_policy.weight_row(row0, gid + 8, operands.rows);
-            if constexpr (RowPolicy::kPaired) {
-                if (local_token < live_columns)
-                    epilogue.apply_pair(destination, row_a, token0, sum.x * top_scale,
-                                        sum.z * bottom_scale);
-                if (local_token + 1 < live_columns)
-                    epilogue.apply_pair(destination, row_a, token0 + 1, sum.y * top_scale,
-                                        sum.w * bottom_scale);
-            } else {
-                if (local_token < live_columns) {
-                    destination.store(row_a, token0,
-                                      epilogue.apply(row_a, token0, sum.x * top_scale));
-                    destination.store(row_b, token0,
-                                      epilogue.apply(row_b, token0, sum.z * bottom_scale));
+            __syncwarp(kMask);
+            partial[gid * 8 + 2 * lid]           = sum.x * top_scale;
+            partial[gid * 8 + 2 * lid + 1]       = sum.y * top_scale;
+            partial[(gid + 8) * 8 + 2 * lid]     = sum.z * bottom_scale;
+            partial[(gid + 8) * 8 + 2 * lid + 1] = sum.w * bottom_scale;
+            __syncwarp(kMask);
+            if (lane < kBlockRows) {
+                const int parent_row = row_policy.weight_row(row0, lane, operands.rows);
+                float projected[Epilogue::kRowTokens];
+#pragma unroll
+                for (int t = 0; t < Epilogue::kRowTokens; ++t) {
+                    projected[t] = partial[lane * 8 + t];
                 }
-                if (local_token + 1 < live_columns) {
-                    destination.store(row_a, token0 + 1,
-                                      epilogue.apply(row_a, token0 + 1, sum.y * top_scale));
-                    destination.store(row_b, token0 + 1,
-                                      epilogue.apply(row_b, token0 + 1, sum.w * bottom_scale));
+                linear_finish_row(destination, epilogue, parent_row, token_begin, projected,
+                                  Epilogue::kRowTokens);
+            }
+        } else {
+#pragma unroll
+            for (int token_mma = 0; token_mma < kTokenMmas; ++token_mma) {
+                float4 sum = make_float4(accumulators[token_mma][0], accumulators[token_mma][1],
+                                         accumulators[token_mma][2], accumulators[token_mma][3]);
+#pragma unroll
+                for (int split = 2; split < kWarps; split += 2) {
+                    const float4 value = load_vec<float4>(
+                        partial + ((split * kTokenMmas + token_mma) * 32 + lane) * 4);
+                    sum.x += value.x;
+                    sum.y += value.y;
+                    sum.z += value.z;
+                    sum.w += value.w;
+                }
+                const int local_token = token_mma * 8 + 2 * lid;
+                const int token0      = token_begin + local_token;
+                const int row_a       = row_policy.weight_row(row0, gid, operands.rows);
+                const int row_b       = row_policy.weight_row(row0, gid + 8, operands.rows);
+                if constexpr (RowPolicy::kPaired) {
+                    if (local_token < live_columns)
+                        epilogue.apply_pair(destination, row_a, token0, sum.x * top_scale,
+                                            sum.z * bottom_scale);
+                    if (local_token + 1 < live_columns)
+                        epilogue.apply_pair(destination, row_a, token0 + 1, sum.y * top_scale,
+                                            sum.w * bottom_scale);
+                } else {
+                    if (local_token < live_columns) {
+                        destination.store(row_a, token0,
+                                          epilogue.apply(row_a, token0, sum.x * top_scale));
+                        destination.store(row_b, token0,
+                                          epilogue.apply(row_b, token0, sum.z * bottom_scale));
+                    }
+                    if (local_token + 1 < live_columns) {
+                        destination.store(row_a, token0 + 1,
+                                          epilogue.apply(row_a, token0 + 1, sum.y * top_scale));
+                        destination.store(row_b, token0 + 1,
+                                          epilogue.apply(row_b, token0 + 1, sum.w * bottom_scale));
+                    }
                 }
             }
         }

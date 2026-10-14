@@ -63,7 +63,7 @@ void launch_matrix(const Tensor& x, const Weight& weight, Tensor& residual, cuda
     } else {
         if (tokens <= 8) {
             launch_nvfp4_a16_sliced_k_mma<
-                Nvfp4ScheduleInstance<Nvfp4SlicedInstance<8, 4, 2>, 17408>>(p, output, epilogue,
+                Nvfp4ScheduleInstance<Nvfp4SlicedInstance<8, 8, 2>, 17408>>(p, output, epilogue,
                                                                             stream);
             return;
         }

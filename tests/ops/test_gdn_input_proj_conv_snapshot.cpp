@@ -1148,6 +1148,8 @@ int run_fp8() {
     failures += run_fp8_case(profile, parent, 6, ops::LinearPolicy::AllowA8, 7);
     failures += run_fp8_case(profile, parent, 7, ops::LinearPolicy::A16Only, 8);
     failures += run_fp8_case(profile, parent, 7, ops::LinearPolicy::AllowA8, 8);
+    failures += run_fp8_case(profile, parent, 8, ops::LinearPolicy::A16Only, 9);
+    failures += run_fp8_case(profile, parent, 8, ops::LinearPolicy::AllowA8, 9);
     failures += run_fp8_case(profile, parent, 9, ops::LinearPolicy::AllowA8, 10);
     failures += run_fp8_case(profile, parent, 10, ops::LinearPolicy::AllowA8, 11);
     failures += run_fp8_case(profile, parent, 10, ops::LinearPolicy::A16Only, 11);

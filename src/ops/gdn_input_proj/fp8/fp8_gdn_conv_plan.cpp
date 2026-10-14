@@ -41,8 +41,8 @@ void require_policy(LinearPolicy policy, const char* operation) {
     }
 }
 
-Fp8GdnConvPlan b1_a16_plan(std::int32_t width) {
-    const bool fused = width <= 4;
+Fp8GdnConvPlan b1_a16_plan(const Fp8GdnInputProfile& profile, std::int32_t width) {
+    const bool fused = width <= (profile.input_rows == 5120 ? 8 : 6);
     return {fused ? Fp8GdnConvScheduleId::FusedA16 : Fp8GdnConvScheduleId::MaterializedA16};
 }
 
@@ -91,7 +91,7 @@ Fp8GdnConvPlan fp8_gdn_snapshot_resolve_plan(const Fp8GdnInputProfile& profile, 
     }
     if (batch_size == 1) {
         if (allows_a8(policy) && width >= 17) { return {Fp8GdnConvScheduleId::MaterializedA8}; }
-        return b1_a16_plan(width);
+        return b1_a16_plan(profile, width);
     }
     if (allows_a8(policy) && width * batch_size >= 17) {
         return {Fp8GdnConvScheduleId::MaterializedA8};

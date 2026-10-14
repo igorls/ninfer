@@ -34,6 +34,16 @@ void fp8_gdn_conv_small_t(const Tensor& x, const Weight& weight, const Tensor& c
                           const Tensor& conv_states, const Tensor& valid_columns,
                           const Tensor& initial_slot, Tensor& query, Tensor& key, Tensor& value,
                           Tensor& z, Publish publish, cudaStream_t stream) {
+    if constexpr (InputRows == 5120 && ActiveTokens >= 3) {
+        using Schedule = Fp8A16SlicedKMmaSchedule<4, 8, 7, Cache::ca, Cache::cg,
+                                                  Fp8ActivationStage::PaddedZero, 1>;
+        launch_fp8_a16_sliced_k_mma<Fp8ScheduleInstance<Schedule, InputRows, ActiveTokens, true>>(
+            fp8_a16_operands<Scale>(x, weight),
+            make_gdn_conv_output<ActiveTokens>(conv_weight, conv_states, valid_columns,
+                                               initial_slot, query, key, value, z, publish),
+            Fp8GdnConvEpilogue<ActiveTokens, Publish>{}, stream);
+        return;
+    }
     using Schedule =
         Fp8A16SimtSchedule<8, 2, 16, ActiveTokens, 1, Fp8SimtActivationAccess::SharedPhase,
                            Fp8CodeCache::Default, 1, Fp8SimtBlockOrder::RowsContiguous, 1>;
@@ -135,7 +145,7 @@ void fp8_gdn_conv_window_dispatch(const Tensor& x, const Weight& weight, const T
     }
 }
 
-// Snapshot form: the 5120 profile fuses B=1, W=1..4; the FP32-scale 2560 profile fuses
+// Snapshot form: the 5120 profile fuses B=1, W=1..8; the FP32-scale 2560 profile fuses
 // B=1..8, W=1..6.
 template <int InputRows, class Scale>
 void fp8_gdn_snapshot_fused(const Tensor& x, const Weight& weight, const Tensor& conv_weight,
@@ -170,7 +180,7 @@ void fp8_gdn_snapshot_fused(const Tensor& x, const Weight& weight, const Tensor&
             return;
         }
     }
-    if (x.ne[2] != 1 || x.ne[1] <= 0 || x.ne[1] > 4) {
+    if (x.ne[2] != 1 || x.ne[1] <= 0 || x.ne[1] > 8) {
         throw std::invalid_argument("fp8 GDN snapshot fused: unsupported B/W");
     }
     const SnapshotHistoryPublish publish{static_cast<__nv_bfloat16*>(conv_states.data),
@@ -194,6 +204,10 @@ void fp8_gdn_snapshot_fused(const Tensor& x, const Weight& weight, const Tensor&
     case 2: launch_small.template operator()<2>(); return;
     case 3: launch_small.template operator()<3>(); return;
     case 4: launch_small.template operator()<4>(); return;
+    case 5: launch_small.template operator()<5>(); return;
+    case 6: launch_small.template operator()<6>(); return;
+    case 7: launch_small.template operator()<7>(); return;
+    case 8: launch_small.template operator()<8>(); return;
     default: throw std::invalid_argument("fp8 GDN snapshot fused: unsupported B/W");
     }
 }
@@ -215,7 +229,7 @@ void fp8_gdn_record_fused(const Tensor& x, const Weight& weight, const Tensor& c
             return;
         }
     }
-    if (x.ne[2] != 1 || x.ne[1] < 2 || x.ne[1] > 4) {
+    if (x.ne[2] != 1 || x.ne[1] < 2 || x.ne[1] > 8) {
         throw std::invalid_argument("fp8 GDN record fused: unsupported B/W");
     }
     auto* record            = static_cast<__nv_bfloat16*>(conv_record.data);
@@ -228,6 +242,10 @@ void fp8_gdn_record_fused(const Tensor& x, const Weight& weight, const Tensor& c
     case 2: launch_small.template operator()<2>(); return;
     case 3: launch_small.template operator()<3>(); return;
     case 4: launch_small.template operator()<4>(); return;
+    case 5: launch_small.template operator()<5>(); return;
+    case 6: launch_small.template operator()<6>(); return;
+    case 7: launch_small.template operator()<7>(); return;
+    case 8: launch_small.template operator()<8>(); return;
     default: throw std::invalid_argument("fp8 GDN record fused: unsupported B/W");
     }
 }

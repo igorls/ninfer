@@ -89,7 +89,7 @@ int verify_preserved(const GuardedDeviceBuffer& device, std::span<const std::uin
 }
 
 int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
-    const std::int32_t first_a4 = k == 6144 ? 17 : 8;
+    const std::int32_t first_a4 = k == 6144 ? 17 : 9;
     const std::array invocations{
         Invocation{1, ops::LinearPolicy::A16Only},
         Invocation{4, ops::LinearPolicy::A16Only},
@@ -111,6 +111,7 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
         Invocation{first_a4, ops::LinearPolicy::AllowA4},
         Invocation{17, ops::LinearPolicy::AllowA4},
         Invocation{8, ops::LinearPolicy::AllowA4},
+        Invocation{9, ops::LinearPolicy::AllowA4},
         Invocation{16, ops::LinearPolicy::AllowA4},
         Invocation{32, ops::LinearPolicy::AllowA4},
         Invocation{64, ops::LinearPolicy::AllowA4},
