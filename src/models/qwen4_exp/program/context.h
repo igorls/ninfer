@@ -38,10 +38,8 @@ struct PrefillContext {
     std::uint32_t text_kv_base;
     const ops::SamplingConfig* sampling;
     Tensor* rewrite_checkpoint_hidden;
-    std::int32_t state_source_slot      = 0;
-    std::int32_t state_destination_slot = 0;
-    // Host full-column copy of the first generated token's logits, or null.
-    std::uint16_t* first_token_logits_host       = nullptr;
+    std::int32_t state_source_slot               = 0;
+    std::int32_t state_destination_slot          = 0;
     const FirstTokenReadout* first_token_readout = nullptr;
     const PromptReadout* prompt_readout          = nullptr;
     const PreparedPromptData* prompt             = nullptr;

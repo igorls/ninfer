@@ -81,7 +81,6 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
-    card.set_first_token_logit_capture(state.first_token_logits_host);
     card.set_first_token_readout(state.first_token_readout);
     card.set_prompt_readout(state.prompt_readout);
     const std::span<const int> prompt(ids.data(), ids.size());
@@ -109,7 +108,6 @@ PrefillChunkResult prefill_multimodal_chunk(PrefillContext& state, const Prepare
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
-    card.set_first_token_logit_capture(state.first_token_logits_host);
     card.set_first_token_readout(state.first_token_readout);
     card.set_prompt_readout(state.prompt_readout);
     if (state.dflash != nullptr) {
@@ -176,17 +174,9 @@ void sample_from_hidden(PrefillContext& state, const Tensor& hidden, std::int32_
     ops::sample(logits, state.execution.io.token, domain, state.sampling, state.execution.io.pos,
                 purpose, state.execution.work, state.execution.device.stream);
     // A zero-suffix reuse samples its first token here instead of in a prefill chunk.
-    if (purpose == ops::kSamplePurposePrefill) {
-        if (state.first_token_logits_host != nullptr) {
-            CUDA_CHECK(cudaMemcpyAsync(state.first_token_logits_host, logits.data,
-                                       static_cast<std::size_t>(domain) * sizeof(std::uint16_t),
-                                       cudaMemcpyDeviceToHost, state.execution.device.stream));
-        }
-        if (state.first_token_readout != nullptr) {
-            enqueue_first_token_readout(*state.first_token_readout, logits,
-                                        state.execution.io.token, domain,
-                                        state.execution.device.stream);
-        }
+    if (purpose == ops::kSamplePurposePrefill && state.first_token_readout != nullptr) {
+        enqueue_first_token_readout(*state.first_token_readout, logits, state.execution.io.token,
+                                    domain, state.execution.device.stream);
     }
     state.execution.work.reset();
 }
@@ -551,9 +541,8 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             dflash_prefill_host_ingress,
             sequence.rope_delta};
         schedule_state.prefill_gpu_timer           = &prefill_gpu_timer_;
-        schedule_state.first_token_logits_host     = token_logits_capture(request);
         const execution::FirstTokenReadout readout = first_token_readout(sequence, request);
-        if (request.logprobs_device_readout) { schedule_state.first_token_readout = &readout; }
+        if (request.logprobs.enabled) { schedule_state.first_token_readout = &readout; }
         if (!request.prompt_readout.positions.empty() || request.prompt_readout.feature_position) {
             schedule_state.prompt_readout = &request.prompt_readout;
         }
@@ -762,11 +751,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
         const std::uint32_t prompt_tokens = staged.prompt_tokens;
 
         validate_licensed_tokens(std::span<const TokenId>(host_tokens, 1));
-        if (request.logprobs_device_readout) {
-            collect_round_logprobs(sequence, request, std::span<const TokenId>(host_tokens, 1));
-        } else {
-            record_round_logprobs(request, nullptr, host_tokens[0]);
-        }
+        collect_round_logprobs(sequence, request, std::span<const TokenId>(host_tokens, 1));
         collect_prompt_readout(request);
         if (sequence.ledger.size() != prompt_tokens) {
             throw std::logic_error("candidate token ledger does not match prompt length");

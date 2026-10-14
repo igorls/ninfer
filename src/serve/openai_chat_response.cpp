@@ -255,19 +255,21 @@ Json base_payload(const OpenAIChatResponseIdentity& identity, const char* object
                 {"model", identity.model}};
 }
 
-Json stream_choice(Json delta, Json finish_reason = nullptr) {
+Json stream_choice(Json delta, Json finish_reason = nullptr, Json logprobs = nullptr) {
     return Json{{"index", 0},
                 {"delta", std::move(delta)},
-                {"logprobs", nullptr},
+                {"logprobs", std::move(logprobs)},
                 {"finish_reason", std::move(finish_reason)}};
 }
 
 std::string event(Json payload) { return "data: " + payload.dump() + "\n\n"; }
 
 std::string chunk(const OpenAIChatResponseIdentity& identity, Json delta, Json finish_reason,
-                  bool include_usage, Json timings = nullptr, Json constraint = nullptr) {
+                  bool include_usage, Json timings = nullptr, Json constraint = nullptr,
+                  Json logprobs = nullptr) {
     Json payload       = base_payload(identity, "chat.completion.chunk");
-    payload["choices"] = Json::array({stream_choice(std::move(delta), std::move(finish_reason))});
+    payload["choices"] = Json::array(
+        {stream_choice(std::move(delta), std::move(finish_reason), std::move(logprobs))});
     if (include_usage) { payload["usage"] = nullptr; }
     if (!timings.is_null()) { payload["timings"] = std::move(timings); }
     if (!constraint.is_null()) payload["constraint"] = std::move(constraint);
@@ -446,17 +448,20 @@ std::vector<std::string> OpenAIChatStream::finish(const GenerationOutcome& outco
                                include_usage_, output_timings));
     }
 
+    Json terminal_logprobs = logprobs_json(outcome);
     if (!outcome.tool_calls.empty()) {
         const std::vector<ToolCall> calls = materialize_tool_calls(outcome.tool_calls);
         events.push_back(chunk(identity_, Json{{"tool_calls", tool_calls_json(calls, true)}},
                                nullptr, include_usage_, output_timings));
         events.push_back(chunk(identity_, Json::object(), finish_reason(outcome), include_usage_,
                                include_usage_ ? Json(nullptr) : final_timings,
-                               include_usage_ ? Json(nullptr) : constraint));
+                               include_usage_ ? Json(nullptr) : constraint,
+                               std::move(terminal_logprobs)));
     } else {
         events.push_back(chunk(identity_, Json::object(), finish_reason(outcome.finish_reason),
                                include_usage_, include_usage_ ? Json(nullptr) : final_timings,
-                               include_usage_ ? Json(nullptr) : constraint));
+                               include_usage_ ? Json(nullptr) : constraint,
+                               std::move(terminal_logprobs)));
     }
     if (include_usage_) {
         events.push_back(usage_chunk(identity_, usage_from(outcome), final_timings, constraint));

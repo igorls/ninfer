@@ -198,9 +198,6 @@ struct RequestControl {
     // Host copy of the prompt-membership bitset while its upload may be in flight.
     std::vector<std::int32_t> prompt_presence_host;
     TokenLogprobOptions logprobs;
-    // Top-alternative requests read a full vocabulary column on the host; every other logprob
-    // request reads K+2 floats per position through ops::candidate_logprobs on the device.
-    bool logprobs_device_readout          = false;
     std::uint32_t logprob_readout_columns = 0;
     // Readout of the round this request is pending on; empty unless logprobs are enabled.
     std::vector<TokenLogprobs> round_logprobs;
@@ -413,8 +410,7 @@ public:
     Tensor logprob_readout;
     Tensor logprob_prompt_next_ids;
     Tensor logprob_prompt_readout;
-    // Pinned host mirrors allocated by the first request that needs them.
-    std::optional<PinnedHostBuffer> token_logits_host;
+    // Pinned host mirror allocated by the first request that needs it.
     std::optional<PinnedHostBuffer> logprob_readout_host;
 
     VisionHandoffState vision_handoff;
@@ -600,11 +596,8 @@ public:
     void prepare_graphs();
     void install_sampling(SequenceState& sequence, RequestControl& request,
                           const ops::SamplingConfig& config, std::span<const TokenId> prompt);
-    // Token log-probability readout. A host-readout request copies one full logit column;
-    // a device-readout request enqueues ops::candidate_logprobs before the round's wait and
-    // collects its K+2 floats per licensed token after it.
-    [[nodiscard]] std::uint16_t* token_logits_capture(const RequestControl& request);
-    void record_round_logprobs(RequestControl& request, const Tensor* column, TokenId token);
+    // Token log-probability readout: enqueues ops::candidate_logprobs before the round's wait and
+    // collects the device readout per licensed token after it.
     void enqueue_round_logprobs(const SequenceState& sequence, RequestControl& request,
                                 const Tensor& logits, const Tensor& sampled, std::uint32_t columns);
     void collect_round_logprobs(const SequenceState& sequence, RequestControl& request,

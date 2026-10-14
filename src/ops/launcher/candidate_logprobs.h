@@ -8,10 +8,11 @@
 
 namespace ninfer::ops::detail {
 
-// Wrapper-validated tensors only. candidate_ids/candidates_out and allowed may be null.
+// Wrapper-validated tensors only. candidate_ids/candidates_out, allowed, and top_ids_out/top_out
+// may be null.
 void candidate_logprobs_launch(const Tensor& logits, std::int32_t valid_rows,
                                const Tensor& sampled_ids, const Tensor* candidate_ids,
                                const Tensor* allowed, Tensor& sampled_out, Tensor* candidates_out,
-                               cudaStream_t stream);
+                               Tensor* top_ids_out, Tensor* top_out, cudaStream_t stream);
 
 } // namespace ninfer::ops::detail

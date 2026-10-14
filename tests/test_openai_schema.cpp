@@ -200,11 +200,12 @@ int test_standard_field_policy() {
         Json orphan_candidates                  = base_request();
         orphan_candidates["logprob_candidates"] = Json::array({"yes"});
         invalid(orphan_candidates, "logprob_candidates", "candidates without logprobs rejected");
-        Json streamed               = body;
-        streamed["stream"]          = true;
-        const ApiError stream_error = api_error([&] { (void)parse(streamed); });
-        failures += check(stream_error.code == "logprobs_stream_not_supported",
-                          "streaming logprobs rejected with a specific code");
+        Json streamed                  = body;
+        streamed["stream"]             = true;
+        const OpenAIChatRequest s_req  = parse(streamed);
+        failures += check(s_req.stream && s_req.generation.logprobs &&
+                              s_req.generation.top_logprobs == 5,
+                          "streaming logprobs and top_logprobs are accepted");
     }
     rejected("modalities", Json::array({"text", "audio"}), "modality_not_supported");
     rejected("web_search_options", Json::object(), "web_search_not_supported");
@@ -960,15 +961,31 @@ int test_stream_response() {
                       "stream separates reasoning and content deltas");
 
     GenerationOutcome outcome = sample_outcome();
+    outcome.token_logprobs.push_back(TokenLogprobPosition{
+        .sampled = TokenLogprobEntry{.token_id    = 101,
+                                     .bytes       = "ans",
+                                     .logprob     = -0.25F,
+                                     .raw_logprob = -0.25F},
+        .top     = {TokenLogprobEntry{.token_id    = 101,
+                                      .bytes       = "ans",
+                                      .logprob     = -0.25F,
+                                      .raw_logprob = -0.25F}},
+    });
     outcome.constraint        = ninfer::ConstraintObservation{
                .branch = ninfer::ConstraintOutputBranch::Content, .complete = true, .terminated = true};
     const std::vector<std::string> events = stream.finish(outcome);
     failures +=
         check(events.size() == 4, "finish emits buffered suffix, terminal, usage, and done");
-    failures += check(parse_sse(events[0])["choices"][0]["delta"]["content"] == "wer",
-                      "terminal content suffix is emitted exactly once");
-    failures += check(parse_sse(events[1])["choices"][0]["finish_reason"] == "stop",
-                      "stream terminal finish reason emitted");
+    failures += check(parse_sse(events[0])["choices"][0]["delta"]["content"] == "wer" &&
+                          parse_sse(events[0])["choices"][0]["logprobs"].is_null(),
+                      "terminal content suffix is emitted exactly once with null logprobs");
+    const Json finish_chunk = parse_sse(events[1]);
+    failures += check(finish_chunk["choices"][0]["finish_reason"] == "stop" &&
+                          finish_chunk["choices"][0]["logprobs"]["content"].size() == 1 &&
+                          finish_chunk["choices"][0]["logprobs"]["content"][0]["token"] == "ans" &&
+                          finish_chunk["choices"][0]["logprobs"]["content"][0]["top_logprobs"]
+                                      .size() == 1,
+                      "stream terminal finish chunk carries finish_reason and logprobs");
     const Json usage = parse_sse(events[2]);
     failures += check(usage["choices"].empty() &&
                           usage["usage"]["prompt_tokens_details"]["cached_tokens"] == 12 &&

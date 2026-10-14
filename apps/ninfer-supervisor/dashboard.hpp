@@ -9,6 +9,7 @@ R"HTML(<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark light">
 <title>NInfer · Your local engine</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231d2124'/%3E%3Ctext x='2.5' y='12.5' font-family='Bahnschrift,sans-serif' font-weight='700' font-size='12' fill='%23e9edef'%3En%3C/text%3E%3Ccircle cx='12' cy='11.2' r='1.6' fill='%234fd98d'/%3E%3C/svg%3E">
 <script>(function(){var r=document.documentElement,m='auto';try{m=localStorage.getItem('ninfer:display')||'auto';}catch(e){}r.dataset.display=m;r.dataset.theme=m==='day'||m==='night'?m:(window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches?'day':'night');})();</script>
 <style>:root{
   --panel:#343a3f;--panel-hi:#3d444a;--panel-lo:#1d2124;--seam:#121517;--bezel:#262b2f;--bezel-top:#2e3439;--bezel-low:#1f2326;
@@ -463,12 +464,15 @@ button.cdu-tab[aria-pressed=true]{color:var(--ink);border-color:var(--ink)}
 /* Chat: a message log in the datalink manner. Your messages ride the prompt channel (ice),
    NInfer's replies the generation channel (green); what a reply measured is white and what
    it was sent is magenta, the colour of a configured target. One screen; the log scrolls. */
-.view-chat{height:100%}
-.view-chat .cdu{display:flex;flex-direction:column;height:100%;min-height:440px}
-.chat-bar{display:flex;align-items:center;gap:8px 16px;flex-wrap:wrap;padding-bottom:8px;border-bottom:1px solid var(--rule-2)}
-.chat-context{display:flex;align-items:center;gap:8px;flex:1 1 220px;min-width:0}
+.view-chat{height:100%;padding:0}
+.view-chat .cdu{display:flex;flex-direction:column;height:100%;min-height:440px;max-width:none}
+.chat-bar{display:flex;align-items:center;gap:8px 14px;flex-wrap:wrap;padding-bottom:8px;border-bottom:1px solid var(--rule)}
+.chat-head-id{display:flex;align-items:baseline;gap:10px;padding-right:14px;border-right:1px solid var(--rule-2);min-width:0}
+.chat-title{font:600 16px/1.2 var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--ink)}
+.chat-model-badge{font:11.5px var(--f-mono);color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:30ch}
+.chat-context{display:flex;align-items:center;gap:8px;flex:1 1 200px;min-width:0}
 .chat-context .cdu-label,.chat-think .cdu-label{margin:0}
-.chat-meter{flex:1;max-width:240px;height:6px;border-radius:1px;background:var(--track);box-shadow:inset 0 0 0 1px var(--track-edge);overflow:hidden}
+.chat-meter{flex:1;max-width:220px;height:6px;border-radius:1px;background:var(--track);box-shadow:inset 0 0 0 1px var(--track-edge);overflow:hidden}
 .chat-meter span{display:block;width:0;height:100%;background:var(--ink);transition:width var(--slew)}
 .chat-meter .amber-fill{background:var(--amber)}
 .chat-context-text{font:500 13px var(--f-panel);font-stretch:87.5%;font-variant-numeric:tabular-nums;white-space:nowrap}
@@ -480,9 +484,20 @@ button.cdu-tab[aria-pressed=true]{color:var(--ink);border-color:var(--ink)}
 .chat-budget-now .cdu-label{margin:0}
 #chat-budget-now{font:500 13px var(--f-panel);font-stretch:87.5%;font-variant-numeric:tabular-nums;color:var(--magenta)}
 #chat-budget-now.engine{color:var(--ink)}
-.chat-settings{position:relative;flex:0 1 auto;min-height:150px;max-height:46vh;overflow:auto;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:12px 22px;padding:10px 2px 12px 0;border-bottom:1px solid var(--rule)}
-.chat-settings-note{grid-column:1/-1;font-size:12px;color:var(--faint)}
-.chat-back{display:none;grid-column:1/-1;justify-self:start;padding:0;border:0;background:none;font-size:12.5px}
+.chat-panes{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) clamp(350px,30vw,430px);gap:18px}
+.chat-main{display:flex;flex-direction:column;min-width:0;min-height:0}
+.chat-side{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:0;padding-top:10px;padding-left:16px;border-left:1px solid var(--rule)}
+.chat-side-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.chat-side-head .client-evidence{margin-top:0}
+.chat-side-title{font:600 12px/1.2 var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--ink)}
+.chat-side-meta{font:500 11.5px var(--f-panel);font-stretch:87.5%;font-variant-numeric:tabular-nums;color:var(--faint)}
+.chat-inspector{flex:0 0 auto;display:flex;flex-direction:column;gap:6px;padding-bottom:10px;border-bottom:1px solid var(--rule)}
+.chat-inspect-body{padding:8px 10px;background:var(--glass-2);border:1px solid var(--well-edge);border-radius:4px}
+.chat-inspect-body .msg-telemetry{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 14px}
+.chat-settings{position:relative;flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:12px;padding-right:4px}
+.chat-settings>*{flex-shrink:0}
+.chat-settings-note{font-size:12px;color:var(--faint)}
+.chat-back{display:none;align-self: flex-start;padding:0;border:0;background:none;font-size:12.5px}
 .chat-group{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 10px;align-content:start;min-width:0;margin:0;padding:0;border:0}
 .chat-group legend{padding:0 0 5px;font:600 11.5px var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--dim)}
 .chat-group-wide{grid-column:1/-1}
@@ -500,17 +515,21 @@ button.cdu-tab[aria-pressed=true]{color:var(--ink);border-color:var(--ink)}
 .chat-settings .invalid{border-color:var(--red)}
 .chat-settings .cfg-help.red{color:var(--red)}
 .chat-settings-keys{flex-direction:row}
-.chat-log{position:relative;flex:1;min-height:150px;overflow:auto;display:flex;flex-direction:column;gap:16px;padding:12px 4px 12px 0}
+.chat-log{position:relative;flex:1;min-height:150px;overflow:auto;display:flex;flex-direction:column;gap:0;padding:12px 6px 12px 0}
 .chat-log>*{flex-shrink:0}
 .chat-empty{margin:auto;max-width:58ch;text-align:center;font-size:13px;color:var(--dim)}
 .chat-empty-title{margin-bottom:6px;font:600 15px var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--ink)}
-.msg{padding-top:12px;border-top:1px solid var(--rule-2)}
-.chat-log .msg:first-of-type{padding-top:0;border-top:0}
+.msg+.msg{margin-top:18px}
+.msg-user+.msg-model{margin-top:8px}
+.msg-user{padding:8px 12px 10px;background:var(--glass-2);border:1px solid var(--well-edge);border-left-color:var(--ice);border-radius:4px}
+.msg-model{padding-left:2px}
+.msg-model+.msg-model{padding-top:12px;border-top:1px solid var(--rule-2)}
 .msg-dir{font-size:8px;letter-spacing:0;transform:translateY(-1px)}
 .msg-user .msg-dir{color:var(--ice)}
 .msg-model .msg-dir{color:var(--green)}
 .msg-error .msg-dir{color:var(--red)}
-.msg-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;margin-bottom:3px;font:600 11.5px var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
+.msg-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;margin-bottom:4px;font:600 11.5px var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
+.msg-head .client-evidence{margin-left:auto;margin-top:0}
 .msg-who{color:var(--ice)}
 .msg-head time,.msg-live{font-variant-numeric:tabular-nums}
 .msg-model-name{font:11.5px var(--f-mono);letter-spacing:0;text-transform:none}
@@ -577,22 +596,38 @@ button.cdu-tab[aria-pressed=true]{color:var(--ink);border-color:var(--ink)}
 .msg-progress{display:flex;align-items:center;gap:10px;margin:2px 0 4px;font-size:12px;color:var(--ice);font-variant-numeric:tabular-nums}
 .msg-bar{flex:none;width:160px;height:5px;background:var(--track);box-shadow:inset 0 0 0 1px var(--track-edge)}
 .msg-bar span{display:block;height:100%;background:var(--ice);transition:width .25s ease-out}
-.msg-telemetry{display:flex;flex-wrap:wrap;gap:4px 18px;margin-top:8px;padding-top:6px;border-top:1px solid var(--rule-2)}
+.msg-foot{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 14px;margin-top:6px;padding-top:5px;border-top:1px solid var(--rule-2)}
+.msg-vitals{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;font:500 12px/1.4 var(--f-panel);font-stretch:87.5%;font-variant-numeric:tabular-nums;color:var(--faint)}
+.vital-v{font-weight:600;color:var(--dim)}
+.vital-v.amber{color:var(--amber)}
+.vital-sep{color:var(--off)}
+.msg-more{margin-top:0}
+.msg-more[aria-pressed=true]{color:var(--ink);text-decoration:underline;text-underline-offset:3px}
+.msg-sent-tag{color:var(--magenta)}
+.msg-actions{display:flex;align-items:baseline;gap:14px;margin-left:auto}
+.msg-actions .client-evidence{margin-top:0}
+.msg-details{margin-top:6px;padding:6px 10px 8px;background:var(--glass-2);border:1px solid var(--well-edge);border-radius:4px}
+.msg-telemetry{display:flex;flex-wrap:wrap;gap:4px 18px}
 .msg-telemetry div{display:flex;flex-direction:column;min-width:0}
 .msg-telemetry dt{font:600 10.5px var(--f-panel);font-stretch:87.5%;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
 .msg-telemetry dd{font:500 13px var(--f-panel);font-stretch:87.5%;font-variant-numeric:tabular-nums;color:var(--ink)}
-.msg-sent{margin-top:5px;font:12px/1.5 var(--f-mono);color:var(--magenta);overflow-wrap:anywhere}
+.msg-telemetry dd.amber{color:var(--amber)}
+.msg-sent{margin-top:5px;padding-top:5px;border-top:1px solid var(--rule-2);font:12px/1.5 var(--f-mono);color:var(--magenta);overflow-wrap:anywhere}
+.msg-details>.msg-sent:first-child,.chat-inspect-body>.msg-sent:first-child{margin-top:0;padding-top:0;border-top:0}
 .msg-sent .cdu-label{display:inline;margin:0 6px 0 0}
 .msg-note{margin-top:4px;font-size:12.5px;color:var(--amber)}
-.msg-telemetry dd.amber{color:var(--amber)}
-.msg-actions{display:flex;gap:16px;margin-top:4px}
 .msg-tokens{font:13px/1.8 var(--f-mono);white-space:pre-wrap;overflow-wrap:anywhere}
-.tok{border-radius:2px}
-.tok:hover{outline:1px solid var(--cyan)}
+.tok{border-radius:2px;cursor:default}
+.tok:is(:hover,:focus-visible){outline:1px solid var(--cyan);outline-offset:0}
 .tok-mid{box-shadow:inset 0 -2px 0 var(--amber)}
 .tok-low{background:var(--amber-glass);box-shadow:inset 0 -2px 0 var(--amber);color:var(--amber)}
 .tok-forced{box-shadow:inset 0 -1px 0 var(--magenta);color:var(--magenta)}
-.msg-token-key{margin-top:6px}
+.tok-special{color:var(--faint);font-size:11.5px}
+.msg-token-bar{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:4px 14px;margin-top:6px;padding:4px 8px;background:var(--glass-2);border:1px solid var(--well-edge);border-radius:3px;font-size:12px}
+.msg-token-readout{font:500 12.5px/1.4 var(--f-panel);font-stretch:87.5%;font-variant-numeric:tabular-nums;color:var(--ink);min-width:0;overflow-wrap:anywhere}
+.msg-token-readout code{font:12px var(--f-mono);color:var(--cyan)}
+.msg-token-readout i{font-style:normal;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin:0 4px}
+.msg-token-key{font-size:11.5px;color:var(--faint);white-space:nowrap}
 .chat-composer{display:flex;flex-direction:column;gap:6px;padding-top:8px;border-top:1px solid var(--rule)}
 )HTML"
 R"HTML(.chat-input{width:100%;min-height:58px;max-height:30vh;resize:vertical;padding:8px 10px;background:var(--glass-2);border:1px solid var(--field-edge);border-radius:4px;color:var(--ink);font:14px/1.5 var(--f-text)}
@@ -604,9 +639,14 @@ R"HTML(.chat-input{width:100%;min-height:58px;max-height:30vh;resize:vertical;pa
 .chat-attachments{display:flex;flex-wrap:wrap;gap:8px}
 .chat-thumb{display:flex;flex-direction:column;align-items:flex-start;gap:4px}
 .chat-thumb img{height:64px;border:1px solid var(--rule);border-radius:3px}
-@media (max-width:880px){
-  .chat.params-open :is(.chat-log,.chat-composer,#chat-think-note){display:none!important}
-  .chat.params-open .chat-settings{flex:1 1 auto;max-height:none;border-bottom:0}
+@media (min-width:981px){
+  #chat-settings-toggle,.msg-details{display:none}
+}
+@media (max-width:980px){
+  .chat-panes{grid-template-columns:minmax(0,1fr)}
+  .chat:not(.params-open) .chat-side{display:none}
+  .chat.params-open .chat-main{display:none}
+  .chat.params-open .chat-side{padding-left:0;border-left:0}
   .chat.params-open .chat-back{display:inline-flex}
 }
 @media (max-width:520px){
@@ -1010,8 +1050,8 @@ R"HTML(      <p class="note">A loaded model holds GPU memory even while idle, so
 
 <section id="view-chat" class="view view-cdu view-chat" aria-labelledby="chat-title" hidden>
   <div class="cdu cdu-wide chat">
-    <header class="cdu-title"><h1 id="chat-title">Chat</h1><span id="chat-model" class="cdu-page">Checking the model…</span></header>
-    <div class="chat-bar">
+    <header class="chat-bar">
+      <div class="chat-head-id"><h1 id="chat-title" class="chat-title">Chat</h1><span id="chat-model" class="chat-model-badge">Checking the model…</span></div>
       <div class="chat-context" title="Tokens the conversation holds, against the model's context limit">
         <span class="cdu-label">Context</span>
         <span class="chat-meter" aria-hidden="true"><span id="chat-meter-fill"></span></span>
@@ -1024,75 +1064,92 @@ R"HTML(      <p class="note">A loaded model holds GPU memory even while idle, so
         <button type="button" class="cdu-tab" data-think="off" aria-pressed="false">Off</button>
       </div>
       <div class="chat-budget-now" title="The output budget the next request carries"><span class="cdu-label">Output</span><span id="chat-budget-now"></span></div>
-      <button type="button" id="chat-settings-toggle" class="key key-small" aria-expanded="false" aria-controls="chat-settings">Parameters<span id="chat-param-count" class="chat-param-count"></span></button>
+      <button type="button" id="chat-settings-toggle" class="key key-small" aria-expanded="false" aria-controls="chat-side">Parameters<span id="chat-param-count-bar" class="chat-param-count"></span></button>
       <button type="button" id="chat-new" class="key key-small">New chat</button>
-    </div>
-    <div id="chat-settings" class="chat-settings" hidden>
-      <button type="button" id="chat-back" class="prompt chat-back">&lt;Chat</button>
-      <p class="chat-settings-note">An empty field sends nothing, so the engine's own default applies. Each reply lists exactly what it sent.</p>
-      <fieldset class="chat-group">
-        <legend>Output</legend>
-        <label class="chat-setting"><span class="cdu-label">Output budget</span>
-          <span class="chat-budget"><select id="chat-budget" class="cfg-select"><option value="unlimited">No limit</option><option value="custom">Custom</option><option value="default">Engine default</option></select><input id="chat-max" class="cdu-input cdu-input-num" type="number" min="0" step="1" placeholder="tokens" aria-label="Output tokens" hidden></span></label>
-        <p id="chat-budget-help" class="cfg-help chat-setting-wide"></p>
-        <label class="cfg-check chat-setting"><input type="checkbox" id="chat-stream" checked><span>Stream the answer</span></label>
-        <label class="cfg-check chat-setting"><input type="checkbox" id="chat-show-reasoning"><span>Open reasoning while it streams</span></label>
-        <label class="chat-setting chat-setting-wide"><span class="cdu-label">System prompt</span><textarea id="chat-system" class="cdu-input chat-text" rows="2" placeholder="Optional instructions for the whole conversation"></textarea></label>
-        <label class="chat-setting chat-setting-wide"><span class="cdu-label">Stop strings · one per line, up to four</span><textarea id="chat-stops" class="cdu-input chat-text" rows="2" placeholder="None"></textarea></label>
-        <label class="chat-setting"><span class="cdu-label">Response format</span><select id="chat-format" class="cfg-select"><option value="">Free text</option><option value="json_object">JSON object</option><option value="json_schema">JSON schema</option></select></label>
-        <label id="chat-schema-row" class="chat-setting chat-setting-wide" hidden><span class="cdu-label">JSON schema</span><textarea id="chat-schema" class="cdu-input chat-text chat-code" rows="4" spellcheck="false" placeholder='{"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}'></textarea><span id="chat-schema-state" class="cfg-help"></span></label>
-      </fieldset>
-      <fieldset class="chat-group">
-        <legend>Sampling</legend>
-        <label class="chat-setting"><span class="cdu-label">Temperature</span><input data-param="temperature" class="cdu-input" type="number" min="0" max="2" step="0.05" placeholder="Engine default"></label>
-        <label class="chat-setting"><span class="cdu-label">Top p</span><input data-param="top_p" class="cdu-input" type="number" min="0" max="1" step="0.01" placeholder="Engine default"></label>
-        <label class="chat-setting"><span class="cdu-label">Top k · 0 to 20</span><input data-param="top_k" data-int class="cdu-input" type="number" min="0" max="20" step="1" placeholder="Engine default"></label>
-        <label class="chat-setting"><span class="cdu-label">Min p · 0 to 1</span><input data-param="min_p" class="cdu-input" type="number" min="0" max="1" step="0.01" placeholder="Engine default"></label>
-        <label class="chat-setting"><span class="cdu-label">Presence penalty</span><input data-param="presence_penalty" class="cdu-input" type="number" min="-2" max="2" step="0.1" placeholder="Engine default"></label>
-        <label class="chat-setting"><span class="cdu-label">Frequency penalty</span><input data-param="frequency_penalty" class="cdu-input" type="number" min="-2" max="2" step="0.1" placeholder="Engine default"></label>
-        <label class="chat-setting"><span class="cdu-label">Seed</span><input data-param="seed" data-int class="cdu-input" type="number" step="1" placeholder="New each request"></label>
-      </fieldset>
-      <fieldset class="chat-group">
-        <legend>Reasoning</legend>
-        <label class="chat-setting"><span class="cdu-label">Reasoning effort</span><select data-param="reasoning_effort" class="cfg-select"><option value="">Template default</option><option>none</option><option>minimal</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></label>
-        <label class="chat-setting"><span class="cdu-label">Thinking budget · tokens</span><input data-param="thinking_budget_tokens" data-int class="cdu-input" type="number" min="-1" step="1" placeholder="Unbounded"></label>
-        <label class="cfg-check chat-setting"><input type="checkbox" data-param="preserve_thinking" data-bool><span>Keep earlier reasoning in the history</span></label>
-      </fieldset>
-      <fieldset class="chat-group">
-        <legend>NInfer</legend>
-        <label class="cfg-check chat-setting"><input type="checkbox" id="chat-logprobs"><span>Token probabilities</span></label>
-        <label class="chat-setting"><span class="cdu-label">Alternatives per token · 0 to 20</span><input id="chat-top-logprobs" class="cdu-input" type="number" min="0" max="20" step="1" placeholder="0"></label>
-        <p id="chat-logprobs-help" class="cfg-help chat-setting-wide">Answers then arrive whole instead of streaming. Each reply gets a token view that marks the tokens the model was unsure of. Any alternatives turn speculative drafts off for that request.</p>
+    </header>
+    <div class="chat-panes">
+      <div class="chat-main">
+        <p id="chat-think-note" class="pad-line amber" hidden>Changing thinking in the middle of a conversation makes the engine read the whole conversation again instead of reusing it. Keep it the same for a conversation, or start a new chat.</p>
+        <div id="chat-log" class="chat-log" role="log" aria-label="Conversation" tabindex="0">
+          <div id="chat-empty" class="chat-empty">
+            <p class="chat-empty-title">Talk to your model</p>
+            <p>Each reply shows how long it took to start, how fast it generated, how much of the conversation the engine reused instead of reading it again, and the parameters it sent. An answer ends when the model finishes, at a stop string, or at the output budget shown above, which Parameters sets.</p>
+          </div>
+        </div>
+        <form id="chat-form" class="chat-composer" autocomplete="off">
+          <div id="chat-attachments" class="chat-attachments" hidden></div>
+          <label class="sr-only" for="chat-input">Message</label>
+          <textarea id="chat-input" class="chat-input" rows="2" placeholder="Message your model · Enter sends, Shift+Enter adds a line"></textarea>
+          <div class="chat-keys">
+            <button type="button" id="chat-attach" class="key key-small" hidden>Attach image</button>
+            <input type="file" id="chat-file" accept="image/*" multiple hidden>
+            <span id="chat-hint" class="cfg-status"></span>
+            <button type="button" id="chat-inspect" class="key key-small" title="Open this conversation's next request on the API page">Open in API</button>
+            <button type="submit" id="chat-send" class="key key-insert">Send<span aria-hidden="true">&gt;</span></button>
+            <button type="button" id="chat-stop" class="key key-stop" hidden>Stop</button>
+          </div>
+        </form>
+      </div>
+      <aside id="chat-side" class="chat-side" aria-label="Reply telemetry and request parameters">
+        <button type="button" id="chat-back" class="prompt chat-back">&lt;Chat</button>
+        <section id="chat-inspector" class="chat-inspector" aria-labelledby="chat-inspect-title">
+          <header class="chat-side-head">
+            <h2 id="chat-inspect-title" class="chat-side-title">Reply inspector</h2>
+            <span id="chat-inspect-meta" class="chat-side-meta">No replies yet</span>
+          </header>
+          <div id="chat-inspect-body" class="chat-inspect-body"><p class="cdu-small">Send a message to inspect its timings, cache reuse, speculative drafts, and sent parameters.</p></div>
+        </section>
+        <div id="chat-settings" class="chat-settings">
+          <div class="chat-side-head chat-params-head">
+            <h2 class="chat-side-title">Parameters<span id="chat-param-count" class="chat-param-count"></span></h2>
+            <button type="button" id="chat-params-reset" class="client-evidence">Reset defaults</button>
+          </div>
+          <p class="chat-settings-note">An empty field sends nothing, so the engine's own default applies. Each reply lists what it sent.</p>
+          <fieldset class="chat-group">
+            <legend>Output</legend>
+            <label class="chat-setting"><span class="cdu-label">Output budget</span>
+              <span class="chat-budget"><select id="chat-budget" class="cfg-select"><option value="unlimited">No limit</option><option value="custom">Custom</option><option value="default">Engine default</option></select><input id="chat-max" class="cdu-input cdu-input-num" type="number" min="0" step="1" placeholder="tokens" aria-label="Output tokens" hidden></span></label>
+            <p id="chat-budget-help" class="cfg-help chat-setting-wide"></p>
+            <label class="cfg-check chat-setting"><input type="checkbox" id="chat-stream" checked><span>Stream the answer</span></label>
+            <label class="cfg-check chat-setting"><input type="checkbox" id="chat-show-reasoning"><span>Open reasoning while it streams</span></label>
+            <label class="chat-setting chat-setting-wide"><span class="cdu-label">System prompt</span><textarea id="chat-system" class="cdu-input chat-text" rows="2" placeholder="Optional instructions for the whole conversation"></textarea></label>
+            <label class="chat-setting chat-setting-wide"><span class="cdu-label">Stop strings · one per line, up to four</span><textarea id="chat-stops" class="cdu-input chat-text" rows="2" placeholder="None"></textarea></label>
+            <label class="chat-setting"><span class="cdu-label">Response format</span><select id="chat-format" class="cfg-select"><option value="">Free text</option><option value="json_object">JSON object</option><option value="json_schema">JSON schema</option></select></label>
+            <label id="chat-schema-row" class="chat-setting chat-setting-wide" hidden><span class="cdu-label">JSON schema</span><textarea id="chat-schema" class="cdu-input chat-text chat-code" rows="4" spellcheck="false" placeholder='{"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}'></textarea><span id="chat-schema-state" class="cfg-help"></span></label>
+          </fieldset>
+          <fieldset class="chat-group">
+            <legend>Sampling</legend>
+            <label class="chat-setting"><span class="cdu-label">Temperature</span><input name="temperature" data-param="temperature" class="cdu-input" type="number" min="0" max="2" step="0.05" placeholder="Engine default"></label>
+            <label class="chat-setting"><span class="cdu-label">Top p</span><input name="top_p" data-param="top_p" class="cdu-input" type="number" min="0" max="1" step="0.01" placeholder="Engine default"></label>
+            <label class="chat-setting"><span class="cdu-label">Top k · 0 to 20</span><input name="top_k" data-param="top_k" data-int class="cdu-input" type="number" min="0" max="20" step="1" placeholder="Engine default"></label>
+            <label class="chat-setting"><span class="cdu-label">Min p · 0 to 1</span><input name="min_p" data-param="min_p" class="cdu-input" type="number" min="0" max="1" step="0.01" placeholder="Engine default"></label>
+            <label class="chat-setting"><span class="cdu-label">Presence penalty</span><input name="presence_penalty" data-param="presence_penalty" class="cdu-input" type="number" min="-2" max="2" step="0.1" placeholder="Engine default"></label>
+            <label class="chat-setting"><span class="cdu-label">Frequency penalty</span><input name="frequency_penalty" data-param="frequency_penalty" class="cdu-input" type="number" min="-2" max="2" step="0.1" placeholder="Engine default"></label>
+            <label class="chat-setting"><span class="cdu-label">Seed</span><input name="seed" data-param="seed" data-int class="cdu-input" type="number" step="1" placeholder="New each request"></label>
+          </fieldset>
+          <fieldset class="chat-group">
+            <legend>Reasoning</legend>
+            <label class="chat-setting"><span class="cdu-label">Reasoning effort</span><select name="reasoning_effort" data-param="reasoning_effort" class="cfg-select"><option value="">Template default</option><option>none</option><option>minimal</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></label>
+            <label class="chat-setting"><span class="cdu-label">Thinking budget · tokens</span><input name="thinking_budget_tokens" data-param="thinking_budget_tokens" data-int class="cdu-input" type="number" min="-1" step="1" placeholder="Unbounded"></label>
+            <label class="cfg-check chat-setting chat-setting-wide"><input type="checkbox" name="preserve_thinking" data-param="preserve_thinking" data-bool><span>Keep earlier reasoning in the history</span></label>
+            <p id="chat-reasoning-help" class="cfg-help chat-setting-wide" hidden></p>
+          </fieldset>
+          <fieldset class="chat-group">
+            <legend>NInfer</legend>
+            <label class="cfg-check chat-setting"><input type="checkbox" id="chat-logprobs"><span>Token probabilities</span></label>
+            <label class="chat-setting"><span class="cdu-label">Alternatives per token · 0 to 20</span><input id="chat-top-logprobs" class="cdu-input" type="number" min="0" max="20" step="1" placeholder="0"></label>
+            <p id="chat-logprobs-help" class="cfg-help chat-setting-wide">Each reply gets a token view that marks the tokens the model was unsure of and shows the top alternatives on hover.</p>
 )HTML"
-R"HTML(        <label class="cfg-check chat-setting chat-setting-wide"><input type="checkbox" data-param="prompt_cache_read_only" data-bool><span>Read the prompt cache without adding to it</span></label>
-        <p class="cfg-help chat-setting-wide">For tests that should not evict other apps' cached conversations. The request still starts from a prefix already in the cache but publishes nothing of its own, so the next turn cannot pick up where this one ended.</p>
-      </fieldset>
-      <fieldset class="chat-group chat-group-wide">
-        <legend>Extra request JSON</legend>
-        <label class="chat-setting chat-setting-wide"><span class="sr-only">Extra request JSON</span><textarea id="chat-extra" class="cdu-input chat-text chat-code" rows="3" spellcheck="false" placeholder='Merged into the request last, so it can set or override any field, for example {"tool_choice": "none"}'></textarea><span id="chat-extra-state" class="cfg-help"></span></label>
-        <div class="chat-setting chat-setting-wide chat-settings-keys"><button type="button" id="chat-params-reset" class="key key-small">Reset to engine defaults</button></div>
-      </fieldset>
+R"HTML(            <label class="cfg-check chat-setting chat-setting-wide"><input type="checkbox" name="prompt_cache_read_only" data-param="prompt_cache_read_only" data-bool><span>Read the prompt cache without adding to it</span></label>
+            <p class="cfg-help chat-setting-wide">For tests that should not evict other apps' cached conversations. The request still starts from a prefix already in the cache but publishes nothing of its own, so the next turn cannot pick up where this one ended.</p>
+          </fieldset>
+          <fieldset class="chat-group chat-group-wide">
+            <legend>Extra request JSON</legend>
+            <label class="chat-setting chat-setting-wide"><span class="sr-only">Extra request JSON</span><textarea id="chat-extra" class="cdu-input chat-text chat-code" rows="3" spellcheck="false" placeholder='Merged into the request last, so it can set or override any field, for example {"tool_choice": "none"}'></textarea><span id="chat-extra-state" class="cfg-help"></span></label>
+          </fieldset>
+        </div>
+      </aside>
     </div>
-    <p id="chat-think-note" class="pad-line amber" hidden>Changing thinking in the middle of a conversation makes the engine read the whole conversation again instead of reusing it. Keep it the same for a conversation, or start a new chat.</p>
-    <div id="chat-log" class="chat-log" role="log" aria-label="Conversation" tabindex="0">
-      <div id="chat-empty" class="chat-empty">
-        <p class="chat-empty-title">Talk to your model</p>
-        <p>Each reply shows how long it took to start, how fast it generated, how much of the conversation the engine reused instead of reading it again, and the parameters it sent. An answer ends when the model finishes, at a stop string, or at the output budget shown above, which Parameters sets.</p>
-      </div>
-    </div>
-    <form id="chat-form" class="chat-composer" autocomplete="off">
-      <div id="chat-attachments" class="chat-attachments" hidden></div>
-      <label class="sr-only" for="chat-input">Message</label>
-      <textarea id="chat-input" class="chat-input" rows="2" placeholder="Message your model · Enter sends, Shift+Enter adds a line"></textarea>
-      <div class="chat-keys">
-        <button type="button" id="chat-attach" class="key key-small" hidden>Attach image</button>
-        <input type="file" id="chat-file" accept="image/*" multiple hidden>
-        <span id="chat-hint" class="cfg-status"></span>
-        <button type="button" id="chat-inspect" class="key key-small" title="Open this conversation's next request on the API page">Open in API</button>
-        <button type="submit" id="chat-send" class="key key-insert">Send<span aria-hidden="true">&gt;</span></button>
-        <button type="button" id="chat-stop" class="key key-stop" hidden>Stop</button>
-      </div>
-    </form>
   </div>
 </section>
 
@@ -3864,7 +3921,7 @@ R"HTML(        if (benchTab === 'body') benchTab = 'text';
       const data = await res.json();
       if (res.ok && data && Array.isArray(data.data) && data.data[0]) {
         benchServedModel = data.data[0].id;
-        if (benchCurrent && benchCurrent.examples.length) benchSelect(benchCurrent, benchExample);
+        if (benchCurrent && benchCurrent.examples.length && benchExample >= 0) benchSelect(benchCurrent, benchExample);
       }
     } catch (_) {}
     renderBenchAuth();
@@ -3882,13 +3939,13 @@ R"HTML(        if (benchTab === 'body') benchTab = 'text';
   // ---------------------------------------------------------------------
   const chatLog = $('chat-log'), chatInput = $('chat-input');
   let chatReady = false, chatAbort = null, chatVision = false, chatCtx = 0;
-  let chat = {messages: [], think: 'default', system: '', thinkUsed: null};
-  try { const saved = JSON.parse(sessionStorage.getItem('ninfer:chat') || 'null'); if (saved && Array.isArray(saved.messages)) chat = Object.assign(chat, saved); } catch (_) {}
+  let chat = {messages: [], think: 'default', system: '', thinkUsed: null, selectedReply: null};
+  try { const saved = JSON.parse(sessionStorage.getItem('ninfer:chat') || 'null'); if (saved && Array.isArray(saved.messages)) chat = Object.assign(chat, saved, {selectedReply: null}); } catch (_) {}
   let chatPending = [];
   function chatSave() {
     // Images and token probabilities stay out of storage; the message keeps how many images
     // it carried and its confidence summary.
-    const slim = Object.assign({}, chat, {messages: chat.messages.map(m => Object.assign({}, m, {images: undefined, tokens: undefined, tokenView: undefined, imageCount: (m.images || []).length || m.imageCount || 0}))});
+    const slim = Object.assign({}, chat, {selectedReply: undefined, messages: chat.messages.map(m => Object.assign({}, m, {images: undefined, tokens: undefined, tokenView: undefined, imageCount: (m.images || []).length || m.imageCount || 0}))});
     try { sessionStorage.setItem('ninfer:chat', JSON.stringify(slim)); } catch (_) {}
   }
   // <markdown>
@@ -4405,6 +4462,32 @@ R"HTML(    // A bare address ends before trailing punctuation and an unbalanced 
   });
   function chatTime(d) { return new Date(d).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'}); }
   function chatPct(a, b) { return b > 0 ? Math.round(100 * a / b) + '%' : '—'; }
+  function chatVitals(st, m) {
+    if (!st) return '';
+    const items = [];
+    const add = (val, unit, title, cls) => items.push(`<span${title ? ` title="${esc(title)}"` : ''}><span class="vital-v${cls ? ' ' + cls : ''}">${esc(val)}</span>${unit ? ' ' + esc(unit) : ''}</span>`);
+    const t = st.timings || {}, u = st.usage || {};
+    if (Number.isFinite(t.predicted_per_second) && t.predicted_n > 1) add(rate(t.predicted_per_second), 'tok/s', 'Generation rate', 'green');
+    if (Number.isFinite(st.ttft)) {
+      const pRead = Number.isFinite(t.prompt_ms) ? ` · engine prompt read ${duration(t.prompt_ms)}` : '';
+      add(duration(st.ttft), st.whole ? 'resp' : 'TTFT', (st.whole ? 'Browser wall time to complete answer' : 'Browser wall time to first token') + pRead);
+    }
+    const out = u.completion_tokens != null ? u.completion_tokens : t.predicted_n;
+    if (out != null) {
+      const reasoning = (u.completion_tokens_details || {}).reasoning_tokens;
+      add(Number(out).toLocaleString(), reasoning ? `tok (${reasoning.toLocaleString()} think)` : 'tok', 'Output tokens');
+    }
+    const prompt = u.prompt_tokens != null ? u.prompt_tokens : (t.cache_n || 0) + (t.prompt_n || 0);
+    if (prompt) add(chatPct(t.cache_n || 0, prompt), 'cache', `${(t.cache_n || 0).toLocaleString()} of ${prompt.toLocaleString()} prompt tokens reused from prefix cache`);
+    if (t.draft_n > 0) add(chatPct(t.draft_n_accepted || 0, t.draft_n), 'drafts', `${(t.draft_n_accepted || 0).toLocaleString()} of ${t.draft_n.toLocaleString()} speculative drafts accepted`);
+    if (st.confidence) add((100 * st.confidence.mean).toFixed(1) + '%', 'conf', `Mean token probability · ${st.confidence.unsure.toLocaleString()} of ${st.confidence.n.toLocaleString()} tokens under 50%`);
+    if (st.finish === 'length') {
+      const sent = new Map((m && m.sent) || []);
+      const limit = sent.has('max_tokens') ? sent.get('max_tokens') : sent.get('max_completion_tokens');
+      add(limit === -1 ? 'context full' : 'budget reached', '', limit === -1 ? 'With no limit an answer ends when the conversation fills the context' : 'Output budget reached · open Details or raise the budget under Parameters', 'amber');
+    } else if (st.finish && st.finish !== 'stop') add(st.finish, '', 'Finish reason', 'amber');
+    return items.length ? `<div class="msg-vitals">${items.join('')}</div>` : '';
+  }
   function chatTelemetry(st, m) {
     if (!st) return '';
     const items = [];
@@ -4439,29 +4522,46 @@ R"HTML(    // A bare address ends before trailing punctuation and an unbalanced 
     return `<p class="msg-sent"><span class="cdu-label">Sent</span> ${m.sent.length ? esc(chatParamText(m.sent)) : 'engine defaults only'}</p>`;
   }
   // Token view: each generated token with its probability; unsure tokens are marked and the
-  // alternatives are on the token's tooltip.
+  // alternatives are shown in the instant token readout bar and on the token's tooltip.
+  const CHAT_SPECIAL_TOKENS = new Set(['<|im_end|>', '<|endoftext|>', '<|im_start|>', '<think>', '</think>']);
   const chatProb = lp => (Number.isFinite(lp) && lp > -9999 ? Math.exp(lp) : 0);
   function chatConfidence(tokens) {
-    const real = tokens.filter(t => !t.forced);
+    const real = tokens.filter(t => !t.forced && !CHAT_SPECIAL_TOKENS.has(t.token));
     if (!real.length) return null;
     const ps = real.map(t => chatProb(t.logprob));
     return {n: ps.length, mean: ps.reduce((a, b) => a + b, 0) / ps.length, unsure: ps.filter(p => p < .5).length};
   }
-  function chatTokenView(tokens) {
-    return tokens.map(t => {
+  function chatSplitTokens(tokens) {
+    if (!Array.isArray(tokens) || !tokens.length) return {think: [], answer: []};
+    const cut = tokens.findIndex(t => t && (t.token === '</think>' || (typeof t.token === 'string' && t.token.includes('</think>'))));
+    return cut >= 0 ? {think: tokens.slice(0, cut + 1), answer: tokens.slice(cut + 1)} : {think: [], answer: tokens};
+  }
+  function chatTokenView(tokens, offset = 0) {
+    return tokens.map((t, idx) => {
       const p = chatProb(t.logprob);
-      const band = t.forced ? 'tok-forced' : p < .2 ? 'tok-low' : p < .5 ? 'tok-mid' : '';
+      const special = CHAT_SPECIAL_TOKENS.has(t.token);
+      const band = t.forced ? 'tok-forced' : special ? 'tok-special' : p < .2 ? 'tok-low' : p < .5 ? 'tok-mid' : '';
       const alts = (t.top_logprobs || []).map(a => `${JSON.stringify(a.token)} ${(100 * chatProb(a.logprob)).toFixed(1)}%`).join('\n');
 )HTML"
-R"HTML(      const tip = t.forced ? 'Inserted by the thinking budget' : `${(100 * p).toFixed(1)}%${alts ? '\n' + alts : ''}`;
-      return `<span class="tok ${band}" title="${esc(tip)}">${esc(t.token)}</span>`;
+R"HTML(      const tip = t.forced ? 'Inserted by the thinking budget' : special ? `Special token · ${(100 * p).toFixed(1)}%` : `${(100 * p).toFixed(1)}%${alts ? '\n' + alts : ''}`;
+      return `<span class="tok ${band}" data-tok="${offset + idx}" tabindex="0" title="${esc(tip)}">${esc(t.token)}</span>`;
     }).join('');
+  }
+  function chatTokenReadoutHtml(t) {
+    if (!t) return '<span class="dim">Hover or focus any token to inspect its probability and top alternatives</span>';
+    const p = chatProb(t.logprob);
+    const special = CHAT_SPECIAL_TOKENS.has(t.token);
+    const pCls = t.forced ? 'magenta' : special ? 'dim' : p < .2 ? 'red' : p < .5 ? 'amber' : 'green';
+    const pText = t.forced ? 'forced by budget' : `${(100 * p).toFixed(1)}%`;
+    const alts = (t.top_logprobs || []).slice(0, 5).map(a => `<span><code>${esc(JSON.stringify(a.token))}</code> <span class="vital-v">${(100 * chatProb(a.logprob)).toFixed(1)}%</span></span>`).join(' · ');
+    return `<span class="cdu-label">${special ? 'Special' : 'Token'}</span> <code>${esc(JSON.stringify(t.token))}</code> <span class="vital-v ${pCls}">${esc(pText)}</span>${alts ? ` <span class="cdu-label">Alts</span> ${alts}` : ''}`;
   }
   const CHAT_STATES = {waiting: 'Waiting for the engine…', reading: 'Reading the prompt…', thinking: 'Thinking…', generating: 'Writing…', whole: 'Writing the whole answer…', stopped: 'Stopped', error: 'Failed'};
   const CHAT_LIVE = new Set(['waiting', 'reading', 'thinking', 'generating', 'whole']);
   function chatHead(m) {
+    const showModel = m.model && (!benchServedModel || m.model !== benchServedModel);
     const who = m.role === 'user' ? '<span class="msg-dir" aria-hidden="true">▲</span><span class="msg-who">You</span>'
-      : `<span class="msg-dir" aria-hidden="true">▼</span><span class="msg-who green">NInfer</span><span class="msg-model-name">${esc(m.model || '')}</span>`;
+      : `<span class="msg-dir" aria-hidden="true">▼</span><span class="msg-who green">NInfer</span>${showModel ? `<span class="msg-model-name">${esc(m.model)}</span>` : ''}`;
     return `<header class="msg-head">${who}<time>${esc(chatTime(m.time))}</time>`;
   }
   // The live skeleton of a reply being written: its text grows by appended deltas, so a long
@@ -4476,6 +4576,49 @@ R"HTML(      const tip = t.forced ? 'Inserted by the thinking budget' : `${(100 
       rview: MD.live(rbody), cview: MD.live(el.querySelector('.msg-body')), rLen: 0, cLen: 0};
     chatLiveUpdate(m, el);
     return el;
+  }
+  function chatActiveReplyIndex() {
+    if (Number.isInteger(chat.selectedReply) && chat.messages[chat.selectedReply] && chat.messages[chat.selectedReply].role === 'assistant') {
+      return chat.selectedReply;
+    }
+    for (let i = chat.messages.length - 1; i >= 0; i--) {
+      if (chat.messages[i] && chat.messages[i].role === 'assistant') return i;
+    }
+    return -1;
+  }
+  function chatRenderInspector() {
+    const metaEl = $('chat-inspect-meta'), bodyEl = $('chat-inspect-body');
+    if (!metaEl || !bodyEl) return;
+    const replies = [];
+    chat.messages.forEach((m, idx) => { if (m && m.role === 'assistant') replies.push({m, idx}); });
+    const activeIdx = chatActiveReplyIndex();
+    chatLog.querySelectorAll('.msg-model').forEach(node => {
+      const idx = Number(node.dataset.index);
+      const btn = node.querySelector('[data-act="details"]');
+      if (btn) btn.setAttribute('aria-pressed', String(idx === activeIdx));
+    });
+    if (!replies.length || activeIdx < 0) {
+      metaEl.textContent = 'No replies yet';
+      bodyEl.innerHTML = '<p class="cdu-small">Send a message to inspect its timings, cache reuse, speculative drafts, and sent parameters.</p>';
+      return;
+    }
+    const pos = replies.findIndex(r => r.idx === activeIdx) + 1;
+    const isLatest = activeIdx === replies[replies.length - 1].idx;
+    const m = chat.messages[activeIdx], st = m.stats || {};
+    if (m.tokens && !st.confidence) st.confidence = chatConfidence(m.tokens);
+    metaEl.textContent = `${isLatest ? 'Latest · ' : ''}Turn ${pos} of ${replies.length} · ${chatTime(m.time)}`;
+    const parts = [];
+    if (CHAT_LIVE.has(m.state)) {
+      const liveRate = m.state === 'generating' && Number.isFinite(st.liveRate) ? ` · <span class="vital-v green">${esc(rate(st.liveRate))}</span> tok/s` : '';
+      parts.push(`<p class="cdu-small"><span class="green">${esc(CHAT_STATES[m.state] || 'Working…')}</span>${liveRate}</p>`);
+    } else if (m.error) {
+      parts.push(`<p class="cdu-small red">${esc(m.error)}</p>`);
+    }
+    const tel = chatTelemetry(st, m);
+    if (tel) parts.push(tel);
+    const sent = chatSentLine(m);
+    if (sent) parts.push(sent);
+    bodyEl.innerHTML = parts.join('') || '<p class="cdu-small">Waiting for reply metrics…</p>';
   }
   function chatLiveUpdate(m, el) {
     const v = el._live, st = m.stats || {};
@@ -4494,6 +4637,7 @@ R"HTML(      const tip = t.forced ? 'Inserted by the thinking budget' : `${(100 
       if (pinned) v.rbody.scrollTop = v.rbody.scrollHeight;
     }
     if (m.content.length > v.cLen) { v.cview.update(m.content); v.cLen = m.content.length; }
+    chatRenderInspector();
   }
   function chatRenderMessage(m, i) {
     const el = document.createElement('article');
@@ -4502,27 +4646,64 @@ R"HTML(      const tip = t.forced ? 'Inserted by the thinking budget' : `${(100 
     if (m.role === 'user') {
       const imgs = (m.images || []).map(src => `<img src="${esc(src)}" alt="Attached image">`).join('');
       const lost = !m.images && m.imageCount ? `<span class="cdu-small">${m.imageCount} image${m.imageCount === 1 ? '' : 's'} attached (not kept after reload)</span>` : '';
-      el.innerHTML = `${chatHead(m)}</header>${imgs || lost ? `<div class="msg-images">${imgs}${lost}</div>` : ''}<div class="msg-body md md-user">${chatMarkdown(m.content, {pre: true})}</div>`;
+      const copyBtn = m.content ? '<span class="msg-actions"><button type="button" class="client-evidence" data-act="copy">Copy</button></span>' : '';
+      el.innerHTML = `${chatHead(m)}${copyBtn}</header>${imgs || lost ? `<div class="msg-images">${imgs}${lost}</div>` : ''}<div class="msg-body md md-user">${chatMarkdown(m.content, {pre: true})}</div>`;
+      const b = el.querySelector('[data-act="copy"]');
+      if (b) b.onclick = () => copyText(b, m.content || '', b.firstChild);
       return el;
     }
     if (CHAT_LIVE.has(m.state)) return chatLiveMessage(m, el);
     const st = m.stats || {};
+    if (m.tokens && !st.confidence) st.confidence = chatConfidence(m.tokens);
     const state = CHAT_STATES[m.state] || '';
-    const reasoning = m.reasoning ? `<details class="msg-reasoning"${m.reasoningOpen ? ' open' : ''}><summary>Reasoning${st.usage && st.usage.completion_tokens_details && st.usage.completion_tokens_details.reasoning_tokens ? ' · ' + st.usage.completion_tokens_details.reasoning_tokens.toLocaleString() + ' tokens' : ''}</summary><div class="msg-reasoning-body md">${chatMarkdown(m.reasoning)}</div></details>` : '';
+    const split = m.tokenView && m.tokens ? chatSplitTokens(m.tokens) : null;
+    const reasoningBody = split && split.think.length ? `<div class="msg-tokens">${chatTokenView(split.think, 0)}</div>` : chatMarkdown(m.reasoning);
+    const reasoning = m.reasoning || (split && split.think.length) ? `<details class="msg-reasoning"${m.reasoningOpen ? ' open' : ''}><summary>Reasoning${st.usage && st.usage.completion_tokens_details && st.usage.completion_tokens_details.reasoning_tokens ? ' · ' + st.usage.completion_tokens_details.reasoning_tokens.toLocaleString() + ' tokens' : ''}</summary><div class="msg-reasoning-body md">${reasoningBody}</div></details>` : '';
     const ended = m.state === 'done' || m.state === 'stopped' || m.state === 'error';
     const tokenKey = m.tokens && m.tokens.length ? `<button type="button" class="client-evidence" data-act="tokens" aria-pressed="${m.tokenView ? 'true' : 'false'}">${m.tokenView ? 'Text view' : 'Token view'}</button>` : '';
     const actions = ended ? `<div class="msg-actions"><button type="button" class="client-evidence" data-act="copy">Copy</button>${tokenKey}${i === chat.messages.length - 1 ? '<button type="button" class="client-evidence" data-act="regen">Regenerate</button>' : ''}</div>` : '';
+    const answerTokens = split ? (split.answer.length ? split.answer : m.tokens) : null;
+    const answerOffset = split && split.answer.length ? split.think.length : 0;
     const body = m.error ? `<span class="red">${esc(m.error)}</span>`
-      : m.tokenView && m.tokens ? `<div class="msg-tokens">${chatTokenView(m.tokens)}</div><p class="cdu-small msg-token-key"><span class="tok tok-mid">under 50%</span> <span class="tok tok-low">under 20%</span> · hover a token for its probability and alternatives; reasoning tokens come first</p>`
+      : m.tokenView && m.tokens ? `<div class="msg-tokens">${chatTokenView(answerTokens, answerOffset)}</div><div class="msg-token-bar"><div class="msg-token-readout">${chatTokenReadoutHtml(null)}</div><span class="msg-token-key"><span class="tok tok-mid">under 50%</span> <span class="tok tok-low">under 20%</span></span></div>`
       : chatMarkdown(m.content);
-    if (m.tokens && !st.confidence) st.confidence = chatConfidence(m.tokens);
-    el.innerHTML = `${chatHead(m)}${state ? `<span class="msg-state${m.state === 'error' ? ' red' : m.state === 'stopped' ? ' amber' : ''}">${esc(state)}</span>` : ''}</header>${m.tokenView ? '' : reasoning}<div class="msg-body md">${body}</div>${m.note ? `<p class="msg-note">${esc(m.note)}</p>` : ''}${m.state === 'done' || m.state === 'stopped' ? chatTelemetry(st, m) : ''}${ended ? chatSentLine(m) : ''}${actions}`;
+    const vitals = m.state === 'done' || m.state === 'stopped' ? chatVitals(st, m) : '';
+    const telemetry = m.state === 'done' || m.state === 'stopped' ? chatTelemetry(st, m) : '';
+    const sentLine = ended ? chatSentLine(m) : '';
+    const hasDetails = Boolean(telemetry || sentLine);
+    const sentCount = m.sent ? m.sent.length : 0;
+    const isInspected = i === chatActiveReplyIndex();
+    const detailsBtn = hasDetails ? `<button type="button" class="client-evidence msg-more" data-act="details" aria-pressed="${isInspected ? 'true' : 'false'}" aria-expanded="${m.detailsOpen ? 'true' : 'false'}" title="Inspect full telemetry and sent parameters">Inspect${sentCount ? `<span class="msg-sent-tag"> · ${sentCount} sent</span>` : ''}</button>` : '';
+    const foot = ended ? `<div class="msg-foot">${vitals}${detailsBtn}${actions}</div>${hasDetails ? `<div class="msg-details"${m.detailsOpen ? '' : ' hidden'}>${telemetry}${sentLine}</div>` : ''}` : '';
+    el.innerHTML = `${chatHead(m)}${state ? `<span class="msg-state${m.state === 'error' ? ' red' : m.state === 'stopped' ? ' amber' : ''}">${esc(state)}</span>` : ''}</header>${reasoning}<div class="msg-body md">${body}</div>${m.note ? `<p class="msg-note">${esc(m.note)}</p>` : ''}${foot}`;
     const det = el.querySelector('.msg-reasoning');
     if (det) det.addEventListener('toggle', () => { m.reasoningOpen = det.open; });
+    const readout = el.querySelector('.msg-token-readout');
+    if (readout && m.tokens) {
+      const showTok = e => {
+        const tokEl = e.target.closest && e.target.closest('.tok[data-tok]');
+        if (!tokEl || !el.contains(tokEl)) return;
+        readout.innerHTML = chatTokenReadoutHtml(m.tokens[Number(tokEl.dataset.tok)]);
+      };
+      el.addEventListener('mouseover', showTok);
+      el.addEventListener('focusin', showTok);
+    }
+    el.addEventListener('click', e => {
+      if (e.target.closest && e.target.closest('button, a, summary, .tok')) return;
+      if (chat.selectedReply !== i) { chat.selectedReply = i; chatRenderInspector(); }
+    });
     el.querySelectorAll('[data-act]').forEach(b => {
       b.onclick = () => {
         if (b.dataset.act === 'copy') copyText(b, m.content || '', b.firstChild);
         else if (b.dataset.act === 'tokens') { m.tokenView = !m.tokenView; chatRender(i); }
+        else if (b.dataset.act === 'details') {
+          chat.selectedReply = i;
+          m.detailsOpen = !m.detailsOpen;
+          const d = el.querySelector('.msg-details');
+          if (d) d.hidden = !m.detailsOpen;
+          b.setAttribute('aria-expanded', String(m.detailsOpen));
+          chatRenderInspector();
+        }
         else if (b.dataset.act === 'regen') chatRegenerate();
       };
     });
@@ -4547,6 +4728,7 @@ R"HTML(      const tip = t.forced ? 'Inserted by the thinking budget' : `${(100 
     $('chat-meter-fill').className = chatCtx && used / chatCtx > .9 ? 'amber-fill' : '';
     $('chat-think-note').hidden = !(chat.thinkUsed != null && chat.thinkUsed !== chat.think && chat.messages.length);
     document.querySelectorAll('[data-think]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.think === chat.think)));
+    chatRenderInspector();
   }
   // Parameters: an empty field is omitted from the request, so the engine's own default
   // applies. They persist in this browser; the conversation stays in the tab.
@@ -4571,6 +4753,8 @@ R"HTML(      const tip = t.forced ? 'Inserted by the thinking budget' : `${(100 
     $('chat-top-logprobs').value = v.top || '';
     $('chat-extra').value = v.extra || '';
     chatFields().forEach(el => { const x = v['p:' + el.dataset.param]; if (el.type === 'checkbox') el.checked = !!x; else el.value = x == null ? '' : x; });
+    const effortEl = document.querySelector('#chat-settings [data-param="reasoning_effort"]');
+    if (chat.think === 'on' && effortEl && effortEl.value === 'none') effortEl.value = '';
     chatParamsUi();
   }
   // The engine's limit for a request that names none: known when the Supervisor launched it.
@@ -4609,16 +4793,30 @@ R"HTML(      const tip = t.forced ? 'Inserted by the thinking budget' : `${(100 
     const lp = $('chat-logprobs').checked;
 )HTML"
 R"HTML(    $('chat-top-logprobs').disabled = !lp;
-    $('chat-stream').disabled = lp;
+    const effortEl = document.querySelector('#chat-settings [data-param="reasoning_effort"]');
+    const budgetEl = document.querySelector('#chat-settings [data-param="thinking_budget_tokens"]');
+    const thinkOff = chat.think === 'off';
+    const effortNone = !thinkOff && effortEl && effortEl.value === 'none';
+    if (effortEl) effortEl.disabled = thinkOff;
+    if (budgetEl) budgetEl.disabled = thinkOff || effortNone;
+    const rHelp = $('chat-reasoning-help');
+    if (rHelp) {
+      rHelp.hidden = !thinkOff && !effortNone;
+      rHelp.textContent = thinkOff ? 'Thinking is Off in the bar above, so reasoning effort and thinking budget are not sent.'
+        : effortNone ? 'Reasoning effort is none, which turns thinking off; thinking budget is not sent.' : '';
+    }
     const schema = chatJsonField('chat-schema', 'chat-schema-state', true);
     if ($('chat-format').value === 'json_schema' && schema.ok && schema.value === undefined) {
       $('chat-schema-state').textContent = 'Enter the schema the answer must follow';
       $('chat-schema').classList.add('invalid');
     }
     chatJsonField('chat-extra', 'chat-extra-state', true);
-    document.querySelectorAll('#chat-settings select').forEach(s => s.classList.toggle('set', s.value !== '' && s.value !== 'default'));
+    document.querySelectorAll('#chat-settings select').forEach(s => s.classList.toggle('set', !s.disabled && s.value !== '' && s.value !== 'default'));
     const sent = chatSentParams(chatRequestBody());
-    $('chat-param-count').textContent = sent.length ? ' · ' + sent.length : '';
+    const countText = sent.length ? ' · ' + sent.length : '';
+    $('chat-param-count').textContent = countText;
+    const barCount = $('chat-param-count-bar');
+    if (barCount) barCount.textContent = countText;
   }
   // The parameters a request sets beyond the conversation and the page's own observations.
   const CHAT_PLUMBING = new Set(['model', 'messages', 'stream_options', 'return_progress', 'timings_per_token']);
@@ -4644,14 +4842,14 @@ R"HTML(    $('chat-top-logprobs').disabled = !lp;
       else msgs.push({role: 'user', content: m.content || ''});
     });
     const logprobs = $('chat-logprobs').checked;
-    // Log probabilities are reported on whole answers only.
-    const stream = !logprobs && $('chat-stream').checked;
+    const stream = $('chat-stream').checked;
     const body = {model: benchServedModel || undefined, messages: msgs, stream};
     if (stream) Object.assign(body, {stream_options: {include_usage: true}, return_progress: true, timings_per_token: true});
     const budget = $('chat-budget').value, max = Number($('chat-max').value);
     if (budget === 'unlimited') body.max_tokens = -1;
     else if (budget === 'custom' && $('chat-max').value !== '' && Number.isInteger(max) && max >= 0) body.max_tokens = max;
     chatFields().forEach(el => {
+      if (el.disabled) return;
       const key = el.dataset.param;
       if (el.type === 'checkbox') { if (el.checked) body[key] = true; return; }
       if (el.value === '') return;
@@ -4673,7 +4871,9 @@ R"HTML(    $('chat-top-logprobs').disabled = !lp;
       const top = Number($('chat-top-logprobs').value);
       if (Number.isInteger(top) && top > 0) body.top_logprobs = Math.min(20, top);
     }
-    if (chat.think !== 'default') body.chat_template_kwargs = {enable_thinking: chat.think === 'on'};
+    if (chat.think !== 'default' && !(chat.think === 'on' && body.reasoning_effort === 'none')) {
+      body.chat_template_kwargs = {enable_thinking: chat.think === 'on'};
+    }
     let extra;
     try { extra = $('chat-extra').value.trim() ? JSON.parse($('chat-extra').value) : null; } catch (_) {}
     if (extra && typeof extra === 'object' && !Array.isArray(extra)) Object.assign(body, extra);
@@ -4700,6 +4900,7 @@ R"HTML(    $('chat-top-logprobs').disabled = !lp;
     }
     const reply = {role: 'assistant', content: '', reasoning: '', model: benchServedModel, time: Date.now(), state: 'waiting', stats: {}, reasoningOpen: $('chat-show-reasoning').checked};
     chat.messages.push(reply);
+    chat.selectedReply = null;
     const index = chat.messages.length - 1;
     const body = chatRequestBody();
     reply.sent = chatSentParams(body);
@@ -4753,6 +4954,9 @@ R"HTML(    $('chat-top-logprobs').disabled = !lp;
           if (!Number.isFinite(reply.stats.ttft)) reply.stats.ttft = performance.now() - t0;
           if (delta.reasoning_content) { reply.reasoning += delta.reasoning_content; reply.state = 'thinking'; }
           if (delta.content) { reply.content += delta.content; reply.state = 'generating'; }
+        }
+        if (ch && ch.logprobs && Array.isArray(ch.logprobs.content) && ch.logprobs.content.length) {
+          reply.tokens = (reply.tokens || []).concat(ch.logprobs.content);
         }
         if (ch && ch.finish_reason) reply.stats.finish = ch.finish_reason;
         if (d.timings) { reply.stats.timings = d.timings; if (Number.isFinite(d.timings.predicted_per_second) && d.timings.predicted_n > 1) reply.stats.liveRate = d.timings.predicted_per_second; }
@@ -4809,36 +5013,52 @@ R"HTML(    $('chat-top-logprobs').disabled = !lp;
   $('chat-stop').onclick = () => { if (chatAbort) chatAbort.abort(); };
   $('chat-new').onclick = () => {
     if (chatAbort) chatAbort.abort();
-    chat.messages = []; chat.thinkUsed = null; chatPending = []; renderChatAttachments();
+    chat.messages = []; chat.thinkUsed = null; chat.selectedReply = null; chatPending = []; renderChatAttachments();
     chatSave(); chatRender(); chatInput.focus();
   };
   function chatShowParams(open) {
-    $('chat-settings').hidden = !open;
     $('chat-settings-toggle').setAttribute('aria-expanded', String(open));
     $('view-chat').querySelector('.chat').classList.toggle('params-open', open);
     if (open) chatParamsUi();
   }
-  $('chat-settings-toggle').onclick = () => chatShowParams($('chat-settings').hidden);
+  $('chat-settings-toggle').onclick = () => chatShowParams(!$('view-chat').querySelector('.chat').classList.contains('params-open'));
   $('chat-back').onclick = () => { chatShowParams(false); chatInput.focus(); };
   ['input', 'change'].forEach(type => $('chat-settings').addEventListener(type, e => {
     if (e.target.id === 'chat-system') return;
+    if (e.target.dataset && e.target.dataset.param === 'reasoning_effort' && e.target.value === 'none' && chat.think === 'on') {
+      chat.think = 'default';
+      chatSave();
+      chatRender();
+    }
     chatParamsUi(); chatSaveParams();
     $('chat-hint').textContent = '';
   }));
   $('chat-params-reset').onclick = () => { try { localStorage.removeItem(PARAMS_KEY); } catch (_) {} chatLoadParams(); };
 )HTML"
 R"HTML(  $('chat-system').addEventListener('input', () => { chat.system = $('chat-system').value; chatSave(); chatParamsUi(); });
-  document.querySelectorAll('[data-think]').forEach(b => { b.onclick = () => { chat.think = b.dataset.think; chatSave(); chatRender(); }; });
+  document.querySelectorAll('[data-think]').forEach(b => {
+    b.onclick = () => {
+      chat.think = b.dataset.think;
+      const effortEl = document.querySelector('#chat-settings [data-param="reasoning_effort"]');
+      if (chat.think === 'on' && effortEl && effortEl.value === 'none') {
+        effortEl.value = '';
+        chatSaveParams();
+      }
+      chatParamsUi();
+      chatSave();
+      chatRender();
+    };
+  });
   $('chat-inspect').onclick = () => {
     const body = chatRequestBody();
     const draft = chatInput.value.trim();
     if (draft) body.messages.push({role: 'user', content: draft});
+    const ep = benchEndpoints.find(e => e.path === '/v1/chat/completions');
+    benchReady = true;
+    benchSelect(ep, -1);
+    benchSetBody(body);
+    renderBenchAuth();
     location.hash = '#api';
-    setTimeout(() => {
-      const ep = benchEndpoints.find(e => e.path === '/v1/chat/completions');
-      benchSelect(ep, 1);
-      benchSetBody(body);
-    }, 0);
   };
 
   // Images: attach, paste or drop. Large images are scaled to 1600 px on the long side,

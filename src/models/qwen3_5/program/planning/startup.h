@@ -25,11 +25,11 @@ inline constexpr std::uint32_t kCausalScoreTile = 1024;
 inline constexpr std::uint32_t kCausalScoreReadoutRows = 1U + kMaximumCausalReferenceTokens;
 
 // Floats one lane's device logprob readout needs for the widest speculative round, and for the
-// largest prompt-position readout; each column is (sampled, raw) followed by candidate pairs.
+// largest prompt-position readout; each column is (sampled, raw), candidate pairs, and top-K.
 inline constexpr std::size_t kLogprobReadoutColumns =
     std::max<std::size_t>(kMtpDecodeMaximumWidth, kDFlashDecodeMaximumWidth);
 inline constexpr std::size_t kLogprobReadoutFloats =
-    (2U + 2U * kMaximumLogprobCandidates) * kLogprobReadoutColumns;
+    (2U + 2U * kMaximumLogprobCandidates + 3U * kMaximumTopLogprobs) * kLogprobReadoutColumns;
 inline constexpr std::size_t kLogprobPromptReadoutFloats =
     (2U + 2U * kMaximumLogprobCandidates) * kMaximumPromptReadouts;
 

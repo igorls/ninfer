@@ -56,9 +56,7 @@ struct PrefillContext {
     std::int32_t dflash_kv_table_row                           = 0;
     qwen3_5::DFlashPrefillIngress* dflash_prefill_host_ingress = nullptr;
     std::int32_t rope_delta                                    = 0;
-    CudaEventTimer* prefill_gpu_timer                          = nullptr;
-    // Host full-column copy of the first generated token's target logits, or null.
-    std::uint16_t* first_token_logits_host       = nullptr;
+    CudaEventTimer* prefill_gpu_timer            = nullptr;
     const FirstTokenReadout* first_token_readout = nullptr;
     const PromptReadout* prompt_readout          = nullptr;
 };

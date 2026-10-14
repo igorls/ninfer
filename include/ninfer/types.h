@@ -311,8 +311,7 @@ struct ThinkingControlOptions {
 
 // Opt-in per-token log probabilities. They are read from the target model's logits before any
 // sampling adjustment (no penalty, temperature or truncation), so they are the model's own
-// distribution at every position regardless of how the token was drawn. A request that enables
-// them decodes one token per round: speculative drafts are not offered for it.
+// distribution at every position regardless of how the token was drawn.
 struct TokenLogprobOptions {
     bool enabled = false;
     // Number of most likely alternatives reported per position, at most kMaximumTopLogprobs.

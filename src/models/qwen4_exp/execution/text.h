@@ -33,9 +33,11 @@ using qwen3_5::execution::VisionChunk;
 struct FirstTokenReadout {
     std::optional<Tensor> candidate_ids;  // I32 [N]
     std::optional<Tensor> allowed;        // I32 [mask words], the position's structured-output mask
-    Tensor sampled_out;                   // FP32 [2, 1]
-    std::optional<Tensor> candidates_out; // FP32 [2, N, 1]
-    void* host        = nullptr;          // pinned destination, sampled_out then candidates_out
+    Tensor sampled_out;                   // FP32 [1, 2]
+    std::optional<Tensor> candidates_out; // FP32 [1, N, 2]
+    std::optional<Tensor> top_ids_out;    // I32 [1, K]
+    std::optional<Tensor> top_out;        // FP32 [1, K, 2]
+    void* host        = nullptr;          // pinned destination
     std::size_t bytes = 0;
 };
 
@@ -109,11 +111,6 @@ public:
     void set_rope_delta(std::int32_t delta) noexcept { rope_delta_ = delta; }
 
     void set_state_slots(std::int32_t source_slot, std::int32_t destination_slot);
-
-    // Pinned host destination for the final prompt position's full logits, or null.
-    void set_first_token_logit_capture(std::uint16_t* host) noexcept {
-        first_token_logits_host_ = host;
-    }
 
     void set_first_token_readout(const FirstTokenReadout* readout) noexcept {
         first_token_readout_ = readout;
@@ -211,7 +208,6 @@ private:
     std::int64_t prefill_split_frontier_            = -1;
     Tensor* rewrite_checkpoint_hidden_output_       = nullptr;
     const ops::SamplingConfig* sampling_config_     = nullptr;
-    std::uint16_t* first_token_logits_host_         = nullptr;
     const FirstTokenReadout* first_token_readout_   = nullptr;
     const PromptReadout* prompt_readout_            = nullptr;
     const RouteTrace* route_trace_                  = nullptr;

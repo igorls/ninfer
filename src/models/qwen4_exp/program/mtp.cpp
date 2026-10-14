@@ -140,11 +140,8 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
             budgets[row].generated_tokens_remaining == 0) {
             throw std::logic_error("MTP sequence is not at a committed decode frontier");
         }
-        const auto extent =
-            request.logprobs.enabled && !request.logprobs_device_readout
-                ? 0U
-                : std::min({draft_window, budgets[row].generated_tokens_remaining - 1,
-                            capacity - frontier - 1});
+        const auto extent = std::min(
+            {draft_window, budgets[row].generated_tokens_remaining - 1, capacity - frontier - 1});
         host.extents[row]           = static_cast<std::int32_t>(extent);
         max_extent                  = std::max(max_extent, host.extents[row]);
         host.valid[row]             = static_cast<std::int32_t>(extent + 1);
@@ -351,7 +348,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
         device.stream);
     for (std::int32_t row = 0; row < batch; ++row) {
         auto& request = requests[lanes[row]];
-        if (request.logprobs_device_readout) {
+        if (request.logprobs.enabled) {
             const auto columns = host.valid[row];
             enqueue_round_logprobs(active_sequence(lanes[row]), request,
                                    frame.logits.slice(2, row, 1).slice(1, 0, columns),
@@ -387,12 +384,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
         }
         const std::span<const TokenId> tokens(mtp_egress->licensed.data() + row * width, count);
         validate_licensed_tokens(tokens);
-        if (request.logprobs_device_readout) {
-            collect_round_logprobs(sequence, request, tokens);
-        } else if (request.logprobs.enabled) {
-            auto column = frame.logits.slice(2, row, 1).slice(1, 0, 1);
-            record_round_logprobs(request, &column, tokens[0]);
-        }
+        collect_round_logprobs(sequence, request, tokens);
         auto& stats = request.speculative_stats;
         if (host.extents[row] == 0) {
             ++stats.fallback_steps;

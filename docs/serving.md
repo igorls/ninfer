@@ -262,10 +262,12 @@ Unknown top-level fields are ignored.
 
 ### Token log probabilities
 
-`logprobs: true` on a non-streaming Chat Completions request returns
+`logprobs: true` on a Chat Completions request returns
 `choices[0].logprobs.content`, one entry per generated token (reasoning tokens and the final stop
 token included), in the OpenAI shape: `token`, `logprob`, `bytes`, and `top_logprobs` with up to
 `top_logprobs` (0 to 20) alternatives. Every entry also carries `token_id` and `raw_logprob`.
+On streaming requests (`stream: true`), `choices[0].logprobs` is delivered on the finish chunk once
+generation completes.
 
 All values are read from the target model's logits **before any sampling adjustment**: no
 repetition/presence/frequency penalty, no temperature, no `top_k`/`top_p`/`min_p` truncation. They
@@ -296,11 +298,9 @@ apply its own temperature scaling for calibration.
   model expects `<think>` at the position before its content, so write the block into the content
   (`"<think>\n\n</think>\n\n" + answer`) to read an answer distribution there.
 
-A request with `logprobs: true` and `top_logprobs` above 0 reads a full vocabulary column on the
-host and decodes one token per round: speculative drafts are not offered for it. Without
-`top_logprobs` the readout runs on the device, costs a few floats per position, and speculative
-decoding stays on. `logprobs` with `stream: true` is rejected with `logprobs_stream_not_supported`;
-the Responses API does not report log probabilities.
+Both `logprobs` and `top_logprobs` (0 to 20) run on the device, copy only the requested scalars
+and top-K entries per position, and keep speculative decoding enabled. The Responses API does not
+report log probabilities.
 
 With thinking off, the maintained Qwen templates render a continued final assistant message
 (assistant prefill) with the same empty think block the generation prompt carries before its

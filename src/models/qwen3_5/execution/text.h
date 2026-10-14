@@ -41,9 +41,11 @@ struct NullTap {
 struct FirstTokenReadout {
     std::optional<Tensor> candidate_ids;  // I32 [N]
     std::optional<Tensor> allowed;        // I32 [mask words], the position's structured-output mask
-    Tensor sampled_out;                   // FP32 [2, 1]
-    std::optional<Tensor> candidates_out; // FP32 [2, N, 1]
-    void* host        = nullptr;          // pinned destination, sampled_out then candidates_out
+    Tensor sampled_out;                   // FP32 [1, 2]
+    std::optional<Tensor> candidates_out; // FP32 [1, N, 2]
+    std::optional<Tensor> top_ids_out;    // I32 [1, K]
+    std::optional<Tensor> top_out;        // FP32 [1, K, 2]
+    void* host        = nullptr;          // pinned destination
     std::size_t bytes = 0;
 };
 
@@ -125,12 +127,6 @@ public:
     void set_rope_delta(std::int32_t delta) noexcept { rope_delta_ = delta; }
 
     void set_sampling(const ops::SamplingConfig* config) noexcept { sampling_config_ = config; }
-
-    // Pinned host destination for the final prompt position's full target logits, or null. The
-    // copy is queued right after sampling because MTP drafting reuses the same logits buffer.
-    void set_first_token_logit_capture(std::uint16_t* host) noexcept {
-        first_token_logits_host_ = host;
-    }
 
     void set_first_token_readout(const FirstTokenReadout* readout) noexcept {
         first_token_readout_ = readout;
@@ -300,8 +296,7 @@ private:
     const std::int32_t* proposal_head_ids_      = nullptr;
     int proposal_head_n_                        = 0;
     const ops::SamplingConfig* sampling_config_ = nullptr;
-    const MtpParameters* mtp_                   = nullptr;
-    std::uint16_t* first_token_logits_host_       = nullptr;
+    const MtpParameters* mtp_                     = nullptr;
     const FirstTokenReadout* first_token_readout_ = nullptr;
     const PromptReadout* prompt_readout_          = nullptr;
 

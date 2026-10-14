@@ -65,10 +65,13 @@ void enqueue_first_token_readout(const FirstTokenReadout& readout, const Tensor&
                                  cudaStream_t stream) {
     Tensor sampled_out                   = readout.sampled_out;
     std::optional<Tensor> candidates_out = readout.candidates_out;
+    std::optional<Tensor> top_ids_out    = readout.top_ids_out;
+    std::optional<Tensor> top_out        = readout.top_out;
     ops::candidate_logprobs(logits, token_domain, sampled,
                             readout.candidate_ids ? &*readout.candidate_ids : nullptr,
                             readout.allowed ? &*readout.allowed : nullptr, sampled_out,
-                            candidates_out ? &*candidates_out : nullptr, stream);
+                            candidates_out ? &*candidates_out : nullptr, stream,
+                            top_ids_out ? &*top_ids_out : nullptr, top_out ? &*top_out : nullptr);
     CUDA_CHECK(cudaMemcpyAsync(readout.host, readout.sampled_out.data, readout.bytes,
                                cudaMemcpyDeviceToHost, stream));
 }
@@ -716,11 +719,6 @@ PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std
                             ops::kSamplePurposePrefill, work_, s);
             } else {
                 ops::argmax(logits, io_.token, domain, s);
-            }
-            if (first_token_logits_host_ != nullptr) {
-                CUDA_CHECK(cudaMemcpyAsync(first_token_logits_host_, logits.data,
-                                           static_cast<std::size_t>(domain) * sizeof(std::uint16_t),
-                                           cudaMemcpyDeviceToHost, s));
             }
             if (first_token_readout_ != nullptr) {
                 enqueue_first_token_readout(*first_token_readout_, logits, io_.token, domain, s);

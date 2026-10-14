@@ -138,13 +138,15 @@ namespace ninfer::runtime {
 }
 
 // Host-side floats of the device readout of one lane's round (ops::candidate_logprobs layouts):
-// sampled_out [2, columns] then candidates_out [2, N, columns], N = the lane's candidate count.
+// sampled_out [2, columns], candidates_out [2, N, columns], top_ids_out [K, columns] (I32),
+// and top_out [2, K, columns], where N = candidate count and K = top alternatives count.
 struct TokenLogprobReadoutLayout {
     std::size_t columns    = 0;
     std::size_t candidates = 0;
+    std::size_t top        = 0;
 
     [[nodiscard]] std::size_t floats() const noexcept {
-        return 2U * columns + 2U * candidates * columns;
+        return 2U * columns + 2U * candidates * columns + 3U * top * columns;
     }
 
     [[nodiscard]] std::size_t sampled(std::size_t plane, std::size_t column) const noexcept {
@@ -155,10 +157,27 @@ struct TokenLogprobReadoutLayout {
                                         std::size_t column) const noexcept {
         return 2U * columns + (plane * candidates + n) * columns + column;
     }
+
+    [[nodiscard]] std::size_t top_id_offset() const noexcept {
+        return 2U * columns + 2U * candidates * columns;
+    }
+
+    [[nodiscard]] std::size_t top_id(std::size_t k, std::size_t column) const noexcept {
+        return top_id_offset() + k * columns + column;
+    }
+
+    [[nodiscard]] std::size_t top_value_offset() const noexcept {
+        return top_id_offset() + top * columns;
+    }
+
+    [[nodiscard]] std::size_t top_value(std::size_t plane, std::size_t k,
+                                        std::size_t column) const noexcept {
+        return top_value_offset() + (plane * top + k) * columns + column;
+    }
 };
 
 // Assembles one position from the device readout, with the same values compute_token_logprobs
-// produces from the full column, minus the top alternatives that only the full column gives.
+// produces from the full column.
 [[nodiscard]] inline TokenLogprobs assemble_token_logprobs(TokenId sampled,
                                                            std::span<const float> readout,
                                                            const TokenLogprobReadoutLayout& layout,
@@ -171,6 +190,18 @@ struct TokenLogprobReadoutLayout {
         .logprob     = readout[layout.sampled(1, column)],
         .raw_logprob = readout[layout.sampled(0, column)],
     };
+    if (layout.top > 0) {
+        out.top.reserve(layout.top);
+        for (std::size_t k = 0; k < layout.top; ++k) {
+            const auto id = std::bit_cast<TokenId>(readout[layout.top_id(k, column)]);
+            if (id < 0) { break; }
+            out.top.push_back(TokenLogprob{
+                .token       = id,
+                .logprob     = readout[layout.top_value(1, k, column)],
+                .raw_logprob = readout[layout.top_value(0, k, column)],
+            });
+        }
+    }
     if (candidates.empty()) { return out; }
     // Candidates renormalise over the allowed members of the list: subtracting their common
     // masked normaliser and re-normalising over the list is the full column's formula exactly.

@@ -24,11 +24,11 @@ inline constexpr std::uint32_t kCausalScoreTile = 1024;
 // Log-probability rows one causal-score column reads: its target and the reference tokens.
 inline constexpr std::uint32_t kCausalScoreReadoutRows = 1U + kMaximumCausalReferenceTokens;
 
-// Floats one lane's device logprob readout needs for one ordinary round, and for the largest
-// prompt-position readout; each column is (sampled, raw) followed by candidate pairs.
+// Floats one lane's device logprob readout needs for the widest speculative round, and for the
+// largest prompt-position readout; each column is (sampled, raw), candidate pairs, and top-K.
 inline constexpr std::size_t kLogprobReadoutColumns = kMtpMaximumWidth;
 inline constexpr std::size_t kLogprobReadoutFloats =
-    (2U + 2U * kMaximumLogprobCandidates) * kLogprobReadoutColumns;
+    (2U + 2U * kMaximumLogprobCandidates + 3U * kMaximumTopLogprobs) * kLogprobReadoutColumns;
 inline constexpr std::size_t kLogprobPromptReadoutFloats =
     (2U + 2U * kMaximumLogprobCandidates) * kMaximumPromptReadouts;
 

@@ -125,17 +125,18 @@ void test_candidate_list_is_a_full_distribution() {
 }
 
 // The device readout (ops::candidate_logprobs layouts) assembled on the host must give the same
-// sampled and candidate values as the full-column path, mask included, with one difference: no
-// top alternatives.
+// sampled, top, and candidate values as the full-column path, mask included.
 void test_device_readout_assembly_matches_the_full_column() {
     const std::vector<float> values{1.0F, 9.0F, 2.0F, 0.0F, 3.0F, 8.0F, -4.0F};
     const auto logits = column(values);
     const std::vector<std::int32_t> mask{(1 << 0) | (1 << 2) | (1 << 4) | (1 << 5)};
-    const TokenLogprobOptions options{.enabled = true, .top = 0, .candidates = {5, 1, 0}};
+    const TokenLogprobOptions options{.enabled = true, .top = 5, .candidates = {5, 1, 0}};
     const TokenLogprobs full = compute_token_logprobs(logits, mask, 4, options);
 
     // What the op writes for two columns (the second is a copy), read for column 1.
-    const ninfer::runtime::TokenLogprobReadoutLayout layout{.columns = 2, .candidates = 3};
+    // Only 4 tokens are allowed by the mask while top=5 is requested, so slot 4 has id=-1.
+    const ninfer::runtime::TokenLogprobReadoutLayout layout{
+        .columns = 2, .candidates = 3, .top = 5};
     std::vector<float> readout(layout.floats(), 0.0F);
     const auto op_values = [&](TokenId token, float& raw, float& masked) {
         const std::vector<int> all{0, 1, 2, 3, 4, 5, 6};
@@ -150,8 +151,19 @@ void test_device_readout_assembly_matches_the_full_column() {
                      ? static_cast<float>(log_softmax(values, allowed, token))
                      : -std::numeric_limits<float>::infinity();
     };
+    const std::vector<TokenId> top_tokens{5, 4, 2, 0, -1};
     for (std::size_t c = 0; c < 2; ++c) {
         op_values(4, readout[layout.sampled(0, c)], readout[layout.sampled(1, c)]);
+        for (std::size_t k = 0; k < 5; ++k) {
+            std::bit_cast<std::int32_t*>(readout.data())[layout.top_id(k, c)] = top_tokens[k];
+            if (top_tokens[k] >= 0) {
+                op_values(top_tokens[k], readout[layout.top_value(0, k, c)],
+                          readout[layout.top_value(1, k, c)]);
+            } else {
+                readout[layout.top_value(0, k, c)] = -std::numeric_limits<float>::infinity();
+                readout[layout.top_value(1, k, c)] = -std::numeric_limits<float>::infinity();
+            }
+        }
         for (std::size_t n = 0; n < 3; ++n) {
             op_values(options.candidates[n], readout[layout.candidate(0, n, c)],
                       readout[layout.candidate(1, n, c)]);
@@ -163,6 +175,14 @@ void test_device_readout_assembly_matches_the_full_column() {
                 close(assembled.sampled.logprob, full.sampled.logprob) &&
                 close(assembled.sampled.raw_logprob, full.sampled.raw_logprob),
             "assembled sampled values differ from the full column");
+    require(assembled.top.size() == full.top.size() && assembled.top.size() == 4,
+            "assembled top count differs from the allowed alternatives");
+    for (std::size_t k = 0; k < assembled.top.size(); ++k) {
+        require(assembled.top[k].token == full.top[k].token &&
+                    close(assembled.top[k].logprob, full.top[k].logprob) &&
+                    close(assembled.top[k].raw_logprob, full.top[k].raw_logprob),
+                "assembled top " + std::to_string(k) + " differs from the full column");
+    }
     require(assembled.candidates.size() == 3, "assembled candidate count differs");
     for (std::size_t n = 0; n < 3; ++n) {
         const bool forbidden = std::isinf(full.candidates[n].logprob);
@@ -173,7 +193,6 @@ void test_device_readout_assembly_matches_the_full_column() {
                     close(assembled.candidates[n].raw_logprob, full.candidates[n].raw_logprob),
                 "assembled candidate " + std::to_string(n) + " differs from the full column");
     }
-    require(assembled.top.empty(), "the device readout reports top alternatives");
 }
 
 void test_invalid_inputs_are_rejected() {

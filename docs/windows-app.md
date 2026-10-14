@@ -121,23 +121,28 @@ it acknowledges the current findings and opens Diagnose.
 The display-mode key switches between **Auto**, which follows the Windows app theme, **Day** and
 **Night**; the choice is kept in the browser.
 
-**Chat** talks to the served model. Each reply shows how long it took to start, its prompt-reading
-time and generation rate, how much of the conversation the engine reused instead of reading it
-again, speculative-draft acceptance, why it finished, and a **Sent** line with exactly the
-parameters the request set. Replies, and the reasoning above them, are formatted as Markdown while
-they arrive: headings, lists, task lists, tables, quotes, code blocks with their language and a
-**Copy** key that copies the code as written, and links. Only http, https and mailto addresses
-become links (opened in a new tab); images are never fetched, and HTML in a reply is shown as text.
-The page imposes no output limit of its own: by default it leaves the limit out, so the engine's
-`--default-max-tokens` applies (8192 unless the launch sets another value), and **Parameters** sets
-a custom budget or no limit (`max_tokens` `-1`, which ends the answer only at a stop condition or a
-full context). Parameters also hold the sampling and reasoning fields the engine accepts, stop
-strings, a response format or JSON schema, token probabilities (answers then arrive whole, and a
-token view marks the tokens the model was unsure of), read-only prompt-cache participation for
-tests that should not evict other apps' cached conversations, and extra request JSON merged into
-the request last. A field left empty sends nothing. Images can be attached, pasted or dropped when
-the model reads them, and **Open in API** carries the next request to the API page. The
-conversation lasts as long as the browser tab; the parameters are kept in the browser.
+**Chat** talks to the served model across a full-width two-pane workspace: the conversation on the
+left and a permanent **Reply inspector** + **Parameters** sidebar on the right (which collapses behind
+the **Parameters** key in narrow windows). Each reply shows a compact vitals strip with its generation
+rate, first-token or whole-response time, output token count, prompt-cache reuse, speculative-draft
+acceptance, token confidence and any non-normal finish status, alongside **Inspect** (which selects
+that turn in the **Reply inspector** to show its full telemetry breakdown and the **Sent** line with
+the exact parameters the request set) and the reply's actions (**Copy**, **Token view**,
+**Regenerate**). User prompts also carry a **Copy** key. Replies, and the reasoning above them, are formatted as Markdown while they arrive: headings,
+lists, task lists, tables, quotes, code blocks with their language and a **Copy** key that copies
+the code as written, and links. Only http, https and mailto addresses become links (opened in a new
+tab); images are never fetched, and HTML in a reply is shown as text. The page imposes no output
+limit of its own: by default it sets no limit (`max_tokens` `-1`, which ends the answer only at a
+stop condition or a full context), while **Parameters** can switch to the engine's
+`--default-max-tokens` (8192 unless the launch sets another value) or a custom token budget.
+Parameters also hold the sampling and reasoning fields the engine accepts, stop strings, a response
+format or JSON schema, token probabilities (answers then arrive whole, and a token view marks
+unsure tokens while an instant readout bar inspects each token's probability and top alternatives),
+read-only prompt-cache participation for tests that should not evict other apps' cached
+conversations, and extra request JSON merged into the request last. A field left empty sends
+nothing. Images can be attached, pasted or dropped when the model reads them, and **Open in API**
+carries the next request to the API page. The conversation lasts as long as the browser tab; the
+parameters are kept in the browser.
 
 **API** is a test bench for every route the engine exposes (status, OpenAI, Anthropic, NInfer and
 admin) and for the Supervisor's own read routes. Each route has ready examples; the answer shows

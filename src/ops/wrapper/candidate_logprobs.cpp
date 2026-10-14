@@ -41,7 +41,8 @@ bool overlaps(const Tensor& lhs, const Tensor& rhs) {
 
 void candidate_logprobs(const Tensor& logits, std::int32_t valid_rows, const Tensor& sampled_ids,
                         const Tensor* candidate_ids, const Tensor* allowed, Tensor& sampled_out,
-                        Tensor* candidates_out, cudaStream_t stream) {
+                        Tensor* candidates_out, cudaStream_t stream, Tensor* top_ids_out,
+                        Tensor* top_out) {
     if (logits.dtype != DType::BF16) { fail("logits must be BF16"); }
     if (logits.ne[0] <= 0 || logits.ne[1] <= 0 || logits.ne[2] != 1 || logits.ne[3] != 1) {
         fail("logits must be rank-2 with positive dimensions");
@@ -64,6 +65,17 @@ void candidate_logprobs(const Tensor& logits, std::int32_t valid_rows, const Ten
         if (candidates_out->dtype != DType::FP32) { fail("candidates_out must be FP32"); }
         require_shape(*candidates_out, columns, candidate_ids->ne[0], 2, "candidates_out");
     }
+    if ((top_ids_out == nullptr) != (top_out == nullptr)) {
+        fail("top_ids_out and top_out are given together");
+    }
+    if (top_ids_out != nullptr) {
+        if (top_ids_out->dtype != DType::I32) { fail("top_ids_out must be I32"); }
+        const std::int32_t top_k = top_ids_out->ne[1];
+        if (top_k <= 0 || top_k > 20) { fail("top_ids_out K must be in [1, 20]"); }
+        require_shape(*top_ids_out, columns, top_k, 1, "top_ids_out");
+        if (top_out->dtype != DType::FP32) { fail("top_out must be FP32"); }
+        require_shape(*top_out, columns, top_k, 2, "top_out");
+    }
     if (allowed != nullptr) {
         if (allowed->dtype != DType::I32) { fail("allowed must be I32"); }
         if (allowed->ne[0] <= 0 || static_cast<std::int64_t>(allowed->ne[0]) * 32 < valid_rows) {
@@ -83,24 +95,31 @@ void candidate_logprobs(const Tensor& logits, std::int32_t valid_rows, const Ten
         require_accessible(*candidate_ids, alignof(std::int32_t), "candidate_ids");
         require_accessible(*candidates_out, alignof(float), "candidates_out");
     }
+    if (top_ids_out != nullptr) {
+        require_accessible(*top_ids_out, alignof(std::int32_t), "top_ids_out");
+        require_accessible(*top_out, alignof(float), "top_out");
+    }
     if (allowed != nullptr) { require_accessible(*allowed, alignof(std::int32_t), "allowed"); }
 
     const Tensor* inputs[]  = {&logits, &sampled_ids, candidate_ids, allowed};
-    const Tensor* outputs[] = {&sampled_out, candidates_out};
-    for (const Tensor* output : outputs) {
+    const Tensor* outputs[] = {&sampled_out, candidates_out, top_ids_out, top_out};
+    for (std::size_t i = 0; i < std::size(outputs); ++i) {
+        const Tensor* output = outputs[i];
         if (output == nullptr) { continue; }
         for (const Tensor* input : inputs) {
             if (input != nullptr && overlaps(*output, *input)) {
                 fail("outputs must not overlap inputs");
             }
         }
-    }
-    if (candidates_out != nullptr && overlaps(sampled_out, *candidates_out)) {
-        fail("outputs must not overlap each other");
+        for (std::size_t j = i + 1; j < std::size(outputs); ++j) {
+            if (outputs[j] != nullptr && overlaps(*output, *outputs[j])) {
+                fail("outputs must not overlap each other");
+            }
+        }
     }
 
     detail::candidate_logprobs_launch(logits, valid_rows, sampled_ids, candidate_ids, allowed,
-                                      sampled_out, candidates_out, stream);
+                                      sampled_out, candidates_out, top_ids_out, top_out, stream);
 }
 
 } // namespace ninfer::ops

@@ -172,10 +172,6 @@ void validate_standard_output_controls(const Json& body) {
             previous = position.get<std::int64_t>();
         }
     }
-    if (logprobs && get_bool(body, "stream", false)) {
-        bad_request("logprobs are reported on non-streaming responses only", "logprobs",
-                    "logprobs_stream_not_supported");
-    }
 
 
     if (body.contains("modalities") && !body.at("modalities").is_null()) {

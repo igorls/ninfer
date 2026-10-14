@@ -28,6 +28,7 @@ struct Case {
     std::int32_t physical_rows = 0;
     std::int32_t valid_rows    = 0;
     std::int32_t columns       = 0;
+    std::int32_t top           = 0;
     std::vector<std::uint16_t> logits;
     std::vector<std::int32_t> sampled;
     std::vector<std::int32_t> candidates;
@@ -85,6 +86,37 @@ void oracle(const Case& c, std::int32_t column, std::int32_t id, double& raw, do
                                                     : -std::numeric_limits<double>::infinity();
 }
 
+void oracle_top(const Case& c, std::int32_t column, std::vector<std::int32_t>& ids,
+                std::vector<double>& raw, std::vector<double>& masked) {
+    const std::size_t base = static_cast<std::size_t>(column) * c.physical_rows;
+    struct Candidate {
+        std::int32_t id;
+        float logit;
+    };
+    std::vector<Candidate> allowed_candidates;
+    for (std::int32_t row = 0; row < c.valid_rows; ++row) {
+        if (allowed_row(c, column, row)) {
+            allowed_candidates.push_back(
+                Candidate{.id = row, .logit = bf16_to_f32(c.logits[base + row])});
+        }
+    }
+    const auto better = [](const Candidate& a, const Candidate& b) {
+        return a.logit != b.logit ? a.logit > b.logit : a.id < b.id;
+    };
+    const std::size_t count =
+        std::min(allowed_candidates.size(), static_cast<std::size_t>(c.top));
+    std::partial_sort(allowed_candidates.begin(),
+                      allowed_candidates.begin() + static_cast<std::ptrdiff_t>(count),
+                      allowed_candidates.end(), better);
+    ids.assign(static_cast<std::size_t>(c.top), -1);
+    raw.assign(static_cast<std::size_t>(c.top), -std::numeric_limits<double>::infinity());
+    masked.assign(static_cast<std::size_t>(c.top), -std::numeric_limits<double>::infinity());
+    for (std::size_t k = 0; k < count; ++k) {
+        ids[k] = allowed_candidates[k].id;
+        oracle(c, column, ids[k], raw[k], masked[k]);
+    }
+}
+
 std::vector<double> fp32_as_double(const void* device, std::size_t count) {
     const auto values = from_device<float>(device, count);
     return {values.begin(), values.end()};
@@ -116,8 +148,11 @@ int verify_with_infinities(const std::string& label, std::vector<double> actual,
 int run_case(const Case& c) {
     const std::size_t columns    = static_cast<std::size_t>(c.columns);
     const std::size_t candidates = c.candidates.size();
+    const std::size_t top        = static_cast<std::size_t>(c.top);
     std::vector<double> expected_sampled(2 * columns);
     std::vector<double> expected_candidates(2 * candidates * columns);
+    std::vector<std::int32_t> expected_top_ids(top * columns, -1);
+    std::vector<double> expected_top(2 * top * columns, -std::numeric_limits<double>::infinity());
     for (std::int32_t column = 0; column < c.columns; ++column) {
         oracle(c, column, c.sampled[static_cast<std::size_t>(column)],
                expected_sampled[static_cast<std::size_t>(column)],
@@ -127,6 +162,17 @@ int run_case(const Case& c) {
                    expected_candidates[n * columns + static_cast<std::size_t>(column)],
                    expected_candidates[candidates * columns + n * columns +
                                        static_cast<std::size_t>(column)]);
+        }
+        if (top != 0) {
+            std::vector<std::int32_t> col_ids;
+            std::vector<double> col_raw, col_masked;
+            oracle_top(c, column, col_ids, col_raw, col_masked);
+            for (std::size_t k = 0; k < top; ++k) {
+                expected_top_ids[k * columns + static_cast<std::size_t>(column)] = col_ids[k];
+                expected_top[k * columns + static_cast<std::size_t>(column)]     = col_raw[k];
+                expected_top[top * columns + k * columns + static_cast<std::size_t>(column)] =
+                    col_masked[k];
+            }
         }
     }
 
@@ -139,6 +185,9 @@ int run_case(const Case& c) {
     GuardedDeviceBuffer device_sampled_out(2 * columns * sizeof(float));
     GuardedDeviceBuffer device_candidates_out(std::max<std::size_t>(2 * candidates * columns, 1) *
                                               sizeof(float));
+    GuardedDeviceBuffer device_top_ids_out(std::max<std::size_t>(top * columns, 1) *
+                                           sizeof(std::int32_t));
+    GuardedDeviceBuffer device_top_out(std::max<std::size_t>(2 * top * columns, 1) * sizeof(float));
     device_logits.copy_from_host(c.logits.data(), device_logits.bytes());
     device_sampled.copy_from_host(c.sampled.data(), columns * sizeof(std::int32_t));
     if (candidates != 0) {
@@ -149,11 +198,13 @@ int run_case(const Case& c) {
     }
     device_sampled_out.fill(0xcd);
     device_candidates_out.fill(0xcd);
+    device_top_ids_out.fill(0xcd);
+    device_top_out.fill(0xcd);
 
     Tensor logits(device_logits.data(), DType::BF16, {c.physical_rows, c.columns});
     Tensor sampled(device_sampled.data(), DType::I32, {c.columns});
     Tensor sampled_out(device_sampled_out.data(), DType::FP32, {c.columns, 2});
-    std::optional<Tensor> candidate_ids, candidates_out, allowed;
+    std::optional<Tensor> candidate_ids, candidates_out, allowed, top_ids_out, top_out;
     if (candidates != 0) {
         candidate_ids.emplace(
             device_candidates.data(), DType::I32,
@@ -161,6 +212,12 @@ int run_case(const Case& c) {
         candidates_out.emplace(device_candidates_out.data(), DType::FP32,
                                std::initializer_list<std::int32_t>{
                                    c.columns, static_cast<std::int32_t>(candidates), 2});
+    }
+    if (top != 0) {
+        top_ids_out.emplace(device_top_ids_out.data(), DType::I32,
+                            std::initializer_list<std::int32_t>{c.columns, c.top});
+        top_out.emplace(device_top_out.data(), DType::FP32,
+                        std::initializer_list<std::int32_t>{c.columns, c.top, 2});
     }
     if (!c.allowed.empty()) {
         if (c.per_column_mask) {
@@ -176,7 +233,8 @@ int run_case(const Case& c) {
     ops::candidate_logprobs(logits, c.valid_rows, sampled,
                             candidate_ids ? &*candidate_ids : nullptr,
                             allowed ? &*allowed : nullptr, sampled_out,
-                            candidates_out ? &*candidates_out : nullptr, nullptr);
+                            candidates_out ? &*candidates_out : nullptr, nullptr,
+                            top_ids_out ? &*top_ids_out : nullptr, top_out ? &*top_out : nullptr);
     cuda_synchronize();
 
     int failures = verify_with_infinities(c.label + " sampled",
@@ -188,22 +246,34 @@ int run_case(const Case& c) {
             fp32_as_double(device_candidates_out.data(), 2 * candidates * columns),
             expected_candidates);
     }
+    if (top != 0) {
+        failures += verify_exact(
+            (c.label + " top_ids").c_str(),
+            from_device<std::int32_t>(device_top_ids_out.data(), top * columns), expected_top_ids);
+        failures += verify_with_infinities(
+            c.label + " top", fp32_as_double(device_top_out.data(), 2 * top * columns),
+            expected_top);
+    }
     failures +=
         verify_exact((c.label + " preserves logits").c_str(),
                      from_device<std::uint16_t>(device_logits.data(), c.logits.size()), c.logits);
     failures += device_logits.verify_guards(c.label + " logits guards");
     failures += device_sampled_out.verify_guards(c.label + " sampled guards");
     failures += device_candidates_out.verify_guards(c.label + " candidates guards");
+    failures += device_top_ids_out.verify_guards(c.label + " top_ids guards");
+    failures += device_top_out.verify_guards(c.label + " top guards");
     return failures;
 }
 
 Case make_case(const std::string& label, std::int32_t physical_rows, std::int32_t valid_rows,
-               std::int32_t columns, std::int32_t candidates, bool masked, std::uint32_t salt) {
+               std::int32_t columns, std::int32_t candidates, bool masked, std::uint32_t salt,
+               std::int32_t top = 0) {
     Case c;
     c.label         = label;
     c.physical_rows = physical_rows;
     c.valid_rows    = valid_rows;
     c.columns       = columns;
+    c.top           = top;
     c.logits        = make_logits(physical_rows, valid_rows, columns, salt);
     for (std::int32_t column = 0; column < columns; ++column) {
         c.sampled.push_back(
@@ -247,12 +317,16 @@ int run_validation_cases() {
     DeviceBuffer ids_data(4 * sizeof(std::int32_t));
     DeviceBuffer mask_data(2 * sizeof(std::int32_t));
     DeviceBuffer out_data(2 * 4 * 2 * sizeof(float));
+    DeviceBuffer top_ids_data(2 * 5 * sizeof(std::int32_t));
+    DeviceBuffer top_out_data(2 * 5 * 2 * sizeof(float));
     Tensor logits(logits_data.p, DType::BF16, {64, 2});
     Tensor sampled(ids_data.p, DType::I32, {2});
     Tensor candidates(ids_data.p, DType::I32, {4});
     Tensor allowed(mask_data.p, DType::I32, {2});
     Tensor sampled_out(out_data.p, DType::FP32, {2, 2});
     Tensor candidates_out(static_cast<float*>(out_data.p) + 4, DType::FP32, {2, 4, 2});
+    Tensor top_ids_out(top_ids_data.p, DType::I32, {2, 5});
+    Tensor top_out(top_out_data.p, DType::FP32, {2, 5, 2});
     int failures = 0;
     failures += expect_invalid("rejects valid_rows=0", [&] {
         ops::candidate_logprobs(logits, 0, sampled, &candidates, nullptr, sampled_out,
@@ -275,6 +349,18 @@ int run_validation_cases() {
         Tensor alias(logits_data.p, DType::FP32, {2, 2});
         ops::candidate_logprobs(logits, 64, sampled, nullptr, nullptr, alias, nullptr, nullptr);
     });
+    failures += expect_invalid("rejects top_ids_out without top_out", [&] {
+        ops::candidate_logprobs(logits, 64, sampled, nullptr, nullptr, sampled_out, nullptr,
+                                nullptr, &top_ids_out, nullptr);
+    });
+    failures += expect_invalid("rejects top_ids_out K > 20", [&] {
+        DeviceBuffer wide_ids(2 * 21 * sizeof(std::int32_t));
+        DeviceBuffer wide_out(2 * 21 * 2 * sizeof(float));
+        Tensor bad_ids(wide_ids.p, DType::I32, {2, 21});
+        Tensor bad_out(wide_out.p, DType::FP32, {2, 21, 2});
+        ops::candidate_logprobs(logits, 64, sampled, nullptr, nullptr, sampled_out, nullptr,
+                                nullptr, &bad_ids, &bad_out);
+    });
     return failures;
 }
 
@@ -289,10 +375,23 @@ int main() try {
     failures += run_case(make_case("small unconstrained", 64, 50, 3, 4, false, 1));
     failures += run_case(make_case("small masked", 64, 50, 3, 4, true, 2));
     failures += run_case(make_case("sampled only", 1024, 1000, 5, 0, true, 3));
+    failures += run_case(make_case("small top-5 unconstrained", 64, 50, 3, 4, false, 11, 5));
+    failures += run_case(make_case("small top-20 masked", 64, 50, 3, 4, true, 12, 20));
+    {
+        // Fewer allowed tokens than K: only 2 tokens are allowed while top=5 is requested.
+        Case sparse    = make_case("sparse mask top-5", 64, 50, 2, 0, false, 19, 5);
+        sparse.allowed = {(1 << 3) | (1 << 17), 0};
+        sparse.sampled = {3, 17};
+        failures += run_case(sparse);
+    }
     failures += run_case(make_case("vocabulary unconstrained", 248320, 248077, 2, 77, false, 4));
     failures += run_case(make_case("vocabulary masked", 248320, 248077, 6, 20, true, 5));
+    failures +=
+        run_case(make_case("vocabulary top-5 unconstrained", 248320, 248077, 6, 0, false, 6, 5));
+    failures +=
+        run_case(make_case("vocabulary top-20 masked", 248320, 248077, 6, 4, true, 7, 20));
     for (const auto rows : {50, 248077}) {
-        Case c            = make_case("per-column grammar", rows + 7, rows, 6, 20, false, 17);
+        Case c            = make_case("per-column grammar", rows + 7, rows, 6, 20, false, 17, 5);
         c.per_column_mask = true;
         const auto words  = (rows + 31) / 32;
         c.allowed.assign(words * c.columns, 0);

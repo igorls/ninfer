@@ -633,6 +633,9 @@ void DashboardServer::run() {
     svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
         res.set_content(std::string(kDashboardHtml), "text/html; charset=utf-8");
     });
+    svr.Get("/favicon.ico", [](const httplib::Request&, httplib::Response& res) {
+        res.status = 204;
+    });
     svr.Get("/api/state", [this](const httplib::Request&, httplib::Response& res) {
         res.set_content(state_json().dump(), "application/json");
     });
