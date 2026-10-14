@@ -25,8 +25,9 @@ inline constexpr std::int32_t kNvfp4MoeIntermediate = 640;
 // gate/up kernel and warp-per-row expert kernels; grouped prefill loads each active expert once
 // per call. The A4 Tensor Core arm replaces the SIMT arm from the extent where activation
 // quantization is repaid.
-inline constexpr std::int32_t kNvfp4MoeDecodeMaxTokens = 48;
-inline constexpr std::int32_t kNvfp4MoeA4MinTokens     = 256;
+inline constexpr std::int32_t kNvfp4MoePreselectMinTokens = 6;
+inline constexpr std::int32_t kNvfp4MoeDecodeMaxTokens    = 48;
+inline constexpr std::int32_t kNvfp4MoeA4MinTokens        = 256;
 
 enum class Nvfp4MoeRoute : std::uint8_t { Decode, GroupedA16, GroupedA4 };
 

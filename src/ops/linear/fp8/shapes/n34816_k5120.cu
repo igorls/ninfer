@@ -9,7 +9,7 @@ using C4         = Fp8A16SimtSchedule<4, 2, 16, 4, 1, Fp8SimtActivationAccess::T
 using Tma64x128  = Fp8A8TmaMmaSchedule<64, 128, 128, 2, 4, 2, 1>;
 using Tma64x256  = Fp8A8TmaMmaSchedule<64, 256, 128, 2, 4, 2, 1>;
 using Tma128x256 = Fp8A8TmaMmaSchedule<128, 256, 128, 2, 4, 2, 1>;
-using Bulk       = Fp8A8TmaSplitKSchedule<Tma128x256, 170, 4, 8>;
+using Bulk       = Fp8A8TmaSplitKSchedule<Tma128x256, 188, 4, 8>;
 
 void launch_a16(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
     const int tokens = x.ne[1];
@@ -44,8 +44,6 @@ void launch_a8(const Tensor& x, const Weight& weight, Tensor& out, Fp8A8Workspac
         return launch_fp8_a8_tma<Geometry, Tma64x128>(x, weight, out, scratch, stream);
     if (x.ne[1] <= 192)
         return launch_fp8_a8_tma<Geometry, Tma64x256>(x, weight, out, scratch, stream);
-    // At T <= 256 the last wave is already well filled, so Bulk uses its ordinary
-    // TMA kernel and needs no partials. Keep one compiled family for this region.
     launch_fp8_a8_tma<Geometry, Bulk>(x, weight, out, scratch, stream);
 }
 
@@ -54,7 +52,7 @@ bool uses_a8(std::int32_t, std::int32_t max_tokens) { return max_tokens >= 5; }
 std::size_t partial_capacity_bytes(std::int32_t max_tokens) {
     // Reserve one wave for any interval using the bulk route. The allocation is
     // independent of which calls in that interval have an underfilled last wave.
-    return max_tokens > 256 ? Bulk::kPartialBytes : 0;
+    return max_tokens > 192 ? Bulk::kPartialBytes : 0;
 }
 } // namespace
 

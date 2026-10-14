@@ -135,7 +135,8 @@ void fp8_gdn_conv_window_dispatch(const Tensor& x, const Weight& weight, const T
     }
 }
 
-// Snapshot form: the FP32-scale 2560 profile also fuses B=1..8, W=1..6.
+// Snapshot form: the 5120 profile fuses B=1, W=1..4; the FP32-scale 2560 profile fuses
+// B=1..8, W=1..6.
 template <int InputRows, class Scale>
 void fp8_gdn_snapshot_fused(const Tensor& x, const Weight& weight, const Tensor& conv_weight,
                             Tensor& conv_states, const Tensor& valid_columns,
@@ -145,10 +146,12 @@ void fp8_gdn_snapshot_fused(const Tensor& x, const Weight& weight, const Tensor&
     if constexpr (InputRows == 2560) {
         if (x.ne[1] >= 2 && x.ne[1] <= 6 && x.ne[2] >= 1 && x.ne[2] <= 8) {
             fp8_gdn_conv_window_dispatch<InputRows, Scale>(
-                x, weight, conv_weight, conv_states, valid_columns, initial_slot,
-                query, key, value, z,
+                x, weight, conv_weight, conv_states, valid_columns, initial_slot, query, key, value,
+                z,
                 SnapshotHistoryPublish{static_cast<__nv_bfloat16*>(conv_states.data),
-                    static_cast<const std::int32_t*>(snapshot_base_slot.data), kGdnChannels}, stream);
+                                       static_cast<const std::int32_t*>(snapshot_base_slot.data),
+                                       kGdnChannels},
+                stream);
             return;
         }
         if (x.ne[1] == 1 && x.ne[2] > 1 && x.ne[2] <= 8) {
@@ -167,7 +170,7 @@ void fp8_gdn_snapshot_fused(const Tensor& x, const Weight& weight, const Tensor&
             return;
         }
     }
-    if (x.ne[2] != 1 || x.ne[1] <= 0 || x.ne[1] > 3) {
+    if (x.ne[2] != 1 || x.ne[1] <= 0 || x.ne[1] > 4) {
         throw std::invalid_argument("fp8 GDN snapshot fused: unsupported B/W");
     }
     const SnapshotHistoryPublish publish{static_cast<__nv_bfloat16*>(conv_states.data),
@@ -182,14 +185,17 @@ void fp8_gdn_snapshot_fused(const Tensor& x, const Weight& weight, const Tensor&
             Fp8GdnConvEpilogue<1, SnapshotHistoryPublish>{}, stream);
         return;
     }
-    if (x.ne[1] == 2) {
-        fp8_gdn_conv_small_t<InputRows, Scale, 2>(x, weight, conv_weight, conv_states,
-                                                  valid_columns, initial_slot, query, key, value, z,
-                                                  publish, stream);
-        return;
+    const auto launch_small = [&]<int Tokens>() {
+        fp8_gdn_conv_small_t<InputRows, Scale, Tokens>(x, weight, conv_weight, conv_states,
+                                                       valid_columns, initial_slot, query, key,
+                                                       value, z, publish, stream);
+    };
+    switch (x.ne[1]) {
+    case 2: launch_small.template operator()<2>(); return;
+    case 3: launch_small.template operator()<3>(); return;
+    case 4: launch_small.template operator()<4>(); return;
+    default: throw std::invalid_argument("fp8 GDN snapshot fused: unsupported B/W");
     }
-    fp8_gdn_conv_small_t<InputRows, Scale, 3>(x, weight, conv_weight, conv_states, valid_columns,
-                                              initial_slot, query, key, value, z, publish, stream);
 }
 
 // Record form uses the same projection and convolution arithmetic as snapshot form.
@@ -201,26 +207,29 @@ void fp8_gdn_record_fused(const Tensor& x, const Weight& weight, const Tensor& c
     if constexpr (InputRows == 2560) {
         if (x.ne[1] >= 2 && x.ne[1] <= 6 && x.ne[2] >= 1 && x.ne[2] <= 8) {
             fp8_gdn_conv_window_dispatch<InputRows, Scale>(
-                x, weight, conv_weight, conv_states, valid_columns, initial_slot,
-                query, key, value, z,
-                RecordColumnPublish{static_cast<__nv_bfloat16*>(conv_record.data),
-                    kGdnChannels, static_cast<std::int32_t>(x.ne[1])}, stream);
+                x, weight, conv_weight, conv_states, valid_columns, initial_slot, query, key, value,
+                z,
+                RecordColumnPublish{static_cast<__nv_bfloat16*>(conv_record.data), kGdnChannels,
+                                    static_cast<std::int32_t>(x.ne[1])},
+                stream);
             return;
         }
     }
-    if (x.ne[2] != 1 || x.ne[1] < 2 || x.ne[1] > 3) {
+    if (x.ne[2] != 1 || x.ne[1] < 2 || x.ne[1] > 4) {
         throw std::invalid_argument("fp8 GDN record fused: unsupported B/W");
     }
-    auto* record = static_cast<__nv_bfloat16*>(conv_record.data);
-    if (x.ne[1] == 2) {
-        fp8_gdn_conv_small_t<InputRows, Scale, 2>(
+    auto* record            = static_cast<__nv_bfloat16*>(conv_record.data);
+    const auto launch_small = [&]<int Tokens>() {
+        fp8_gdn_conv_small_t<InputRows, Scale, Tokens>(
             x, weight, conv_weight, conv_states, valid_columns, initial_slot, query, key, value, z,
-            RecordColumnPublish{record, kGdnChannels, 2}, stream);
-        return;
+            RecordColumnPublish{record, kGdnChannels, Tokens}, stream);
+    };
+    switch (x.ne[1]) {
+    case 2: launch_small.template operator()<2>(); return;
+    case 3: launch_small.template operator()<3>(); return;
+    case 4: launch_small.template operator()<4>(); return;
+    default: throw std::invalid_argument("fp8 GDN record fused: unsupported B/W");
     }
-    fp8_gdn_conv_small_t<InputRows, Scale, 3>(x, weight, conv_weight, conv_states, valid_columns,
-                                              initial_slot, query, key, value, z,
-                                              RecordColumnPublish{record, kGdnChannels, 3}, stream);
 }
 
 } // namespace ninfer::ops::detail

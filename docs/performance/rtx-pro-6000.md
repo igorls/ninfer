@@ -1,11 +1,130 @@
 # RTX PRO 6000 workstation records (fork)
 
 These results were measured on the fork's RTX PRO 6000 Blackwell 96 GB workstation and, where a
-section says so, on Colab G4 VMs with the same GPU in its Server Edition. The first section compares
-weight profiles; the next three compare the fork line with the previous release build; the others are records of the fork's
-pre-v3 engine (`research/qwen4-flash-next`), taken beside other desktop GPU work. They do not
-follow every rule of the [publication methodology](methodology.md); each section states its own
-conditions. Qwen3.8-Flash-Next records stay with that line until its port.
+section says so, on Colab G4 VMs with the same GPU in its Server Edition. The first section records
+the 2026-10-14 kernel and runtime optimizations for `Qwen3.8-27B` (`qwen3_5`) and
+`Qwen3.8-Flash-Next` (`qwen4_exp`); the second compares weight profiles; the next three compare the
+fork line with the previous release build; the others are records of the fork's pre-v3 engine
+(`research/qwen4-flash-next`), taken beside other desktop GPU work. They do not follow every rule of
+the [publication methodology](methodology.md); each section states its own conditions.
+
+## RTX PRO 6000 kernel and runtime optimizations (2026-10-14)
+
+### Phase 1: `Qwen3.8-27B` (`qwen3_5` Dense)
+
+Changes applied to the `qwen3_5` dense execution path and `sm_120a` operators:
+
+- **MTP FFN & post-attention fusion (`src/models/qwen3_5/program/mtp.cpp`):** Replaced four separate
+  kernels (`linear(w_gate)`, `linear(w_up)`, `swiglu`, `linear(w_down)`, `residual_add`) with two
+  fused ops (`linear_swiglu` + `linear_add`), and fused `linear(wo)` + `residual_add` into
+  `linear_add(wo, residual)` across both `prefill_mtp` and `forward_mtp_tokens`.
+- **Fused FP8 GDN input+conv1d for `B = 1, W <= 4` (`src/ops/gdn_input_proj/fp8/`):** Extended the
+  single-kernel `fp8_a16_gdn_input_decode_vec_kernel` with a `MultiToken = true` path handling
+  contiguous single-request MTP verification windows (`B = 1, W in [2, 4]`) with exact sequential
+  depthwise conv1d causal history updates across columns, eliminating two intermediate launches and
+  144 KB of global memory traffic per GDN layer (`48` layers).
+- **NVFP4 `linear_swiglu` `SmallTFusedA16` extended to `T <= 8` (`src/ops/linear_swiglu/nvfp4/`):**
+  Extended the register-resident activation path from `T <= 6` to `T <= 8` so DFlash2 `K=7` (`T=8`)
+  and `concurrency=8` decode stay on the fused register-resident path.
+- **188-SM `WaveCtas` retuning (`src/ops/linear/fp8/shapes/`, `src/ops/linear_add/fp8/`,
+  `src/ops/linear_swiglu/fp8/`, `src/ops/attn_input_proj/fp8/`, `src/ops/gdn_input_proj/fp8/`):**
+  Retuned `WaveCtas` in the FP8 A8 TMA Split-K schedules from RTX 5090 (`170` SMs, `336` CTAs) to
+  RTX PRO 6000 (`188` SMs, `376` CTAs = `2 * 188`) for `T <= 256` (`n6144_k5120`, `n12288_k5120`,
+  `n14336_k5120`, `n34816_k5120`, `n5120_k4096`, `n5120_k6144`, `n5120_k17408`).
+
+Workstation verification (`RTX PRO 6000 Blackwell`, Windows 11, MSVC 19.50, CUDA 13.3, live
+supervised `ninfer-serve` on `qwen3_8_27b_nvfp4_dflash2.ninfer` with `--spec mtp --draft-tokens 5
+--lm-head-draft --kv-dtype fp8 --max-concurrency 8`):
+
+- Unit tests: `ninfer_gdn_input_proj_fp8_test`, `ninfer_linear_swiglu_nvfp4_test`,
+  `ninfer_linear_fp8_a8_test`, `ninfer_linear_add_fp8_test`, `ninfer_linear_swiglu_fp8_test`, and
+  `ninfer_attn_input_proj_fp8_test` all pass against their independent FP32/FP64 oracles.
+- Live serving sanity check (`127.0.0.1:8099`): multi-turn `/v1/chat/completions` (`#chat` route)
+  reached **`201.4 tok/s`** (`296` tokens in `1.47 s`, Turn 1) and **`228.3 tok/s`** (`151` tokens in
+  `0.66 s`, Turn 2 with KV prefix reuse); `/v1/systemone` completed in **`264 ms`**.
+
+### Phase 2: `Qwen3.8-Flash-Next` (`qwen4_exp` Hybrid MoE, Colab G4)
+
+Measured on a Colab G4 VM (`NVIDIA RTX PRO 6000 Blackwell Server Edition`, 96 GB, Linux, CUDA 13.3,
+driver 580.126.20) on the derived v3 artifact `qwen3_8_flash_next_mixed.ninfer` (`3cade505298b...`,
+49 layers of 512 NVFP4-bank experts with top-10 + 1 shared expert, `H = 2560`, `I = 640`).
+
+Changes applied to `qwen4_exp` and its `K = 2560` / NVFP4-bank MoE operators:
+
+1. **BF16 `K = 2560` multi-token `T = 2..7` whole-call specializations
+   (`src/ops/linear/bf16/shapes/k2560.cu`):** Added `DecodeBatch`, `DecodeBatchDirect`, and
+   `DecodeBatchDirect8` templates for `T = 2, 3, 4, 5, 6, 7` and `NarrowDecodeBatch6` /
+   `NarrowDecodeBatch8` (`T = 2..8` and `9..48`) so `lm_head` (`[248320, 2560]`), PLE (`[10240, 2560]`),
+   QSA (`[13312, 2560]`), and `wo` (`[2560, 2560]`) read weight tiles once per verification batch
+   instead of splitting odd token counts (`T = 3, 5, 6, 7`) across multiple kernel launches.
+2. **NVFP4-bank Sparse MoE router + decode pipeline (`src/ops/linear/nvfp4/nvfp4_a16_gemv.cuh`,
+   `src/ops/sparse_moe/nvfp4_bank/nvfp4_bank_moe.h`, `route.cu`, `decode.cu`):**
+   - Added `nvfp4_a16_dot2560_pair_t` (`#pragma unroll 4` outer loop over 80 scale groups, loading
+     `weight_scales_a` and `weight_scales_b` once per 4-group iteration and pipelining four `uint4`
+     packed-byte loads per matrix) for `nvfp4_moe_decode_gate_up_kernel`.
+   - Unrolled `nvfp4_moe_router_GEMV_kernel` across 4 token rows per outer weight load while keeping
+     `kScoreRowsPerBlock = 4` (`129` blocks of 4 warps = 1 wave on 188 SMs).
+   - Eliminated unused `smem_products` shared-memory writes in `nvfp4_moe_decode_gate_up_kernel`
+     (shrinking dynamic shared memory from `34,688` to `20,608` bytes so 4 CTAs/SM fit in 100 KB).
+   - Introduced a hybrid selection + reduction crossover at `kNvfp4MoePreselectMinTokens = 6`:
+     for `T <= 5`, `nvfp4_moe_decode_gate_up_kernel<false>` selects the routed expert rank inline in
+     warp 0 (avoiding a separate selection kernel launch); for `T >= 6`, `nvfp4_moe_route` launches
+     `nvfp4_moe_select_kernel` once to precompute `selected_indices[T, 10]` and
+     `selected_weights[T, 10]`, and `nvfp4_moe_decode_down_row_kernel<true>` cooperatively stages
+     `products[11, 640]` into `14,080` bytes of shared memory before the 8 warps reduce `H = 2560`.
+3. **Bounded MTP proposal loop (`src/models/qwen4_exp/program/mtp.cpp`):** Bounded autoregressive
+   draft proposal steps in `decode_mtp_batch` by `proposal_steps = route_trace ? (width - 1) :
+   max_extent`, skipping `ar_hidden` copy, proposal graph launches, `drafts` D2H transfer, and the
+   mid-round `device.synchronize()` when `proposal_steps == 0`.
+
+#### Operator microbenchmarks on Colab G4 (`RTX PRO 6000 Server Edition`)
+
+`K = 2560` BF16 Linear (`ninfer_linear_bench`, cold L2 rotated across weight buffer pool):
+
+| Shape (`[N, K]`) | Consumer | `T` | Baseline (`us`) | Optimized (`us`) | Speedup | Sustained GB/s (% of peak) |
+|---|---|---:|---:|---:|---:|---:|
+| `[248320, 2560]` | `lm_head` | 4 | 839.68 | **835.58** | 1.005x | 1,521.4 (90.9%) |
+| `[248320, 2560]` | `lm_head` | 5 | 1,669.12 | **845.82** | **1.973x** (`-823.3 us`) | 1,506.1 (89.9%) |
+| `[248320, 2560]` | `lm_head` | 6 | 1,671.17 | **843.81** | **1.981x** (`-827.4 us`) | 1,510.3 (90.2%) |
+| `[248320, 2560]` | `lm_head` | 7 | 1,673.22 | **858.14** | **1.950x** (`-815.1 us`) | 1,485.7 (88.7%) |
+| `[248320, 2560]` | `lm_head` | 8 | 1,679.36 | **1,667.07** | 1.007x | 765.3 (45.7%) |
+| `[10240, 2560]` | PLE | 5 | 49.18 | **38.91** | **1.264x** (`-10.3 us`) | 1,350.7 (80.7%) |
+| `[10240, 2560]` | PLE | 6 | 49.15 | **40.96** | **1.200x** (`-8.2 us`) | 1,283.8 (76.7%) |
+| `[2560, 2560]` | `wo` / MTP | 5..7 | 16.38 | **12.29** | **1.333x** (`-4.1 us`) | 1,071.7 (64.0%) |
+
+`sparse_moe` NVFP4-bank (`H = 2560, E = 512, top_k = 10 + 1 shared, I = 640`, per layer and 49-layer sum):
+
+| `T` | Baseline cold (`us`) | Opt cold (`us`) | 49-layer cold delta | Baseline warm (`us`) | Opt warm (`us`) | 49-layer warm delta |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 60.38 | **56.29** | **-0.201 ms** (`1.073x`) | 30.40 | **29.50** | -0.044 ms (`1.031x`) |
+| 2 | 84.96 | **84.96** | 0.000 ms (`1.000x`) | 42.14 | **41.73** | -0.020 ms (`1.010x`) |
+| 3 | 104.38 | **103.39** | -0.049 ms (`1.010x`) | 54.78 | **54.02** | -0.037 ms (`1.014x`) |
+| 4 | 123.90 | **113.63** | **-0.503 ms** (`1.090x`) | 71.30 | **66.14** | **-0.253 ms** (`1.078x`) |
+| 5 | 133.50 | **132.06** | -0.071 ms (`1.011x`) | 83.14 | **78.66** | **-0.220 ms** (`1.057x`) |
+| 6 | 150.56 | **147.42** | -0.154 ms (`1.021x`) | 99.07 | **86.88** | **-0.598 ms** (`1.140x`) |
+| 8 | 177.15 | **168.96** | **-0.401 ms** (`1.048x`) | 125.54 | **111.33** | **-0.696 ms** (`1.128x`) |
+| 12 | 234.46 | **220.16** | **-0.701 ms** (`1.065x`) | 187.14 | **163.46** | **-1.161 ms** (`1.145x`) |
+| 16 | 289.79 | **265.22** | **-1.204 ms** (`1.093x`) | 240.42 | **209.73** | **-1.503 ms** (`1.146x`) |
+| 24 | 390.14 | **345.09** | **-2.208 ms** (`1.131x`) | 350.75 | **299.84** | **-2.495 ms** (`1.170x`) |
+| 48 | 709.63 | **602.11** | **-5.269 ms** (`1.179x`) | 674.14 | **569.92** | **-5.107 ms** (`1.183x`) |
+
+#### End-to-end `ninfer_bench` on `qwen3_8_flash_next_mixed.ninfer` (Colab G4)
+
+All 21 real-artifact checks in `ninfer_qwen4_exp_engine_real_test`, all 27 cases in
+`ninfer_sparse_moe_nvfp4_test`, and `ninfer_linear_bf16_a16_test` pass.
+
+| Concurrency | Workload | Speculation | Baseline (`tok/s`) | Optimized (`tok/s`) | Batch out (`tok/s`, base $\to$ opt) | Gain |
+|---:|---|---|---:|---:|---:|---:|
+| 1 | `pp512` | `none` | `7,237.41 ± 2.54` | **`7,256.71 ± 12.49`** | — | **+0.27%** |
+| 1 | `pp2048` | `none` | `8,933.97 ± 3.58` | **`9,224.07 ± 19.72`** | — | **+3.25%** |
+| 1 | `tg128` | `none` (`T=1`) | `132.24 ± 0.03` | **`134.39 ± 0.20`** | `131.80` $\to$ **`133.93`** | **+1.63%** |
+| 1 | `tg128` | `mtp` (`draft=3`, `T=4`) | `168.16 ± 0.29` | **`177.26 ± 1.14`** | `164.39` $\to$ **`173.07`** | **+5.41%** |
+| 1 | `tg128` | `mtp` (`draft=4`, `T=5`) | `145.71 ± 0.44` | **`170.60 ± 0.19`** | `143.04` $\to$ **`167.03`** | **+17.08%** |
+| 1 | `tg128` | `mtp` (`draft=5`, `T=6`) | `148.20 ± 0.34` | **`161.33 ± 0.23`** | `145.69` $\to$ **`158.25`** | **+8.86%** |
+| 4 | `tg128` | `none` (`T=4`) | `85.05 ± 0.33` | **`86.78 ± 0.27`** | `328.83` $\to$ **`335.48`** | **+2.02%** |
+| 8 | `tg128` | `none` (`T=8`) | `57.11 ± 0.20` | **`58.38 ± 0.16`** | `431.96` $\to$ **`441.71`** | **+2.26%** |
+| 4 | `tg128` | `mtp` (`draft=3`, `T=16`) | `82.18 ± 0.32` | **`91.36 ± 0.68`** | `303.45` $\to$ **`336.04`** | **+10.74%** |
+| 8 | `tg128` | `mtp` (`draft=3`, `T=32`) | `48.00 ± 0.51` | **`54.69 ± 0.66`** | `341.03` $\to$ **`385.88`** | **+13.15%** |
 
 ## Qwen3.8-27B `nvfp4full` against the production profile (2026-09-28)
 

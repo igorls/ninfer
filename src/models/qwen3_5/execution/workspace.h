@@ -196,20 +196,6 @@ MtpAttentionResultRoots mtp_attention_results(Allocator& allocator, const TextCo
     };
 }
 
-struct MtpPostAttentionRoots {
-    Tensor output;
-    Tensor post_mixer_hidden;
-};
-
-template <class Allocator>
-MtpPostAttentionRoots mtp_post_attention(Allocator& allocator, const TextConfig& config,
-                                         std::int32_t tokens) {
-    return {
-        matrix(allocator, DType::BF16, dimension(config.hidden_size), tokens),
-        matrix(allocator, DType::BF16, dimension(config.hidden_size), tokens),
-    };
-}
-
 struct DFlashContextRoots {
     Tensor projected;
     Tensor normalized;

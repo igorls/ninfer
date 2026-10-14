@@ -165,25 +165,77 @@ compute_nvfp4_rows(const __nv_bfloat16* __restrict__ x, const std::uint8_t* __re
 
 #pragma unroll
     for (int phase = 0; phase < kPhases; ++phase) {
-        float coefficients[Schedule::kRowsPerWarp][kGroupsPerLane];
         Nvfp4CodePack<Schedule::kValuesPerLane> row_codes[Schedule::kRowsPerWarp];
 #pragma unroll
         for (int local_row = 0; local_row < Schedule::kRowsPerWarp; ++local_row) {
-            load_nvfp4_coefficients<Geometry, Schedule>(
-                scales, shared, parent_rows[local_row], flat_row0 + local_row, phase, lane,
-                inverse_weight_divisor, coefficients[local_row]);
             const std::int64_t code_offset =
                 static_cast<std::int64_t>(parent_rows[local_row]) * Geometry::kCodeBytesPerRow +
                 phase * (kValuesPerPhase / 2) + lane * (Schedule::kValuesPerLane / 2);
             row_codes[local_row] = load_nvfp4_codes<Schedule::kCodeCache, Schedule::kValuesPerLane>(
                 codes + code_offset);
         }
+        std::uint32_t act_words[Schedule::kPairsPerLane];
+        if constexpr (Schedule::kPairsPerLane == 4) {
+            const uint4 vec =
+                load_vec<uint4>(x + phase * kValuesPerPhase + lane * Schedule::kValuesPerLane);
+            act_words[0] = vec.x;
+            act_words[1] = vec.y;
+            act_words[2] = vec.z;
+            act_words[3] = vec.w;
+        } else if constexpr (Schedule::kPairsPerLane == 8) {
+            const uint4 vec0 =
+                load_vec<uint4>(x + phase * kValuesPerPhase + lane * Schedule::kValuesPerLane);
+            const uint4 vec1 =
+                load_vec<uint4>(x + phase * kValuesPerPhase + lane * Schedule::kValuesPerLane + 8);
+            act_words[0] = vec0.x;
+            act_words[1] = vec0.y;
+            act_words[2] = vec0.z;
+            act_words[3] = vec0.w;
+            act_words[4] = vec1.x;
+            act_words[5] = vec1.y;
+            act_words[6] = vec1.z;
+            act_words[7] = vec1.w;
+        } else {
+#pragma unroll
+            for (int pair = 0; pair < Schedule::kPairsPerLane; ++pair) {
+                act_words[pair] = activation_pairs[phase * (kValuesPerPhase / 2) +
+                                                   lane * Schedule::kPairsPerLane + pair];
+            }
+        }
+        float coefficients[Schedule::kRowsPerWarp][kGroupsPerLane];
+        if constexpr (Schedule::kScaleAccess == Nvfp4ScaleAccess::Direct) {
+            const int value_begin =
+                phase * 32 * Schedule::kValuesPerLane + lane * Schedule::kValuesPerLane;
+            const int group_begin = value_begin / 16;
+            std::uint8_t raw_scales[Schedule::kRowsPerWarp][kGroupsPerLane];
+#pragma unroll
+            for (int local_row = 0; local_row < Schedule::kRowsPerWarp; ++local_row) {
+#pragma unroll
+                for (int group = 0; group < kGroupsPerLane; ++group) {
+                    raw_scales[local_row][group] = scales[nvfp4_scale_offset<Geometry>(
+                        parent_rows[local_row], group_begin + group)];
+                }
+            }
+#pragma unroll
+            for (int local_row = 0; local_row < Schedule::kRowsPerWarp; ++local_row) {
+#pragma unroll
+                for (int group = 0; group < kGroupsPerLane; ++group) {
+                    coefficients[local_row][group] =
+                        decode_nvfp4_e4m3(raw_scales[local_row][group]) * inverse_weight_divisor;
+                }
+            }
+        } else {
+#pragma unroll
+            for (int local_row = 0; local_row < Schedule::kRowsPerWarp; ++local_row) {
+                load_nvfp4_coefficients<Geometry, Schedule>(
+                    scales, shared, parent_rows[local_row], flat_row0 + local_row, phase, lane,
+                    inverse_weight_divisor, coefficients[local_row]);
+            }
+        }
 
 #pragma unroll
         for (int pair = 0; pair < Schedule::kPairsPerLane; ++pair) {
-            const int activation_index =
-                phase * (kValuesPerPhase / 2) + lane * Schedule::kPairsPerLane + pair;
-            const float2 activation = bf16x2_bits_to_float2(activation_pairs[activation_index]);
+            const float2 activation = bf16x2_bits_to_float2(act_words[pair]);
             const int group         = ((lane * Schedule::kValuesPerLane & 15) + pair * 2) / 16;
 #pragma unroll
             for (int local_row = 0; local_row < Schedule::kRowsPerWarp; ++local_row) {

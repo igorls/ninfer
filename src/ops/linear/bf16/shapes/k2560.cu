@@ -15,11 +15,39 @@ using Gemv = Bf16A16GemvSchedule<4, 1, 8, 8, 4, Bf16ActivationAccess::Direct,
 using DecodeBatch =
     Bf16A16SimtSchedule<4, 1, 8, 8, 4, 4, Bf16SimtActivationAccess::WarpPacked,
                         Bf16WeightCache::Default, Bf16PhaseOrder::RowSwizzled, 1, 1, 1, 2>;
+using DecodeBatchDirect =
+    Bf16A16SimtSchedule<4, 1, 8, 8, 4, 2, Bf16SimtActivationAccess::DirectStream,
+                        Bf16WeightCache::Default, Bf16PhaseOrder::RowSwizzled, 1, 1, 1, 2, 6>;
+using DecodeBatchDirect8 =
+    Bf16A16SimtSchedule<4, 1, 8, 8, 4, 1, Bf16SimtActivationAccess::DirectStream,
+                        Bf16WeightCache::Default, Bf16PhaseOrder::RowSwizzled, 1, 1, 1, 1, 8>;
 } // namespace
 
 Bf16Launch select_bf16_n10240_k2560(std::int32_t tokens) {
-    if (tokens == 1) return launch_bf16_gemv<Bf16ScheduleInstance<Gemv, 2560>>;
-    if (tokens <= 48) return launch_bf16_simt<Bf16ScheduleInstance<DecodeBatch, 2560>>;
+    switch (tokens) {
+    case 1:
+        return launch_bf16_gemv<Bf16ScheduleInstance<Gemv, 2560>>;
+    case 2:
+        return launch_bf16_simt<Bf16ScheduleInstance<DecodeBatch, 2560, 2, true>>;
+    case 3:
+        return launch_bf16_simt<Bf16ScheduleInstance<DecodeBatch, 2560, 3, true>>;
+    case 4:
+        return launch_bf16_simt<Bf16ScheduleInstance<DecodeBatch, 2560, 4, true>>;
+    case 5:
+        return launch_bf16_simt<Bf16ScheduleInstance<DecodeBatch, 2560, 5, true>>;
+    case 6:
+        return launch_bf16_simt<Bf16ScheduleInstance<DecodeBatchDirect, 2560, 6, true>>;
+    case 7:
+        return launch_bf16_simt<Bf16ScheduleInstance<DecodeBatchDirect8, 2560, 7, true>>;
+    default:
+        break;
+    }
+    if (tokens <= 48) {
+        if ((tokens + 5) / 6 < (tokens + 3) / 4) {
+            return launch_bf16_simt<Bf16ScheduleInstance<DecodeBatchDirect, 2560>>;
+        }
+        return launch_bf16_simt<Bf16ScheduleInstance<DecodeBatch, 2560>>;
+    }
     if (tokens <= 64) return launch_bf16_tma_mma<Bf16ScheduleInstance<Bf16A16TmaR64T64K64S3, 2560>>;
     if (tokens <= 96) return launch_bf16_mma<Bf16ScheduleInstance<Bf16A16MmaR64T32K64S3, 2560>>;
     if (tokens <= 128)
@@ -46,11 +74,41 @@ using NarrowC4 =
 using NarrowDecodeBatch =
     Bf16A16SimtSchedule<4, 2, 2, 8, 4, 4, Bf16SimtActivationAccess::WarpPacked,
                         Bf16WeightCache::Default, Bf16PhaseOrder::RowSwizzled, 1, 1, 2, 1>;
+using NarrowDecodeBatch6 =
+    Bf16A16SimtSchedule<4, 2, 2, 8, 4, 4, Bf16SimtActivationAccess::WarpPacked,
+                        Bf16WeightCache::Default, Bf16PhaseOrder::RowSwizzled, 1, 1, 2, 1, 6>;
+using NarrowDecodeBatch8 =
+    Bf16A16SimtSchedule<4, 2, 2, 8, 4, 4, Bf16SimtActivationAccess::WarpPacked,
+                        Bf16WeightCache::Default, Bf16PhaseOrder::RowSwizzled, 1, 1, 2, 1, 8>;
 } // namespace
 
 Bf16Launch select_bf16_n2560_k2560(std::int32_t tokens) {
-    if (tokens == 1) return launch_bf16_gemv<Bf16ScheduleInstance<NarrowGemv, 2560>>;
-    if (tokens <= 48) return launch_bf16_simt<Bf16ScheduleInstance<NarrowDecodeBatch, 2560>>;
+    switch (tokens) {
+    case 1:
+        return launch_bf16_gemv<Bf16ScheduleInstance<NarrowGemv, 2560>>;
+    case 2:
+        return launch_bf16_simt<Bf16ScheduleInstance<NarrowDecodeBatch, 2560, 2, true>>;
+    case 3:
+        return launch_bf16_simt<Bf16ScheduleInstance<NarrowDecodeBatch, 2560, 3, true>>;
+    case 4:
+        return launch_bf16_simt<Bf16ScheduleInstance<NarrowDecodeBatch, 2560, 4, true>>;
+    case 5:
+        return launch_bf16_simt<Bf16ScheduleInstance<NarrowDecodeBatch6, 2560, 5, true>>;
+    case 6:
+        return launch_bf16_simt<Bf16ScheduleInstance<NarrowDecodeBatch6, 2560, 6, true>>;
+    case 7:
+        return launch_bf16_simt<Bf16ScheduleInstance<NarrowDecodeBatch8, 2560, 7, true>>;
+    case 8:
+        return launch_bf16_simt<Bf16ScheduleInstance<NarrowDecodeBatch8, 2560, 8, true>>;
+    default:
+        break;
+    }
+    if (tokens <= 48) {
+        if ((tokens + 7) / 8 < (tokens + 5) / 6) {
+            return launch_bf16_simt<Bf16ScheduleInstance<NarrowDecodeBatch8, 2560>>;
+        }
+        return launch_bf16_simt<Bf16ScheduleInstance<NarrowDecodeBatch6, 2560>>;
+    }
     return select_bf16_n2560_k2560_prefill(tokens);
 }
 

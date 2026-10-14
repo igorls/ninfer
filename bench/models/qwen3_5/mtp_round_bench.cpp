@@ -146,8 +146,13 @@ int run(const Options& options) {
     engine = ninfer::runtime::normalize_engine_options(std::move(engine));
     ninfer::DeviceContext device(options.device);
     auto constructed = ninfer::runtime::construct_model(engine, device);
-    auto& frontend   = constructed.instance->frontend;
-    auto& program    = constructed.instance->program;
+    const auto* qwen_instance =
+        std::get_if<std::unique_ptr<ninfer::runtime::Qwen3_5Instance>>(&constructed.instance);
+    if (qwen_instance == nullptr || *qwen_instance == nullptr) {
+        throw std::runtime_error("mtp_round_bench requires a Qwen3_5 model artifact");
+    }
+    auto& frontend = (*qwen_instance)->frontend;
+    auto& program  = (*qwen_instance)->program;
     auto prompt      = frontend.prepare_tokens(seed, false);
     ninfer::runtime::ResolvedExecutionOptions execution;
     execution.requested_output_tokens = 1 + measured_rounds * (options.draft_tokens + 1);

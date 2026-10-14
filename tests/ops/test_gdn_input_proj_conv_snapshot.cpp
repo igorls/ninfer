@@ -1142,8 +1142,12 @@ int run_fp8() {
     failures += run_fp8_case(profile, parent, 1, ops::LinearPolicy::A16Only, 2, true, true);
     failures += run_fp8_case(profile, parent, 3, ops::LinearPolicy::A16Only, 4);
     failures += run_fp8_case(profile, parent, 4, ops::LinearPolicy::A16Only, 5);
+    failures += run_fp8_case(profile, parent, 4, ops::LinearPolicy::AllowA8, 5);
+    failures += run_fp8_case(profile, parent, 5, ops::LinearPolicy::AllowA8, 6);
     failures += run_fp8_case(profile, parent, 6, ops::LinearPolicy::A16Only, 7);
+    failures += run_fp8_case(profile, parent, 6, ops::LinearPolicy::AllowA8, 7);
     failures += run_fp8_case(profile, parent, 7, ops::LinearPolicy::A16Only, 8);
+    failures += run_fp8_case(profile, parent, 7, ops::LinearPolicy::AllowA8, 8);
     failures += run_fp8_case(profile, parent, 9, ops::LinearPolicy::AllowA8, 10);
     failures += run_fp8_case(profile, parent, 10, ops::LinearPolicy::AllowA8, 11);
     failures += run_fp8_case(profile, parent, 10, ops::LinearPolicy::A16Only, 11);
@@ -1154,6 +1158,12 @@ int run_fp8() {
     failures += run_fp8_case(profile, parent, 512, ops::LinearPolicy::AllowA8, 513);
     failures += run_fp8_case(profile, parent, 1025, ops::LinearPolicy::AllowA8, 1026);
 
+    for (const auto policy : {ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA8}) {
+        for (std::int32_t batch = 2; batch <= 8; ++batch) {
+            failures += run_fp8_batched(profile, parent, 1, batch, {}, 930U + batch, policy);
+        }
+    }
+    failures += run_fp8_batched(profile, parent, 1, 8, {1, 0, 1, 1, 0, 1, 1, 1}, 939U);
     failures += run_fp8_batched(profile, parent, 4, 2, {4, 2}, 937U);
     failures += run_fp8_batched(profile, parent, 16, 8, {16, 13, 11, 7, 5, 3, 2, 1}, 941U);
     failures += parent.verify_preserved("batched FP8 parent weight");

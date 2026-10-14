@@ -471,17 +471,18 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
     }
     ops::sigmoid_mul(gate, a, s);
 
-    const auto post = workspace::mtp_post_attention(work_, config_, T);
-    Tensor o        = post.output;
-    project(a.view({dimension(config_.attention->query_width()), T}), mtp_->output, o, work_, s);
-    ops::residual_add(o, x, s);
+    {
+        auto output_scope = work_.scope();
+        ops::linear_add(a.view({dimension(config_.attention->query_width()), T}),
+                        mtp_->output.weight, x, mtp_->output.policy, work_, s);
+    }
 
-    Tensor mh = post.post_mixer_hidden;
+    Tensor mh = workspace::post_mixer_hidden(work_, config_, T);
     ops::rmsnorm(x, mtp_->post_attention_norm, config_.rms_norm_eps, true, mh, s);
 
     {
         auto post_mixer_scope = work_.scope();
-        ffn(mh, mtp_->ffn, x, {}, work_, ctx_.execution_view(), true);
+        ffn(mh, mtp_->ffn, x, {}, work_, ctx_.execution_view());
     }
 
     Tensor flat_mtp_hidden = mtp_hidden.view({dimension(config_.hidden_size), T});
@@ -620,16 +621,17 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
             mtp_kv_.layer_view(0), envelope, work_, a, ctx_.execution_view());
         ops::sigmoid_mul(gate, a, s);
 
-        Tensor o = work_.alloc(DType::BF16, {dimension(config_.hidden_size), 1});
-        project(a.view({dimension(config_.attention->query_width()), 1}), mtp_->output, o, work_,
-                s);
-        ops::residual_add(o, x_last, s);
+        {
+            auto output_scope = work_.scope();
+            ops::linear_add(a.view({dimension(config_.attention->query_width()), 1}),
+                            mtp_->output.weight, x_last, mtp_->output.policy, work_, s);
+        }
 
-        Tensor mh = work_.alloc(DType::BF16, {dimension(config_.hidden_size), 1});
+        Tensor mh = workspace::post_mixer_hidden(work_, config_, 1);
         ops::rmsnorm(x_last, mtp_->post_attention_norm, config_.rms_norm_eps, true, mh, s);
         {
             auto post_mixer_scope = work_.scope();
-            ffn(mh, mtp_->ffn, x_last, {}, work_, ctx_.execution_view(), true);
+            ffn(mh, mtp_->ffn, x_last, {}, work_, ctx_.execution_view());
         }
         ops::rmsnorm(x_last, mtp_->final_norm, config_.rms_norm_eps, true, *final_hidden, s);
         proposal_argmax(*final_hidden, *logits, *draft_token);

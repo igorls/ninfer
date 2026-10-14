@@ -42,7 +42,7 @@ void require_policy(LinearPolicy policy, const char* operation) {
 }
 
 Fp8GdnConvPlan b1_a16_plan(std::int32_t width) {
-    const bool fused = width <= 3;
+    const bool fused = width <= 4;
     return {fused ? Fp8GdnConvScheduleId::FusedA16 : Fp8GdnConvScheduleId::MaterializedA16};
 }
 
@@ -85,7 +85,10 @@ Fp8GdnConvPlan fp8_gdn_snapshot_resolve_plan(const Fp8GdnInputProfile& profile, 
     if (width <= 0 || batch_size <= 0 || batch_size > 8 || (batch_size > 1 && width > 16)) {
         throw std::invalid_argument("fp8 GDN snapshot: invalid B/W domain");
     }
-    if (profile.input_rows == 2560 && width <= 6) { return {Fp8GdnConvScheduleId::FusedA16}; }
+    if ((batch_size == 1 && width == 1) ||
+        (profile.input_rows == 2560 && (width == 1 || width <= 6))) {
+        return {Fp8GdnConvScheduleId::FusedA16};
+    }
     if (batch_size == 1) {
         if (allows_a8(policy) && width >= 17) { return {Fp8GdnConvScheduleId::MaterializedA8}; }
         return b1_a16_plan(width);

@@ -122,7 +122,8 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
     auto& host            = *mtp_ingress;
     *mtp_egress           = {};
     host                  = {};
-    std::uint32_t maximum = 0;
+    std::uint32_t maximum    = 0;
+    std::int32_t max_extent  = 0;
     for (std::int32_t row = 0; row < batch; ++row) {
         const auto lane = lanes[row];
         if (lane >= max_concurrency ||
@@ -145,6 +146,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
                 : std::min({draft_window, budgets[row].generated_tokens_remaining - 1,
                             capacity - frontier - 1});
         host.extents[row]           = static_cast<std::int32_t>(extent);
+        max_extent                  = std::max(max_extent, host.extents[row]);
         host.valid[row]             = static_cast<std::int32_t>(extent + 1);
         host.frontiers[row]         = static_cast<std::int32_t>(frontier);
         host.anchors[row]           = sequence.ledger.back();
@@ -166,70 +168,81 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
                     position + sequence.rope_delta;
             }
         }
-        copy(frame.ar_hidden.slice(1, row, 1),
-             state_images->continuation_hidden_slot(selectors.source)
-                 .view({frame.ar_hidden.ne[0], 1}),
-             device.stream);
+        if (extent > 0 || route_trace) {
+            copy(frame.ar_hidden.slice(1, row, 1),
+                 state_images->continuation_hidden_slot(selectors.source)
+                     .view({frame.ar_hidden.ne[0], 1}),
+                 device.stream);
+        }
     }
+    const std::int32_t proposal_steps = route_trace ? (width - 1) : max_extent;
     ops::QsaIndexerSelectEnvelope envelope{
         indexer_envelope_blocks(maximum, parameters.model.config().text.indexer.compress_ratio)};
     DecodeGraphExecutable* proposal_graph = nullptr;
     DecodeGraphExecutable* verify_graph   = nullptr;
     if (use_cuda_graph) {
-        proposal_graph = &mtp_graph_for(mtp_proposal_graphs, batch, maximum);
-        verify_graph   = &mtp_graph_for(mtp_verify_graphs, batch, maximum);
+        if (proposal_steps > 0) {
+            proposal_graph = &mtp_graph_for(mtp_proposal_graphs, batch, maximum);
+        }
+        verify_graph = &mtp_graph_for(mtp_verify_graphs, batch, maximum);
     }
     const auto input = [&](std::size_t offset, std::int32_t count) {
         return frame.i32(offset, count);
     };
-    CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, &host, sizeof(host), cudaMemcpyHostToDevice,
-                               device.stream));
-    copy(frame.proposal_ids, input(offsetof(MtpIngress, anchors), batch), device.stream);
-    copy(frame.proposal_sources, input(offsetof(MtpIngress, sources), batch), device.stream);
     execution::TextContext card(device, parameters, work, *ple_gather, {}, *state_images, io,
                                 prefill_hidden, prefill_chunk, 0, &decoder->text_kv);
     card.set_mtp_cache({}, decoder->mtp_cache());
     mark_workspace_usage(workspace_plan.mtp_round);
-    // Each recursive proposal writes a private forming-block slot. Canonical MTP state remains
-    // untouched until teacher extension has rebuilt every accepted target prefix.
-    for (std::int32_t step = 0; step < width - 1; ++step) {
-        copy(frame.proposal_positions,
-             input(offsetof(MtpIngress, proposal_positions), (width - 1) * batch)
-                 .slice(0, step * batch, batch),
-             device.stream);
-        copy(frame.proposal_rope,
-             input(offsetof(MtpIngress, proposal_rope), 3 * (width - 1) * batch)
-                 .slice(0, step * 3 * batch, 3 * batch)
-                 .view({batch, 3}),
-             device.stream);
-        if (step == 0) {
-            for (std::int32_t row = 0; row < batch; ++row) {
-                const auto saved = state_images->continuation_positions_slot(host.sources[row]);
-                for (std::int32_t axis = 0; axis < 3; ++axis) {
-                    CUDA_CHECK(cudaMemcpyAsync(
-                        static_cast<std::int32_t*>(frame.proposal_rope.data) + axis * batch + row,
-                        static_cast<const std::int32_t*>(saved.data) + axis, sizeof(std::int32_t),
-                        cudaMemcpyDeviceToDevice, device.stream));
+    if (proposal_steps > 0) {
+        CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, &host, sizeof(host), cudaMemcpyHostToDevice,
+                                   device.stream));
+        copy(frame.proposal_ids, input(offsetof(MtpIngress, anchors), batch), device.stream);
+        copy(frame.proposal_sources, input(offsetof(MtpIngress, sources), batch), device.stream);
+        // Each recursive proposal writes a private forming-block slot. Canonical MTP state remains
+        // untouched until teacher extension has rebuilt every accepted target prefix.
+        for (std::int32_t step = 0; step < proposal_steps; ++step) {
+            copy(frame.proposal_positions,
+                 input(offsetof(MtpIngress, proposal_positions), (width - 1) * batch)
+                     .slice(0, step * batch, batch),
+                 device.stream);
+            copy(frame.proposal_rope,
+                 input(offsetof(MtpIngress, proposal_rope), 3 * (width - 1) * batch)
+                     .slice(0, step * 3 * batch, 3 * batch)
+                     .view({batch, 3}),
+                 device.stream);
+            if (step == 0) {
+                for (std::int32_t row = 0; row < batch; ++row) {
+                    const auto saved = state_images->continuation_positions_slot(host.sources[row]);
+                    for (std::int32_t axis = 0; axis < 3; ++axis) {
+                        CUDA_CHECK(cudaMemcpyAsync(static_cast<std::int32_t*>(
+                                                       frame.proposal_rope.data) +
+                                                       axis * batch + row,
+                                                   static_cast<const std::int32_t*>(saved.data) +
+                                                       axis,
+                                                   sizeof(std::int32_t), cudaMemcpyDeviceToDevice,
+                                                   device.stream));
+                    }
                 }
             }
+            if (proposal_graph != nullptr) {
+                proposal_graph->launch(device.stream);
+            } else {
+                mtp_proposal_body(batch, envelope);
+            }
+            if (route_trace) { route_trace->download_proposal(step, batch, device.stream); }
+            CUDA_CHECK(cudaMemcpy2DAsync(static_cast<std::int32_t*>(frame.drafts.data) + step,
+                                         (width - 1) * sizeof(std::int32_t),
+                                         frame.proposal_ids.data, sizeof(std::int32_t),
+                                         sizeof(std::int32_t), batch, cudaMemcpyDeviceToDevice,
+                                         device.stream));
         }
-        if (proposal_graph != nullptr) {
-            proposal_graph->launch(device.stream);
-        } else {
-            mtp_proposal_body(batch, envelope);
-        }
-        if (route_trace) { route_trace->download_proposal(step, batch, device.stream); }
-        CUDA_CHECK(cudaMemcpy2DAsync(static_cast<std::int32_t*>(frame.drafts.data) + step,
-                                     (width - 1) * sizeof(std::int32_t), frame.proposal_ids.data,
-                                     sizeof(std::int32_t), sizeof(std::int32_t), batch,
-                                     cudaMemcpyDeviceToDevice, device.stream));
+        CUDA_CHECK(cudaMemcpyAsync(mtp_egress->drafts.data(), frame.drafts.data,
+                                   frame.drafts.bytes(), cudaMemcpyDeviceToHost, device.stream));
+        timing.begin_wait();
+        device.synchronize();
+        timing.end_wait();
+        timing.resume_submit();
     }
-    CUDA_CHECK(cudaMemcpyAsync(mtp_egress->drafts.data(), frame.drafts.data, frame.drafts.bytes(),
-                               cudaMemcpyDeviceToHost, device.stream));
-    timing.begin_wait();
-    device.synchronize();
-    timing.end_wait();
-    timing.resume_submit();
     if (route_trace && width > 1) {
         std::vector<execution::RouteTraceColumn> proposed(
             static_cast<std::size_t>((width - 1) * batch));

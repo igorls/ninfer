@@ -389,8 +389,9 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         }
     };
     const auto mtp_post_mixer = [&](WorkspaceLayoutBuilder& layout, int first, int last) {
-        linear_scratch(layout, parameters.mtp->output, first, last);
-        scratch(layout, execution::ffn_workspace_bytes(parameters.mtp->ffn, first, last, true));
+        add_scratch(layout, parameters.mtp->output, first, last);
+        (void)workspace::post_mixer_hidden(layout, config, last);
+        scratch(layout, execution::ffn_workspace_bytes(parameters.mtp->ffn, first, last));
     };
     const auto proposal_scratch = [&](WorkspaceLayoutBuilder& layout, std::int32_t columns) {
         if (plan.proposal_head == ProposalHead::Optimized) {
@@ -418,7 +419,6 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                              dimension(config.attention->num_attention_heads),
                              dimension(config.attention->num_key_value_heads)},
                             plan.kv_storage, envelope, 1, tokens, tokens, device_execution));
-        (void)workspace::mtp_post_attention(layout, config, tokens);
         mtp_post_mixer(layout, tokens, tokens);
     };
     const auto mtp_full_call = [&](WorkspaceLayoutBuilder& layout, std::int32_t tokens,
@@ -458,8 +458,6 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                              dimension(config.attention->num_attention_heads),
                              dimension(config.attention->num_key_value_heads)},
                             plan.kv_storage, text_envelope, 1, 1, 1, device_execution));
-        matrix(layout, DType::BF16, dimension(config.hidden_size), 1);
-        matrix(layout, DType::BF16, dimension(config.hidden_size), 1);
         mtp_post_mixer(layout, 1, 1);
         proposal_scratch(layout, 1);
     };
@@ -555,7 +553,6 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                              dimension(config.attention->num_attention_heads),
                              dimension(config.attention->num_key_value_heads)},
                             plan.kv_storage, text_envelope, batch, width, width, device_execution));
-                (void)workspace::mtp_post_attention(layout, config, tokens);
                 mtp_post_mixer(layout, tokens, tokens);
             };
 

@@ -1,7 +1,7 @@
 // Router of the NVFP4-bank SparseMoe: 513 FP32 score rows (512 experts plus the shared-expert
-// gate) per token. The decode route (T <= 8) only projects the scores; its gate/up kernel selects
-// from them after the kernel boundary (decode.cu). Grouped routes project with the BF16 MMA and
-// select in a separate kernel. Selection itself is select.cuh.
+// gate) per token, followed by top-10 selection. The decode route (T <= 48) projects all 513
+// score rows in one register-resident kernel; grouped routes project with the BF16 MMA and shared
+// gate kernel. Selection itself is select.cuh.
 
 #include "ops/sparse_moe/nvfp4_bank/nvfp4_bank_moe.h"
 
@@ -23,9 +23,8 @@ constexpr int kHidden    = kNvfp4MoeHidden;
 constexpr int kScoreRows = kNvfp4MoeScoreRows;
 
 // ---------------------------------------------------------------------------------------------
-// Decode scores (T <= 8): 129 CTAs of four warps; each warp owns one score row and keeps its 2560
+// Decode scores (T <= 48): 129 CTAs of four warps; each warp owns one score row and keeps its 2560
 // weights in registers while looping over the tokens, so the router matrix is read once per call.
-// No CTA waits for another: the selection runs in the next kernel.
 // ---------------------------------------------------------------------------------------------
 constexpr int kScoreRowsPerBlock = 4;
 constexpr int kScoreThreads      = kScoreRowsPerBlock * 32;
@@ -33,6 +32,12 @@ constexpr int kScoreBlocks       = (kScoreRows + kScoreRowsPerBlock - 1) / kScor
 constexpr int kStepsPerLane      = kHidden / (32 * 8);
 
 static_assert(kHidden % 256 == 0, "a lane owns whole 16-byte chunks");
+
+__device__ __forceinline__ float finish_row_score(const float (&acc)[8]) {
+    const float sum =
+        ((acc[0] + acc[4]) + (acc[2] + acc[6])) + ((acc[1] + acc[5]) + (acc[3] + acc[7]));
+    return nvfp4_moe_warp_sum(sum);
+}
 
 __device__ __forceinline__ float decode_row_score(const uint4 (&w)[kStepsPerLane],
                                                   const uint4* __restrict__ x_chunks, int lane) {
@@ -49,8 +54,7 @@ __device__ __forceinline__ float decode_row_score(const uint4 (&w)[kStepsPerLane
             acc[i] = fmaf(__bfloat162float(w_bf[i]), __bfloat162float(x_bf[i]), acc[i]);
         }
     }
-    float sum = ((acc[0] + acc[4]) + (acc[2] + acc[6])) + ((acc[1] + acc[5]) + (acc[3] + acc[7]));
-    return nvfp4_moe_warp_sum(sum);
+    return finish_row_score(acc);
 }
 
 __global__ void __launch_bounds__(kScoreThreads)
@@ -66,10 +70,72 @@ __global__ void __launch_bounds__(kScoreThreads)
     const __nv_bfloat16* weight =
         row < kExperts ? router + static_cast<std::int64_t>(row) * kHidden : shared_gate;
     const auto* w_chunks = reinterpret_cast<const uint4*>(weight);
+    if (tokens == 1) {
+        const auto* x_chunks = reinterpret_cast<const uint4*>(x);
+        float acc[8]         = {};
+#pragma unroll
+        for (int j = 0; j < kStepsPerLane; ++j) {
+            const uint4 w_raw = __ldg(w_chunks + j * 32 + lane);
+            const uint4 x_raw = __ldg(x_chunks + j * 32 + lane);
+            const auto* w_bf  = reinterpret_cast<const __nv_bfloat16*>(&w_raw);
+            const auto* x_bf  = reinterpret_cast<const __nv_bfloat16*>(&x_raw);
+#pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                acc[i] = fmaf(__bfloat162float(w_bf[i]), __bfloat162float(x_bf[i]), acc[i]);
+            }
+        }
+        const float score = finish_row_score(acc);
+        if (lane == 0) { scores[row] = score; }
+        return;
+    }
+
     uint4 w[kStepsPerLane];
 #pragma unroll
     for (int j = 0; j < kStepsPerLane; ++j) { w[j] = __ldg(w_chunks + j * 32 + lane); }
-    for (int token = 0; token < tokens; ++token) {
+
+    int token = 0;
+    for (; token + 4 <= tokens; token += 4) {
+        const auto* x0 =
+            reinterpret_cast<const uint4*>(x + static_cast<std::int64_t>(token + 0) * kHidden);
+        const auto* x1 =
+            reinterpret_cast<const uint4*>(x + static_cast<std::int64_t>(token + 1) * kHidden);
+        const auto* x2 =
+            reinterpret_cast<const uint4*>(x + static_cast<std::int64_t>(token + 2) * kHidden);
+        const auto* x3 =
+            reinterpret_cast<const uint4*>(x + static_cast<std::int64_t>(token + 3) * kHidden);
+        float acc0[8] = {}, acc1[8] = {}, acc2[8] = {}, acc3[8] = {};
+#pragma unroll
+        for (int j = 0; j < kStepsPerLane; ++j) {
+            const uint4 r0   = __ldg(x0 + j * 32 + lane);
+            const uint4 r1   = __ldg(x1 + j * 32 + lane);
+            const uint4 r2   = __ldg(x2 + j * 32 + lane);
+            const uint4 r3   = __ldg(x3 + j * 32 + lane);
+            const auto* w_bf = reinterpret_cast<const __nv_bfloat16*>(&w[j]);
+            const auto* b0   = reinterpret_cast<const __nv_bfloat16*>(&r0);
+            const auto* b1   = reinterpret_cast<const __nv_bfloat16*>(&r1);
+            const auto* b2   = reinterpret_cast<const __nv_bfloat16*>(&r2);
+            const auto* b3   = reinterpret_cast<const __nv_bfloat16*>(&r3);
+#pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                const float wf = __bfloat162float(w_bf[i]);
+                acc0[i]        = fmaf(wf, __bfloat162float(b0[i]), acc0[i]);
+                acc1[i]        = fmaf(wf, __bfloat162float(b1[i]), acc1[i]);
+                acc2[i]        = fmaf(wf, __bfloat162float(b2[i]), acc2[i]);
+                acc3[i]        = fmaf(wf, __bfloat162float(b3[i]), acc3[i]);
+            }
+        }
+        const float s0 = finish_row_score(acc0);
+        const float s1 = finish_row_score(acc1);
+        const float s2 = finish_row_score(acc2);
+        const float s3 = finish_row_score(acc3);
+        if (lane == 0) {
+            scores[static_cast<std::int64_t>(token + 0) * kScoreRows + row] = s0;
+            scores[static_cast<std::int64_t>(token + 1) * kScoreRows + row] = s1;
+            scores[static_cast<std::int64_t>(token + 2) * kScoreRows + row] = s2;
+            scores[static_cast<std::int64_t>(token + 3) * kScoreRows + row] = s3;
+        }
+    }
+    for (; token < tokens; ++token) {
         const auto* x_chunks =
             reinterpret_cast<const uint4*>(x + static_cast<std::int64_t>(token) * kHidden);
         const float score = decode_row_score(w, x_chunks, lane);
@@ -77,7 +143,7 @@ __global__ void __launch_bounds__(kScoreThreads)
     }
 }
 
-// Grouped-route selection: one warp per token over the projected [513,T] scores.
+// One warp per token over the projected [513,T] scores.
 __global__ void __launch_bounds__(256)
     nvfp4_moe_select_kernel(const float* __restrict__ scores, std::int32_t* __restrict__ ids,
                             float* __restrict__ weights, float* __restrict__ shared_scale,
@@ -138,15 +204,15 @@ void nvfp4_moe_route(const Tensor& x, const SparseMoeNvfp4BankWeights& weights,
         nvfp4_moe_decode_scores_kernel<<<kScoreBlocks, kScoreThreads, 0, stream>>>(
             input, router, gate, scores, tokens);
         CUDA_CHECK(cudaGetLastError());
-        return;
+        if (tokens < kNvfp4MoePreselectMinTokens) { return; }
+    } else {
+        launch_bf16_a16_mma<RouterMmaSchedule>(
+            Bf16A16Operands{input, router, kExperts, kHidden, tokens}, Fp32ScoreOutput{scores},
+            LinearIdentityEpilogue{}, stream);
+        nvfp4_moe_shared_gate_score_kernel<<<static_cast<unsigned>(tokens), 256, 0, stream>>>(
+            input, gate, scores);
+        CUDA_CHECK(cudaGetLastError());
     }
-
-    launch_bf16_a16_mma<RouterMmaSchedule>(
-        Bf16A16Operands{input, router, kExperts, kHidden, tokens}, Fp32ScoreOutput{scores},
-        LinearIdentityEpilogue{}, stream);
-    nvfp4_moe_shared_gate_score_kernel<<<static_cast<unsigned>(tokens), 256, 0, stream>>>(
-        input, gate, scores);
-    CUDA_CHECK(cudaGetLastError());
     nvfp4_moe_select_kernel<<<static_cast<unsigned>((tokens + 7) / 8), 256, 0, stream>>>(
         scores, static_cast<std::int32_t*>(workspace.ids.data),
         static_cast<float*>(workspace.weights.data),
