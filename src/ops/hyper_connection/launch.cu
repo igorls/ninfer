@@ -1,9 +1,10 @@
+#include "ops/common/numeric/math.cuh"
 #include "ops/hyper_connection/launch.h"
 
 #include "core/device.h"
 #include "ops/hyper_connection/kernel.cuh"
-#include "ops/linear/bf16/bf16_split_k_launch.cuh"
-#include "ops/linear/bf16/bf16_template_launch.cuh"
+#include "ops/linear/kernels/bf16/bf16_split_k_launch.cuh"
+#include "ops/linear/kernels/bf16/bf16_template_launch.cuh"
 
 #include <stdexcept>
 
@@ -12,7 +13,7 @@ namespace {
 
 // Wide-T down projection [320,10240]: a 32x32 tile gives only 10 row tiles, so split-K over
 // four K quarters fills the GPU at prefill widths. The FP32 partials are reduced in fixed split
-// order and the reduction applies silu(x/4) before the BF16 store.
+// order and the reduction applies common::silu(x/4) before the BF16 store.
 using DownSchedule = Bf16ScheduleInstance<
     Bf16A16MmaSchedule<32, 32, 256, 16, 16, 2, 2, Cache::cg, Cache::cg,
                        Bf16MmaFragmentPipeline::PingPong, Bf16MmaRaster::TokenFast>,
@@ -23,7 +24,7 @@ using UpSchedule = Bf16ScheduleInstance<
                        Bf16MmaFragmentPipeline::PingPong, Bf16MmaRaster::TokenFast>,
     kHyperLowRank>;
 
-// The sigmoid consumes the complete FP32 up-projection, matching the decode route.
+// The common::sigmoid consumes the complete FP32 up-projection, matching the decode route.
 struct HyperFloatOutput {
     float* data;
     __device__ __forceinline__ void store(int row, int token, float value) const {
@@ -33,7 +34,7 @@ struct HyperFloatOutput {
 
 struct HyperLowRankEpilogue {
     __device__ __forceinline__ float apply(int, int, float value) const {
-        return silu(value * 0.25F);
+        return common::silu(value * 0.25F);
     }
 };
 

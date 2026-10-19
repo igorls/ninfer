@@ -12,7 +12,7 @@ set(ninfer_op_tests
   embedding
   argmax
   rope
-  vision_pos_embed
+  embedding_interpolate_add
   sampling
   scalar
   cast
@@ -28,9 +28,7 @@ foreach(op IN LISTS ninfer_op_tests)
     LIBRARIES ninfer_ops)
 endforeach()
 
-ninfer_add_op_test(ninfer_linear_topk_test
-  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_linear_topk.cu"
-  LIBRARIES ninfer_ops)
+include("${CMAKE_CURRENT_LIST_DIR}/linear_topk/tests.cmake")
 
 ninfer_add_op_test(ninfer_candidate_selector_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_candidate_selector.cpp"
@@ -90,17 +88,11 @@ ninfer_add_op_test(ninfer_speculative_round_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_speculative_round.cpp"
   LIBRARIES ninfer_ops)
 
-ninfer_add_op_test(ninfer_attn_input_proj_test
-  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_attn_input_proj.cpp"
-  LIBRARIES ninfer_ops)
-
 ninfer_add_op_test(ninfer_dynamic_grouped_conv_prepare_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_dynamic_grouped_conv_prepare.cpp"
   LIBRARIES ninfer_ops)
 
-ninfer_add_op_test(ninfer_linear_dynamic_grouped_conv_add_test
-  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_linear_dynamic_grouped_conv_add.cpp"
-  LIBRARIES ninfer_ops)
+include("${CMAKE_CURRENT_LIST_DIR}/linear_dynamic_grouped_conv_add/tests.cmake")
 
 include("${CMAKE_CURRENT_LIST_DIR}/linear/tests.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/softmax_attention/qsa/tests.cmake")

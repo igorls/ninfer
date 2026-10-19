@@ -1,3 +1,4 @@
+#include "ops/common/numeric/math.cuh"
 // Short route (T <= 48) of the NVFP4-bank SparseMoe. Gate/up: one warp per (intermediate row,
 // token, path) evaluates both the gate and up rows against the represented BF16 activation (A16),
 // with the shared expert at blockIdx.z == 0 (tiling up to 6 tokens per CTA so the 6.55 MB BF16
@@ -10,10 +11,10 @@
 #include "ops/sparse_moe/nvfp4_bank/nvfp4_bank_moe.h"
 
 #include "core/device.h"
-#include "ops/common/math.cuh"
-#include "ops/common/warp.cuh"
-#include "ops/linear/nvfp4/nvfp4_a16_gemv.cuh"
-#include "ops/linear/nvfp4/nvfp4_codec.cuh"
+#include "ops/common/numeric/convert.cuh"
+#include "ops/common/cuda/reduce.cuh"
+#include "ops/linear/kernels/nvfp4/nvfp4_a16_gemv.cuh"
+#include "ops/common/quant/nvfp4.cuh"
 #include "ops/sparse_moe/nvfp4_bank/expert_bank.cuh"
 #include "ops/sparse_moe/nvfp4_bank/select.cuh"
 
@@ -76,18 +77,18 @@ __global__ void __launch_bounds__(GateSchedule::kThreads, 4) nvfp4_moe_decode_ga
                     const uint4 gw   = __ldg(g_row + j * 32 + lane);
                     const uint4 uw   = __ldg(u_row + j * 32 + lane);
                     const uint4 xv   = __ldg(x_vec + j * 32 + lane);
-                    const float2 g01 = bf16x2_bits_to_float2(gw.x);
-                    const float2 g23 = bf16x2_bits_to_float2(gw.y);
-                    const float2 g45 = bf16x2_bits_to_float2(gw.z);
-                    const float2 g67 = bf16x2_bits_to_float2(gw.w);
-                    const float2 u01 = bf16x2_bits_to_float2(uw.x);
-                    const float2 u23 = bf16x2_bits_to_float2(uw.y);
-                    const float2 u45 = bf16x2_bits_to_float2(uw.z);
-                    const float2 u67 = bf16x2_bits_to_float2(uw.w);
-                    const float2 x01 = bf16x2_bits_to_float2(xv.x);
-                    const float2 x23 = bf16x2_bits_to_float2(xv.y);
-                    const float2 x45 = bf16x2_bits_to_float2(xv.z);
-                    const float2 x67 = bf16x2_bits_to_float2(xv.w);
+                    const float2 g01 = common::bf16x2_bits_to_float2(gw.x);
+                    const float2 g23 = common::bf16x2_bits_to_float2(gw.y);
+                    const float2 g45 = common::bf16x2_bits_to_float2(gw.z);
+                    const float2 g67 = common::bf16x2_bits_to_float2(gw.w);
+                    const float2 u01 = common::bf16x2_bits_to_float2(uw.x);
+                    const float2 u23 = common::bf16x2_bits_to_float2(uw.y);
+                    const float2 u45 = common::bf16x2_bits_to_float2(uw.z);
+                    const float2 u67 = common::bf16x2_bits_to_float2(uw.w);
+                    const float2 x01 = common::bf16x2_bits_to_float2(xv.x);
+                    const float2 x23 = common::bf16x2_bits_to_float2(xv.y);
+                    const float2 x45 = common::bf16x2_bits_to_float2(xv.z);
+                    const float2 x67 = common::bf16x2_bits_to_float2(xv.w);
                     gate_sum0        = fmaf(g01.x, x01.x, gate_sum0);
                     gate_sum1        = fmaf(g01.y, x01.y, gate_sum1);
                     gate_sum0        = fmaf(g23.x, x23.x, gate_sum0);
@@ -105,11 +106,11 @@ __global__ void __launch_bounds__(GateSchedule::kThreads, 4) nvfp4_moe_decode_ga
                     up_sum0          = fmaf(u67.x, x67.x, up_sum0);
                     up_sum1          = fmaf(u67.y, x67.y, up_sum1);
                 }
-                const float gate = warp_reduce_sum(gate_sum0 + gate_sum1);
-                const float up   = warp_reduce_sum(up_sum0 + up_sum1);
+                const float gate = common::warp_reduce_sum(gate_sum0 + gate_sum1);
+                const float up   = common::warp_reduce_sum(up_sum0 + up_sum1);
                 if (lane == 0) {
                     activations[static_cast<std::int64_t>(kTopK) * kIntermediate + row] =
-                        __float2bfloat16_rn(silu(gate) * up);
+                        __float2bfloat16_rn(common::silu(gate) * up);
                 }
                 if (blockIdx.x == 0 && warp == 0) {
                     nvfp4_moe_select_token(scores, ids, route_weights, shared_scale, lane);
@@ -123,24 +124,24 @@ __global__ void __launch_bounds__(GateSchedule::kThreads, 4) nvfp4_moe_decode_ga
         for (int j = 0; j < kStepsPerLane; ++j) {
             const uint4 gw   = __ldg(g_row + j * 32 + lane);
             const uint4 uw   = __ldg(u_row + j * 32 + lane);
-            const float2 g01 = bf16x2_bits_to_float2(gw.x);
-            const float2 g23 = bf16x2_bits_to_float2(gw.y);
-            const float2 g45 = bf16x2_bits_to_float2(gw.z);
-            const float2 g67 = bf16x2_bits_to_float2(gw.w);
-            const float2 u01 = bf16x2_bits_to_float2(uw.x);
-            const float2 u23 = bf16x2_bits_to_float2(uw.y);
-            const float2 u45 = bf16x2_bits_to_float2(uw.z);
-            const float2 u67 = bf16x2_bits_to_float2(uw.w);
+            const float2 g01 = common::bf16x2_bits_to_float2(gw.x);
+            const float2 g23 = common::bf16x2_bits_to_float2(gw.y);
+            const float2 g45 = common::bf16x2_bits_to_float2(gw.z);
+            const float2 g67 = common::bf16x2_bits_to_float2(gw.w);
+            const float2 u01 = common::bf16x2_bits_to_float2(uw.x);
+            const float2 u23 = common::bf16x2_bits_to_float2(uw.y);
+            const float2 u45 = common::bf16x2_bits_to_float2(uw.z);
+            const float2 u67 = common::bf16x2_bits_to_float2(uw.w);
 #pragma unroll
             for (int b = 0; b < kTile; ++b) {
                 if (b < count) {
                     const auto* x_vec = reinterpret_cast<const uint4*>(
                         x + static_cast<std::int64_t>(token_base + b) * kHidden);
                     const uint4 xv   = __ldg(x_vec + j * 32 + lane);
-                    const float2 x01 = bf16x2_bits_to_float2(xv.x);
-                    const float2 x23 = bf16x2_bits_to_float2(xv.y);
-                    const float2 x45 = bf16x2_bits_to_float2(xv.z);
-                    const float2 x67 = bf16x2_bits_to_float2(xv.w);
+                    const float2 x01 = common::bf16x2_bits_to_float2(xv.x);
+                    const float2 x23 = common::bf16x2_bits_to_float2(xv.y);
+                    const float2 x45 = common::bf16x2_bits_to_float2(xv.z);
+                    const float2 x67 = common::bf16x2_bits_to_float2(xv.w);
                     gate_acc[b][0]   = fmaf(g01.x, x01.x, gate_acc[b][0]);
                     gate_acc[b][1]   = fmaf(g01.y, x01.y, gate_acc[b][1]);
                     gate_acc[b][0]   = fmaf(g23.x, x23.x, gate_acc[b][0]);
@@ -163,12 +164,12 @@ __global__ void __launch_bounds__(GateSchedule::kThreads, 4) nvfp4_moe_decode_ga
 #pragma unroll
         for (int b = 0; b < kTile; ++b) {
             if (b < count) {
-                const float gate = warp_reduce_sum(gate_acc[b][0] + gate_acc[b][1]);
-                const float up   = warp_reduce_sum(up_acc[b][0] + up_acc[b][1]);
+                const float gate = common::warp_reduce_sum(gate_acc[b][0] + gate_acc[b][1]);
+                const float up   = common::warp_reduce_sum(up_acc[b][0] + up_acc[b][1]);
                 if (lane == 0) {
                     activations[(static_cast<std::int64_t>(token_base + b) * kPaths + kTopK) *
                                     kIntermediate +
-                                row] = __float2bfloat16_rn(silu(gate) * up);
+                                row] = __float2bfloat16_rn(common::silu(gate) * up);
                 }
             }
         }
@@ -224,11 +225,11 @@ __global__ void __launch_bounds__(GateSchedule::kThreads, 4) nvfp4_moe_decode_ga
         gate += accumulators[0][chain];
         up += accumulators[1][chain];
     }
-    gate = warp_reduce_sum(gate);
-    up   = warp_reduce_sum(up);
+    gate = common::warp_reduce_sum(gate);
+    up   = common::warp_reduce_sum(up);
     if (lane == 0) {
         activations[(static_cast<std::int64_t>(token) * kPaths + path) * kIntermediate + row] =
-            __float2bfloat16_rn(silu(gate) * up);
+            __float2bfloat16_rn(common::silu(gate) * up);
     }
 }
 
@@ -240,9 +241,9 @@ __device__ __forceinline__ void accumulate_down_group_loaded(uint2 words, uint4 
     const std::uint32_t activation_bits[8] = {a0.x, a0.y, a0.z, a0.w, a1.x, a1.y, a1.z, a1.w};
 #pragma unroll
     for (int pair = 0; pair < 8; ++pair) {
-        const float2 w = decode_nvfp4_e2m1x2(
+        const float2 w = common::decode_nvfp4_e2m1x2(
             static_cast<std::uint8_t>(code_words[pair >> 2] >> (8 * (pair & 3))));
-        const float2 h = bf16x2_bits_to_float2(activation_bits[pair]);
+        const float2 h = common::bf16x2_bits_to_float2(activation_bits[pair]);
         sum0           = fmaf(w.x * coefficient, h.x, sum0);
         sum1           = fmaf(w.y * coefficient, h.y, sum1);
     }
@@ -277,10 +278,10 @@ __device__ __forceinline__ float routed_down_value(const Nvfp4ExpertPlanes& expe
     const std::uint32_t word0 = __shfl_sync(0xFFFF'FFFFU, tile_word, lane >> 2);
     const std::uint32_t word1 = __shfl_sync(0xFFFF'FFFFU, tile_word, 8 + (lane >> 2));
     const float coefficient0 =
-        decode_nvfp4_e4m3(static_cast<std::uint8_t>(word0 >> ((lane & 3) * 8))) *
+        common::decode_e4m3(static_cast<std::uint8_t>(word0 >> ((lane & 3) * 8))) *
         expert.inverse_divisor;
     const float coefficient1 =
-        decode_nvfp4_e4m3(static_cast<std::uint8_t>(word1 >> ((lane & 3) * 8))) *
+        common::decode_e4m3(static_cast<std::uint8_t>(word1 >> ((lane & 3) * 8))) *
         expert.inverse_divisor;
     float sum0 = 0.0F;
     float sum1 = 0.0F;
@@ -288,7 +289,7 @@ __device__ __forceinline__ float routed_down_value(const Nvfp4ExpertPlanes& expe
     if (lane < kDownGroups - 32) {
         accumulate_down_group_loaded(words1, a10, a11, coefficient1, sum0, sum1);
     }
-    return warp_reduce_sum(sum0 + sum1);
+    return common::warp_reduce_sum(sum0 + sum1);
 }
 
 __device__ __forceinline__ void accumulate_bf16x8(uint4 w, uint4 a, float& sum) {
@@ -296,8 +297,8 @@ __device__ __forceinline__ void accumulate_bf16x8(uint4 w, uint4 a, float& sum) 
     const std::uint32_t ab[4] = {a.x, a.y, a.z, a.w};
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
-        const float2 wv = bf16x2_bits_to_float2(wb[i]);
-        const float2 av = bf16x2_bits_to_float2(ab[i]);
+        const float2 wv = common::bf16x2_bits_to_float2(wb[i]);
+        const float2 av = common::bf16x2_bits_to_float2(ab[i]);
         sum             = fmaf(wv.x, av.x, sum);
         sum             = fmaf(wv.y, av.y, sum);
     }
@@ -324,7 +325,7 @@ __device__ __forceinline__ float shared_down_value(const __nv_bfloat16* __restri
     accumulate_bf16x8(w0, a0, sum);
     accumulate_bf16x8(w1, a1, sum);
     if (lane < 16) { accumulate_bf16x8(w2, a2, sum); }
-    return warp_reduce_sum(sum);
+    return common::warp_reduce_sum(sum);
 }
 
 template <bool StageProducts>

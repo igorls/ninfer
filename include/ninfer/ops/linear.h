@@ -49,15 +49,15 @@ enum class LinearPolicy : std::uint8_t {
                                                           std::int32_t max_tokens);
 
 /**
- * @brief Applies a bias-free matrix projection independently to every input column.
+ * Y[n,t] = sum_k decode(W)[n,k] * X[k,t].
  *
- * @details The ideal mathematical result is
+ * X is BF16 [K,T], W represents [N,K], and Y is BF16 [N,T]. Activations and output are
+ * contiguous, non-null and 16-byte aligned; T is positive. Output overlaps neither X nor
+ * any weight plane. Inputs are preserved. There is no bias, activation or transpose.
  *
- * @f[
- *   \mathrm{ideal}_{n,t} =
- *   \sum_{k=0}^{K-1}
- *     \mathrm{FP32Dequant}(w)_{n,k}\,\mathrm{FP32}(x_{k,t}).
- * @f]
+ * Supports registered weight geometries and column domains for contiguous BF16, RowSplit
+ * Q4/Q5/Q6-G64 and Q8-G32 with FP16 scales, row-scaled FP8, and block-scaled NVFP4.
+ * Unsupported format/geometry/layout combinations throw.
  *
  * `out` stores a BF16 approximation of this ideal result under the named numerical criterion for
  * the selected private activation-compute path.
@@ -123,17 +123,7 @@ enum class LinearPolicy : std::uint8_t {
 void linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
             WorkspaceArena& workspace, cudaStream_t stream);
 
-/**
- * @brief Applies the A16-only form of the bias-free matrix projection.
- *
- * @details This overload admits only A16 compute and requires no transient workspace. All tensor,
- * weight, aliasing, and execution-domain requirements of the policy-bearing overload apply.
- *
- * @param[in] x Contiguous BF16 input matrix `[K,T]`.
- * @param[in] w Logical weight matrix `[N,K]` in a registered persistent format and layout.
- * @param[out] out Contiguous BF16 output matrix `[N,T]`.
- * @param[in] stream CUDA stream on which execution is enqueued.
- */
+/** A16-only projection with the same operand requirements and no transient workspace. */
 void linear(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream);
 
 } // namespace ninfer::ops

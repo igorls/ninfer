@@ -1,10 +1,11 @@
+#include "ops/common/numeric/math.cuh"
 #pragma once
 
 // Flash-Next per-layer-embedding kernels: exact u4z8 row decode, the per-stream gated combine and
 // group norm, and the dilation-3 four-tap causal convolution with its nine-column BF16 history.
 
-#include "ops/common/math.cuh"
-#include "ops/common/warp.cuh"
+#include "ops/common/numeric/convert.cuh"
+#include "ops/common/cuda/reduce.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -56,7 +57,7 @@ __device__ __forceinline__ void ple_block_sum(float (&values)[N], float (*partia
     const int lane       = static_cast<int>(threadIdx.x) & 31;
     const int warp       = static_cast<int>(threadIdx.x) >> 5;
 #pragma unroll
-    for (int i = 0; i < N; ++i) values[i] = warp_reduce_sum(values[i]);
+    for (int i = 0; i < N; ++i) values[i] = common::warp_reduce_sum(values[i]);
     if (lane == 0) {
 #pragma unroll
         for (int i = 0; i < N; ++i) partials[warp][i] = values[i];
@@ -72,7 +73,7 @@ __device__ __forceinline__ void ple_block_sum(float (&values)[N], float (*partia
 }
 
 // Grid (4, columns), 256 threads: one CTA owns one stream of one column. Writes the FP32 stream
-// gate sigmoid(gate_s) and u = BF16(n(V, conv_norm)); V = gate * value is recomputed in FP32 by
+// gate common::sigmoid(gate_s) and u = BF16(n(V, conv_norm)); V = gate * value is recomputed in FP32 by
 // the convolution kernels.
 __global__ void __launch_bounds__(kPleGateThreads)
     ple_gate_norm_kernel(const __nv_bfloat16* __restrict__ hidden,
@@ -115,7 +116,7 @@ __global__ void __launch_bounds__(kPleGateThreads)
     ple_block_sum<kPleGateThreads>(dot, dots);
     const float raw  = dot[0] * 0.019764235376052372F; // 1 / sqrt(2560)
     const float sign = raw > 0.0F ? 1.0F : (raw < 0.0F ? -1.0F : 0.0F);
-    const float gate = sigmoid(sign * sqrtf(fmaxf(fabsf(raw), 1.0e-6F)));
+    const float gate = common::sigmoid(sign * sqrtf(fmaxf(fabsf(raw), 1.0e-6F)));
 
     float square[1] = {0.0F};
     for (int d = tid; d < kPleStreamWidth; d += kPleGateThreads) {
@@ -175,7 +176,7 @@ __global__ void __launch_bounds__(kPleConvThreads)
     }
     const auto at = static_cast<std::int64_t>(column) * kPleWidth + channel;
     out[at]       = __float2bfloat16_rn(ple_value(gates, value, column, channel) +
-                                        silu(ple_conv(taps, weights)));
+                                        common::silu(ple_conv(taps, weights)));
 }
 
 // Grid 40, 256 threads: the new nine-column window. Ascending i reads index T + i >= i + 1 of an
@@ -227,7 +228,7 @@ __global__ void __launch_bounds__(kPleConvThreads)
                                  __bfloat162float(window[6]), __bfloat162float(u)};
         const std::int64_t column = static_cast<std::int64_t>(row) * width + j;
         out[at] = __float2bfloat16_rn(ple_value(gates, value, column, channel) +
-                                      silu(ple_conv(taps, weights)));
+                                      common::silu(ple_conv(taps, weights)));
 #pragma unroll
         for (int i = 0; i + 1 < kPleHistory; ++i) window[i] = window[i + 1];
         window[kPleHistory - 1] = u;

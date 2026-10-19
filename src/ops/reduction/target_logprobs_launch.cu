@@ -1,0 +1,25 @@
+// Implements: include/ninfer/ops/target_logprobs.h
+// Match: wrapper-validated contiguous tensors and valid vocabulary rows.
+// Algorithm assumptions: one independent CTA per column; no global workspace.
+#include "ops/reduction/target_logprobs_launch.h"
+
+#include "core/device.h"
+#include "ops/reduction/target_logprobs_kernel.cuh"
+
+namespace ninfer::ops::detail {
+
+void target_logprobs_launch(const Tensor& logits, const Tensor& target_ids, std::int32_t valid_rows,
+                            Tensor& output, cudaStream_t stream) {
+    const auto columns = static_cast<unsigned int>(logits.ne[1]);
+    // A [C] target vector is the T=1 case of [T,C].
+    const std::int32_t targets = target_ids.ne[1] == 1 && target_ids.ne[0] == logits.ne[1]
+                                     ? 1
+                                     : target_ids.ne[0];
+    target_logprobs_kernel<kTargetLogprobsBlock><<<columns, kTargetLogprobsBlock, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(logits.data),
+        static_cast<const std::int32_t*>(target_ids.data), static_cast<float*>(output.data),
+        valid_rows, logits.ne[0], targets);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+} // namespace ninfer::ops::detail

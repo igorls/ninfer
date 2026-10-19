@@ -1,9 +1,9 @@
 #include "models/qwen3_5/execution/mtp.h"
 
 #include "core/layout.h"
-#include "ninfer/ops/attn_input_proj.h"
+#include "ninfer/ops/linear_split.h"
 #include "ninfer/ops/linear_pair.h"
-#include "ninfer/ops/mtp_pack.h"
+#include "ninfer/ops/indexing.h"
 
 #include <algorithm>
 
@@ -14,8 +14,7 @@ std::size_t mtp_projection_workspace_bytes(const MtpProjectionParameters& parame
     const auto& p = parameters.packed;
     const auto& w = p.weight;
     if (!parameters.rows) {
-        return ops::attn_input_proj_workspace_capacity_bytes(w.qtype, w.n, w.k, p.policy, first,
-                                                             last);
+        return ops::linear_split_workspace_capacity_bytes(p, parameters.output_rows, first, last);
     }
     WorkspaceLayoutBuilder layout;
     (void)layout.alloc(DType::BF16, {w.n, last});
@@ -61,8 +60,8 @@ void mtp_projection(const Tensor& hidden, const MtpProjectionParameters& paramet
                     Tensor& value, WorkspaceArena& workspace, cudaStream_t stream) {
     const auto& p = parameters.packed;
     if (!parameters.rows) {
-        ops::attn_input_proj(hidden, p.weight, query, gate, key, value, p.policy, workspace,
-                             stream);
+        std::array outputs{query, key, gate, value};
+        ops::linear_split(hidden, p, outputs, workspace, stream);
         return;
     }
     auto scope         = workspace.scope();
@@ -77,7 +76,7 @@ void mtp_projection(const Tensor& hidden, const MtpProjectionParameters& paramet
         gate.view({dimension(config.head_dim), dimension(config.num_attention_heads), columns});
     Tensor v =
         value.view({dimension(config.head_dim), dimension(config.num_key_value_heads), columns});
-    ops::mtp_split_attn_in(packed, q, k, g, v, stream);
+    ops::split_bf16_features(packed, q, k, g, v, stream);
 }
 
 void mtp_kv_projection(const Tensor& hidden, const MtpProjectionParameters& parameters,

@@ -1,8 +1,7 @@
 #include "ops/softmax_attention/dense/causal_cache/int8/launch.h"
 #include "ops/softmax_attention/dense/causal_cache/int8/instances.h"
 #include "ops/softmax_attention/dense/causal_cache/int8/plan.h"
-#include "ops/softmax_attention/dense/causal_cache/int8/template_launch.cuh"
-#include "ops/kv_cache/append/launch.h"
+#include "ops/softmax_attention/kernels/causal/int8/template_launch.cuh"
 
 namespace ninfer::ops::detail {
 namespace {
@@ -121,10 +120,11 @@ void int8_kv_append_attention(const Tensor& q, const Tensor& k, const Tensor& v,
                               CausalAttentionExecutionEnvelope envelope, WorkspaceArena& workspace,
                               Tensor& out, DeviceExecutionView execution) {
     const cudaStream_t stream = execution.stream;
-    const auto plan           = make_int8_kv_causal_plan(q.ne[1], q.ne[2], q.ne[3], envelope,
-                                                         execution.multiprocessor_count);
+    const auto plan           = select_int8_kv_causal_plan(q.ne[1], q.ne[2], q.ne[3], envelope,
+                                                           execution.multiprocessor_count);
     if (plan.family != Int8KvFamily::Grouped) {
-        kv_cache_append_batch_launch(k, v, positions, valid, rows, cache, stream);
+        kv::launch_paged_write(select_int8_kv_write(k.ne[1], k.ne[2], k.ne[3]), k, v, positions,
+                               valid, rows, cache, stream);
         const auto p = make_causal_operands(q, positions, out, scale, envelope.max_visible_keys);
         const auto view =
             make_quantized_causal_cache_view<Int8KvCacheView<false>>(cache, &valid, &rows);
@@ -146,7 +146,7 @@ void int8_kv_cached_attention(const Tensor& q, const Tensor& positions, float sc
                               Tensor& out, DeviceExecutionView execution) {
     const cudaStream_t stream = execution.stream;
     const auto plan =
-        make_int8_kv_causal_plan(q.ne[1], q.ne[2], 1, envelope, execution.multiprocessor_count);
+        select_int8_kv_causal_plan(q.ne[1], q.ne[2], 1, envelope, execution.multiprocessor_count);
     const auto view = single_row_paged_kv_batch_view(cache);
     if (plan.family == Int8KvFamily::Tiled)
         tiled(make_causal_operands(q, positions, out, scale, envelope.max_visible_keys),

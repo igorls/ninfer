@@ -14,7 +14,7 @@ struct PleWeights {
 };
 
 struct PleScratch {
-    float* gates;     // FP32 [4,columns]: sigmoid of each stream gate
+    float* gates;     // FP32 [4,columns]: common::sigmoid of each stream gate
     void* normalized; // BF16 [10240,columns]
 };
 

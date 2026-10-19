@@ -2,7 +2,7 @@
 
 // Top-10 selection of the NVFP4-bank SparseMoe router: 513 FP32 scores per token (512 experts then
 // the shared-expert gate), the ten largest experts with the lower id first at an exact tie, their
-// renormalized route weights and the sigmoid shared-expert scale. One warp ranks one token. Every
+// renormalized route weights and the common::sigmoid shared-expert scale. One warp ranks one token. Every
 // consumer of a token's selection (the decode gate/up prologue, its designated writer and the
 // grouped selection kernel) runs this one algorithm over the same scores, so all of them agree.
 

@@ -101,7 +101,7 @@ normalized、block output 或 sample hidden 代替或反推。`F=0` 没有有效
 Verify 保留 `[2560,T,B]` sample window 和启用 MTP 时的 `[10240,T,B]` conditioning
 window。`a>0` 使用同一 selector 选择两个窗口的 `a-1` 列；`a=0` 保留旧恢复点，
 不以负 selector gather。可复用
-[accepted-hidden 选择合同](../../include/ninfer/ops/speculative_round.h)分别复制两种宽度，
+[batch column gather 合同](../../include/ninfer/ops/indexing.h)分别复制两种宽度，
 保留原 words，不重跑较短投影或 final Mix 来重建。StateImage 的 Device/Host layout、
 clone、checkpoint 和 restore 必须显式表达这两个不同字段。
 
@@ -133,11 +133,12 @@ gamma 是直接乘数，既不是 offset norm，也不是 SiLU gate；BF16 结�
 
 | 执行路径 | 输入与调用组合 | 状态结果 |
 |---|---|---|
-| Prefill、Replay、CausalScoring | `B=1` 的连续窗口；`gdn_input_proj → causal_conv1d_silu_split → gated_delta_net`，再走共同输出末端 | 整个窗口后的 conv/recurrent state；长 T 由 recurrence 选择实现，不保存逐 token 完整 state |
+| Prefill、Replay、CausalScoring | `B=1` 的连续窗口；`linear_split → causal_conv1d_silu_split → gated_delta_net`，再走共同输出末端 | 整个窗口后的 conv/recurrent state；长 T 由 recurrence 选择实现，不保存逐 token 完整 state |
 | Ordinary decode、单列 control | 实际紧凑 `T=1,B=1..8`；`gdn_input_proj_conv_snapshot → gated_delta_net_batch_update` | 每行 conv 与 recurrent 结果写入同一候选 state slot 的对应层 |
 | Target verify | 原始物理 `T=2..16,B=1..8`；`gdn_input_proj_conv_record → gated_delta_net_replay_record` | 基准 state 只读，产生实际 records；接受前缀确定后调用 `GdnReplayFoldPlan` |
 
-投影与卷积的独立、snapshot、record 入口及容量查询见
+独立 QKVZ 分段投影及容量查询见 [LinearSplit](../../include/ninfer/ops/linear_split.h)；
+融合投影/卷积的 snapshot、record 入口及容量查询见
 [GDN input 合同](../../include/ninfer/ops/gdn_input_proj.h)，独立卷积见
 [causal convolution](../../include/ninfer/ops/causal_conv1d_silu.h)。分立投影的 BF16 出口是
 公开边界；融合投影/卷积不额外固定一个私有 BF16 投影中间值。Record 与 snapshot 的
@@ -168,7 +169,7 @@ Verify 保存四类实际记录：卷积前最新 history 列、卷积/SiLU 后�
 ## 4. QSA 三阶段、页组与 tail
 
 Main 用 Q8 Q/gate parent 和 BF16 K/V/index parent，MTP 用一个 BF16 joint parent。
-[qsa_input_proj](../../include/ninfer/ops/qsa.h)直接产生各自连续的 BF16 分段输出，按原
+[linear_split](../../include/ninfer/ops/linear_split.h)直接产生各自连续的 BF16 分段输出，按原
 `T/B` 改 view 后依次进入三个独立 Op；输入投影和 O projection 位于三阶段之外。
 
 | 阶段 | 消费与交接 |
@@ -353,7 +354,7 @@ lead 规划，不假定与 Main 相同。最终容量、Host reservation、迁�
 | GDN 输出 norm | `sigmoid_gated_rmsnorm`，与 SiLU gated 形式共用 RMSNorm 家族；已通过数学与 Op 性能验收 |
 | GDN control | BF16 `[96,2560]` 合并 AB projection、权重准备、FP32 controls 和容量查询；已通过数学与 Op 性能验收 |
 | HC 基础计算与 Mix | 五种基础形式、block/final Mix 及区间容量查询，保留 residual seam；已通过数学与 Op 性能验收 |
-| GDN input 与 ReplaySSM | Q8 `[16384,2560]` 的 projection/snapshot/record 和容量查询；`(36,16,48,10240)` 全层 fold 已实现 |
+| GDN input 与 ReplaySSM | Q8 `[16384,2560]` 的 `linear_split`、融合投影/卷积 snapshot/record 及各自容量查询；`(36,16,48,10240)` 全层 fold 已实现 |
 | QSA | 分段输入投影、五类 KV 的 Prepare/Sparse GQA、Indexer、tail extraction 已实现 |
 | Paged KV 机制 | `tokens_per_row=1/4` 的共同逻辑页及 Host/Device plane 布局、传输和相应覆盖语义已有通用实现；模型 pool/StateImage 接入仍待完成 |
 | PLE GPU 局部能力 | 共享合同、`ple_conv_add`、`ple_conv_add_norm`、`ple_state_extract` 已实现；Gate 目前只有声明 |

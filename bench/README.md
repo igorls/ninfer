@@ -543,16 +543,14 @@ Common flags are `--execution graph|eager|both`, `--cache cold|warm|both`, `--wa
 `--tokens` accepts an exact extent or comma-separated list; `--sweep START:END[:STEP]` accepts an
 inclusive interval. Capacity and actual workspace high-water are reported separately.
 
-`ninfer_gdn_input_proj_bench` selects `--op projection|snapshot|record`. `--format` and the actual
+`ninfer_gdn_input_proj_bench` selects `--op snapshot|record`. `--format` and the actual
 `--n`/`--k` identify the stored matrix; `--policy a16|allow-a8|allow-a4` reports the caller's
 activation permission. Supported geometries are Q8 `[12288,2048]` and `[16384,2560]`, and
 Q4/Q5, FP8, or NVFP4 `[16384,5120]`. Q4/Q5 uses the two stored parents `[4096,5120]` and
-`[12288,5120]`. Projection uses M; convolution uses physical T and B, with optional device
+`[12288,5120]`. Convolution uses physical T and B, with optional device
 valid-prefix extents supplied by `--valid-columns`.
 
 ```bash
-./build/bench/ninfer_gdn_input_proj_bench \
-  --op projection --format q8 --n 16384 --k 2560 --tokens 1,16,1024,2048,4096 --cache cold
 ./build/bench/ninfer_gdn_input_proj_bench \
   --op snapshot --format nvfp4 --n 16384 --k 5120 --policy allow-a4 --sweep 1:17
 ./build/bench/ninfer_gdn_input_proj_bench \
@@ -695,12 +693,13 @@ cmake --build build --parallel --target ninfer_context_softmax_attention_bench
 
 `ninfer_sliding_window_attention_bench` measures the public Q32/KV8/D128 symmetric sliding-window
 contract over a 2048- or 4096-slot cyclic BF16-K/FP16-V cache and a complete non-causal query
-block with nonzero represented K/V values. It reports the production route, key tile, split capacity,
-merge warp count, Graph node count, workspace, and exact batch shape. `--envelope-max N` holds the
+block with nonzero represented K/V values. It reports Graph node count, workspace, and exact batch
+shape. `--envelope-max N` holds the
 Graph resource envelope fixed while the actual context varies. `--graph-calls 32 --execution graph`
 measures 32 public calls in one Graph and reports latency per call; this removes host submission
 gaps from short warm-cache measurements. For a cold bundle, L2 is flushed once before the bundle,
-so only its first call starts cold. Profiling uses one public call (`--graph-calls 1`).
+so only its first call starts cold. These rows are labeled `cold-before-graph-bundle`; warm and
+bundled rows omit the DRAM roofline fraction. Profiling uses one public call (`--graph-calls 1`).
 
 ```bash
 cmake --build build --parallel --target ninfer_sliding_window_attention_bench
@@ -889,34 +888,34 @@ references.
 ```bash
 cmake --build build --parallel --target ninfer_bf16_linear_add_bench
 ./build/bench/ninfer_bf16_linear_add_bench \
-  --sweep 1:128:1 --route production --warmup 10 --repeat 50 \
+  --sweep 1:128:1 --warmup 10 --repeat 50 \
   --csv-out profiles/bench/bf16_linear_add_t1_128.csv
 ./build/bench/ninfer_bf16_linear_add_bench \
-  --t-sweep 1024,1536,2048 --route production --warmup 10 --repeat 50
+  --t-sweep 1024,1536,2048 --warmup 10 --repeat 50
 ./build/bench/ninfer_bf16_linear_add_bench \
-  --t-sweep 1024 --route production --profile
+  --t-sweep 1024 --profile
 ```
 
 ## Q8 LinearAdd Op benchmark
 
 `ninfer_q8_linear_add_bench` measures the Q8 `[2048,4096]` and `[2048,6144]` projections with their
-BF16 residual epilogue. Production updates the residual in place and uses no workspace. Use
-`--production-only` for public evidence; every cold-cache sample follows a 256 MiB L2 flush.
+BF16 residual epilogue. Each sample calls the public Op, which updates the residual in place and
+uses no workspace. Every cold-cache sample follows a 256 MiB L2 flush.
 
 ```bash
 cmake --build build --parallel --target ninfer_q8_linear_add_bench
 ./build/bench/ninfer_q8_linear_add_bench \
-  --k 4096 --production-only \
+  --k 4096 \
   --t-sweep 1,2,4,8,16,32,48,64,96,128 --warmup 10 --repeat 50
 ./build/bench/ninfer_q8_linear_add_bench \
-  --k 6144 --production-only \
+  --k 6144 \
   --t-sweep 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,32,33,64,65,96,128,256,640,641,896,960,1024,1280,2048 \
   --warmup 10 --repeat 50 --csv-out profiles/bench/q8_linear_add.csv
 ./build/bench/ninfer_q8_linear_add_bench \
-  --production-only --t-sweep "$(seq -s, 1 2048)" \
+  --t-sweep "$(seq -s, 1 2048)" \
   --warmup 3 --repeat 15 --csv-out profiles/bench/q8_linear_add_all_t.csv
 ./build/bench/ninfer_q8_linear_add_bench \
-  --profile --production-only --t-sweep 1024
+  --profile --t-sweep 1024
 ```
 
 ## FP8 LinearAdd Op benchmark
@@ -938,12 +937,12 @@ cmake --build build --parallel --target ninfer_fp8_linear_add_bench
   --warmup 5 --repeat 30
 ```
 
-## Attention input-projection Op benchmark
+## LinearSplit benchmarks
 
-`ninfer_attn_input_proj_bench` measures every registered public `attn_input_proj()` weight/shape
-contract: the 27B two-parent Q4/Q5 projection; the 35B Q8 Q/K/gate/V and companion Q/K/V
-projections; the DFlash2 Q8 `[6144,5120]` Q/K/V projection; and the 27B BF16, NVFP4, and FP8
-single-parent Q/K/gate/V projections. Fixture packing and public workspace capacity queries happen
+`ninfer_linear_split_multi_output_bench` measures the three/four-output forms of public
+`linear_split()`: Q4/Q5 `[7168+7168,5120]`; Q8 `[9216,2048]`, `[6144,2048]` and
+`[6144,5120]`; and BF16, NVFP4 and FP8 `[14336,5120]`.
+Fixture packing and public workspace capacity queries happen
 before timing. Every sample and profiler range contains exactly one public Op call, so production
 owns format-specific dispatch and launch decomposition.
 `--execution eager` (default) times the public call; `--execution graph` captures that call and
@@ -958,29 +957,37 @@ allocation reserved for the entire requested sweep. Logical GB/s counts semantic
 bytes; it is not a measured DRAM utilization percentage.
 
 ```bash
-cmake --build build -j --target ninfer_attn_input_proj_bench
-./build/bench/ninfer_attn_input_proj_bench \
+cmake --build build -j --target ninfer_linear_split_multi_output_bench
+./build/bench/ninfer_linear_split_multi_output_bench \
   --format all --tokens 1,2,4,8,12,16,32,64,128,256,512,1024 \
   --cache cold --warmup 10 --repeat 50 \
-  --csv-out profiles/bench/attn_input_proj.csv
-./build/bench/ninfer_attn_input_proj_bench \
+  --csv-out profiles/bench/linear_split.csv
+./build/bench/ninfer_linear_split_multi_output_bench \
   --format nvfp4 --nvfp4-policy a4 --tokens 1024 \
   --cache cold --warmup 10 --profile
-./build/bench/ninfer_attn_input_proj_bench \
+./build/bench/ninfer_linear_split_multi_output_bench \
   --format fp8 --fp8-policy a8 --tokens 1,5,32,64,65,96,128 \
   --cache cold --warmup 10 --repeat 50
-./build/bench/ninfer_attn_input_proj_bench \
+./build/bench/ninfer_linear_split_multi_output_bench \
   --format q8-dflash2-qkv --tokens 8,16,32,53,54,64,65,96,128,1024 \
   --execution graph --cache cold --warmup 10 --repeat 50
 ```
 
-The stateful GDN projection/convolution/snapshot contract remains in its own public Op benchmark;
-it is not a mode of Attention input projection. End-to-end target measurement uses `ninfer_bench`.
+`ninfer_linear_split_two_output_bench` covers Q8 `[12288,2048]` and `[16384,2560]`,
+FP8/NVFP4 `[16384,5120]`, and paired Q4/Q5 `[4096+12288,5120]`. It uses the common
+`op_measurement.cuh` options described above; `--n` is the total logical row count.
+
+```bash
+./build/bench/ninfer_linear_split_two_output_bench \
+  --format q8 --n 16384 --k 2560 --tokens 1,16,1024,2048,4096 --cache cold
+```
+
+Stateful projection/convolution remains in `ninfer_gdn_input_proj_bench`.
 
 ## QSA Op benchmark
 
-`ninfer_qsa_bench --op input-proj` (the default) compares the three public A16 `qsa_input_proj()`
-overloads with the corresponding contiguous-output `linear()` calls.
+`ninfer_qsa_bench --op input-proj` (the default) measures public A16 `linear_split()` on the three
+QSA projection geometries alongside the corresponding contiguous-output `linear()` calls.
 `--projection qg|kv-index|qkgv-index|all` selects Q8 `[12288,2560]`,
 BF16 `[1664,2560]`, or BF16 `[13952,2560]`. `--entry split|linear|both` selects the public entries;
 `both` reuses identical weights, inputs, and total output storage and alternates entry order by round.
@@ -1117,7 +1124,7 @@ router plus eight routed and one shared gate/up and down matrix products.
 `[1024,K]` K/V row views of a `[6144,K]` QKV parent, for the registered `K=2048` and `K=5120`
 geometries. It uses cold-cache eager execution or CUDA Graph replay, accepts an arbitrary token
 list or sweep, and reports route-neutral effective bandwidth, logical FLOP/s, and calculated T=1
-linear extrapolation.
+linear extrapolation. `--flush-mib` must be positive; the header records the eviction size.
 
 ```bash
 cmake --build build -j --target ninfer_linear_pair_bench
@@ -1257,23 +1264,21 @@ effects are measured through the public Engine benchmark or the target round ben
 
 ## Pointwise Op benchmarks
 
-The Section 5 benchmarks cover the complete Qwen3.6-35B pointwise matrix. Default invocation runs
-all registered small, established, maximum-video, and maximum-image shapes. `--control` preserves
-the selected kernel topology and payload while replacing the mathematical operation with minimal
-bitwise work:
+The pointwise benchmarks call their public Ops. Default invocation runs the registered small,
+established, maximum-video, and maximum-image shapes:
 
 ```bash
 cmake --build build --parallel --target \
   ninfer_residual_add_bench ninfer_sigmoid_mul_bench \
   ninfer_gelu_bench ninfer_add_bias_bench
 
-./build/bench/ninfer_residual_add_bench [--patches P] [--control]
+./build/bench/ninfer_residual_add_bench [--patches P]
 ./build/bench/ninfer_sigmoid_mul_bench \
-  [--tokens T[,T...]] [--control | --candidate-block B]
+  [--tokens T[,T...]]
 ./build/bench/ninfer_position_bench \
-  [--tokens T[,T...]] [--candidate-block B] [--cold-graph] [--warmup N] [--repeat N]
-./build/bench/ninfer_gelu_bench [--mode tanh|exact --columns C] [--control]
-./build/bench/ninfer_add_bias_bench [--d D --columns C] [--control]
+  [--tokens T[,T...]] [--cold-graph] [--warmup N] [--repeat N]
+./build/bench/ninfer_gelu_bench [--mode tanh|exact --columns C]
+./build/bench/ninfer_add_bias_bench [--d D --columns C]
 ```
 
 Aligned registered shapes use 16-byte BF16 packs in the cache-sized regime. GELU and AddBias
@@ -1294,15 +1299,6 @@ pass `--cache cold` for the state route decisions are made in.
 `--split` selects the split-output entry. Its partition follows the channel extent, because those
 are the row profiles the entry admits: `--channels 8192` gives (2048, 2048, 4096) and
 `--channels 10240` gives (2048, 2048, 6144).
-
-`--legacy-stage` times the stage the split entry replaced - one packed convolution into a `[C,T]`
-plane followed by three `extract_bf16_columns` - so the two can be compared under one set of
-timing conditions. It is a decision benchmark and is meant to be removed once that decision is
-closed.
-
-```bash
-./build/bench/ninfer_causal_conv1d_silu_bench --legacy-stage --split --cache cold --channels 8192 --tokens 1024,8192
-```
 
 ## Reports
 

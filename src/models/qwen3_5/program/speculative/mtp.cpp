@@ -1,10 +1,9 @@
-#include "ninfer/ops/speculative_round.h"
 #include "models/qwen3_5/program/graph_execution.h"
 #include "models/qwen3_5/program/internal.h"
 #include "models/qwen3_5/program/execution_context.h"
 #include "core/nvtx.h"
-#include "ninfer/ops/mtp_round.h"
-#include "ninfer/ops/scatter.h"
+#include "ninfer/ops/sequence.h"
+#include "ninfer/ops/indexing.h"
 #include "ninfer/ops/scalar.h"
 #include <cuda_runtime.h>
 #include <stdexcept>
@@ -22,9 +21,9 @@ void mtp_bridge_and_propose(PrefillContext& state, const Tensor& next_token,
     }
     state.execution.work.reset();
     TextContext card(state.execution.device, state.execution.parameters, state.execution.work,
-                     state.text_kv, state.execution.linear_attention, state.execution.io,
+                     state.text_cache, state.execution.linear_attention, state.execution.io,
                      state.execution.prefill_hidden, state.execution.prefill_chunk,
-                     state.text_kv_base, state.mtp_kv, &state.text_cache, state.mtp_cache);
+                     state.text_kv_base, state.mtp_kv, state.mtp_cache);
     configure_text_card(card, state.execution, state.sampling, state.state_source_slot,
                         state.state_destination_slot, state.mtp_proposal_extent);
 
@@ -85,9 +84,9 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
         }
 
         TextContext card(state.execution.device, state.execution.parameters, state.execution.work,
-                         {}, state.execution.linear_attention, state.execution.io,
+                         state.text_cache, state.execution.linear_attention, state.execution.io,
                          state.execution.prefill_hidden, state.execution.prefill_chunk, 0, {},
-                         &state.text_cache, &state.mtp_cache);
+                         &state.mtp_cache);
         Tensor anchors            = frame.anchors.slice(0, 0, batch_size);
         Tensor frontiers          = frame.base_frontiers.slice(0, 0, batch_size);
         Tensor budgets            = frame.remaining_budgets.slice(0, 0, batch_size);
@@ -142,7 +141,7 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
             .sampling                = frame.sampling,
         };
         if (phase == SpeculativePhase::Forward) {
-            ops::speculative_prepare_verify_inputs(anchors, current_drafts, frontiers,
+            ops::prepare_verify_inputs(anchors, current_drafts, frontiers,
                                                    current_extents, verify_ids, target_positions,
                                                    state.execution.device.stream);
             nvtx::ScopedRange target_range(nvtx::Name::DecodeMtpTarget, nvtx::Category::Mtp,
@@ -155,7 +154,7 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
         {
             nvtx::ScopedRange draft_range(nvtx::Name::DecodeMtpDraft, nvtx::Category::Mtp,
                                           static_cast<std::uint64_t>(k) * batch_size);
-            ops::mtp_prepare_next_round(verify_ids, anchors, accepted, frontiers, budgets,
+            ops::prepare_autoregressive_round(verify_ids, anchors, accepted, frontiers, budgets,
                                         licensed_counts, rope_deltas, alignment_ids, next_extents,
                                         ar_positions, ar_rope_positions, ar_valid_columns,
                                         static_cast<std::int32_t>(state.text_cache.max_context()),
@@ -163,7 +162,7 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
             card.mtp_forward_decode_batch(alignment_ids, target_hidden, target_positions,
                                           target_rope, licensed_counts, mtp_rows, envelopes.batch,
                                           alignment_hidden);
-            ops::speculative_select_accepted_hidden(alignment_hidden, accepted, ar_hidden,
+            ops::gather_bf16_batch_columns(alignment_hidden, accepted, ar_hidden,
                                                     state.execution.device.stream);
 
             Tensor proposal_logits = frame.proposal_logits.slice(1, 0, batch_size);

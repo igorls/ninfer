@@ -9,6 +9,7 @@
 #include "ninfer/ops/rmsnorm.h"
 #include "ninfer/ops/gdn_control.h"
 #include "ninfer/ops/gdn_input_proj.h"
+#include "ninfer/ops/linear_split.h"
 #include "ninfer/ops/hyper_connection.h"
 #include "ninfer/ops/kv_cache_append.h"
 #include "ninfer/ops/linear.h"
@@ -20,7 +21,7 @@
 #include "ninfer/ops/rmsnorm.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/scalar.h"
-#include "ninfer/ops/scatter.h"
+#include "ninfer/ops/indexing.h"
 #include "ninfer/ops/selected_block_attention.h"
 #include "ninfer/ops/sigmoid_mul.h"
 #include "ninfer/ops/sparse_moe.h"
@@ -219,7 +220,7 @@ void TextContext::gdn(const GdnParameters& p, std::uint32_t layer, workspace::La
     if (prefill) {
         {
             auto projection_scope = work_.scope();
-            ops::gdn_input_proj(roots.block_input, p.projection, {stage.qkv, stage.z}, work_, s);
+            ops::linear_split(roots.block_input, p.projection, std::array{stage.qkv, stage.z}, work_, s);
         }
         const Tensor conv_in = linear.conv_slot(layer, state_source_slot_);
         Tensor conv_out      = linear.conv_slot(layer, state_destination_slot_);

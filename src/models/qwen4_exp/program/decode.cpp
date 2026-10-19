@@ -8,7 +8,7 @@
 #include "models/qwen4_exp/program/planning/graph_profiles.h"
 #include "ninfer/ops/candidate_logprobs.h"
 #include "ninfer/ops/sampling.h"
-#include "ninfer/ops/scatter.h"
+#include "ninfer/ops/indexing.h"
 
 #include <algorithm>
 #include <array>

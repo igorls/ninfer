@@ -13,22 +13,20 @@
 #include "ninfer/ops/rmsnorm_pack_tail.h"
 #include "ninfer/ops/linear_topk.h"
 #include "ninfer/ops/candidate_selector.h"
-#include "ninfer/ops/attn_input_proj.h"
+#include "ninfer/ops/linear_split.h"
 #include "ninfer/ops/embedding.h"
 #include "ninfer/ops/kv_cache_append.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/linear_add.h"
 #include "ninfer/ops/linear_pair.h"
 #include "ninfer/ops/linear_swiglu.h"
-#include "ninfer/ops/prepare_masked_block.h"
-#include "ninfer/ops/prepare_ragged_prefix.h"
+#include "ninfer/ops/sequence.h"
 #include "ninfer/ops/rmsnorm.h"
 #include "ninfer/ops/rope.h"
 #include "ninfer/ops/scalar.h"
-#include "ninfer/ops/scatter.h"
+#include "ninfer/ops/indexing.h"
 #include "ninfer/ops/sliding_window_attention.h"
 #include "ninfer/ops/softmax_attention.h"
-#include "ninfer/ops/speculative_round.h"
 
 #include <cuda_runtime.h>
 
@@ -310,9 +308,9 @@ void propose_dflash2_batch(DFlashBatchContext& state, qwen3_5::DFlashDecodeState
                     query.view({dimension(config.attention.query_width()), columns});
                 Tensor key_flat   = key.view({dimension(config.attention.key_width()), columns});
                 Tensor value_flat = value.view({dimension(config.attention.key_width()), columns});
-                ops::attn_input_proj(branch.prepared.view({dimension(target.hidden_size), columns}),
-                                     layer.query_key_value.weight, query_flat, key_flat, value_flat,
-                                     stream);
+                std::array outputs{query_flat, key_flat, value_flat};
+                ops::linear_split(branch.prepared.view({dimension(target.hidden_size), columns}),
+                                  layer.query_key_value.weight, outputs, stream);
                 ops::rmsnorm_rope(positions, layer.query_norm, layer.key_norm, query, key, stream);
                 Tensor attention = work.alloc(
                     DType::BF16, {dimension(config.attention.head_dim),
@@ -442,8 +440,9 @@ void propose_batch_impl(DFlashBatchContext& state, qwen3_5::DFlashDecodeState& f
                     query_raw.view({dimension(config.attention.query_width()), columns});
                 Tensor key_flat = key_raw.view({dimension(config.attention.key_width()), columns});
                 Tensor value_flat = value.view({dimension(config.attention.key_width()), columns});
-                ops::attn_input_proj(roots.hidden, weight.query_key_value.weight, query_flat,
-                                     key_flat, value_flat, state.execution.device.stream);
+                std::array outputs{query_flat, key_flat, value_flat};
+                ops::linear_split(roots.hidden, weight.query_key_value.weight, outputs,
+                                  state.execution.device.stream);
                 Tensor query =
                     roots.query.view({dimension(config.attention.head_dim),
                                       dimension(config.attention.num_attention_heads), columns});
@@ -554,7 +553,7 @@ void propose_batch_impl(DFlashBatchContext& state, qwen3_5::DFlashDecodeState& f
                     : dimension(state.execution.parameters.model.resources().public_token_count),
                 state.execution.device.stream);
             if (proposal.token_ids)
-                ops::proposal_remap_token_ids(
+                ops::remap_ids_inplace(
                     flat_drafts, static_cast<const std::int32_t*>(proposal.token_ids->data),
                     dimension(proposal.rows), state.execution.device.stream);
         }
@@ -629,15 +628,14 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
             } else {
                 state.drafts_ready.record(state.execution.device.stream);
             }
-            ops::speculative_prepare_verify_inputs(anchors, drafts, frontiers, extents, verify_ids,
+            ops::prepare_verify_inputs(anchors, drafts, frontiers, extents, verify_ids,
                                                    target_positions, state.execution.device.stream);
         }
 
 
         TextContext card(state.execution.device, state.execution.parameters, state.execution.work,
-                         {}, state.execution.linear_attention, state.execution.io,
-                         state.execution.prefill_hidden, state.execution.prefill_chunk, 0, {},
-                         &state.text_cache);
+                         state.text_cache, state.execution.linear_attention, state.execution.io,
+                         state.execution.prefill_hidden, state.execution.prefill_chunk, 0);
         DFlashFeatureSink sink =
             batch_feature_sink_impl(state, active_lanes, valid_columns, width, batch_size);
         {

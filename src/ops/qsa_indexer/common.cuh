@@ -1,7 +1,7 @@
 #pragma once
 
 #include "ops/common/text_mrope_r64.cuh"
-#include "ops/common/warp.cuh"
+#include "ops/common/cuda/reduce.cuh"
 
 #include <cuda_bf16.h>
 
@@ -37,7 +37,7 @@ __device__ __forceinline__ float qsa_norm_rotate(float x, float weight, const fl
     const int lane = dim & 31;
     const int warp = dim >> 5;
     float* partial = scratch + kQsaHeadDim;
-    const float squares = warp_sum(x * x);
+    const float squares = common::warp_sum(x * x);
     if (lane == 0) { partial[warp] = squares; }
     __syncthreads();
     const float sum      = partial[0] + partial[1] + partial[2] + partial[3];

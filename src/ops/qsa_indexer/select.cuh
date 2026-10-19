@@ -1,8 +1,8 @@
 #pragma once
 
-#include "ops/common/memory.cuh"
-#include "ops/common/mma.cuh"
-#include "ops/common/rowsplit_mma.cuh"
+#include "ops/common/cuda/pipeline.cuh"
+#include "ops/common/cuda/mma.cuh"
+#include "ops/linear/kernels/rowsplit/rowsplit_mma.cuh"
 #include "ops/qsa_indexer/common.cuh"
 
 #include <cuda_bf16.h>
@@ -89,7 +89,7 @@ __global__ __launch_bounds__(kQsaScoreThreads) void qsa_score_rows_kernel(
         }
     }
 #pragma unroll
-    for (int h = 0; h < kQsaQueryHeads; ++h) { dots[h] = warp_sum<8>(dots[h]); }
+    for (int h = 0; h < kQsaQueryHeads; ++h) { dots[h] = common::warp_sum<8>(dots[h]); }
     if (block < complete && part == 0) {
         float score = 0.0F;
 #pragma unroll
@@ -109,7 +109,7 @@ __global__ __launch_bounds__(kQsaMmaThreads) void qsa_score_shared_row_kernel(
     const __nv_bfloat16* __restrict__ prepared, const std::int32_t* __restrict__ positions,
     const std::int32_t* __restrict__ table, const __nv_bfloat16* __restrict__ block_keys,
     float* __restrict__ scores, int score_stride, int columns) {
-    using detail::gemm_swz64;
+    using common::swizzle_xor_64;
     __shared__ __align__(16) __nv_bfloat16 keys[kQsaMmaBlocks * kQsaHeadDim];
     __shared__ __align__(16) __nv_bfloat16 query[kQsaMmaColumns * kQsaHeadDim];
     __shared__ int complete_of[kQsaMmaColumns];
@@ -136,10 +136,10 @@ __global__ __launch_bounds__(kQsaMmaThreads) void qsa_score_shared_row_kernel(
         const bool valid = block < limit;
         const __nv_bfloat16* source =
             valid ? block_keys + qsa_block_offset(table, block) + k8 * 8 : block_keys;
-        cp_async_zfill<16, Cache::cg>(&keys[row * kQsaHeadDim + gemm_swz64(row, k8 * 8)], source,
+        common::cp_async_zfill<16, Cache::cg>(&keys[row * kQsaHeadDim + common::swizzle_xor_64(row, k8 * 8)], source,
                                       valid ? 16 : 0);
     }
-    cp_commit();
+    common::cp_commit();
 
     float total[8][4] = {};
     const int a_row = warp * 16 + (lane & 7) + (((lane >> 3) & 1) << 3);
@@ -154,25 +154,25 @@ __global__ __launch_bounds__(kQsaMmaThreads) void qsa_score_shared_row_kernel(
             const bool valid = c < columns;
             const __nv_bfloat16* source =
                 prepared + (valid ? (static_cast<std::int64_t>(c) * kQsaQueryHeads + head) * kQsaHeadDim + k8 * 8 : 0);
-            cp_async_zfill<16, Cache::cg>(&query[col * kQsaHeadDim + gemm_swz64(col, k8 * 8)],
+            common::cp_async_zfill<16, Cache::cg>(&query[col * kQsaHeadDim + common::swizzle_xor_64(col, k8 * 8)],
                                           source, valid ? 16 : 0);
         }
-        cp_commit();
-        cp_wait<0>();
+        common::cp_commit();
+        common::cp_wait<0>();
         __syncthreads();
         float dot[8][4] = {};
 #pragma unroll
         for (int kstep = 0; kstep < kQsaHeadDim / 16; ++kstep) {
             unsigned a[4];
-            ldmatrix_x4(a[0], a[1], a[2], a[3],
-                        smem_addr(&keys[a_row * kQsaHeadDim + gemm_swz64(a_row, kstep * 16 + a_col)]));
+            common::ldmatrix_x4(a[0], a[1], a[2], a[3],
+                        common::smem_addr(&keys[a_row * kQsaHeadDim + common::swizzle_xor_64(a_row, kstep * 16 + a_col)]));
 #pragma unroll
             for (int n = 0; n < 8; ++n) {
                 const int col = n * 8 + b_row;
                 unsigned b[2];
-                ldmatrix_x2(b[0], b[1],
-                            smem_addr(&query[col * kQsaHeadDim + gemm_swz64(col, kstep * 16 + b_col)]));
-                mma_bf16(dot[n][0], dot[n][1], dot[n][2], dot[n][3], a[0], a[1], a[2], a[3], b[0],
+                common::ldmatrix_x2(b[0], b[1],
+                            common::smem_addr(&query[col * kQsaHeadDim + common::swizzle_xor_64(col, kstep * 16 + b_col)]));
+                common::mma_bf16(dot[n][0], dot[n][1], dot[n][2], dot[n][3], a[0], a[1], a[2], a[3], b[0],
                          b[1]);
             }
         }
@@ -241,7 +241,7 @@ __device__ __forceinline__ int qsa_block_exclusive_scan(int value, int* warp_tot
     int inclusive  = value;
 #pragma unroll
     for (int offset = 1; offset < 32; offset <<= 1) {
-        const int other = __shfl_up_sync(kFullWarpMask, inclusive, offset);
+        const int other = __shfl_up_sync(common::kFullWarpMask, inclusive, offset);
         if (lane >= offset) { inclusive += other; }
     }
     if (lane == 31) { warp_totals[warp] = inclusive; }
@@ -306,7 +306,7 @@ __global__ __launch_bounds__(kQsaSelectThreads) void qsa_select_kernel(
             for (int j = 0; j < kPerLane; ++j) { lane_sum += histogram[tid * kPerLane + j]; }
             unsigned above = 0;
             for (int other = 1; other < 32; ++other) {
-                const unsigned value = __shfl_down_sync(kFullWarpMask, lane_sum, other);
+                const unsigned value = __shfl_down_sync(common::kFullWarpMask, lane_sum, other);
                 if (tid + other < 32) { above += value; }
             }
             if (above < remain && above + lane_sum >= remain) {

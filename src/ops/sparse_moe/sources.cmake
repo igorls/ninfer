@@ -1,13 +1,10 @@
 target_sources(ninfer_ops PRIVATE
-  "${CMAKE_CURRENT_LIST_DIR}/decode/sparse_moe_decode_kernels.cu"
-  "${CMAKE_CURRENT_LIST_DIR}/decode/sparse_moe_decode_plan.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/prefill/sparse_moe_prefill_kernels.cu"
-  "${CMAKE_CURRENT_LIST_DIR}/prefill/sparse_moe_prefill_plan.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/small_t/sparse_moe_small_t_kernels.cu"
-  "${CMAKE_CURRENT_LIST_DIR}/small_t/sparse_moe_small_t_plan.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/../wrapper/sparse_moe.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/nvfp4_bank/route.cu"
-  "${CMAKE_CURRENT_LIST_DIR}/nvfp4_bank/decode.cu"
-  "${CMAKE_CURRENT_LIST_DIR}/nvfp4_bank/grouped.cu"
-  "${CMAKE_CURRENT_LIST_DIR}/../wrapper/sparse_moe_nvfp4_bank.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/entry.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/plan.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/decode/launch.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/small_t/launch.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/prefill/launch.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/kernels/token_experts.cu"
 )
+
+target_sources(ninfer_ops PRIVATE "${CMAKE_CURRENT_LIST_DIR}/nvfp4_bank/route.cu" "${CMAKE_CURRENT_LIST_DIR}/nvfp4_bank/decode.cu" "${CMAKE_CURRENT_LIST_DIR}/nvfp4_bank/grouped.cu" "${CMAKE_CURRENT_LIST_DIR}/nvfp4_bank/entry.cpp")

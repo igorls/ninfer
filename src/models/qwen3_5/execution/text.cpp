@@ -12,7 +12,6 @@
 #include "models/qwen3_5/program/vision_control.h"
 #include "ninfer/ops/argmax.h"
 #include "ninfer/ops/candidate_logprobs.h"
-#include "ninfer/ops/attn_input_proj.h"
 #include "ninfer/ops/causal_conv1d_silu.h"
 #include "ninfer/ops/embedding.h"
 #include "ninfer/ops/gated_delta_net.h"
@@ -20,17 +19,14 @@
 #include "ninfer/ops/gdn_input_proj.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/kv_cache_append.h"
-#include "ninfer/ops/speculative_round.h"
 #include "ninfer/ops/linear_add.h"
 #include "ninfer/ops/linear_pair.h"
 #include "ninfer/ops/linear_swiglu.h"
-#include "ninfer/ops/mtp_pack.h"
+#include "ninfer/ops/indexing.h"
 #include "ninfer/ops/position.h"
 #include "ninfer/ops/residual_add.h"
-#include "ninfer/ops/rmsnorm.h"
 #include "ninfer/ops/rope.h"
 #include "ninfer/ops/sparse_moe.h"
-#include "ninfer/ops/scatter.h"
 #include "ninfer/ops/scalar.h"
 #include "ninfer/ops/sigmoid_mul.h"
 #include "ninfer/ops/silu_mul.h"
@@ -230,16 +226,15 @@ void DFlashFeatureSink::consume_prefill_chunk(std::int32_t tokens, bool rewrite_
 }
 
 TextContext::TextContext(DeviceContext& ctx, const execution::Parameters& weights,
-                         WorkspaceArena& work, qwen3_5::PagedKVCacheView kv,
+                         WorkspaceArena& work, const qwen3_5::PagedKVCache& batch_text_kv,
                          LinearAttentionStatePool& state, qwen3_5::RoundState& io,
                          Tensor& prefill_hidden, std::uint32_t prefill_chunk,
                          std::uint32_t text_kv_base, qwen3_5::PagedKVCacheView mtp_kv,
-                         const qwen3_5::PagedKVCache* batch_text_kv,
                          const qwen3_5::PagedKVCache* batch_mtp_kv)
-    : ctx_(ctx), parameters_(weights), config_(weights.model.config().text), work_(work), kv_(kv),
-      mtp_kv_(mtp_kv), state_(state), io_(io), prefill_hidden_(prefill_hidden),
-      prefill_chunk_(prefill_chunk), text_kv_base_(text_kv_base), batch_text_kv_(batch_text_kv),
-      batch_mtp_kv_(batch_mtp_kv) {
+    : ctx_(ctx), parameters_(weights), config_(weights.model.config().text), work_(work),
+      mtp_kv_(mtp_kv), batch_text_kv_(batch_text_kv), batch_mtp_kv_(batch_mtp_kv), state_(state),
+      io_(io), prefill_hidden_(prefill_hidden), prefill_chunk_(prefill_chunk),
+      text_kv_base_(text_kv_base) {
     if (prefill_chunk_ == 0 ||
         prefill_chunk_ > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
         throw std::invalid_argument("TextContext effective prefill chunk must fit positive int32");
@@ -389,7 +384,7 @@ void TextContext::mtp_forward_stem(const Tensor& ids, const Tensor& hidden,
     ops::rmsnorm(flat_hidden, mtp_->hidden_norm, config_.rms_norm_eps, true, h, s);
 
     Tensor fc_in = roots.packed_input;
-    ops::mtp_pack_fc_input(e, h, fc_in, s);
+    ops::concat_bf16_features(e, h, fc_in, s);
 
     x = roots.residual;
     project(fc_in, mtp_->input_projection, x, work_, s);
@@ -657,7 +652,7 @@ void TextContext::proposal_argmax(const Tensor& hidden, Tensor& logits, Tensor& 
                         : dimension(parameters_.model.resources().public_token_count),
                     ctx_.stream);
         if (proposal_head_ids_ != nullptr) {
-            ops::proposal_remap_token_ids(proposal_tokens, proposal_head_ids_, proposal_head_n_,
+            ops::remap_ids_inplace(proposal_tokens, proposal_head_ids_, proposal_head_n_,
                                           ctx_.stream);
         }
     } else {
@@ -882,7 +877,7 @@ void TextContext::mtp_forward_decode_batch(const Tensor& ids, const Tensor& hidd
     if (batch_mtp_kv_ == nullptr) { throw std::runtime_error("MTP forward is not enabled"); }
     const std::int32_t width = ids.ne[0];
     const std::int32_t batch = ids.ne[1];
-    if (width <= 0 || width > static_cast<std::int32_t>(kMaximumMtpDraftTokens + 1) || batch <= 0 ||
+    if (width <= 0 || width > static_cast<std::int32_t>(kMtpDecodeMaximumWidth) || batch <= 0 ||
         batch > static_cast<std::int32_t>(kMaximumConcurrency)) {
         throw std::invalid_argument("MTP decode batch shape is outside the supported domain");
     }
@@ -985,7 +980,7 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase 
              dimension(config_.attention->num_attention_heads),
              dimension(config_.attention->num_key_value_heads)},
             static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim))),
-            batch_text_kv_->batch_layer_view(fidx), *active_causal_attention_envelope_, work_,
+            batch_text_kv_.batch_layer_view(fidx), *active_causal_attention_envelope_, work_,
             a_batch, ctx_.execution_view());
     } else {
         ops::causal_softmax_attention(
@@ -994,7 +989,7 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase 
              dimension(config_.attention->num_attention_heads),
              dimension(config_.attention->num_key_value_heads)},
             static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim))),
-            batch_text_kv_->batch_layer_view(fidx), *active_causal_attention_envelope_, work_, a,
+            batch_text_kv_.batch_layer_view(fidx), *active_causal_attention_envelope_, work_, a,
             ctx_.execution_view());
     }
     ops::sigmoid_mul(gate, a, s);

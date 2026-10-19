@@ -6,9 +6,9 @@
 #include "core/nvtx.h"
 #include "core/device.h"
 #include "ninfer/ops/candidate_logprobs.h"
-#include "ninfer/ops/prepare_ragged_prefix.h"
+#include "ninfer/ops/sequence.h"
 #include "ninfer/ops/sampling.h"
-#include "ninfer/ops/scatter.h"
+#include "ninfer/ops/indexing.h"
 
 #include <algorithm>
 #include <bit>
@@ -37,9 +37,8 @@ auto ordinary_batch_body(OrdinaryBatchContext& state, std::int32_t batch_size,
                                    state.execution.device.stream));
 
         TextContext card(state.execution.device, state.execution.parameters, state.execution.work,
-                         {}, state.execution.linear_attention, state.execution.io,
-                         state.execution.prefill_hidden, state.execution.prefill_chunk, 0, {},
-                         &state.text_cache);
+                         state.text_cache, state.execution.linear_attention, state.execution.io,
+                         state.execution.prefill_hidden, state.execution.prefill_chunk, 0);
 
         Tensor tokens             = ordinary.tokens.slice(0, 0, batch_size);
         Tensor cache_positions    = ordinary.cache_positions.slice(0, 0, batch_size);

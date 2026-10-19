@@ -1,3 +1,4 @@
+#include "ops/common/numeric/math.cuh"
 // Grouped routes (T > 8) of the NVFP4-bank SparseMoe. Tokens are grouped by selected expert so
 // each active expert's weights are read once per call.
 //
@@ -13,13 +14,13 @@
 #include "ops/sparse_moe/nvfp4_bank/nvfp4_bank_moe.h"
 
 #include "core/device.h"
-#include "ops/common/math.cuh"
-#include "ops/common/memory.cuh"
-#include "ops/common/mma.cuh"
-#include "ops/common/warp.cuh"
-#include "ops/linear/bf16/bf16_template_launch.cuh"
-#include "ops/linear/nvfp4/nvfp4_a4_quantize.cuh"
-#include "ops/linear/nvfp4/nvfp4_codec.cuh"
+#include "ops/common/numeric/convert.cuh"
+#include "ops/common/cuda/pipeline.cuh"
+#include "ops/common/cuda/mma.cuh"
+#include "ops/common/cuda/reduce.cuh"
+#include "ops/linear/kernels/bf16/bf16_template_launch.cuh"
+#include "ops/linear/kernels/nvfp4/nvfp4_a4_quantize.cuh"
+#include "ops/common/quant/nvfp4.cuh"
 #include "ops/sparse_moe/nvfp4_bank/expert_bank.cuh"
 
 #include <cuda_bf16.h>
@@ -135,7 +136,7 @@ __global__ void nvfp4_moe_shared_product_kernel(const float* __restrict__ gate,
     const int token = index / kIntermediate;
     const int row   = index - token * kIntermediate;
     const auto value =
-        __float2bfloat16_rn(silu(gate[index]) * up[index]);
+        __float2bfloat16_rn(common::silu(gate[index]) * up[index]);
     if (product != nullptr) { product[index] = value; }
     activations[(static_cast<std::int64_t>(token) * kPaths + kTopK) * kIntermediate + row] = value;
 }
@@ -205,9 +206,9 @@ __global__ void __launch_bounds__(256, 4) nvfp4_moe_a16_gate_up_kernel(
                 const uint2 g_words = *reinterpret_cast<const uint2*>(gate_codes + group * 8);
                 const uint2 u_words = *reinterpret_cast<const uint2*>(up_codes + group * 8);
                 const float g_coefficient =
-                    decode_nvfp4_e4m3(scale_bytes[warp][group]) * expert.inverse_divisor;
+                    common::decode_e4m3(scale_bytes[warp][group]) * expert.inverse_divisor;
                 const float u_coefficient =
-                    decode_nvfp4_e4m3(scale_bytes[8 + warp][group]) * expert.inverse_divisor;
+                    common::decode_e4m3(scale_bytes[8 + warp][group]) * expert.inverse_divisor;
                 float2 g_values[8];
                 float2 u_values[8];
 #pragma unroll
@@ -215,9 +216,9 @@ __global__ void __launch_bounds__(256, 4) nvfp4_moe_a16_gate_up_kernel(
                     const std::uint32_t gw = p < 4 ? g_words.x : g_words.y;
                     const std::uint32_t uw = p < 4 ? u_words.x : u_words.y;
                     g_values[p] =
-                        decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(gw >> (8 * (p & 3))));
+                        common::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(gw >> (8 * (p & 3))));
                     u_values[p] =
-                        decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(uw >> (8 * (p & 3))));
+                        common::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(uw >> (8 * (p & 3))));
                 }
 #pragma unroll
                 for (int b = 0; b < kSimtTokens; ++b) {
@@ -230,7 +231,7 @@ __global__ void __launch_bounds__(256, 4) nvfp4_moe_a16_gate_up_kernel(
                         float u_sum                 = 0.0F;
 #pragma unroll
                         for (int p = 0; p < 8; ++p) {
-                            const float2 xv = bf16x2_bits_to_float2(bits[p]);
+                            const float2 xv = common::bf16x2_bits_to_float2(bits[p]);
                             g_sum           = fmaf(g_values[p].x, xv.x, g_sum);
                             g_sum           = fmaf(g_values[p].y, xv.y, g_sum);
                             u_sum           = fmaf(u_values[p].x, xv.x, u_sum);
@@ -244,14 +245,14 @@ __global__ void __launch_bounds__(256, 4) nvfp4_moe_a16_gate_up_kernel(
 #pragma unroll
             for (int b = 0; b < kSimtTokens; ++b) {
                 if (b < batch) {
-                    const float gate = warp_reduce_sum(gate_acc[b]);
-                    const float up   = warp_reduce_sum(up_acc[b]);
+                    const float gate = common::warp_reduce_sum(gate_acc[b]);
+                    const float up   = common::warp_reduce_sum(up_acc[b]);
                     if (lane == 0) {
                         const int position = start + base + b;
                         activations[(static_cast<std::int64_t>(grouped_tokens[position]) * kPaths +
                                      grouped_paths[position]) *
                                         kIntermediate +
-                                    pair]  = __float2bfloat16_rn(silu(gate) * up);
+                                    pair]  = __float2bfloat16_rn(common::silu(gate) * up);
                     }
                 }
             }
@@ -326,7 +327,7 @@ __global__ void __launch_bounds__(256, 4) nvfp4_moe_a16_down_kernel(
                     for (int p = 0; p < 8; ++p) {
                         const std::uint32_t word = p < 4 ? words.x : words.y;
                         w[r][p] =
-                            decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(word >> (8 * (p & 3))));
+                            common::decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(word >> (8 * (p & 3))));
                     }
                 }
 #pragma unroll
@@ -339,12 +340,12 @@ __global__ void __launch_bounds__(256, 4) nvfp4_moe_a16_down_kernel(
 #pragma unroll
                         for (int r = 0; r < 2; ++r) {
                             const float coefficient =
-                                decode_nvfp4_e4m3(scale_bytes[local_row + r][group]) *
+                                common::decode_e4m3(scale_bytes[local_row + r][group]) *
                                 expert.inverse_divisor;
                             float sum = 0.0F;
 #pragma unroll
                             for (int p = 0; p < 8; ++p) {
-                                const float2 hv = bf16x2_bits_to_float2(bits[p]);
+                                const float2 hv = common::bf16x2_bits_to_float2(bits[p]);
                                 sum             = fmaf(w[r][p].x, hv.x, sum);
                                 sum             = fmaf(w[r][p].y, hv.y, sum);
                             }
@@ -361,7 +362,7 @@ __global__ void __launch_bounds__(256, 4) nvfp4_moe_a16_down_kernel(
                     const int path     = grouped_paths[position];
 #pragma unroll
                     for (int r = 0; r < 2; ++r) {
-                        const float value = warp_reduce_sum(acc[b][r]);
+                        const float value = common::warp_reduce_sum(acc[b][r]);
                         if (lane == 0) {
                             partials[(static_cast<std::int64_t>(token) * kHidden + row_base + r) *
                                          kTopK +
@@ -403,8 +404,8 @@ __global__ void __launch_bounds__(256) nvfp4_moe_a16_reduce_kernel(
                 const std::uint32_t ab[4] = {a.x, a.y, a.z, a.w};
 #pragma unroll
                 for (int i = 0; i < 4; ++i) {
-                    const float2 wv = bf16x2_bits_to_float2(wb[i]);
-                    const float2 av = bf16x2_bits_to_float2(ab[i]);
+                    const float2 wv = common::bf16x2_bits_to_float2(wb[i]);
+                    const float2 av = common::bf16x2_bits_to_float2(ab[i]);
                     shared[b]       = fmaf(wv.x, av.x, shared[b]);
                     shared[b]       = fmaf(wv.y, av.y, shared[b]);
                 }
@@ -415,14 +416,14 @@ __global__ void __launch_bounds__(256) nvfp4_moe_a16_reduce_kernel(
     for (int b = 0; b < 8; ++b) {
         if (b < batch) {
             const int token        = token_base + b;
-            const float shared_sum = warp_reduce_sum(shared[b]);
+            const float shared_sum = common::warp_reduce_sum(shared[b]);
             float routed           = 0.0F;
             if (lane < kTopK) {
                 routed =
                     route_weights[token * kTopK + lane] *
                     partials[(static_cast<std::int64_t>(token) * kHidden + row) * kTopK + lane];
             }
-            routed = warp_reduce_sum<16>(routed); // lanes 0..9 hold the paths, 10..15 zero
+            routed = common::warp_reduce_sum<16>(routed); // lanes 0..9 hold the paths, 10..15 zero
             if (lane == 0) {
                 output[static_cast<std::int64_t>(token) * kHidden + row] =
                     __float2bfloat16_rn(routed + shared_sum * shared_scale[token]);
@@ -477,14 +478,14 @@ __global__ void __launch_bounds__(256, 2) nvfp4_moe_a4_gate_up_kernel(
                 const int local      = row & 15;
                 const int pair       = pair_base + (row >> 4) * 8 + (local & 7);
                 const int weight_row = pair + (local >= 8 ? kIntermediate : 0);
-                cp_async<16, Cache::cg>(weight_codes + i,
+                common::cp_async<16, Cache::cg>(weight_codes + i,
                                         expert.codes +
                                             static_cast<std::int64_t>(weight_row) * (kHidden / 2) +
                                             k_half * kA4GateCodes + column);
                 const int token_index = token_chunk + row;
                 if (token_index < count) {
                     const int token = grouped_tokens[offset + token_index];
-                    cp_async<16, Cache::ca>(act_codes + i,
+                    common::cp_async<16, Cache::ca>(act_codes + i,
                                             input_codes +
                                                 static_cast<std::int64_t>(token) * (kHidden / 2) +
                                                 k_half * kA4GateCodes + column);
@@ -498,14 +499,14 @@ __global__ void __launch_bounds__(256, 2) nvfp4_moe_a4_gate_up_kernel(
                 const int local      = row & 15;
                 const int pair       = pair_base + (row >> 4) * 8 + (local & 7);
                 const int weight_row = pair + (local >= 8 ? kIntermediate : 0);
-                cp_async<4, Cache::ca>(weight_scales + row * kA4GateScaleStride + tile * 4,
+                common::cp_async<4, Cache::ca>(weight_scales + row * kA4GateScaleStride + tile * 4,
                                        expert.scales + nvfp4_expert_scale_word(weight_row,
                                                                                k_half * 20 + tile,
                                                                                kGateTiles));
                 const int token_index = token_chunk + row;
                 if (token_index < count) {
                     const int token = grouped_tokens[offset + token_index];
-                    cp_async<4, Cache::ca>(act_scales + row * kA4GateScaleStride + tile * 4,
+                    common::cp_async<4, Cache::ca>(act_scales + row * kA4GateScaleStride + tile * 4,
                                            input_scales +
                                                static_cast<std::int64_t>(token) * (kHidden / 16) +
                                                (k_half * 20 + tile) * 4);
@@ -514,8 +515,8 @@ __global__ void __launch_bounds__(256, 2) nvfp4_moe_a4_gate_up_kernel(
                                                       tile * 4) = 0;
                 }
             }
-            cp_commit();
-            cp_wait<0>();
+            common::cp_commit();
+            common::cp_wait<0>();
             __syncthreads();
             if (token_chunk + warp_n * 8 < count) {
                 const std::uint8_t* w_codes  = weight_codes + warp_m * 16 * kA4GateCodes;
@@ -528,16 +529,16 @@ __global__ void __launch_bounds__(256, 2) nvfp4_moe_a4_gate_up_kernel(
                     unsigned b[2];
                     const int matrix_row = (lane & 7) + (((lane >> 3) & 1) << 3);
                     const int column     = (lane >> 4) * 16;
-                    ldmatrix_x4(a[0], a[1], a[2], a[3],
-                                smem_addr(w_codes + matrix_row * kA4GateCodes + k * 32 + column));
-                    ldmatrix_x2(b[0], b[1],
-                                smem_addr(a_codes + (lane & 7) * kA4GateCodes + k * 32 +
+                    common::ldmatrix_x4(a[0], a[1], a[2], a[3],
+                                common::smem_addr(w_codes + matrix_row * kA4GateCodes + k * 32 + column));
+                    common::ldmatrix_x2(b[0], b[1],
+                                common::smem_addr(a_codes + (lane & 7) * kA4GateCodes + k * 32 +
                                           ((lane >> 3) & 1) * 16));
                     const unsigned scale_a = *reinterpret_cast<const unsigned*>(
                         w_scales + (((lane & 1) << 3) | (lane >> 2)) * kA4GateScaleStride + k * 4);
                     const unsigned scale_b = *reinterpret_cast<const unsigned*>(
                         a_scales + (lane >> 2) * kA4GateScaleStride + k * 4);
-                    mma_nvfp4_e4m3(accumulators[0], accumulators[1], accumulators[2],
+                    common::mma_nvfp4_e4m3(accumulators[0], accumulators[1], accumulators[2],
                                    accumulators[3], a[0], a[1], a[2], a[3], b[0], b[1], scale_a,
                                    scale_b);
                 }
@@ -556,7 +557,7 @@ __global__ void __launch_bounds__(256, 2) nvfp4_moe_a4_gate_up_kernel(
                 activations[(static_cast<std::int64_t>(grouped_tokens[position]) * kPaths +
                              grouped_paths[position]) *
                                 kIntermediate +
-                            pair]  = __float2bfloat16_rn(silu(gate) * up);
+                            pair]  = __float2bfloat16_rn(common::silu(gate) * up);
             }
         }
     }
@@ -669,17 +670,17 @@ __global__ void __launch_bounds__(128, 4) nvfp4_moe_a4_down_kernel(
                 for (int k = 0; k < kIntermediate / 64; ++k) {
                     unsigned a[4];
                     unsigned b[2];
-                    ldmatrix_x4(
+                    common::ldmatrix_x4(
                         a[0], a[1], a[2], a[3],
-                        smem_addr(w_codes[group] + a_row_offset * kCodes + k * 32 + a_column_byte));
-                    ldmatrix_x2(b[0], b[1],
-                                smem_addr(a_codes[warp_n] + b_row_offset * kCodes + k * 32 +
+                        common::smem_addr(w_codes[group] + a_row_offset * kCodes + k * 32 + a_column_byte));
+                    common::ldmatrix_x2(b[0], b[1],
+                                common::smem_addr(a_codes[warp_n] + b_row_offset * kCodes + k * 32 +
                                           b_column_byte));
                     const std::uint32_t sfa = *reinterpret_cast<const std::uint32_t*>(
                         w_scales[group] + sfa_row * kScales + k * 4);
                     const std::uint32_t sfb = *reinterpret_cast<const std::uint32_t*>(
                         a_scales[warp_n] + sfb_row * kScales + k * 4);
-                    mma_nvfp4_e4m3(accumulators[0], accumulators[1], accumulators[2],
+                    common::mma_nvfp4_e4m3(accumulators[0], accumulators[1], accumulators[2],
                                    accumulators[3], a[0], a[1], a[2], a[3], b[0], b[1], sfa, sfb);
                 }
                 const int row0 = row_base + group * 16 + (lane >> 2);

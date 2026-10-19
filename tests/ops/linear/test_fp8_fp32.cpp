@@ -3,7 +3,7 @@
 #include "core/weight.h"
 #include "core/weight_view.h"
 #include "ninfer/ops/weight_input.h"
-#include "ops/linear/fp8/fp8_format.h"
+#include "ops/common/host/operands.h"
 #include "ops/linear/linear_test_common.h"
 #include "ops/op_tester.h"
 
@@ -76,7 +76,7 @@ int prepared_native_weight() {
         ++failures;
     }
     try {
-        (void)ops::detail::validate_fp8_row_weight(actual, "prepared FP8 FP32");
+        (void)ops::common::validate_fp8_weight(actual, "prepared FP8 FP32");
     } catch (const std::exception& error) {
         std::cerr << "prepared FP32-scale FP8 weight was rejected: " << error.what() << '\n';
         return failures + 1;
@@ -193,14 +193,14 @@ int run_fp8_fp32() {
 
     auto packed = make_fp8_fp32_weight(2560, 6144, 931U);
     try {
-        (void)ops::detail::validate_fp8_row_weight(packed.weight, "FP8 FP32 validator test");
+        (void)ops::common::validate_fp8_weight(packed.weight, "FP8 FP32 validator test");
     } catch (const std::exception& error) {
         std::cerr << "valid FP8 FP32 metadata was rejected: " << error.what() << '\n';
         ++failures;
     }
     const auto expect_invalid = [&](const char* label, Weight invalid) {
         try {
-            (void)ops::detail::validate_fp8_row_weight(invalid, "FP8 FP32 validator test");
+            (void)ops::common::validate_fp8_weight(invalid, "FP8 FP32 validator test");
             std::cerr << "invalid FP8 FP32 " << label << " was accepted\n";
             ++failures;
         } catch (const std::invalid_argument&) {}

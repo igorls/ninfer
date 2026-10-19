@@ -6,7 +6,7 @@
 #include "ops/sparse_moe/nvfp4_bank/nvfp4_bank_moe.h"
 
 #include "core/device.h"
-#include "ops/linear/bf16/bf16_template_launch.cuh"
+#include "ops/linear/kernels/bf16/bf16_template_launch.cuh"
 #include "ops/sparse_moe/nvfp4_bank/select.cuh"
 
 #include <cuda_bf16.h>

@@ -29,7 +29,9 @@ Tests are grouped by observable risk, not by mirroring every source file or clas
 `CMakeLists.txt` includes explicit registrations from `cmake/`, `artifact/`, `models/qwen3_5/`,
 `models/qwen4_exp/` and `ops/`. Registration helpers live in `cmake/NinferTests.cmake`; included manifests keep
 executables and CTest working directories under `build/tests/`.
-`ops/op_tester.h` and `ops/op_check.h` own only reusable device/guard and comparison mechanics.
+`ops/op_tester.h` and `ops/op_check.h` own reusable device/guard and comparison mechanics.
+`ops/linear_common.h` shares extent checks, explicit sampling recipes, payload preservation and
+0/1/77 entry handling; each projection family keeps its own fixtures and complete oracle.
 Concrete numerical criteria remain named by the semantic Op suite; there are no cross-Op tolerance
 presets.
 
@@ -38,7 +40,8 @@ Op suites. `ops/quantized_weight.h` owns packed-weight fixtures and independent 
 `ops/direct_bf16_weight.h` owns direct BF16 fixtures. GDN record/fold tests preserve their specified
 snapshot reference separately from projection and recurrence mathematical qualification.
 
-For QSA, run `ctest --test-dir build -R '^ninfer_qsa_input_proj_test$' --output-on-failure`.
+For segmented projection, run the original 2560-input suite and the migrated two/multi-output suites:
+`ctest --test-dir build -R '^ninfer_linear_split(_two_output|_multi_output)?_test$' --output-on-failure`.
 `ninfer_qsa_sparse_gqa_test --kv-cache bf16|fp8|int8|nvfp4|k8v4` selects one cache profile;
 the default checks all five. QSA tail, prepare, indexer and sparse-GQA partial-initialization cases
 also check their permitted read footprints under Compute Sanitizer initcheck.
@@ -127,12 +130,12 @@ For a change confined to one Q8 geometry, use the same public conformance cases 
 `./build/tests/ninfer_linear_q8_a16_test --shape N K`. The default CTest invocation still covers
 all registered Q8 geometries.
 
-For a change confined to a newly supported BF16 geometry, use
-`./build/tests/ninfer_linear_bf16_a16_test --shape N K`. This filter currently covers the new
-geometry table; default invocation also runs the older BF16 cases.
+For a change confined to one BF16 geometry, use
+`./build/tests/ninfer_linear_bf16_a16_test --shape N K`. The filter covers all registered BF16
+geometries, including the original projections and selector matrix. The default runs all cases.
 
-Linear, LinearAdd and LinearSwiGLU common implementations each compile once into a test support
-library. Their libraries and CXX Op test executables receive `-fno-fast-math` and `-ffp-contract=off`
+Linear (including both BF16 fixture recipes), LinearAdd (including FP8/NVFP4) and LinearSwiGLU
+common implementations each compile once into a test support library. Their libraries and CXX Op test executables receive `-fno-fast-math` and `-ffp-contract=off`
 on GNU/Clang. The remaining organization, entry-point and oracle-build work is tracked in the
 [Linear test reorganization requirements](../docs/maintainer/linear-test-reorganization-plan.md).
 
@@ -321,6 +324,18 @@ A permanent test should protect one current risk, such as:
 - generated-token commit/stop/cancel consistency;
 - public benchmark or OpenAI/Anthropic observable behavior;
 - a reproduced supported bug.
+
+Structural refactoring preserves existing cases, seeds, input distributions, oracles and numerical
+criteria. Treat changes to test data or acceptance as explicit verification changes, identifying
+the regression risk they protect and their execution cost.
+
+Test each Op's workspace query against its own execution and interval contract. Shared allocation
+helpers do not promise equal capacities across different Ops.
+
+Stateful integration fixtures establish the prerequisites of the path they test. Isolate unrelated
+cache history when qualifying restoration; share history deliberately when testing retention or
+resource pressure. Enabling prefix reuse does not guarantee a cache hit after arbitrary preceding
+work: availability and selection follow the [context-cache policy](../docs/maintainer/resource-scheduling-and-context-cache.md).
 
 Performance-only assertions belong in benchmarks and profiler review. Source scans,
 implementation-shape assertions, trivial getters/configuration, retired command surfaces, and

@@ -3,65 +3,10 @@
 #include "core/device.h"
 #include "core/paged_kv_cache.h"
 #include "core/tensor.h"
-#include "core/weight.h"
 
 #include <cuda_runtime.h>
 
 namespace ninfer::ops {
-
-/**
- * Op: qsa_input_proj
- *
- * Math / indexing:
- * Each output s is an independent contiguous row segment of one matrix projection:
- *   ideal_s[r,m] = sum_k logical_weight[begin_s+r,k] * BF16_value(x[k,m]).
- * There is no bias, normalization, RoPE, or gate activation. The parent is already in the
- * following row order; the Op does not apply an additional head permutation:
- *
- *   Q8 [12288,2560]:  query [0,6144), gate [6144,12288).
- *   BF16 [1664,2560]: key [0,512), value [512,1024), index_query [1024,1536),
- *                     index_key [1536,1664).
- *   BF16 [13952,2560]: query [0,6144), key [6144,6656), gate [6656,12800),
- *                      value [12800,13312), index_query [13312,13824),
- *                      index_key [13824,13952).
- *
- * Logical shapes / supported domain:
- * x is BF16 [2560,M]. Each output is BF16 [segment_rows,M]. All activation tensors are
- * contiguous, non-null, and 16-byte aligned. M is any positive column extent representable
- * by the tensors and available storage. For a layer batch, M=T*B; the caller may view the
- * continuous segments as [256,24,T,B], [256,2,T,B], [128,4,T,B], and [128,T,B].
- * The two-output parent is Q8_G32_FP16 RowSplit with G32 FP16 scales. The four- and six-output
- * parents are BF16 Contiguous. Logical and padded weight shapes are equal to the registered
- * [N,2560] shapes above. Weight code/data planes and Q8 scales are non-null and 16-byte aligned.
- * Weight inputs are native Weight views; each call admits only its corresponding parent form.
- *
- * Numeric:
- * All routes use A16 compute and write BF16 outputs. The independent oracle decodes the logical
- * weight and evaluates every complete dot product naively in FP64 from represented inputs.
- * BF16 outputs are promoted and compared to the unrounded ideal result under the Op's A16
- * criterion. Private dequantization, accumulation, and reduction order are implementation
- * choices. Every physical input column is computed; masked layer inputs supply finite safe
- * values before invoking this Op.
- *
- * Effects:
- * All outputs are fully written and mutually disjoint. They overlap neither x nor any weight
- * plane. Inputs and weights are preserved. Outputs may occupy disjoint slices of one allocation.
- * There is no state, cache, metadata, frontier, or allocation side effect.
- *
- * Workspace / execution:
- * No caller-owned global scratch or hidden Device allocation. Results are written directly
- * to the supplied segments. Work is submitted to stream and supports CUDA Graph capture/replay;
- * operand readiness and lifetime through the last consumer belong to the caller.
- */
-void qsa_input_proj(const Tensor& x, const Weight& query_gate_weight, Tensor& query, Tensor& gate,
-                    cudaStream_t stream);
-
-void qsa_input_proj(const Tensor& x, const Weight& kv_index_weight, Tensor& key, Tensor& value,
-                    Tensor& index_query, Tensor& index_key, cudaStream_t stream);
-
-void qsa_input_proj(const Tensor& x, const Weight& joint_weight, Tensor& query, Tensor& key,
-                    Tensor& gate, Tensor& value, Tensor& index_query, Tensor& index_key,
-                    cudaStream_t stream);
 
 // Non-owning views of one layer. Dimension zero is contiguous; outer strides may retain
 // pool/layer gaps or interleaving. BF16/I32 bases and used strides are naturally aligned,
@@ -157,7 +102,6 @@ struct QsaIndexerExecutionEnvelope {
  * Every live p+1 is <= envelope.max_visible_tokens <=262144, within the table capacity.
  * Envelope zero permits only inert queries. Live scoring operands and their FP32 scores are
  * finite. BF16 values enter FP32 accumulation directly; scores have no BF16 rounding boundary.
- * Mathematical scores and selection boundaries are independently qualified against FP64.
  * Device counts, positions, selectors and readable live pages are caller guarantees.
  *
  * Effects / output:
@@ -220,10 +164,9 @@ struct QsaSparseGqaExecutionEnvelope {
  * covered by its table. Selection is contiguous I32 [512,T,B] and [T,B]; each live c lies in
  * [0,min(512,C)], with distinct ids in [0,C). Id order is unspecified; the set need not be an
  * Indexer's actual TopK. Device metadata and readable selected pages are caller guarantees. Live
- * mathematical operands/results are finite. The independent oracle decodes the actual stored
- * codes/scales and evaluates basis transforms, dot, stable softmax, PV and sigmoid in FP64,
- * comparing promoted BF16 output to the unrounded ideal under one A16 criterion. Cache storage
- * quantization error is separate from this computation error.
+ * mathematical operands/results are finite. Cache storage quantization and the A16 computation
+ * have separate rounding boundaries; decoded KV, transformed Q and probabilities are internal
+ * operands rather than additional public tensors.
  *
  * Effects / execution:
  * All inputs and cache are preserved. There is no append, persistent state or publication.
@@ -298,10 +241,10 @@ void qsa_sparse_gqa(const Tensor& query, const Tensor& output_gate,
  * Numeric / effects:
  * Norm and rotation have no intermediate represented tensor. The pooled mean's BF16 rounding
  * is semantic; raw records preserve input words exactly. Q/IQ/index keys and BFloat16-cache K
- * are BF16 approximations to the complete formula, independently qualified against a
- * high-precision oracle. Quantized K includes the storage encoder's representation error;
- * V uses its profile's exact persistent encoding. Q/IQ for t>=n are exactly BF16 +0; inert columns
- * do not read projections/positions/state or write cache/records. An empty row need not have valid
+ * are BF16 approximations to the complete formula. Quantized K includes the storage encoder's
+ * representation error; V uses its profile's exact persistent encoding. Q/IQ for t>=n are
+ * exactly BF16 +0; inert columns do not read projections/positions/state or write cache/records.
+ * An empty row need not have valid
  * slot/table selectors. before, metadata, page tables and untouched cache/record regions remain
  * unchanged. query may exactly alias projected.query, and index_query may independently exactly
  * alias projected.index_query (same address/shape/strides). Partial overlap and all other

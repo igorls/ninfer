@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ops/common/warp.cuh"
+#include "ops/common/cuda/reduce.cuh"
 #include "ops/softmax_attention/selected_block/common.cuh"
 
 #include <cuda_bf16.h>
@@ -27,10 +27,10 @@ __global__ __launch_bounds__(kSelectedHeadDim) void selected_block_decode_merge_
             lane < splits ? values[lane * kSelectedPartialStride + kSelectedHeadDim] : -CUDART_INF_F;
         const float split_sum =
             lane < splits ? values[lane * kSelectedPartialStride + kSelectedHeadDim + 1] : 0.0F;
-        const float maximum = warp_max(split_max);
+        const float maximum = common::warp_max(split_max);
         const float factor  = split_sum > 0.0F ? expf(split_max - maximum) : 0.0F;
         factors[lane]       = factor;
-        const float total   = warp_sum(factor * split_sum);
+        const float total   = common::warp_sum(factor * split_sum);
         if (lane == 0) { denominator = total; }
     }
     __syncthreads();

@@ -1,3 +1,4 @@
+#include "ops/common/numeric/math.cuh"
 #pragma once
 
 // Four-stream hyper-connection kernels. The short chain (T <= 48) is CUDA-core: a group norm
@@ -5,8 +6,8 @@
 // applying its four up rows to every token. The tensor-core route reuses the BF16 Linear MMA
 // contraction for the down and up projections (launch.cu).
 
-#include "ops/common/math.cuh"
-#include "ops/common/warp.cuh"
+#include "ops/common/numeric/convert.cuh"
+#include "ops/common/cuda/reduce.cuh"
 
 #include <cuda_bf16.h>
 
@@ -65,7 +66,7 @@ __global__ void __launch_bounds__(kHyperNormThreads)
     }
     // One reduction per launch: warp_sums is never rewritten after it, the total lives in warp 0
     // and inv_rms is published behind its own barrier.
-    sum_sq = block_reduce_sum<kHyperNormThreads>(sum_sq, warp_sums);
+    sum_sq = common::block_reduce_sum<kHyperNormThreads>(sum_sq, warp_sums);
     if (tid == 0) inv_rms = rsqrtf(sum_sq / static_cast<float>(kHyperHidden) + 1.0e-6F);
     __syncthreads();
 
@@ -103,14 +104,14 @@ __global__ void __launch_bounds__(256)
                               *reinterpret_cast<const ulonglong2*>(x + chunk * 8), sum);
     }
     // One reduction per launch; only thread 0 (in warp 0) consumes it.
-    sum = block_reduce_sum<256>(sum, warp_sums);
+    sum = common::block_reduce_sum<256>(sum, warp_sums);
     if (tid == 0) {
         if (row < kHyperLowRank) {
             low_rank[static_cast<std::int64_t>(token) * kHyperLowRank + row] =
-                __float2bfloat16_rn(silu(sum * 0.25F));
+                __float2bfloat16_rn(common::silu(sum * 0.25F));
         } else {
             injection[static_cast<std::int64_t>(token) * kHyperStreams + (row - kHyperLowRank)] =
-                2.0F * sigmoid(sum * 0.25F);
+                2.0F * common::sigmoid(sum * 0.25F);
         }
     }
 }
@@ -163,10 +164,10 @@ __global__ void __launch_bounds__(128)
 #pragma unroll
     for (int t = 0; t < Tokens; ++t) {
         if (t >= active) { continue; }
-        const float total = warp_reduce_sum(sums[t]);
+        const float total = common::warp_reduce_sum(sums[t]);
         if (lane == 0) {
             contribution[t][stream] =
-                sigmoid(total) *
+                common::sigmoid(total) *
                 __bfloat162float(normalized[static_cast<std::int64_t>(t) * kHyperConcat + row]);
         }
     }
@@ -181,7 +182,7 @@ __global__ void __launch_bounds__(128)
 }
 
 // Grid T, 256 threads: 64 threads per stream; two warps per stream reduce with shuffles and one
-// per-stream shared pair (no block_reduce_sum).
+// per-stream shared pair (no common::block_reduce_sum).
 __global__ void __launch_bounds__(256)
     hyper_group_norm_wide_kernel(const __nv_bfloat16* __restrict__ hidden,
                                  const __nv_bfloat16* __restrict__ norm,
@@ -205,7 +206,7 @@ __global__ void __launch_bounds__(256)
             sum_sq = fmaf(__bfloat162float(v[i]), __bfloat162float(v[i]), sum_sq);
         }
     }
-    sum_sq = warp_reduce_sum(sum_sq);
+    sum_sq = common::warp_reduce_sum(sum_sq);
     if ((stream_tid & 31) == 0) warp_sums[stream][stream_tid / 32] = sum_sq;
     __syncthreads();
     if (stream_tid == 0) {
@@ -244,14 +245,14 @@ __global__ void __launch_bounds__(128)
         sum              = hyper_dot_chunk(*reinterpret_cast<const ulonglong2*>(w + column),
                                            *reinterpret_cast<const ulonglong2*>(x + column), sum);
     }
-    sum = warp_reduce_sum(sum);
+    sum = common::warp_reduce_sum(sum);
     if (lane == 0) {
         injection[static_cast<std::int64_t>(token) * kHyperStreams + stream] =
-            2.0F * sigmoid(sum * 0.25F);
+            2.0F * common::sigmoid(sum * 0.25F);
     }
 }
 
-// Grid T, 256 threads: block_input = mean over streams of sigmoid(up) * normalized.
+// Grid T, 256 threads: block_input = mean over streams of common::sigmoid(up) * normalized.
 __global__ void __launch_bounds__(256)
     hyper_mix_reduce_wide_kernel(const float* __restrict__ up,
                                  const __nv_bfloat16* __restrict__ normalized,
@@ -270,7 +271,7 @@ __global__ void __launch_bounds__(256)
             const auto* n    = reinterpret_cast<const __nv_bfloat16*>(&n_raw);
 #pragma unroll
             for (int i = 0; i < 8; ++i) {
-                mean[i] += sigmoid(z[i]) * __bfloat162float(n[i]);
+                mean[i] += common::sigmoid(z[i]) * __bfloat162float(n[i]);
             }
         }
         ulonglong2 raw_out;

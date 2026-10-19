@@ -1,3 +1,4 @@
+#include "ninfer/ops/speculative_accept.h"
 #include "models/qwen4_exp/program/program_impl.h"
 #include "models/qwen4_exp/program/context_work.h"
 #include "models/qwen4_exp/program/context.h"
@@ -5,7 +6,7 @@
 #include "core/device.h"
 #include "ninfer/ops/argmax.h"
 #include "ninfer/ops/embedding.h"
-#include "ninfer/ops/speculative_round.h"
+#include "ninfer/ops/indexing.h"
 
 #include <algorithm>
 #include <chrono>

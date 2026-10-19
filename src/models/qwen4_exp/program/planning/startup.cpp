@@ -1,4 +1,5 @@
-#include "ninfer/ops/speculative_round.h"
+#include "ninfer/ops/speculative_accept.h"
+#include "ninfer/ops/indexing.h"
 #include "models/qwen4_exp/program/planning/startup.h"
 
 #include "core/device.h"
@@ -9,6 +10,7 @@
 #include "ninfer/ops/gated_delta_net.h"
 #include "ninfer/ops/gdn_control.h"
 #include "ninfer/ops/gdn_input_proj.h"
+#include "ninfer/ops/linear_split.h"
 #include "ninfer/ops/hyper_connection.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/ple_ngram.h"
@@ -259,8 +261,9 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                     const auto& w = g.projection.weight;
                     if (prefill) {
                         scratch(layout,
-                                ops::gdn_input_proj_workspace_capacity_bytes(
-                                    g.projection, tokens, tokens));
+                                ops::linear_split_workspace_capacity_bytes(
+                                    g.projection, std::array<std::int32_t, 2>{10240, 6144},
+                                    tokens, tokens));
                     } else {
                         scratch(layout,
                                 std::max<std::size_t>(

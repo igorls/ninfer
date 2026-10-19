@@ -4,7 +4,7 @@
 #include "core/device.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/scalar.h"
-#include "ninfer/ops/scatter.h"
+#include "ninfer/ops/indexing.h"
 
 #include <algorithm>
 #include <array>
@@ -380,7 +380,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
         request.timings.vision_seconds += vision_seconds;
         request.timings.prefill_seconds = std::max(0.0, staged.elapsed_seconds - vision_seconds);
         if (staged.vision) { staged.vision->retire_handoff(); }
-        staged.prompt.release_all_media_payloads();
+        for (auto& payload : staged.prompt.media_payloads) { payload.reset(); }
 
         const bool prompt_frontier_capture =
             request.next_capture < request.capture_groups.size() &&

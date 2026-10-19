@@ -15,10 +15,10 @@ Qualification and performance evidence remain specific to each device and route.
 | Item | Value |
 |---|---|
 | Fork line | `workstation` (named `port/upstream-v3` until September 28, 2026), based on upstream [`bace20dc`](https://github.com/Neroued/ninfer/commit/bace20dc70249eed6402b66d4852c6c3f9612905) (September 24, 2026) and merged with upstream `e31bc99b` in `e2a149f1` and `d44ab584` in `d29866c9` |
-| Last reviewed upstream commit | [`81c8ce09`](https://github.com/Neroued/ninfer/commit/81c8ce093b2c1646a87566a8e59d807fcf0ec95c) (October 8, 2026), merged on `sync/upstream-81c8ce09` |
+| Last merged upstream commit | [`6e772ee3`](https://github.com/Neroued/ninfer/commit/6e772ee3) on the local `sync/upstream-64d10fbf` branch; hardware qualification is in progress |
 | Pre-v3 fork line | `research/qwen4-flash-next` at `87812bc8` (September 26); the source for Flash-Next |
-| Current sync | All 44 commits in `d44ab584..81c8ce09`; upstream preemptive runtime adopted and Flash-Next migrated |
-| Current assessment target | `64d10fbf` (October 16, 2026); 77 incoming commits reviewed on October 19, not merged; see the assessment below |
+| Current sync | The earlier 44-commit sync through `81c8ce09` is followed by the first 38 of the 77 reviewed incoming commits; the Core memory/execution boundary is next |
+| Current target | `64d10fbf` (October 16, 2026); full source integration and qualification remain incomplete; see the assessment below |
 
 The fork syncs by merging `origin/master` into the fork line, never by rebasing or cherry-picking
 upstream work. Each merge records every upstream change it brings in here as integrated, deferred
@@ -45,8 +45,8 @@ link them here.
 
 **Status: In progress; full merge and GPU qualification incomplete.** Implementation
 was authorized after the assessment. The contained grammar trial is carried in
-`58cd4222` on `sync/upstream-64d10fbf`; the first 24-commit upstream merge is being
-adapted. The original assessment comparison is committed
+`58cd4222` on `sync/upstream-64d10fbf`; the first 24-commit upstream merge is
+`d3ffa5b3`. The original assessment comparison is committed
 `workstation` at `2b62e8e5` against upstream
 [`64d10fbf`](https://github.com/Neroued/ninfer/commit/64d10fbf9f8e6bfc79ab0570b94674c5b9997929).
 There are 77 upstream commits and 166 fork-only commits after the common ancestor
@@ -223,7 +223,7 @@ with the small-case costs and production-vocabulary uncertainty explicit.
 Source/history review, dry merges and the contained Windows CPU trial are complete.
 The trial was committed as `58cd4222` after implementation authorization. The full
 integration, model numerical comparison, model conversion and dual-GPU qualification
-remain open. No upstream merge is finalized, and nothing has been pushed or deployed.
+remain open. The first source merge is recorded locally; nothing has been pushed or deployed.
 
 Stage 1 carries the fork's FP32-row-scale FP8 input kernels, short-window schedules
 and BF16 GDN control operands into the upstream prepared-operand interfaces. The
@@ -256,6 +256,48 @@ Colab's disk then filled while holding two complete build trees and both explici
 artifacts. Link and synthetic-converter I/O failures from that condition are
 invalidated checks, with reruns after removing disposable benchmark binaries and
 download caches. Hardware/numerical qualification is still in progress.
+
+The converter rerun then exposed an actual integration error: the U4Z8 method's
+return was lost when the stored-scale method was added. Restoring it makes all
+85 artifact/converter Python checks pass under Python 3.11.17; three CUDA-only
+quantizer checks are skipped by the CPU Torch environment. The real-model
+baseline also has two explicit prerequisite failures with the selected 27B
+artifact: the 35B MoE test rejects its dense architecture, and the DFlash test
+requires a missing `dflash` component. Neither is a candidate regression or a
+passed qualification of those routes.
+
+At the second boundary, Op-family ownership and plain segmented projections are
+migrated. The fork's BF16 vocabulary TopK and LinearAdd profiles remain
+under `linear/topk` and `linear/add`; source integration retains those profiles
+rather than dropping them during the file moves. Shared operand validation
+accounts for the actual BF16/FP32 FP8 scale words. The retained masked D256 KV
+form uses the upstream shared writer with fork admission checks; its numerical
+and performance acceptance remains pending. The FP8 TMA handoff still counts and
+releases every consumer thread after its reads. Linux and Windows builds of
+this second boundary pass for the model runtime. Linux CLI/server and Windows
+CLI/server/Supervisor build successfully. Six selected Windows host schema,
+serving-option and Supervisor checks pass. CUDA arithmetic qualification remains
+in progress; these product builds do not establish its result or a speed gain.
+The first GPU snapshot passes 35 of 38 selected checks, including its 27B Engine
+cases, BF16 GDN control oracle and upstream HC/QSA/norm/PLE cases. All three GDN
+input checks abort on the newly represented FP32-scale profile: admission was
+extended but backing validation still called the BF16-only validator. This is
+an integration failure, not a numerical pass. The first snapshot is corrected
+for reruns; the second boundary consolidates both represented scale formats in
+the shared validator. Its Linux Engine library compiles; linking the products
+also found fork Chat fields still calling the boolean helper removed upstream.
+Those fields migrate to the equivalent shared request validator, retaining
+their null/default and boolean schema behavior.
+The first second-boundary qualification build also exposed a malformed merge of
+the TopK fixtures. The complete fork oracle, including Q8, FP8, BF16 and mapped
+Q4 heads, is retained under the new test target; its rerun is pending.
+
+As a separate baseline for later ports, upstream `64d10fbf` passes 14 selected
+CPU topology/executor, asynchronous read-queue, expert-cache, NF4 and CPU MoE
+checks on Linux with a Colab RTX PRO 6000 Blackwell Server Edition, CUDA 13.3
+and Python 3.11.17. Its 71 artifact/converter checks pass with Torch 2.14.1+cu130,
+including the CUDA quantizer cases. This is upstream primitive qualification on
+that host, not integration into the fork or a full-model offload measurement.
 
 ## Upstream through `bace20dc`
 

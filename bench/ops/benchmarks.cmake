@@ -14,7 +14,7 @@ ninfer_add_op_bench(ninfer_rmsnorm_rope_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}
 ninfer_add_op_bench(ninfer_add_bias_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/add_bias_bench.cu")
 ninfer_add_op_bench(ninfer_gelu_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/gelu_bench.cu")
 ninfer_add_op_bench(ninfer_layer_norm_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/layer_norm_bench.cu")
-ninfer_add_op_bench(ninfer_vision_pos_embed_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/vision_pos_embed_bench.cu")
+ninfer_add_op_bench(ninfer_embedding_interpolate_add_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/embedding_interpolate_add_bench.cu")
 ninfer_add_op_bench(ninfer_scatter_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/scatter_bench.cu")
 ninfer_add_op_bench(ninfer_scatter_bf16_batch_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/scatter_bf16_batch_bench.cu")
 ninfer_add_op_bench(ninfer_packed_softmax_attention_bench
@@ -29,7 +29,8 @@ ninfer_add_op_bench(ninfer_causal_conv1d_silu_bench SOURCES "${CMAKE_CURRENT_LIS
 ninfer_add_op_bench(ninfer_linear_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/linear_bench.cu")
 ninfer_add_op_bench(ninfer_linear_topk_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/linear_topk_bench.cu")
 ninfer_add_op_bench(ninfer_candidate_selector_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/candidate_selector_bench.cu")
-ninfer_add_op_bench(ninfer_attn_input_proj_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/attn_input_proj_bench.cu")
+ninfer_add_op_bench(ninfer_linear_split_multi_output_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/linear/split/multi_output.cu")
+ninfer_add_op_bench(ninfer_linear_split_two_output_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/linear/split/two_output.cu")
 ninfer_add_op_bench(ninfer_q8_linear_swiglu_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/q8_linear_swiglu_bench.cu")
 ninfer_add_op_bench(ninfer_nvfp4_linear_swiglu_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/nvfp4_linear_swiglu_bench.cu")
 ninfer_add_op_bench(ninfer_fp8_linear_swiglu_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/fp8_linear_swiglu_bench.cu")

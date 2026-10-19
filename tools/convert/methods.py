@@ -89,10 +89,6 @@ class PrepareRequest:
             raise ValueError("this method has multiple inputs; use request.inputs")
         return self.inputs[0].source
 
-    def require_input_shape(self, shape: tuple[int, ...]) -> None:
-        if self.source.shape != tuple(shape):
-            raise ValueError(f"source shape {self.source.shape} differs from {shape}")
-
     def job(self, *, produce, auxiliaries=None) -> PreparedMethod:
         return PreparedMethod(produce, {} if auxiliaries is None else dict(auxiliaries))
 
@@ -415,6 +411,10 @@ def u4z8_maxabs(request: PrepareRequest) -> PreparedMethod:
             values = request.values(begin * k, end * k).reshape(end - begin, k)
             codes, scales = encode_u4z8_rows(values.to(request.device))
             output.write_codes(begin, codes.cpu(), scales.cpu())
+
+    return request.job(produce=produce)
+
+
 def stored_scale_mse(request: PrepareRequest) -> PreparedMethod:
     """Two-pass object amax and exhaustive G16 stored-scale MSE encoding."""
     if (
