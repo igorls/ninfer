@@ -6,8 +6,8 @@
 #include "ninfer/ops/causal_conv1d_silu.h"
 #include "ninfer/ops/embedding.h"
 #include "ninfer/ops/gated_delta_net.h"
-#include "ninfer/ops/gated_rmsnorm.h"
-#include "ninfer/ops/gdn_gating_proj.h"
+#include "ninfer/ops/rmsnorm.h"
+#include "ninfer/ops/gdn_control.h"
 #include "ninfer/ops/gdn_input_proj.h"
 #include "ninfer/ops/hyper_connection.h"
 #include "ninfer/ops/kv_cache_append.h"
@@ -219,8 +219,7 @@ void TextContext::gdn(const GdnParameters& p, std::uint32_t layer, workspace::La
     if (prefill) {
         {
             auto projection_scope = work_.scope();
-            ops::gdn_input_proj(roots.block_input, p.projection.weight, stage.qkv, stage.z,
-                                p.projection.policy, work_, s);
+            ops::gdn_input_proj(roots.block_input, p.projection, {stage.qkv, stage.z}, work_, s);
         }
         const Tensor conv_in = linear.conv_slot(layer, state_source_slot_);
         Tensor conv_out      = linear.conv_slot(layer, state_destination_slot_);
@@ -241,24 +240,24 @@ void TextContext::gdn(const GdnParameters& p, std::uint32_t layer, workspace::La
         // The fused route's overlap contract takes a disjoint span even when it needs no scratch.
         WorkspaceArena scratch(work_.alloc_bytes(std::max<std::size_t>(
             1, ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
-                   w.qtype, w.n, w.k, ops::LinearPolicy::A16Only, batch, width, width))));
+                   ops::SingleProjectionWeight{w}, batch, width, width))));
         if (decode_->replay != nullptr) {
             auto records = decode_->replay->layer(static_cast<std::int32_t>(layer), batch);
-            ops::gdn_input_proj_conv_record(input3, w, p.convolution, conv_states,
-                                            decode_->valid_columns, decode_->state_source_slots,
-                                            records.conv, query3, key3, value3, z3,
-                                            ops::LinearPolicy::A16Only, scratch, s);
+            ops::gdn_input_proj_conv_record(
+                input3, ops::SingleProjectionWeight{w}, p.convolution,
+                {conv_states, decode_->state_source_slots}, decode_->valid_columns,
+                {query3, key3, value3, z3}, records.conv, scratch, s);
         } else {
-            ops::gdn_input_proj_conv_snapshot(input3, w, p.convolution, conv_states,
-                                              decode_->valid_columns, decode_->state_source_slots,
-                                              decode_->state_destination_slots, query3, key3,
-                                              value3, z3, ops::LinearPolicy::A16Only, scratch, s);
+            ops::gdn_input_proj_conv_snapshot(
+                input3, ops::SingleProjectionWeight{w}, p.convolution,
+                {conv_states, decode_->state_source_slots, decode_->state_destination_slots},
+                decode_->valid_columns, {query3, key3, value3, z3}, scratch, s);
         }
     }
     {
         auto control_scope = work_.scope();
-        ops::gdn_gating_proj(roots.block_input, p.control, p.a_log, p.dt_bias, work_, stage.g,
-                             stage.beta, ctx_.execution_view());
+        ops::gdn_control_proj(roots.block_input, ops::SingleProjectionWeight{p.control},
+                              p.a_log, p.dt_bias, {stage.g, stage.beta}, work_, ctx_.execution_view());
     }
     const float scale = inverse_sqrt(g.linear_key_head_dim);
     if (prefill) {
@@ -285,7 +284,7 @@ void TextContext::gdn(const GdnParameters& p, std::uint32_t layer, workspace::La
             auto records = decode_->replay->layer(static_cast<std::int32_t>(layer), batch);
             ops::gated_delta_net_replay_record(q, k, v, gate, beta, scale, recurrent_states,
                                                decode_->valid_columns, decode_->state_source_slots,
-                                               records.key, records.value, records.gate, out, s);
+                                               {records.key, records.value, records.gate}, out, s);
         } else {
             ops::gated_delta_net_batch_update(q, k, v, gate, beta, scale, true, recurrent_states,
                                               decode_->state_source_slots,
@@ -295,7 +294,7 @@ void TextContext::gdn(const GdnParameters& p, std::uint32_t layer, workspace::La
     Tensor recurrent  = stage.recurrent.view({head_dim, value_heads * tokens});
     Tensor z          = stage.z.view({head_dim, value_heads * tokens});
     Tensor normalized = stage.normalized.view({head_dim, value_heads * tokens});
-    ops::gated_rmsnorm_sigmoid(recurrent, p.norm, z, config_.rms_norm_eps, normalized,
+    ops::sigmoid_gated_rmsnorm(recurrent, p.norm, z, config_.rms_norm_eps, normalized,
                                ctx_.execution_view());
     project(stage.normalized, p.output, roots.block_output);
 }

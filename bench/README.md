@@ -118,7 +118,7 @@ of at least two. Warmups use the same mixture and compile constraints before mea
 time. Per-request phase rates remain separate from this aggregate throughput.
 
 The benchmark disables context retention because every repetition is an independent root request.
-Schema v16 records `speculative_backend`, `draft_tokens`, and the proposal head independently;
+Reports record `speculative_backend`, `draft_tokens`, and the proposal head independently;
 JSON and CSV identify DFlash2 explicitly. MTP alone reserves its extra lookahead KV margin.
 
 ## Context-cost calibration
@@ -290,16 +290,9 @@ percentages and the DRAM memory floor. Multiple calls are for timing and cannot 
 `--profile`, which always captures one complete public call.
 
 Every ordinary sample is cold-cache: a 256 MiB L2 eviction read completes before the timed
-interval. Reported effective bandwidth uses the encoded weight planes once, one BF16 activation
-read, and one BF16 output write. Reported FLOPs are the mathematical `2*N*K*T`; neither metric
-copies route-private tile, replay, padding, split, schedule, host-launcher, or kernel-instance
-behavior. The fixed RTX 5090 memory reference is `1792 GB/s` DRAM bandwidth. Tensor Core utilization
-is reported only for registered shape/policy/extent combinations with a known MMA profile; the
-activation policy alone does not identify that profile. MXFP8 with FP32 accumulation uses the
-`838 TFLOP/s` dense reference. `READ_%` additionally compares the same one-read model
-bytes with the measured `1674.5 GB/s` pure-read ceiling from `tools/hbm_bandwidth_probe.cu`; it is
-the practical utilization measure for read-dominated points. Physical traffic and instruction
-utilization still require NCU.
+interval. [Linear measurement rules](../docs/maintainer/linear-tuning.md#5-logical-metrics) define
+byte/FLOP accounting, hardware references, timing conditions and suite expansion. Physical traffic
+and instruction utilization require profiler evidence.
 
 ## LinearTopK Op benchmark
 
@@ -390,47 +383,137 @@ cmake --build build -j --target ninfer_scatter_bf16_batch_bench
 
 ## RMSNorm Op benchmark
 
-`ninfer_rmsnorm_bench` measures public RMSNorm, with `--kind dflash2_hidden` for plain D=5120,
-`hidden27` for offset D=5120, and `target_q27` / `target_k27` for offset D=256 with 24 / 4 heads.
-The existing DFlash, 35B target and GatedRMSNorm profiles remain selectable in `--help`.
-`--tokens` supplies aggregate matrix columns, independently of the speculative block width.
-Inputs and gains are nonuniform represented BF16 values. CSV reports actual geometry, Graph
-nodes/calls, zero scratch, logical bytes and median/min/p95 public-call latency.
+`ninfer_rmsnorm_bench` measures one public RMSNorm call selected by
+`--op rmsnorm|offset|silu-gated|sigmoid-gated`. Plain and offset forms select direct or unit-offset
+gain; both gated forms use direct gain. `--dim D --heads H --tokens T[,T...] --batch B` describes
+BF16 `[D,H,T,B]`, with a separate D-element reduction for each of the `H*T*B` rows. Inputs, gains
+and gates are nonuniform represented BF16 values. Defaults are `rmsnorm`, D=128, H=48, T=1, B=1.
+`--sweep START:END[:STEP]` replaces the token list; `--tokens` and `--sweep` are mutually exclusive.
 
-Cold mode flushes 256 MiB before each measured interval. Warm Graph bundles avoid host launch
-gaps and normalize time per public call; a cold bundle flushes only before its first call.
-`--profile` brackets one public call with CUDA profiler start/stop.
+The RMSNorm, GDN control and HC benchmarks share `bench/ops/op_measurement.cuh`. Each sample times
+a complete public Op or an explicitly named composition comparison. Graph GPU timing brackets the
+captured Op body with external CUDA event nodes; eager GPU timing includes host launch gaps.
+Host submission is measured separately.
+Fixture preparation and cold-cache eviction precede the timed interval. CSV reports semantic
+geometry, execution/cache mode, GPU and host median/min/p95 microseconds, `workspace_bytes`,
+`workspace_peak`, and `kernels` (actual captured kernel nodes, excluding event nodes).
+RMSNorm uses zero workspace. These measurements establish Op latency, not Engine latency.
+
+All three benchmarks accept `--execution graph|eager|both`, `--cache cold|warm|both`, `--warmup N`,
+`--repeat N`, `--flush-mib N` and `--csv-out PATH`. Defaults are Graph, both cache modes,
+10 warmups, 100 samples and a 256 MiB cold-cache flush; CSV goes to stdout unless a path is supplied.
 
 ```bash
 cmake --build build -j --target ninfer_rmsnorm_bench
-./build/bench/ninfer_rmsnorm_bench --kind dflash2_hidden --tokens 1,8,16,32,64,96,128,2048
-./build/bench/ninfer_rmsnorm_bench --kind target_q27 --tokens 1,8,16,32,64,96,128 \
-  --cache warm --graph-calls 32 --csv-out /tmp/rmsnorm.csv
-./build/bench/ninfer_rmsnorm_bench --kind hidden27 --tokens 128 --profile
+./build/bench/ninfer_rmsnorm_bench \
+  --op rmsnorm --dim 5120 --heads 1 --tokens 1,8,16,32,64,96,128,2048
+./build/bench/ninfer_rmsnorm_bench \
+  --op offset --dim 256 --heads 24 --tokens 1,8,16,32,64,96,128 \
+  --execution graph --cache warm --csv-out /tmp/rmsnorm.csv
+./build/bench/ninfer_rmsnorm_bench \
+  --op silu-gated --dim 128 --heads 48 --tokens 1,8,16,128
+./build/bench/ninfer_rmsnorm_bench \
+  --op sigmoid-gated --dim 128 --heads 48 --batch 8 --tokens 1,7,16 \
+  --execution both --cache both
 ```
 
-## GDN control-projection Op benchmark
+## GDN control Op benchmark
 
-`ninfer_gdn_gating_proj_bench` measures the complete public `gdn_norm_gating_proj` (`--op norm`,
-default) or `gdn_gating_proj` (`--op control`). `--geometry 27b` uses D5120/H48 and defaults to the
-Qwen3.8 contiguous BF16 `[96,5120]` parent; `--weights split` measures the two-weight form.
-`--geometry 35b` uses the D2048/H32 parent. All numerical inputs are nonuniform represented values.
+`ninfer_gdn_control_bench` selects `--op control|projection|norm-projection` for public
+`gdn_control`, `gdn_control_proj` and `gdn_norm_control_proj`. Direct control consumes BF16 a/b;
+projection includes AB projection and both nonlinear controls; norm-projection also includes
+offset input RMSNorm and its explicit BF16 normalized output. Controls are FP32. All numerical
+inputs are nonuniform represented values.
 
-The benchmark reports eager/Graph latency, graph call/node counts, and the public point workspace
-query against its measured peak. Cold runs flush 256 MiB before each call. For short warm Ops,
-`--graph-calls 16` captures consecutive calls and normalizes times per Op; it requires Graph/warm.
-`--profile` brackets one selected workload with CUDA profiler APIs. Production owns all dispatch.
+`--heads H --input-rows K --weights parent|pair` supplies numerical geometry and weight storage.
+Parent storage is a contiguous BF16 `[2H,K]` matrix, with A before B; pair storage uses two BF16
+`[H,K]` matrices. Supported combinations are:
+
+| Op | H | K | Weights |
+|---|---:|---:|---|
+| `control` | 48 | — | none; explicit `--input-rows` and `--weights` are rejected |
+| `projection` | 48 | 2560 | `parent` |
+| `projection`, `norm-projection` | 48 | 5120 | `parent` or `pair` |
+| `projection`, `norm-projection` | 32 | 2048 | `parent` |
+
+Defaults are `projection`, H=48, K=2560, `parent`, tokens=1 and batch=1. Norm-projection requires
+an explicit supported K. `--tokens T[,T...]` or `--sweep START:END[:STEP]` selects T, with
+`M=T*B`, column=`t+T*b`, and `--batch B` selecting B. Timing flags and CSV statistics follow the
+[RMSNorm benchmark](#rmsnorm-op-benchmark); GDN also reports `weights`. The workspace columns
+compare the public point capacity query with measured arena peak; direct control has no scratch.
+Only operands needed by the selected Op are allocated. Production owns all dispatch.
 
 ```bash
-cmake --build build -j --target ninfer_gdn_gating_proj_bench
-./build/bench/ninfer_gdn_gating_proj_bench \
-  --geometry 27b --op norm --weights parent --tokens 1,2,4,8,9,16,32,64,128 \
+cmake --build build -j --target ninfer_gdn_control_bench
+./build/bench/ninfer_gdn_control_bench \
+  --op projection --heads 48 --input-rows 2560 --weights parent --sweep 1:128 \
   --execution graph --cache cold --warmup 10 --repeat 61
-./build/bench/ninfer_gdn_gating_proj_bench \
-  --geometry 27b --op norm --tokens 1,2,4,8,9,16,32,64,128 \
-  --execution graph --cache warm --graph-calls 16 --csv-out /tmp/gdn-norm-warm.csv
-./build/bench/ninfer_gdn_gating_proj_bench \
-  --geometry 35b --op norm --tokens 16 --execution graph --cache cold --profile
+./build/bench/ninfer_gdn_control_bench \
+  --op norm-projection --heads 48 --input-rows 5120 --weights pair \
+  --tokens 1,2,4,8,9,16,32,64,128 --execution graph --cache warm \
+  --csv-out /tmp/gdn-norm-warm.csv
+./build/bench/ninfer_gdn_control_bench \
+  --op norm-projection --heads 32 --input-rows 2048 --tokens 16,17,128
+./build/bench/ninfer_gdn_control_bench \
+  --op control --heads 48 --batch 8 --tokens 1,7,16 --execution both --cache warm
+```
+
+## HC gated residual Op benchmark
+
+`ninfer_gated_residual_bench` measures the five public HC residual forms with
+`--op expand-norm|grouped-rmsnorm|combine|combine-norm|add-norm`. Geometry is fixed at H=2560
+and four streams. Input/output residual and normalized tensors are BF16 `[2560,4,M]`,
+embedding/block tensors are BF16 `[2560,M]`, and activated injection is FP32 `[4,M]`.
+`add-norm` selects the unit-weight overload without an injection operand.
+
+`block-mix` and `final-mix` measure the complete public `hc_mix` overloads, including both BF16
+projections, nonlinearities, four-stream mean and Block injection. They consume normalized BF16
+`[2560,4,M]`, native compact BF16 Down/Up parents and caller-owned workspace. The fixture seeds
+nonuniform inputs/weights, allocates only the selected form’s operands, and queries/allocates scratch
+before timing. No norm or residual combine is included; internal routes remain production-owned.
+These are new capabilities without a preexisting production Mix baseline.
+
+`combine-then-norm` times public `hc_combine` followed by `hc_grouped_rmsnorm` as one interval.
+`add-then-norm` uses the same composition with an all-one FP32 injection prepared before timing.
+These are explicit two-Op decomposition comparisons for a new capability, with no preexisting
+HC production implementation as a performance baseline. Production owns the fused entry's internal
+choice of one or multiple kernels; the benchmark reports actual kernel count.
+
+Defaults are `combine-norm`, tokens=1, batch=1 and `--alias disjoint`. `--alias inplace` is
+available for `combine`, `combine-norm`, `add-norm` and the staged comparisons. Original inputs are
+restored on the measurement stream before each interval, then cold mode flushes the cache. `--tokens T[,T...]`
+or mutually exclusive `--sweep START:END[:STEP]`, together with `--batch B`, gives M=T*B.
+Timing flags, defaults and CSV statistics follow the [RMSNorm benchmark](#rmsnorm-op-benchmark);
+HC adds `alias` and `condition_us`. Residual forms have zero workspace; Mix reports its public
+point capacity and actual arena peak, excluding public buffers. `--condition-us N`
+defaults to 200: register-only GPU work precedes restoration and optional eviction, outside the
+timed Op body. This gives both cache modes an activity prelude without warming operand data or
+locking clocks. It also allows eager submissions to queue behind the prelude; use
+`--condition-us 0` to measure without that setup, and keep the two conditions separate.
+Fixtures allocate only selected operands and an in-place backup when needed. The measurements cover
+Op latency and the named compositions.
+
+```bash
+cmake --build build -j --target ninfer_gated_residual_bench
+./build/bench/ninfer_gated_residual_bench \
+  --op expand-norm --tokens 1,8,128,1024,2048 --execution both --cache both
+./build/bench/ninfer_gated_residual_bench \
+  --op combine-norm --alias inplace --tokens 1,8,128,2048,4096 \
+  --execution graph --cache cold --csv-out /tmp/hc-combine-norm.csv
+./build/bench/ninfer_gated_residual_bench \
+  --op combine-then-norm --alias inplace --tokens 1,8,128,2048,4096 \
+  --execution graph --cache cold --csv-out /tmp/hc-staged.csv
+./build/bench/ninfer_gated_residual_bench \
+  --op add-norm --tokens 1,7,16 --batch 8 --execution both --cache warm
+./build/bench/ninfer_gated_residual_bench \
+  --op combine-norm --tokens 1,128 --execution eager --cache warm --condition-us 0
+./build/bench/ninfer_gated_residual_bench \
+  --op block-mix --sweep 1:128 --execution graph --cache both \
+  --warmup 10 --repeat 61 --csv-out /tmp/hc-block-mix.csv
+./build/bench/ninfer_gated_residual_bench \
+  --op final-mix --tokens 1,4,8,64,128,512,1024 --execution both --cache both
+./build/bench/ninfer_gated_residual_bench \
+  --op block-mix --tokens 1,7,16 --batch 8 --execution both --cache warm
 ```
 
 ## Dynamic grouped-convolution prepare Op benchmark
@@ -446,114 +529,87 @@ cmake --build build -j --target ninfer_dynamic_grouped_conv_prepare_bench
 ./build/bench/ninfer_dynamic_grouped_conv_prepare_bench --warmup 10 --repeat 80
 ```
 
-## Gated DeltaNet Op benchmark
+## GDN benchmarks
 
-`ninfer_gated_delta_net_bench` measures the BF16 Gated DeltaNet contract with state/head dimension
-128, production Q/K normalization, and any positive, divisible `value_heads >= qk_heads` mapping.
-Running/chunked modes use batch 1; batch-update mode accepts exact `B=1..8` at `T=1`. Every
-measurement is a CUDA Graph replay preceded by a 256 MiB L2 flush outside the timed interval.
+The three GDN executables share `ops/op_measurement.cuh`: CSV fields, option parsing, fixture
+uploads, and timing. Each graph contains one selected Op (or an explicitly named analysis stage),
+with external CUDA events bracketing its body. `kernels` counts kernel nodes only. Eager GPU timing
+includes host launch gaps; host submission time is reported separately. Mutable state is restored
+before each invocation, and cold-cache samples evict 256 MiB from L2 before the timer. These are
+Op measurements, not model throughput measurements.
 
-`--running` measures the public running-state entry and uses its workspace capacity query. The
-current prefill dispatcher uses recurrence below 16 tokens and a two-kernel chunked route at
-larger extents. The chunked route prepares 16-token packets and combines recurrence with output;
-its final packet is padded inside the kernels. `--batch-update` measures the public selected-slot
-update at `T=1`, with `B=1..8`; `--qk-norm composed` retains the B=1 two-L2Norm comparison.
+Common flags are `--execution graph|eager|both`, `--cache cold|warm|both`, `--warmup N`,
+`--repeat N`, `--flush-mib N`, and `--csv-out PATH`. CSV goes to stdout when no path is supplied.
+`--tokens` accepts an exact extent or comma-separated list; `--sweep START:END[:STEP]` accepts an
+inclusive interval. Capacity and actual workspace high-water are reported separately.
 
-`--force-chunked` and `--recurrent-only` call the selected production launchers with fused Q/K
-normalization at matching prefill extents to measure their crossover. `--chunked-only` forces
-the chunked route with pre-normalized BF16 Q/K. These prefill comparisons are independent of
-decode and ReplaySSM. Adding `--breakdown` to a chunked measurement reports isolated
-`chunked.prepare` and `chunked.recurrence` timings using the same production launchers and
-workspace layout.
-
-`stage_share_pct` partitions the sum of isolated-stage medians. Each isolated stage receives its own
-cold-L2 flush, so `relative_to_e2e_pct` is informative but is not an additive partition of the
-pipeline latency.
-
-`logical_bytes` and `logical_gbps` count each contract-visible tensor and state transfer once.
-`tensor_io_request_bytes` and `tensor_io_request_gbps` count CTA tensor I/O requests, including
-repeated Q/K reads in prepare and repeated packet reads across recurrence value tiles. The
-workspace holds BF16 Q/K shared by each Q/K head group and FP32 control packets per value head;
-`workspace_request_bytes` isolates their producer/consumer traffic and any composed normalization
-intermediates. These deterministic byte counts describe requests, not physical DRAM traffic;
-physical DRAM/L2 sectors and cache reuse still require NCU.
+`ninfer_gdn_input_proj_bench` selects `--op projection|snapshot|record`. `--format` and the actual
+`--n`/`--k` identify the stored matrix; `--policy a16|allow-a8|allow-a4` reports the caller's
+activation permission. Supported geometries are Q8 `[12288,2048]` and `[16384,2560]`, and
+Q4/Q5, FP8, or NVFP4 `[16384,5120]`. Q4/Q5 uses the two stored parents `[4096,5120]` and
+`[12288,5120]`. Projection uses M; convolution uses physical T and B, with optional device
+valid-prefix extents supplied by `--valid-columns`.
 
 ```bash
-cmake --build build -j --target ninfer_gated_delta_net_bench
-./build/bench/ninfer_gated_delta_net_bench \
-  --running --value-heads 32 --sweep --warmup 20 --repeat 100 --csv
-./build/bench/ninfer_gated_delta_net_bench \
-  --batch-update --value-heads 32 --batch 8 --qk-norm fused --warmup 20 --repeat 100 --csv
-./build/bench/ninfer_gated_delta_net_bench \
-  --chunked-only --value-heads 32 --tokens 1024 --breakdown \
-  --warmup 20 --repeat 100
+./build/bench/ninfer_gdn_input_proj_bench \
+  --op projection --format q8 --n 16384 --k 2560 --tokens 1,16,1024,2048,4096 --cache cold
+./build/bench/ninfer_gdn_input_proj_bench \
+  --op snapshot --format nvfp4 --n 16384 --k 5120 --policy allow-a4 --sweep 1:17
+./build/bench/ninfer_gdn_input_proj_bench \
+  --op record --format fp8 --n 16384 --k 5120 --policy allow-a8 \
+  --tokens 6 --batch 3 --valid-columns 6,3,1 --csv-out out/bench/gdn-record.csv
 ```
 
-## GDN input-projection Op benchmark
-
-`ninfer_gdn_input_proj_bench` measures all registered public `gdn_input_proj` forms: the 27B
-Q4/Q5 two-parent projection, the 35B Q8 single-parent projection, and the 27B NVFP4 or row-scaled
-FP8 single-parent projection under its admitted policies. Every timed and profiled point is exactly
-one public Op call. Single-parent workspace is queried and allocated through the public capacity
-entry before timing; the benchmark has no private launchers, route controls, or candidate mode.
-
-Cold cache is the primary model-layer condition. Reported logical traffic counts encoded weights
-once, BF16 input once, and QKV/Z outputs once. FLOPs describe the complete registered projection.
-The benchmark reports caller policy rather than inferring a private activation-compute route.
+`ninfer_gated_delta_net_bench` selects `--mode running|batch-update|chunked-raw|chunked-normalized|recurrent`.
+Running and batch-update call public Ops. The other modes force a production mechanism for
+crossover analysis; `chunked-raw` normalizes raw Q/K inside prepare, while `chunked-normalized`
+supplies pre-normalized BF16 inputs and skips that normalization. `--breakdown` additionally
+times the private prepare and recurrence stages. `stage_share_pct` partitions the sum of isolated
+stage medians; `relative_to_total_pct` compares each stage with the complete pipeline. Separate
+cache conditioning means isolated medians are not an additive breakdown of pipeline latency.
+`logical_bytes` counts contract tensors once; `tensor_io_request_bytes` and
+`workspace_request_bytes` estimate CTA requests, not measured DRAM traffic.
 
 ```bash
-cmake --build build --parallel --target ninfer_gdn_input_proj_bench
-./build/bench/ninfer_gdn_input_proj_bench \
-  --format all --tokens 1,2,4,8,12,16,32,64,128,256,512,1024 \
-  --cache cold --warmup 5 --repeat 30 \
-  --csv-out profiles/bench/gdn_input_proj.csv
-./build/bench/ninfer_gdn_input_proj_bench \
-  --format nvfp4 --nvfp4-policy a4 --tokens 1024 --cache cold --profile
-./build/bench/ninfer_gdn_input_proj_bench \
-  --format fp8 --fp8-policy a8 --tokens 1,2,3,4,5,6,7,8 --cache cold
+./build/bench/ninfer_gated_delta_net_bench \
+  --mode running --qk-heads 16 --value-heads 48 --tokens 1,15,16,17,1024 --cache cold
+./build/bench/ninfer_gated_delta_net_bench \
+  --mode batch-update --value-heads 32 --batch 8 --qk-norm fused
+./build/bench/ninfer_gated_delta_net_bench \
+  --mode chunked-raw --value-heads 48 --tokens 1024 --breakdown
 ```
 
-## GDN input projection/convolution Snapshot/Record Op benchmark
-
-`ninfer_gdn_input_proj_conv_snapshot_bench` measures the public Qwen3.6/Qwen3.8 Q4/Q5, NVFP4,
-row-scaled FP8, and Q8 `gdn_input_proj_conv_snapshot` / `gdn_input_proj_conv_record` forms for exact
-`B=1..8`. The timed body is exactly one complete public Op call; the benchmark does not include
-private launchers, candidate selection, duplicated compositions, or route labels. Its default
-`T=1..6` sweep is the production MTP verification interval; Record begins at `T=2`.
-`--form snapshot|record|both` selects the semantic form. NVFP4 accepts public `a16`/`a4`, while FP8
-accepts `a16`/`a8`; the reported profile names caller policy, not a private resolved route.
-
-CUDA Graph replay is the default execution mode. The graph contains external timing event nodes
-around the complete Op body, while L2 eviction stays outside the timed interval. Cold-cache results
-model successive model layers with distinct weights and are the authoritative comparison; warm
-results make launch and cache effects visible. The initial state occupies a slot disjoint from all
-published snapshot slots, so repeated replay does not introduce a benchmark-only state reset.
+`ninfer_gdn_replay_bench` selects `--op fold|record`. Fold measures all specified layers;
+record measures one recurrence layer. Specify actual `--layers`, `--value-heads`, and
+`--conv-channels`; Q/K heads are 16 and head dimension is 128. Fold geometries are
+`48/48/10240`, `30/32/8192`, and `36/48/10240`. Both Ops accept T=2..16 and B=1..8.
+`--commits dense|one|mixed|N[,N...]` selects fold lengths, including zero;
+`--valid dense|mixed|N[,N...]` selects positive record prefixes. Host fold rows are captured
+at graph construction; eager timing includes their submission on every call.
 
 ```bash
-cmake --build build --parallel --target ninfer_gdn_input_proj_conv_snapshot_bench
-./build/bench/ninfer_gdn_input_proj_conv_snapshot_bench \
-  --format q4q5 --sweep 1:6 --execution graph --cache both \
-  --warmup 10 --repeat 100 \
-  --csv-out profiles/bench/gdn_input_proj_conv_snapshot.csv
-./build/bench/ninfer_gdn_input_proj_conv_snapshot_bench \
-  --format q4q5 --form record --tokens 8 --batch 2 \
-  --execution graph --cache cold --warmup 10 --repeat 100
-./build/bench/ninfer_gdn_input_proj_conv_snapshot_bench \
-  --format nvfp4 --nvfp4-policy a4 --sweep 1:17 \
-  --execution graph --cache cold --warmup 10 --repeat 100
-./build/bench/ninfer_gdn_input_proj_conv_snapshot_bench \
-  --format q8 --tokens 16 --batch 8 \
-  --execution graph --cache cold --warmup 10 --repeat 100
-./build/bench/ninfer_gdn_input_proj_conv_snapshot_bench \
-  --format nvfp4 --tokens 6 --batch 3 --valid-columns 6,3,1 \
-  --execution graph --cache cold --warmup 10 --repeat 100
-./build/bench/ninfer_gdn_input_proj_conv_snapshot_bench \
-  --format fp8 --fp8-policy a8 --form both --batch 1 --sweep 1:16 \
-  --execution both --cache both --warmup 5 --repeat 30
+./build/bench/ninfer_gdn_replay_bench \
+  --op fold --layers 36 --value-heads 48 --conv-channels 10240 \
+  --tokens 16 --batch 8 --commits mixed --execution both
+./build/bench/ninfer_gdn_replay_bench \
+  --op record --value-heads 48 --tokens 2,8,16 --batch 8 --valid mixed
 ```
 
-`--execution eager|both` is available only to attribute launch behavior; it calls the same public
-Op with the same operands and workspace.
+## PLE convolution and state extraction
+
+`ninfer_ple_bench` measures `--op conv-add|conv-add-norm|state-extract` at H=2560,
+four streams, dilation=3 and nine history columns. It uses the shared Op measurement harness
+described above, with zero global workspace. `--valid` and `--accepted` accept `dense`, `mixed`,
+or comma-separated per-row counts; zero counts are supported. `--offset` selects the convolution
+record window. `--inplace` updates the residual or selected history slots and restores the input
+before each measurement. CSV includes the actual counts, record offset and alias mode.
+
+```bash
+./build/bench/ninfer_ple_bench --op conv-add-norm --tokens 1,16,1024,2048,4096 --cache cold
+./build/bench/ninfer_ple_bench --op conv-add --tokens 16 --batch 8 --valid mixed --offset 5
+./build/bench/ninfer_ple_bench --op state-extract --tokens 16 --batch 8 \
+  --accepted 0,1,2,3,8,9,15,16 --inplace --execution both
+```
 
 ## Softmax Attention Op benchmarks
 
@@ -920,6 +976,103 @@ cmake --build build -j --target ninfer_attn_input_proj_bench
 
 The stateful GDN projection/convolution/snapshot contract remains in its own public Op benchmark;
 it is not a mode of Attention input projection. End-to-end target measurement uses `ninfer_bench`.
+
+## QSA Op benchmark
+
+`ninfer_qsa_bench --op input-proj` (the default) compares the three public A16 `qsa_input_proj()`
+overloads with the corresponding contiguous-output `linear()` calls.
+`--projection qg|kv-index|qkgv-index|all` selects Q8 `[12288,2560]`,
+BF16 `[1664,2560]`, or BF16 `[13952,2560]`. `--entry split|linear|both` selects the public entries;
+`both` reuses identical weights, inputs, and total output storage and alternates entry order by round.
+The split entry writes each contiguous segment directly and uses zero global workspace.
+
+Timing uses `op_measurement.cuh`: Graph body and eager latency, cold/warm cache, Host submission,
+and actual Graph kernel count. Cold measurements evict 256 MiB before timing. CSV rows include the
+projection and round; fixture creation is outside timing.
+
+```bash
+cmake --build build -j --target ninfer_qsa_bench
+./build/bench/ninfer_qsa_bench --projection all --entry both --sweep 1:128 \
+  --rounds 3 --warmup 10 --repeat 100 --execution graph --cache both \
+  --csv-out out/bench/qsa_small.csv
+./build/bench/ninfer_qsa_bench --tokens 256,512,1024,2048,4096 \
+  --rounds 3 --warmup 10 --repeat 100 --execution both --cache both \
+  --csv-out out/bench/qsa_prefill.csv
+```
+
+`--op tail-extract` measures the complete public `qsa_tail_extract()` call. `--capacity` selects
+record capacities R; `--batch`, `--base-positions`, `--valid`, and `--accepted` specify the actual
+Device metadata. A single position/count broadcasts to B rows; a list must contain B values.
+`--accepted dense` retains the valid prefix, while `mixed` varies retention across rows.
+`--layout contiguous|layered|unaligned` selects compact buffers, twelve-layer slab strides, or
+naturally aligned BF16 views requiring scalar word copies. `--inplace` uses the source slots as
+destinations and restores both source planes outside each timed call. Extraction CSV rows use
+`tokens` for R and include base positions, layout, in-place mode and round. There is zero workspace.
+
+```bash
+./build/bench/ninfer_qsa_bench --op tail-extract --capacity 16,4096 --batch 8 \
+  --base-positions 6 --accepted mixed --layout layered --inplace \
+  --rounds 3 --warmup 10 --repeat 100 --execution both --cache both \
+  --csv-out out/bench/qsa_tail.csv
+```
+
+`--op prepare` measures the complete `qsa_prepare()` call. `--kv-cache bf16|int8|fp8|nvfp4|k8v4`
+selects the main-cache profile (default `bf16`). `--tokens` selects T, `--batch` selects B,
+and `--axes 1|3` selects current RoPE coordinates. `--base-positions` and
+`--valid` set Device metadata; cache pages use a nonsequential mapping. `--layout` controls the
+tail/record views. `--inplace` aliases both Q/IQ outputs and restores their original projection
+words outside every timed call. CSV rows include positions, axes, alias mode, layout and round.
+
+```bash
+./build/bench/ninfer_qsa_bench --op prepare --sweep 1:16 --batch 8 --axes 3 \
+  --base-positions 63 --inplace --rounds 3 --cache both \
+  --csv-out out/bench/qsa_prepare_small.csv
+./build/bench/ninfer_qsa_bench --op prepare --tokens 128,1024,2048,4096 \
+  --kv-cache nvfp4 --axes 3 --rounds 3 --execution both --cache both \
+  --csv-out out/bench/qsa_prepare_prefill.csv
+```
+
+`--op indexer` measures the complete public `qsa_indexer()` call, including paged scoring and
+Top512 selection. `--contexts L[,L...]` gives each row's visible original-token count at its last
+live query; one value broadcasts to B rows. `--valid` sets live query prefixes. The fixed
+`--context-capacity` envelope defaults to 262144 and is independent of actual context lengths.
+`--layout` selects contiguous, interleaved-page, or naturally aligned BF16 keys. Page mappings are
+nonsequential. CSV includes actual contexts, envelope, layout, caller workspace capacity/peak,
+and Graph kernel count. The index plane is always BF16, independent of main KV encoding.
+
+```bash
+./build/bench/ninfer_qsa_bench --op indexer --tokens 1,8,64,1024,2048,4096 \
+  --contexts 262144 --context-capacity 262144 --rounds 3 --execution graph --cache both \
+  --csv-out out/bench/qsa_indexer.csv
+./build/bench/ninfer_qsa_bench --op indexer --tokens 8 --batch 8 \
+  --contexts 262144,131072,32768,8192,2052,2051,4,0 --valid 8,8,8,8,8,8,4,0 \
+  --rounds 3 --execution graph --cache both --csv-out out/bench/qsa_indexer_mixed.csv
+```
+
+`--op sparse-gqa` measures the complete public attention and sigmoid gate, including any split
+reduction and inverse value-basis transform. `--kv-cache bf16|int8|fp8|nvfp4|k8v4` selects cache
+storage; activations remain BF16/FP16. All profiles start from the same represented BF16 K/V
+source values, initialized through public `kv_cache_append` outside timing. `--contexts` and
+`--valid` have the same meaning as Indexer. Its
+`--context-capacity` defaults to the batch's maximum actual context; an explicit wider value
+measures that capture envelope. `--selection random|shared|contiguous` selects dispersed independent
+sets, a shared shuffled block ranking filtered by each query's causal boundary, or recent adjacent
+blocks. `--selected-blocks` defaults to 512 and permits 0..512; incomplete tails are always included.
+Physical pages are shuffled, and `--layout` exercises the same three plane layouts.
+
+CSV records the envelope, workspace, node count, separate useful QK/PV FLOPs, summed per-query
+selected K/V bytes including scales, union K/V bytes across queries, and allocated physical cache
+bytes. Payload rates are not measured DRAM bandwidth; use actual DRAM/L2 traffic to interpret the
+roofline.
+
+```bash
+./build/bench/ninfer_qsa_bench --op sparse-gqa --tokens 1,8,128,1024,2048,4096 \
+  --contexts 262144 --kv-cache nvfp4 --execution graph --cache both \
+  --csv-out out/bench/qsa_sparse.csv
+./build/bench/ninfer_qsa_bench --op sparse-gqa --tokens 9 --batch 8 \
+  --contexts 64,2048,8192,32768,131072,262144,0,65536 --valid 9,9,9,5,9,9,0,9 \
+  --context-capacity 262144 --execution graph --cache both
+```
 
 ## 35B sparse-MoE dFlash benchmark
 

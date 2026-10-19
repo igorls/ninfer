@@ -16,9 +16,7 @@
 #include "ninfer/ops/causal_conv1d_silu.h"
 #include "ninfer/ops/embedding.h"
 #include "ninfer/ops/gated_delta_net.h"
-#include "ninfer/ops/gated_rmsnorm.h"
-#include "ninfer/ops/gdn_gating.h"
-#include "ninfer/ops/gdn_gating_proj.h"
+#include "ninfer/ops/rmsnorm.h"
 #include "ninfer/ops/gdn_input_proj.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/kv_cache_append.h"
@@ -1052,11 +1050,11 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
                 throw std::logic_error("Replay-record GDN has no record storage");
             }
             GdnReplayRecordLayer records = replay_records_->layer(gidx, active_sequence_batch_);
-            gdn_projection_record(projection_input, p, *config_.gdn, conv_states, valid,
+            gdn_projection_record(projection_input, p, conv_states, valid,
                                   *active_linear_state_source_slots_, records.conv, query_output,
                                   key_output, value_output, gate_output, work_, s);
         } else {
-            gdn_projection_snapshot(projection_input, p, *config_.gdn, conv_states, valid,
+            gdn_projection_snapshot(projection_input, p, conv_states, valid,
                                     *active_linear_state_source_slots_,
                                     *active_linear_state_destination_slots_, query_output,
                                     key_output, value_output, gate_output, work_, s);
@@ -1109,8 +1107,8 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
                 q_batch, k_batch, v_batch, g_batch, beta_batch,
                 static_cast<float>(
                     1.0 / std::sqrt(static_cast<double>(config_.gdn->linear_key_head_dim))),
-                recurrent_states, valid, *active_linear_state_source_slots_, records.key,
-                records.value, records.gate, out_batch, s);
+                recurrent_states, valid, *active_linear_state_source_slots_,
+                {records.key, records.value, records.gate}, out_batch, s);
         } else {
             ops::gated_delta_net_batch_update(
                 q_batch, k_batch, v_batch, g_batch, beta_batch,
@@ -1134,7 +1132,7 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
     Tensor on = workspace::gdn_normalized_output(work_, config_, T)
                     .view({dimension(config_.gdn->linear_value_head_dim),
                            dimension(config_.gdn->linear_num_value_heads), T});
-    ops::gated_rmsnorm(o, p.norm, z, config_.rms_norm_eps, on, ctx_.execution_view());
+    ops::silu_gated_rmsnorm(o, p.norm, z, config_.rms_norm_eps, on, ctx_.execution_view());
 
     ops::linear_add(on.view({dimension(config_.gdn->value_width()), T}), p.output.weight, x,
                     p.output.policy, work_, s);

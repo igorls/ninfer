@@ -20,11 +20,13 @@ constexpr std::array kFormats = {
     std::pair{QType::FP8_E4M3FN_ROW_FP32, std::string_view{"fp8_e4m3fn_row_fp32"}},
     std::pair{QType::U4Z8_G16_FP16, std::string_view{"u4z8_g16_fp16"}},
     std::pair{QType::INT64, std::string_view{"int64"}},
+    std::pair{QType::NF4_G16_E4M3FN, std::string_view{"nf4_g16_e4m3fn"}},
 };
 constexpr std::array kLayouts = {
     std::pair{QuantLayout::Contiguous, std::string_view{"contiguous_le_v1"}},
     std::pair{QuantLayout::RowSplit, std::string_view{"row_split_k128_v1"}},
     std::pair{QuantLayout::RowScale, std::string_view{"row_scale_v1"}},
+    std::pair{QuantLayout::RowPagedG16_4K, std::string_view{"row_paged_g16_4k_v1"}},
     std::pair{QuantLayout::BlockScaleK16M128x4, std::string_view{"block_scale_k16_m128x4_v1"}},
     std::pair{QuantLayout::RowScaleFp32, std::string_view{"row_scale_fp32_v1"}},
     std::pair{QuantLayout::ExpertBlockScaleK16M128x4,

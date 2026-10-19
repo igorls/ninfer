@@ -18,6 +18,7 @@ from .formats import (
     DirectFormat,
     Fp8RowFormat,
     Nvfp4Format,
+    Nf4Format,
     NumericFormat,
     QuantFormat,
     U4Z8Format,
@@ -107,6 +108,23 @@ class RowScaleGeometry:
     payload_bytes: int
 
 
+@dataclass(frozen=True, slots=True)
+class RowPagedGeometry:
+    n: int
+    k: int
+    row_bytes: int
+    rows_per_page: int
+    page_count: int
+    weight_divisor_offset: int
+    payload_bytes: int
+
+    def row_offset(self, row: int) -> int:
+        if not 0 <= row < self.n:
+            raise ValueError("row exceeds paged tensor")
+        page, slot = divmod(row, self.rows_per_page)
+        return page * 4096 + slot * self.row_bytes
+
+
 CONTIGUOUS_LE_V1 = Layout(
     "contiguous_le_v1", 256, frozenset(("bf16", "fp32", "int32", "int64"))
 )
@@ -140,6 +158,9 @@ PACKED_U4_G16_V1 = Layout(
     256,
     frozenset(("u4z8_g16_fp16",)),
 )
+ROW_PAGED_G16_4K_V1 = Layout(
+    "row_paged_g16_4k_v1", 4096, frozenset(("nf4_g16_e4m3fn",))
+)
 
 LAYOUTS = MappingProxyType(
     {
@@ -152,6 +173,7 @@ LAYOUTS = MappingProxyType(
             ROW_SCALE_FP32_V1,
             EXPERT_BLOCK_SCALE_K16_M128X4_V1,
             PACKED_U4_G16_V1,
+            ROW_PAGED_G16_4K_V1,
         )
     }
 )
@@ -352,6 +374,24 @@ def row_scale_geometry(
     )
 
 
+def row_paged_geometry(
+    format: str | Nf4Format, shape: Sequence[int]
+) -> RowPagedGeometry:
+    if not isinstance(_format(format), Nf4Format):
+        raise ValueError("row_paged_g16_4k_v1 requires NF4 G16")
+    n, k = _shape(shape, rank=2)
+    if k % 16:
+        raise ValueError("paged NF4 requires K divisible by 16")
+    row_bytes = k // 2 + k // 16
+    rows_per_page = 4096 // row_bytes
+    if rows_per_page == 0:
+        raise ValueError("encoded NF4 row exceeds 4096 bytes")
+    pages = (n + rows_per_page - 1) // rows_per_page
+    return RowPagedGeometry(
+        n, k, row_bytes, rows_per_page, pages, pages * 4096, pages * 4096 + 4
+    )
+
+
 def encoded_size(
     layout: str | Layout,
     format: str | NumericFormat,
@@ -386,4 +426,6 @@ def encoded_size(
         return expert_block_scale_geometry(numeric_spec, shape).payload_bytes
     if layout_spec is PACKED_U4_G16_V1:
         return packed_u4_geometry(numeric_spec, shape).payload_bytes
+    if layout_spec is ROW_PAGED_G16_4K_V1:
+        return row_paged_geometry(numeric_spec, shape).payload_bytes
     raise ValueError(f"unsupported tensor layout: {layout_spec.name!r}")

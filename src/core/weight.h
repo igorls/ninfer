@@ -19,6 +19,7 @@ enum class QType : std::uint16_t {
     FP8_E4M3FN_ROW_FP32 = 9,
     U4Z8_G16_FP16       = 10,
     INT64               = 11,
+    NF4_G16_E4M3FN      = 12,
 };
 
 enum class QuantLayout : std::uint16_t {
@@ -29,6 +30,7 @@ enum class QuantLayout : std::uint16_t {
     RowScaleFp32              = 4,
     ExpertBlockScaleK16M128x4 = 5,
     PackedU4G16               = 6,
+    RowPagedG16_4K            = 7,
 };
 
 struct Weight {

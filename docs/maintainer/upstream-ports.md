@@ -43,8 +43,10 @@ link them here.
 
 ## Upstream `81c8ce09..64d10fbf` (assessment, October 19, 2026)
 
-**Status: Candidate; not merged or GPU-qualified.** A contained Windows CPU grammar
-trial is complete; the remaining integration is source review only. The comparison is committed
+**Status: In progress; full merge and GPU qualification incomplete.** Implementation
+was authorized after the assessment. The contained grammar trial is carried in
+`58cd4222` on `sync/upstream-64d10fbf`; the first 24-commit upstream merge is being
+adapted. The original assessment comparison is committed
 `workstation` at `2b62e8e5` against upstream
 [`64d10fbf`](https://github.com/Neroued/ninfer/commit/64d10fbf9f8e6bfc79ab0570b94674c5b9997929).
 There are 77 upstream commits and 166 fork-only commits after the common ancestor
@@ -218,10 +220,42 @@ not the production tokenizer, serving TTFT or model decode. See the full
 Recommendation: carry the candidate into the sync for bounded-string handling,
 with the small-case costs and production-vocabulary uncertainty explicit.
 
-Source/history review, dry merges and this contained Windows CPU trial are
-complete. The full integration, model numerical comparison, model conversion and
-dual-GPU qualification remain open. No upstream merge, commit, push or deployment
-has occurred.
+Source/history review, dry merges and the contained Windows CPU trial are complete.
+The trial was committed as `58cd4222` after implementation authorization. The full
+integration, model numerical comparison, model conversion and dual-GPU qualification
+remain open. No upstream merge is finalized, and nothing has been pushed or deployed.
+
+Stage 1 carries the fork's FP32-row-scale FP8 input kernels, short-window schedules
+and BF16 GDN control operands into the upstream prepared-operand interfaces. The
+removed `gdn_gating_proj` and gated-RMSNorm aliases are migrated across native
+callers. Independent GDN fixtures add the represented BF16 control words and FP32
+row scales; upstream QSA and the fork's block-key indexer retain distinct test names.
+The first Windows build exposed stale geometry constants in the moved FP8 output
+helper and missing aggregate-template deduction on MSVC; both are corrected.
+The Release runtime, GDN control projection and GDN snapshot targets build with
+MSVC 19.51/CUDA 13.3.33. Default parallelism also exhausted `ptxas` allocation;
+the successful retry used four jobs at below-normal priority. These are build
+checks, not desktop GPU qualification. Linker CRT-library conflict warnings remain.
+The Colab baseline full build also found
+an existing DFlash benchmark using pointer access on the ModelInstance variant;
+the same benchmark-only correction is applied to both trees, without changing the
+baseline inference implementation.
+
+The first boundary also brings generic paged-NF4 framing/codecs, mixed-row KV
+spans, PLE state Ops and the independent upstream HC/QSA Ops into source. The
+fork's resident Flash-Next composition continues to use its existing HC, PLE and
+block-key QSA routes at this boundary. This does not replace their optimized
+implementations or establish a performance gain. The upstream flat
+`tools/convert/qwen4_exp.py` is deferred until the native binding/representation
+merge: it would otherwise be shadowed by the active fork package of the same
+name. The active converter, recipes and representation references stay together.
+Generic NF4 encoding support is separate from an advertised runnable NF4 model.
+The Linux qualification snapshot initially omitted a newly restored private
+header and retained one old replay-record call signature; both were corrected.
+Colab's disk then filled while holding two complete build trees and both explicit
+artifacts. Link and synthetic-converter I/O failures from that condition are
+invalidated checks, with reruns after removing disposable benchmark binaries and
+download caches. Hardware/numerical qualification is still in progress.
 
 ## Upstream through `bace20dc`
 

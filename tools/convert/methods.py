@@ -30,6 +30,7 @@ from .quantization.groupwise import quantize_matrix
 from .quantization.nvfp4 import encode_rows as encode_nvfp4_rows
 from .quantization.nvfp4 import weight_divisor as nvfp4_weight_divisor
 from .quantization.u4z8 import encode_rows as encode_u4z8_rows
+from .quantization.stored_scale import quantize_stored_scale
 from .sources.logical import EncodedRows, LogicalSource
 
 UseKey = tuple[str, str]
@@ -414,6 +415,40 @@ def u4z8_maxabs(request: PrepareRequest) -> PreparedMethod:
             values = request.values(begin * k, end * k).reshape(end - begin, k)
             codes, scales = encode_u4z8_rows(values.to(request.device))
             output.write_codes(begin, codes.cpu(), scales.cpu())
+def stored_scale_mse(request: PrepareRequest) -> PreparedMethod:
+    """Two-pass object amax and exhaustive G16 stored-scale MSE encoding."""
+    if (
+        request.target.format not in ("nf4_g16_e4m3fn", "nvfp4")
+        or len(request.target.shape) != 2
+    ):
+        raise ValueError("stored_scale_mse requires an NF4 or NVFP4 matrix")
+    _preflight(request)
+    n, k = request.target.shape
+    chunk = request.rows_per_chunk
+    if request.target.format == "nvfp4":
+        chunk = max(128, chunk // 128 * 128)
+
+    def produce(output):
+        maximum = 0.0
+        for begin in range(0, n, chunk):
+            end = min(n, begin + chunk)
+            values = request.values(begin * k, end * k).to(
+                device=request.device, dtype=torch.float32
+            )
+            if not bool(torch.isfinite(values).all()):
+                raise ValueError("stored-scale source contains NaN or infinity")
+            maximum = max(maximum, values.abs().max().item())
+        limit = 448.0 if request.target.format == "nf4_g16_e4m3fn" else 2688.0
+        divisor = struct.pack("<f", limit / maximum if maximum else 1.0)
+        if not valid_positive_fp32_word(struct.unpack("<I", divisor)[0]):
+            raise ValueError("amax produces an invalid FP32 object divisor")
+        for begin in range(0, n, chunk):
+            end = min(n, begin + chunk)
+            values = request.values(begin * k, end * k).reshape(end - begin, k)
+            encoded = quantize_stored_scale(
+                values, request.target.format, divisor, device=request.device
+            )
+            output.write_codes(begin, encoded.codes, encoded.scales, divisor)
 
     return request.job(produce=produce)
 
@@ -426,4 +461,5 @@ METHODS: dict[str, Method] = {
     "nvfp4_maxabs": nvfp4_maxabs,
     "nvfp4_expert_maxabs": nvfp4_expert_maxabs,
     "u4z8_maxabs": u4z8_maxabs,
+    "stored_scale_mse": stored_scale_mse,
 }

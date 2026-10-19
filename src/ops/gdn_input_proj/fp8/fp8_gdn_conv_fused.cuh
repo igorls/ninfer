@@ -9,7 +9,7 @@
 #include "core/weight.h"
 
 #include "core/device.h"
-#include "ops/gdn_input_proj/gdn_conv_output.cuh"
+#include "ops/gdn_input_proj/conv_output.cuh"
 #include "ops/linear/fp8/fp8_schedule.cuh"
 #include "ops/linear/fp8/fp8_a16_gemv.cuh"
 #include "ops/linear/fp8/fp8_a16_simt.cuh"
@@ -39,7 +39,7 @@ void fp8_gdn_conv_small_t(const Tensor& x, const Weight& weight, const Tensor& c
                                                   Fp8ActivationStage::PaddedZero, 1>;
         launch_fp8_a16_sliced_k_mma<Fp8ScheduleInstance<Schedule, InputRows, ActiveTokens, true>>(
             fp8_a16_operands<Scale>(x, weight),
-            make_gdn_conv_output<ActiveTokens>(conv_weight, conv_states, valid_columns,
+            make_gdn_conv_output<GdnConvGeometry<6144>, ActiveTokens>(conv_weight, conv_states, valid_columns,
                                                initial_slot, query, key, value, z, publish),
             Fp8GdnConvEpilogue<ActiveTokens, Publish>{}, stream);
         return;
@@ -50,7 +50,7 @@ void fp8_gdn_conv_small_t(const Tensor& x, const Weight& weight, const Tensor& c
     static_assert(Schedule::kBlockTokens == ActiveTokens);
     launch_fp8_a16_simt<Fp8ScheduleInstance<Schedule, InputRows, ActiveTokens, true>>(
         fp8_a16_operands<Scale>(x, weight),
-        make_gdn_conv_output<ActiveTokens>(conv_weight, conv_states, valid_columns, initial_slot,
+        make_gdn_conv_output<GdnConvGeometry<6144>, ActiveTokens>(conv_weight, conv_states, valid_columns, initial_slot,
                                            query, key, value, z, publish),
         Fp8GdnConvEpilogue<ActiveTokens, Publish>{}, stream);
 }
@@ -59,11 +59,11 @@ void fp8_gdn_conv_small_t(const Tensor& x, const Weight& weight, const Tensor& c
 // through convolution. Match the B=1 lane partition and four accumulation chains; changing
 // that reduction can amplify into a different real-model trajectory. Only final outputs and
 // persistent history are rounded to BF16.
-struct Fp8GdnBatchSnapshotOutput : GdnConvOutput<1, SnapshotHistoryPublish> {
+struct Fp8GdnBatchSnapshotOutput : GdnConvOutput<GdnConvGeometry<6144>, 1, SnapshotHistoryPublish> {
     __device__ __forceinline__ void store(int parent_row, int batch, float projected) const {
-        auto row           = static_cast<const GdnConvOutput<1, SnapshotHistoryPublish>&>(*this);
+        auto row           = static_cast<const GdnConvOutput<GdnConvGeometry<6144>, 1, SnapshotHistoryPublish>&>(*this);
         row.conv.batch_row = batch;
-        row.z += static_cast<std::int64_t>(batch) * kGdnZRows;
+        row.z += static_cast<std::int64_t>(batch) * GdnConvGeometry<6144>::value_rows;
         row.store(parent_row, 0, projected);
     }
 };
@@ -79,8 +79,8 @@ void fp8_gdn_snapshot_batch_one(const Tensor& x, const Weight& weight, const Ten
                            Fp8CodeCache::Default, 2, Fp8SimtBlockOrder::RowsContiguous, 2>;
     const SnapshotHistoryPublish publish{static_cast<__nv_bfloat16*>(conv_states.data),
                                          static_cast<const std::int32_t*>(snapshot_base_slot.data),
-                                         kGdnChannels};
-    Fp8GdnBatchSnapshotOutput output{make_gdn_conv_output<1>(
+                                         GdnConvGeometry<6144>::channels};
+    Fp8GdnBatchSnapshotOutput output{make_gdn_conv_output<GdnConvGeometry<6144>, 1>(
         conv_weight, conv_states, valid_columns, initial_slot, query, key, value, z, publish)};
     Tensor flat(x.data, DType::BF16, {InputRows, x.ne[2]});
     launch_fp8_a16_simt<Fp8ScheduleInstance<Schedule, InputRows>>(
@@ -90,12 +90,12 @@ void fp8_gdn_snapshot_batch_one(const Tensor& x, const Weight& weight, const Ten
 // A CTA owns one sequence's full speculative window. Independent sequences reuse the same
 // reduction order as W=1; convolution never crosses from one batch row to the next.
 template <int Width, class Publish>
-struct Fp8GdnWindowOutput : GdnConvOutput<Width, Publish, true> {
+struct Fp8GdnWindowOutput : GdnConvOutput<GdnConvGeometry<6144>, Width, Publish, true> {
     __device__ __forceinline__ void store_window(int parent_row, int token_begin,
                                                  const float (&projected)[Width]) const {
-        auto row = static_cast<const GdnConvOutput<Width, Publish, true>&>(*this);
+        auto row = static_cast<const GdnConvOutput<GdnConvGeometry<6144>, Width, Publish, true>&>(*this);
         row.conv.batch_row = token_begin / Width;
-        row.z += static_cast<std::int64_t>(token_begin) * kGdnZRows;
+        row.z += static_cast<std::int64_t>(token_begin) * GdnConvGeometry<6144>::value_rows;
         row.store_row(parent_row, projected);
     }
 };
@@ -119,7 +119,7 @@ void fp8_gdn_conv_window(const Tensor& x, const Weight& weight, const Tensor& co
     using Schedule =
         Fp8A16SimtSchedule<4, 2, 8, Width, 4, Fp8SimtActivationAccess::SharedPhase,
                            Fp8CodeCache::Default, 2, Fp8SimtBlockOrder::RowsContiguous, 2>;
-    Fp8GdnWindowOutput<Width, Publish> output{make_gdn_conv_output<Width, true>(
+    Fp8GdnWindowOutput<Width, Publish> output{make_gdn_conv_output<GdnConvGeometry<6144>, Width, true>(
         conv_weight, conv_states, valid_columns, initial_slot, query, key, value, z, publish)};
     Tensor flat(x.data, DType::BF16, {InputRows, x.ne[1] * x.ne[2]});
     launch_fp8_a16_simt<Fp8ScheduleInstance<Schedule, InputRows>>(
@@ -160,7 +160,7 @@ void fp8_gdn_snapshot_fused(const Tensor& x, const Weight& weight, const Tensor&
                 z,
                 SnapshotHistoryPublish{static_cast<__nv_bfloat16*>(conv_states.data),
                                        static_cast<const std::int32_t*>(snapshot_base_slot.data),
-                                       kGdnChannels},
+                                       GdnConvGeometry<6144>::channels},
                 stream);
             return;
         }
@@ -185,12 +185,12 @@ void fp8_gdn_snapshot_fused(const Tensor& x, const Weight& weight, const Tensor&
     }
     const SnapshotHistoryPublish publish{static_cast<__nv_bfloat16*>(conv_states.data),
                                          static_cast<const std::int32_t*>(snapshot_base_slot.data),
-                                         kGdnChannels};
+                                         GdnConvGeometry<6144>::channels};
     if (x.ne[1] == 1) {
         using Schedule = Fp8A16GemvSchedule<8, 2, 8, 4, Fp8CodeCache::Default, 2, 2>;
         launch_fp8_a16_gemv<Fp8ScheduleInstance<Schedule, InputRows>>(
             fp8_a16_operands<Scale>(x, weight),
-            make_gdn_conv_output<1>(conv_weight, conv_states, valid_columns, initial_slot, query,
+            make_gdn_conv_output<GdnConvGeometry<6144>, 1>(conv_weight, conv_states, valid_columns, initial_slot, query,
                                     key, value, z, publish),
             Fp8GdnConvEpilogue<1, SnapshotHistoryPublish>{}, stream);
         return;
@@ -223,7 +223,7 @@ void fp8_gdn_record_fused(const Tensor& x, const Weight& weight, const Tensor& c
             fp8_gdn_conv_window_dispatch<InputRows, Scale>(
                 x, weight, conv_weight, conv_states, valid_columns, initial_slot, query, key, value,
                 z,
-                RecordColumnPublish{static_cast<__nv_bfloat16*>(conv_record.data), kGdnChannels,
+                RecordColumnPublish{static_cast<__nv_bfloat16*>(conv_record.data), GdnConvGeometry<6144>::channels,
                                     static_cast<std::int32_t>(x.ne[1])},
                 stream);
             return;
@@ -236,7 +236,7 @@ void fp8_gdn_record_fused(const Tensor& x, const Weight& weight, const Tensor& c
     const auto launch_small = [&]<int Tokens>() {
         fp8_gdn_conv_small_t<InputRows, Scale, Tokens>(
             x, weight, conv_weight, conv_states, valid_columns, initial_slot, query, key, value, z,
-            RecordColumnPublish{record, kGdnChannels, Tokens}, stream);
+            RecordColumnPublish{record, GdnConvGeometry<6144>::channels, Tokens}, stream);
     };
     switch (x.ne[1]) {
     case 2: launch_small.template operator()<2>(); return;

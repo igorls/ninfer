@@ -82,9 +82,9 @@ struct ReadSpan {
 
 float read_divisor(const Reader& reader, ObjectHandle handle, const WeightGeometry& geometry,
                    std::span<const std::byte> host, MaterializationStats& stats) {
-    // An expert bank keeps one divisor per expert inside its payload; only a matrix has a parent
-    // divisor.
-    if (geometry.layout != QuantLayout::BlockScaleK16M128x4) { return 0.0F; }
+    // Expert-bank divisors remain per expert; matrix NVFP4 and NF4 own a scalar.
+    if (geometry.layout != QuantLayout::BlockScaleK16M128x4 &&
+        geometry.format != QType::NF4_G16_E4M3FN) { return 0.0F; }
     std::array<std::byte, 4> word{};
     if (!host.empty()) {
         std::copy_n(host.data() + geometry.divisor_offset, word.size(), word.data());
@@ -96,8 +96,7 @@ float read_divisor(const Reader& reader, ObjectHandle handle, const WeightGeomet
     }
     const auto value = std::bit_cast<float>(read_u32_le(word.data()));
     if (!std::isfinite(value) || value <= 0) {
-        throw ArtifactError(reader.directory().tensor(handle).id +
-                            ": invalid NVFP4 weight divisor");
+        throw ArtifactError(reader.directory().tensor(handle).id + ": invalid weight divisor");
     }
     return value;
 }

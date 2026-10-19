@@ -52,8 +52,16 @@ class U4Z8Format:
     group_size: int
 
 
+@dataclass(frozen=True, slots=True)
+class Nf4Format:
+    """Fixed NF4 codebook, K16 E4M3FN scales and an FP32 divisor."""
+
+    name: str
+    group_size: int = 16
+
+
 NumericFormat: TypeAlias = (
-    DirectFormat | QuantFormat | Nvfp4Format | Fp8RowFormat | U4Z8Format
+    DirectFormat | QuantFormat | Nvfp4Format | Fp8RowFormat | U4Z8Format | Nf4Format
 )
 
 
@@ -70,6 +78,28 @@ NVFP4 = Nvfp4Format("nvfp4", 16)
 FP8_E4M3FN_ROW_BF16 = Fp8RowFormat("fp8_e4m3fn_row_bf16", 2)
 FP8_E4M3FN_ROW_FP32 = Fp8RowFormat("fp8_e4m3fn_row_fp32", 4)
 U4Z8_G16_FP16 = U4Z8Format("u4z8_g16_fp16", 16)
+NF4_G16_E4M3FN = Nf4Format("nf4_g16_e4m3fn")
+NF4_CODEBOOK_WORDS = (
+    0xBF800000,
+    0xBF3239B1,
+    0xBF066B30,
+    0xBECA32A0,
+    0xBE91A24D,
+    0xBE3D353F,
+    0xBDBA7871,
+    0x00000000,
+    0x3DA2FAFF,
+    0x3E24CAE3,
+    0x3E7C04DD,
+    0x3EAD033A,
+    0x3EE1A4B8,
+    0x3F1007AB,
+    0x3F3913B3,
+    0x3F800000,
+)
+NF4_CODEBOOK = tuple(
+    struct.unpack("<f", struct.pack("<I", w))[0] for w in NF4_CODEBOOK_WORDS
+)
 
 
 DIRECT_FORMATS = MappingProxyType(
@@ -83,6 +113,7 @@ FP8_ROW_FORMATS = MappingProxyType(
     {item.name: item for item in (FP8_E4M3FN_ROW_BF16, FP8_E4M3FN_ROW_FP32)}
 )
 U4Z8_FORMATS = MappingProxyType({U4Z8_G16_FP16.name: U4Z8_G16_FP16})
+NF4_FORMATS = MappingProxyType({NF4_G16_E4M3FN.name: NF4_G16_E4M3FN})
 NUMERIC_FORMATS = MappingProxyType(
     {
         **DIRECT_FORMATS,
@@ -90,6 +121,7 @@ NUMERIC_FORMATS = MappingProxyType(
         **NVFP4_FORMATS,
         **FP8_ROW_FORMATS,
         **U4Z8_FORMATS,
+        **NF4_FORMATS,
     }
 )
 
@@ -191,6 +223,11 @@ __all__ = [
     "FP8_E4M3FN_ROW_BF16",
     "FP8_E4M3FN_ROW_FP32",
     "U4Z8_G16_FP16",
+    "NF4_G16_E4M3FN",
+    "NF4_CODEBOOK_WORDS",
+    "NF4_CODEBOOK",
+    "NF4_FORMATS",
+    "Nf4Format",
     "DIRECT_FORMATS",
     "QUANT_FORMATS",
     "NVFP4_FORMATS",

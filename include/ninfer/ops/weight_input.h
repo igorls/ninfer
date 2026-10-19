@@ -1,12 +1,11 @@
 #pragma once
 
 #include "core/weight_view.h"
-#include "ninfer/ops/linear.h"
+#include "ninfer/ops/projection_weights.h"
 #include "ninfer/ops/sparse_moe.h"
 
 #include <optional>
 #include <span>
-#include <variant>
 
 namespace ninfer::ops {
 
@@ -16,19 +15,6 @@ struct WeightInput {
     LinearPolicy policy = LinearPolicy::A16Only;
     std::optional<float> activation_input_divisor;
 };
-
-struct SingleProjectionWeight {
-    Weight weight;
-    LinearPolicy policy = LinearPolicy::A16Only;
-};
-
-struct PairedProjectionWeights {
-    Weight first, second;
-};
-
-using ProjectionWeights = std::variant<SingleProjectionWeight, PairedProjectionWeights>;
-
-// Nvfp4ExpertBankWeight is declared with its consuming Op in sparse_moe.h.
 
 // Prepare the existing native forms; no device allocation, upload, execution or graph rewrite.
 // Runtime shape/phase choices and scratch remain with the actual calling Op.
@@ -46,8 +32,8 @@ using ProjectionWeights = std::variant<SingleProjectionWeight, PairedProjectionW
                                                                const WeightInput& key,
                                                                const WeightInput& value,
                                                                const WeightInput& z);
-[[nodiscard]] ProjectionWeights prepare_gdn_gating_proj_weights(const WeightInput& a,
-                                                                const WeightInput& b);
+[[nodiscard]] ProjectionWeights prepare_gdn_control_proj_weights(const WeightInput& a,
+                                                                 const WeightInput& b);
 [[nodiscard]] SingleProjectionWeight prepare_linear_swiglu_weight(const WeightInput& gate,
                                                                   const WeightInput& up);
 [[nodiscard]] Nvfp4ExpertBankWeight prepare_nvfp4_expert_bank_weight(const WeightInput& input);

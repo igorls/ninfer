@@ -7,7 +7,7 @@
 #include "models/qwen4_exp/program/internal.h"
 #include "models/qwen4_exp/program/planning/graph_profiles.h"
 #include "ninfer/ops/gated_delta_net.h"
-#include "ninfer/ops/gdn_gating_proj.h"
+#include "ninfer/ops/gdn_control.h"
 #include "ninfer/ops/gdn_input_proj.h"
 #include "ninfer/ops/hyper_connection.h"
 #include "ninfer/ops/linear.h"
@@ -260,17 +260,16 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                     if (prefill) {
                         scratch(layout,
                                 ops::gdn_input_proj_workspace_capacity_bytes(
-                                    w.qtype, w.n, w.k, g.projection.policy, tokens, tokens));
+                                    g.projection, tokens, tokens));
                     } else {
                         scratch(layout,
                                 std::max<std::size_t>(
                                     1, ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
-                                           w.qtype, w.n, w.k, g.projection.policy, tokens / width,
+                                           g.projection, tokens / width,
                                            width, width)));
                     }
-                    scratch(layout, ops::gdn_gating_proj_workspace_capacity_bytes(
-                                        dimension(config.gdn.linear_num_value_heads),
-                                        dimension(config.hidden_size), tokens, tokens));
+                    scratch(layout, ops::gdn_control_proj_workspace_capacity_bytes(
+                                        ops::SingleProjectionWeight{g.control}, tokens, tokens));
                     if (prefill) {
                         scratch(layout,
                                 ops::gated_delta_net_workspace_capacity_bytes(

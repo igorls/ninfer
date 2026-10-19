@@ -221,8 +221,9 @@ int run(const Options& options) {
     engine = ninfer::runtime::normalize_engine_options(std::move(engine));
     ninfer::DeviceContext device(options.device);
     auto constructed = ninfer::runtime::construct_model(engine, device);
-    auto& frontend   = constructed.instance->frontend;
-    auto& program    = constructed.instance->program;
+    auto& instance = *std::get<std::unique_ptr<ninfer::runtime::ModelInstanceOf<ninfer::runtime::Qwen3_5Package>>>(constructed.instance);
+    auto& frontend = instance.frontend;
+    auto& program = instance.program;
     ninfer::runtime::ResolvedExecutionOptions execution;
     execution.requested_output_tokens = 1 + measured_rounds * (options.draft_tokens + 1);
     execution.allow_prefix_reuse      = false;

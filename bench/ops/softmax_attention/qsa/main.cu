@@ -1,0 +1,232 @@
+#include "fixture.cuh"
+#include "tail_fixture.cuh"
+#include "prepare_fixture.cuh"
+#include "indexer_fixture.cuh"
+#include "sparse_gqa_fixture.cuh"
+#include "ninfer/ops/linear.h"
+#include "ninfer/ops/qsa.h"
+
+using namespace ninfer;
+using namespace ninfer::bench;
+
+namespace {
+void launch_split(qsa::Projection projection, qsa::Fixture& f, const Weight& weight,
+                  cudaStream_t stream) {
+    auto& out = f.split;
+    switch (projection) {
+    case qsa::Projection::QueryGate:
+        ops::qsa_input_proj(f.x, weight, out[0], out[1], stream);
+        return;
+    case qsa::Projection::KeyValueIndex:
+        ops::qsa_input_proj(f.x, weight, out[0], out[1], out[2], out[3], stream);
+        return;
+    case qsa::Projection::Joint:
+        ops::qsa_input_proj(f.x, weight, out[0], out[1], out[2], out[3], out[4], out[5], stream);
+        return;
+    }
+}
+
+void measure_tail(const qsa::Options& options, DeviceContext& device, L2FlushBuffer& flush) {
+    measurement::Csv csv(options.timing.csv_out, "base_positions,inplace,layout,round");
+    for (int capacity : options.capacities) {
+        qsa::TailFixture fixture(options, capacity);
+        measurement::Row row;
+        row.op      = "qsa_tail_extract";
+        row.format  = "bf16";
+        row.tokens  = capacity;
+        row.batch   = options.batch;
+        row.valid   = qsa::csv_list(fixture.counts);
+        row.commits = qsa::csv_list(fixture.commits);
+        for (int round = 0; round < options.rounds; ++round)
+            for (const auto& execution :
+                 measurement::selections(options.timing.execution, "graph", "eager"))
+                for (const auto& cache :
+                     measurement::selections(options.timing.cache, "cold", "warm")) {
+                    const auto result = measurement::measure(
+                        [&](auto stream) {
+                            fixture.launch(device.execution_view().on_stream(stream));
+                        },
+                        [&](auto stream) { fixture.restore(stream); }, flush, device.stream,
+                        options.timing, execution, cache);
+                    csv.write(row, result, execution, cache,
+                              qsa::csv_list(fixture.bases) + "," + std::to_string(options.inplace) +
+                                  "," + options.layout + "," + std::to_string(round));
+                }
+    }
+}
+
+void measure_prepare(const qsa::Options& options, DeviceContext& device, L2FlushBuffer& flush) {
+    measurement::Csv csv(options.timing.csv_out, "base_positions,axes,inplace,layout,round");
+    for (int tokens : options.tokens) {
+        qsa::PrepareFixture fixture(options, tokens);
+        measurement::Row row;
+        row.op       = "qsa_prepare";
+        row.format   = qsa::name(options.storage);
+        row.tokens   = tokens;
+        row.batch    = options.batch;
+        row.valid    = qsa::csv_list(fixture.counts);
+        row.qk_heads = 24;
+        for (int round = 0; round < options.rounds; ++round)
+            for (const auto& execution :
+                 measurement::selections(options.timing.execution, "graph", "eager"))
+                for (const auto& cache :
+                     measurement::selections(options.timing.cache, "cold", "warm")) {
+                    const auto result = measurement::measure(
+                        [&](auto stream) {
+                            fixture.launch(device.execution_view().on_stream(stream));
+                        },
+                        [&](auto stream) { fixture.restore(stream); }, flush, device.stream,
+                        options.timing, execution, cache);
+                    csv.write(row, result, execution, cache,
+                              qsa::csv_list(fixture.bases) + "," + std::to_string(options.axes) +
+                                  "," + std::to_string(options.inplace) + "," + options.layout +
+                                  "," + std::to_string(round));
+                }
+    }
+}
+
+void measure_indexer(const qsa::Options& options, DeviceContext& device, L2FlushBuffer& flush) {
+    measurement::Csv csv(options.timing.csv_out, "contexts,context_capacity,layout,round");
+    for (int tokens : options.tokens) {
+        qsa::IndexerFixture fixture(options, tokens, device.execution_view());
+        measurement::Row row;
+        row.op              = "qsa_indexer";
+        row.format          = "bf16";
+        row.policy          = "fp32_scores";
+        row.tokens          = tokens;
+        row.batch           = options.batch;
+        row.qk_heads        = 4;
+        row.valid           = qsa::csv_list(fixture.lengths);
+        row.workspace_bytes = fixture.workspace_bytes;
+        for (int round = 0; round < options.rounds; ++round)
+            for (const auto& execution :
+                 measurement::selections(options.timing.execution, "graph", "eager"))
+                for (const auto& cache :
+                     measurement::selections(options.timing.cache, "cold", "warm")) {
+                    const auto result = measurement::measure(
+                        [&](auto stream) {
+                            fixture.launch(device.execution_view().on_stream(stream));
+                        },
+                        [](auto) {}, flush, device.stream, options.timing, execution, cache);
+                    row.workspace_peak = fixture.workspace->peak_used();
+                    csv.write(row, result, execution, cache,
+                              qsa::csv_list(fixture.contexts) + "," +
+                                  std::to_string(options.context_capacity) + "," + options.layout +
+                                  "," + std::to_string(round));
+                }
+    }
+}
+
+void measure_sparse(const qsa::Options& options, DeviceContext& device, L2FlushBuffer& flush) {
+    measurement::Csv csv(
+        options.timing.csv_out,
+        "contexts,context_capacity,layout,selection,selected_blocks,qk_flops,pv_flops,selected_kv_"
+        "bytes,unique_kv_bytes,physical_cache_bytes,round");
+    for (int tokens : options.tokens) {
+        qsa::SparseGqaFixture fixture(options, tokens, device.execution_view());
+        measurement::Row row;
+        row.op              = "qsa_sparse_gqa";
+        row.format          = qsa::name(options.storage);
+        row.policy          = "bf16_output";
+        row.tokens          = tokens;
+        row.batch           = options.batch;
+        row.qk_heads        = 24;
+        row.value_heads     = 24;
+        row.valid           = qsa::csv_list(fixture.lengths);
+        row.workspace_bytes = fixture.workspace_bytes;
+        for (int round = 0; round < options.rounds; ++round)
+            for (const auto& execution :
+                 measurement::selections(options.timing.execution, "graph", "eager"))
+                for (const auto& cache :
+                     measurement::selections(options.timing.cache, "cold", "warm")) {
+                    const auto result = measurement::measure(
+                        [&](auto stream) {
+                            fixture.launch(device.execution_view().on_stream(stream));
+                        },
+                        [](auto) {}, flush, device.stream, options.timing, execution, cache);
+                    row.workspace_peak = fixture.workspace->peak_used();
+                    const auto flops   = fixture.selected_tokens * 2 * 24 * 256;
+                    csv.write(
+                        row, result, execution, cache,
+                        qsa::csv_list(fixture.contexts) + "," +
+                            std::to_string(fixture.envelope.max_visible_tokens) + "," +
+                            options.layout + "," + options.selection + "," +
+                            std::to_string(options.selected_blocks) + "," + std::to_string(flops) +
+                            "," + std::to_string(flops) + "," +
+                            std::to_string(fixture.selected_tokens * fixture.token_bytes) + "," +
+                            std::to_string(fixture.unique_tokens * fixture.token_bytes) + "," +
+                            std::to_string(fixture.key_data.bytes + fixture.value_data.bytes +
+                                           fixture.key_scales.bytes + fixture.value_scales.bytes) +
+                            "," + std::to_string(round));
+                }
+    }
+}
+} // namespace
+
+int main(int argc, char** argv) {
+    try {
+        const auto options = qsa::parse_options(argc, argv);
+        measurement::hardware();
+        DeviceContext device;
+        L2FlushBuffer flush(options.timing.flush_bytes);
+        if (options.op == "sparse-gqa") {
+            measure_sparse(options, device, flush);
+            return 0;
+        }
+        if (options.op == "indexer") {
+            measure_indexer(options, device, flush);
+            return 0;
+        }
+        if (options.op == "tail-extract") {
+            measure_tail(options, device, flush);
+            return 0;
+        }
+        if (options.op == "prepare") {
+            measure_prepare(options, device, flush);
+            return 0;
+        }
+        measurement::Csv csv(options.timing.csv_out, "projection,round");
+        for (auto projection : options.projections) {
+            qsa::Weights weights(projection);
+            for (int tokens : options.tokens) {
+                qsa::Fixture fixture(weights, tokens);
+                measurement::Row row;
+                row.format = weights.weight.qtype == QType::BF16 ? "bf16" : "q8";
+                row.policy = "a16";
+                row.n      = weights.parent_rows;
+                row.k      = qsa::kInputRows;
+                row.tokens = tokens;
+                for (int round = 0; round < options.rounds; ++round) {
+                    auto entries = measurement::selections(options.entry, "linear", "split");
+                    if (round % 2) std::reverse(entries.begin(), entries.end());
+                    for (const auto& execution :
+                         measurement::selections(options.timing.execution, "graph", "eager"))
+                        for (const auto& cache :
+                             measurement::selections(options.timing.cache, "cold", "warm")) {
+                            for (const auto& entry : entries) {
+                                const bool baseline = entry == "linear";
+                                row.op              = baseline ? "linear" : "qsa_input_proj";
+                                const auto result   = measurement::measure(
+                                    [&](auto stream) {
+                                        if (baseline)
+                                            ops::linear(fixture.x, weights.weight, fixture.packed,
+                                                          stream);
+                                        else
+                                            launch_split(projection, fixture, weights.weight,
+                                                           stream);
+                                    },
+                                    [](auto) {}, flush, device.stream, options.timing, execution,
+                                    cache);
+                                csv.write(row, result, execution, cache,
+                                          std::string(qsa::name(projection)) + "," +
+                                              std::to_string(round));
+                            }
+                        }
+                }
+            }
+        }
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
+    }
+}

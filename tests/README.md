@@ -33,9 +33,15 @@ executables and CTest working directories under `build/tests/`.
 Concrete numerical criteria remain named by the semantic Op suite; there are no cross-Op tolerance
 presets.
 
-`ops/quantized_weight.h` is the common packed-weight fixture for Q4/Q5/Q6/Q8, FP8 and NVFP4 Op tests. It
-owns deterministic payload generation, device `Weight` views, row views, and independent logical
-weight decoding.
+Family-specific case declarations, independent oracles and numerical criteria live alongside the
+Op suites. `ops/quantized_weight.h` owns packed-weight fixtures and independent logical decoding;
+`ops/direct_bf16_weight.h` owns direct BF16 fixtures. GDN record/fold tests preserve their specified
+snapshot reference separately from projection and recurrence mathematical qualification.
+
+For QSA, run `ctest --test-dir build -R '^ninfer_qsa_input_proj_test$' --output-on-failure`.
+`ninfer_qsa_sparse_gqa_test --kv-cache bf16|fp8|int8|nvfp4|k8v4` selects one cache profile;
+the default checks all five. QSA tail, prepare, indexer and sparse-GQA partial-initialization cases
+also check their permitted read footprints under Compute Sanitizer initcheck.
 
 ## Build and run
 
@@ -76,14 +82,37 @@ statistics still drive the normal verdict. Passing tests remain quiet without it
 
 `ninfer_softmax_attention_test --causal-only` runs both D256 geometries and all five KV types;
 `--kv-dtype bf16|int8|fp8|nvfp4|k8v4` selects the same complete causal suite for one type.
-The suite covers prefill, decode/spec widths, batched prefixes, cache effects, and Graph replay and
-updates with changing live lengths. Numerical cases include small, unit-RMS and RMS1.8 Q/K inputs.
-The FP64 oracle retains internal Q quantization error; the INT8/FP8 compute budgets account for
-that accepted approximation. The default invocation also runs packed and context attention.
-Large causal reference calculations use at most eight CPU workers while preserving each output's
-FP64 accumulation order; small cases remain serial. Cache fixtures populate the reachable KV
-prefix while reserving the full execution-envelope page table. The runner reports elapsed time
-per KV type.
+The default invocation also runs packed and context attention. Large causal oracle calculations
+use at most eight CPU workers while preserving each output's FP64 accumulation order; small cases
+remain serial. The runner reports elapsed time per KV type.
+
+Run the RMSNorm and GDN control families together:
+
+```bash
+cmake --build build -j --target \
+  ninfer_rmsnorm_test ninfer_gated_rmsnorm_test \
+  ninfer_gdn_control_test ninfer_gdn_control_proj_test ninfer_gdn_norm_control_proj_test
+ctest --test-dir build --output-on-failure \
+  -R '^ninfer_(rmsnorm|gated_rmsnorm|gdn_control|gdn_control_proj|gdn_norm_control_proj)_test$'
+```
+
+Numerical criteria live in [test_gated.cpp](ops/rmsnorm/test_gated.cpp) and
+[GDN criteria.h](ops/gdn_control/criteria.h). `NINFER_OP_REPORT_STATS=1` with verbose CTest output
+reports the same suite-owned criteria used by the normal verdict.
+
+Run the HC residual family:
+
+```bash
+cmake --build build -j --target \
+  ninfer_hc_expand_norm_test ninfer_hc_grouped_rmsnorm_test \
+  ninfer_hc_combine_test ninfer_hc_combine_norm_test ninfer_hc_mix_test
+ctest --test-dir build --output-on-failure \
+  -R '^ninfer_hc_(expand_norm|grouped_rmsnorm|combine|combine_norm|mix)_test$'
+```
+
+HC suites qualify the public [gated residual forms](../include/ninfer/ops/gated_residual.h),
+including Mix, using [family-owned criteria](ops/gated_residual/criteria.h). Exact copying and
+mathematical outputs retain their respective references and the public BF16 residual boundary.
 
 Linear tests are independently runnable by weight and activation-compute profile:
 
@@ -99,30 +128,13 @@ For a change confined to one Q8 geometry, use the same public conformance cases 
 all registered Q8 geometries.
 
 For a change confined to a newly supported BF16 geometry, use
-`./build/tests/ninfer_linear_bf16_a16_test --shape N K`. These cases use the common full-K FP64
-oracle with exact BF16 weights, complete output checks for small N, route boundaries, changed-input
-Graph replay, both public overloads, workspace domains, and preservation/guard checks. The small
-control projections also cover terminal-K pulses and paired cancellation.
+`./build/tests/ninfer_linear_bf16_a16_test --shape N K`. This filter currently covers the new
+geometry table; default invocation also runs the older BF16 cases.
 
-All Linear files use `ops/linear/linear_test_common.{h,cpp}` and the same
-`ops/quantized_weight.h` fixture as the fused projection tests. The fixture produces the complete
-packed GPU payload and exact-decodes the logical float rows used by the one
-`cpu_linear_gemm_fp64()` reference. The reference performs naive double accumulation and never
-reproduces a production route's activation quantization, staging, reduction tree, or BF16 output
-rounding. Each activation compute path selects one centrally defined comparison tolerance for its
-whole suite; private kernel, schedule, launcher, and T selection do not change it. Individual test
-files call public `linear()` and contain no private selector, launcher, schedule, or kernel
-assertions.
-
-The Q8 suite includes `[2560,6144]`, `[6144,2560]`, `[10240,2560]`, `[12288,2560]`, and
-`[16384,2560]`: full-output FP64 comparisons at T=1/4/8,
-sampled-output checks at larger extents including 512/1024 and 129/1025, production boundaries,
-changed-input Graph replay, both public overloads, permissive policies, input/weight preservation,
-output guards, and valid/invalid workspace intervals.
-
-The Linear, LinearAdd and LinearSwiGLU common `.cpp` implementations each compile once into a
-test support library. Both those libraries and the Op test executables receive the oracle's
-`-fno-fast-math` and `-ffp-contract=off` options on GNU/Clang C++ compilers.
+Linear, LinearAdd and LinearSwiGLU common implementations each compile once into a test support
+library. Their libraries and CXX Op test executables receive `-fno-fast-math` and `-ffp-contract=off`
+on GNU/Clang. The remaining organization, entry-point and oracle-build work is tracked in the
+[Linear test reorganization requirements](../docs/maintainer/linear-test-reorganization-plan.md).
 
 Run the native Python suites with the project Python environment:
 
@@ -328,16 +340,11 @@ NINFER_TEST_ARTIFACT=out/qwen3_6_35b_a3b.ninfer \
   build/tests/ninfer_qwen3_5_dflash_prefill_real_test dflash
 ```
 
-The Engine test uses an artifact containing DFlash2 and checks output budgets, speculative activity,
-forced thinking-control append, penalty-enabled sampling, compact batches with unequal budgets,
-same-route same-seed replay, retained/fresh prefix behavior and absence of a full backend KV pool.
-A shared DFlash/DFlash2 fixture starts decode at token 63, verifies across the page boundary, stops
-after one target column at token 64, and checks the exact retained frontier and subsequent generation
-with and without reuse.
-The KV Store test checks exact mapping and reservation accounting for the same transition.
-K>=7 also exercises a stop inside a licensed block; K=15 additionally checks oversized prefill,
-local ring wrap, and the logical context-capacity tail. Optional Vision runs image/video capture
-and prefix restore. Zero extra Device StateImage slots exercise Host snapshot/restore.
+The Engine test requires a DFlash2 companion artifact and covers speculative transactions,
+page-boundary commit/continuation and retained/fresh prefix behavior. K>=7 exercises a stop inside
+a licensed block; K=15 adds oversized prefill, local-ring wrap and the context-capacity tail.
+Optional Vision enables image/video and prefix-restore cases. Zero extra Device StateImage slots
+exercise Host snapshot/restore.
 
 ```bash
 cmake --build build -j --target ninfer_qwen3_5_dflash2_real_test
