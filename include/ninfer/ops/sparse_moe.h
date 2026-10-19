@@ -35,6 +35,7 @@ enum class SparseMoeEpilogue : std::uint8_t {
  * activation divisor: an A4 route quantizes each activation row with a dynamic scale.
  */
 struct Nvfp4ExpertBankWeight {
+    Device device;
     const std::byte* codes               = nullptr;
     const std::byte* scales              = nullptr;
     const float* weight_scale_divisors   = nullptr;
@@ -108,21 +109,21 @@ struct SparseMoeHints {
  * Every positive T is supported.
  *
  * x, destination, all weight planes, and live workspace must be pairwise non-overlapping.
- * Execution is enqueued on execution.stream without host synchronization. The positive physical
+ * Execution is enqueued on execution.stream() without host synchronization. The positive physical
  * SM count in execution selects the persistent prefill grid. Workspace is caller-owned,
  * graph-stable transient storage and carries no state beyond the call; its capacity does not
  * depend on the grid.
  */
 void sparse_moe(const Tensor& x, const SparseMoeWeights& weights, SparseMoeEpilogue epilogue,
-                Tensor& destination, WorkspaceArena& workspace, DeviceExecutionView execution);
+                Tensor& destination, MemoryArena& workspace, CudaExecutionView execution);
 
 /**
  * The same Op with caller-supplied execution hints. Semantics, workspace requirement and output
  * are exactly those of the overload above; hints only steer cache warming.
  */
 void sparse_moe(const Tensor& x, const SparseMoeWeights& weights, SparseMoeEpilogue epilogue,
-                Tensor& destination, const SparseMoeHints& hints, WorkspaceArena& workspace,
-                DeviceExecutionView execution);
+                Tensor& destination, const SparseMoeHints& hints, MemoryArena& workspace,
+                CudaExecutionView execution);
 
 /**
  * Returns the transient capacity required by the NVFP4-bank SparseMoe overload for every T in the
@@ -190,7 +191,7 @@ void sparse_moe(const Tensor& x, const SparseMoeWeights& weights, SparseMoeEpilo
  *   only through the bank views; no gather or repack of expert weights occurs.
  */
 void sparse_moe(const Tensor& x, const SparseMoeNvfp4BankWeights& weights,
-                SparseMoeEpilogue epilogue, Tensor& destination, WorkspaceArena& workspace,
-                cudaStream_t stream, Tensor* selected_experts = nullptr);
+                SparseMoeEpilogue epilogue, Tensor& destination, MemoryArena& workspace,
+                CudaExecutionView execution, Tensor* selected_experts = nullptr);
 
 } // namespace ninfer::ops

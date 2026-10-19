@@ -1,4 +1,6 @@
 #include "ninfer/ops/kv_cache_append.h"
+#include "cuda_fixture.h"
+#include "core/buffer.h"
 #include "ops/op_tester.h"
 #include "core/decode_graph.h"
 #include "core/device.h"
@@ -450,9 +452,9 @@ int full_append_case(int kv_heads, KvCacheStorage storage, int tokens = 3) {
     DeviceBuffer d_v         = to_device(input_v);
     DeviceBuffer d_positions = to_device(positions);
     DeviceBuffer d_mapping   = to_device(mapping);
-    Tensor k(d_k.p, DType::BF16, {kFullHeadDim, kv_heads, tokens});
-    Tensor v(d_v.p, DType::BF16, {kFullHeadDim, kv_heads, tokens});
-    Tensor position_tensor(d_positions.p, DType::I32, {tokens});
+    Tensor k(d_k.span(), DType::BF16, {kFullHeadDim, kv_heads, tokens});
+    Tensor v(d_v.span(), DType::BF16, {kFullHeadDim, kv_heads, tokens});
+    Tensor position_tensor(d_positions.span(), DType::I32, {tokens});
 
     GuardedDeviceBuffer cache_k(k_code_count * dtype_size(layout.key.code_dtype));
     GuardedDeviceBuffer cache_v(v_code_count * dtype_size(layout.value.code_dtype));
@@ -461,11 +463,11 @@ int full_append_case(int kv_heads, KvCacheStorage storage, int tokens = 3) {
     GuardedDeviceBuffer scale_v(
         layout.value.scale_extent == 0 ? 1 : v_scale_count * dtype_size(layout.value.scale_dtype));
     PagedKVLayerView cache{
-        .k_pages      = Tensor(cache_k.data(), layout.key.code_dtype,
+        .k_pages      = Tensor(cache_k.span(), layout.key.code_dtype,
                                {layout.key.code_extent, kPage, kv_heads, physical_pages}),
-        .v_pages      = Tensor(cache_v.data(), layout.value.code_dtype,
+        .v_pages      = Tensor(cache_v.span(), layout.value.code_dtype,
                                {layout.value.code_extent, kPage, kv_heads, physical_pages}),
-        .block_table  = Tensor(d_mapping.p, DType::I32, {logical_pages}),
+        .block_table  = Tensor(d_mapping.span(), DType::I32, {logical_pages}),
         .head_dim     = kFullHeadDim,
         .num_kv_heads = kv_heads,
         .storage      = storage,
@@ -490,7 +492,8 @@ int full_append_case(int kv_heads, KvCacheStorage storage, int tokens = 3) {
                 }
             }
         }
-        ops::kv_cache_append(k, v, position_tensor, cache, nullptr);
+        ops::kv_cache_append(k, v, position_tensor, cache,
+                             ninfer::test::cuda_environment().default_execution);
         cuda_synchronize();
         const std::string label = "kv_cache_append full bf16 Hkv=" + std::to_string(kv_heads) +
                                   " T=" + std::to_string(tokens) +
@@ -513,9 +516,9 @@ int full_append_case(int kv_heads, KvCacheStorage storage, int tokens = 3) {
         scale_v.copy_from_host(expected_scale_v.data(),
                                expected_scale_v.size() * sizeof(std::uint16_t));
         cache.k_scale_pages =
-            Tensor(scale_k.data(), DType::FP16, {kFullGroups, kPage, kv_heads, physical_pages});
+            Tensor(scale_k.span(), DType::FP16, {kFullGroups, kPage, kv_heads, physical_pages});
         cache.v_scale_pages =
-            Tensor(scale_v.data(), DType::FP16, {kFullGroups, kPage, kv_heads, physical_pages});
+            Tensor(scale_v.span(), DType::FP16, {kFullGroups, kPage, kv_heads, physical_pages});
         for (int token = 0; token < tokens; ++token) {
             const int position = positions[static_cast<std::size_t>(token)];
             const int page     = mapping[static_cast<std::size_t>(position / kPage)];
@@ -527,7 +530,8 @@ int full_append_case(int kv_heads, KvCacheStorage storage, int tokens = 3) {
                 }
             }
         }
-        ops::kv_cache_append(k, v, position_tensor, cache, nullptr);
+        ops::kv_cache_append(k, v, position_tensor, cache,
+                             ninfer::test::cuda_environment().default_execution);
         cuda_synchronize();
         const std::string label = "kv_cache_append full int8-g64 Hkv=" + std::to_string(kv_heads) +
                                   " T=" + std::to_string(tokens) +
@@ -552,9 +556,9 @@ int full_append_case(int kv_heads, KvCacheStorage storage, int tokens = 3) {
         scale_v.copy_from_host(expected_scale_v.data(),
                                expected_scale_v.size() * sizeof(std::uint16_t));
         cache.k_scale_pages =
-            Tensor(scale_k.data(), DType::FP16, {kFullFp8Groups, kPage, kv_heads, physical_pages});
+            Tensor(scale_k.span(), DType::FP16, {kFullFp8Groups, kPage, kv_heads, physical_pages});
         cache.v_scale_pages =
-            Tensor(scale_v.data(), DType::FP16, {kFullFp8Groups, kPage, kv_heads, physical_pages});
+            Tensor(scale_v.span(), DType::FP16, {kFullFp8Groups, kPage, kv_heads, physical_pages});
         for (int token = 0; token < tokens; ++token) {
             const int position = positions[static_cast<std::size_t>(token)];
             const int page     = mapping[static_cast<std::size_t>(position / kPage)];
@@ -573,7 +577,8 @@ int full_append_case(int kv_heads, KvCacheStorage storage, int tokens = 3) {
                                     expected_scale_v);
             }
         }
-        ops::kv_cache_append(k, v, position_tensor, cache, nullptr);
+        ops::kv_cache_append(k, v, position_tensor, cache,
+                             ninfer::test::cuda_environment().default_execution);
         cuda_synchronize();
         const std::string label =
             "kv_cache_append full fp8-row256 Hkv=" + std::to_string(kv_heads) +
@@ -603,9 +608,9 @@ int full_append_case(int kv_heads, KvCacheStorage storage, int tokens = 3) {
                                expected_scale_k.size() * sizeof(std::uint16_t));
         scale_v.copy_from_host(expected_scale_v.data(), expected_scale_v.size());
         cache.k_scale_pages =
-            Tensor(scale_k.data(), DType::FP16, {kFullFp8Groups, kPage, kv_heads, physical_pages});
+            Tensor(scale_k.span(), DType::FP16, {kFullFp8Groups, kPage, kv_heads, physical_pages});
         cache.v_scale_pages =
-            Tensor(scale_v.data(), DType::U8, {kFullNvfp4Groups, kPage, kv_heads, physical_pages});
+            Tensor(scale_v.span(), DType::U8, {kFullNvfp4Groups, kPage, kv_heads, physical_pages});
         for (int token = 0; token < tokens; ++token) {
             const int position = positions[static_cast<std::size_t>(token)];
             const int page     = mapping[static_cast<std::size_t>(position / kPage)];
@@ -625,7 +630,8 @@ int full_append_case(int kv_heads, KvCacheStorage storage, int tokens = 3) {
                                       expected_scale_v);
             }
         }
-        ops::kv_cache_append(k, v, position_tensor, cache, nullptr);
+        ops::kv_cache_append(k, v, position_tensor, cache,
+                             ninfer::test::cuda_environment().default_execution);
         cuda_synchronize();
         const std::string label = "kv_cache_append full k8v4 Hkv=" + std::to_string(kv_heads) +
                                   " T=" + std::to_string(tokens) +
@@ -654,9 +660,9 @@ int full_append_case(int kv_heads, KvCacheStorage storage, int tokens = 3) {
         scale_k.copy_from_host(expected_scale_k.data(), expected_scale_k.size());
         scale_v.copy_from_host(expected_scale_v.data(), expected_scale_v.size());
         cache.k_scale_pages =
-            Tensor(scale_k.data(), DType::U8, {kFullNvfp4Groups, kPage, kv_heads, physical_pages});
+            Tensor(scale_k.span(), DType::U8, {kFullNvfp4Groups, kPage, kv_heads, physical_pages});
         cache.v_scale_pages =
-            Tensor(scale_v.data(), DType::U8, {kFullNvfp4Groups, kPage, kv_heads, physical_pages});
+            Tensor(scale_v.span(), DType::U8, {kFullNvfp4Groups, kPage, kv_heads, physical_pages});
         for (int token = 0; token < tokens; ++token) {
             const int position = positions[static_cast<std::size_t>(token)];
             const int page     = mapping[static_cast<std::size_t>(position / kPage)];
@@ -676,7 +682,8 @@ int full_append_case(int kv_heads, KvCacheStorage storage, int tokens = 3) {
                                       expected_scale_v);
             }
         }
-        ops::kv_cache_append(k, v, position_tensor, cache, nullptr);
+        ops::kv_cache_append(k, v, position_tensor, cache,
+                             ninfer::test::cuda_environment().default_execution);
         cuda_synchronize();
         const std::string label = "kv_cache_append full nvfp4-g16 Hkv=" + std::to_string(kv_heads) +
                                   " T=" + std::to_string(tokens) +
@@ -779,9 +786,9 @@ void append_oracle(std::vector<std::uint16_t>& cache_k, std::vector<std::uint16_
 PagedKVBatchLayerView paged_view(GuardedDeviceBuffer& k, GuardedDeviceBuffer& v,
                                  DeviceBuffer& block_table, int table_rows = 1) {
     return {
-        .k_pages      = Tensor(k.data(), DType::BF16, {kHeadDim, kPage, kPhysicalPages, kKVHeads}),
-        .v_pages      = Tensor(v.data(), DType::FP16, {kHeadDim, kPage, kPhysicalPages, kKVHeads}),
-        .block_tables = Tensor(block_table.p, DType::I32, {kLogicalPages, table_rows}),
+        .k_pages      = Tensor(k.span(), DType::BF16, {kHeadDim, kPage, kPhysicalPages, kKVHeads}),
+        .v_pages      = Tensor(v.span(), DType::FP16, {kHeadDim, kPage, kPhysicalPages, kKVHeads}),
+        .block_tables = Tensor(block_table.span(), DType::I32, {kLogicalPages, table_rows}),
         .head_dim     = kHeadDim,
         .num_kv_heads = kKVHeads,
         .storage      = KvCacheStorage::BFloat16,
@@ -791,8 +798,8 @@ PagedKVBatchLayerView paged_view(GuardedDeviceBuffer& k, GuardedDeviceBuffer& v,
 CyclicKVCacheLayerView cyclic_view(GuardedDeviceBuffer& k, GuardedDeviceBuffer& v, int capacity,
                                    int lane_capacity = 1) {
     return {
-        .k        = Tensor(k.data(), DType::BF16, {kHeadDim, capacity, kKVHeads, lane_capacity}),
-        .v        = Tensor(v.data(), DType::FP16, {kHeadDim, capacity, kKVHeads, lane_capacity}),
+        .k        = Tensor(k.span(), DType::BF16, {kHeadDim, capacity, kKVHeads, lane_capacity}),
+        .v        = Tensor(v.span(), DType::FP16, {kHeadDim, capacity, kKVHeads, lane_capacity}),
         .capacity = static_cast<std::uint32_t>(capacity),
         .padded_capacity = static_cast<std::uint32_t>(capacity),
         .num_kv_heads    = kKVHeads,
@@ -829,27 +836,31 @@ int run_case(int tokens, int commit_count, int first_position, bool cyclic,
     DeviceBuffer d_positions = to_device(positions);
     DeviceBuffer d_count     = to_device<std::int32_t>({commit_count});
     DeviceBuffer d_selector  = to_device<std::int32_t>({0});
-    DeviceBuffer d_table     = cyclic ? DeviceBuffer(1) : to_device(mapping);
+    DeviceBuffer d_table     = cyclic
+                                   ? DeviceBuffer(ninfer::test::cuda_environment().context.device(), 1)
+                                   : to_device(mapping);
     GuardedDeviceBuffer cache_k(cache_count * sizeof(std::uint16_t));
     GuardedDeviceBuffer cache_v(cache_count * sizeof(std::uint16_t));
     cache_k.copy_from_host(initial_k.data(), cache_k.bytes());
     cache_v.copy_from_host(initial_v.data(), cache_v.bytes());
 
-    Tensor k(d_k.p, DType::BF16, {kHeadDim, kKVHeads, tokens, 1});
-    Tensor v(d_v.p, DType::BF16, {kHeadDim, kKVHeads, tokens, 1});
-    Tensor position_tensor(d_positions.p, DType::I32, {tokens, 1});
-    Tensor count_tensor(d_count.p, DType::I32, {1});
-    Tensor selector_tensor(d_selector.p, DType::I32, {1});
+    Tensor k(d_k.span(), DType::BF16, {kHeadDim, kKVHeads, tokens, 1});
+    Tensor v(d_v.span(), DType::BF16, {kHeadDim, kKVHeads, tokens, 1});
+    Tensor position_tensor(d_positions.span(), DType::I32, {tokens, 1});
+    Tensor count_tensor(d_count.span(), DType::I32, {1});
+    Tensor selector_tensor(d_selector.span(), DType::I32, {1});
     const ops::KVCacheAppendPrefixExecutionEnvelope envelope{
         .min_count = static_cast<std::uint32_t>(min_count),
         .max_count = static_cast<std::uint32_t>(tokens),
     };
     if (cyclic) {
         ops::kv_cache_append_prefix(k, v, position_tensor, count_tensor, selector_tensor, envelope,
-                                    cyclic_view(cache_k, cache_v, cyclic_capacity), nullptr);
+                                    cyclic_view(cache_k, cache_v, cyclic_capacity),
+                                    ninfer::test::cuda_environment().default_execution);
     } else {
         ops::kv_cache_append_prefix(k, v, position_tensor, count_tensor, selector_tensor, envelope,
-                                    paged_view(cache_k, cache_v, d_table), nullptr);
+                                    paged_view(cache_k, cache_v, d_table),
+                                    ninfer::test::cuda_environment().default_execution);
     }
     cuda_synchronize();
 
@@ -894,22 +905,23 @@ int cyclic_graph_replay_case(int capacity, int tokens) {
     DeviceBuffer d_lane      = to_device<std::int32_t>({0});
     GuardedDeviceBuffer cache_k(cache_count * sizeof(std::uint16_t));
     GuardedDeviceBuffer cache_v(cache_count * sizeof(std::uint16_t));
-    Tensor k(d_k.p, DType::BF16, {kHeadDim, kKVHeads, tokens, 1});
-    Tensor v(d_v.p, DType::BF16, {kHeadDim, kKVHeads, tokens, 1});
-    Tensor position_tensor(d_positions.p, DType::I32, {tokens, 1});
-    Tensor count_tensor(d_count.p, DType::I32, {1});
-    Tensor lane_tensor(d_lane.p, DType::I32, {1});
+    Tensor k(d_k.span(), DType::BF16, {kHeadDim, kKVHeads, tokens, 1});
+    Tensor v(d_v.span(), DType::BF16, {kHeadDim, kKVHeads, tokens, 1});
+    Tensor position_tensor(d_positions.span(), DType::I32, {tokens, 1});
+    Tensor count_tensor(d_count.span(), DType::I32, {1});
+    Tensor lane_tensor(d_lane.span(), DType::I32, {1});
     auto cache = cyclic_view(cache_k, cache_v, capacity);
 
     cudaStream_t stream        = nullptr;
     cudaGraph_t graph          = nullptr;
     cudaGraphExec_t executable = nullptr;
     cuda_check(cudaStreamCreate(&stream), "create kv append stream");
+    const auto stream_execution = ninfer::test::cuda_environment().context.execution_view(stream);
     cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal),
                "begin kv append capture");
     const ops::KVCacheAppendPrefixExecutionEnvelope envelope{0, static_cast<std::uint32_t>(tokens)};
     ops::kv_cache_append_prefix(k, v, position_tensor, count_tensor, lane_tensor, envelope, cache,
-                                stream);
+                                stream_execution);
     cuda_check(cudaStreamEndCapture(stream, &graph), "end kv append capture");
     cuda_check(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0),
                "instantiate kv append graph");
@@ -974,21 +986,22 @@ int paged_graph_replay_case() {
     DeviceBuffer d_table     = to_device<std::int32_t>({0, 1, 2});
     GuardedDeviceBuffer cache_k(cache_count * sizeof(std::uint16_t));
     GuardedDeviceBuffer cache_v(cache_count * sizeof(std::uint16_t));
-    Tensor k(d_k.p, DType::BF16, {kHeadDim, kKVHeads, tokens, 1});
-    Tensor v(d_v.p, DType::BF16, {kHeadDim, kKVHeads, tokens, 1});
-    Tensor position_tensor(d_positions.p, DType::I32, {tokens, 1});
-    Tensor count_tensor(d_count.p, DType::I32, {1});
-    Tensor row_tensor(d_row.p, DType::I32, {1});
+    Tensor k(d_k.span(), DType::BF16, {kHeadDim, kKVHeads, tokens, 1});
+    Tensor v(d_v.span(), DType::BF16, {kHeadDim, kKVHeads, tokens, 1});
+    Tensor position_tensor(d_positions.span(), DType::I32, {tokens, 1});
+    Tensor count_tensor(d_count.span(), DType::I32, {1});
+    Tensor row_tensor(d_row.span(), DType::I32, {1});
     auto cache = paged_view(cache_k, cache_v, d_table);
 
     cudaStream_t stream        = nullptr;
     cudaGraph_t graph          = nullptr;
     cudaGraphExec_t executable = nullptr;
     cuda_check(cudaStreamCreate(&stream), "create paged kv append stream");
+    const auto stream_execution = ninfer::test::cuda_environment().context.execution_view(stream);
     cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal),
                "begin paged kv append capture");
     ops::kv_cache_append_prefix(k, v, position_tensor, count_tensor, row_tensor, {0, tokens}, cache,
-                                stream);
+                                stream_execution);
     cuda_check(cudaStreamEndCapture(stream, &graph), "end paged kv append capture");
     cuda_check(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0),
                "instantiate paged kv append graph");
@@ -1088,24 +1101,28 @@ int batch_selector_case(bool cyclic, int cyclic_capacity = kDFlashWindow) {
     DeviceBuffer d_positions = to_device(positions);
     DeviceBuffer d_counts    = to_device(counts);
     DeviceBuffer d_selectors = to_device(selectors);
-    DeviceBuffer d_tables    = cyclic ? DeviceBuffer(1) : to_device(tables);
+    DeviceBuffer d_tables    = cyclic
+                                   ? DeviceBuffer(ninfer::test::cuda_environment().context.device(), 1)
+                                   : to_device(tables);
     GuardedDeviceBuffer cache_k(initial_k.size() * sizeof(std::uint16_t));
     GuardedDeviceBuffer cache_v(initial_v.size() * sizeof(std::uint16_t));
     cache_k.copy_from_host(initial_k.data(), cache_k.bytes());
     cache_v.copy_from_host(initial_v.data(), cache_v.bytes());
 
-    Tensor k(d_k.p, DType::BF16, {kHeadDim, kKVHeads, tokens, batch});
-    Tensor v(d_v.p, DType::BF16, {kHeadDim, kKVHeads, tokens, batch});
-    Tensor position_tensor(d_positions.p, DType::I32, {tokens, batch});
-    Tensor count_tensor(d_counts.p, DType::I32, {batch});
-    Tensor selector_tensor(d_selectors.p, DType::I32, {batch});
+    Tensor k(d_k.span(), DType::BF16, {kHeadDim, kKVHeads, tokens, batch});
+    Tensor v(d_v.span(), DType::BF16, {kHeadDim, kKVHeads, tokens, batch});
+    Tensor position_tensor(d_positions.span(), DType::I32, {tokens, batch});
+    Tensor count_tensor(d_counts.span(), DType::I32, {batch});
+    Tensor selector_tensor(d_selectors.span(), DType::I32, {batch});
     constexpr ops::KVCacheAppendPrefixExecutionEnvelope envelope{0, tokens};
     if (cyclic) {
         ops::kv_cache_append_prefix(k, v, position_tensor, count_tensor, selector_tensor, envelope,
-                                    cyclic_view(cache_k, cache_v, cyclic_capacity, batch), nullptr);
+                                    cyclic_view(cache_k, cache_v, cyclic_capacity, batch),
+                                    ninfer::test::cuda_environment().default_execution);
     } else {
         ops::kv_cache_append_prefix(k, v, position_tensor, count_tensor, selector_tensor, envelope,
-                                    paged_view(cache_k, cache_v, d_tables, batch), nullptr);
+                                    paged_view(cache_k, cache_v, d_tables, batch),
+                                    ninfer::test::cuda_environment().default_execution);
     }
     cuda_synchronize();
 
@@ -1174,13 +1191,14 @@ int cyclic_decode_batch_case(int capacity) {
     cache_k.copy_from_host(initial_k.data(), cache_k.bytes());
     cache_v.copy_from_host(initial_v.data(), cache_v.bytes());
 
-    Tensor k(d_k.p, DType::BF16, {kHeadDim, kKVHeads, tokens, batch});
-    Tensor v(d_v.p, DType::BF16, {kHeadDim, kKVHeads, tokens, batch});
-    Tensor position_tensor(d_positions.p, DType::I32, {tokens, batch});
-    Tensor count_tensor(d_counts.p, DType::I32, {batch});
-    Tensor lane_tensor(d_lanes.p, DType::I32, {batch});
+    Tensor k(d_k.span(), DType::BF16, {kHeadDim, kKVHeads, tokens, batch});
+    Tensor v(d_v.span(), DType::BF16, {kHeadDim, kKVHeads, tokens, batch});
+    Tensor position_tensor(d_positions.span(), DType::I32, {tokens, batch});
+    Tensor count_tensor(d_counts.span(), DType::I32, {batch});
+    Tensor lane_tensor(d_lanes.span(), DType::I32, {batch});
     ops::kv_cache_append_prefix(k, v, position_tensor, count_tensor, lane_tensor, {0, tokens},
-                                cyclic_view(cache_k, cache_v, capacity, batch), nullptr);
+                                cyclic_view(cache_k, cache_v, capacity, batch),
+                                ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
 
     const std::string label =
@@ -1227,13 +1245,13 @@ public:
         std::vector<int> positions(width * batch), counts(batch), lanes(batch);
         GuardedDeviceBuffer dk(elements * 2), dv(elements * 2), dp(positions.size() * 4),
             dc(batch * 4), dl(batch * 4);
-        Tensor k(dk.data(), DType::BF16, {kHeadDim, kKVHeads, width, batch}),
-            v(dv.data(), DType::BF16, {kHeadDim, kKVHeads, width, batch}),
-            p(dp.data(), DType::I32, {width, batch}), c(dc.data(), DType::I32, {batch}),
-            l(dl.data(), DType::I32, {batch});
+        Tensor k(dk.span(), DType::BF16, {kHeadDim, kKVHeads, width, batch}),
+            v(dv.span(), DType::BF16, {kHeadDim, kKVHeads, width, batch}),
+            p(dp.span(), DType::I32, {width, batch}), c(dc.span(), DType::I32, {batch}),
+            l(dl.span(), DType::I32, {batch});
         CyclicKVCacheLayerView cache{
-            .k        = Tensor(cache_k_.data(), DType::BF16, {kHeadDim, padded_, kKVHeads, Lanes}),
-            .v        = Tensor(cache_v_.data(), DType::FP16, {kHeadDim, padded_, kKVHeads, Lanes}),
+            .k        = Tensor(cache_k_.span(), DType::BF16, {kHeadDim, padded_, kKVHeads, Lanes}),
+            .v        = Tensor(cache_v_.span(), DType::FP16, {kHeadDim, padded_, kKVHeads, Lanes}),
             .capacity = static_cast<std::uint32_t>(capacity_),
             .padded_capacity = static_cast<std::uint32_t>(padded_),
             .num_kv_heads    = kKVHeads,
@@ -1245,7 +1263,7 @@ public:
         DecodeGraphDefinition definition;
         DecodeGraphExecutable graph;
         const auto launch = [&] {
-            ops::kv_cache_append_prefix(k, v, p, c, l, envelope, cache, device.stream);
+            ops::kv_cache_append_prefix(k, v, p, c, l, envelope, cache, device.execution_view());
         };
         int failures = 0;
         for (int phase = 0; phase < (replay ? 2 : 1); ++phase) {
@@ -1297,14 +1315,14 @@ public:
             dl.copy_from_host(lanes.data(), batch * 4);
             cuda_synchronize();
             if (replay && phase == 0) {
-                definition.capture(device.stream, launch);
+                definition.capture(device.stream(), launch);
                 graph.instantiate(definition);
             }
             if (replay)
-                graph.launch(device.stream);
+                graph.launch(device.stream());
             else
                 launch();
-            cuda_synchronize(device.stream);
+            cuda_synchronize(device.stream());
             const std::string label =
                 "cyclic prefix capacity=" + std::to_string(capacity_) +
                 " Wc=" + std::to_string(width) + " B=" + std::to_string(batch) +
@@ -1391,7 +1409,7 @@ BatchPlane make_batch_plane(const TestVectorLayout& vector, bool code, int kv_he
 Tensor batch_plane_tensor(const BatchPlane& plane, GuardedDeviceBuffer& buffer, DType dtype,
                           int kv_heads, int physical_pages) {
     if (plane.extent == 0) return Tensor{};
-    return Tensor(buffer.data(), dtype, {plane.extent, kPage, kv_heads, physical_pages});
+    return Tensor(buffer.span(), dtype, {plane.extent, kPage, kv_heads, physical_pages});
 }
 
 struct BatchCase {
@@ -1498,17 +1516,17 @@ int batched_full_append_case(const BatchCase& c) {
                                   physical_pages);
     };
 
-    Tensor k(d_k.p, DType::BF16, {kFullHeadDim, kv_heads, width, batch});
-    Tensor v(d_v.p, DType::BF16, {kFullHeadDim, kv_heads, width, batch});
-    Tensor position_tensor(d_positions.p, DType::I32, {width, batch});
-    Tensor valid_tensor = c.masked ? Tensor(d_valid.p, DType::I32, {batch}) : Tensor{};
-    Tensor row_tensor(d_rows.p, DType::I32, {batch});
+    Tensor k(d_k.span(), DType::BF16, {kFullHeadDim, kv_heads, width, batch});
+    Tensor v(d_v.span(), DType::BF16, {kFullHeadDim, kv_heads, width, batch});
+    Tensor position_tensor(d_positions.span(), DType::I32, {width, batch});
+    Tensor valid_tensor = c.masked ? Tensor(d_valid.span(), DType::I32, {batch}) : Tensor{};
+    Tensor row_tensor(d_rows.span(), DType::I32, {batch});
     PagedKVBatchLayerView batched{
         .k_pages       = view_tensor(0, true),
         .v_pages       = view_tensor(1, true),
         .k_scale_pages = view_tensor(2, true),
         .v_scale_pages = view_tensor(3, true),
-        .block_tables  = Tensor(d_tables.p, DType::I32, {kRowPages, table_row_count}),
+        .block_tables  = Tensor(d_tables.span(), DType::I32, {kRowPages, table_row_count}),
         .head_dim      = kFullHeadDim,
         .num_kv_heads  = kv_heads,
         .storage       = c.storage,
@@ -1517,7 +1535,7 @@ int batched_full_append_case(const BatchCase& c) {
     DeviceContext context;
     const auto launch = [&] {
         ops::kv_cache_append(k, v, position_tensor, valid_tensor, row_tensor, batched,
-                             context.stream);
+                             context.execution_view());
     };
     int failures = 0;
     reset();
@@ -1526,45 +1544,44 @@ int batched_full_append_case(const BatchCase& c) {
         // Capture on the initial input, then replay on a changed input and cache.
         DecodeGraphDefinition definition;
         DecodeGraphExecutable executable;
-        definition.capture(context.stream, launch);
+        definition.capture(context.stream(), launch);
         executable.instantiate(definition);
         for (auto& bits : input_k) bits ^= 0x8000U; // negate K
         d_k.copy_from_host(input_k.data(), input_k.size() * sizeof(std::uint16_t));
         reset();
         cuda_synchronize();
-        executable.launch(context.stream);
+        executable.launch(context.stream());
     } else {
         launch();
     }
-    cuda_synchronize(context.stream);
+    cuda_synchronize(context.stream());
 
     // Reference: one single-sequence append per row over its valid prefix.
     const std::size_t row_elements = static_cast<std::size_t>(kFullHeadDim) * kv_heads * width;
     for (int b = 0; b < batch; ++b) {
         const int count = valid[static_cast<std::size_t>(b)];
         if (count == 0) continue;
-        const auto row_k = static_cast<std::uint16_t*>(d_k.p) + row_elements * b;
-        const auto row_v = static_cast<std::uint16_t*>(d_v.p) + row_elements * b;
-        Tensor k_row(row_k, DType::BF16, {kFullHeadDim, kv_heads, count});
-        Tensor v_row(row_v, DType::BF16, {kFullHeadDim, kv_heads, count});
-        Tensor p_row(static_cast<std::int32_t*>(d_positions.p) + static_cast<std::size_t>(width) * b,
-                     DType::I32, {count});
+        const auto row_k = static_cast<std::uint16_t*>(d_k.data()) + row_elements * b;
+        const auto row_v = static_cast<std::uint16_t*>(d_v.data()) + row_elements * b;
+        Tensor k_row(row_k, ninfer::test::cuda_environment().context.device(), DType::BF16, {kFullHeadDim, kv_heads, count});
+        Tensor v_row(row_v, ninfer::test::cuda_environment().context.device(), DType::BF16, {kFullHeadDim, kv_heads, count});
+        Tensor p_row(static_cast<std::int32_t*>(d_positions.data()) + static_cast<std::size_t>(width) * b, ninfer::test::cuda_environment().context.device(), DType::I32, {count});
         PagedKVLayerView single{
             .k_pages       = view_tensor(0, false),
             .v_pages       = view_tensor(1, false),
             .k_scale_pages = view_tensor(2, false),
             .v_scale_pages = view_tensor(3, false),
-            .block_table   = Tensor(static_cast<std::int32_t*>(d_tables.p) +
+            .block_table   = Tensor(static_cast<std::int32_t*>(d_tables.data()) +
                                         static_cast<std::size_t>(kRowPages) *
                                             table_rows[static_cast<std::size_t>(b)],
-                                    DType::I32, {kRowPages}),
+                                    d_tables.device(), DType::I32, {kRowPages}),
             .head_dim      = kFullHeadDim,
             .num_kv_heads  = kv_heads,
             .storage       = c.storage,
         };
-        ops::kv_cache_append(k_row, v_row, p_row, single, context.stream);
+        ops::kv_cache_append(k_row, v_row, p_row, single, context.execution_view());
     }
-    cuda_synchronize(context.stream);
+    cuda_synchronize(context.stream());
 
     for (std::size_t index = 0; index < planes.size(); ++index) {
         auto& plane = planes[index];
@@ -1633,17 +1650,16 @@ int batched_full_append_cases(KvCacheStorage storage) {
 // Domain validation of the batched form; every rejected call must throw before any launch.
 int batched_full_append_rejections() {
     constexpr int kv_heads = 2;
-    DeviceBuffer input(static_cast<std::size_t>(kFullHeadDim) * 4 * 17 * 9 * 2);
-    DeviceBuffer metadata(4096);
-    DeviceBuffer planes(static_cast<std::size_t>(kFullHeadDim) * kPage * 4 * 8 * 2 * 2);
-    auto* base       = static_cast<std::uint8_t*>(planes.p);
-    const auto* meta = static_cast<std::int32_t*>(metadata.p);
+    DeviceBuffer input(ninfer::test::cuda_environment().context.device(), static_cast<std::size_t>(kFullHeadDim) * 4 * 17 * 9 * 2);
+    DeviceBuffer metadata(ninfer::test::cuda_environment().context.device(), 4096);
+    DeviceBuffer planes(ninfer::test::cuda_environment().context.device(), static_cast<std::size_t>(kFullHeadDim) * kPage * 4 * 8 * 2 * 2);
+    auto* base       = static_cast<std::uint8_t*>(planes.data());
+    const auto* meta = static_cast<std::int32_t*>(metadata.data());
     const auto cache = [&](int heads, int table_rows) {
         return PagedKVBatchLayerView{
-            .k_pages      = Tensor(base, DType::BF16, {kFullHeadDim, kPage, heads, 4}),
-            .v_pages      = Tensor(base + static_cast<std::size_t>(kFullHeadDim) * kPage * 4 * 4 * 2,
-                                   DType::FP16, {kFullHeadDim, kPage, heads, 4}),
-            .block_tables = Tensor(const_cast<std::int32_t*>(meta) + 512, DType::I32, {2, table_rows}),
+            .k_pages      = Tensor(base, ninfer::test::cuda_environment().context.device(), DType::BF16, {kFullHeadDim, kPage, heads, 4}),
+            .v_pages      = Tensor(base + static_cast<std::size_t>(kFullHeadDim) * kPage * 4 * 4 * 2, ninfer::test::cuda_environment().context.device(), DType::FP16, {kFullHeadDim, kPage, heads, 4}),
+            .block_tables = Tensor(const_cast<std::int32_t*>(meta) + 512, ninfer::test::cuda_environment().context.device(), DType::I32, {2, table_rows}),
             .head_dim     = kFullHeadDim,
             .num_kv_heads = heads,
             .storage      = KvCacheStorage::BFloat16,
@@ -1651,12 +1667,12 @@ int batched_full_append_rejections() {
     };
     const auto run = [&](int heads, int width, int batch, int table_rows, bool bad_positions,
                          bool bad_valid) {
-        Tensor k(input.p, DType::BF16, {kFullHeadDim, heads, width, batch});
-        Tensor positions(const_cast<std::int32_t*>(meta), DType::I32,
+        Tensor k(input.span(), DType::BF16, {kFullHeadDim, heads, width, batch});
+        Tensor positions(const_cast<std::int32_t*>(meta), ninfer::test::cuda_environment().context.device(), DType::I32,
                          {bad_positions ? width + 1 : width, batch});
-        Tensor valid(const_cast<std::int32_t*>(meta) + 256, DType::I32, {bad_valid ? batch + 1 : batch});
-        Tensor rows(const_cast<std::int32_t*>(meta) + 384, DType::I32, {batch});
-        ops::kv_cache_append(k, k, positions, valid, rows, cache(heads, table_rows), nullptr);
+        Tensor valid(const_cast<std::int32_t*>(meta) + 256, ninfer::test::cuda_environment().context.device(), DType::I32, {bad_valid ? batch + 1 : batch});
+        Tensor rows(const_cast<std::int32_t*>(meta) + 384, ninfer::test::cuda_environment().context.device(), DType::I32, {batch});
+        ops::kv_cache_append(k, k, positions, valid, rows, cache(heads, table_rows), ninfer::test::cuda_environment().default_execution);
     };
     struct Rejection {
         const char* what;

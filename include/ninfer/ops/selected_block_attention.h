@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/device.h"
+
 #include "core/arena.h"
 #include "core/paged_kv_cache.h"
 #include "core/tensor.h"
@@ -73,8 +75,8 @@ namespace ninfer::ops {
  */
 void selected_block_attention(const Tensor& q, const Tensor& positions, const Tensor& table_rows,
                               const Tensor& selections, const Tensor& counts,
-                              const PagedKVBatchLayerView& cache, WorkspaceArena& workspace,
-                              Tensor& out, cudaStream_t stream);
+                              const PagedKVBatchLayerView& cache, MemoryArena& workspace,
+                              Tensor& out, CudaExecutionView execution);
 
 /**
  * Minimum transient capacity of the batched form for every column count C in
@@ -89,6 +91,6 @@ void selected_block_attention(const Tensor& q, const Tensor& positions, const Te
  */
 void selected_block_attention(const Tensor& q, const Tensor& positions, const Tensor& selections,
                               const Tensor& counts, const PagedKVLayerView& cache, Tensor& out,
-                              cudaStream_t stream);
+                              CudaExecutionView execution);
 
 } // namespace ninfer::ops

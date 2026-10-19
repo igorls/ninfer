@@ -1,5 +1,6 @@
 // ninfer::ops - target_logprobs wrapper: public contract validation and launcher dispatch.
 #include "ninfer/ops/target_logprobs.h"
+#include "ops/common/host/operands.h"
 
 #include "ops/reduction/target_logprobs_launch.h"
 
@@ -58,7 +59,11 @@ bool overlaps(const Tensor& lhs, const Tensor& rhs) {
 } // namespace
 
 void target_logprobs(const Tensor& logits, const Tensor& target_ids, std::int32_t valid_rows,
-                     Tensor& output, cudaStream_t stream) {
+                     Tensor& output, CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    common::operand::device(logits.device, execution.device(), "target_logprobs", "logits");
+    common::operand::device(target_ids.device, execution.device(), "target_logprobs", "target ids");
+    common::operand::device(output.device, execution.device(), "target_logprobs", "output");
     if (logits.dtype != DType::BF16) {
         throw std::invalid_argument("target_logprobs: logits must be BF16");
     }

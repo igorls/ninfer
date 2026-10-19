@@ -57,7 +57,7 @@ MtpFrameLayout plan_mtp_frame(const TextConfig& c, std::int32_t width, std::int3
             F(proposal_logits) F(proposal_ids) F(proposal_positions) F(proposal_rope)              \
                 F(proposal_sources)
 
-MtpFrame::MtpFrame(DeviceSpan backing, const MtpFrameLayout& l)
+MtpFrame::MtpFrame(MemorySpan backing, const MtpFrameLayout& l)
     : ingress(l.ingress.bind(backing)), ple(l.ple), records(backing, l.records), width(l.width),
       batch_capacity(l.batch_capacity) {
 #define BIND(name) name = l.name.bind(backing);
@@ -80,14 +80,14 @@ MtpFrame MtpFrame::batch(std::int32_t count) const {
         *t = t->slice(0, 0, count);
     }
     // Planar controls are repacked for the current B, with a fixed maximum backing.
-    f.teacher_rope  = Tensor(teacher_rope.data, DType::I32, {width * count, 3});
-    f.proposal_rope = Tensor(proposal_rope.data, DType::I32, {count, 3});
-    f.embedding     = Tensor(embedding.data, DType::BF16, {embedding.ne[0], width * count});
+    f.teacher_rope  = Tensor(teacher_rope.data, teacher_rope.device, DType::I32, {width * count, 3});
+    f.proposal_rope = Tensor(proposal_rope.data, proposal_rope.device, DType::I32, {count, 3});
+    f.embedding     = Tensor(embedding.data, embedding.device, DType::BF16, {embedding.ne[0], width * count});
     return f;
 }
 
 Tensor MtpFrame::i32(std::size_t offset, std::int32_t count) const {
-    return Tensor(static_cast<std::byte*>(ingress.data) + offset, DType::I32, {count});
+    return Tensor(static_cast<std::byte*>(ingress.data) + offset, ingress.device, DType::I32, {count});
 }
 
 const ops::SamplingConfig* MtpFrame::sampling() const {

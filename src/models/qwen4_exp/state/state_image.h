@@ -150,7 +150,7 @@ struct IndexerStateView {
  */
 class StateImageDevicePool {
 public:
-    StateImageDevicePool(DeviceSpan backing, const StateImageDeviceLayout& layout);
+    StateImageDevicePool(MemorySpan backing, const StateImageDeviceLayout& layout);
 
     StateImageDevicePool(const StateImageDevicePool&)            = delete;
     StateImageDevicePool& operator=(const StateImageDevicePool&) = delete;

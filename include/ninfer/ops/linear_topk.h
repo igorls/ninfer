@@ -1,10 +1,10 @@
 #pragma once
 
+#include "core/device.h"
 #include "core/weight.h"
 #include "core/arena.h"
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -47,8 +47,8 @@ namespace ninfer::ops {
  * persistent state and performs no internal device allocation.
  */
 void linear_topk(const Tensor& hidden, const Weight& head, std::int32_t valid_rows,
-                 Tensor& candidate_ids, Tensor& candidate_scores, WorkspaceArena& workspace,
-                 cudaStream_t stream);
+                 Tensor& candidate_ids, Tensor& candidate_scores, MemoryArena& workspace,
+                 CudaExecutionView execution);
 
 /**
  * @brief Projects through the optimized 131072-row proposal head and returns stable top sixteen
@@ -60,7 +60,7 @@ void linear_topk(const Tensor& hidden, const Weight& head, std::int32_t valid_ro
  * used for output and tie-breaking. Artifact binding establishes the map's range and uniqueness.
  */
 void linear_topk(const Tensor& hidden, const Weight& head, const Tensor& row_to_global_ids,
-                 Tensor& candidate_ids, Tensor& candidate_scores, WorkspaceArena& workspace,
-                 cudaStream_t stream);
+                 Tensor& candidate_ids, Tensor& candidate_scores, MemoryArena& workspace,
+                 CudaExecutionView execution);
 
 } // namespace ninfer::ops

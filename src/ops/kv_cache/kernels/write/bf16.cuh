@@ -9,13 +9,22 @@
 #include <cstdint>
 
 namespace ninfer::ops::detail::kv {
-template <typename Geometry, typename Metadata>
+template <typename Geometry, typename Metadata, bool Batch = false>
 __global__ void write_bf16_kernel(const __nv_bfloat16* __restrict__ k,
                                   const __nv_bfloat16* __restrict__ v,
                                   const std::int32_t* __restrict__ positions, Metadata metadata,
                                   __nv_bfloat16* __restrict__ cache_k, __half* __restrict__ cache_v,
                                   std::int32_t width) {
     constexpr int VecElems = 8;
+    if constexpr (Batch) {
+        const int batch = blockIdx.z;
+        metadata.table_rows += batch;
+        if constexpr (Metadata::masked) metadata.valid_columns += batch;
+        const auto offset = static_cast<std::int64_t>(batch) * width * kHeadDim * Geometry::KVHeads;
+        k += offset;
+        v += offset;
+        positions += batch * width;
+    }
     const int tokens       = metadata.valid_tokens(width);
     const std::int64_t idx = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const std::int64_t n =

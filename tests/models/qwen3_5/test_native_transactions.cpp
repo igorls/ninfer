@@ -116,7 +116,7 @@ public:
 
     void synchronize() {
         device_.synchronize();
-        CUDA_CHECK(cudaStreamSynchronize(device_.transfer_stream));
+        CUDA_CHECK(cudaStreamSynchronize(device_.transfer_stream()));
     }
 
     qwen::ContextProgress settle(bool cancelled = false) {
@@ -1724,7 +1724,7 @@ void shared_capture_alignment(DeviceContext& device, const qwen::execution::Para
         std::atomic<bool> flag{cancelled};
         for (unsigned step = 0; step < 8; ++step) {
             device.synchronize();
-            CUDA_CHECK(cudaStreamSynchronize(device.transfer_stream));
+            CUDA_CHECK(cudaStreamSynchronize(device.transfer_stream()));
             auto progress = program.poll_context({&flag});
             if (progress.complete) { return progress; }
         }
@@ -1881,7 +1881,7 @@ void replay_sampling_counts(DeviceContext& device, const qwen::execution::Parame
     const auto settle = [&]() {
         for (unsigned step = 0; step < 8; ++step) {
             device.synchronize();
-            CUDA_CHECK(cudaStreamSynchronize(device.transfer_stream));
+            CUDA_CHECK(cudaStreamSynchronize(device.transfer_stream()));
             auto progress = program.poll_context({});
             if (progress.complete) { return progress; }
         }

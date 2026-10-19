@@ -5,8 +5,9 @@ A C++/CUDA inference engine for local, single-GPU text and vision workloads. Thi
 [Neroued/ninfer](https://github.com/Neroued/ninfer), with native Windows support, a Supervisor app,
 and application-serving extensions.
 
-The engine targets **`sm_120a` only**. The fork targets an **RTX PRO 6000 Blackwell, 96 GB**;
-upstream measurements use an **RTX 5090**.
+The engine targets **`sm_120a` only**. The fork supports **RTX 5090** and
+**RTX PRO 6000 Blackwell, 96 GB**, with native Windows and Linux builds.
+Qualification and performance records identify the device and execution route actually tested.
 
 [Models](#models) · [Quick start](#quick-start) · [Performance and evaluation](#performance-and-evaluation) · [Documentation](docs/README.md)
 

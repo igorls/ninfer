@@ -82,7 +82,7 @@ void fp8_gdn_snapshot_batch_one(const Tensor& x, const Weight& weight, const Ten
                                          GdnConvGeometry<6144>::channels};
     Fp8GdnBatchSnapshotOutput output{make_gdn_conv_output<GdnConvGeometry<6144>, 1>(
         conv_weight, conv_states, valid_columns, initial_slot, query, key, value, z, publish)};
-    Tensor flat(x.data, DType::BF16, {InputRows, x.ne[2]});
+    Tensor flat(x.data, x.device, DType::BF16, {InputRows, x.ne[2]});
     launch_fp8_a16_simt<Fp8ScheduleInstance<Schedule, InputRows>>(
         fp8_a16_operands<Scale>(flat, weight), output, LinearIdentityEpilogue{}, stream);
 }
@@ -121,7 +121,7 @@ void fp8_gdn_conv_window(const Tensor& x, const Weight& weight, const Tensor& co
                            Fp8CodeCache::Default, 2, Fp8SimtBlockOrder::RowsContiguous, 2>;
     Fp8GdnWindowOutput<Width, Publish> output{make_gdn_conv_output<GdnConvGeometry<6144>, Width, true>(
         conv_weight, conv_states, valid_columns, initial_slot, query, key, value, z, publish)};
-    Tensor flat(x.data, DType::BF16, {InputRows, x.ne[1] * x.ne[2]});
+    Tensor flat(x.data, x.device, DType::BF16, {InputRows, x.ne[1] * x.ne[2]});
     launch_fp8_a16_simt<Fp8ScheduleInstance<Schedule, InputRows>>(
         fp8_a16_operands<Scale>(flat, weight), output, Fp8GdnWindowEpilogue<Width>{}, stream);
 }

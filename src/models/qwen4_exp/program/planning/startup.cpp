@@ -216,8 +216,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
     };
     const auto finish = [](const WorkspaceLayoutBuilder& layout) { return layout.peak_bytes(1); };
     const auto linear_bytes = [](const execution::LinearParameters& p, std::int32_t tokens) {
-        return ops::linear_workspace_capacity_bytes(p.weight.qtype, p.weight.n, p.weight.k,
-                                                    p.policy, tokens, tokens);
+        return ops::linear_workspace_capacity_bytes(p.weight.qtype, p.weight.n, p.weight.k, p.policy, tokens, tokens);
     };
     const ops::QsaIndexerSelectEnvelope full_envelope{
         indexer_envelope_blocks(plan.capacity - 1U, config.indexer.compress_ratio)};
@@ -246,8 +245,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                     scratch(layout, linear_bytes(a->projection, tokens));
                     scratch(layout, linear_bytes(a->indexer_projection, tokens));
                     std::size_t attention_scratch =
-                        ops::qsa_indexer_select_workspace_capacity_bytes(tokens, tokens,
-                                                                         full_envelope);
+                        ops::qsa_indexer_select_workspace_capacity_bytes(tokens, tokens, full_envelope);
                     if (!prefill) {
                         attention_scratch = std::max(
                             attention_scratch,
@@ -262,22 +260,19 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                     if (prefill) {
                         scratch(layout,
                                 ops::linear_split_workspace_capacity_bytes(
-                                    g.projection, std::array<std::int32_t, 2>{10240, 6144},
-                                    tokens, tokens));
+                                    g.projection, std::array<std::int32_t, 2>{10240, 6144}, tokens, tokens));
                     } else {
                         scratch(layout,
                                 std::max<std::size_t>(
                                     1, ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
-                                           g.projection, tokens / width,
-                                           width, width)));
+                                           g.projection, tokens / width, width, width)));
                     }
                     scratch(layout, ops::gdn_control_proj_workspace_capacity_bytes(
                                         ops::SingleProjectionWeight{g.control}, tokens, tokens));
                     if (prefill) {
                         scratch(layout,
                                 ops::gated_delta_net_workspace_capacity_bytes(
-                                    dimension(config.gdn.linear_num_key_heads),
-                                    dimension(config.gdn.linear_num_value_heads), tokens, tokens));
+                                    dimension(config.gdn.linear_num_key_heads), dimension(config.gdn.linear_num_value_heads), tokens, tokens));
                     }
                     scratch(layout, linear_bytes(g.output, tokens));
                 }
@@ -315,17 +310,14 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
             scratch(layout, linear_bytes(a.projection, tokens));
             scratch(layout, linear_bytes(a.indexer_projection, tokens));
             if (!teacher) {
-                scratch(layout, ops::qsa_indexer_select_workspace_capacity_bytes(tokens, tokens,
-                                                                                 full_envelope));
+                scratch(layout, ops::qsa_indexer_select_workspace_capacity_bytes(tokens, tokens, full_envelope));
                 scratch(layout,
                         ops::selected_block_attention_workspace_capacity_bytes(tokens, tokens));
                 scratch(layout, linear_bytes(a.output, tokens));
             }
         }
         if (!teacher) {
-            scratch(layout, ops::sparse_moe_workspace_capacity_bytes(m.layer.moe.gate_up.policy,
-                                                                     m.layer.moe.down.policy,
-                                                                     tokens, tokens));
+            scratch(layout, ops::sparse_moe_workspace_capacity_bytes(m.layer.moe.gate_up.policy, m.layer.moe.down.policy, tokens, tokens));
             (void)workspace::mixed_hidden(layout, config, tokens);
             scratch(layout, ops::hyper_connection_workspace_capacity_bytes(tokens, tokens));
             scratch(layout, linear_bytes(m.output_head, tokens));

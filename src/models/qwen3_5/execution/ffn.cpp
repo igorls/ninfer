@@ -12,8 +12,7 @@ std::size_t ffn_workspace_bytes(const FfnParameters& parameters, std::int32_t fi
                                 std::int32_t last) {
     if (first <= 0 || last < first) { throw std::invalid_argument("FFN: invalid column interval"); }
     if (const auto* moe = std::get_if<ops::SparseMoeWeights>(&parameters)) {
-        return ops::sparse_moe_workspace_capacity_bytes(moe->routed_gate_up.qtype,
-                                                        moe->routed_down.qtype, first, last);
+        return ops::sparse_moe_workspace_capacity_bytes(moe->routed_gate_up.qtype, moe->routed_down.qtype, first, last);
     }
     const auto& p    = std::get<DenseParameters>(parameters);
     const auto& gu   = p.gate_up.weight;
@@ -34,17 +33,16 @@ std::size_t ffn_workspace_bytes(const FfnParameters& parameters, std::int32_t fi
 }
 
 void ffn(const Tensor& hidden, const FfnParameters& parameters, Tensor& residual,
-         const ops::SparseMoeHints& hints, WorkspaceArena& workspace,
-         DeviceExecutionView execution) {
-    const auto stream  = execution.stream;
+         const ops::SparseMoeHints& hints, MemoryArena& workspace,
+         CudaExecutionView execution) {
+    const auto stream  = execution.stream();
     auto scope         = workspace.scope();
     const auto columns = hidden.ne[1];
     if (const auto* moe = std::get_if<ops::SparseMoeWeights>(&parameters)) {
         const auto storage =
             workspace.alloc_bytes(ffn_workspace_bytes(parameters, columns, columns));
-        WorkspaceArena scratch(storage);
-        ops::sparse_moe(hidden, *moe, ops::SparseMoeEpilogue::AddResidual, residual, hints, scratch,
-                        execution);
+        MemoryArena scratch(storage);
+        ops::sparse_moe(hidden, *moe, ops::SparseMoeEpilogue::AddResidual, residual, hints, scratch, execution);
         return;
     }
     const auto& p     = std::get<DenseParameters>(parameters);
@@ -53,9 +51,9 @@ void ffn(const Tensor& hidden, const FfnParameters& parameters, Tensor& residual
     Tensor activation = workspace.alloc(DType::BF16, {gu.n / 2, columns});
     {
         auto call = workspace.scope();
-        ops::linear_swiglu(hidden, gu, activation, p.gate_up.policy, workspace, stream);
+        ops::linear_swiglu(hidden, gu, activation, p.gate_up.policy, workspace, execution);
     }
-    ops::linear_add(activation, down, residual, p.down.policy, workspace, stream);
+    ops::linear_add(activation, down, residual, p.down.policy, workspace, execution);
 }
 
 } // namespace ninfer::models::qwen3_5::execution

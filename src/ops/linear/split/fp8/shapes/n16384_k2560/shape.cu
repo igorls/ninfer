@@ -89,7 +89,7 @@ std::size_t capacity(LinearPolicy policy, std::int32_t first, std::int32_t last)
     return allows_a8(policy) && last >= 17 ? fp8_a8_workspace_capacity_bytes(last, 2560, 0) : 0;
 }
 void launch(const Tensor& x, Weights weights, std::span<const Tensor> outputs,
-            WorkspaceArena* workspace, cudaStream_t stream) {
+            MemoryArena* workspace, cudaStream_t stream) {
     Tensor first = outputs[0], second = outputs[1];
     if (!allows_a8(weights.policy) || x.ne[1] < 17)
         return launch_a16(x, weights.first, first, second, stream);

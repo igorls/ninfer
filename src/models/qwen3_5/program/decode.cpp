@@ -34,7 +34,7 @@ auto ordinary_batch_body(OrdinaryBatchContext& state, std::int32_t batch_size,
         qwen3_5::OrdinaryDecodeState& ordinary = state.frame;
         CUDA_CHECK(cudaMemcpyAsync(ordinary.ingress.data, &state.host_ingress,
                                    sizeof(qwen3_5::OrdinaryDecodeIngress), cudaMemcpyHostToDevice,
-                                   state.execution.device.stream));
+                                   state.execution.cuda.stream()));
 
         TextContext card(state.execution.device, state.execution.parameters, state.execution.work,
                          state.text_cache, state.execution.linear_attention, state.execution.io,
@@ -52,15 +52,11 @@ auto ordinary_batch_body(OrdinaryBatchContext& state, std::int32_t batch_size,
 
         card.ordinary_decode_batch(tokens, cache_positions, rope_positions, kv_rows, state_sources,
                                    state_destinations, envelope, hidden, logits);
-        ops::scatter(hidden, state_destinations, state.continuation_hidden_store,
-                     state.execution.device.stream);
-        ops::sample(logits, sampled,
-                    dimension(state.execution.parameters.model.resources().public_token_count),
-                    ordinary.sampling, cache_positions, ops::kSamplePurposeDecode,
-                    state.execution.work, state.execution.device.stream);
+        ops::scatter(hidden, state_destinations, state.continuation_hidden_store, state.execution.cuda);
+        ops::sample(logits, sampled, dimension(state.execution.parameters.model.resources().public_token_count), ordinary.sampling, cache_positions, ops::kSamplePurposeDecode, state.execution.work, state.execution.cuda);
         CUDA_CHECK(cudaMemcpyAsync(&state.host_egress, ordinary.egress.data,
                                    sizeof(qwen3_5::OrdinaryDecodeEgress), cudaMemcpyDeviceToHost,
-                                   state.execution.device.stream));
+                                   state.execution.cuda.stream()));
     };
 }
 
@@ -102,7 +98,7 @@ void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& requ
                 logprob_candidate_ids.slice(1, static_cast<std::int32_t>(sequence.lane), 1);
             CUDA_CHECK(cudaMemcpyAsync(ids.data, request.logprobs.candidates.data(),
                                        request.logprobs.candidates.size() * sizeof(TokenId),
-                                       cudaMemcpyHostToDevice, device.stream));
+                                       cudaMemcpyHostToDevice, device.stream()));
         }
     }
     request.speculative_stats = SpeculativeStats{
@@ -114,7 +110,7 @@ void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& requ
     const bool penalties = request.sampling_host.presence_penalty != 0.0F ||
                            request.sampling_host.frequency_penalty != 0.0F ||
                            request.sampling_host.repetition_penalty != 1.0F;
-    if (penalties) { CUDA_CHECK(cudaMemsetAsync(counts.data, 0, counts.bytes(), device.stream)); }
+    if (penalties) { CUDA_CHECK(cudaMemsetAsync(counts.data, 0, counts.bytes(), device.stream())); }
     request.sampling_host.token_counts =
         penalties ? static_cast<std::int32_t*>(counts.data) : nullptr;
     request.sampling_host.prompt_presence = nullptr;
@@ -131,13 +127,13 @@ void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& requ
                                                    (1U << (static_cast<std::uint32_t>(token) % 32U)));
         }
         CUDA_CHECK(cudaMemcpyAsync(bits.data, request.prompt_presence_host.data(), bits.bytes(),
-                                   cudaMemcpyHostToDevice, device.stream));
+                                   cudaMemcpyHostToDevice, device.stream()));
         request.sampling_host.prompt_presence = static_cast<const std::int32_t*>(bits.data);
     }
     Tensor config_lane = sampling_config.slice(1, static_cast<std::int32_t>(sequence.lane), 1);
     CUDA_CHECK(cudaMemcpyAsync(config_lane.data, &request.sampling_host,
                                sizeof(request.sampling_host), cudaMemcpyHostToDevice,
-                               device.stream));
+                               device.stream()));
 }
 
 std::span<const TokenLogprobs> ProgramImpl::round_token_logprobs(std::uint32_t lane) const {
@@ -165,36 +161,33 @@ void ProgramImpl::enqueue_round_logprobs(const SequenceState& sequence, RequestC
     };
     Tensor lane_readout = logprob_readout.slice(1, lane, 1);
     auto* base          = static_cast<float*>(lane_readout.data);
-    Tensor sampled_out(base, DType::FP32, {cols, 2});
+    Tensor sampled_out(base, device.device(), DType::FP32, {cols, 2});
     std::optional<Tensor> candidate_ids;
     std::optional<Tensor> candidates_out;
     if (count > 0) {
-        candidate_ids.emplace(logprob_candidate_ids.slice(1, lane, 1).data, DType::I32,
+        candidate_ids.emplace(logprob_candidate_ids.slice(1, lane, 1).data, device.device(), DType::I32,
                               std::initializer_list<std::int32_t>{count});
-        candidates_out.emplace(base + 2 * cols, DType::FP32,
+        candidates_out.emplace(base + 2 * cols, device.device(), DType::FP32,
                                std::initializer_list<std::int32_t>{cols, count, 2});
     }
     std::optional<Tensor> top_ids_out;
     std::optional<Tensor> top_out;
     if (top > 0) {
-        top_ids_out.emplace(base + layout.top_id_offset(), DType::I32,
+        top_ids_out.emplace(base + layout.top_id_offset(), device.device(), DType::I32,
                             std::initializer_list<std::int32_t>{cols, top});
-        top_out.emplace(base + layout.top_value_offset(), DType::FP32,
+        top_out.emplace(base + layout.top_value_offset(), device.device(), DType::FP32,
                         std::initializer_list<std::int32_t>{cols, top, 2});
     }
     std::optional<Tensor> allowed;
     if (request.sampling_host.mask.words != nullptr) {
-        allowed.emplace(const_cast<std::uint32_t*>(request.sampling_host.mask.words), DType::I32,
+        allowed.emplace(const_cast<std::uint32_t*>(request.sampling_host.mask.words), device.device(), DType::I32,
                         std::initializer_list<std::int32_t>{(domain + 31) / 32, cols});
     }
-    ops::candidate_logprobs(logits, domain, sampled, candidate_ids ? &*candidate_ids : nullptr,
-                            allowed ? &*allowed : nullptr, sampled_out,
-                            candidates_out ? &*candidates_out : nullptr, device.stream,
-                            top_ids_out ? &*top_ids_out : nullptr, top_out ? &*top_out : nullptr);
+    ops::candidate_logprobs(logits, domain, sampled, candidate_ids ? &*candidate_ids : nullptr, allowed ? &*allowed : nullptr, sampled_out, candidates_out ? &*candidates_out : nullptr, device.execution_view(), top_ids_out ? &*top_ids_out : nullptr, top_out ? &*top_out : nullptr);
     auto* host = static_cast<float*>(logprob_readout_host->data()) +
                  static_cast<std::size_t>(lane) * kLogprobReadoutFloats;
     CUDA_CHECK(cudaMemcpyAsync(host, lane_readout.data, layout.floats() * sizeof(float),
-                               cudaMemcpyDeviceToHost, device.stream));
+                               cudaMemcpyDeviceToHost, device.stream()));
     request.logprob_readout_columns = columns;
 }
 
@@ -236,21 +229,21 @@ execution::FirstTokenReadout ProgramImpl::first_token_readout(const SequenceStat
     };
     Tensor lane_readout = logprob_readout.slice(1, lane, 1);
     auto* base          = static_cast<float*>(lane_readout.data);
-    out.sampled_out     = Tensor(base, DType::FP32, {1, 2});
+    out.sampled_out     = Tensor(base, lane_readout.device, DType::FP32, {1, 2});
     if (count > 0) {
-        out.candidate_ids.emplace(logprob_candidate_ids.slice(1, lane, 1).data, DType::I32,
+        out.candidate_ids.emplace(logprob_candidate_ids.slice(1, lane, 1).data, device.device(), DType::I32,
                                   std::initializer_list<std::int32_t>{count});
-        out.candidates_out.emplace(base + 2, DType::FP32,
+        out.candidates_out.emplace(base + 2, device.device(), DType::FP32,
                                    std::initializer_list<std::int32_t>{1, count, 2});
     }
     if (top > 0) {
-        out.top_ids_out.emplace(base + layout.top_id_offset(), DType::I32,
+        out.top_ids_out.emplace(base + layout.top_id_offset(), device.device(), DType::I32,
                                 std::initializer_list<std::int32_t>{1, top});
-        out.top_out.emplace(base + layout.top_value_offset(), DType::FP32,
+        out.top_out.emplace(base + layout.top_value_offset(), device.device(), DType::FP32,
                             std::initializer_list<std::int32_t>{1, top, 2});
     }
     if (request.sampling_host.mask.words != nullptr) {
-        out.allowed.emplace(const_cast<std::uint32_t*>(request.sampling_host.mask.words),
+        out.allowed.emplace(const_cast<std::uint32_t*>(request.sampling_host.mask.words), device.device(),
                             DType::I32, std::initializer_list<std::int32_t>{(domain + 31) / 32});
     }
     out.host = static_cast<float*>(logprob_readout_host->data()) +
@@ -294,14 +287,14 @@ void ProgramImpl::install_prompt_readout(const SequenceState& sequence, RequestC
     for (std::size_t i = 0; i < positions.size(); ++i) { next[i] = prompt[positions[i] + 1U]; }
     Tensor ids = logprob_prompt_next_ids.slice(1, lane, 1);
     CUDA_CHECK(cudaMemcpyAsync(ids.data, next.data(), next.size() * sizeof(TokenId),
-                               cudaMemcpyHostToDevice, device.stream));
+                               cudaMemcpyHostToDevice, device.stream()));
     execution::PromptReadout& readout = request.prompt_readout;
     readout.positions                 = positions;
     readout.next_ids                  = static_cast<const std::int32_t*>(ids.data);
     readout.candidates                = request.logprobs.candidates.size();
     if (readout.candidates != 0) {
         readout.candidate_ids.emplace(
-            logprob_candidate_ids.slice(1, lane, 1).data, DType::I32,
+            logprob_candidate_ids.slice(1, lane, 1).data, device.device(), DType::I32,
             std::initializer_list<std::int32_t>{static_cast<std::int32_t>(readout.candidates)});
     }
     readout.readout = static_cast<float*>(logprob_prompt_readout.slice(1, lane, 1).data);
@@ -352,13 +345,13 @@ void ProgramImpl::copy_tail(SequenceState& sequence, const Tensor& source) {
         throw std::logic_error("target tail hidden has an invalid shape");
     }
     CUDA_CHECK(cudaMemcpyAsync(sequence.tail_hidden.data, source.data, sequence.tail_hidden.bytes(),
-                               cudaMemcpyDeviceToDevice, device.stream));
+                               cudaMemcpyDeviceToDevice, device.stream()));
     sequence.tail_hidden_valid = true;
 }
 
 void ProgramImpl::copy_round_token() {
     CUDA_CHECK(cudaMemcpyAsync(host_tokens, io.token.data, sizeof(TokenId), cudaMemcpyDeviceToHost,
-                               device.stream));
+                               device.stream()));
 }
 
 void ProgramImpl::mark_workspace_usage(std::size_t phase_bytes) noexcept {
@@ -409,7 +402,7 @@ void ProgramImpl::enqueue_dflash_context_append(std::span<const std::uint32_t> l
         // DFlash2 has only fixed cyclic state; DFlash also grows its Full backend KV here.
         if (sequence.kv->backend) {
             backend_kv_addresses->ensure_mapped_to_tokens(*sequence.kv->backend, end,
-                                                          device.stream);
+                                                          device.stream());
         }
         minimum_count = std::min(minimum_count, counts[row]);
         maximum_count = std::max(maximum_count, counts[row]);
@@ -418,7 +411,7 @@ void ProgramImpl::enqueue_dflash_context_append(std::span<const std::uint32_t> l
     qwen3_5::DFlashDecodeState& frame = *io.dflash_decode;
     CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, dflash_host_ingress,
                                sizeof(qwen3_5::DFlashDecodeIngress), cudaMemcpyHostToDevice,
-                               device.stream));
+                               device.stream()));
     const auto batch                = static_cast<std::int32_t>(lanes.size());
     Tensor active_lane_tensor       = frame.active_lanes.slice(0, 0, batch);
     Tensor state_destination_tensor = frame.state_destination_slots.slice(0, 0, batch);
@@ -432,8 +425,7 @@ void ProgramImpl::enqueue_dflash_context_append(std::span<const std::uint32_t> l
     Tensor features =
         work.alloc(DType::BF16, {dimension(parameters.draft->feature_projection.weight.k),
                                  static_cast<std::int32_t>(draft_window + 1U), batch});
-    ops::prepare_ragged_prefix(dflash->pending_features, active_lane_tensor, device_starts,
-                               device_ends, features, positions, device_counts, device.stream);
+    ops::prepare_ragged_prefix(dflash->pending_features, active_lane_tensor, device_starts, device_ends, features, positions, device_counts, device.execution_view());
 
     execution::DFlashAppendContext state{{device, parameters, work, state_images->linear(),
                                           replay_records ? &*replay_records : nullptr, io,
@@ -1095,7 +1087,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_non_speculative_pending(
     if (request.pending.kind == PendingKind::Begin && terminal && sequence.state.fork_pending) {
         const StateImageSelectors selectors = state_selectors(sequence);
         timing.resume_submit();
-        state_images->copy_slot(selectors.source, selectors.destination, device.stream);
+        state_images->copy_slot(selectors.source, selectors.destination, device.stream());
         timing.begin_wait();
         device.synchronize();
         timing.end_wait();

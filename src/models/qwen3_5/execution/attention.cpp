@@ -21,25 +21,24 @@ void require_rope_axes(const Tensor& positions, const RopeConfig& config) {
 
 std::size_t attention_projection_workspace_bytes(const AttentionParameters& parameters,
                                                  std::int32_t first, std::int32_t last) {
-    return ops::linear_split_workspace_capacity_bytes(parameters.projection,
-                                                      parameters.projection_rows, first, last);
+    return ops::linear_split_workspace_capacity_bytes(parameters.projection, parameters.projection_rows, first, last);
 }
 
 void attention_projection(const Tensor& hidden, const AttentionParameters& parameters,
                           Tensor& query, Tensor& gate, Tensor& key, Tensor& value,
-                          WorkspaceArena& workspace, cudaStream_t stream) {
+                          MemoryArena& workspace, CudaExecutionView execution) {
     std::array outputs{query, key, gate, value};
-    ops::linear_split(hidden, parameters.projection, outputs, workspace, stream);
+    ops::linear_split(hidden, parameters.projection, outputs, workspace, execution);
 }
 
 void text_rope(const Tensor& positions, const RopeConfig& config, Tensor& query,
-               DeviceExecutionView execution) {
+               CudaExecutionView execution) {
     require_rope_axes(positions, config);
     ops::rope(positions, dimension(config.rotary_dim), config.rope_theta, query, execution);
 }
 
 void text_rope(const Tensor& positions, const RopeConfig& config, Tensor& query, Tensor& key,
-               DeviceExecutionView execution) {
+               CudaExecutionView execution) {
     require_rope_axes(positions, config);
     ops::rope(positions, dimension(config.rotary_dim), config.rope_theta, query, key, execution);
 }

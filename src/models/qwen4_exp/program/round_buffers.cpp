@@ -87,24 +87,24 @@ PleTransferLayout plan_ple_transfer(std::size_t control_bytes, const PleRowGeome
     return out;
 }
 
-Tensor ple_transfer_codes(const DeviceSpan& region, const PleTransferLayout& layout,
+Tensor ple_transfer_codes(const MemorySpan& region, const PleTransferLayout& layout,
                           std::int32_t tokens) {
     if (tokens <= 0 || static_cast<std::size_t>(tokens) > layout.token_capacity ||
         region.bytes < layout.bytes) {
         throw std::invalid_argument("PLE transfer tokens exceed the region capacity");
     }
-    return Tensor(static_cast<std::byte*>(region.data) + layout.codes_offset, DType::U8,
+    return Tensor(static_cast<std::byte*>(region.data) + layout.codes_offset, region.device, DType::U8,
                   {transfer_extent(layout.geometry.code_row_bytes),
                    transfer_extent(layout.geometry.rows(static_cast<std::size_t>(tokens)))});
 }
 
-Tensor ple_transfer_scales(const DeviceSpan& region, const PleTransferLayout& layout,
+Tensor ple_transfer_scales(const MemorySpan& region, const PleTransferLayout& layout,
                            std::int32_t tokens) {
     if (tokens <= 0 || static_cast<std::size_t>(tokens) > layout.token_capacity ||
         region.bytes < layout.bytes) {
         throw std::invalid_argument("PLE transfer tokens exceed the region capacity");
     }
-    return Tensor(static_cast<std::byte*>(region.data) + layout.scales_offset, DType::FP16,
+    return Tensor(static_cast<std::byte*>(region.data) + layout.scales_offset, region.device, DType::FP16,
                   {transfer_extent(layout.geometry.scale_row_bytes / sizeof(std::uint16_t)),
                    transfer_extent(layout.geometry.rows(static_cast<std::size_t>(tokens)))});
 }
@@ -134,7 +134,7 @@ RoundStateLayout plan_round_state_layout(LayoutBuilder& builder, const RoundStat
     return layout;
 }
 
-OrdinaryDecodeState::OrdinaryDecodeState(DeviceSpan backing,
+OrdinaryDecodeState::OrdinaryDecodeState(MemorySpan backing,
                                          const OrdinaryDecodeStateLayout& layout,
                                          std::uint32_t capacity)
     : ple(layout.ple), batch_capacity(capacity) {
@@ -157,7 +157,7 @@ OrdinaryDecodeState::OrdinaryDecodeState(DeviceSpan backing,
         require_batch(batch, batch_capacity);                                                      \
         return Tensor(static_cast<unsigned char*>(ingress.data) +                                  \
                           offsetof(OrdinaryDecodeIngress, name),                                   \
-                      DType::I32, {batch});                                                        \
+                      ingress.device, DType::I32, {batch});                                        \
     }
 
 NINFER_ORDINARY_I32_VIEW(tokens)
@@ -171,7 +171,7 @@ NINFER_ORDINARY_I32_VIEW(state_destination_slots)
 Tensor OrdinaryDecodeState::rope_positions(std::int32_t batch) const {
     require_batch(batch, batch_capacity);
     return Tensor(static_cast<unsigned char*>(ingress.data) +
-                      offsetof(OrdinaryDecodeIngress, rope_positions),
+                      offsetof(OrdinaryDecodeIngress, rope_positions), ingress.device,
                   DType::I32, {batch, 3});
 }
 
@@ -188,11 +188,11 @@ Tensor OrdinaryDecodeState::ple_scales(std::int32_t batch) const {
 Tensor OrdinaryDecodeState::sampled_tokens(std::int32_t batch) const {
     require_batch(batch, batch_capacity);
     return Tensor(static_cast<unsigned char*>(egress.data) +
-                      offsetof(OrdinaryDecodeEgress, sampled_tokens),
+                      offsetof(OrdinaryDecodeEgress, sampled_tokens), egress.device,
                   DType::I32, {batch});
 }
 
-RoundState::RoundState(DeviceSpan backing, const RoundStateLayout& layout) {
+RoundState::RoundState(MemorySpan backing, const RoundStateLayout& layout) {
     if (layout.ordinary) { ordinary.emplace(backing, *layout.ordinary, layout.spec.batch_capacity); }
     if (!layout.spec.causal_scoring) {
         token = layout.token.bind(backing);

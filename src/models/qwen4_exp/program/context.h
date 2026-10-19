@@ -21,7 +21,7 @@ namespace ninfer::models::qwen4_exp::execution {
 struct ExecutionCore {
     DeviceContext& device;
     const execution::Parameters& parameters;
-    WorkspaceArena& work;
+    MemoryArena& work;
     StateImageDevicePool& state;
     PleGather& ple;
     qwen4_exp::RoundState& io;

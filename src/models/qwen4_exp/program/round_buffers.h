@@ -44,9 +44,9 @@ struct PleTransferLayout {
                                                   std::size_t token_capacity);
 
 // Device views of the first `tokens` planar tokens of a transfer region.
-[[nodiscard]] Tensor ple_transfer_codes(const DeviceSpan& region, const PleTransferLayout& layout,
+[[nodiscard]] Tensor ple_transfer_codes(const MemorySpan& region, const PleTransferLayout& layout,
                                         std::int32_t tokens);
-[[nodiscard]] Tensor ple_transfer_scales(const DeviceSpan& region, const PleTransferLayout& layout,
+[[nodiscard]] Tensor ple_transfer_scales(const MemorySpan& region, const PleTransferLayout& layout,
                                          std::int32_t tokens);
 
 struct RoundStateSpec {
@@ -100,8 +100,8 @@ struct RoundStateLayout {
 
 // Device views of the ordinary ingress for the round's exact B.
 struct OrdinaryDecodeState {
-    DeviceSpan ingress;
-    DeviceSpan egress;
+    MemorySpan ingress;
+    MemorySpan egress;
     PleTransferLayout ple;
     std::uint32_t batch_capacity        = 0;
     const ops::SamplingConfig* sampling = nullptr;
@@ -109,7 +109,7 @@ struct OrdinaryDecodeState {
     Tensor hidden;
 
     OrdinaryDecodeState() = default;
-    OrdinaryDecodeState(DeviceSpan backing, const OrdinaryDecodeStateLayout& layout,
+    OrdinaryDecodeState(MemorySpan backing, const OrdinaryDecodeStateLayout& layout,
                         std::uint32_t batch_capacity);
 
     [[nodiscard]] Tensor tokens(std::int32_t batch) const;
@@ -135,7 +135,7 @@ struct RoundState {
     Tensor prefill_tail;
 
     RoundState() = default;
-    RoundState(DeviceSpan backing, const RoundStateLayout& layout);
+    RoundState(MemorySpan backing, const RoundStateLayout& layout);
 };
 
 } // namespace ninfer::models::qwen4_exp

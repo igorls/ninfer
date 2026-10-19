@@ -56,8 +56,7 @@ public:
     DenseParameters dense(const DenseWeights& w) const {
         return {with_context(model_.weight(w.gate).name,
                              [&] {
-                                 return ops::prepare_linear_swiglu_weight(model_.input(w.gate),
-                                                                          model_.input(w.up));
+                                 return ops::prepare_linear_swiglu_weight(model_.input(w.gate), model_.input(w.up));
                              }),
                 linear(w.down)};
     }
@@ -78,9 +77,7 @@ public:
         }
         return with_context(model_.weight(moe.router).name, [&] {
             return ops::prepare_sparse_moe_weights(
-                model_.input(moe.router), model_.input(moe.shared_score), gate_up, down,
-                model_.input(moe.shared.gate), model_.input(moe.shared.up),
-                model_.input(moe.shared.down));
+                model_.input(moe.router), model_.input(moe.shared_score), gate_up, down, model_.input(moe.shared.gate), model_.input(moe.shared.up), model_.input(moe.shared.down));
         });
     }
 
@@ -113,8 +110,7 @@ public:
             out.mixer =
                 GdnParameters{std::move(projection),
                               rows,
-                              ops::prepare_gdn_control_proj_weights(model_.input(g.a_projection),
-                                                                    model_.input(g.b_projection)),
+                              ops::prepare_gdn_control_proj_weights(model_.input(g.a_projection), model_.input(g.b_projection)),
                               tensor(g.a_log),
                               tensor(g.dt_bias),
                               tensor(g.convolution),
@@ -155,8 +151,7 @@ public:
         if (model_.config().text.architecture == Architecture::Qwen3_5) {
             out.projection.rows = {linear(a.query), linear(a.key), linear(a.gate), linear(a.value)};
         } else {
-            (void)ops::linear_split_workspace_capacity_bytes(out.projection.packed,
-                                                             out.projection.output_rows, 1, 1);
+            (void)ops::linear_split_workspace_capacity_bytes(out.projection.packed, out.projection.output_rows, 1, 1);
         }
         out.query_norm  = tensor(a.query_norm);
         out.key_norm    = tensor(a.key_norm);

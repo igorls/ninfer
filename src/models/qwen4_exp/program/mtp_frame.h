@@ -49,7 +49,7 @@ MtpFrameLayout plan_mtp_frame(const TextConfig& config, std::int32_t width, std:
 // One startup-fixed verification width. Per-row valid extents bound mutations; records and
 // token-mixer snapshots remain live until the whole pending round is committed or cancelled.
 struct MtpFrame {
-    DeviceSpan ingress;
+    MemorySpan ingress;
     PleTransferLayout ple;
     Tensor hidden, logits, argmax, drafts, licensed, counts, accepted;
     Tensor previous, teacher_output, teacher_positions, teacher_rope;
@@ -57,7 +57,7 @@ struct MtpFrame {
     Tensor proposal_ids, proposal_positions, proposal_rope, proposal_sources;
     GdnReplayRecords records;
     std::int32_t width = 0, batch_capacity = 0;
-    MtpFrame(DeviceSpan backing, const MtpFrameLayout& layout);
+    MtpFrame(MemorySpan backing, const MtpFrameLayout& layout);
     [[nodiscard]] MtpFrame batch(std::int32_t count) const;
     [[nodiscard]] Tensor i32(std::size_t offset, std::int32_t count) const;
     [[nodiscard]] const ops::SamplingConfig* sampling() const;

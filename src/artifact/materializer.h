@@ -2,7 +2,7 @@
 
 #include "artifact/file_io.h"
 #include "artifact/schema.h"
-#include "core/arena.h"
+#include "core/buffer.h"
 #include "core/device.h"
 #include "core/weight_view.h"
 #include "ninfer/types.h"
@@ -86,7 +86,7 @@ private:
         std::vector<std::byte> mapped_copy;
     };
 
-    std::unique_ptr<DeviceArena> arena_;
+    DeviceBuffer device_storage_;
     std::vector<ObjectStorage> objects_;
     MaterializationStats stats_;
 };

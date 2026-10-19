@@ -1,3 +1,4 @@
+#include "cuda_fixture.h"
 #include "ninfer/ops/candidate_logprobs.h"
 #include "ops/op_tester.h"
 
@@ -201,39 +202,39 @@ int run_case(const Case& c) {
     device_top_ids_out.fill(0xcd);
     device_top_out.fill(0xcd);
 
-    Tensor logits(device_logits.data(), DType::BF16, {c.physical_rows, c.columns});
-    Tensor sampled(device_sampled.data(), DType::I32, {c.columns});
-    Tensor sampled_out(device_sampled_out.data(), DType::FP32, {c.columns, 2});
+    Tensor logits(device_logits.span(), DType::BF16, {c.physical_rows, c.columns});
+    Tensor sampled(device_sampled.span(), DType::I32, {c.columns});
+    Tensor sampled_out(device_sampled_out.span(), DType::FP32, {c.columns, 2});
     std::optional<Tensor> candidate_ids, candidates_out, allowed, top_ids_out, top_out;
     if (candidates != 0) {
         candidate_ids.emplace(
-            device_candidates.data(), DType::I32,
+            device_candidates.span(), DType::I32,
             std::initializer_list<std::int32_t>{static_cast<std::int32_t>(candidates)});
-        candidates_out.emplace(device_candidates_out.data(), DType::FP32,
+        candidates_out.emplace(device_candidates_out.span(), DType::FP32,
                                std::initializer_list<std::int32_t>{
                                    c.columns, static_cast<std::int32_t>(candidates), 2});
     }
     if (top != 0) {
-        top_ids_out.emplace(device_top_ids_out.data(), DType::I32,
+        top_ids_out.emplace(device_top_ids_out.span(), DType::I32,
                             std::initializer_list<std::int32_t>{c.columns, c.top});
-        top_out.emplace(device_top_out.data(), DType::FP32,
+        top_out.emplace(device_top_out.span(), DType::FP32,
                         std::initializer_list<std::int32_t>{c.columns, c.top, 2});
     }
     if (!c.allowed.empty()) {
         if (c.per_column_mask) {
             allowed.emplace(
-                device_allowed.data(), DType::I32,
+                device_allowed.span(), DType::I32,
                 std::initializer_list<std::int32_t>{(c.valid_rows + 31) / 32, c.columns});
         } else {
             allowed.emplace(
-                device_allowed.data(), DType::I32,
+                device_allowed.span(), DType::I32,
                 std::initializer_list<std::int32_t>{static_cast<std::int32_t>(c.allowed.size())});
         }
     }
     ops::candidate_logprobs(logits, c.valid_rows, sampled,
                             candidate_ids ? &*candidate_ids : nullptr,
                             allowed ? &*allowed : nullptr, sampled_out,
-                            candidates_out ? &*candidates_out : nullptr, nullptr,
+                            candidates_out ? &*candidates_out : nullptr, ninfer::test::cuda_environment().default_execution,
                             top_ids_out ? &*top_ids_out : nullptr, top_out ? &*top_out : nullptr);
     cuda_synchronize();
 
@@ -313,53 +314,50 @@ int expect_invalid(const char* label, Function&& function) {
 }
 
 int run_validation_cases() {
-    DeviceBuffer logits_data(64 * 2 * sizeof(std::uint16_t));
-    DeviceBuffer ids_data(4 * sizeof(std::int32_t));
-    DeviceBuffer mask_data(2 * sizeof(std::int32_t));
-    DeviceBuffer out_data(2 * 4 * 2 * sizeof(float));
-    DeviceBuffer top_ids_data(2 * 5 * sizeof(std::int32_t));
-    DeviceBuffer top_out_data(2 * 5 * 2 * sizeof(float));
-    Tensor logits(logits_data.p, DType::BF16, {64, 2});
-    Tensor sampled(ids_data.p, DType::I32, {2});
-    Tensor candidates(ids_data.p, DType::I32, {4});
-    Tensor allowed(mask_data.p, DType::I32, {2});
-    Tensor sampled_out(out_data.p, DType::FP32, {2, 2});
-    Tensor candidates_out(static_cast<float*>(out_data.p) + 4, DType::FP32, {2, 4, 2});
-    Tensor top_ids_out(top_ids_data.p, DType::I32, {2, 5});
-    Tensor top_out(top_out_data.p, DType::FP32, {2, 5, 2});
+    DeviceBuffer logits_data(ninfer::test::cuda_environment().context.device(), 64 * 2 * sizeof(std::uint16_t));
+    DeviceBuffer ids_data(ninfer::test::cuda_environment().context.device(), 4 * sizeof(std::int32_t));
+    DeviceBuffer mask_data(ninfer::test::cuda_environment().context.device(), 2 * sizeof(std::int32_t));
+    DeviceBuffer out_data(ninfer::test::cuda_environment().context.device(), 2 * 4 * 2 * sizeof(float));
+    DeviceBuffer top_ids_data(ninfer::test::cuda_environment().context.device(), 2 * 5 * sizeof(std::int32_t));
+    DeviceBuffer top_out_data(ninfer::test::cuda_environment().context.device(), 2 * 5 * 2 * sizeof(float));
+    Tensor logits(logits_data.span(), DType::BF16, {64, 2});
+    Tensor sampled(ids_data.span(), DType::I32, {2});
+    Tensor candidates(ids_data.span(), DType::I32, {4});
+    Tensor allowed(mask_data.span(), DType::I32, {2});
+    Tensor sampled_out(out_data.span(), DType::FP32, {2, 2});
+    Tensor candidates_out(static_cast<float*>(out_data.data()) + 4, out_data.device(), DType::FP32, {2, 4, 2});
+    Tensor top_ids_out(top_ids_data.span(), DType::I32, {2, 5});
+    Tensor top_out(top_out_data.span(), DType::FP32, {2, 5, 2});
     int failures = 0;
     failures += expect_invalid("rejects valid_rows=0", [&] {
         ops::candidate_logprobs(logits, 0, sampled, &candidates, nullptr, sampled_out,
-                                &candidates_out, nullptr);
+                                &candidates_out, ninfer::test::cuda_environment().default_execution);
     });
     failures += expect_invalid("rejects candidates without output", [&] {
-        ops::candidate_logprobs(logits, 64, sampled, &candidates, nullptr, sampled_out, nullptr,
-                                nullptr);
+        ops::candidate_logprobs(logits, 64, sampled, &candidates, nullptr, sampled_out, nullptr, ninfer::test::cuda_environment().default_execution);
     });
     failures += expect_invalid("rejects a mask that does not cover the rows", [&] {
-        Tensor short_mask(mask_data.p, DType::I32, {1});
+        Tensor short_mask(mask_data.span(), DType::I32, {1});
         ops::candidate_logprobs(logits, 64, sampled, &candidates, &short_mask, sampled_out,
-                                &candidates_out, nullptr);
+                                &candidates_out, ninfer::test::cuda_environment().default_execution);
     });
     failures += expect_invalid("rejects sampled_out shape", [&] {
-        Tensor wrong(out_data.p, DType::FP32, {2});
-        ops::candidate_logprobs(logits, 64, sampled, nullptr, nullptr, wrong, nullptr, nullptr);
+        Tensor wrong(out_data.span(), DType::FP32, {2});
+        ops::candidate_logprobs(logits, 64, sampled, nullptr, nullptr, wrong, nullptr, ninfer::test::cuda_environment().default_execution);
     });
     failures += expect_invalid("rejects output aliasing an input", [&] {
-        Tensor alias(logits_data.p, DType::FP32, {2, 2});
-        ops::candidate_logprobs(logits, 64, sampled, nullptr, nullptr, alias, nullptr, nullptr);
+        Tensor alias(logits_data.span(), DType::FP32, {2, 2});
+        ops::candidate_logprobs(logits, 64, sampled, nullptr, nullptr, alias, nullptr, ninfer::test::cuda_environment().default_execution);
     });
     failures += expect_invalid("rejects top_ids_out without top_out", [&] {
-        ops::candidate_logprobs(logits, 64, sampled, nullptr, nullptr, sampled_out, nullptr,
-                                nullptr, &top_ids_out, nullptr);
+        ops::candidate_logprobs(logits, 64, sampled, nullptr, nullptr, sampled_out, nullptr, ninfer::test::cuda_environment().default_execution, &top_ids_out, nullptr);
     });
     failures += expect_invalid("rejects top_ids_out K > 20", [&] {
-        DeviceBuffer wide_ids(2 * 21 * sizeof(std::int32_t));
-        DeviceBuffer wide_out(2 * 21 * 2 * sizeof(float));
-        Tensor bad_ids(wide_ids.p, DType::I32, {2, 21});
-        Tensor bad_out(wide_out.p, DType::FP32, {2, 21, 2});
-        ops::candidate_logprobs(logits, 64, sampled, nullptr, nullptr, sampled_out, nullptr,
-                                nullptr, &bad_ids, &bad_out);
+        DeviceBuffer wide_ids(ninfer::test::cuda_environment().context.device(), 2 * 21 * sizeof(std::int32_t));
+        DeviceBuffer wide_out(ninfer::test::cuda_environment().context.device(), 2 * 21 * 2 * sizeof(float));
+        Tensor bad_ids(wide_ids.span(), DType::I32, {2, 21});
+        Tensor bad_out(wide_out.span(), DType::FP32, {2, 21, 2});
+        ops::candidate_logprobs(logits, 64, sampled, nullptr, nullptr, sampled_out, nullptr, ninfer::test::cuda_environment().default_execution, &bad_ids, &bad_out);
     });
     return failures;
 }

@@ -4,7 +4,7 @@
 namespace ninfer::ops::detail::gdn_control {
 template <int Tile, bool Paired, class ControlWord>
 void mma_n96_k2560(const Inputs& in, GdnControlOutputs out, Plan plan, Scratch scratch,
-                   DeviceExecutionView e) {
+                   CudaExecutionView e) {
     using Geometry = MmaGeometry<48, 2560, Tile, Paired, ControlWord>;
     bool launched  = false;
     switch (plan.split_k) {
@@ -34,9 +34,9 @@ void mma_n96_k2560(const Inputs& in, GdnControlOutputs out, Plan plan, Scratch s
 
 template <class ControlWord>
 void launch_n96_k2560_typed(const Inputs& in, GdnControlOutputs out, Plan plan, Scratch scratch,
-                      DeviceExecutionView e) {
+                      CudaExecutionView e) {
     if (plan.kernel == Kernel::Gemv) {
-        gemv_kernel<48, 2560, ControlWord><<<96, 256, 0, e.stream>>>(
+        gemv_kernel<48, 2560, ControlWord><<<96, 256, 0, e.stream()>>>(
             static_cast<const __nv_bfloat16*>(in.x.data), static_cast<const __nv_bfloat16*>(in.a),
             static_cast<const __nv_bfloat16*>(in.b), static_cast<const ControlWord*>(in.a_log.data),
             static_cast<const ControlWord*>(in.dt_bias.data), static_cast<float*>(out.g.data),
@@ -45,7 +45,7 @@ void launch_n96_k2560_typed(const Inputs& in, GdnControlOutputs out, Plan plan, 
         return;
     }
     if (plan.kernel == Kernel::TiledGemv) {
-        tiled_gemv_kernel<4, 256, ControlWord><<<dim3(96, (in.x.ne[1] + 3) / 4), 256, 0, e.stream>>>(
+        tiled_gemv_kernel<4, 256, ControlWord><<<dim3(96, (in.x.ne[1] + 3) / 4), 256, 0, e.stream()>>>(
             static_cast<const __nv_bfloat16*>(in.x.data), static_cast<const __nv_bfloat16*>(in.a),
             static_cast<const __nv_bfloat16*>(in.b), static_cast<const ControlWord*>(in.a_log.data),
             static_cast<const ControlWord*>(in.dt_bias.data), static_cast<float*>(out.g.data),
@@ -61,7 +61,7 @@ void launch_n96_k2560_typed(const Inputs& in, GdnControlOutputs out, Plan plan, 
         mma_n96_k2560<128, true, ControlWord>(in, out, plan, scratch, e);
 }
 void launch_n96_k2560(const Inputs& in, GdnControlOutputs out, Plan plan, Scratch scratch,
-                      DeviceExecutionView execution) {
+                      CudaExecutionView execution) {
     if (in.a_log.dtype == DType::BF16)
         launch_n96_k2560_typed<__nv_bfloat16>(in, out, plan, scratch, execution);
     else

@@ -1,3 +1,4 @@
+#include "cuda_fixture.h"
 #include "core/weight.h"
 #include "ninfer/ops/linear_topk.h"
 
@@ -51,10 +52,12 @@ FixtureWeight make_rowsplit(QType qtype, std::int32_t rows) {
     const std::uint64_t scale_offset = align_up(code_bytes, 256);
     const std::uint64_t scale_bytes  = groups * sizeof(std::uint16_t);
     FixtureWeight result{
-        DeviceBuffer(static_cast<std::size_t>(scale_offset + scale_bytes)), {}, scale_offset};
+        DeviceBuffer(ninfer::test::cuda_environment().context.device(), static_cast<std::size_t>(scale_offset + scale_bytes)), {}, scale_offset};
     result.payload.fill(0);
-    result.weight.payload          = result.payload.p;
-    result.weight.payload_bytes    = result.payload.bytes;
+    result.weight.device = result.payload.device();
+    result.weight.payload          = result.payload.data();
+    result.weight.device = result.payload.device();
+    result.weight.payload_bytes    = result.payload.size();
     result.weight.high_plane_bytes = 0;
     result.weight.qtype            = qtype;
     result.weight.group_size       = group;
@@ -63,9 +66,9 @@ FixtureWeight make_rowsplit(QType qtype, std::int32_t rows) {
     result.weight.padded_shape[0]  = rows;
     result.weight.padded_shape[1]  = kHidden;
     result.weight.ndim             = 2;
-    result.weight.qdata            = result.payload.p;
+    result.weight.qdata            = result.payload.data();
     result.weight.qhigh            = nullptr;
-    result.weight.scales           = static_cast<std::uint8_t*>(result.payload.p) + scale_offset;
+    result.weight.scales           = static_cast<std::uint8_t*>(result.payload.data()) + scale_offset;
     result.weight.n                = rows;
     result.weight.k                = kHidden;
     result.weight.group            = group;
@@ -79,10 +82,12 @@ FixtureWeight make_fp8() {
     const std::uint64_t scale_offset = align_up(code_bytes, 256);
     const std::uint64_t scale_bytes  = static_cast<std::uint64_t>(kFullRows) * 2;
     FixtureWeight result{
-        DeviceBuffer(static_cast<std::size_t>(scale_offset + scale_bytes)), {}, scale_offset};
+        DeviceBuffer(ninfer::test::cuda_environment().context.device(), static_cast<std::size_t>(scale_offset + scale_bytes)), {}, scale_offset};
     result.payload.fill(0);
-    result.weight.payload          = result.payload.p;
-    result.weight.payload_bytes    = result.payload.bytes;
+    result.weight.device = result.payload.device();
+    result.weight.payload          = result.payload.data();
+    result.weight.device = result.payload.device();
+    result.weight.payload_bytes    = result.payload.size();
     result.weight.high_plane_bytes = 0;
     result.weight.qtype            = QType::FP8_E4M3FN_ROW_BF16;
     result.weight.group_size       = kHidden;
@@ -91,9 +96,9 @@ FixtureWeight make_fp8() {
     result.weight.padded_shape[0]  = kFullRows;
     result.weight.padded_shape[1]  = kHidden;
     result.weight.ndim             = 2;
-    result.weight.qdata            = result.payload.p;
+    result.weight.qdata            = result.payload.data();
     result.weight.qhigh            = nullptr;
-    result.weight.scales           = static_cast<std::uint8_t*>(result.payload.p) + scale_offset;
+    result.weight.scales           = static_cast<std::uint8_t*>(result.payload.data()) + scale_offset;
     result.weight.n                = kFullRows;
     result.weight.k                = kHidden;
     result.weight.group            = kHidden;
@@ -109,11 +114,13 @@ FixtureWeight make_fp8() {
 
 // A contiguous BF16 full head, as kept by a checkpoint that does not quantize its output head.
 FixtureWeight make_bf16() {
-    FixtureWeight result{DeviceBuffer(static_cast<std::size_t>(kFullRows) * kHidden * 2), {}, 0};
+    FixtureWeight result{DeviceBuffer(ninfer::test::cuda_environment().context.device(), static_cast<std::size_t>(kFullRows) * kHidden * 2), {}, 0};
     result.payload.fill(0);
-    result.weight.payload         = result.payload.p;
-    result.weight.payload_bytes   = result.payload.bytes;
-    result.weight.qdata           = result.payload.p;
+    result.weight.device = result.payload.device();
+    result.weight.payload         = result.payload.data();
+    result.weight.device = result.payload.device();
+    result.weight.payload_bytes   = result.payload.size();
+    result.weight.qdata           = result.payload.data();
     result.weight.qtype           = QType::BF16;
     result.weight.layout          = QuantLayout::Contiguous;
     result.weight.n               = kFullRows;
@@ -297,9 +304,10 @@ template <class Launch>
 void replay_graph_twice(Launch&& launch, cudaStream_t stream) {
     cudaGraph_t graph         = nullptr;
     cudaGraphExec_t execution = nullptr;
+    const auto cuda = ninfer::test::cuda_environment().context.execution_view(stream);
     cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal),
                "linear_topk begin capture");
-    launch(stream);
+    launch(cuda);
     cuda_check(cudaStreamEndCapture(stream, &graph), "linear_topk end capture");
     cuda_check(cudaGraphInstantiate(&execution, graph, 0), "linear_topk instantiate graph");
     cuda_check(cudaGraphLaunch(execution, stream), "linear_topk first graph replay");
@@ -319,18 +327,19 @@ std::vector<int> test_columns() {
 int verify_zero_ties(const FixtureWeight& fixture, const Tensor* id_map,
                      const std::vector<std::int32_t>* host_map) {
     constexpr int columns = 3;
-    DeviceBuffer hidden(static_cast<std::size_t>(kHidden) * columns * 2);
+    DeviceBuffer hidden(ninfer::test::cuda_environment().context.device(), static_cast<std::size_t>(kHidden) * columns * 2);
     hidden.fill(0);
     GuardedDeviceBuffer ids(kTopK * columns * 4), scores(kTopK * columns * 4);
-    Tensor x(hidden.p, DType::BF16, {kHidden, columns});
-    Tensor out_ids(ids.data(), DType::I32, {kTopK, columns});
-    Tensor out_scores(scores.data(), DType::FP32, {kTopK, columns});
-    WorkspaceArena workspace(ops::linear_topk_workspace_capacity_bytes(
+    Tensor x(hidden.span(), DType::BF16, {kHidden, columns});
+    Tensor out_ids(ids.span(), DType::I32, {kTopK, columns});
+    Tensor out_scores(scores.span(), DType::FP32, {kTopK, columns});
+    DeviceBuffer workspace_storage(ninfer::test::cuda_environment().context.device(), ops::linear_topk_workspace_capacity_bytes(
         fixture.weight.qtype, fixture.weight.n, kHidden, columns, columns));
+    MemoryArena workspace(workspace_storage.span());
     if (id_map)
-        ops::linear_topk(x, fixture.weight, *id_map, out_ids, out_scores, workspace, nullptr);
+        ops::linear_topk(x, fixture.weight, *id_map, out_ids, out_scores, workspace, ninfer::test::cuda_environment().default_execution);
     else
-        ops::linear_topk(x, fixture.weight, kValidRows, out_ids, out_scores, workspace, nullptr);
+        ops::linear_topk(x, fixture.weight, kValidRows, out_ids, out_scores, workspace, ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
     std::vector<int> expected;
     if (host_map) {
@@ -374,28 +383,28 @@ int run_full(QType qtype, const char* profile, const DeviceBuffer& hidden,
     const std::size_t capacity =
         ops::linear_topk_workspace_capacity_bytes(qtype, kFullRows, kHidden, 1, kMaxColumns);
     GuardedDeviceBuffer graph_scratch(capacity);
-    WorkspaceArena workspace(DeviceSpan{graph_scratch.data(), graph_scratch.bytes()});
-    DeviceBuffer ids(static_cast<std::size_t>(kTopK) * kMaxColumns * sizeof(std::int32_t));
-    DeviceBuffer scores(static_cast<std::size_t>(kTopK) * kMaxColumns * sizeof(float));
+    MemoryArena workspace(graph_scratch.span());
+    DeviceBuffer ids(ninfer::test::cuda_environment().context.device(), static_cast<std::size_t>(kTopK) * kMaxColumns * sizeof(std::int32_t));
+    DeviceBuffer scores(ninfer::test::cuda_environment().context.device(), static_cast<std::size_t>(kTopK) * kMaxColumns * sizeof(float));
     int failures = 0;
     for (int columns : test_columns()) {
         GuardedDeviceBuffer x(static_cast<std::size_t>(kHidden) * columns * 2);
         GuardedDeviceBuffer out_ids(static_cast<std::size_t>(kTopK) * columns * 4);
         GuardedDeviceBuffer out_scores(static_cast<std::size_t>(kTopK) * columns * 4);
-        cuda_check(cudaMemcpy(x.data(), hidden.p, x.bytes(), cudaMemcpyDeviceToDevice),
+        cuda_check(cudaMemcpy(x.data(), hidden.data(), x.bytes(), cudaMemcpyDeviceToDevice),
                    "copy input fixture");
         const auto before = from_device<std::uint16_t>(x.data(), x.bytes() / 2);
         const auto exact  = ops::linear_topk_workspace_capacity_bytes(
             fixture.weight.qtype, fixture.weight.n, kHidden, columns, columns);
         GuardedDeviceBuffer scratch(exact);
-        WorkspaceArena point_workspace(DeviceSpan{scratch.data(), exact});
-        Tensor hidden_tensor(x.data(), DType::BF16, {kHidden, columns});
-        Tensor ids_tensor(out_ids.data(), DType::I32, {kTopK, columns});
-        Tensor scores_tensor(out_scores.data(), DType::FP32, {kTopK, columns});
+        MemoryArena point_workspace(scratch.span());
+        Tensor hidden_tensor(x.span(), DType::BF16, {kHidden, columns});
+        Tensor ids_tensor(out_ids.span(), DType::I32, {kTopK, columns});
+        Tensor scores_tensor(out_scores.span(), DType::FP32, {kTopK, columns});
         out_ids.fill(0xcd);
         out_scores.fill(0xff);
         ops::linear_topk(hidden_tensor, fixture.weight, kValidRows, ids_tensor, scores_tensor,
-                         point_workspace, nullptr);
+                         point_workspace, ninfer::test::cuda_environment().default_execution);
         cuda_synchronize();
         failures +=
             verify_invocation(profile, columns, ids_tensor, scores_tensor, base_score, expected);
@@ -415,13 +424,13 @@ int run_full(QType qtype, const char* profile, const DeviceBuffer& hidden,
 
     for (int graph_columns : {1,  8,  9,  16, 17, 24, 25, 32,  33,  48,  49, 64,
                               65, 80, 81, 88, 89, 96, 97, 112, 113, 120, 129}) {
-        Tensor graph_hidden(hidden.p, DType::BF16, {kHidden, graph_columns});
-        Tensor graph_ids(ids.p, DType::I32, {kTopK, graph_columns});
-        Tensor graph_scores(scores.p, DType::FP32, {kTopK, graph_columns});
+        Tensor graph_hidden(const_cast<void*>(hidden.data()), hidden.device(), DType::BF16, {kHidden, graph_columns});
+        Tensor graph_ids(ids.span(), DType::I32, {kTopK, graph_columns});
+        Tensor graph_scores(scores.span(), DType::FP32, {kTopK, graph_columns});
         cudaStream_t stream = nullptr;
         cuda_check(cudaStreamCreate(&stream), "linear_topk create graph stream");
         replay_graph_twice(
-            [&](cudaStream_t captured_stream) {
+            [&](CudaExecutionView captured_stream) {
                 ops::linear_topk(graph_hidden, fixture.weight, kValidRows, graph_ids, graph_scores,
                                  workspace, captured_stream);
             },
@@ -442,36 +451,36 @@ int run_q4(const DeviceBuffer& hidden, const std::vector<double>& base_score) {
     }
     std::vector<std::int32_t> host_map(kShortRows);
     for (std::int32_t row = 0; row < kShortRows; ++row) { host_map[row] = kValidRows - 1 - row; }
-    DeviceBuffer map(host_map.size() * sizeof(std::int32_t));
-    map.copy_from_host(host_map.data(), map.bytes);
+    DeviceBuffer map(ninfer::test::cuda_environment().context.device(), host_map.size() * sizeof(std::int32_t));
+    map.copy_from_host(host_map.data(), map.size());
     const auto expected = expected_order(kShortWinnerRows, &host_map);
 
     const std::size_t capacity = ops::linear_topk_workspace_capacity_bytes(
         QType::Q4_G64_FP16, kShortRows, kHidden, 1, kMaxColumns);
     GuardedDeviceBuffer graph_scratch(capacity);
-    WorkspaceArena workspace(DeviceSpan{graph_scratch.data(), graph_scratch.bytes()});
-    DeviceBuffer ids(static_cast<std::size_t>(kTopK) * kMaxColumns * sizeof(std::int32_t));
-    DeviceBuffer scores(static_cast<std::size_t>(kTopK) * kMaxColumns * sizeof(float));
-    Tensor map_tensor(map.p, DType::I32, {kShortRows});
+    MemoryArena workspace(graph_scratch.span());
+    DeviceBuffer ids(ninfer::test::cuda_environment().context.device(), static_cast<std::size_t>(kTopK) * kMaxColumns * sizeof(std::int32_t));
+    DeviceBuffer scores(ninfer::test::cuda_environment().context.device(), static_cast<std::size_t>(kTopK) * kMaxColumns * sizeof(float));
+    Tensor map_tensor(map.span(), DType::I32, {kShortRows});
     int failures = 0;
     for (int columns : test_columns()) {
         GuardedDeviceBuffer x(static_cast<std::size_t>(kHidden) * columns * 2);
         GuardedDeviceBuffer out_ids(static_cast<std::size_t>(kTopK) * columns * 4);
         GuardedDeviceBuffer out_scores(static_cast<std::size_t>(kTopK) * columns * 4);
-        cuda_check(cudaMemcpy(x.data(), hidden.p, x.bytes(), cudaMemcpyDeviceToDevice),
+        cuda_check(cudaMemcpy(x.data(), hidden.data(), x.bytes(), cudaMemcpyDeviceToDevice),
                    "copy input fixture");
         const auto before = from_device<std::uint16_t>(x.data(), x.bytes() / 2);
         const auto exact  = ops::linear_topk_workspace_capacity_bytes(
             fixture.weight.qtype, fixture.weight.n, kHidden, columns, columns);
         GuardedDeviceBuffer scratch(exact);
-        WorkspaceArena point_workspace(DeviceSpan{scratch.data(), exact});
-        Tensor hidden_tensor(x.data(), DType::BF16, {kHidden, columns});
-        Tensor ids_tensor(out_ids.data(), DType::I32, {kTopK, columns});
-        Tensor scores_tensor(out_scores.data(), DType::FP32, {kTopK, columns});
+        MemoryArena point_workspace(scratch.span());
+        Tensor hidden_tensor(x.span(), DType::BF16, {kHidden, columns});
+        Tensor ids_tensor(out_ids.span(), DType::I32, {kTopK, columns});
+        Tensor scores_tensor(out_scores.span(), DType::FP32, {kTopK, columns});
         out_ids.fill(0xcd);
         out_scores.fill(0xff);
         ops::linear_topk(hidden_tensor, fixture.weight, map_tensor, ids_tensor, scores_tensor,
-                         point_workspace, nullptr);
+                         point_workspace, ninfer::test::cuda_environment().default_execution);
         cuda_synchronize();
         failures += verify_invocation("q4-optimized", columns, ids_tensor, scores_tensor,
                                       base_score, expected);
@@ -491,13 +500,13 @@ int run_q4(const DeviceBuffer& hidden, const std::vector<double>& base_score) {
 
     for (int graph_columns : {1,  8,  9,  16, 17, 24, 25, 32,  33,  48,  49, 64,
                               65, 80, 81, 88, 89, 96, 97, 112, 113, 120, 129}) {
-        Tensor graph_hidden(hidden.p, DType::BF16, {kHidden, graph_columns});
-        Tensor graph_ids(ids.p, DType::I32, {kTopK, graph_columns});
-        Tensor graph_scores(scores.p, DType::FP32, {kTopK, graph_columns});
+        Tensor graph_hidden(const_cast<void*>(hidden.data()), hidden.device(), DType::BF16, {kHidden, graph_columns});
+        Tensor graph_ids(ids.span(), DType::I32, {kTopK, graph_columns});
+        Tensor graph_scores(scores.span(), DType::FP32, {kTopK, graph_columns});
         cudaStream_t stream = nullptr;
         cuda_check(cudaStreamCreate(&stream), "linear_topk create graph stream");
         replay_graph_twice(
-            [&](cudaStream_t captured_stream) {
+            [&](CudaExecutionView captured_stream) {
                 ops::linear_topk(graph_hidden, fixture.weight, map_tensor, graph_ids, graph_scores,
                                  workspace, captured_stream);
             },
@@ -508,7 +517,7 @@ int run_q4(const DeviceBuffer& hidden, const std::vector<double>& base_score) {
     }
     failures += graph_scratch.verify_guards("graph workspace tail");
     failures += verify_zero_ties(fixture, &map_tensor, &host_map);
-    if (from_device<std::int32_t>(map.p, host_map.size()) != host_map) {
+    if (from_device<std::int32_t>(map.data(), host_map.size()) != host_map) {
         std::cerr << "linear_topk modified id map\n";
         ++failures;
     }
@@ -524,8 +533,8 @@ int main() {
     }
     try {
         const std::vector<std::uint16_t> host_hidden = make_hidden();
-        DeviceBuffer hidden(host_hidden.size() * sizeof(std::uint16_t));
-        hidden.copy_from_host(host_hidden.data(), hidden.bytes);
+        DeviceBuffer hidden(ninfer::test::cuda_environment().context.device(), host_hidden.size() * sizeof(std::uint16_t));
+        hidden.copy_from_host(host_hidden.data(), hidden.size());
 
         int failures = 0;
         failures += run_full(QType::Q8_G32_FP16, "q8-full", hidden,

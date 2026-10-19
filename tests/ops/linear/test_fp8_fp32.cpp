@@ -1,8 +1,10 @@
+#include "cuda_fixture.h"
 #include "core/arena.h"
 #include "core/device.h"
 #include "core/weight.h"
 #include "core/weight_view.h"
 #include "ninfer/ops/weight_input.h"
+#include "ninfer/ops/linear_add.h"
 #include "ops/common/host/operands.h"
 #include "ops/linear/linear_test_common.h"
 #include "ops/op_tester.h"
@@ -55,16 +57,17 @@ int prepared_native_weight() {
     constexpr std::int32_t n = 2560, k = 6144, tokens = 33;
     int failures             = 0;
     const auto packed        = make_fp8_fp32_weight(n, k, 907U);
-    DeviceBuffer payload(packed.payload.size());
-    payload.copy_from_host(packed.payload.data(), payload.bytes);
+    DeviceBuffer payload(ninfer::test::cuda_environment().context.device(), packed.payload.size());
+    payload.copy_from_host(packed.payload.data(), payload.size());
 
     const std::vector<std::uint64_t> shape{n, k};
     WeightParent parent;
     parent.geometry = weight_geometry(QType::FP8_E4M3FN_ROW_FP32, QuantLayout::RowScaleFp32, shape);
-    parent.data     = static_cast<const std::byte*>(payload.p);
+    parent.device = payload.device();
+    parent.data     = static_cast<const std::byte*>(payload.data());
     const WeightView view{shape, {WeightRegion{&parent, 0, parent.geometry.elements}}};
     const auto prepared = ops::prepare_linear_weight({view, ops::LinearPolicy::AllowA8});
-    const Weight expected = packed.device_weight(payload.p);
+    const Weight expected = packed.device_weight(payload.span());
     const Weight& actual  = prepared.weight;
     if (prepared.policy != ops::LinearPolicy::AllowA8 || actual.qtype != expected.qtype ||
         actual.layout != expected.layout || actual.scale_dtype != expected.scale_dtype ||
@@ -86,23 +89,24 @@ int prepared_native_weight() {
     for (std::size_t i = 0; i < bits.size(); ++i)
         bits[i] = static_cast<std::uint16_t>(0x3c00U + (i * 37U) % 0x0300U) ^
                   static_cast<std::uint16_t>((i % 3U) == 0 ? 0x8000U : 0U);
-    DeviceBuffer x_buffer(bits.size() * 2);
-    x_buffer.copy_from_host(bits.data(), x_buffer.bytes);
-    DeviceBuffer out_a(static_cast<std::size_t>(n) * tokens * 2);
-    DeviceBuffer out_b(out_a.bytes);
-    Tensor x(x_buffer.p, DType::BF16, {k, tokens});
-    Tensor ya(out_a.p, DType::BF16, {n, tokens});
-    Tensor yb(out_b.p, DType::BF16, {n, tokens});
-    DeviceArena workspace(std::max<std::size_t>(
+    DeviceBuffer x_buffer(ninfer::test::cuda_environment().context.device(), bits.size() * 2);
+    x_buffer.copy_from_host(bits.data(), x_buffer.size());
+    DeviceBuffer out_a(ninfer::test::cuda_environment().context.device(), static_cast<std::size_t>(n) * tokens * 2);
+    DeviceBuffer out_b(ninfer::test::cuda_environment().context.device(), out_a.size());
+    Tensor x(x_buffer.span(), DType::BF16, {k, tokens});
+    Tensor ya(out_a.span(), DType::BF16, {n, tokens});
+    Tensor yb(out_b.span(), DType::BF16, {n, tokens});
+    DeviceBuffer workspace_storage(ninfer::test::cuda_environment().context.device(), std::max<std::size_t>(
         ops::linear_workspace_capacity_bytes(QType::FP8_E4M3FN_ROW_FP32, n, k,
                                              ops::LinearPolicy::AllowA8, tokens, tokens),
         256));
-    ops::linear(x, actual, ya, prepared.policy, workspace, nullptr);
-    ops::linear(x, expected, yb, ops::LinearPolicy::AllowA8, workspace, nullptr);
+    MemoryArena workspace(workspace_storage.span());
+    ops::linear(x, actual, ya, prepared.policy, workspace, ninfer::test::cuda_environment().default_execution);
+    ops::linear(x, expected, yb, ops::LinearPolicy::AllowA8, workspace, ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
     std::vector<std::uint16_t> a(static_cast<std::size_t>(n) * tokens), b(a.size());
-    out_a.copy_to_host(a.data(), out_a.bytes);
-    out_b.copy_to_host(b.data(), out_b.bytes);
+    out_a.copy_to_host(a.data(), out_a.size());
+    out_b.copy_to_host(b.data(), out_b.size());
     if (a != b) {
         std::cerr << "prepared FP32-scale FP8 Weight changed the Linear output\n";
         ++failures;
@@ -119,9 +123,9 @@ int a8_column_invariance() {
     int failures = 0;
     for (const auto& [n, k] : {std::pair{13312, 2560}, std::pair{16384, 2560}, std::pair{2560, 6144}}) {
         const auto packed = make_fp8_fp32_weight(n, k, 941U);
-        DeviceBuffer payload(packed.payload.size());
-        payload.copy_from_host(packed.payload.data(), payload.bytes);
-        const Weight weight = packed.device_weight(payload.p);
+        DeviceBuffer payload(ninfer::test::cuda_environment().context.device(), packed.payload.size());
+        payload.copy_from_host(packed.payload.data(), payload.size());
+        const Weight weight = packed.device_weight(payload.span());
         std::vector<std::uint16_t> previous;
         for (const std::int32_t tokens : {289, 385, 513, 769, 2048, 4096, 8192}) {
             // Uniform values make the FP32 accumulation round, so a different K order shows.
@@ -129,16 +133,17 @@ int a8_column_invariance() {
             fill_uniform(values, 0x5eedU, -1.0F, 1.0F);
             std::vector<std::uint16_t> bits(values.size());
             for (std::size_t i = 0; i < bits.size(); ++i) bits[i] = f32_to_bf16(values[i]);
-            DeviceBuffer x_buffer(bits.size() * 2);
-            x_buffer.copy_from_host(bits.data(), x_buffer.bytes);
-            DeviceBuffer out(static_cast<std::size_t>(n) * tokens * 2);
-            Tensor x(x_buffer.p, DType::BF16, {k, tokens});
-            Tensor y(out.p, DType::BF16, {n, tokens});
-            DeviceArena workspace(std::max<std::size_t>(
+            DeviceBuffer x_buffer(ninfer::test::cuda_environment().context.device(), bits.size() * 2);
+            x_buffer.copy_from_host(bits.data(), x_buffer.size());
+            DeviceBuffer out(ninfer::test::cuda_environment().context.device(), static_cast<std::size_t>(n) * tokens * 2);
+            Tensor x(x_buffer.span(), DType::BF16, {k, tokens});
+            Tensor y(out.span(), DType::BF16, {n, tokens});
+            DeviceBuffer workspace_storage(ninfer::test::cuda_environment().context.device(), std::max<std::size_t>(
                 ops::linear_workspace_capacity_bytes(QType::FP8_E4M3FN_ROW_FP32, n, k,
                                                      ops::LinearPolicy::AllowA8, tokens, tokens),
                 256));
-            ops::linear(x, weight, y, ops::LinearPolicy::AllowA8, workspace, nullptr);
+    MemoryArena workspace(workspace_storage.span());
+            ops::linear(x, weight, y, ops::LinearPolicy::AllowA8, workspace, ninfer::test::cuda_environment().default_execution);
             cuda_synchronize();
             std::vector<std::uint16_t> current(static_cast<std::size_t>(n) * tokens);
             out.copy_to_host(current.data(), current.size() * 2);
@@ -217,9 +222,26 @@ int run_fp8_fp32() {
     invalid               = packed.weight;
     invalid.payload_bytes = invalid.payload_bytes - 1;
     expect_invalid("payload bound", invalid);
+    // A public BF16-scale-only consumer must reject FP32 multipliers at an
+    // otherwise registered geometry, both in capacity planning and execution.
     try {
-        (void)ops::detail::validate_fp8_weight(packed.weight, "BF16-only FP8 consumer");
-        std::cerr << "a BF16-scale FP8 consumer accepted FP32 row multipliers\n";
+        (void)ops::linear_add_workspace_capacity_bytes(
+            QType::FP8_E4M3FN_ROW_FP32, 5120, 6144, 1, 1);
+        std::cerr << "LinearAdd capacity admitted FP32 row multipliers\n";
+        ++failures;
+    } catch (const std::invalid_argument&) {}
+    const auto add_packed = make_fp8_fp32_weight(5120, 6144, 937U);
+    DeviceBuffer add_payload(ninfer::test::cuda_environment().context.device(), add_packed.payload.size());
+    add_payload.copy_from_host(add_packed.payload.data(), add_payload.size());
+    const Weight add_weight = add_packed.device_weight(add_payload.span());
+    DeviceBuffer add_x(ninfer::test::cuda_environment().context.device(), 6144 * 2), add_out(ninfer::test::cuda_environment().context.device(), 5120 * 2);
+    Tensor add_input(add_x.span(), DType::BF16, {6144, 1});
+    Tensor add_residual(add_out.span(), DType::BF16, {5120, 1});
+    DeviceBuffer add_workspace_storage(ninfer::test::cuda_environment().context.device(), 256);
+    MemoryArena add_workspace(add_workspace_storage.span());
+    try {
+        ops::linear_add(add_input, add_weight, add_residual, add_workspace, ninfer::test::cuda_environment().default_execution);
+        std::cerr << "LinearAdd admitted FP32 row multipliers\n";
         ++failures;
     } catch (const std::invalid_argument&) {}
 
@@ -231,7 +253,7 @@ int run_fp8_fp32() {
 } // namespace
 
 int main() {
-    if (!ninfer::test::linear::cuda_available()) {
+    if (ninfer::test::cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

@@ -52,7 +52,7 @@ std::size_t fp8_linear_add_workspace_capacity_bytes(std::int32_t output_rows,
 }
 
 void fp8_linear_add_dispatch(const Tensor& x, const Weight& weight, Tensor& residual,
-                             LinearPolicy policy, WorkspaceArena& workspace, cudaStream_t stream) {
+                             LinearPolicy policy, MemoryArena& workspace, cudaStream_t stream) {
     const Fp8LinearAddRoute route = resolve_route(weight.n, weight.k, policy, x.ne[1]);
     if (route == Fp8LinearAddRoute::A16) {
         launch_a16(x, weight, residual, stream);

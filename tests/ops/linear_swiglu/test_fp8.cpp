@@ -47,8 +47,5 @@ int main() {
             kA8Cases, std::array{4, 5, 8, 16, 17, 65, 193, 257, 512, 513, 1025});
         std::cout << (failures == 0 ? "OK" : "FAIL") << " LinearSwiGLU FP8 correctness\n";
         return failures == 0 ? 0 : 1;
-    } catch (const std::exception& error) {
-        std::cerr << "LinearSwiGLU FP8 test failed: " << error.what() << '\n';
-        return 1;
-    }
+    });
 }

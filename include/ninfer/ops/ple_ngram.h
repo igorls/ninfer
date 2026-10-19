@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/device.h"
+
 #include "core/arena.h"
 #include "core/tensor.h"
 
@@ -57,7 +59,7 @@ void require_ple_ngram_geometry(const PleNgramGeometry& geometry);
  *   Writes out completely; codes and scales are unchanged and must not overlap out. All
  *   tensors are contiguous and 16-byte aligned. No workspace; valid inside CUDA Graph capture.
  */
-void ple_ngram_decode(const Tensor& codes, const Tensor& scales, Tensor& out, cudaStream_t stream);
+void ple_ngram_decode(const Tensor& codes, const Tensor& scales, Tensor& out, CudaExecutionView execution);
 
 /**
  * Op: gated per-layer-embedding combine with a dilated causal convolution (Flash-Next PLE).
@@ -102,7 +104,7 @@ void ple_ngram_decode(const Tensor& codes, const Tensor& scales, Tensor& out, cu
 void ple_ngram(const Tensor& hidden, const Tensor& key, const Tensor& value,
                const Tensor& query_norm, const Tensor& key_norm, const Tensor& conv_norm,
                const Tensor& conv_weight, const Tensor& state_in, Tensor& state_out, Tensor& out,
-               WorkspaceArena& workspace, cudaStream_t stream);
+               MemoryArena& workspace, CudaExecutionView execution);
 
 /**
  * Batched snapshot form of ple_ngram() for independent rows (decode and speculative
@@ -122,6 +124,6 @@ void ple_ngram_snapshot(const Tensor& hidden, const Tensor& key, const Tensor& v
                         const Tensor& query_norm, const Tensor& key_norm, const Tensor& conv_norm,
                         const Tensor& conv_weight, Tensor& states, const Tensor& valid_columns,
                         const Tensor& initial_slots, const Tensor& snapshot_base_slots,
-                        Tensor& out, WorkspaceArena& workspace, cudaStream_t stream);
+                        Tensor& out, MemoryArena& workspace, CudaExecutionView execution);
 
 } // namespace ninfer::ops

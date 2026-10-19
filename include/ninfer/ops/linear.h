@@ -4,7 +4,7 @@
 #include "core/arena.h"
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include "core/device.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -121,9 +121,9 @@ enum class LinearPolicy : std::uint8_t {
  * @param[in] stream CUDA stream on which execution is enqueued.
  */
 void linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
-            WorkspaceArena& workspace, cudaStream_t stream);
+            MemoryArena& workspace, CudaExecutionView execution);
 
 /** A16-only projection with the same operand requirements and no transient workspace. */
-void linear(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream);
+void linear(const Tensor& x, const Weight& w, Tensor& out, CudaExecutionView execution);
 
 } // namespace ninfer::ops

@@ -1,3 +1,4 @@
+#include "ops/common/host/operands.h"
 #include "ninfer/ops/selected_block_attention.h"
 
 #include "core/layout.h"
@@ -130,8 +131,22 @@ std::size_t selected_block_attention_workspace_capacity_bytes(std::int32_t min_c
 
 void selected_block_attention(const Tensor& q, const Tensor& positions, const Tensor& table_rows,
                               const Tensor& selections, const Tensor& counts,
-                              const PagedKVBatchLayerView& cache, WorkspaceArena& workspace,
-                              Tensor& out, cudaStream_t stream) {
+                              const PagedKVBatchLayerView& cache, MemoryArena& workspace,
+                              Tensor& out, CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    if (q.data) common::operand::device(q.device, execution.device(), "selected_block_attention", "q");
+    if (positions.data) common::operand::device(positions.device, execution.device(), "selected_block_attention", "positions");
+    if (table_rows.data) common::operand::device(table_rows.device, execution.device(), "selected_block_attention", "table_rows");
+    if (selections.data) common::operand::device(selections.device, execution.device(), "selected_block_attention", "selections");
+    if (counts.data) common::operand::device(counts.device, execution.device(), "selected_block_attention", "counts");
+    common::operand::device(cache.k_pages.device, execution.device(), "selected_block_attention", "cache.k_pages");
+    common::operand::device(cache.v_pages.device, execution.device(), "selected_block_attention", "cache.v_pages");
+    if (cache.k_scale_pages.data) common::operand::device(cache.k_scale_pages.device, execution.device(), "selected_block_attention", "cache.k_scale_pages");
+    if (cache.v_scale_pages.data) common::operand::device(cache.v_scale_pages.device, execution.device(), "selected_block_attention", "cache.v_scale_pages");
+    if (cache.block_tables.data) common::operand::device(cache.block_tables.device, execution.device(), "selected_block_attention", "cache.block_tables");
+    common::operand::device(workspace.device(), execution.device(), "selected_block_attention", "workspace");
+    if (out.data) common::operand::device(out.device, execution.device(), "selected_block_attention", "out");
+
     const std::int32_t columns = q.ne[2];
     if (columns < 1 || columns > kMaxColumns) { fail("batched C must be 1..48"); }
     require_columns(q, positions, selections, counts, out, columns);
@@ -150,7 +165,19 @@ void selected_block_attention(const Tensor& q, const Tensor& positions, const Te
 
 void selected_block_attention(const Tensor& q, const Tensor& positions, const Tensor& selections,
                               const Tensor& counts, const PagedKVLayerView& cache, Tensor& out,
-                              cudaStream_t stream) {
+                              CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    if (q.data) common::operand::device(q.device, execution.device(), "selected_block_attention", "q");
+    if (positions.data) common::operand::device(positions.device, execution.device(), "selected_block_attention", "positions");
+    if (selections.data) common::operand::device(selections.device, execution.device(), "selected_block_attention", "selections");
+    if (counts.data) common::operand::device(counts.device, execution.device(), "selected_block_attention", "counts");
+    common::operand::device(cache.k_pages.device, execution.device(), "selected_block_attention", "cache.k_pages");
+    common::operand::device(cache.v_pages.device, execution.device(), "selected_block_attention", "cache.v_pages");
+    if (cache.k_scale_pages.data) common::operand::device(cache.k_scale_pages.device, execution.device(), "selected_block_attention", "cache.k_scale_pages");
+    if (cache.v_scale_pages.data) common::operand::device(cache.v_scale_pages.device, execution.device(), "selected_block_attention", "cache.v_scale_pages");
+    if (cache.block_table.data) common::operand::device(cache.block_table.device, execution.device(), "selected_block_attention", "cache.block_table");
+    if (out.data) common::operand::device(out.device, execution.device(), "selected_block_attention", "out");
+
     const std::int32_t columns = q.ne[2];
     if (columns < 1 || columns > kMaxSharedRow) { fail("shared-row C must be 1..262144"); }
     require_columns(q, positions, selections, counts, out, columns);

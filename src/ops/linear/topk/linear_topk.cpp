@@ -190,11 +190,11 @@ void require_scratch_nonoverlap(const Tensor& hidden, const Tensor& candidate_id
 Tensor column_slice(const Tensor& tensor, int first, int columns) {
     return Tensor(static_cast<std::uint8_t*>(tensor.data) +
                       static_cast<std::int64_t>(first) * tensor.nb[1],
-                  tensor.dtype, {tensor.ne[0], columns});
+                  tensor.device, tensor.dtype, {tensor.ne[0], columns});
 }
 
 void execute(const Tensor& hidden, const Weight& head, const Tensor* id_map, Tensor& ids,
-             Tensor& scores, WorkspaceArena& workspace, cudaStream_t stream) {
+             Tensor& scores, MemoryArena& workspace, cudaStream_t stream) {
     const auto profile = resolve_profile(head.qtype, head.n, head.k);
     for (int first = 0; first < hidden.ne[1];) {
         const int columns  = std::min(detail::kLinearTopKMaxChunkColumns, hidden.ne[1] - first);
@@ -254,8 +254,14 @@ std::size_t linear_topk_workspace_capacity_bytes(QType qtype, std::int32_t head_
 }
 
 void linear_topk(const Tensor& hidden, const Weight& head, std::int32_t valid_rows,
-                 Tensor& candidate_ids, Tensor& candidate_scores, WorkspaceArena& workspace,
-                 cudaStream_t stream) {
+                 Tensor& candidate_ids, Tensor& candidate_scores, MemoryArena& workspace,
+                 CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    common::operand::device(hidden.device, execution.device(), "linear_topk", "hidden");
+    common::operand::device(head.device, execution.device(), "linear_topk", "head");
+    common::operand::device(candidate_ids.device, execution.device(), "linear_topk", "ids");
+    common::operand::device(candidate_scores.device, execution.device(), "linear_topk", "scores");
+    common::operand::device(workspace.device(), execution.device(), "linear_topk", "workspace");
     validate_io(hidden, candidate_ids, candidate_scores);
     const HeadProfile profile = resolve_profile(head.qtype, head.n, head.k);
     if (profile == HeadProfile::Q4Optimized || valid_rows != detail::kLinearTopKFullValidRows) {
@@ -278,8 +284,15 @@ void linear_topk(const Tensor& hidden, const Weight& head, std::int32_t valid_ro
 }
 
 void linear_topk(const Tensor& hidden, const Weight& head, const Tensor& row_to_global_ids,
-                 Tensor& candidate_ids, Tensor& candidate_scores, WorkspaceArena& workspace,
-                 cudaStream_t stream) {
+                 Tensor& candidate_ids, Tensor& candidate_scores, MemoryArena& workspace,
+                 CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    common::operand::device(hidden.device, execution.device(), "linear_topk", "hidden");
+    common::operand::device(head.device, execution.device(), "linear_topk", "head");
+    common::operand::device(row_to_global_ids.device, execution.device(), "linear_topk", "id map");
+    common::operand::device(candidate_ids.device, execution.device(), "linear_topk", "ids");
+    common::operand::device(candidate_scores.device, execution.device(), "linear_topk", "scores");
+    common::operand::device(workspace.device(), execution.device(), "linear_topk", "workspace");
     validate_io(hidden, candidate_ids, candidate_scores);
     if (resolve_profile(head.qtype, head.n, head.k) != HeadProfile::Q4Optimized) {
         throw std::invalid_argument("linear_topk: invalid optimized-head profile");

@@ -1,3 +1,4 @@
+#include "cuda_fixture.h"
 #include "core/device.h"
 #include "models/qwen4_exp/state/state_image.h"
 
@@ -79,18 +80,18 @@ void round_trip(ninfer::DeviceContext& device, bool real_shape, std::uint32_t pl
     };
     ninfer::LayoutBuilder builder;
     const auto layout = q4::plan_state_image_device_pool(builder, spec);
-    ninfer::DeviceBuffer backing(builder.finish(256));
-    q4::StateImageDevicePool pool({backing.p, backing.bytes}, layout);
+    ninfer::DeviceBuffer backing(ninfer::test::cuda_environment().context.device(), builder.finish(256));
+    q4::StateImageDevicePool pool(backing.span(), layout);
     ninfer::PinnedHostBuffer host(layout.host.image_bytes);
     auto* host_bytes = static_cast<std::byte*>(host.data());
 
     for (int slot = 0; slot < 4; ++slot) { fill(pool, slot, 20U * (slot + 1)); }
-    pool.copy_to_host(0, {host_bytes, &layout.host}, device.stream);
+    pool.copy_to_host(0, {host_bytes, &layout.host}, device.stream());
     device.synchronize();
     // Destroy every Device copy of the saved state before restoring into a different slot.
-    pool.zero_slot(0, device.stream);
-    pool.copy_from_host({host_bytes, &layout.host}, 2, device.stream);
-    pool.copy_slot(2, 3, device.stream);
+    pool.zero_slot(0, device.stream());
+    pool.copy_from_host({host_bytes, &layout.host}, 2, device.stream());
+    pool.copy_slot(2, 3, device.stream());
     device.synchronize();
     check(pool, 0, 0, true);
     check(pool, 1, 40);
@@ -107,13 +108,13 @@ void round_trip(ninfer::DeviceContext& device, bool real_shape, std::uint32_t pl
         }
         bool rejected = false;
         try {
-            pool.copy_from_host({host_bytes, &wrong_layout}, 1, device.stream);
+            pool.copy_from_host({host_bytes, &wrong_layout}, 1, device.stream());
         } catch (const std::invalid_argument&) { rejected = true; }
         if (!rejected) { throw std::runtime_error("incompatible Host state was accepted"); }
     }
     device.synchronize();
     check(pool, 1, 40);
-    pool.zero_all(device.stream);
+    pool.zero_all(device.stream());
     device.synchronize();
     for (int slot = 0; slot < 4; ++slot) { check(pool, slot, 0, true); }
 }

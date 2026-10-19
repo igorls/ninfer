@@ -151,9 +151,10 @@ public:
     Nvfp4ExpertBankWeight device(const DeviceBuffer& codes, const DeviceBuffer& scales,
                                  const DeviceBuffer& divisors, LinearPolicy policy) const {
         Nvfp4ExpertBankWeight bank;
-        bank.codes                  = static_cast<const std::byte*>(codes.p);
-        bank.scales                 = static_cast<const std::byte*>(scales.p);
-        bank.weight_scale_divisors  = static_cast<const float*>(divisors.p);
+        bank.device = codes.device();
+        bank.codes                  = static_cast<const std::byte*>(codes.data());
+        bank.scales                 = static_cast<const std::byte*>(scales.data());
+        bank.weight_scale_divisors  = static_cast<const float*>(divisors.data());
         bank.experts                = kExperts;
         bank.n                      = n_;
         bank.k                      = k_;
@@ -209,7 +210,8 @@ struct HostBf16 {
 
     Weight device(const DeviceBuffer& buffer) const {
         Weight weight{};
-        weight.payload         = buffer.p;
+        weight.device = buffer.device();
+        weight.payload         = buffer.data();
         weight.payload_bytes   = bits.size() * sizeof(std::uint16_t);
         weight.qtype           = QType::BF16;
         weight.layout          = QuantLayout::Contiguous;
@@ -218,7 +220,7 @@ struct HostBf16 {
         weight.shape[1]        = k;
         weight.padded_shape[0] = n;
         weight.padded_shape[1] = k;
-        weight.qdata           = buffer.p;
+        weight.qdata           = buffer.data();
         weight.n               = n;
         weight.k               = k;
         return weight;
@@ -414,22 +416,24 @@ int run_case(const Fixture& fixture, const Profile& profile, const Case& c) {
     GuardedDeviceBuffer output(input.size() * sizeof(std::uint16_t));
     output.fill(0xff); // BF16 NaN: every element must be overwritten
     const auto weights = fixture.weights(profile.policy);
-    Tensor x(device_input.p, DType::BF16, {kHidden, tokens});
-    Tensor destination(output.data(), DType::BF16, {kHidden, tokens});
+    Tensor x(device_input.span(), DType::BF16, {kHidden, tokens});
+    Tensor destination(output.span(), DType::BF16, {kHidden, tokens});
     GuardedDeviceBuffer selection(expected_selection.size() * sizeof(std::int32_t));
     selection.fill(0xff); // -1: every id must be overwritten
-    Tensor selected(selection.data(), DType::I32, {kTopK, tokens});
+    Tensor selected(selection.span(), DType::I32, {kTopK, tokens});
     const std::size_t capacity =
         ops::sparse_moe_workspace_capacity_bytes(profile.policy, profile.policy, tokens, tokens);
-    WorkspaceArena workspace(capacity);
+    DeviceBuffer workspace_storage(ninfer::test::cuda_environment().context.device(), capacity);
+    MemoryArena workspace(workspace_storage.span());
 
     if (c.graph_replay) {
         cudaStream_t stream  = nullptr;
         cudaGraph_t graph    = nullptr;
         cudaGraphExec_t exec = nullptr;
         cuda_check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "graph stream");
+        const auto stream_execution = ninfer::test::cuda_environment().context.execution_view(stream);
         cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal), "begin capture");
-        ops::sparse_moe(x, weights, ops::SparseMoeEpilogue::Store, destination, workspace, stream,
+        ops::sparse_moe(x, weights, ops::SparseMoeEpilogue::Store, destination, workspace, stream_execution,
                         &selected);
         cuda_check(cudaStreamEndCapture(stream, &graph), "end capture");
         cuda_check(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0), "instantiate");
@@ -443,7 +447,7 @@ int run_case(const Fixture& fixture, const Profile& profile, const Case& c) {
         cuda_check(cudaGraphDestroy(graph), "destroy graph");
         cuda_check(cudaStreamDestroy(stream), "destroy stream");
     } else {
-        ops::sparse_moe(x, weights, ops::SparseMoeEpilogue::Store, destination, workspace, nullptr,
+        ops::sparse_moe(x, weights, ops::SparseMoeEpilogue::Store, destination, workspace, ninfer::test::cuda_environment().default_execution,
                         &selected);
         cuda_synchronize();
     }

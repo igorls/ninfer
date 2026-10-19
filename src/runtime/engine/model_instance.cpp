@@ -222,10 +222,10 @@ namespace {
 // Fail before a multi-GiB upload when the weights alone cannot leave the reserve.
 void require_weight_headroom(const DeviceContext& device, std::uint64_t weight_bytes,
                              std::size_t desktop_reserve_bytes) {
-    const DeviceMemorySnapshot memory = query_device_memory(device.device);
+    const DeviceMemorySnapshot memory = query_device_memory(device.device().index());
     const auto weights                = static_cast<std::size_t>(weight_bytes);
     if (memory.free_bytes < weights + desktop_reserve_bytes) {
-        throw std::invalid_argument(format_insufficient_memory_error(memory, device.device, weights,
+        throw std::invalid_argument(format_insufficient_memory_error(memory, device.device().index(), weights,
                                                                      desktop_reserve_bytes));
     }
 }
@@ -320,15 +320,15 @@ ConstructedModel construct_package(Package package, const artifact::Reader& read
     StartupPhaseScope planning(options.startup_observer, StartupPhase::TargetFinalize);
     const auto signature = package_prefill_signature(*instance->model);
     auto context_cost    = resolve_context_machine_cost(
-        {.hardware_class =
-                context_cost_hardware_class(device.props.name, device.props.major, device.props.minor),
+        {.hardware_class = context_cost_hardware_class(
+             device.properties().name, device.properties().major, device.properties().minor),
             .prefill_signature = signature},
         options.context_cost.preset_path);
     auto planner                      = make_planner(instance->parameters, device, options);
     const SequenceCapacityCurve curve = planner.capacity_curve();
     auto resolution                   = resolve_kv_capacity(
         options.kv_capacity, curve,
-        runtime_bytes_after_weights(device.device, options.desktop_reserve_bytes));
+        runtime_bytes_after_weights(device.device().index(), options.desktop_reserve_bytes));
     resolution.desktop_reserve_bytes          = options.desktop_reserve_bytes;
     const std::uint32_t effective_concurrency = reconcile_concurrency(options, curve, resolution);
     if (effective_concurrency != options.max_concurrency) {
@@ -345,13 +345,13 @@ ConstructedModel construct_package(Package package, const artifact::Reader& read
     instance->kv_capacity_resolution          = resolution;
     planning.complete();
     StartupPhaseScope program(options.startup_observer, StartupPhase::ProgramInitialize);
-    const std::size_t available_before_program = query_device_memory(device.device).free_bytes;
+    const std::size_t available_before_program = query_device_memory(device.device().index()).free_bytes;
     instance->program =
         make_program(instance->parameters, std::move(sequence), device, options.startup_observer);
     device.synchronize();
     program.complete();
     instance->kv_capacity_resolution.available_after_startup_bytes =
-        query_device_memory(device.device).free_bytes;
+        query_device_memory(device.device().index()).free_bytes;
     check_post_startup_reserve(options, instance->kv_capacity_resolution, available_before_program,
                                instance->kv_capacity_resolution.available_after_startup_bytes);
     set_runtime_desktop_reserve_floor(options.desktop_reserve_bytes);

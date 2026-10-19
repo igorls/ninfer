@@ -18,10 +18,10 @@ int rejects(std::string_view name, Call&& call) {
 }
 } // namespace
 
-int validate(Profile p, bool normalize_input, DeviceExecutionView execution) {
+int validate(Profile p, bool normalize_input, CudaExecutionView execution) {
     Fixture f(p, {512}, normalize_input);
-    f.repaint(execution.stream);
-    cuda_synchronize(execution.stream);
+    f.repaint(execution.stream());
+    cuda_synchronize(execution.stream());
     const auto name  = label(p, {512}, normalize_input);
     const auto old_g = from_device<std::uint32_t>(f.g.data(), std::size_t(p.heads) * 512);
     const auto old_b = from_device<std::uint32_t>(f.beta.data(), std::size_t(p.heads) * 512);
@@ -94,9 +94,8 @@ int validate(Profile p, bool normalize_input, DeviceExecutionView execution) {
     mutate([](Weight& a) { a.layout = QuantLayout::RowSplit; });
     mutate([](Weight& a) { a.qdata = nullptr; });
     mutate([](Weight& a) { a.qdata = static_cast<const std::byte*>(a.qdata) + 2; });
-    auto bad_execution                 = execution;
-    bad_execution.multiprocessor_count = 0;
-    failed += rejects(name + " SM count", [&] { f.invoke(f.arena, bad_execution); });
+    mutate([](Weight& weight) { weight.device = Device::cpu(); });
+    mutate([&](Weight& weight) { weight.device = Device::cuda(execution.device().index() + 1); });
     if (normalize_input)
         for (float eps : {0.F, -1.F, std::numeric_limits<float>::infinity(),
                           std::numeric_limits<float>::quiet_NaN()})
@@ -106,12 +105,12 @@ int validate(Profile p, bool normalize_input, DeviceExecutionView execution) {
                                            {f.normalized_tensor, f.outputs}, f.arena, execution);
             });
     if (f.capacity) {
-        WorkspaceArena small(DeviceSpan{f.scratch.data(), f.capacity - 1});
+        MemoryArena small(f.scratch.span().subspan(0, f.capacity - 1));
         failed += rejects<std::bad_alloc>(name + " insufficient arena",
                                           [&] { f.invoke(small, execution); });
         if (small.used()) ++failed;
     }
-    WorkspaceArena overlapping(DeviceSpan{f.device_x.p, f.capacity});
+    MemoryArena overlapping(MemorySpan{f.device_x.data(), f.capacity, f.device_x.device()});
     failed += rejects(name + " scratch overlap", [&] { f.invoke(overlapping, execution); });
     failed += verify_exact((name + " rejected g untouched").c_str(),
                            from_device<std::uint32_t>(f.g.data(), old_g.size()), old_g);
@@ -170,10 +169,12 @@ int validate_capacity(Profile p, bool normalize_input) {
             (void)workspace_capacity(metadata, normalize_input, first, last);
         });
     const int last = std::numeric_limits<std::int32_t>::max();
-    if (workspace_capacity(metadata, normalize_input, last, last) != 0 ||
-        workspace_capacity(metadata, normalize_input, 1, last) <
-            workspace_capacity(metadata, normalize_input, 1, 8193))
+    const auto whole = workspace_capacity(metadata, normalize_input, 1, last);
+    if (whole < workspace_capacity(metadata, normalize_input, last, last) ||
+        whole < workspace_capacity(metadata, normalize_input, 1, 8193)) {
+        std::cerr << "control full-domain capacity omitted a supported extent\n";
         ++failed;
+    }
     return failed;
 }
 } // namespace ninfer::test::gdn_control

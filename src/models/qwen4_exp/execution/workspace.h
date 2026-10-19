@@ -1,7 +1,7 @@
 #pragma once
 
 // Phase allocations shared by Text execution and startup sizing. Every stage helper is called with
-// the execution WorkspaceArena or the sizing WorkspaceLayoutBuilder in the same order, so the
+// the execution MemoryArena or the sizing WorkspaceLayoutBuilder in the same order, so the
 // planned capacity and the executed high-water mark agree by construction.
 
 #include "core/arena.h"

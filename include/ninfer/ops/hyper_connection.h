@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/device.h"
+
 #include "core/arena.h"
 #include "core/tensor.h"
 #include "core/weight.h"
@@ -71,7 +73,7 @@ struct HyperConnectionWeights {
  */
 void hyper_connection_prepare(const Tensor& hidden, const HyperConnectionWeights& weights,
                               const Weight& block_inject, Tensor& block_input, Tensor& injection,
-                              WorkspaceArena& workspace, cudaStream_t stream);
+                              MemoryArena& workspace, CudaExecutionView execution);
 
 /**
  * Op: four-stream hyper-connection mixer (the final Text and MTP mixers).
@@ -80,7 +82,7 @@ void hyper_connection_prepare(const Tensor& hidden, const HyperConnectionWeights
  * without the injection output: block_input[c,t] = (1/4) * sum_s M[s,c] * N[s,c].
  */
 void hyper_connection_mix(const Tensor& hidden, const HyperConnectionWeights& weights,
-                          Tensor& block_input, WorkspaceArena& workspace, cudaStream_t stream);
+                          Tensor& block_input, MemoryArena& workspace, CudaExecutionView execution);
 
 /**
  * Op: hyper-connection injection of a block output into the four-stream state, in place.
@@ -101,7 +103,7 @@ void hyper_connection_mix(const Tensor& hidden, const HyperConnectionWeights& we
  *   hidden. No workspace. Enqueued on `stream`; valid inside CUDA Graph capture.
  */
 void hyper_connection_inject(const Tensor& block_output, const Tensor& injection, Tensor& hidden,
-                             cudaStream_t stream);
+                             CudaExecutionView execution);
 
 /**
  * Op: four-stream hyper-connection state initialization.
@@ -121,6 +123,6 @@ void hyper_connection_inject(const Tensor& block_output, const Tensor& injection
  *   hidden is overwritten completely and its incoming value is not read; x is unchanged and must
  *   not overlap hidden. No workspace. Enqueued on `stream`; valid inside CUDA Graph capture.
  */
-void hyper_connection_expand(const Tensor& x, Tensor& hidden, cudaStream_t stream);
+void hyper_connection_expand(const Tensor& x, Tensor& hidden, CudaExecutionView execution);
 
 } // namespace ninfer::ops

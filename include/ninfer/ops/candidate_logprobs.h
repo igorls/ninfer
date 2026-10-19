@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/device.h"
+
 #include "core/tensor.h"
 
 #include <cstdint>
@@ -60,7 +62,7 @@ namespace ninfer::ops {
  */
 void candidate_logprobs(const Tensor& logits, std::int32_t valid_rows, const Tensor& sampled_ids,
                         const Tensor* candidate_ids, const Tensor* allowed, Tensor& sampled_out,
-                        Tensor* candidates_out, cudaStream_t stream, Tensor* top_ids_out = nullptr,
+                        Tensor* candidates_out, CudaExecutionView execution, Tensor* top_ids_out = nullptr,
                         Tensor* top_out = nullptr);
 
 } // namespace ninfer::ops

@@ -59,7 +59,7 @@ void geometry_and_views() {
     const auto* direct_bytes = reinterpret_cast<const std::byte*>(direct_words.data());
     const WeightParent direct_parent{weight_geometry(QType::BF16, QuantLayout::Contiguous,
                                                      std::array<std::uint64_t, 3>{2, 2, 3}),
-                                     direct_bytes};
+                                     Device::cpu(), direct_bytes};
     const WeightView direct_view{{2, 3}, {{&direct_parent, 3, 6}, {&direct_parent, 6, 9}}};
     const auto direct = native_weight(direct_view);
     require(direct.n == 2 && direct.k == 3 && direct.padded_shape[1] == 3 &&
@@ -69,7 +69,7 @@ void geometry_and_views() {
     Fixture fixture;
     WeightParent parent{weight_geometry(QType::Q5_G64_FP16, QuantLayout::RowSplit,
                                         std::array<std::uint64_t, 2>{2, 130}),
-                        fixture.payload.data() + 256};
+                        Device::cpu(), fixture.payload.data() + 256};
     const WeightView row{{1, 130}, {{&parent, 130, 260}}};
     const auto planes = weight_row_planes(row.parts.front());
     require(parent.geometry.bytes == 528 && planes.codes == parent.data + 128 &&
@@ -88,7 +88,7 @@ void geometry_and_views() {
     std::vector<std::byte> fp8(16896);
     WeightParent fp8_parent{weight_geometry(QType::FP8_E4M3FN_ROW_BF16, QuantLayout::RowScale,
                                             std::array<std::uint64_t, 2>{256, 64}),
-                            fp8.data()};
+                            Device::cpu(), fp8.data()};
     WeightView fp8_rows{{128, 64}, {{&fp8_parent, 0, 128 * 64}}};
     require(weight_row_planes(fp8_rows.parts.front()).scales == fp8.data() + 16384,
             "FP8 view recomputed the parent scale base");
@@ -98,7 +98,7 @@ void geometry_and_views() {
     std::vector<std::byte> nvfp4(4612);
     WeightParent nv_parent{weight_geometry(QType::NVFP4, QuantLayout::BlockScaleK16M128x4,
                                            std::array<std::uint64_t, 2>{128, 64}),
-                           nvfp4.data(), 2.0F};
+                           Device::cpu(), nvfp4.data(), 2.0F};
     require(weight_scale_offset(nv_parent.geometry, 31, 0) == 4096 + 496 &&
                 weight_scale_offset(nv_parent.geometry, 32, 0) == 4096 + 4,
             "NVFP4 parent swizzle origin was lost");
@@ -125,7 +125,7 @@ void geometry_and_views() {
     require(nf4_code_value(0) == -1 && nf4_code_value(7) == 0 && nf4_code_value(15) == 1 &&
                 std::bit_cast<std::uint32_t>(nf4_code_value(8)) == 0x3da2faff,
             "NF4 codebook changed");
-    WeightParent paged_parent{paged, nvfp4.data(), 2.0F};
+    WeightParent paged_parent{paged, Device::cpu(), nvfp4.data(), 2.0F};
     rejects<std::invalid_argument>([&] { (void)weight_row_planes({&paged_parent, 0, 160}); },
                                    "paged lookup was exposed as constant-stride planes");
     rejects<std::invalid_argument>([&] { (void)weight_paged_row_offset(paged, 46); },
@@ -149,7 +149,7 @@ void flash_next_registrations() {
     const WeightParent fp8_parent{weight_geometry(QType::FP8_E4M3FN_ROW_FP32,
                                                   QuantLayout::RowScaleFp32,
                                                   std::array<std::uint64_t, 2>{3, 5}),
-                                  fp8.data()};
+                                  Device::cpu(), fp8.data()};
     const auto fp8_weight = native_weight({{3, 5}, {{&fp8_parent, 0, 15}}});
     require(fp8_parent.geometry.bytes == 268 && fp8_weight.scales == fp8.data() + 256 &&
                 fp8_weight.scale_dtype == DType::FP32 && fp8_weight.scale_nb[0] == 4,
@@ -164,7 +164,7 @@ void flash_next_registrations() {
     std::vector<std::byte> u4(264);
     const WeightParent u4_parent{weight_geometry(QType::U4Z8_G16_FP16, QuantLayout::PackedU4G16,
                                                  std::array<std::uint64_t, 2>{2, 32}),
-                                 u4.data()};
+                                 Device::cpu(), u4.data()};
     const auto u4_row = weight_row_planes({&u4_parent, 32, 64});
     require(u4_parent.geometry.bytes == 264 && u4_row.codes == u4.data() + 16 &&
                 u4_row.scales == u4.data() + 260 && u4_row.scale_row_bytes == 4,
@@ -179,7 +179,7 @@ void flash_next_registrations() {
     const std::array<std::int64_t, 3> integers{-3, 1LL << 40, 7};
     const WeightParent int64_parent{
         weight_geometry(QType::INT64, QuantLayout::Contiguous, std::array<std::uint64_t, 1>{3}),
-        reinterpret_cast<const std::byte*>(integers.data())};
+        Device::cpu(), reinterpret_cast<const std::byte*>(integers.data())};
     const auto table = weight_tensor({{3}, {{&int64_parent, 0, 3}}}, {3});
     require(int64_parent.geometry.bytes == 24 && table.dtype == DType::I64,
             "INT64 table lost its word width");

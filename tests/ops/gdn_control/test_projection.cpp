@@ -13,6 +13,7 @@ int main() {
     }
     DeviceContext device;
     int failed = 0;
+    failed += control::verify_column_invariance(device.execution_view());
     for (auto profile : control::kProfiles) {
         for (auto test_case : control::projection_cases(profile))
             failed += control::run(profile, test_case, false, device.execution_view());

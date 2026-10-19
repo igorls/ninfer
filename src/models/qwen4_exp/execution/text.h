@@ -63,7 +63,7 @@ struct PromptReadout {
 // Enqueues the device readout of one logit column for the token in `sampled` (I32 [1]).
 void enqueue_first_token_readout(const FirstTokenReadout& readout, const Tensor& logits,
                                  const Tensor& sampled, std::int32_t token_domain,
-                                 cudaStream_t stream);
+                                 CudaExecutionView execution);
 
 struct PrefillChunkResult {
     std::uint32_t processed_tokens = 0;
@@ -98,7 +98,7 @@ struct OrdinaryDecodeInputs {
 // injected before its block, and the final mixer before the independent output head.
 class TextContext {
 public:
-    TextContext(DeviceContext& ctx, const Parameters& parameters, WorkspaceArena& work,
+    TextContext(DeviceContext& ctx, const Parameters& parameters, MemoryArena& work,
                 PleGather& ple, qwen4_exp::PagedKVCacheView kv, StateImageDevicePool& state,
                 qwen4_exp::RoundState& io, Tensor& prefill_hidden, std::uint32_t prefill_chunk,
                 std::uint32_t text_kv_base, const qwen4_exp::PagedKVCache* batch_kv = nullptr);
@@ -183,7 +183,7 @@ private:
     DeviceContext& ctx_;
     const Parameters& parameters_;
     const TextConfig& config_;
-    WorkspaceArena& work_;
+    MemoryArena& work_;
     PleGather& ple_;
     qwen4_exp::PagedKVCacheView kv_;
     const qwen4_exp::PagedKVCache* batch_kv_ = nullptr;

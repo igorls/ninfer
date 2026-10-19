@@ -1,3 +1,4 @@
+#include "cuda_fixture.h"
 #include "ninfer/ops/hyper_connection.h"
 
 #include "core/arena.h"
@@ -75,8 +76,9 @@ Bf16Host make_hidden(std::int32_t tokens, std::uint32_t seed) {
 
 Weight bf16_weight(const DeviceBuffer& buffer, std::int32_t n, std::int32_t k) {
     Weight weight{};
-    weight.payload         = buffer.p;
-    weight.payload_bytes   = buffer.bytes;
+    weight.device          = buffer.device();
+    weight.payload         = buffer.data();
+    weight.payload_bytes   = buffer.size();
     weight.qtype           = QType::BF16;
     weight.layout          = QuantLayout::Contiguous;
     weight.ndim            = 2;
@@ -84,7 +86,7 @@ Weight bf16_weight(const DeviceBuffer& buffer, std::int32_t n, std::int32_t k) {
     weight.shape[1]        = k;
     weight.padded_shape[0] = n;
     weight.padded_shape[1] = k;
-    weight.qdata           = buffer.p;
+    weight.qdata           = buffer.data();
     weight.n               = n;
     weight.k               = k;
     return weight;
@@ -105,7 +107,7 @@ struct Fixture {
           inject_d(to_device(inject.bits)) {}
 
     ops::HyperConnectionWeights weights() const {
-        return {Tensor(norm_d.p, DType::BF16, {kConcat}), bf16_weight(down_d, kLowRank, kConcat),
+        return {Tensor(const_cast<void*>(norm_d.data()), norm_d.device(), DType::BF16, {kConcat}), bf16_weight(down_d, kLowRank, kConcat),
                 bf16_weight(up_d, kConcat, kLowRank)};
     }
 
@@ -166,20 +168,21 @@ int run_mix_case(const Fixture& fixture, std::int32_t tokens, bool prepare, bool
     DeviceBuffer h_d  = to_device(hidden.bits);
     GuardedDeviceBuffer block_d(static_cast<std::size_t>(kHidden) * tokens * 2);
     GuardedDeviceBuffer inj_d(static_cast<std::size_t>(kStreams) * tokens * 4);
-    Tensor h(h_d.p, DType::BF16, {kConcat, tokens});
-    Tensor block(block_d.data(), DType::BF16, {kHidden, tokens});
-    Tensor injection(inj_d.data(), DType::FP32, {kStreams, tokens});
+    Tensor h(h_d.span(), DType::BF16, {kConcat, tokens});
+    Tensor block(block_d.span(), DType::BF16, {kHidden, tokens});
+    Tensor injection(inj_d.span(), DType::FP32, {kStreams, tokens});
     const auto capacity = ops::hyper_connection_workspace_capacity_bytes(tokens, tokens);
-    DeviceArena workspace(std::max<std::size_t>(capacity, 256));
+    DeviceBuffer workspace_storage(ninfer::test::cuda_environment().context.device(), std::max<std::size_t>(capacity, 256));
+    MemoryArena workspace(workspace_storage.span());
     DeviceContext context;
     const auto weights = fixture.weights();
     const auto inject  = fixture.inject_weight();
     const auto launch  = [&] {
         if (prepare)
             ops::hyper_connection_prepare(h, weights, inject, block, injection, workspace,
-                                          context.stream);
+                                          context.execution_view());
         else
-            ops::hyper_connection_mix(h, weights, block, workspace, context.stream);
+            ops::hyper_connection_mix(h, weights, block, workspace, context.execution_view());
     };
     block_d.fill(0xff);
     inj_d.fill(0xff);
@@ -189,21 +192,21 @@ int run_mix_case(const Fixture& fixture, std::int32_t tokens, bool prepare, bool
         DecodeGraphDefinition definition;
         DecodeGraphExecutable executable;
         auto other = make_hidden(tokens, 77U);
-        h_d.copy_from_host(other.bits.data(), h_d.bytes);
+        h_d.copy_from_host(other.bits.data(), h_d.size());
         cuda_synchronize();
-        definition.capture(context.stream, launch);
+        definition.capture(context.stream(), launch);
         executable.instantiate(definition);
-        executable.launch(context.stream);
-        cuda_synchronize(context.stream);
-        h_d.copy_from_host(hidden.bits.data(), h_d.bytes);
+        executable.launch(context.stream());
+        cuda_synchronize(context.stream());
+        h_d.copy_from_host(hidden.bits.data(), h_d.size());
         block_d.fill(0xff);
         inj_d.fill(0xff);
         cuda_synchronize();
-        executable.launch(context.stream);
+        executable.launch(context.stream());
     } else {
         launch();
     }
-    cuda_synchronize(context.stream);
+    cuda_synchronize(context.stream());
     if (workspace.peak_used() > capacity || workspace.used() != 0) {
         std::cerr << label << ": workspace query/scope mismatch\n";
         ++failures;
@@ -246,21 +249,21 @@ int run_inject_case(std::int32_t tokens, bool graph) {
     h_d.copy_from_host(hidden.bits.data(), h_d.bytes());
     DeviceBuffer out_d   = to_device(output.bits);
     DeviceBuffer inj_d   = to_device(injection);
-    Tensor h(h_d.data(), DType::BF16, {kConcat, tokens});
-    Tensor out(out_d.p, DType::BF16, {kHidden, tokens});
-    Tensor inj(inj_d.p, DType::FP32, {kStreams, tokens});
+    Tensor h(h_d.span(), DType::BF16, {kConcat, tokens});
+    Tensor out(out_d.span(), DType::BF16, {kHidden, tokens});
+    Tensor inj(inj_d.span(), DType::FP32, {kStreams, tokens});
     DeviceContext context;
     if (graph) {
         DecodeGraphDefinition definition;
         DecodeGraphExecutable executable;
-        definition.capture(context.stream,
-                           [&] { ops::hyper_connection_inject(out, inj, h, context.stream); });
+        definition.capture(context.stream(),
+                           [&] { ops::hyper_connection_inject(out, inj, h, context.execution_view()); });
         executable.instantiate(definition);
-        executable.launch(context.stream);
+        executable.launch(context.stream());
     } else {
-        ops::hyper_connection_inject(out, inj, h, context.stream);
+        ops::hyper_connection_inject(out, inj, h, context.execution_view());
     }
-    cuda_synchronize(context.stream);
+    cuda_synchronize(context.stream());
     int failures = h_d.verify_guards(label);
     std::vector<double> expected(hidden.values.size());
     for (std::int32_t t = 0; t < tokens; ++t)
@@ -287,31 +290,31 @@ int run_expand_case(std::int32_t tokens, bool graph) {
     auto x = random_bf16(static_cast<std::size_t>(kHidden) * tokens, 4000U + tokens, 1.0F);
     DeviceBuffer x_d = to_device(x.bits);
     GuardedDeviceBuffer h_d(static_cast<std::size_t>(kConcat) * tokens * 2);
-    Tensor input(x_d.p, DType::BF16, {kHidden, tokens});
-    Tensor hidden(h_d.data(), DType::BF16, {kConcat, tokens});
+    Tensor input(x_d.span(), DType::BF16, {kHidden, tokens});
+    Tensor hidden(h_d.span(), DType::BF16, {kConcat, tokens});
     DeviceContext context;
     h_d.fill(0xff);
     cuda_synchronize();
     if (graph) {
         // Capture on a different input, then replay on the tested one.
         const auto other = random_bf16(x.bits.size(), 91U, 1.0F);
-        x_d.copy_from_host(other.bits.data(), x_d.bytes);
+        x_d.copy_from_host(other.bits.data(), x_d.size());
         cuda_synchronize();
         DecodeGraphDefinition definition;
         DecodeGraphExecutable executable;
-        definition.capture(context.stream,
-                           [&] { ops::hyper_connection_expand(input, hidden, context.stream); });
+        definition.capture(context.stream(),
+                           [&] { ops::hyper_connection_expand(input, hidden, context.execution_view()); });
         executable.instantiate(definition);
-        executable.launch(context.stream);
-        cuda_synchronize(context.stream);
-        x_d.copy_from_host(x.bits.data(), x_d.bytes);
+        executable.launch(context.stream());
+        cuda_synchronize(context.stream());
+        x_d.copy_from_host(x.bits.data(), x_d.size());
         h_d.fill(0xff);
         cuda_synchronize();
-        executable.launch(context.stream);
+        executable.launch(context.stream());
     } else {
-        ops::hyper_connection_expand(input, hidden, context.stream);
+        ops::hyper_connection_expand(input, hidden, context.execution_view());
     }
-    cuda_synchronize(context.stream);
+    cuda_synchronize(context.stream());
     int failures = h_d.verify_guards(label);
     std::vector<std::uint16_t> expected(static_cast<std::size_t>(kConcat) * tokens);
     for (std::int32_t t = 0; t < tokens; ++t)

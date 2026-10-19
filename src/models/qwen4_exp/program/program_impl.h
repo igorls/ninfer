@@ -1,3 +1,4 @@
+#include "core/buffer.h"
 #pragma once
 #include "models/qwen4_exp/program/internal.h"
 
@@ -349,9 +350,9 @@ public:
     const std::size_t graph_allowance_bytes;
     const WorkspacePlan workspace_plan;
 
-    DeviceArena persistent;
-    DeviceArena workspace_storage;
-    WorkspaceArena work;
+    DeviceBuffer persistent;
+    DeviceBuffer workspace_storage;
+    MemoryArena work;
     std::unique_ptr<qwen4_exp::DecoderState> decoder;
     std::unique_ptr<HostContextArena> host_context_arena;
     std::unique_ptr<HostKVArena> host_kv_arena;

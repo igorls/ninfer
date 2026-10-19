@@ -2,6 +2,8 @@
 
 #include "artifact/framing.h"
 #include "artifact/reader.h"
+#include "core/arena.h"
+#include "core/buffer.h"
 #include "core/startup.h"
 
 #include <cuda_runtime.h>
@@ -162,8 +164,8 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
         throw ArtifactError("device backing exceeds size_t");
     }
     if (plan.device_capacity_bytes) {
-        out.arena_ =
-            std::make_unique<DeviceArena>(static_cast<std::size_t>(plan.device_capacity_bytes));
+        out.device_storage_ =
+            DeviceBuffer(device.device(), static_cast<std::size_t>(plan.device_capacity_bytes));
     }
     for (auto& placement : plan.host_objects) {
         reader.validate_object(placement.object);
@@ -185,7 +187,7 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
             const auto& geometry = reader.geometry(placement.object);
             const auto divisor =
                 read_divisor(reader, placement.object, geometry, storage.host_data, out.stats_);
-            storage.host = WeightParent{geometry, storage.host_data.data(), divisor};
+            storage.host = WeightParent{geometry, Device::cpu(), storage.host_data.data(), divisor};
         }
     }
     // Mapped parents are page-cache views warmed here, before readiness, so the first request does
@@ -212,32 +214,34 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
             throw ArtifactError("mapped placement size differs from object");
         }
         const auto divisor = read_divisor(reader, handle, geometry, bytes, out.stats_);
-        storage.mapped     = WeightParent{geometry, bytes.data(), divisor};
+        storage.mapped     = WeightParent{geometry, Device::cpu(), bytes.data(), divisor};
         mapped_done        = checked_add(mapped_done, bytes.size(), "mapped bytes");
         phase.progress(mapped_done, total);
     }
     out.stats_.mapped_bytes = mapped_done;
     out.stats_.mapped_warm_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - warm_start).count();
+    MemoryArena arena(out.device_storage_.span());
     std::vector<CopyRange> ranges;
     for (const auto& placement : plan.device_objects) {
         const auto& geometry = reader.geometry(placement.object);
         auto& object         = out.objects_.at(placement.object.index);
-        if (object.device || !out.arena_ || geometry.bytes != placement.bytes) {
+        if (object.device || !out.device_storage_.data() || geometry.bytes != placement.bytes) {
             throw ArtifactError("invalid or duplicate device placement");
         }
-        auto storage      = out.arena_->alloc_bytes(static_cast<std::size_t>(placement.bytes),
-                                                    static_cast<std::size_t>(placement.alignment));
-        const auto offset = static_cast<std::uint64_t>(static_cast<std::byte*>(storage.data) -
-                                                       static_cast<std::byte*>(out.arena_->base()));
+        const auto storage = arena.alloc_bytes(static_cast<std::size_t>(placement.bytes),
+                                               static_cast<std::size_t>(placement.alignment));
+        const auto offset =
+            static_cast<std::uint64_t>(static_cast<std::byte*>(storage.data) -
+                                       static_cast<std::byte*>(out.device_storage_.data()));
         if (offset != placement.offset) {
             throw ArtifactError("device offset differs from materialization plan");
         }
-        const auto divisor = object.host
-                                 ? object.host->weight_scale_divisor
-                                 : read_divisor(reader, placement.object, geometry, {}, out.stats_);
-        object.device =
-            WeightParent{geometry, static_cast<const std::byte*>(storage.data), divisor};
+        const auto divisor     = object.host
+                                     ? object.host->weight_scale_divisor
+                                     : read_divisor(reader, placement.object, geometry, {}, out.stats_);
+        object.device          = WeightParent{geometry, storage.device,
+                                     static_cast<const std::byte*>(storage.data), divisor};
         const auto& descriptor = reader.directory().tensor(placement.object);
         for (const auto& segment : reader.segments(descriptor.offset, descriptor.bytes)) {
             ranges.push_back({segment.file_index, segment.file_offset,
@@ -284,7 +288,7 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
         slots.push_back(std::make_unique<Slot>(slot_bytes));
     }
     pin_phase.complete();
-    TransferCompletion completion{device.transfer_stream};
+    TransferCompletion completion{device.transfer_stream()};
     std::size_t next_slot  = 0;
     std::size_t next_range = 0;
     std::uint64_t copied   = 0;
@@ -313,14 +317,14 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
                                                static_cast<const std::byte*>(slot.buffer.data()) +
                                                    (begin - source),
                                                static_cast<std::size_t>(end - begin),
-                                               cudaMemcpyHostToDevice, device.transfer_stream),
+                                               cudaMemcpyHostToDevice, device.transfer_stream()),
                                "upload weight bytes");
                     copied = checked_add(copied, end - begin, "copied bytes");
                 }
                 if (range.end > chunk_end) { break; }
                 ++next_range;
             }
-            check_cuda(cudaEventRecord(slot.event, device.transfer_stream),
+            check_cuda(cudaEventRecord(slot.event, device.transfer_stream()),
                        "record weight staging completion");
             slot.pending = true;
             phase.progress(mapped_done + copied, total);

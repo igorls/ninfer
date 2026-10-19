@@ -208,6 +208,7 @@ Nvfp4ExpertBankWeight prepare_nvfp4_expert_bank_weight(const WeightInput& input)
             "NVFP4 expert bank dimensions exceed the native i32 domain");
     const auto experts = g.shape[0];
     Nvfp4ExpertBankWeight out;
+    out.device = parent.device;
     out.codes                  = parent.data;
     out.scales                 = parent.data + g.scale_offset;
     out.weight_scale_divisors  = reinterpret_cast<const float*>(parent.data + g.divisor_offset);

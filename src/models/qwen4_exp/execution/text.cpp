@@ -63,21 +63,18 @@ float inverse_sqrt(std::uint32_t value) {
 
 void enqueue_first_token_readout(const FirstTokenReadout& readout, const Tensor& logits,
                                  const Tensor& sampled, std::int32_t token_domain,
-                                 cudaStream_t stream) {
+                                 CudaExecutionView execution) {
+    const auto stream = execution.stream();
     Tensor sampled_out                   = readout.sampled_out;
     std::optional<Tensor> candidates_out = readout.candidates_out;
     std::optional<Tensor> top_ids_out    = readout.top_ids_out;
     std::optional<Tensor> top_out        = readout.top_out;
-    ops::candidate_logprobs(logits, token_domain, sampled,
-                            readout.candidate_ids ? &*readout.candidate_ids : nullptr,
-                            readout.allowed ? &*readout.allowed : nullptr, sampled_out,
-                            candidates_out ? &*candidates_out : nullptr, stream,
-                            top_ids_out ? &*top_ids_out : nullptr, top_out ? &*top_out : nullptr);
+    ops::candidate_logprobs(logits, token_domain, sampled, readout.candidate_ids ? &*readout.candidate_ids : nullptr, readout.allowed ? &*readout.allowed : nullptr, sampled_out, candidates_out ? &*candidates_out : nullptr, execution, top_ids_out ? &*top_ids_out : nullptr, top_out ? &*top_out : nullptr);
     CUDA_CHECK(cudaMemcpyAsync(readout.host, readout.sampled_out.data, readout.bytes,
                                cudaMemcpyDeviceToHost, stream));
 }
 
-TextContext::TextContext(DeviceContext& ctx, const Parameters& parameters, WorkspaceArena& work,
+TextContext::TextContext(DeviceContext& ctx, const Parameters& parameters, MemoryArena& work,
                          PleGather& ple, qwen4_exp::PagedKVCacheView kv,
                          StateImageDevicePool& state, qwen4_exp::RoundState& io,
                          Tensor& prefill_hidden, std::uint32_t prefill_chunk,
@@ -105,32 +102,30 @@ void TextContext::project(const Tensor& x, const LinearParameters& parameters, T
     // Verification is target decode even when its W*B physical extent exceeds a prefill
     // kernel threshold. It must retain the ordinary decode activation representation.
     const auto policy = decode_ ? ops::LinearPolicy::A16Only : parameters.policy;
-    ops::linear(x, parameters.weight, out, policy, work_, ctx_.stream);
+    ops::linear(x, parameters.weight, out, policy, work_, ctx_.execution_view());
 }
 
 void TextContext::inject_ple(std::size_t index, workspace::LayerRoots& roots, const Tensor& codes,
                              const Tensor& scales, bool prefill, std::int32_t tokens) {
     const PleParameters& p  = parameters_.text.ple[index];
-    cudaStream_t s          = ctx_.stream;
+    cudaStream_t s          = ctx_.stream();
     auto scope              = work_.scope();
     auto stage              = workspace::ple_stage(work_, config_, tokens);
     const std::int32_t rows = dimension(std::uint64_t(config_.ple.heads()) * std::uint64_t(tokens));
     Tensor decoded          = stage.embedding.view({dimension(config_.ple.head_width()), rows});
     // The rows are planar by PLE layer; this layer's rows are one contiguous operand.
     const auto first = dimension(std::uint64_t(index) * std::uint64_t(rows));
-    ops::ple_ngram_decode(codes.slice(1, first, rows), scales.slice(1, first, rows), decoded, s);
+    ops::ple_ngram_decode(codes.slice(1, first, rows), scales.slice(1, first, rows), decoded, ctx_.execution_view());
     project(stage.embedding, p.key_projection, stage.key);
     project(stage.embedding, p.value_projection, stage.value);
     {
         auto ple_scope = work_.scope();
-        WorkspaceArena scratch(work_.alloc_bytes(
+        MemoryArena scratch(work_.alloc_bytes(
             std::max<std::size_t>(1, ops::ple_ngram_workspace_capacity_bytes(tokens, tokens))));
         if (prefill) {
             const Tensor history_in = state_.ple_history_slot(index, state_source_slot_);
             Tensor history_out      = state_.ple_history_slot(index, state_destination_slot_);
-            ops::ple_ngram(roots.hidden, stage.key, stage.value, p.query_norm, p.key_norm,
-                           p.conv_norm, p.convolution, history_in, history_out, stage.output,
-                           scratch, s);
+            ops::ple_ngram(roots.hidden, stage.key, stage.value, p.query_norm, p.key_norm, p.conv_norm, p.convolution, history_in, history_out, stage.output, scratch, ctx_.execution_view());
         } else {
             Tensor histories           = state_.ple_history(index);
             const std::int32_t streams = dimension(config_.stream_width());
@@ -140,18 +135,15 @@ void TextContext::inject_ple(std::size_t index, workspace::LayerRoots& roots, co
             Tensor key3                = stage.key.view({streams, width, batch});
             Tensor value3  = stage.value.view({dimension(config_.hidden_size), width, batch});
             Tensor output3 = stage.output.view({streams, width, batch});
-            ops::ple_ngram_snapshot(hidden3, key3, value3, p.query_norm, p.key_norm, p.conv_norm,
-                                    p.convolution, histories, decode_->valid_columns,
-                                    decode_->state_source_slots, decode_->state_destination_slots,
-                                    output3, scratch, s);
+            ops::ple_ngram_snapshot(hidden3, key3, value3, p.query_norm, p.key_norm, p.conv_norm, p.convolution, histories, decode_->valid_columns, decode_->state_source_slots, decode_->state_destination_slots, output3, scratch, ctx_.execution_view());
         }
     }
-    ops::residual_add(stage.output, roots.hidden, s);
+    ops::residual_add(stage.output, roots.hidden, ctx_.execution_view());
 }
 
 void TextContext::attention(const AttentionParameters& p, std::uint32_t layer,
                             workspace::LayerRoots& roots, bool prefill, std::int32_t tokens) {
-    cudaStream_t s       = ctx_.stream;
+    cudaStream_t s       = ctx_.stream();
     const auto& a        = config_.attention;
     const std::int32_t d = dimension(a.head_dim);
     auto scope           = work_.scope();
@@ -161,8 +153,7 @@ void TextContext::attention(const AttentionParameters& p, std::uint32_t layer,
     Tensor gate = stage.gate.view({d, dimension(a.num_attention_heads), tokens});
     Tensor k    = stage.key.view({d, dimension(a.num_key_value_heads), tokens});
     Tensor v    = stage.value.view({d, dimension(a.num_key_value_heads), tokens});
-    ops::rmsnorm_rope(stage.projection, *rope_positions_, p.query_norm, p.key_norm, q, gate, k, v,
-                      s);
+    ops::rmsnorm_rope(stage.projection, *rope_positions_, p.query_norm, p.key_norm, q, gate, k, v, ctx_.execution_view());
     project(roots.block_input, p.indexer_projection, stage.indexer);
     const IndexerStateView indexer_state =
         state_.indexer(mtp_active_ ? config_.full_attention_layers : layer);
@@ -170,16 +161,12 @@ void TextContext::attention(const AttentionParameters& p, std::uint32_t layer,
     Tensor attended = stage.attended.view({d, dimension(a.num_attention_heads), tokens});
     if (prefill) {
         const PagedKVLayerView cache = (mtp_active_ ? mtp_kv_ : kv_).layer_view(layer);
-        ops::kv_cache_append(k, v, *positions_, cache, s);
+        ops::kv_cache_append(k, v, *positions_, cache, ctx_.execution_view());
         const ops::QsaIndexerBlockKeys blocks = (mtp_active_ ? mtp_kv_ : kv_).indexer_blocks(layer);
-        ops::qsa_indexer_append(stage.indexer, *positions_, *rope_positions_, p.indexer_key_norm,
-                                state_source_slot_, state_destination_slot_, key_state, blocks, s);
+        ops::qsa_indexer_append(stage.indexer, *positions_, *rope_positions_, p.indexer_key_norm, state_source_slot_, state_destination_slot_, key_state, blocks, ctx_.execution_view());
         if (mtp_teacher_) { return; }
-        ops::qsa_indexer_select(stage.indexer, *positions_, *rope_positions_, p.indexer_query_norm,
-                                blocks, indexer_envelope_, work_, stage.selections, stage.counts,
-                                s);
-        ops::selected_block_attention(q, *positions_, stage.selections, stage.counts, cache,
-                                      attended, s);
+        ops::qsa_indexer_select(stage.indexer, *positions_, *rope_positions_, p.indexer_query_norm, blocks, indexer_envelope_, work_, stage.selections, stage.counts, ctx_.execution_view());
+        ops::selected_block_attention(q, *positions_, stage.selections, stage.counts, cache, attended, ctx_.execution_view());
     } else {
         const auto* active_cache          = mtp_active_ ? mtp_batch_kv_ : batch_kv_;
         const PagedKVBatchLayerView cache = active_cache->batch_layer_view(layer);
@@ -190,26 +177,21 @@ void TextContext::attention(const AttentionParameters& p, std::uint32_t layer,
         Tensor k4         = k.view({d, dimension(a.num_key_value_heads), width, batch});
         Tensor v4         = v.view({d, dimension(a.num_key_value_heads), width, batch});
         Tensor positions2 = positions_->view({width, batch});
-        ops::kv_cache_append(k4, v4, positions2, decode_->valid_columns, sequence_rows, cache, s);
+        ops::kv_cache_append(k4, v4, positions2, decode_->valid_columns, sequence_rows, cache, ctx_.execution_view());
         const ops::QsaIndexerBlockKeys blocks = active_cache->batch_indexer_blocks(layer);
         Tensor indexer3 = stage.indexer.view({stage.indexer.ne[0], width, batch});
-        ops::qsa_indexer_append(indexer3, positions2, *rope_positions_, sequence_rows,
-                                decode_->state_source_slots, decode_->state_destination_slots,
-                                decode_->valid_columns, p.indexer_key_norm, key_state, blocks, s);
+        ops::qsa_indexer_append(indexer3, positions2, *rope_positions_, sequence_rows, decode_->state_source_slots, decode_->state_destination_slots, decode_->valid_columns, p.indexer_key_norm, key_state, blocks, ctx_.execution_view());
         if (mtp_teacher_) { return; }
-        ops::qsa_indexer_select(stage.indexer, *positions_, *rope_positions_, rows,
-                                p.indexer_query_norm, blocks, indexer_envelope_, work_,
-                                stage.selections, stage.counts, s);
-        ops::selected_block_attention(q, *positions_, rows, stage.selections, stage.counts, cache,
-                                      work_, attended, s);
+        ops::qsa_indexer_select(stage.indexer, *positions_, *rope_positions_, rows, p.indexer_query_norm, blocks, indexer_envelope_, work_, stage.selections, stage.counts, ctx_.execution_view());
+        ops::selected_block_attention(q, *positions_, rows, stage.selections, stage.counts, cache, work_, attended, ctx_.execution_view());
     }
-    ops::sigmoid_mul(gate, attended, s);
+    ops::sigmoid_mul(gate, attended, ctx_.execution_view());
     project(stage.attended, p.output, roots.block_output);
 }
 
 void TextContext::gdn(const GdnParameters& p, std::uint32_t layer, workspace::LayerRoots& roots,
                       bool prefill, std::int32_t tokens) {
-    cudaStream_t s                   = ctx_.stream;
+    cudaStream_t s                   = ctx_.stream();
     const auto& g                    = config_.gdn;
     auto scope                       = work_.scope();
     auto stage                       = workspace::gdn_stage(work_, config_, tokens, prefill);
@@ -220,12 +202,11 @@ void TextContext::gdn(const GdnParameters& p, std::uint32_t layer, workspace::La
     if (prefill) {
         {
             auto projection_scope = work_.scope();
-            ops::linear_split(roots.block_input, p.projection, std::array{stage.qkv, stage.z}, work_, s);
+            ops::linear_split(roots.block_input, p.projection, std::array{stage.qkv, stage.z}, work_, ctx_.execution_view());
         }
         const Tensor conv_in = linear.conv_slot(layer, state_source_slot_);
         Tensor conv_out      = linear.conv_slot(layer, state_destination_slot_);
-        ops::causal_conv1d_silu_split(stage.qkv, p.convolution, conv_in, conv_out, stage.query,
-                                      stage.key, stage.value, s);
+        ops::causal_conv1d_silu_split(stage.qkv, p.convolution, conv_in, conv_out, stage.query, stage.key, stage.value, ctx_.execution_view());
     } else {
         const std::int32_t hidden = dimension(config_.hidden_size);
         const auto width          = decode_->width;
@@ -239,26 +220,21 @@ void TextContext::gdn(const GdnParameters& p, std::uint32_t layer, workspace::La
         auto projection_scope     = work_.scope();
         const auto& w             = p.projection.weight;
         // The fused route's overlap contract takes a disjoint span even when it needs no scratch.
-        WorkspaceArena scratch(work_.alloc_bytes(std::max<std::size_t>(
+        MemoryArena scratch(work_.alloc_bytes(std::max<std::size_t>(
             1, ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
                    ops::SingleProjectionWeight{w}, batch, width, width))));
         if (decode_->replay != nullptr) {
             auto records = decode_->replay->layer(static_cast<std::int32_t>(layer), batch);
             ops::gdn_input_proj_conv_record(
-                input3, ops::SingleProjectionWeight{w}, p.convolution,
-                {conv_states, decode_->state_source_slots}, decode_->valid_columns,
-                {query3, key3, value3, z3}, records.conv, scratch, s);
+                input3, ops::SingleProjectionWeight{w}, p.convolution, {conv_states, decode_->state_source_slots}, decode_->valid_columns, {query3, key3, value3, z3}, records.conv, scratch, ctx_.execution_view());
         } else {
             ops::gdn_input_proj_conv_snapshot(
-                input3, ops::SingleProjectionWeight{w}, p.convolution,
-                {conv_states, decode_->state_source_slots, decode_->state_destination_slots},
-                decode_->valid_columns, {query3, key3, value3, z3}, scratch, s);
+                input3, ops::SingleProjectionWeight{w}, p.convolution, {conv_states, decode_->state_source_slots, decode_->state_destination_slots}, decode_->valid_columns, {query3, key3, value3, z3}, scratch, ctx_.execution_view());
         }
     }
     {
         auto control_scope = work_.scope();
-        ops::gdn_control_proj(roots.block_input, ops::SingleProjectionWeight{p.control},
-                              p.a_log, p.dt_bias, {stage.g, stage.beta}, work_, ctx_.execution_view());
+        ops::gdn_control_proj(roots.block_input, ops::SingleProjectionWeight{p.control}, p.a_log, p.dt_bias, {stage.g, stage.beta}, work_, ctx_.execution_view());
     }
     const float scale = inverse_sqrt(g.linear_key_head_dim);
     if (prefill) {
@@ -269,8 +245,7 @@ void TextContext::gdn(const GdnParameters& p, std::uint32_t layer, workspace::La
         const Tensor state_in = linear.recurrent_slot(layer, state_source_slot_);
         Tensor state_out      = linear.recurrent_slot(layer, state_destination_slot_);
         auto recurrence_scope = work_.scope();
-        ops::gated_delta_net(q, k, v, stage.g, stage.beta, scale, true, work_, state_in, state_out,
-                             out, ctx_.execution_view());
+        ops::gated_delta_net(q, k, v, stage.g, stage.beta, scale, true, work_, state_in, state_out, out, ctx_.execution_view());
     } else {
         const auto width        = decode_->width;
         const auto batch        = tokens / width;
@@ -283,26 +258,21 @@ void TextContext::gdn(const GdnParameters& p, std::uint32_t layer, workspace::La
         Tensor recurrent_states = linear.layer_view(layer).recurrent;
         if (decode_->replay != nullptr) {
             auto records = decode_->replay->layer(static_cast<std::int32_t>(layer), batch);
-            ops::gated_delta_net_replay_record(q, k, v, gate, beta, scale, recurrent_states,
-                                               decode_->valid_columns, decode_->state_source_slots,
-                                               {records.key, records.value, records.gate}, out, s);
+            ops::gated_delta_net_replay_record(q, k, v, gate, beta, scale, recurrent_states, decode_->valid_columns, decode_->state_source_slots, {records.key, records.value, records.gate}, out, ctx_.execution_view());
         } else {
-            ops::gated_delta_net_batch_update(q, k, v, gate, beta, scale, true, recurrent_states,
-                                              decode_->state_source_slots,
-                                              decode_->state_destination_slots, out, s);
+            ops::gated_delta_net_batch_update(q, k, v, gate, beta, scale, true, recurrent_states, decode_->state_source_slots, decode_->state_destination_slots, out, ctx_.execution_view());
         }
     }
     Tensor recurrent  = stage.recurrent.view({head_dim, value_heads * tokens});
     Tensor z          = stage.z.view({head_dim, value_heads * tokens});
     Tensor normalized = stage.normalized.view({head_dim, value_heads * tokens});
-    ops::sigmoid_gated_rmsnorm(recurrent, p.norm, z, config_.rms_norm_eps, normalized,
-                               ctx_.execution_view());
+    ops::sigmoid_gated_rmsnorm(recurrent, p.norm, z, config_.rms_norm_eps, normalized, ctx_.execution_view());
     project(stage.normalized, p.output, roots.block_output);
 }
 
 void TextContext::run_layers(workspace::LayerRoots& roots, const Tensor& ple_codes,
                              const Tensor& ple_scales, bool prefill, std::int32_t tokens) {
-    cudaStream_t s       = ctx_.stream;
+    cudaStream_t s       = ctx_.stream();
     const auto& layers   = parameters_.text.layers;
     const auto& ple      = parameters_.text.ple;
     std::size_t next_ple = 0;
@@ -315,9 +285,7 @@ void TextContext::run_layers(workspace::LayerRoots& roots, const Tensor& ple_cod
             }
             {
                 auto scope = work_.scope();
-                ops::hyper_connection_prepare(roots.hidden, block.attention_hyper.mixing,
-                                              block.attention_hyper.block_inject, roots.block_input,
-                                              roots.injection, work_, s);
+                ops::hyper_connection_prepare(roots.hidden, block.attention_hyper.mixing, block.attention_hyper.block_inject, roots.block_input, roots.injection, work_, ctx_.execution_view());
             }
             const std::uint32_t compact = config_.compact_layer_indices[layer];
             if (const auto* a = std::get_if<AttentionParameters>(&block.mixer)) {
@@ -325,26 +293,22 @@ void TextContext::run_layers(workspace::LayerRoots& roots, const Tensor& ple_cod
             } else {
                 gdn(std::get<GdnParameters>(block.mixer), compact, roots, prefill, tokens);
             }
-            ops::hyper_connection_inject(roots.block_output, roots.injection, roots.hidden, s);
+            ops::hyper_connection_inject(roots.block_output, roots.injection, roots.hidden, ctx_.execution_view());
             {
                 auto scope = work_.scope();
-                ops::hyper_connection_prepare(roots.hidden, block.mlp_hyper.mixing,
-                                              block.mlp_hyper.block_inject, roots.block_input,
-                                              roots.injection, work_, s);
+                ops::hyper_connection_prepare(roots.hidden, block.mlp_hyper.mixing, block.mlp_hyper.block_inject, roots.block_input, roots.injection, work_, ctx_.execution_view());
             }
             {
                 // The MoE requires its workspace disjoint from every operand, so it gets an
                 // exact sub-arena rather than the arena that also holds the layer roots.
                 auto scope = work_.scope();
-                WorkspaceArena scratch(work_.alloc_bytes(ops::sparse_moe_workspace_capacity_bytes(
+                MemoryArena scratch(work_.alloc_bytes(ops::sparse_moe_workspace_capacity_bytes(
                     block.moe.gate_up.policy, block.moe.down.policy, tokens, tokens)));
                 Tensor selected;
                 if (route_trace_ != nullptr) { selected = route_trace_->slice(layer, tokens); }
-                ops::sparse_moe(roots.block_input, block.moe, ops::SparseMoeEpilogue::Store,
-                                roots.block_output, scratch, s,
-                                route_trace_ != nullptr ? &selected : nullptr);
+                ops::sparse_moe(roots.block_input, block.moe, ops::SparseMoeEpilogue::Store, roots.block_output, scratch, ctx_.execution_view(), route_trace_ != nullptr ? &selected : nullptr);
             }
-            ops::hyper_connection_inject(roots.block_output, roots.injection, roots.hidden, s);
+            ops::hyper_connection_inject(roots.block_output, roots.injection, roots.hidden, ctx_.execution_view());
         } catch (const std::exception& error) {
             throw std::runtime_error("text/layers/" + std::to_string(layer) +
                                      (prefill ? " prefill" : " decode") +
@@ -359,7 +323,7 @@ void TextContext::project_streams(const Tensor& streams, Tensor& logits) {
     Tensor mixed             = workspace::mixed_hidden(work_, config_, count);
     {
         auto mix_scope = work_.scope();
-        ops::hyper_connection_mix(streams, parameters_.text.final_mixer, mixed, work_, ctx_.stream);
+        ops::hyper_connection_mix(streams, parameters_.text.final_mixer, mixed, work_, ctx_.execution_view());
     }
     project(mixed, parameters_.text.output_head, logits);
 }
@@ -396,58 +360,50 @@ void TextContext::mtp_forward(const Tensor& embedding, const Tensor& previous_st
     try {
         auto scope        = work_.scope();
         auto roots        = workspace::layer_roots(work_, config_, tokens, streams);
-        const auto stream = ctx_.stream;
+        const auto stream = ctx_.stream();
         {
             auto stem                  = work_.scope();
             Tensor norm_embedding      = workspace::mixed_hidden(work_, config_, tokens);
             Tensor projected_embedding = workspace::mixed_hidden(work_, config_, tokens);
             Tensor norm_hidden         = workspace::stream_hidden(work_, config_, tokens);
             Tensor projected_hidden    = workspace::stream_hidden(work_, config_, tokens);
-            ops::rmsnorm(embedding, m.embedding_norm, config_.rms_norm_eps, true, norm_embedding,
-                         stream);
+            ops::rmsnorm(embedding, m.embedding_norm, config_.rms_norm_eps, true, norm_embedding, ctx_.execution_view());
             project(norm_embedding, m.embedding_projection, projected_embedding);
-            ops::rmsnorm(previous_streams, m.hidden_norm, config_.rms_norm_eps, true, norm_hidden,
-                         stream);
+            ops::rmsnorm(previous_streams, m.hidden_norm, config_.rms_norm_eps, true, norm_hidden, ctx_.execution_view());
             Tensor flat_in  = norm_hidden.view({dimension(config_.hidden_size), 4 * tokens});
             Tensor flat_out = projected_hidden.view({dimension(config_.hidden_size), 4 * tokens});
             project(flat_in, m.hidden_projection, flat_out);
-            ops::hyper_connection_expand(projected_embedding, roots.hidden, stream);
-            ops::residual_add(projected_hidden, roots.hidden, stream);
+            ops::hyper_connection_expand(projected_embedding, roots.hidden, ctx_.execution_view());
+            ops::residual_add(projected_hidden, roots.hidden, ctx_.execution_view());
         }
         const auto& block = m.layer;
         {
             auto scratch = work_.scope();
-            ops::hyper_connection_prepare(roots.hidden, block.attention_hyper.mixing,
-                                          block.attention_hyper.block_inject, roots.block_input,
-                                          roots.injection, work_, stream);
+            ops::hyper_connection_prepare(roots.hidden, block.attention_hyper.mixing, block.attention_hyper.block_inject, roots.block_input, roots.injection, work_, ctx_.execution_view());
         }
         attention(std::get<AttentionParameters>(block.mixer), 0, roots, batch == nullptr, tokens);
         if (!teacher) {
-            ops::hyper_connection_inject(roots.block_output, roots.injection, roots.hidden, stream);
+            ops::hyper_connection_inject(roots.block_output, roots.injection, roots.hidden, ctx_.execution_view());
             {
                 auto scratch = work_.scope();
-                ops::hyper_connection_prepare(roots.hidden, block.mlp_hyper.mixing,
-                                              block.mlp_hyper.block_inject, roots.block_input,
-                                              roots.injection, work_, stream);
+                ops::hyper_connection_prepare(roots.hidden, block.mlp_hyper.mixing, block.mlp_hyper.block_inject, roots.block_input, roots.injection, work_, ctx_.execution_view());
             }
             {
                 auto stage = work_.scope();
-                WorkspaceArena scratch(work_.alloc_bytes(ops::sparse_moe_workspace_capacity_bytes(
+                MemoryArena scratch(work_.alloc_bytes(ops::sparse_moe_workspace_capacity_bytes(
                     block.moe.gate_up.policy, block.moe.down.policy, tokens, tokens)));
                 Tensor selected;
                 if (route_trace_ != nullptr) {
                     selected = route_trace_->slice(route_trace_->mtp_layer(), tokens);
                 }
-                ops::sparse_moe(roots.block_input, block.moe, ops::SparseMoeEpilogue::Store,
-                                roots.block_output, scratch, stream,
-                                route_trace_ != nullptr ? &selected : nullptr);
+                ops::sparse_moe(roots.block_input, block.moe, ops::SparseMoeEpilogue::Store, roots.block_output, scratch, ctx_.execution_view(), route_trace_ != nullptr ? &selected : nullptr);
             }
-            ops::hyper_connection_inject(roots.block_output, roots.injection, roots.hidden, stream);
+            ops::hyper_connection_inject(roots.block_output, roots.injection, roots.hidden, ctx_.execution_view());
             if (logits != nullptr) {
                 Tensor mixed = workspace::mixed_hidden(work_, config_, tokens);
                 {
                     auto scratch = work_.scope();
-                    ops::hyper_connection_mix(roots.hidden, m.final_mixer, mixed, work_, stream);
+                    ops::hyper_connection_mix(roots.hidden, m.final_mixer, mixed, work_, ctx_.execution_view());
                 }
                 project(mixed, m.output_head, *logits);
             }
@@ -461,7 +417,7 @@ void TextContext::mtp_forward(const Tensor& embedding, const Tensor& previous_st
 
 void TextContext::run_prompt_readout(const Tensor& streams, std::int64_t begin,
                                      std::int32_t length) {
-    cudaStream_t s               = ctx_.stream;
+    cudaStream_t s               = ctx_.stream();
     const PromptReadout& readout = *prompt_readout_;
     const std::int32_t width     = dimension(config_.stream_width());
     const std::int32_t hidden    = dimension(config_.hidden_size);
@@ -472,8 +428,7 @@ void TextContext::run_prompt_readout(const Tensor& streams, std::int64_t begin,
         Tensor mixed     = workspace::mixed_hidden(work_, config_, 1);
         {
             auto mix_scope = work_.scope();
-            ops::hyper_connection_mix(streams.slice(1, local, 1), parameters_.text.final_mixer,
-                                      mixed, work_, s);
+            ops::hyper_connection_mix(streams.slice(1, local, 1), parameters_.text.final_mixer, mixed, work_, ctx_.execution_view());
         }
         CUDA_CHECK(cudaMemcpyAsync(readout.feature_host, mixed.data,
                                    static_cast<std::size_t>(hidden) * sizeof(std::uint16_t),
@@ -510,17 +465,16 @@ void TextContext::run_prompt_readout(const Tensor& streams, std::int64_t begin,
             const std::size_t index = first + tile + static_cast<std::size_t>(j);
             float* block            = readout.readout + index * block_floats;
             const Tensor column     = logits.slice(1, j, 1);
-            const Tensor sampled(const_cast<std::int32_t*>(readout.next_ids) + index, DType::I32,
+            const Tensor sampled(const_cast<std::int32_t*>(readout.next_ids) + index, ctx_.device(), DType::I32,
                                  {1});
-            Tensor sampled_out(block, DType::FP32, {1, 2});
+            Tensor sampled_out(block, ctx_.device(), DType::FP32, {1, 2});
             std::optional<Tensor> candidates_out;
             if (candidates > 0) {
-                candidates_out.emplace(block + 2, DType::FP32,
+                candidates_out.emplace(block + 2, ctx_.device(), DType::FP32,
                                        std::initializer_list<std::int32_t>{1, candidates, 2});
             }
             ops::candidate_logprobs(
-                column, domain, sampled, readout.candidate_ids ? &*readout.candidate_ids : nullptr,
-                nullptr, sampled_out, candidates_out ? &*candidates_out : nullptr, s);
+                column, domain, sampled, readout.candidate_ids ? &*readout.candidate_ids : nullptr, nullptr, sampled_out, candidates_out ? &*candidates_out : nullptr, ctx_.execution_view());
         }
     }
     CUDA_CHECK(cudaMemcpyAsync(readout.host + first * block_floats,
@@ -541,7 +495,7 @@ PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std
         static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max())) {
         throw std::overflow_error("text prefill absolute position exceeds int32");
     }
-    cudaStream_t s  = ctx_.stream;
+    cudaStream_t s  = ctx_.stream();
     const auto base = static_cast<std::int32_t>(begin);
     std::int32_t len =
         static_cast<std::int32_t>(std::min<std::uint32_t>(prefill_chunk_, nominal_length));
@@ -578,7 +532,7 @@ PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std
         CUDA_CHECK(cudaMemcpyAsync(controls.ids.data, full_ids.data() + begin,
                                    static_cast<std::size_t>(len) * sizeof(std::int32_t),
                                    cudaMemcpyHostToDevice, s));
-        ops::fill_i32_positions(controls.positions, base, s);
+        ops::fill_i32_positions(controls.positions, base, ctx_.execution_view());
         for (std::int32_t axis = 0; axis < 3; ++axis) {
             Tensor axis_positions = controls.rope_positions.slice(1, axis, 1).view({len});
             if (prompt != nullptr) {
@@ -589,7 +543,7 @@ PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std
                                            static_cast<std::size_t>(len) * sizeof(std::int32_t),
                                            cudaMemcpyHostToDevice, s));
             } else {
-                ops::fill_i32_positions(axis_positions, base + rope_delta_, s);
+                ops::fill_i32_positions(axis_positions, base + rope_delta_, ctx_.execution_view());
             }
         }
         const Tensor hidden = workspace::stream_hidden(work_, config_, len);
@@ -604,16 +558,15 @@ PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std
         {
             auto scope      = work_.scope();
             Tensor embedded = workspace::mixed_hidden(work_, config_, len);
-            ops::embedding(controls.ids, parameters_.text.token_embedding, embedded, s);
+            ops::embedding(controls.ids, parameters_.text.token_embedding, embedded, ctx_.execution_view());
             if (!scatter_indices.empty()) {
                 const auto count = static_cast<std::int32_t>(scatter_indices.size());
                 Tensor indices   = work_.alloc(DType::I32, {count});
                 CUDA_CHECK(cudaMemcpyAsync(indices.data, scatter_indices.data(), indices.bytes(),
                                            cudaMemcpyHostToDevice, s));
-                ops::scatter(vision_chunk.embeddings.slice(1, visual_begin, count), indices,
-                             embedded, s);
+                ops::scatter(vision_chunk.embeddings.slice(1, visual_begin, count), indices, embedded, ctx_.execution_view());
             }
-            ops::hyper_connection_expand(embedded, roots.hidden, s);
+            ops::hyper_connection_expand(embedded, roots.hidden, ctx_.execution_view());
         }
         // The PLE rows are gathered on the host while the device runs the blocks ahead of the
         // injection layer; the copy is ordered on the stream before the injection consumes it.
@@ -630,20 +583,19 @@ PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std
             if (count > 0) {
                 auto teacher    = work_.scope();
                 Tensor embedded = workspace::mixed_hidden(work_, config_, len);
-                ops::embedding(controls.ids, parameters_.mtp->token_embedding, embedded, s);
+                ops::embedding(controls.ids, parameters_.mtp->token_embedding, embedded, ctx_.execution_view());
                 if (!scatter_indices.empty()) {
                     Tensor indices = work_.alloc(
                         DType::I32, {static_cast<std::int32_t>(scatter_indices.size())});
                     CUDA_CHECK(cudaMemcpyAsync(indices.data, scatter_indices.data(),
                                                indices.bytes(), cudaMemcpyHostToDevice, s));
-                    ops::scatter(vision_chunk.embeddings.slice(1, visual_begin, indices.ne[0]),
-                                 indices, embedded, s);
+                    ops::scatter(vision_chunk.embeddings.slice(1, visual_begin, indices.ne[0]), indices, embedded, ctx_.execution_view());
                 }
                 Tensor previous  = workspace::stream_hidden(work_, config_, count);
                 Tensor output    = workspace::stream_hidden(work_, config_, count);
                 Tensor positions = work_.alloc(DType::I32, {count});
                 Tensor rope      = work_.alloc(DType::I32, {count, 3});
-                ops::fill_i32_positions(positions, base + offset - 1, s);
+                ops::fill_i32_positions(positions, base + offset - 1, ctx_.execution_view());
                 const auto row_bytes =
                     static_cast<std::size_t>(config_.stream_width()) * sizeof(std::uint16_t);
                 if (offset == 0) {
@@ -694,7 +646,7 @@ PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std
         if (prefill_hidden_.data != nullptr) {
             Tensor mixed = columns(prefill_hidden_, len);
             auto scope   = work_.scope();
-            ops::hyper_connection_mix(roots.hidden, parameters_.text.final_mixer, mixed, work_, s);
+            ops::hyper_connection_mix(roots.hidden, parameters_.text.final_mixer, mixed, work_, ctx_.execution_view());
         }
         const Tensor tail = roots.hidden.slice(1, len - 1, 1);
         CUDA_CHECK(cudaMemcpyAsync(io_.prefill_tail.data, tail.data, io_.prefill_tail.bytes(),
@@ -712,16 +664,15 @@ PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std
             Tensor logits = columns(io_.logits, 1);
             project_streams(tail, logits);
             // The bonus token's absolute position keys the sampler RNG (prefill purpose).
-            ops::set_i32_scalar(io_.pos, base + len, s);
+            ops::set_i32_scalar(io_.pos, base + len, ctx_.execution_view());
             const std::int32_t domain = dimension(parameters_.model.resources().public_token_count);
             if (sampling_config_ != nullptr) {
-                ops::sample(logits, io_.token, domain, sampling_config_, io_.pos,
-                            ops::kSamplePurposePrefill, work_, s);
+                ops::sample(logits, io_.token, domain, sampling_config_, io_.pos, ops::kSamplePurposePrefill, work_, ctx_.execution_view());
             } else {
-                ops::argmax(logits, io_.token, domain, s);
+                ops::argmax(logits, io_.token, domain, ctx_.execution_view());
             }
             if (first_token_readout_ != nullptr) {
-                enqueue_first_token_readout(*first_token_readout_, logits, io_.token, domain, s);
+                enqueue_first_token_readout(*first_token_readout_, logits, io_.token, domain, ctx_.execution_view());
             }
         }
         positions_      = nullptr;
@@ -785,7 +736,7 @@ void TextContext::decode_batch(const OrdinaryDecodeInputs& inputs, Tensor& hidde
     require_shape(logits, DType::BF16, {dimension(config_.vocab_size), batch},
                   "ordinary decode logits");
 
-    cudaStream_t s = ctx_.stream;
+    cudaStream_t s = ctx_.stream();
     work_.reset();
     positions_        = &inputs.cache_positions;
     rope_positions_   = &inputs.rope_positions;
@@ -796,8 +747,8 @@ void TextContext::decode_batch(const OrdinaryDecodeInputs& inputs, Tensor& hidde
         {
             auto scope      = work_.scope();
             Tensor embedded = workspace::mixed_hidden(work_, config_, batch);
-            ops::embedding(inputs.ids, parameters_.text.token_embedding, embedded, s);
-            ops::hyper_connection_expand(embedded, roots.hidden, s);
+            ops::embedding(inputs.ids, parameters_.text.token_embedding, embedded, ctx_.execution_view());
+            ops::hyper_connection_expand(embedded, roots.hidden, ctx_.execution_view());
         }
         run_layers(roots, inputs.ple_codes, inputs.ple_scales, false, batch);
         project_streams(roots.hidden, logits);

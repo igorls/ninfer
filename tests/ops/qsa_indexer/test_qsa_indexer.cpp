@@ -1,3 +1,4 @@
+#include "cuda_fixture.h"
 // Qualification of ops::qsa_indexer_append and ops::qsa_indexer_select.
 //
 // Append: published block keys against an FP64 oracle (after the contract's BF16 mean cast),
@@ -93,7 +94,7 @@ Plane make_plane(int rows, int blocks_per_row, std::mt19937& rng) {
 }
 
 Tensor plane_tensor(DeviceBuffer& keys, const Plane& plane) {
-    return Tensor(keys.p, DType::BF16, {kDim, kBlocksPage, plane.pages});
+    return Tensor(keys.span(), DType::BF16, {kDim, kBlocksPage, plane.pages});
 }
 
 int compare_keys(const std::string& label, const std::vector<double>& got,
@@ -169,15 +170,15 @@ int run_append_shared(int first_position, int tokens, bool same_slot, std::uint3
                  raw_d = to_device(raw_keys), rawpos_d = to_device(raw_positions),
                  proj_d = to_device(projected), pos_d = to_device(positions), rope_d = to_device(rope),
                  norm_d = to_device(norm);
-    ops::QsaIndexerKeyState state{Tensor(raw_d.p, DType::BF16, {kDim, 4, slots}),
-                                  Tensor(rawpos_d.p, DType::I32, {3, 4, slots})};
+    ops::QsaIndexerKeyState state{Tensor(raw_d.span(), DType::BF16, {kDim, 4, slots}),
+                                  Tensor(rawpos_d.span(), DType::I32, {3, 4, slots})};
     ops::QsaIndexerBlockKeys blocks{plane_tensor(keys_d, plane),
-                                    Tensor(tables_d.p, DType::I32, {plane.logical, 1})};
-    ops::qsa_indexer_append(Tensor(proj_d.p, DType::BF16, {kProjection, tokens}),
-                            Tensor(pos_d.p, DType::I32, {tokens}),
-                            Tensor(rope_d.p, DType::I32, {tokens, 3}),
-                            Tensor(norm_d.p, DType::BF16, {kDim}), source, destination, state,
-                            blocks, nullptr);
+                                    Tensor(tables_d.span(), DType::I32, {plane.logical, 1})};
+    ops::qsa_indexer_append(Tensor(proj_d.span(), DType::BF16, {kProjection, tokens}),
+                            Tensor(pos_d.span(), DType::I32, {tokens}),
+                            Tensor(rope_d.span(), DType::I32, {tokens, 3}),
+                            Tensor(norm_d.span(), DType::BF16, {kDim}), source, destination, state,
+                            blocks, ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
 
     const std::string label = "qsa_indexer_append shared p0=" + std::to_string(first_position) +
@@ -307,33 +308,34 @@ int run_append_snapshot(int width, const std::vector<int>& first_positions, std:
                  proj_d = to_device(projected), pos_d = to_device(positions), rope_d = to_device(rope),
                  norm_d = to_device(norm), rows_d = to_device(table_rows), init_d = to_device(initial),
                  base_d = to_device(base), valid_d = to_device(valid);
-    ops::QsaIndexerKeyState state{Tensor(raw_d.p, DType::BF16, {kDim, 4, slots}),
-                                  Tensor(rawpos_d.p, DType::I32, {3, 4, slots})};
+    ops::QsaIndexerKeyState state{Tensor(raw_d.span(), DType::BF16, {kDim, 4, slots}),
+                                  Tensor(rawpos_d.span(), DType::I32, {3, 4, slots})};
     ops::QsaIndexerBlockKeys blocks{plane_tensor(keys_d, plane),
-                                    Tensor(tables_d.p, DType::I32, {plane.logical, batch})};
-    const auto launch = [&](cudaStream_t stream) {
-        ops::qsa_indexer_append(Tensor(proj_d.p, DType::BF16, {kProjection, width, batch}),
-                                Tensor(pos_d.p, DType::I32, {width, batch}),
-                                Tensor(rope_d.p, DType::I32, {columns, 3}),
-                                Tensor(rows_d.p, DType::I32, {batch}), Tensor(init_d.p, DType::I32, {batch}),
-                                Tensor(base_d.p, DType::I32, {batch}),
-                                ragged ? Tensor(valid_d.p, DType::I32, {batch}) : Tensor{}, Tensor(norm_d.p, DType::BF16, {kDim}),
-                                state, blocks, stream);
+                                    Tensor(tables_d.span(), DType::I32, {plane.logical, batch})};
+    const auto launch = [&](CudaExecutionView execution) {
+        ops::qsa_indexer_append(Tensor(proj_d.span(), DType::BF16, {kProjection, width, batch}),
+                                Tensor(pos_d.span(), DType::I32, {width, batch}),
+                                Tensor(rope_d.span(), DType::I32, {columns, 3}),
+                                Tensor(rows_d.span(), DType::I32, {batch}), Tensor(init_d.span(), DType::I32, {batch}),
+                                Tensor(base_d.span(), DType::I32, {batch}),
+                                ragged ? Tensor(valid_d.span(), DType::I32, {batch}) : Tensor{}, Tensor(norm_d.span(), DType::BF16, {kDim}),
+                                state, blocks, execution);
     };
     if (graph) {
         cudaStream_t stream = nullptr;
         cuda_check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "create stream");
+    const auto stream_execution = ninfer::test::cuda_environment().context.execution_view(stream);
         {
             DecodeGraphDefinition definition;
             DecodeGraphExecutable executable;
-            definition.capture(stream, [&] { launch(stream); });
+            definition.capture(stream, [&] { launch(stream_execution); });
             executable.instantiate(definition);
             executable.launch(stream);
             cuda_synchronize(stream);
         }
         cuda_check(cudaStreamDestroy(stream), "destroy stream");
     } else {
-        launch(nullptr);
+        launch(ninfer::test::cuda_environment().default_execution);
         cuda_synchronize();
     }
     const std::string label = "qsa_indexer_append snapshot W=" + std::to_string(width) +
@@ -483,37 +485,38 @@ int run_select(const SelectCase& cs, std::uint32_t seed) {
     const ops::QsaIndexerSelectEnvelope envelope{cs.envelope};
     const std::size_t capacity = ops::qsa_indexer_select_workspace_capacity_bytes(1, columns, envelope);
     GuardedDeviceBuffer workspace_storage(std::max<std::size_t>(capacity, 256));
-    WorkspaceArena workspace(DeviceSpan{workspace_storage.data(), std::max<std::size_t>(capacity, 256)});
+    MemoryArena workspace(workspace_storage.span().subspan(0, std::max<std::size_t>(capacity, 256)));
     ops::QsaIndexerBlockKeys blocks{plane_tensor(keys_d, plane),
-                                    Tensor(tables_d.p, DType::I32, {plane.logical, rows})};
-    Tensor sel_t(sel_d.data(), DType::I32, {kMaxSelected, columns});
-    Tensor count_t(count_d.data(), DType::I32, {columns});
-    const auto launch = [&](cudaStream_t stream) {
-        const Tensor proj(proj_d.p, DType::BF16, {kProjection, columns});
-        const Tensor pos(pos_d.p, DType::I32, {columns});
-        const Tensor rp(rope_d.p, DType::I32, {columns, 3});
-        const Tensor nm(norm_d.p, DType::BF16, {kDim});
+                                    Tensor(tables_d.span(), DType::I32, {plane.logical, rows})};
+    Tensor sel_t(sel_d.span(), DType::I32, {kMaxSelected, columns});
+    Tensor count_t(count_d.span(), DType::I32, {columns});
+    const auto launch = [&](CudaExecutionView execution) {
+        const Tensor proj(proj_d.span(), DType::BF16, {kProjection, columns});
+        const Tensor pos(pos_d.span(), DType::I32, {columns});
+        const Tensor rp(rope_d.span(), DType::I32, {columns, 3});
+        const Tensor nm(norm_d.span(), DType::BF16, {kDim});
         if (cs.rows_form) {
-            ops::qsa_indexer_select(proj, pos, rp, Tensor(rows_d.p, DType::I32, {columns}), nm, blocks,
-                                    envelope, workspace, sel_t, count_t, stream);
+            ops::qsa_indexer_select(proj, pos, rp, Tensor(rows_d.span(), DType::I32, {columns}), nm, blocks,
+                                    envelope, workspace, sel_t, count_t, execution);
         } else {
-            ops::qsa_indexer_select(proj, pos, rp, nm, blocks, envelope, workspace, sel_t, count_t, stream);
+            ops::qsa_indexer_select(proj, pos, rp, nm, blocks, envelope, workspace, sel_t, count_t, execution);
         }
     };
     if (cs.graph) {
         cudaStream_t stream = nullptr;
         cuda_check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "create stream");
+    const auto stream_execution = ninfer::test::cuda_environment().context.execution_view(stream);
         {
             DecodeGraphDefinition definition;
             DecodeGraphExecutable executable;
-            definition.capture(stream, [&] { launch(stream); });
+            definition.capture(stream, [&] { launch(stream_execution); });
             executable.instantiate(definition);
             executable.launch(stream);
             cuda_synchronize(stream);
         }
         cuda_check(cudaStreamDestroy(stream), "destroy stream");
     } else {
-        launch(nullptr);
+        launch(ninfer::test::cuda_environment().default_execution);
         cuda_synchronize();
     }
     const std::string label = std::string("qsa_indexer_select ") + (cs.rows_form ? "rows" : "shared") +

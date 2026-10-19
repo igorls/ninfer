@@ -33,7 +33,7 @@ std::size_t fp8_linear_workspace_capacity_bytes(QType qtype, std::int32_t n, std
 }
 
 void fp8_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
-                  WorkspaceArena* workspace, cudaStream_t stream) {
+                  MemoryArena* workspace, cudaStream_t stream) {
     common::validate_fp8_weight(weight, "fp8 linear");
     if (x.ne[1] <= 0) throw std::invalid_argument("fp8 linear: T must be positive");
     const auto& shape = resolve_shape(weight.qtype, weight.n, weight.k, policy);

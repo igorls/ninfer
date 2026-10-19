@@ -99,7 +99,7 @@ constexpr std::int32_t kWaveCols       = 512;
 constexpr std::int32_t kNarrowTailCols = 192;
 
 void launch_wide_with_narrow_tail(const Tensor& x, const Weight& w, Tensor& residual_out,
-                                  WorkspaceArena& ws, cudaStream_t stream) {
+                                  MemoryArena& ws, cudaStream_t stream) {
     const std::int32_t cols = x.ne[1];
     const std::int32_t wide = (cols / kWaveCols) * kWaveCols;
     const std::int32_t tail = cols - wide;
@@ -184,7 +184,7 @@ std::size_t q5_linear_add_capacity_workspace_bytes(std::int32_t rows, std::int32
 }
 
 void q5_linear_add_execute_plan(const Q5LinearAddPlan& plan, const Tensor& x, const Weight& w,
-                                Tensor& residual_out, WorkspaceArena& ws, cudaStream_t stream) {
+                                Tensor& residual_out, MemoryArena& ws, cudaStream_t stream) {
     const Q5LinearAddProblem problem{residual_out.ne[0], x.ne[0], w.padded_shape[1], x.ne[1]};
     const Q5LinearAddPlan resolved = q5_linear_add_resolve_plan(problem);
     if (resolved.schedule != plan.schedule || resolved.workspace_bytes != plan.workspace_bytes) {
@@ -237,7 +237,7 @@ void q5_linear_add_execute_plan(const Q5LinearAddPlan& plan, const Tensor& x, co
 }
 
 void q5_linear_add_dispatch(const Tensor& x, const Weight& w, Tensor& residual_out,
-                            WorkspaceArena& ws, cudaStream_t stream) {
+                            MemoryArena& ws, cudaStream_t stream) {
     const Q5LinearAddProblem problem{residual_out.ne[0], x.ne[0], w.padded_shape[1], x.ne[1]};
     const Q5LinearAddPlan plan = q5_linear_add_resolve_plan(problem);
     q5_linear_add_execute_plan(plan, x, w, residual_out, ws, stream);

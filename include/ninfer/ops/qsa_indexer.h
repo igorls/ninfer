@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/device.h"
+
 #include "core/arena.h"
 #include "core/tensor.h"
 
@@ -97,14 +99,14 @@ void qsa_indexer_append(const Tensor& projected, const Tensor& positions,
                         const Tensor& rope_positions, const Tensor& key_norm,
                         std::int32_t source_slot, std::int32_t destination_slot,
                         const QsaIndexerKeyState& state, const QsaIndexerBlockKeys& blocks,
-                        cudaStream_t stream);
+                        CudaExecutionView execution);
 
 void qsa_indexer_append(const Tensor& projected, const Tensor& positions,
                         const Tensor& rope_positions, const Tensor& table_rows,
                         const Tensor& initial_slots, const Tensor& snapshot_base_slots,
                         const Tensor& valid_columns,
                         const Tensor& key_norm, const QsaIndexerKeyState& state,
-                        const QsaIndexerBlockKeys& blocks, cudaStream_t stream);
+                        const QsaIndexerBlockKeys& blocks, CudaExecutionView execution);
 
 /**
  * Host execution envelope of qsa_indexer_select: every column's complete-block count
@@ -156,13 +158,13 @@ qsa_indexer_select_workspace_capacity_bytes(std::int32_t min_columns, std::int32
 void qsa_indexer_select(const Tensor& projected, const Tensor& positions,
                         const Tensor& rope_positions, const Tensor& table_rows,
                         const Tensor& query_norm, const QsaIndexerBlockKeys& blocks,
-                        QsaIndexerSelectEnvelope envelope, WorkspaceArena& workspace,
-                        Tensor& selections, Tensor& counts, cudaStream_t stream);
+                        QsaIndexerSelectEnvelope envelope, MemoryArena& workspace,
+                        Tensor& selections, Tensor& counts, CudaExecutionView execution);
 
 void qsa_indexer_select(const Tensor& projected, const Tensor& positions,
                         const Tensor& rope_positions, const Tensor& query_norm,
                         const QsaIndexerBlockKeys& blocks, QsaIndexerSelectEnvelope envelope,
-                        WorkspaceArena& workspace, Tensor& selections, Tensor& counts,
-                        cudaStream_t stream);
+                        MemoryArena& workspace, Tensor& selections, Tensor& counts,
+                        CudaExecutionView execution);
 
 } // namespace ninfer::ops

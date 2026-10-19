@@ -26,14 +26,17 @@ void require_shape(const Tensor& tensor, std::int32_t n0, std::int32_t n1, std::
     }
 }
 
-void require_contiguous_nonnull(const Tensor& tensor, const char* op, const char* name) {
+void require_contiguous_nonnull(const Tensor& tensor, const char* op, const char* name,
+                                Device device) {
+    common::operand::device(tensor.device, device, op, name);
     if (!tensor.is_contiguous() || tensor.data == nullptr) {
         throw std::invalid_argument(std::string(op) + ": " + name +
                                     " must be contiguous and non-null");
     }
 }
 
-std::uint32_t validate_full_cache(const PagedKVLayerView& cache, std::int32_t kv_heads) {
+std::uint32_t validate_full_cache(const PagedKVLayerView& cache, std::int32_t kv_heads,
+                                  Device device) {
     PagedKVStorageLayout layout{};
     try {
         layout = paged_kv_storage_layout(cache.storage, kFullHeadDim);
@@ -60,13 +63,13 @@ std::uint32_t validate_full_cache(const PagedKVLayerView& cache, std::int32_t kv
                   physical_pages, kAppendOp, "cache k pages");
     require_shape(cache.v_pages, layout.value.data_leading_extent, kPagedKVPageSize, kv_heads,
                   physical_pages, kAppendOp, "cache v pages");
-    require_contiguous_nonnull(cache.k_pages, kAppendOp, "cache k pages");
-    require_contiguous_nonnull(cache.v_pages, kAppendOp, "cache v pages");
+    require_contiguous_nonnull(cache.k_pages, kAppendOp, "cache k pages", device);
+    require_contiguous_nonnull(cache.v_pages, kAppendOp, "cache v pages", device);
     if (cache.block_table.dtype != DType::I32) {
         throw std::invalid_argument("kv_cache_append: block table must be I32");
     }
     require_shape(cache.block_table, logical_pages, 1, 1, 1, kAppendOp, "block table");
-    require_contiguous_nonnull(cache.block_table, kAppendOp, "block table");
+    require_contiguous_nonnull(cache.block_table, kAppendOp, "block table", device);
 
     const auto validate_scale = [&](const Tensor& tensor, const PagedKVVectorLayout& vector,
                                     const char* name) {
@@ -81,7 +84,7 @@ std::uint32_t validate_full_cache(const PagedKVLayerView& cache, std::int32_t kv
         }
         require_shape(tensor, vector.scale_leading_extent, kPagedKVPageSize, kv_heads,
                       physical_pages, kAppendOp, name);
-        require_contiguous_nonnull(tensor, kAppendOp, name);
+        require_contiguous_nonnull(tensor, kAppendOp, name, device);
     };
     validate_scale(cache.k_scale_pages, layout.key, "cache k scale pages");
     validate_scale(cache.v_scale_pages, layout.value, "cache v scale pages");
@@ -91,7 +94,7 @@ std::uint32_t validate_full_cache(const PagedKVLayerView& cache, std::int32_t kv
 // Batched D256 cache: the single-sequence plane contract over one shared page pool, with one
 // block-table row per table selector.
 std::uint32_t validate_full_batch_cache(const PagedKVBatchLayerView& cache, std::int32_t kv_heads,
-                                        std::int32_t batch) {
+                                        std::int32_t batch, Device device) {
     PagedKVStorageLayout layout{};
     try {
         layout = paged_kv_storage_layout(cache.storage, kFullHeadDim);
@@ -118,13 +121,13 @@ std::uint32_t validate_full_batch_cache(const PagedKVBatchLayerView& cache, std:
                   physical_pages, kAppendOp, "cache k pages");
     require_shape(cache.v_pages, layout.value.data_leading_extent, kPagedKVPageSize, kv_heads,
                   physical_pages, kAppendOp, "cache v pages");
-    require_contiguous_nonnull(cache.k_pages, kAppendOp, "cache k pages");
-    require_contiguous_nonnull(cache.v_pages, kAppendOp, "cache v pages");
+    require_contiguous_nonnull(cache.k_pages, kAppendOp, "cache k pages", device);
+    require_contiguous_nonnull(cache.v_pages, kAppendOp, "cache v pages", device);
     if (cache.block_tables.dtype != DType::I32) {
         throw std::invalid_argument("kv_cache_append: block tables must be I32");
     }
     require_shape(cache.block_tables, logical_pages, table_rows, 1, 1, kAppendOp, "block tables");
-    require_contiguous_nonnull(cache.block_tables, kAppendOp, "block tables");
+    require_contiguous_nonnull(cache.block_tables, kAppendOp, "block tables", device);
 
     const auto validate_scale = [&](const Tensor& tensor, const PagedKVVectorLayout& vector,
                                     const char* name) {
@@ -139,7 +142,7 @@ std::uint32_t validate_full_batch_cache(const PagedKVBatchLayerView& cache, std:
         }
         require_shape(tensor, vector.scale_leading_extent, kPagedKVPageSize, kv_heads,
                       physical_pages, kAppendOp, name);
-        require_contiguous_nonnull(tensor, kAppendOp, name);
+        require_contiguous_nonnull(tensor, kAppendOp, name, device);
     };
     validate_scale(cache.k_scale_pages, layout.key, "cache k scale pages");
     validate_scale(cache.v_scale_pages, layout.value, "cache v scale pages");
@@ -150,8 +153,8 @@ bool aligned16(const Tensor& tensor) {
     return (reinterpret_cast<std::uintptr_t>(tensor.data) & 15u) == 0u;
 }
 
-void require_vector_aligned(const Tensor& tensor, const char* name) {
-    require_contiguous_nonnull(tensor, kPrefixAppendOp, name);
+void require_vector_aligned(const Tensor& tensor, const char* name, Device device) {
+    require_contiguous_nonnull(tensor, kPrefixAppendOp, name, device);
     if (!common::operand::aligned(tensor.data, 16)) {
         throw std::invalid_argument("kv_cache_append_prefix: " + std::string(name) +
                                     " must be 16-byte aligned");
@@ -160,7 +163,7 @@ void require_vector_aligned(const Tensor& tensor, const char* name) {
 
 void validate_inputs(const Tensor& k, const Tensor& v, const Tensor& positions,
                      const Tensor& counts, const Tensor& selectors,
-                     KVCacheAppendPrefixExecutionEnvelope envelope) {
+                     KVCacheAppendPrefixExecutionEnvelope envelope, Device device) {
     if (k.dtype != DType::BF16 || v.dtype != DType::BF16) {
         throw std::invalid_argument("kv_cache_append_prefix: k/v must be BF16");
     }
@@ -180,11 +183,11 @@ void validate_inputs(const Tensor& k, const Tensor& v, const Tensor& positions,
     require_shape(positions, tokens, batch, 1, 1, kPrefixAppendOp, "positions");
     require_shape(counts, batch, 1, 1, 1, kPrefixAppendOp, "counts");
     require_shape(selectors, batch, 1, 1, 1, kPrefixAppendOp, "selectors");
-    require_vector_aligned(k, "k");
-    require_vector_aligned(v, "v");
-    require_contiguous_nonnull(positions, kPrefixAppendOp, "positions");
-    require_contiguous_nonnull(counts, kPrefixAppendOp, "counts");
-    require_contiguous_nonnull(selectors, kPrefixAppendOp, "selectors");
+    require_vector_aligned(k, "k", device);
+    require_vector_aligned(v, "v", device);
+    require_contiguous_nonnull(positions, kPrefixAppendOp, "positions", device);
+    require_contiguous_nonnull(counts, kPrefixAppendOp, "counts", device);
+    require_contiguous_nonnull(selectors, kPrefixAppendOp, "selectors", device);
     if (envelope.min_count > envelope.max_count ||
         envelope.max_count > static_cast<std::uint32_t>(tokens)) {
         throw std::invalid_argument("kv_cache_append_prefix: invalid execution envelope");
@@ -192,7 +195,7 @@ void validate_inputs(const Tensor& k, const Tensor& v, const Tensor& positions,
 }
 
 void validate_paged_cache(const PagedKVBatchLayerView& cache,
-                          KVCacheAppendPrefixExecutionEnvelope envelope) {
+                          KVCacheAppendPrefixExecutionEnvelope envelope, Device device) {
     if (cache.storage != KvCacheStorage::BFloat16 || cache.num_kv_heads != kKVHeads ||
         cache.head_dim != kHeadDim || cache.k_pages.ne[2] <= 0 ||
         cache.k_pages.ne[2] != cache.v_pages.ne[2] || cache.block_tables.ne[0] <= 0 ||
@@ -211,13 +214,13 @@ void validate_paged_cache(const PagedKVBatchLayerView& cache,
         cache.block_tables.ne[3] != 1) {
         throw std::invalid_argument("kv_cache_append_prefix: invalid paged cache tensors");
     }
-    require_vector_aligned(cache.k_pages, "cache k pages");
-    require_vector_aligned(cache.v_pages, "cache v pages");
-    require_contiguous_nonnull(cache.block_tables, kPrefixAppendOp, "cache block tables");
+    require_vector_aligned(cache.k_pages, "cache k pages", device);
+    require_vector_aligned(cache.v_pages, "cache v pages", device);
+    require_contiguous_nonnull(cache.block_tables, kPrefixAppendOp, "cache block tables", device);
 }
 
 void validate_cyclic_cache(const CyclicKVCacheLayerView& cache,
-                           KVCacheAppendPrefixExecutionEnvelope envelope) {
+                           KVCacheAppendPrefixExecutionEnvelope envelope, Device device) {
     const bool registered_capacity = cache.capacity == 2048 || cache.capacity == 4096;
     if (cache.num_kv_heads != kKVHeads || cache.head_dim != kHeadDim || !registered_capacity ||
         cache.padded_capacity < cache.capacity ||
@@ -234,14 +237,15 @@ void validate_cyclic_cache(const CyclicKVCacheLayerView& cache,
         cache.k.ne[3] != cache.lane_capacity) {
         throw std::invalid_argument("kv_cache_append_prefix: invalid cyclic cache tensors");
     }
-    require_vector_aligned(cache.k, "cache k");
-    require_vector_aligned(cache.v, "cache v");
+    require_vector_aligned(cache.k, "cache k", device);
+    require_vector_aligned(cache.v, "cache v", device);
 }
 
 } // namespace
 
 void kv_cache_append(const Tensor& k, const Tensor& v, const Tensor& positions,
-                     PagedKVLayerView cache, cudaStream_t stream) {
+                     PagedKVLayerView cache, CudaExecutionView execution) {
+    const auto stream = execution.stream();
     if (k.dtype != DType::BF16 || v.dtype != DType::BF16) {
         throw std::invalid_argument("kv_cache_append: k/v must be BF16");
     }
@@ -257,10 +261,10 @@ void kv_cache_append(const Tensor& k, const Tensor& v, const Tensor& positions,
     require_shape(k, kFullHeadDim, kv_heads, tokens, 1, kAppendOp, "k");
     require_shape(v, kFullHeadDim, kv_heads, tokens, 1, kAppendOp, "v");
     require_shape(positions, tokens, 1, 1, 1, kAppendOp, "positions");
-    require_contiguous_nonnull(k, kAppendOp, "k");
-    require_contiguous_nonnull(v, kAppendOp, "v");
-    require_contiguous_nonnull(positions, kAppendOp, "positions");
-    const std::uint32_t capacity = validate_full_cache(cache, kv_heads);
+    require_contiguous_nonnull(k, kAppendOp, "k", execution.device());
+    require_contiguous_nonnull(v, kAppendOp, "v", execution.device());
+    require_contiguous_nonnull(positions, kAppendOp, "positions", execution.device());
+    const std::uint32_t capacity = validate_full_cache(cache, kv_heads, execution.device());
     if (static_cast<std::uint32_t>(tokens) > capacity) {
         throw std::invalid_argument("kv_cache_append: T exceeds cache capacity");
     }
@@ -269,7 +273,19 @@ void kv_cache_append(const Tensor& k, const Tensor& v, const Tensor& positions,
 
 void kv_cache_append(const Tensor& k, const Tensor& v, const Tensor& positions,
                      const Tensor& valid_columns, const Tensor& table_rows,
-                     PagedKVBatchLayerView cache, cudaStream_t stream) {
+                     PagedKVBatchLayerView cache, CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    if (k.data) common::operand::device(k.device, execution.device(), "kv_cache_append", "k");
+    if (v.data) common::operand::device(v.device, execution.device(), "kv_cache_append", "v");
+    if (positions.data) common::operand::device(positions.device, execution.device(), "kv_cache_append", "positions");
+    if (valid_columns.data) common::operand::device(valid_columns.device, execution.device(), "kv_cache_append", "valid_columns");
+    if (table_rows.data) common::operand::device(table_rows.device, execution.device(), "kv_cache_append", "table_rows");
+    common::operand::device(cache.k_pages.device, execution.device(), "kv_cache_append", "cache.k_pages");
+    common::operand::device(cache.v_pages.device, execution.device(), "kv_cache_append", "cache.v_pages");
+    if (cache.k_scale_pages.data) common::operand::device(cache.k_scale_pages.device, execution.device(), "kv_cache_append", "cache.k_scale_pages");
+    if (cache.v_scale_pages.data) common::operand::device(cache.v_scale_pages.device, execution.device(), "kv_cache_append", "cache.v_scale_pages");
+    if (cache.block_tables.data) common::operand::device(cache.block_tables.device, execution.device(), "kv_cache_append", "cache.block_tables");
+
     if (k.dtype != DType::BF16 || v.dtype != DType::BF16) {
         throw std::invalid_argument("kv_cache_append: k/v must be BF16");
     }
@@ -292,15 +308,15 @@ void kv_cache_append(const Tensor& k, const Tensor& v, const Tensor& positions,
     require_shape(positions, width, batch, 1, 1, kAppendOp, "positions");
     require_shape(table_rows, batch, 1, 1, 1, kAppendOp, "table rows");
     if (masked) require_shape(valid_columns, batch, 1, 1, 1, kAppendOp, "valid columns");
-    require_contiguous_nonnull(k, kAppendOp, "k");
-    require_contiguous_nonnull(v, kAppendOp, "v");
-    require_contiguous_nonnull(positions, kAppendOp, "positions");
-    require_contiguous_nonnull(table_rows, kAppendOp, "table rows");
-    if (masked) require_contiguous_nonnull(valid_columns, kAppendOp, "valid columns");
+    require_contiguous_nonnull(k, kAppendOp, "k", execution.device());
+    require_contiguous_nonnull(v, kAppendOp, "v", execution.device());
+    require_contiguous_nonnull(positions, kAppendOp, "positions", execution.device());
+    require_contiguous_nonnull(table_rows, kAppendOp, "table rows", execution.device());
+    if (masked) require_contiguous_nonnull(valid_columns, kAppendOp, "valid columns", execution.device());
     if (!aligned16(k) || !aligned16(v)) {
         throw std::invalid_argument("kv_cache_append: k/v must be 16-byte aligned");
     }
-    const std::uint32_t capacity = validate_full_batch_cache(cache, kv_heads, batch);
+    const std::uint32_t capacity = validate_full_batch_cache(cache, kv_heads, batch, execution.device());
     if (static_cast<std::uint32_t>(width) > capacity) {
         throw std::invalid_argument("kv_cache_append: W exceeds cache capacity");
     }
@@ -310,9 +326,10 @@ void kv_cache_append(const Tensor& k, const Tensor& v, const Tensor& positions,
 void kv_cache_append_prefix(const Tensor& k, const Tensor& v, const Tensor& positions,
                             const Tensor& counts, const Tensor& table_rows,
                             KVCacheAppendPrefixExecutionEnvelope envelope,
-                            PagedKVBatchLayerView cache, cudaStream_t stream) {
-    validate_inputs(k, v, positions, counts, table_rows, envelope);
-    validate_paged_cache(cache, envelope);
+                            PagedKVBatchLayerView cache, CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    validate_inputs(k, v, positions, counts, table_rows, envelope, execution.device());
+    validate_paged_cache(cache, envelope, execution.device());
     detail::kv_cache_append_prefix_dispatch(k, v, positions, counts, table_rows, cache, envelope,
                                             stream);
 }
@@ -320,9 +337,10 @@ void kv_cache_append_prefix(const Tensor& k, const Tensor& v, const Tensor& posi
 void kv_cache_append_prefix(const Tensor& k, const Tensor& v, const Tensor& positions,
                             const Tensor& counts, const Tensor& lanes,
                             KVCacheAppendPrefixExecutionEnvelope envelope,
-                            CyclicKVCacheLayerView cache, cudaStream_t stream) {
-    validate_inputs(k, v, positions, counts, lanes, envelope);
-    validate_cyclic_cache(cache, envelope);
+                            CyclicKVCacheLayerView cache, CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    validate_inputs(k, v, positions, counts, lanes, envelope, execution.device());
+    validate_cyclic_cache(cache, envelope, execution.device());
     detail::kv_cache_append_prefix_dispatch(k, v, positions, counts, lanes, cache, envelope,
                                             stream);
 }

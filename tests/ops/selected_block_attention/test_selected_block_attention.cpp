@@ -1,3 +1,4 @@
+#include "cuda_fixture.h"
 // Qualification of ops::selected_block_attention against an independent FP64 oracle.
 //
 // The cache is written directly in the paged v3 layouts ([256,64,2,N] page-major, shuffled
@@ -264,17 +265,17 @@ View make_view(const Cache& cache, DeviceCache& d, int table_rows) {
     View view{};
     const int n = cache.physical_pages;
     if (cache.profile == Profile::Bf16) {
-        view.k_pages = Tensor(d.k.p, DType::BF16, {kDim, kPage, kKvHeads, n});
-        view.v_pages = Tensor(d.v.p, DType::FP16, {kDim, kPage, kKvHeads, n});
+        view.k_pages = Tensor(d.k.data(), ninfer::test::cuda_environment().context.device(), DType::BF16, {kDim, kPage, kKvHeads, n});
+        view.v_pages = Tensor(d.v.data(), ninfer::test::cuda_environment().context.device(), DType::FP16, {kDim, kPage, kKvHeads, n});
         view.storage = KvCacheStorage::BFloat16;
     } else {
-        view.k_pages       = Tensor(d.k.p, DType::FP8_E4M3FN, {kDim, kPage, kKvHeads, n});
-        view.v_pages       = Tensor(d.v.p, DType::FP8_E4M3FN, {kDim, kPage, kKvHeads, n});
-        view.k_scale_pages = Tensor(d.ks.p, DType::FP16, {1, kPage, kKvHeads, n});
-        view.v_scale_pages = Tensor(d.vs.p, DType::FP16, {1, kPage, kKvHeads, n});
+        view.k_pages       = Tensor(d.k.data(), ninfer::test::cuda_environment().context.device(), DType::FP8_E4M3FN, {kDim, kPage, kKvHeads, n});
+        view.v_pages       = Tensor(d.v.data(), ninfer::test::cuda_environment().context.device(), DType::FP8_E4M3FN, {kDim, kPage, kKvHeads, n});
+        view.k_scale_pages = Tensor(d.ks.data(), ninfer::test::cuda_environment().context.device(), DType::FP16, {1, kPage, kKvHeads, n});
+        view.v_scale_pages = Tensor(d.vs.data(), ninfer::test::cuda_environment().context.device(), DType::FP16, {1, kPage, kKvHeads, n});
         view.storage       = KvCacheStorage::Fp8E4M3Row256;
     }
-    const Tensor tables(d.tables.p, DType::I32, {cache.logical_pages, table_rows});
+    const Tensor tables(d.tables.data(), ninfer::test::cuda_environment().context.device(), DType::I32, {cache.logical_pages, table_rows});
     if constexpr (requires { view.block_tables; }) {
         view.block_tables = tables;
     } else {
@@ -379,13 +380,13 @@ int run_batched(Profile profile, int batch, int context, int mode, float magnitu
     GuardedDeviceBuffer out(static_cast<std::size_t>(batch) * kQueryHeads * kDim * 2);
     const std::size_t capacity = ops::selected_block_attention_workspace_capacity_bytes(1, batch);
     GuardedDeviceBuffer workspace_storage(capacity);
-    WorkspaceArena workspace(DeviceSpan{workspace_storage.data(), capacity});
-    Tensor q_t(q_device.p, DType::BF16, {kDim, kQueryHeads, batch});
-    Tensor positions_t(positions_device.p, DType::I32, {batch});
-    Tensor rows_t(rows_device.p, DType::I32, {batch});
-    Tensor selections_t(selections_device.p, DType::I32, {kMaxSelected, batch});
-    Tensor counts_t(counts_device.p, DType::I32, {batch});
-    Tensor out_t(out.data(), DType::BF16, {kDim, kQueryHeads, batch});
+    MemoryArena workspace(workspace_storage.span().subspan(0, capacity));
+    Tensor q_t(q_device.span(), DType::BF16, {kDim, kQueryHeads, batch});
+    Tensor positions_t(positions_device.span(), DType::I32, {batch});
+    Tensor rows_t(rows_device.span(), DType::I32, {batch});
+    Tensor selections_t(selections_device.span(), DType::I32, {kMaxSelected, batch});
+    Tensor counts_t(counts_device.span(), DType::I32, {batch});
+    Tensor out_t(out.span(), DType::BF16, {kDim, kQueryHeads, batch});
     const std::string base = std::string("selected_block_attention batched ") +
                              (profile == Profile::Bf16 ? "bf16" : "fp8") + " B=" +
                              std::to_string(batch) + " ctx=" + std::to_string(context) +
@@ -401,16 +402,16 @@ int run_batched(Profile profile, int batch, int context, int mode, float magnitu
     };
     if (!graph) {
         ops::selected_block_attention(q_t, positions_t, rows_t, selections_t, counts_t, view,
-                                      workspace, out_t, nullptr);
+                                      workspace, out_t, ninfer::test::cuda_environment().default_execution);
         cuda_synchronize();
         verify(columns, base);
         const auto batched = from_device_bf16(out.data(), q.size());
         DeviceBuffer single_position_device = to_device(std::vector<std::int32_t>{0});
         DeviceBuffer single_row_device = to_device(std::vector<std::int32_t>{0});
         DeviceBuffer single_count_device = to_device(std::vector<std::int32_t>{0});
-        const Tensor single_position(single_position_device.p, DType::I32, {1});
-        const Tensor single_row(single_row_device.p, DType::I32, {1});
-        const Tensor single_count(single_count_device.p, DType::I32, {1});
+        const Tensor single_position(single_position_device.span(), DType::I32, {1});
+        const Tensor single_row(single_row_device.span(), DType::I32, {1});
+        const Tensor single_count(single_count_device.span(), DType::I32, {1});
         for (int column = 0; column < batch; ++column) {
             single_position_device.copy_from_host(&positions[column], sizeof(std::int32_t));
             single_row_device.copy_from_host(&rows[column], sizeof(std::int32_t));
@@ -419,7 +420,7 @@ int run_batched(Profile profile, int batch, int context, int mode, float magnitu
             ops::selected_block_attention(
                 q_t.slice(2, column, 1), single_position, single_row,
                 selections_t.slice(1, column, 1), single_count, view, workspace,
-                single_out, nullptr);
+                single_out, ninfer::test::cuda_environment().default_execution);
         }
         cuda_synchronize();
         if (from_device_bf16(out.data(), q.size()) != batched) {
@@ -432,12 +433,13 @@ int run_batched(Profile profile, int batch, int context, int mode, float magnitu
     }
     cudaStream_t stream = nullptr;
     cuda_check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "create stream");
+    const auto stream_execution = ninfer::test::cuda_environment().context.execution_view(stream);
     {
         DecodeGraphDefinition definition;
         DecodeGraphExecutable executable;
         definition.capture(stream, [&] {
             ops::selected_block_attention(q_t, positions_t, rows_t, selections_t, counts_t, view,
-                                          workspace, out_t, stream);
+                                          workspace, out_t, stream_execution);
         });
         executable.instantiate(definition);
         executable.launch(stream);
@@ -474,28 +476,29 @@ int run_shared_row(Profile profile, int tokens, int first_position, int mode, fl
     DeviceBuffer q_device = to_device(q_bits), positions_device = to_device(positions),
                  selections_device = to_device(selections), counts_device = to_device(counts);
     GuardedDeviceBuffer out(static_cast<std::size_t>(tokens) * kQueryHeads * kDim * 2);
-    Tensor q_t(q_device.p, DType::BF16, {kDim, kQueryHeads, tokens});
-    Tensor positions_t(positions_device.p, DType::I32, {tokens});
-    Tensor selections_t(selections_device.p, DType::I32, {kMaxSelected, tokens});
-    Tensor counts_t(counts_device.p, DType::I32, {tokens});
-    Tensor out_t(out.data(), DType::BF16, {kDim, kQueryHeads, tokens});
-    const auto launch = [&](cudaStream_t stream) {
-        ops::selected_block_attention(q_t, positions_t, selections_t, counts_t, view, out_t, stream);
+    Tensor q_t(q_device.span(), DType::BF16, {kDim, kQueryHeads, tokens});
+    Tensor positions_t(positions_device.span(), DType::I32, {tokens});
+    Tensor selections_t(selections_device.span(), DType::I32, {kMaxSelected, tokens});
+    Tensor counts_t(counts_device.span(), DType::I32, {tokens});
+    Tensor out_t(out.span(), DType::BF16, {kDim, kQueryHeads, tokens});
+    const auto launch = [&](CudaExecutionView execution) {
+        ops::selected_block_attention(q_t, positions_t, selections_t, counts_t, view, out_t, execution);
     };
     if (graph) {
         cudaStream_t stream = nullptr;
         cuda_check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "create stream");
+    const auto stream_execution = ninfer::test::cuda_environment().context.execution_view(stream);
         {
             DecodeGraphDefinition definition;
             DecodeGraphExecutable executable;
-            definition.capture(stream, [&] { launch(stream); });
+            definition.capture(stream, [&] { launch(stream_execution); });
             executable.instantiate(definition);
             executable.launch(stream);
             cuda_synchronize(stream);
         }
         cuda_check(cudaStreamDestroy(stream), "destroy stream");
     } else {
-        launch(nullptr);
+        launch(ninfer::test::cuda_environment().default_execution);
         cuda_synchronize();
     }
     const std::string label = std::string("selected_block_attention shared-row ") +

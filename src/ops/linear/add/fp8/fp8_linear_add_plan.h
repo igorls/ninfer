@@ -25,9 +25,9 @@ void fp8_linear_add_decode_launch(const Tensor& x, const Weight& weight, Tensor&
                                   cudaStream_t stream);
 void fp8_linear_add_matrix_launch(const Tensor&, const Weight&, Tensor&, cudaStream_t);
 void fp8_linear_add_a8_launch(const Tensor& x, const Weight& weight, Tensor& residual,
-                              WorkspaceArena& workspace, cudaStream_t stream);
+                              MemoryArena& workspace, cudaStream_t stream);
 
 void fp8_linear_add_dispatch(const Tensor& x, const Weight& weight, Tensor& residual,
-                             LinearPolicy policy, WorkspaceArena& workspace, cudaStream_t stream);
+                             LinearPolicy policy, MemoryArena& workspace, cudaStream_t stream);
 
 } // namespace ninfer::ops::detail

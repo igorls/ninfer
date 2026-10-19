@@ -15,9 +15,9 @@ Qualification and performance evidence remain specific to each device and route.
 | Item | Value |
 |---|---|
 | Fork line | `workstation` (named `port/upstream-v3` until September 28, 2026), based on upstream [`bace20dc`](https://github.com/Neroued/ninfer/commit/bace20dc70249eed6402b66d4852c6c3f9612905) (September 24, 2026) and merged with upstream `e31bc99b` in `e2a149f1` and `d44ab584` in `d29866c9` |
-| Last merged upstream commit | [`6e772ee3`](https://github.com/Neroued/ninfer/commit/6e772ee3) on the local `sync/upstream-64d10fbf` branch; hardware qualification is in progress |
+| Last merged upstream commit | [`6a42de35`](https://github.com/Neroued/ninfer/commit/6a42de35) on the local `sync/upstream-64d10fbf` branch; hardware qualification is in progress |
 | Pre-v3 fork line | `research/qwen4-flash-next` at `87812bc8` (September 26); the source for Flash-Next |
-| Current sync | The earlier 44-commit sync through `81c8ce09` is followed by the first 38 of the 77 reviewed incoming commits; the Core memory/execution boundary is next |
+| Current sync | The earlier 44-commit sync through `81c8ce09` is followed by the first 39 of the 77 reviewed incoming commits; CPU/GPU expert execution and graph calibration are next |
 | Current target | `64d10fbf` (October 16, 2026); full source integration and qualification remain incomplete; see the assessment below |
 
 The fork syncs by merging `origin/master` into the fork line, never by rebasing or cherry-picking
@@ -290,7 +290,46 @@ Those fields migrate to the equivalent shared request validator, retaining
 their null/default and boolean schema behavior.
 The first second-boundary qualification build also exposed a malformed merge of
 the TopK fixtures. The complete fork oracle, including Q8, FP8, BF16 and mapped
-Q4 heads, is retained under the new test target; its rerun is pending.
+Q4 heads, is retained under the new test target and passes on Colab G4. The NVFP4
+LinearAdd fixture also required its complete shared oracle runner, retaining the
+fork's A16/A4 boundaries and graph/ragged cases. All 88 artifact/converter Python
+checks pass with CUDA Torch enabled on the second G4.
+
+The selected second-boundary matrix initially passed 26 of 29 entries. The three
+failures were masked batched BF16 KV writes missing from the shared writer, an
+FP32-scale GDN snapshot losing precision in its short A8 contraction, and a GDN
+record fixture hardcoding input width 5120 for the 2560-wide parent. The shared
+BF16 writer now handles masked request rows with the existing exact codec oracle;
+the FP32-scale convolution route keeps BF16 activations through 32 aggregate
+columns; the fixture follows its actual parent width. All affected GDN/KV checks
+pass after correction. Performance of the convolution fallback is unmeasured.
+
+The first complete Flash-Next candidate run also failed MTP batch target parity,
+although its other cases passed. The merge had replaced the fork's fixed paired
+split-8 control reduction with token-dependent schedules. Restoring the fixed
+reduction makes the real-model parity case pass, and an added exact shared-column
+regression passes for BF16 and FP32 controls over decode, speculative and prefill
+widths. Control accuracy remains checked independently in FP64. Its capacity test
+now verifies the entire interval instead of assuming the largest extent needs no
+scratch. The original fork baseline passes all 24 Flash-Next real-model cases.
+
+The Core boundary (`6a42de35`) is adapted with explicit physical Device tags,
+DeviceBuffer backing, non-owning MemoryArena spans and borrowed CudaExecutionView
+operands across the fork's native routes. NVML device-wide reserve enforcement
+remains at physical allocation, and blocking synchronization remains the default.
+Windows CLI/server/Supervisor builds and four selected native host memory/API
+tests pass. The complete Linux CLI/server/test build passes; its 174-entry CTest
+run and full real-model rerun are in progress. Earlier incomplete BF16 Linear and
+FP8 SwiGLU fixture merges, remaining pointer/view migrations and retained stream
+signatures were caught and corrected during compilation. Independent fork shape,
+BF16 head and graph cases are retained with the shared mathematical runners.
+This is source/build evidence, not full qualification.
+
+The Colab hosts are RTX PRO 6000 Blackwell **Server Edition**, driver 580.82.07,
+CUDA 13.3.33 and Python 3.11.17. They are not the workstation card or an RTX 5090.
+The resident artifacts are pinned 27B NVFP4 and fork mixed Flash-Next v3 inputs.
+No matched inference speed comparison, full-model offload result or physical
+RTX 5090 qualification has been established by this sync yet.
 
 As a separate baseline for later ports, upstream `64d10fbf` passes 14 selected
 CPU topology/executor, asynchronous read-queue, expert-cache, NF4 and CPU MoE

@@ -186,13 +186,7 @@ private:
 void require_supported_ple(const TextConfig& config) {
     // The PLE convolution's dilation is the n-gram size (transformers Qwen4ExpTextPLELayer).
     ops::require_ple_ngram_geometry({
-        .stream_width = config.hidden_size,
-        .streams      = config.hyper_connection.streams,
-        .row_width    = config.ple.head_width(),
-        .taps         = config.ple.conv_kernel_size,
-        .dilation     = config.ple.ngram_size,
-        .epsilon      = config.rms_norm_eps,
-    });
+        .stream_width = config.hidden_size, .streams      = config.hyper_connection.streams, .row_width    = config.ple.head_width(), .taps         = config.ple.conv_kernel_size, .dilation     = config.ple.ngram_size, .epsilon      = config.rms_norm_eps, });
 }
 
 Parameters::Parameters(const Model& source) : model(source) {

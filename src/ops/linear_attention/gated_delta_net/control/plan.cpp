@@ -29,18 +29,10 @@ constexpr std::array kN64K2048{
     Route{1, 127, mma(64, 16)},    Route{128, 1024, mma(64, 8)},   Route{1025, 2048, mma(64, 4)},
     Route{2049, 4096, mma(64, 2)}, Route{4097, kLast, mma(64, 1)},
 };
+// Fixed paired-row split-K keeps each token's reduction order independent of
+// prefill chunking and MTP batch width, as required by the resident Flash-Next route.
 constexpr std::array kN96K2560{
-    Route{1, 1, {Kernel::Gemv}},
-    Route{2, 8, {Kernel::TiledGemv, 4}},
-    Route{9, 192, mma(64, 8, RowMode::Merged)},
-    Route{193, 448, mma(64, 8)},
-    Route{449, 896, mma(128, 8)},
-    Route{897, 1280, mma(64, 8)},
-    Route{1281, 2688, mma(64, 4)},
-    Route{2689, 5120, mma(64, 2)},
-    Route{5121, 7168, mma(128, 1)},
-    Route{7169, 8192, mma(64, 1)},
-    Route{8193, kLast, mma(128, 1)},
+    Route{1, kLast, mma(64, 8)},
 };
 
 // Materialized norm+control owns its tuning independently of control projection.

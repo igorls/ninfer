@@ -1,3 +1,4 @@
+#include "ops/common/host/operands.h"
 #include "ninfer/ops/hyper_connection.h"
 
 #include "core/layout.h"
@@ -93,7 +94,7 @@ detail::HyperScratch allocate_scratch(Arena& arena, std::int32_t tokens) {
 }
 
 void run(const Tensor& hidden, const HyperConnectionWeights& weights, const Weight* inject,
-         Tensor& block_input, Tensor* injection, WorkspaceArena& workspace, cudaStream_t stream) {
+         Tensor& block_input, Tensor* injection, MemoryArena& workspace, cudaStream_t stream) {
     const auto scope   = workspace.scope();
     const auto scratch = allocate_scratch(workspace, hidden.ne[1]);
     detail::hyper_mix_launch(hidden.data, weights.norm.data, weights.input_mix_down.qdata,
@@ -118,7 +119,17 @@ std::size_t hyper_connection_workspace_capacity_bytes(std::int32_t min_tokens,
 
 void hyper_connection_prepare(const Tensor& hidden, const HyperConnectionWeights& weights,
                               const Weight& block_inject, Tensor& block_input, Tensor& injection,
-                              WorkspaceArena& workspace, cudaStream_t stream) {
+                              MemoryArena& workspace, CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    if (hidden.data) common::operand::device(hidden.device, execution.device(), "hyper_connection_prepare", "hidden");
+    common::operand::device(weights.norm.device, execution.device(), "hyper_connection_prepare", "weights.norm");
+    common::operand::device(weights.input_mix_down.device, execution.device(), "hyper_connection_prepare", "weights.input_mix_down");
+    common::operand::device(weights.input_mix_up.device, execution.device(), "hyper_connection_prepare", "weights.input_mix_up");
+    common::operand::device(block_inject.device, execution.device(), "hyper_connection_prepare", "block_inject");
+    if (block_input.data) common::operand::device(block_input.device, execution.device(), "hyper_connection_prepare", "block_input");
+    if (injection.data) common::operand::device(injection.device, execution.device(), "hyper_connection_prepare", "injection");
+    common::operand::device(workspace.device(), execution.device(), "hyper_connection_prepare", "workspace");
+
     constexpr const char* op = "hyper_connection_prepare";
     validate_mix(hidden, weights, block_input, op);
     require_bf16_weight(block_inject, kStreams, kConcat, op, "block_inject");
@@ -132,7 +143,15 @@ void hyper_connection_prepare(const Tensor& hidden, const HyperConnectionWeights
 }
 
 void hyper_connection_mix(const Tensor& hidden, const HyperConnectionWeights& weights,
-                          Tensor& block_input, WorkspaceArena& workspace, cudaStream_t stream) {
+                          Tensor& block_input, MemoryArena& workspace, CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    if (hidden.data) common::operand::device(hidden.device, execution.device(), "hyper_connection_mix", "hidden");
+    common::operand::device(weights.norm.device, execution.device(), "hyper_connection_mix", "weights.norm");
+    common::operand::device(weights.input_mix_down.device, execution.device(), "hyper_connection_mix", "weights.input_mix_down");
+    common::operand::device(weights.input_mix_up.device, execution.device(), "hyper_connection_mix", "weights.input_mix_up");
+    if (block_input.data) common::operand::device(block_input.device, execution.device(), "hyper_connection_mix", "block_input");
+    common::operand::device(workspace.device(), execution.device(), "hyper_connection_mix", "workspace");
+
     constexpr const char* op = "hyper_connection_mix";
     validate_mix(hidden, weights, block_input, op);
     require_disjoint_output(block_input, hidden, weights, nullptr, op, "block_input alias");
@@ -140,7 +159,12 @@ void hyper_connection_mix(const Tensor& hidden, const HyperConnectionWeights& we
 }
 
 void hyper_connection_inject(const Tensor& block_output, const Tensor& injection, Tensor& hidden,
-                             cudaStream_t stream) {
+                             CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    if (block_output.data) common::operand::device(block_output.device, execution.device(), "hyper_connection_inject", "block_output");
+    if (injection.data) common::operand::device(injection.device, execution.device(), "hyper_connection_inject", "injection");
+    if (hidden.data) common::operand::device(hidden.device, execution.device(), "hyper_connection_inject", "hidden");
+
     constexpr const char* op  = "hyper_connection_inject";
     const std::int32_t tokens = hidden.ne[1];
     if (tokens <= 0) fail(op, "token extent");
@@ -155,7 +179,11 @@ void hyper_connection_inject(const Tensor& block_output, const Tensor& injection
                                 hidden.data, tokens, stream);
 }
 
-void hyper_connection_expand(const Tensor& x, Tensor& hidden, cudaStream_t stream) {
+void hyper_connection_expand(const Tensor& x, Tensor& hidden, CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    if (x.data) common::operand::device(x.device, execution.device(), "hyper_connection_expand", "x");
+    if (hidden.data) common::operand::device(hidden.device, execution.device(), "hyper_connection_expand", "hidden");
+
     constexpr const char* op  = "hyper_connection_expand";
     const std::int32_t tokens = x.ne[1];
     if (tokens <= 0) fail(op, "token extent");

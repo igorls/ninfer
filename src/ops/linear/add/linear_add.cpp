@@ -139,13 +139,18 @@ std::size_t linear_add_workspace_capacity_bytes(QType qtype, std::int32_t output
     throw std::invalid_argument("linear_add workspace: unsupported weight format");
 }
 
-void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, WorkspaceArena& ws,
-                cudaStream_t stream) {
-    linear_add(x, w, residual_out, LinearPolicy::A16Only, ws, stream);
+void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, MemoryArena& ws,
+                CudaExecutionView execution) {
+    linear_add(x, w, residual_out, LinearPolicy::A16Only, ws, execution);
 }
 
 void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPolicy policy,
-                WorkspaceArena& ws, cudaStream_t stream) {
+                MemoryArena& ws, CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    common::operand::device(x.device, execution.device(), "linear_add", "x");
+    common::operand::device(w.device, execution.device(), "linear_add", "weight");
+    common::operand::device(residual_out.device, execution.device(), "linear_add", "residual");
+    common::operand::device(ws.device(), execution.device(), "linear_add", "workspace");
     validate_policy(policy);
     const std::int32_t t = x.ne[1];
     if (t <= 0) { throw std::invalid_argument("linear_add: T must be positive"); }

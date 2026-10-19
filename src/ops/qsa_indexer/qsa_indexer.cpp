@@ -1,3 +1,4 @@
+#include "ops/common/host/operands.h"
 #include "ninfer/ops/qsa_indexer.h"
 
 #include "core/layout.h"
@@ -99,7 +100,7 @@ detail::QsaSelectWorkspace allocate_select(Arena& arena, std::int32_t columns,
 void select_common(const Tensor& projected, const Tensor& positions, const Tensor& rope_positions,
                    const Tensor* table_rows, const Tensor& query_norm,
                    const QsaIndexerBlockKeys& blocks, QsaIndexerSelectEnvelope envelope,
-                   WorkspaceArena& workspace, Tensor& selections, Tensor& counts,
+                   MemoryArena& workspace, Tensor& selections, Tensor& counts,
                    cudaStream_t stream) {
     const std::int32_t columns = projected.ne[1];
     if (columns < 1 || (table_rows != nullptr && columns > kMaxRowColumns)) {
@@ -140,7 +141,17 @@ void qsa_indexer_append(const Tensor& projected, const Tensor& positions,
                         const Tensor& rope_positions, const Tensor& key_norm,
                         std::int32_t source_slot, std::int32_t destination_slot,
                         const QsaIndexerKeyState& state, const QsaIndexerBlockKeys& blocks,
-                        cudaStream_t stream) {
+                        CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    if (projected.data) common::operand::device(projected.device, execution.device(), "qsa_indexer_append", "projected");
+    if (positions.data) common::operand::device(positions.device, execution.device(), "qsa_indexer_append", "positions");
+    if (rope_positions.data) common::operand::device(rope_positions.device, execution.device(), "qsa_indexer_append", "rope_positions");
+    if (key_norm.data) common::operand::device(key_norm.device, execution.device(), "qsa_indexer_append", "key_norm");
+    common::operand::device(state.raw_keys.device, execution.device(), "qsa_indexer_append", "state.raw_keys");
+    common::operand::device(state.raw_positions.device, execution.device(), "qsa_indexer_append", "state.raw_positions");
+    common::operand::device(blocks.keys.device, execution.device(), "qsa_indexer_append", "blocks.keys");
+    if (blocks.block_tables.data) common::operand::device(blocks.block_tables.device, execution.device(), "qsa_indexer_append", "blocks.block_tables");
+
     const std::int32_t tokens = projected.ne[1];
     if (tokens < 1) { fail(kAppend, "T must be positive"); }
     require(kAppend, projected, DType::BF16, {kProjection, tokens}, "projection");
@@ -167,7 +178,21 @@ void qsa_indexer_append(const Tensor& projected, const Tensor& positions,
                         const Tensor& initial_slots, const Tensor& snapshot_base_slots,
                         const Tensor& valid_columns,
                         const Tensor& key_norm, const QsaIndexerKeyState& state,
-                        const QsaIndexerBlockKeys& blocks, cudaStream_t stream) {
+                        const QsaIndexerBlockKeys& blocks, CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    if (projected.data) common::operand::device(projected.device, execution.device(), "qsa_indexer_append", "projected");
+    if (positions.data) common::operand::device(positions.device, execution.device(), "qsa_indexer_append", "positions");
+    if (rope_positions.data) common::operand::device(rope_positions.device, execution.device(), "qsa_indexer_append", "rope_positions");
+    if (table_rows.data) common::operand::device(table_rows.device, execution.device(), "qsa_indexer_append", "table_rows");
+    if (initial_slots.data) common::operand::device(initial_slots.device, execution.device(), "qsa_indexer_append", "initial_slots");
+    if (snapshot_base_slots.data) common::operand::device(snapshot_base_slots.device, execution.device(), "qsa_indexer_append", "snapshot_base_slots");
+    if (valid_columns.data) common::operand::device(valid_columns.device, execution.device(), "qsa_indexer_append", "valid_columns");
+    if (key_norm.data) common::operand::device(key_norm.device, execution.device(), "qsa_indexer_append", "key_norm");
+    common::operand::device(state.raw_keys.device, execution.device(), "qsa_indexer_append", "state.raw_keys");
+    common::operand::device(state.raw_positions.device, execution.device(), "qsa_indexer_append", "state.raw_positions");
+    common::operand::device(blocks.keys.device, execution.device(), "qsa_indexer_append", "blocks.keys");
+    if (blocks.block_tables.data) common::operand::device(blocks.block_tables.device, execution.device(), "qsa_indexer_append", "blocks.block_tables");
+
     const std::int32_t width = projected.ne[1];
     const std::int32_t batch = projected.ne[2];
     if (width < 1 || width > kMaxWidth || batch < 1 || batch > kMaxBatch) {
@@ -208,8 +233,20 @@ std::size_t qsa_indexer_select_workspace_capacity_bytes(std::int32_t min_columns
 void qsa_indexer_select(const Tensor& projected, const Tensor& positions,
                         const Tensor& rope_positions, const Tensor& table_rows,
                         const Tensor& query_norm, const QsaIndexerBlockKeys& blocks,
-                        QsaIndexerSelectEnvelope envelope, WorkspaceArena& workspace,
-                        Tensor& selections, Tensor& counts, cudaStream_t stream) {
+                        QsaIndexerSelectEnvelope envelope, MemoryArena& workspace,
+                        Tensor& selections, Tensor& counts, CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    if (projected.data) common::operand::device(projected.device, execution.device(), "qsa_indexer_select", "projected");
+    if (positions.data) common::operand::device(positions.device, execution.device(), "qsa_indexer_select", "positions");
+    if (rope_positions.data) common::operand::device(rope_positions.device, execution.device(), "qsa_indexer_select", "rope_positions");
+    if (table_rows.data) common::operand::device(table_rows.device, execution.device(), "qsa_indexer_select", "table_rows");
+    if (query_norm.data) common::operand::device(query_norm.device, execution.device(), "qsa_indexer_select", "query_norm");
+    common::operand::device(blocks.keys.device, execution.device(), "qsa_indexer_select", "blocks.keys");
+    if (blocks.block_tables.data) common::operand::device(blocks.block_tables.device, execution.device(), "qsa_indexer_select", "blocks.block_tables");
+    common::operand::device(workspace.device(), execution.device(), "qsa_indexer_select", "workspace");
+    if (selections.data) common::operand::device(selections.device, execution.device(), "qsa_indexer_select", "selections");
+    if (counts.data) common::operand::device(counts.device, execution.device(), "qsa_indexer_select", "counts");
+
     select_common(projected, positions, rope_positions, &table_rows, query_norm, blocks, envelope,
                   workspace, selections, counts, stream);
 }
@@ -217,8 +254,19 @@ void qsa_indexer_select(const Tensor& projected, const Tensor& positions,
 void qsa_indexer_select(const Tensor& projected, const Tensor& positions,
                         const Tensor& rope_positions, const Tensor& query_norm,
                         const QsaIndexerBlockKeys& blocks, QsaIndexerSelectEnvelope envelope,
-                        WorkspaceArena& workspace, Tensor& selections, Tensor& counts,
-                        cudaStream_t stream) {
+                        MemoryArena& workspace, Tensor& selections, Tensor& counts,
+                        CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    if (projected.data) common::operand::device(projected.device, execution.device(), "qsa_indexer_select", "projected");
+    if (positions.data) common::operand::device(positions.device, execution.device(), "qsa_indexer_select", "positions");
+    if (rope_positions.data) common::operand::device(rope_positions.device, execution.device(), "qsa_indexer_select", "rope_positions");
+    if (query_norm.data) common::operand::device(query_norm.device, execution.device(), "qsa_indexer_select", "query_norm");
+    common::operand::device(blocks.keys.device, execution.device(), "qsa_indexer_select", "blocks.keys");
+    if (blocks.block_tables.data) common::operand::device(blocks.block_tables.device, execution.device(), "qsa_indexer_select", "blocks.block_tables");
+    common::operand::device(workspace.device(), execution.device(), "qsa_indexer_select", "workspace");
+    if (selections.data) common::operand::device(selections.device, execution.device(), "qsa_indexer_select", "selections");
+    if (counts.data) common::operand::device(counts.device, execution.device(), "qsa_indexer_select", "counts");
+
     select_common(projected, positions, rope_positions, nullptr, query_norm, blocks, envelope,
                   workspace, selections, counts, stream);
 }

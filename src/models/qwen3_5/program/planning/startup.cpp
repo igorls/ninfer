@@ -292,7 +292,6 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
 }
 
 WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
-    const DeviceExecutionView device_execution{nullptr, plan.multiprocessor_count};
     const auto& parameters = *plan.parameters;
     const auto& config     = parameters.model.config().text;
 
@@ -322,8 +321,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
     };
     const auto linear_scratch = [&](WorkspaceLayoutBuilder& layout,
                                     const execution::LinearParameters& p, int first, int last) {
-        scratch(layout, ops::linear_workspace_capacity_bytes(p.weight.qtype, p.weight.n, p.weight.k,
-                                                             p.policy, first, last));
+        scratch(layout, ops::linear_workspace_capacity_bytes(p.weight.qtype, p.weight.n, p.weight.k, p.policy, first, last));
     };
     const auto add_scratch = [&](WorkspaceLayoutBuilder& layout,
                                  const execution::LinearParameters& p, int first, int last) {
@@ -345,11 +343,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                                                                     first, last));
                     (void)workspace::text_attention_results(layout, config, last);
                     scratch(layout, ops::causal_softmax_attention_workspace_capacity_bytes(
-                                        {dimension(config.attention->head_dim),
-                                         dimension(config.attention->num_attention_heads),
-                                         dimension(config.attention->num_key_value_heads)},
-                                        plan.kv_storage, envelope, batch_size, min_width, max_width,
-                                        device_execution));
+                                        {dimension(config.attention->head_dim), dimension(config.attention->num_attention_heads), dimension(config.attention->num_key_value_heads)}, plan.kv_storage, envelope, batch_size, min_width, max_width, plan.multiprocessor_count));
                     add_scratch(layout, attention->output, first, last);
                 } else {
                     const auto& gdn = std::get<execution::GdnParameters>(block.mixer);
@@ -372,8 +366,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                     if (path == GdnWorkspacePath::Prefill) {
                         scratch(layout,
                                 ops::gated_delta_net_workspace_capacity_bytes(
-                                    dimension(config.gdn->linear_num_key_heads),
-                                    dimension(config.gdn->linear_num_value_heads), first, last));
+                                    dimension(config.gdn->linear_num_key_heads), dimension(config.gdn->linear_num_value_heads), first, last));
                     }
                     (void)workspace::gdn_normalized_output(layout, config, last);
                     add_scratch(layout, gdn.output, first, last);
@@ -414,10 +407,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                                                   tokens, tokens));
         (void)workspace::mtp_attention_results(layout, config, tokens);
         scratch(layout, ops::causal_softmax_attention_workspace_capacity_bytes(
-                            {dimension(config.attention->head_dim),
-                             dimension(config.attention->num_attention_heads),
-                             dimension(config.attention->num_key_value_heads)},
-                            plan.kv_storage, envelope, 1, tokens, tokens, device_execution));
+                            {dimension(config.attention->head_dim), dimension(config.attention->num_attention_heads), dimension(config.attention->num_key_value_heads)}, plan.kv_storage, envelope, 1, tokens, tokens, plan.multiprocessor_count));
         mtp_post_mixer(layout, tokens, tokens);
     };
     const auto mtp_full_call = [&](WorkspaceLayoutBuilder& layout, std::int32_t tokens,
@@ -453,10 +443,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         matrix(layout, DType::I32, 3, 1);
         matrix(layout, DType::BF16, dimension(config.attention->query_width()), 1);
         scratch(layout, ops::causal_softmax_attention_workspace_capacity_bytes(
-                            {dimension(config.attention->head_dim),
-                             dimension(config.attention->num_attention_heads),
-                             dimension(config.attention->num_key_value_heads)},
-                            plan.kv_storage, text_envelope, 1, 1, 1, device_execution));
+                            {dimension(config.attention->head_dim), dimension(config.attention->num_attention_heads), dimension(config.attention->num_key_value_heads)}, plan.kv_storage, text_envelope, 1, 1, 1, plan.multiprocessor_count));
         mtp_post_mixer(layout, 1, 1);
         proposal_scratch(layout, 1);
     };
@@ -548,10 +535,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                 (void)workspace::mtp_attention_results(layout, config, tokens);
                 scratch(layout,
                         ops::causal_softmax_attention_workspace_capacity_bytes(
-                            {dimension(config.attention->head_dim),
-                             dimension(config.attention->num_attention_heads),
-                             dimension(config.attention->num_key_value_heads)},
-                            plan.kv_storage, text_envelope, batch, width, width, device_execution));
+                            {dimension(config.attention->head_dim), dimension(config.attention->num_attention_heads), dimension(config.attention->num_key_value_heads)}, plan.kv_storage, text_envelope, batch, width, width, plan.multiprocessor_count));
                 mtp_post_mixer(layout, tokens, tokens);
             };
 
@@ -563,8 +547,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
             proposal_scratch(proposal, batch);
             const std::size_t batch_accept =
                 ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(
-                    dimension(parameters.model.resources().public_token_count), drafts, drafts,
-                    batch, batch);
+                    dimension(parameters.model.resources().public_token_count), drafts, drafts, batch, batch);
             out.mtp_round = std::max({out.mtp_round, finish(target), finish(alignment), finish(ar),
                                       finish(proposal), batch_accept});
         }
@@ -624,15 +607,10 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                         matrix(layout, DType::BF16, dimension(draft->attention.query_width()),
                                tokens);
                         scratch(layout, ops::sliding_window_attention_workspace_capacity_bytes(
-                                            {dimension(draft->attention.head_dim),
-                                             dimension(draft->attention.num_attention_heads),
-                                             dimension(draft->attention.num_key_value_heads)},
-                                            dimension(draft->sliding_window.value_or(0)),
-                                            {0, plan.capacity}, width, width, batch));
+                                            {dimension(draft->attention.head_dim), dimension(draft->attention.num_attention_heads), dimension(draft->attention.num_key_value_heads)}, dimension(draft->sliding_window.value_or(0)), {0, plan.capacity}, width, width, batch));
                         scratch(layout,
                                 ops::linear_dynamic_grouped_conv_add_workspace_capacity_bytes(
-                                    dimension(draft->attention.query_width()), width, width, batch,
-                                    batch));
+                                    dimension(draft->attention.query_width()), width, width, batch, batch));
                     }
                     {
                         auto mlp = layout.scope();
@@ -641,8 +619,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                         for (const auto& block : parameters.draft->layers) {
                             const auto& p = block.mlp.gate_up;
                             scratch(layout, ops::linear_swiglu_workspace_capacity_bytes(
-                                                p.weight.qtype, p.weight.n, p.weight.k, p.policy,
-                                                tokens, tokens));
+                                                p.weight.qtype, p.weight.n, p.weight.k, p.policy, tokens, tokens));
                         }
                         scratch(
                             layout,
@@ -657,8 +634,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                            ? parameters.proposal->head
                                            : parameters.draft->output_head;
                     scratch(layout, ops::linear_topk_workspace_capacity_bytes(
-                                        head.weight.qtype, head.weight.n, head.weight.k,
-                                        mask_columns, mask_columns));
+                                        head.weight.qtype, head.weight.n, head.weight.k, mask_columns, mask_columns));
                     matrix(layout, DType::BF16, dimension(draft->dflash2->selector_rank),
                            mask_columns);
                     linear_scratch(layout, parameters.draft->selector->hidden_projection,
@@ -672,16 +648,9 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                     (void)workspace::dflash_attention(layout, config, *draft, tokens);
                     scratch(layout,
                             std::max(ops::sliding_window_attention_workspace_capacity_bytes(
-                                         {dimension(draft->attention.head_dim),
-                                          dimension(draft->attention.num_attention_heads),
-                                          dimension(draft->attention.num_key_value_heads)},
-                                         dimension(draft->sliding_window.value_or(0)),
-                                         {0, plan.capacity}, width, width, batch),
+                                         {dimension(draft->attention.head_dim), dimension(draft->attention.num_attention_heads), dimension(draft->attention.num_key_value_heads)}, dimension(draft->sliding_window.value_or(0)), {0, plan.capacity}, width, width, batch),
                                      ops::context_softmax_attention_workspace_capacity_bytes(
-                                         {dimension(draft->attention.head_dim),
-                                          dimension(draft->attention.num_attention_heads),
-                                          dimension(draft->attention.num_key_value_heads)},
-                                         {0, plan.capacity}, width, width, batch)));
+                                         {dimension(draft->attention.head_dim), dimension(draft->attention.num_attention_heads), dimension(draft->attention.num_key_value_heads)}, {0, plan.capacity}, width, width, batch)));
                     for (const auto& block : parameters.draft->layers) {
                         add_scratch(layout, block.output, tokens, tokens);
                     }
@@ -692,8 +661,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                     for (const auto& block : parameters.draft->layers) {
                         const auto& p = block.mlp.gate_up;
                         scratch(layout, ops::linear_swiglu_workspace_capacity_bytes(
-                                            p.weight.qtype, p.weight.n, p.weight.k, p.policy,
-                                            tokens, tokens));
+                                            p.weight.qtype, p.weight.n, p.weight.k, p.policy, tokens, tokens));
                     }
                     for (const auto& block : parameters.draft->layers) {
                         add_scratch(layout, block.mlp.down, tokens, tokens);
@@ -725,11 +693,9 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                 const std::size_t accept =
                     draft->dflash2.has_value()
                         ? ops::speculative_accept_sparse_drafts_workspace_capacity_bytes(
-                              dimension(parameters.model.resources().public_token_count), {false},
-                              drafts, drafts, batch, batch)
+                              dimension(parameters.model.resources().public_token_count), {false}, drafts, drafts, batch, batch)
                         : ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(
-                              dimension(parameters.model.resources().public_token_count), drafts,
-                              drafts, batch, batch);
+                              dimension(parameters.model.resources().public_token_count), drafts, drafts, batch, batch);
                 const std::size_t proposal = dflash_proposal_capacity(verify, batch);
                 out.dflash_round =
                     std::max({out.dflash_round, finish(target), accept,
@@ -854,7 +820,6 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->features             = inputs.features;
     impl->use_cuda_graph       = inputs.use_cuda_graph;
     impl->causal_scoring       = inputs.causal_scoring;
-    impl->device               = inputs.device;
     impl->multiprocessor_count = inputs.multiprocessor_count;
     impl->context_cache        = inputs.context_cache;
     impl->kv_storage           = inputs.kv_storage;
@@ -934,7 +899,6 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .features             = models::load_options(options),
         .use_cuda_graph       = options.use_cuda_graph,
         .causal_scoring       = options.purpose == EnginePurpose::CausalScoring,
-        .device               = options.device,
         .multiprocessor_count = device.multiprocessor_count(),
         .context_cache        = options.context_cache,
     };

@@ -38,7 +38,7 @@ Tensor RouteTrace::slice(std::uint32_t layer, std::int32_t columns) const {
     }
     auto* base = static_cast<std::int32_t*>(device_.data) +
                  static_cast<std::size_t>(layer) * kRouteTraceTopK * columns_;
-    return Tensor(base, DType::I32, {kRouteTraceTopK, columns});
+    return Tensor(base, device_.device, DType::I32, {kRouteTraceTopK, columns});
 }
 
 void RouteTrace::download_text(std::int32_t columns, cudaStream_t stream) const {

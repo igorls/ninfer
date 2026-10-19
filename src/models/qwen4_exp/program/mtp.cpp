@@ -79,7 +79,7 @@ void ProgramImpl::mtp_proposal_body(std::int32_t batch, ops::QsaIndexerSelectEnv
     card.set_route_trace(traced_route());
     work.reset();
     auto embedded = frame.embedding.slice(1, 0, batch);
-    ops::embedding(frame.proposal_ids, parameters.mtp->token_embedding, embedded, device.stream);
+    ops::embedding(frame.proposal_ids, parameters.mtp->token_embedding, embedded, device.execution_view());
     execution::OrdinaryDecodeInputs proposal{
         .ids                     = frame.proposal_ids,
         .cache_positions         = frame.proposal_positions,
@@ -90,10 +90,9 @@ void ProgramImpl::mtp_proposal_body(std::int32_t batch, ops::QsaIndexerSelectEnv
         .indexer                 = envelope};
     card.mtp_forward(embedded, frame.ar_hidden, frame.proposal_positions, frame.proposal_rope,
                      frame.next_hidden, &frame.proposal_logits, &proposal);
-    ops::argmax(frame.proposal_logits, frame.proposal_ids,
-                dimension(parameters.model.resources().public_token_count), device.stream);
-    copy(frame.ar_hidden, frame.next_hidden, device.stream);
-    copy(frame.proposal_sources, proposal.state_destination_slots, device.stream);
+    ops::argmax(frame.proposal_logits, frame.proposal_ids, dimension(parameters.model.resources().public_token_count), device.execution_view());
+    copy(frame.ar_hidden, frame.next_hidden, device.stream());
+    copy(frame.proposal_sources, proposal.state_destination_slots, device.stream());
 }
 
 void ProgramImpl::mtp_verify_body(std::int32_t batch, ops::QsaIndexerSelectEnvelope envelope) {
@@ -170,7 +169,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
             copy(frame.ar_hidden.slice(1, row, 1),
                  state_images->continuation_hidden_slot(selectors.source)
                      .view({frame.ar_hidden.ne[0], 1}),
-                 device.stream);
+                 device.stream());
         }
     }
     const std::int32_t proposal_steps = route_trace ? (width - 1) : max_extent;
@@ -193,21 +192,21 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
     mark_workspace_usage(workspace_plan.mtp_round);
     if (proposal_steps > 0) {
         CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, &host, sizeof(host), cudaMemcpyHostToDevice,
-                                   device.stream));
-        copy(frame.proposal_ids, input(offsetof(MtpIngress, anchors), batch), device.stream);
-        copy(frame.proposal_sources, input(offsetof(MtpIngress, sources), batch), device.stream);
+                                   device.stream()));
+        copy(frame.proposal_ids, input(offsetof(MtpIngress, anchors), batch), device.stream());
+        copy(frame.proposal_sources, input(offsetof(MtpIngress, sources), batch), device.stream());
         // Each recursive proposal writes a private forming-block slot. Canonical MTP state remains
         // untouched until teacher extension has rebuilt every accepted target prefix.
         for (std::int32_t step = 0; step < proposal_steps; ++step) {
             copy(frame.proposal_positions,
                  input(offsetof(MtpIngress, proposal_positions), (width - 1) * batch)
                      .slice(0, step * batch, batch),
-                 device.stream);
+                 device.stream());
             copy(frame.proposal_rope,
                  input(offsetof(MtpIngress, proposal_rope), 3 * (width - 1) * batch)
                      .slice(0, step * 3 * batch, 3 * batch)
                      .view({batch, 3}),
-                 device.stream);
+                 device.stream());
             if (step == 0) {
                 for (std::int32_t row = 0; row < batch; ++row) {
                     const auto saved = state_images->continuation_positions_slot(host.sources[row]);
@@ -218,24 +217,24 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
                                                    static_cast<const std::int32_t*>(saved.data) +
                                                        axis,
                                                    sizeof(std::int32_t), cudaMemcpyDeviceToDevice,
-                                                   device.stream));
+                                                   device.stream()));
                     }
                 }
             }
             if (proposal_graph != nullptr) {
-                proposal_graph->launch(device.stream);
+                proposal_graph->launch(device.stream());
             } else {
                 mtp_proposal_body(batch, envelope);
             }
-            if (route_trace) { route_trace->download_proposal(step, batch, device.stream); }
+            if (route_trace) { route_trace->download_proposal(step, batch, device.stream()); }
             CUDA_CHECK(cudaMemcpy2DAsync(static_cast<std::int32_t*>(frame.drafts.data) + step,
                                          (width - 1) * sizeof(std::int32_t),
                                          frame.proposal_ids.data, sizeof(std::int32_t),
                                          sizeof(std::int32_t), batch, cudaMemcpyDeviceToDevice,
-                                         device.stream));
+                                         device.stream()));
         }
         CUDA_CHECK(cudaMemcpyAsync(mtp_egress->drafts.data(), frame.drafts.data,
-                                   frame.drafts.bytes(), cudaMemcpyDeviceToHost, device.stream));
+                                   frame.drafts.bytes(), cudaMemcpyDeviceToHost, device.stream()));
         timing.begin_wait();
         device.synchronize();
         timing.end_wait();
@@ -291,44 +290,44 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
     }
     // The control record and the verification PLE planes.
     CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, &host, frame.ple.bytes, cudaMemcpyHostToDevice,
-                               device.stream));
+                               device.stream()));
     auto verify = mtp_verify_inputs(frame, batch, envelope);
     auto logits = frame.logits.view({frame.logits.ne[0], columns});
     if (verify_graph != nullptr) {
-        verify_graph->launch(device.stream);
+        verify_graph->launch(device.stream());
     } else {
         mtp_verify_body(batch, envelope);
     }
-    if (route_trace) { route_trace->download_text(columns, device.stream); }
+    if (route_trace) { route_trace->download_text(columns, device.stream()); }
     // Teacher MTP keys at position p use target streams at p and token embedding at p+1.
     // The first preceding stream/position comes from the saved continuation, including MRoPE.
     for (std::int32_t row = 0; row < batch; ++row) {
         auto previous = frame.previous.slice(2, row, 1).view({frame.previous.ne[0], width});
         copy(previous.slice(1, 0, 1),
              state_images->continuation_hidden_slot(host.sources[row]).view({previous.ne[0], 1}),
-             device.stream);
+             device.stream());
         copy(previous.slice(1, 1, width - 1),
              frame.hidden.slice(2, row, 1).view({previous.ne[0], width}).slice(1, 0, width - 1),
-             device.stream);
+             device.stream());
         const auto saved = state_images->continuation_positions_slot(host.sources[row]);
         for (std::int32_t axis = 0; axis < 3; ++axis) {
             auto* dst =
                 static_cast<std::int32_t*>(frame.teacher_rope.data) + axis * columns + row * width;
             CUDA_CHECK(cudaMemcpyAsync(dst, static_cast<const std::int32_t*>(saved.data) + axis,
                                        sizeof(std::int32_t), cudaMemcpyDeviceToDevice,
-                                       device.stream));
+                                       device.stream()));
             CUDA_CHECK(cudaMemcpyAsync(
                 dst + 1,
                 static_cast<const std::int32_t*>(verify.rope_positions.data) + axis * columns +
                     row * width,
-                (width - 1) * sizeof(std::int32_t), cudaMemcpyDeviceToDevice, device.stream));
+                (width - 1) * sizeof(std::int32_t), cudaMemcpyDeviceToDevice, device.stream()));
         }
     }
     copy(frame.teacher_positions,
          input(offsetof(MtpIngress, teacher_positions), columns).view({width, batch}),
-         device.stream);
+         device.stream());
     work.reset();
-    ops::embedding(verify.ids, parameters.mtp->token_embedding, frame.embedding, device.stream);
+    ops::embedding(verify.ids, parameters.mtp->token_embedding, frame.embedding, device.execution_view());
     auto teacher_inputs          = verify;
     teacher_inputs.kv_table_rows = input(offsetof(MtpIngress, mtp_rows), columns);
     teacher_inputs.sequence_rows = input(offsetof(MtpIngress, mtp_sequence_rows), batch);
@@ -337,16 +336,12 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
     card.mtp_forward(frame.embedding, previous, frame.teacher_positions.view({columns}),
                      frame.teacher_rope, teacher_out, nullptr, &teacher_inputs, true);
     auto argmax = frame.argmax.view({columns});
-    ops::argmax(logits, argmax, dimension(parameters.model.resources().public_token_count),
-                device.stream);
+    ops::argmax(logits, argmax, dimension(parameters.model.resources().public_token_count), device.execution_view());
     auto lengths = input(offsetof(MtpIngress, frontiers), batch);
     auto anchors = input(offsetof(MtpIngress, anchors), batch);
     work.reset();
     ops::speculative_accept_greedy_drafts(
-        frame.argmax, frame.logits, frame.drafts, input(offsetof(MtpIngress, extents), batch),
-        lengths, anchors, frame.licensed, frame.counts, frame.accepted,
-        dimension(parameters.model.resources().public_token_count), frame.sampling(), work,
-        device.stream);
+        frame.argmax, frame.logits, frame.drafts, input(offsetof(MtpIngress, extents), batch), lengths, anchors, frame.licensed, frame.counts, frame.accepted, dimension(parameters.model.resources().public_token_count), frame.sampling(), work, device.execution_view());
     for (std::int32_t row = 0; row < batch; ++row) {
         auto& request = requests[lanes[row]];
         if (request.logprobs.enabled) {
@@ -358,11 +353,11 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
         }
     }
     CUDA_CHECK(cudaMemcpyAsync(mtp_egress->licensed.data(), frame.licensed.data,
-                               frame.licensed.bytes(), cudaMemcpyDeviceToHost, device.stream));
+                               frame.licensed.bytes(), cudaMemcpyDeviceToHost, device.stream()));
     CUDA_CHECK(cudaMemcpyAsync(mtp_egress->counts.data(), frame.counts.data, frame.counts.bytes(),
-                               cudaMemcpyDeviceToHost, device.stream));
+                               cudaMemcpyDeviceToHost, device.stream()));
     CUDA_CHECK(cudaMemcpyAsync(mtp_egress->accepted.data(), frame.accepted.data,
-                               frame.accepted.bytes(), cudaMemcpyDeviceToHost, device.stream));
+                               frame.accepted.bytes(), cudaMemcpyDeviceToHost, device.stream()));
     timing.begin_wait();
     device.synchronize();
     timing.end_wait();
@@ -438,10 +433,10 @@ runtime::ExecutionTiming ProgramImpl::resolve_mtp_pending(
             throw std::logic_error("MTP invalid committed prefix");
         }
         state_images->commit_token_mixer(mtp_ingress->snapshots[row] + count - 1,
-                                         selectors.destination, device.stream);
+                                         selectors.destination, device.stream());
         copy(state_images->continuation_hidden_slot(selectors.destination),
              frame.hidden.slice(2, row, 1).slice(1, count - 1, 1).view({frame.hidden.ne[0]}),
-             device.stream);
+             device.stream());
         const auto saved = state_images->continuation_positions_slot(selectors.destination);
         const auto rope  = frame.i32(offsetof(MtpIngress, rope), width * batch * 3);
         for (std::int32_t axis = 0; axis < 3; ++axis) {
@@ -449,10 +444,10 @@ runtime::ExecutionTiming ProgramImpl::resolve_mtp_pending(
                                        static_cast<const std::int32_t*>(rope.data) +
                                            axis * width * batch + row * width + count - 1,
                                        sizeof(std::int32_t), cudaMemcpyDeviceToDevice,
-                                       device.stream));
+                                       device.stream()));
         }
     }
-    mtp_fold->execute({rows.data(), lanes.size()}, device.stream);
+    mtp_fold->execute({rows.data(), lanes.size()}, device.execution_view());
     timing.begin_wait();
     device.synchronize();
     timing.end_wait();

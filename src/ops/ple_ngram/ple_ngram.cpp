@@ -1,3 +1,4 @@
+#include "ops/common/host/operands.h"
 #include "ninfer/ops/ple_ngram.h"
 
 #include "core/layout.h"
@@ -84,7 +85,12 @@ void require_ple_ngram_geometry(const PleNgramGeometry& geometry) {
 }
 
 void ple_ngram_decode(const Tensor& codes, const Tensor& scales, Tensor& out,
-                      cudaStream_t stream) {
+                      CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    if (codes.data) common::operand::device(codes.device, execution.device(), "ple_ngram_decode", "codes");
+    if (scales.data) common::operand::device(scales.device, execution.device(), "ple_ngram_decode", "scales");
+    if (out.data) common::operand::device(out.device, execution.device(), "ple_ngram_decode", "out");
+
     constexpr const char* op = "ple_ngram_decode";
     const std::int32_t rows  = codes.ne[1];
     if (rows <= 0) fail(op, "row extent");
@@ -107,7 +113,20 @@ std::size_t ple_ngram_workspace_capacity_bytes(std::int32_t min_columns,
 void ple_ngram(const Tensor& hidden, const Tensor& key, const Tensor& value,
                const Tensor& query_norm, const Tensor& key_norm, const Tensor& conv_norm,
                const Tensor& conv_weight, const Tensor& state_in, Tensor& state_out, Tensor& out,
-               WorkspaceArena& workspace, cudaStream_t stream) {
+               MemoryArena& workspace, CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    if (hidden.data) common::operand::device(hidden.device, execution.device(), "ple_ngram", "hidden");
+    if (key.data) common::operand::device(key.device, execution.device(), "ple_ngram", "key");
+    if (value.data) common::operand::device(value.device, execution.device(), "ple_ngram", "value");
+    if (query_norm.data) common::operand::device(query_norm.device, execution.device(), "ple_ngram", "query_norm");
+    if (key_norm.data) common::operand::device(key_norm.device, execution.device(), "ple_ngram", "key_norm");
+    if (conv_norm.data) common::operand::device(conv_norm.device, execution.device(), "ple_ngram", "conv_norm");
+    if (conv_weight.data) common::operand::device(conv_weight.device, execution.device(), "ple_ngram", "conv_weight");
+    if (state_in.data) common::operand::device(state_in.device, execution.device(), "ple_ngram", "state_in");
+    if (state_out.data) common::operand::device(state_out.device, execution.device(), "ple_ngram", "state_out");
+    if (out.data) common::operand::device(out.device, execution.device(), "ple_ngram", "out");
+    common::operand::device(workspace.device(), execution.device(), "ple_ngram", "workspace");
+
     constexpr const char* op = "ple_ngram";
     const std::int32_t T     = hidden.ne[1];
     if (T <= 0) fail(op, "column extent");
@@ -137,7 +156,22 @@ void ple_ngram_snapshot(const Tensor& hidden, const Tensor& key, const Tensor& v
                         const Tensor& query_norm, const Tensor& key_norm, const Tensor& conv_norm,
                         const Tensor& conv_weight, Tensor& states, const Tensor& valid_columns,
                         const Tensor& initial_slots, const Tensor& snapshot_base_slots,
-                        Tensor& out, WorkspaceArena& workspace, cudaStream_t stream) {
+                        Tensor& out, MemoryArena& workspace, CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    if (hidden.data) common::operand::device(hidden.device, execution.device(), "ple_ngram_snapshot", "hidden");
+    if (key.data) common::operand::device(key.device, execution.device(), "ple_ngram_snapshot", "key");
+    if (value.data) common::operand::device(value.device, execution.device(), "ple_ngram_snapshot", "value");
+    if (query_norm.data) common::operand::device(query_norm.device, execution.device(), "ple_ngram_snapshot", "query_norm");
+    if (key_norm.data) common::operand::device(key_norm.device, execution.device(), "ple_ngram_snapshot", "key_norm");
+    if (conv_norm.data) common::operand::device(conv_norm.device, execution.device(), "ple_ngram_snapshot", "conv_norm");
+    if (conv_weight.data) common::operand::device(conv_weight.device, execution.device(), "ple_ngram_snapshot", "conv_weight");
+    if (states.data) common::operand::device(states.device, execution.device(), "ple_ngram_snapshot", "states");
+    if (valid_columns.data) common::operand::device(valid_columns.device, execution.device(), "ple_ngram_snapshot", "valid_columns");
+    if (initial_slots.data) common::operand::device(initial_slots.device, execution.device(), "ple_ngram_snapshot", "initial_slots");
+    if (snapshot_base_slots.data) common::operand::device(snapshot_base_slots.device, execution.device(), "ple_ngram_snapshot", "snapshot_base_slots");
+    if (out.data) common::operand::device(out.device, execution.device(), "ple_ngram_snapshot", "out");
+    common::operand::device(workspace.device(), execution.device(), "ple_ngram_snapshot", "workspace");
+
     constexpr const char* op = "ple_ngram_snapshot";
     const std::int32_t W     = hidden.ne[1];
     const std::int32_t B     = hidden.ne[2];

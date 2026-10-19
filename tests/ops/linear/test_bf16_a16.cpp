@@ -1,4 +1,6 @@
 #include "core/weight.h"
+#include "cuda_fixture.h"
+#include "core/buffer.h"
 #include "ninfer/ops/linear.h"
 
 #include "ops/direct_bf16_weight.h"
@@ -78,31 +80,10 @@ int run_bf16_projection(std::int32_t n, std::int32_t k, std::uint32_t seed) {
          {63, 64, 65, 66, 95, 96, 97, 98, 127, 128, 129, 130, 191, 192, 193, 194, 1024, 1536}) {
         calls.push_back({tokens});
     }
-    const std::string suffix = " T=" + std::to_string(tokens) + (replay ? " graph" : " eager");
-    int failures             = guarded_output.verify_guards("BF16_A16 Linear output" + suffix);
-    const std::vector<std::uint16_t> output_bits =
-        from_device<std::uint16_t>(guarded_output.data(), static_cast<std::size_t>(rows) * tokens);
-    if (hidden == 2560 && rows >= 2560 && tokens > 1 && tokens <= 48) {
-        for (const int column : {0, tokens - 1}) {
-            Tensor single_output = output.slice(1, column, 1);
-            ops::linear(x.slice(1, column, 1), weight.view(), single_output,
-                        ops::LinearPolicy::A16Only, workspace, nullptr);
-        }
-        cuda_synchronize();
-        if (from_device<std::uint16_t>(guarded_output.data(), output_bits.size()) != output_bits) {
-            std::cerr << "BF16_A16 Linear" << suffix
-                      << " changes a decode column with batch membership\n";
-            ++failures;
-        }
-    }
-    for (std::size_t index = 0; index < output_bits.size(); ++index) {
-        const std::uint16_t bits = output_bits[index];
-        if (!std::isfinite(bf16_to_f32(bits))) {
-            std::cerr << "BF16_A16 Linear output" << suffix << " element " << index
-                      << " is not finite\n";
-            ++failures;
-            break;
-        }
+    for (int tokens : {3, 7, 13, 19, 23, 25, 29, 33, 64, 65, 97, 129, 193}) {
+        // The original graph cases also made an eager call before capture.
+        calls.push_back({tokens});
+        calls.push_back({tokens, CallForm::Policy, ops::LinearPolicy::A16Only, true});
     }
     return failures + run_shape("BF16_A16 Linear", ActivationCompute::A16, make_bf16_weight,
                                 bf16_fixture(n, k, seed, Comparison::Sampled, calls));
@@ -113,57 +94,15 @@ int run_selector_linear() {
     std::vector<Invocation> calls;
     for (int tokens = 1; tokens <= 120; ++tokens) calls.push_back({tokens});
     for (int tokens : {121, 127, 128,  129,  159,  160,  161,  162,  256,  639,  640,
-                       641, 642, 1023, 1024, 1025, 1026, 1279, 1280, 1281, 1282, 2048})
-        run(tokens, false);
+                       641, 642, 1023, 1024, 1025, 1026, 1279, 1280, 1281, 1282, 2048}) {
+        calls.push_back({tokens});
+    }
     for (int tokens : {1,   7,   8,   15,  16,  63,  64,  65,   76,   77,   80,   81,
-                       119, 120, 129, 160, 161, 640, 641, 1024, 1025, 1280, 1281, 2048})
-        run(tokens, true);
-    failures += weight.verify_preserved("BF16 selector weight");
-    return failures;
-}
-
-int run_bf16_linear() {
-    int failures = 0;
-    DeviceWeight attention_weight(make_patterned(14336, 5120, 401U));
-    DeviceWeight output_weight(make_patterned(5120, 6144, 409U));
-    // A checkpoint that keeps its full vocabulary head in BF16.
-    DeviceWeight head_weight(make_patterned(248320, 5120, 431U));
-    for (DeviceWeight* weight : {&attention_weight, &output_weight, &head_weight}) {
-        for (int tokens = 1; tokens <= 33; ++tokens) {
-            failures += run_bf16_linear_case(*weight, tokens);
-        }
-        for (int tokens :
-             {63, 64, 65, 66, 95, 96, 97, 98, 127, 128, 129, 130, 191, 192, 193, 194, 1024, 1536}) {
-            failures += run_bf16_linear_case(*weight, tokens);
-        }
-        for (int tokens : {3, 7, 13, 19, 23, 25, 29, 33, 64, 65, 97, 129, 193}) {
-            failures += run_bf16_linear_case(*weight, tokens, true);
-        }
+                       119, 120, 129, 160, 161, 640, 641, 1024, 1025, 1280, 1281, 2048}) {
+        calls.push_back({tokens, CallForm::Policy, ops::LinearPolicy::A16Only, true});
     }
-    failures += run_selector_linear();
-
-    // Flash-Next K=2560 problems plus its BF16 MTP output projection [2560,6144]. The token set
-    // covers every registered route boundary of these shapes.
-    struct FlashNextShape {
-        std::int32_t n, k;
-        std::uint32_t seed;
-    };
-
-    for (const FlashNextShape shape :
-         {FlashNextShape{640, 2560, 433U}, FlashNextShape{2560, 2560, 439U},
-          FlashNextShape{10240, 2560, 443U}, FlashNextShape{13312, 2560, 449U},
-          FlashNextShape{248320, 2560, 457U}, FlashNextShape{2560, 6144, 461U}}) {
-        DeviceWeight weight(make_patterned(shape.n, shape.k, shape.seed));
-        for (int tokens : {1,   2,   3,   4,   5,   8,   15,  16,  17,   31,   32,   33,
-                           47,  48,  49,  63,  64,  65,  95,  96,  97,   127,  128,  129,
-                           191, 192, 193, 511, 512, 513, 640, 641, 1024, 1536, 2048, 2049}) {
-            failures += run_bf16_linear_case(weight, tokens);
-        }
-        for (int tokens : {1, 4, 5, 17, 33, 48, 49, 65, 129, 513}) {
-            failures += run_bf16_linear_case(weight, tokens, true);
-        }
-    }
-    return failures;
+    return run_shape("BF16 selector", ActivationCompute::A16, make_bf16_weight,
+                     bf16_fixture(256, 5120, 419U, Comparison::Full, calls));
 }
 
 enum class ColumnDomain { Text, RawPatch, Merger };
@@ -254,19 +193,24 @@ int run_new_bf16_geometry(const Geometry& shape) {
     if (text) failures += verify_workspace_envelopes(QType::BF16, shape.n, shape.k);
     if (raw) {
         DeviceWeight weight(make_patterned(shape.n, shape.k, 503U));
-        DeviceBuffer input(static_cast<std::size_t>(shape.k) * 8 * 2);
-        DeviceBuffer output(static_cast<std::size_t>(shape.n) * 8 * 2);
-        DeviceArena scratch(256);
+        DeviceBuffer input(ninfer::test::cuda_environment().context.device(),
+                           static_cast<std::size_t>(shape.k) * 8 * 2);
+        DeviceBuffer output(ninfer::test::cuda_environment().context.device(),
+                            static_cast<std::size_t>(shape.n) * 8 * 2);
+        ninfer::DeviceBuffer scratch_storage(ninfer::test::cuda_environment().context.device(),
+                                             256);
+        MemoryArena scratch(scratch_storage.span());
         for (int t : {1, 3, 5, 7}) {
-            Tensor x(input.p, DType::BF16, {shape.k, t});
-            Tensor y(output.p, DType::BF16, {shape.n, t});
+            Tensor x(input.span(), DType::BF16, {shape.k, t});
+            Tensor y(output.span(), DType::BF16, {shape.n, t});
             for (bool convenience : {false, true}) {
                 try {
                     if (convenience)
-                        ops::linear(x, weight.view(), y, nullptr);
+                        ops::linear(x, weight.view(), y,
+                                    ninfer::test::cuda_environment().default_execution);
                     else
                         ops::linear(x, weight.view(), y, ops::LinearPolicy::A16Only, scratch,
-                                    nullptr);
+                                    ninfer::test::cuda_environment().default_execution);
                     std::cerr << "BF16: accepted an invalid raw-patch extent\n";
                     ++failures;
                 } catch (const std::invalid_argument&) {}
@@ -345,7 +289,7 @@ int run_bf16(int selected_n = 0, int selected_k = 0) {
     };
 
     for (const auto shape :
-         {ProjectionFixture{14336, 5120, 401U}, ProjectionFixture{5120, 6144, 409U}}) {
+         {ProjectionFixture{14336, 5120, 401U}, ProjectionFixture{5120, 6144, 409U}, ProjectionFixture{248320, 5120, 431U}}) {
         if (selected_n && (shape.n != selected_n || shape.k != selected_k)) continue;
         found = true;
         failures += run_bf16_projection(shape.n, shape.k, shape.seed);
@@ -358,6 +302,23 @@ int run_bf16(int selected_n = 0, int selected_k = 0) {
         if (selected_n && (shape.n != selected_n || shape.k != selected_k)) continue;
         found = true;
         failures += run_new_bf16_geometry(shape);
+    }
+    for (const ProjectionFixture shape :
+         {ProjectionFixture{640, 2560, 433U}, ProjectionFixture{2560, 2560, 439U},
+          ProjectionFixture{10240, 2560, 443U}, ProjectionFixture{13312, 2560, 449U},
+          ProjectionFixture{248320, 2560, 457U}, ProjectionFixture{2560, 6144, 461U}}) {
+        if (selected_n && (shape.n != selected_n || shape.k != selected_k)) continue;
+        found = true;
+        using namespace ninfer::test::linear;
+        std::vector<Invocation> calls;
+        for (int tokens : {1, 2, 3, 4, 5, 8, 15, 16, 17, 31, 32, 33, 47, 48, 49,
+                           63, 64, 65, 95, 96, 97, 127, 128, 129, 191, 192, 193,
+                           511, 512, 513, 640, 641, 1024, 1536, 2048, 2049})
+            calls.push_back({tokens});
+        for (int tokens : {1, 4, 5, 17, 33, 48, 49, 65, 129, 513})
+            calls.push_back({tokens, CallForm::Policy, ops::LinearPolicy::A16Only, true});
+        failures += run_shape("BF16 Flash-Next Linear", ActivationCompute::A16, make_bf16_weight,
+                              bf16_fixture(shape.n, shape.k, shape.seed, Comparison::Sampled, calls));
     }
     if (!found) throw std::invalid_argument("BF16 test: unknown geometry");
     return failures;

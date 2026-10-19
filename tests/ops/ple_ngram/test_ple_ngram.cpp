@@ -1,3 +1,4 @@
+#include "cuda_fixture.h"
 #include "ninfer/ops/ple_ngram.h"
 
 #include "core/arena.h"
@@ -72,8 +73,8 @@ struct Weights {
     DeviceBuffer conv_d       = to_device(conv.bits);
 
     Tensor tensor(const DeviceBuffer& buffer, std::int32_t taps = 1) const {
-        return taps == 1 ? Tensor(buffer.p, DType::BF16, {kWidth})
-                         : Tensor(buffer.p, DType::BF16, {kWidth, taps});
+        return taps == 1 ? Tensor(const_cast<void*>(buffer.data()), buffer.device(), DType::BF16, {kWidth})
+                         : Tensor(const_cast<void*>(buffer.data()), buffer.device(), DType::BF16, {kWidth, taps});
     }
 };
 
@@ -186,10 +187,10 @@ int run_decode(std::int64_t rows) {
     DeviceBuffer codes_d  = to_device(codes);
     DeviceBuffer scales_d = to_device(scales);
     GuardedDeviceBuffer out_d(expected.size() * 2);
-    Tensor codes_t(codes_d.p, DType::U8, {80, static_cast<std::int32_t>(rows)});
-    Tensor scales_t(scales_d.p, DType::FP16, {10, static_cast<std::int32_t>(rows)});
-    Tensor out(out_d.data(), DType::BF16, {kRowWidth, static_cast<std::int32_t>(rows)});
-    ops::ple_ngram_decode(codes_t, scales_t, out, nullptr);
+    Tensor codes_t(codes_d.span(), DType::U8, {80, static_cast<std::int32_t>(rows)});
+    Tensor scales_t(scales_d.span(), DType::FP16, {10, static_cast<std::int32_t>(rows)});
+    Tensor out(out_d.span(), DType::BF16, {kRowWidth, static_cast<std::int32_t>(rows)});
+    ops::ple_ngram_decode(codes_t, scales_t, out, ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
     int failures = out_d.verify_guards(label);
     failures += verify_exact(label.c_str(), from_device<std::uint16_t>(out_d.data(), expected.size()),
@@ -204,30 +205,31 @@ int run_sequence(const Weights& w, std::int32_t T, bool aliased_state, bool grap
     const Bf16Host history = random_bf16(static_cast<std::size_t>(kWidth) * kHistory, 7U + T, 1.0F);
     DeviceBuffer h_d = to_device(in.hidden.bits), k_d = to_device(in.key.bits),
                  v_d = to_device(in.value.bits), s_in = to_device(history.bits);
-    DeviceBuffer s_out_buffer(history.bits.size() * 2);
+    DeviceBuffer s_out_buffer(ninfer::test::cuda_environment().context.device(), history.bits.size() * 2);
     GuardedDeviceBuffer out_d(static_cast<std::size_t>(kWidth) * T * 2);
-    Tensor hidden(h_d.p, DType::BF16, {kWidth, T}), key(k_d.p, DType::BF16, {kWidth, T}),
-        value(v_d.p, DType::BF16, {kStreamWidth, T}), out(out_d.data(), DType::BF16, {kWidth, T});
-    Tensor state_in(s_in.p, DType::BF16, {kWidth, kHistory});
-    Tensor state_out(aliased_state ? s_in.p : s_out_buffer.p, DType::BF16, {kWidth, kHistory});
+    Tensor hidden(h_d.span(), DType::BF16, {kWidth, T}), key(k_d.span(), DType::BF16, {kWidth, T}),
+        value(v_d.span(), DType::BF16, {kStreamWidth, T}), out(out_d.span(), DType::BF16, {kWidth, T});
+    Tensor state_in(s_in.span(), DType::BF16, {kWidth, kHistory});
+    Tensor state_out(aliased_state ? s_in.data() : s_out_buffer.data(), ninfer::test::cuda_environment().context.device(), DType::BF16, {kWidth, kHistory});
     const auto capacity = ops::ple_ngram_workspace_capacity_bytes(T, T);
-    DeviceArena workspace(capacity);
+    DeviceBuffer workspace_storage(ninfer::test::cuda_environment().context.device(), capacity);
+    MemoryArena workspace(workspace_storage.span());
     DeviceContext context;
     const auto launch = [&] {
         ops::ple_ngram(hidden, key, value, w.tensor(w.query_norm_d), w.tensor(w.key_norm_d),
                        w.tensor(w.conv_norm_d), w.tensor(w.conv_d, 4), state_in, state_out, out,
-                       workspace, context.stream);
+                       workspace, context.execution_view());
     };
     if (graph) {
         DecodeGraphDefinition definition;
         DecodeGraphExecutable executable;
-        definition.capture(context.stream, launch);
+        definition.capture(context.stream(), launch);
         executable.instantiate(definition);
-        executable.launch(context.stream);
+        executable.launch(context.stream());
     } else {
         launch();
     }
-    cuda_synchronize(context.stream);
+    cuda_synchronize(context.stream());
     int failures = out_d.verify_guards(label);
     if (workspace.peak_used() > capacity || workspace.used() != 0) {
         std::cerr << label << ": workspace query/scope mismatch\n";
@@ -268,14 +270,15 @@ int run_snapshot(const Weights& w, std::int32_t W, std::int32_t B, bool ragged, 
                  v_d = to_device(in.value.bits), states_d = to_device(initial_states.bits),
                  valid_d = to_device(valid), initial_d = to_device(initial), base_d = to_device(base);
     GuardedDeviceBuffer out_d(static_cast<std::size_t>(kWidth) * W * B * 2);
-    Tensor hidden(h_d.p, DType::BF16, {kWidth, W, B}), key(k_d.p, DType::BF16, {kWidth, W, B}),
-        value(v_d.p, DType::BF16, {kStreamWidth, W, B}),
-        out(out_d.data(), DType::BF16, {kWidth, W, B}),
-        states(states_d.p, DType::BF16, {kWidth, kHistory, slots}),
-        valid_t = ragged ? Tensor(valid_d.p, DType::I32, {B}) : Tensor{},
-        initial_t(initial_d.p, DType::I32, {B}), base_t(base_d.p, DType::I32, {B});
+    Tensor hidden(h_d.span(), DType::BF16, {kWidth, W, B}), key(k_d.span(), DType::BF16, {kWidth, W, B}),
+        value(v_d.span(), DType::BF16, {kStreamWidth, W, B}),
+        out(out_d.span(), DType::BF16, {kWidth, W, B}),
+        states(states_d.span(), DType::BF16, {kWidth, kHistory, slots}),
+        valid_t = ragged ? Tensor(valid_d.span(), DType::I32, {B}) : Tensor{},
+        initial_t(initial_d.span(), DType::I32, {B}), base_t(base_d.span(), DType::I32, {B});
     const auto capacity = ops::ple_ngram_workspace_capacity_bytes(W * B, W * B);
-    DeviceArena workspace(capacity);
+    DeviceBuffer workspace_storage(ninfer::test::cuda_environment().context.device(), capacity);
+    MemoryArena workspace(workspace_storage.span());
     DeviceContext context;
     out_d.fill(0x7f);
     cuda_synchronize();
@@ -283,18 +286,18 @@ int run_snapshot(const Weights& w, std::int32_t W, std::int32_t B, bool ragged, 
         ops::ple_ngram_snapshot(hidden, key, value, w.tensor(w.query_norm_d),
                                 w.tensor(w.key_norm_d), w.tensor(w.conv_norm_d),
                                 w.tensor(w.conv_d, 4), states, valid_t, initial_t, base_t, out,
-                                workspace, context.stream);
+                                workspace, context.execution_view());
     };
     if (graph) {
         DecodeGraphDefinition definition;
         DecodeGraphExecutable executable;
-        definition.capture(context.stream, launch);
+        definition.capture(context.stream(), launch);
         executable.instantiate(definition);
-        executable.launch(context.stream);
+        executable.launch(context.stream());
     } else {
         launch();
     }
-    cuda_synchronize(context.stream);
+    cuda_synchronize(context.stream());
     int failures = out_d.verify_guards(label);
     const auto got_out   = from_device_bf16(out_d.data(), static_cast<std::size_t>(kWidth) * W * B);
     const auto got_state = from_device<std::uint16_t>(states_d, initial_states.bits.size());

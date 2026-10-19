@@ -13,6 +13,11 @@ ProjectionPlan select_projection_plan(const WeightOperands& weights, std::int32_
 
 ConvPlan select_conv_plan(const WeightOperands& weights, Batch batch) {
     ConvPlan plan{select_projection_plan(weights, batch.columns())};
+    // The FP32-scale parent's short A8 contraction loses too much precision for
+    // convolution/state publication. Keep represented BF16 activations here.
+    if (weights.format == Format::Fp8 && weights.geometry.input_rows == 2560 &&
+        batch.columns() <= 32)
+        plan.projection.compute = Compute::A16;
     switch (weights.format) {
     case Format::Q4Q5:
         if (batch.rows == 1 && (batch.tokens <= 3 || batch.tokens == 5 || batch.tokens == 6))

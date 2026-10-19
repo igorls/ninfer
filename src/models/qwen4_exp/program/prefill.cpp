@@ -67,16 +67,15 @@ void sample_from_hidden(PrefillContext& state, const Tensor& streams,
                      state.text_kv_base, &state.text_cache);
     Tensor logits = io.logits.slice(1, 0, 1);
     card.project_streams(streams, logits);
-    cudaStream_t stream = state.execution.device.stream;
+    cudaStream_t stream = state.execution.device.stream();
     CUDA_CHECK(cudaMemcpyAsync(io.pos.data, &absolute_position, sizeof(absolute_position),
                                cudaMemcpyHostToDevice, stream));
     const std::int32_t domain =
         dimension(state.execution.parameters.model.resources().public_token_count);
-    ops::sample(logits, io.token, domain, state.sampling, io.pos, purpose, state.execution.work,
-                stream);
+    ops::sample(logits, io.token, domain, state.sampling, io.pos, purpose, state.execution.work, state.execution.device.execution_view());
     // A zero-suffix reuse samples its first token here instead of in a prefill chunk.
     if (purpose == ops::kSamplePurposePrefill && state.first_token_readout != nullptr) {
-        enqueue_first_token_readout(*state.first_token_readout, logits, io.token, domain, stream);
+        enqueue_first_token_readout(*state.first_token_readout, logits, io.token, domain, state.execution.device.execution_view());
     }
     state.execution.work.reset();
 }
@@ -105,7 +104,7 @@ PrefillProgress ProgramImpl::advance_prefill(SequenceHandle handle,
         requests[lane].sampling_host.mask = config.mask;
         Tensor config_lane = sampling_config.slice(1, static_cast<std::int32_t>(lane), 1);
         CUDA_CHECK(cudaMemcpyAsync(config_lane.data, &config, sizeof(config),
-                                   cudaMemcpyHostToDevice, device.stream));
+                                   cudaMemcpyHostToDevice, device.stream()));
     }
     auto progress = wrap_prefill(lane, advance_prefill_raw(lane, timing));
     if (!progress.complete) { settle_unit(lane); }

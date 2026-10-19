@@ -1,6 +1,7 @@
 #include "models/qwen3_5/program/program_impl.h"
 #include "models/qwen3_5/program/context_work.h"
 #include "models/qwen3_5/program/execution_context.h"
+#include "core/buffer.h"
 #include "models/qwen3_5/execution/linear.h"
 #include "core/startup.h"
 #include "core/device.h"
@@ -33,8 +34,9 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       vision_enabled(plan.features.vision), use_cuda_graph(plan.use_cuda_graph),
       causal_scoring(plan.causal_scoring), kv_payload_bytes(plan.persistent.kv_payload_bytes),
       graph_allowance_bytes(plan.graph_allowance_bytes), workspace_plan(plan.workspace),
-      persistent(plan.persistent.bytes), workspace_storage(plan.workspace.capacity),
-      work(DeviceSpan{workspace_storage.base(), plan.workspace.general_capacity}),
+      persistent(device.device(), plan.persistent.bytes),
+      workspace_storage(device.device(), plan.workspace.capacity),
+      work(workspace_storage.span().subspan(0, plan.workspace.general_capacity)),
       round_host(plan.causal_scoring ? std::nullopt
                                      : std::make_optional<PinnedHostBuffer>(sizeof(qwen3_5::PrefillRoundHost))),
       score_logprobs_host(plan.causal_scoring
@@ -57,9 +59,9 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
                                                              sizeof(qwen3_5::DFlashPrefillIngress))
                       : std::nullopt),
       context_source_ready_(device_in), context_completion_(device_in),
-      context_transfer_timers_{CudaEventTimer(device_in, device_in.transfer_stream),
-                               CudaEventTimer(device_in, device_in.transfer_stream),
-                               CudaEventTimer(device_in, device_in.transfer_stream)},
+      context_transfer_timers_{CudaEventTimer(device_in, device_in.transfer_stream()),
+                               CudaEventTimer(device_in, device_in.transfer_stream()),
+                               CudaEventTimer(device_in, device_in.transfer_stream())},
       prefill_gpu_timer_(device_in) {
     if (&parameters != plan.parameters || parameters.model.options() != plan.features) {
         throw std::invalid_argument("Program parameters do not match the frozen sequence plan");
@@ -72,7 +74,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
          workspace_plan.vision->general_capacity_bytes != workspace_plan.general_capacity)) {
         throw std::invalid_argument("Qwen3.5 workspace plan does not match startup features");
     }
-    const DeviceSpan backing = persistent.alloc_bytes(plan.persistent.bytes, 256);
+    const MemorySpan backing = persistent.span();
     decoder      = std::make_unique<qwen3_5::DecoderState>(backing, plan.persistent.decoder);
     state_images = std::make_unique<StateImageDevicePool>(backing, plan.persistent.state_images);
     if (plan.persistent.replay_records) {
@@ -201,7 +203,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
         *ordinary_host_ingress = {};
         *ordinary_host_egress  = {};
         CUDA_CHECK(cudaMemsetAsync(io.ordinary->egress.data, 0, io.ordinary->egress.bytes,
-                                   device.stream));
+                                   device.stream()));
     }
     if (mtp_host) {
         mtp_host_ingress = static_cast<qwen3_5::MtpDecodeIngress*>(mtp_host->data());
@@ -211,7 +213,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
         *mtp_host_egress  = {};
         // Whole-frame transfers include capacity beyond the live K/C prefixes.
         CUDA_CHECK(cudaMemsetAsync(io.mtp_decode->egress.data, 0, io.mtp_decode->egress.bytes,
-                                   device.stream));
+                                   device.stream()));
     }
     if (dflash_host) {
         dflash_host_ingress = static_cast<qwen3_5::DFlashDecodeIngress*>(dflash_host->data());
@@ -225,17 +227,17 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
             sizeof(qwen3_5::DFlashDecodeIngress) + sizeof(qwen3_5::DFlashDecodeEgress));
         *dflash_prefill_host_ingress = {};
         CUDA_CHECK(cudaMemsetAsync(io.dflash_decode->egress.data, 0,
-                                   io.dflash_decode->egress.bytes, device.stream));
+                                   io.dflash_decode->egress.bytes, device.stream()));
     }
-    CUDA_CHECK(cudaMemsetAsync(io.rope_delta.data, 0, io.rope_delta.bytes(), device.stream));
+    CUDA_CHECK(cudaMemsetAsync(io.rope_delta.data, 0, io.rope_delta.bytes(), device.stream()));
     if (io.mtp) {
         CUDA_CHECK(
-            cudaMemsetAsync(io.mtp->position.data, 0, io.mtp->position.bytes(), device.stream));
+            cudaMemsetAsync(io.mtp->position.data, 0, io.mtp->position.bytes(), device.stream()));
     }
     if (!causal_scoring) {
-        CUDA_CHECK(cudaMemsetAsync(token_counts.data, 0, token_counts.bytes(), device.stream));
+        CUDA_CHECK(cudaMemsetAsync(token_counts.data, 0, token_counts.bytes(), device.stream()));
         CUDA_CHECK(
-            cudaMemsetAsync(sampling_config.data, 0, sampling_config.bytes(), device.stream));
+            cudaMemsetAsync(sampling_config.data, 0, sampling_config.bytes(), device.stream()));
     }
     device.synchronize();
     if (use_cuda_graph) {
@@ -249,8 +251,10 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
 }
 
 ProgramImpl::~ProgramImpl() noexcept {
-    if (device.transfer_stream != nullptr) { (void)cudaStreamSynchronize(device.transfer_stream); }
-    if (device.stream != nullptr) { (void)cudaStreamSynchronize(device.stream); }
+    if (device.transfer_stream() != nullptr) {
+        (void)cudaStreamSynchronize(device.transfer_stream());
+    }
+    if (device.stream() != nullptr) { (void)cudaStreamSynchronize(device.stream()); }
 }
 
 CausalScores ProgramImpl::causal_score(PreparedPromptData&& prompt, std::uint32_t first_target,
@@ -334,14 +338,14 @@ CausalScores ProgramImpl::causal_score(PreparedPromptData&& prompt, std::uint32_
     std::size_t scored_cursor    = 0;
 
     try {
-        state = state_store->reserve_reset(device.stream);
+        state = state_store->reserve_reset(device.stream());
         if (!state) { throw std::bad_alloc(); }
-        address = text_kv_addresses->create_active(required_pages, 0, device.stream);
+        address = text_kv_addresses->create_active(required_pages, 0, device.stream());
         if (!address) { throw std::bad_alloc(); }
         if (text_kv_addresses->bound_row(*address) != 0) {
             throw std::logic_error("causal score did not bind the unique Main KV row");
         }
-        text_kv_addresses->ensure_mapped_to_tokens(*address, predictor_count, device.stream);
+        text_kv_addresses->ensure_mapped_to_tokens(*address, predictor_count, device.stream());
 
         const std::int32_t state_slot = state_store->physical_slot(*state);
         const auto flush = [&] {
@@ -362,13 +366,13 @@ CausalScores ProgramImpl::causal_score(PreparedPromptData&& prompt, std::uint32_
             Tensor argmax_ids     = work.alloc(DType::I32, {columns});
             Tensor argmax_logprob = work.alloc(DType::FP32, {columns});
             Tensor hidden         = score_hidden->slice(1, 0, columns);
-            execution::project(hidden, parameters.text.output_head, logits, work, device.stream);
+            execution::project(hidden, parameters.text.output_head, logits, work, device.execution_view());
             CUDA_CHECK(cudaMemcpyAsync(target_ids.data, staged_targets.data(), target_ids.bytes(),
-                                       cudaMemcpyHostToDevice, device.stream));
-            ops::target_logprobs(logits, target_ids, valid_rows, logprobs, device.stream);
+                                       cudaMemcpyHostToDevice, device.stream()));
+            ops::target_logprobs(logits, target_ids, valid_rows, logprobs, device.execution_view());
             auto* host = static_cast<std::byte*>(score_logprobs_host->data());
             CUDA_CHECK(cudaMemcpyAsync(host, logprobs.data, logprobs.bytes(),
-                                       cudaMemcpyDeviceToHost, device.stream));
+                                       cudaMemcpyDeviceToHost, device.stream()));
             if (readout.capture_hidden_rows) {
                 // The leading [hidden_size, columns] window of the BF16 tile: one contiguous
                 // final-normalized row per staged column.
@@ -378,18 +382,17 @@ CausalScores ProgramImpl::causal_score(PreparedPromptData&& prompt, std::uint32_
                     throw std::logic_error("causal score hidden tile has an unexpected shape");
                 }
                 CUDA_CHECK(cudaMemcpyAsync(score_hidden_host->data(), hidden.data, hidden.bytes(),
-                                           cudaMemcpyDeviceToHost, device.stream));
+                                           cudaMemcpyDeviceToHost, device.stream()));
             }
             if (references != 0) {
-                ops::argmax(logits, argmax_ids, valid_rows, device.stream);
-                ops::target_logprobs(logits, argmax_ids, valid_rows, argmax_logprob,
-                                     device.stream);
+                ops::argmax(logits, argmax_ids, valid_rows, device.execution_view());
+                ops::target_logprobs(logits, argmax_ids, valid_rows, argmax_logprob, device.execution_view());
                 CUDA_CHECK(cudaMemcpyAsync(host + logprobs.bytes(), argmax_ids.data,
                                            argmax_ids.bytes(), cudaMemcpyDeviceToHost,
-                                           device.stream));
+                                           device.stream()));
                 CUDA_CHECK(cudaMemcpyAsync(host + logprobs.bytes() + argmax_ids.bytes(),
                                            argmax_logprob.data, argmax_logprob.bytes(),
-                                           cudaMemcpyDeviceToHost, device.stream));
+                                           cudaMemcpyDeviceToHost, device.stream()));
             }
             device.synchronize();
             const auto* values = reinterpret_cast<const float*>(host);
@@ -459,7 +462,7 @@ CausalScores ProgramImpl::causal_score(PreparedPromptData&& prompt, std::uint32_
                 Tensor destination = score_hidden->slice(
                     1, static_cast<std::int32_t>(staged_columns), static_cast<std::int32_t>(count));
                 CUDA_CHECK(cudaMemcpyAsync(destination.data, source.data, source.bytes(),
-                                           cudaMemcpyDeviceToDevice, device.stream));
+                                           cudaMemcpyDeviceToDevice, device.stream()));
                 for (std::uint32_t column = 0; column < count; ++column) {
                     staged_targets.push_back(prompt.token_ids[selected + column + 1U]);
                     const auto reference =
@@ -526,15 +529,14 @@ runtime::ContextTransferObservation ProgramImpl::context_transfer_observation(
 
 MemorySummary ProgramImpl::memory_summary() const noexcept {
     MemorySummary out;
-    out.device          = device.device;
+    out.device          = device.device().index();
     out.max_context     = capacity;
     out.kv_capacity     = kv_capacity;
     out.kv_cache        = kv_storage;
     const auto& weights = parameters.model.storage_stats();
-    out.weights = ArenaMemorySummary{weights.device_capacity_bytes, weights.device_capacity_bytes,
+    out.weights  = ArenaMemorySummary{weights.device_capacity_bytes, weights.device_capacity_bytes,
                                      weights.device_capacity_bytes};
-    out.sequence =
-        ArenaMemorySummary{persistent.capacity(), persistent.used(), persistent.peak_used()};
+    out.sequence = ArenaMemorySummary{persistent.size(), persistent.size(), persistent.size()};
     std::size_t active_handoff_bytes = 0;
     for (const RequestControl& request : requests) {
         if (request.prefill && request.prefill->vision) {
@@ -552,7 +554,7 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
             std::max(active_workspace_bytes,
                      workspace_plan.vision->handoff_offset_bytes + active_handoff_bytes);
     }
-    out.workspace = ArenaMemorySummary{workspace_storage.capacity(), active_workspace_bytes,
+    out.workspace = ArenaMemorySummary{workspace_storage.size(), active_workspace_bytes,
                                        std::max(work.peak_used(), workspace_logical_peak_bytes)};
     if (workspace_plan.vision) {
         out.vision_workspace = VisionWorkspaceMemorySummary{
@@ -581,7 +583,6 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
 }
 
 void ProgramImpl::reset_memory_peaks() noexcept {
-    persistent.reset_peak();
     work.reset_peak();
     std::size_t active_handoff_bytes = 0;
     for (const RequestControl& request : requests) {

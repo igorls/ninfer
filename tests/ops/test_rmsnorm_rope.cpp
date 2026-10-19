@@ -1,4 +1,6 @@
 #include "ninfer/ops/rmsnorm_rope.h"
+#include "cuda_fixture.h"
+#include "core/buffer.h"
 #include "core/decode_graph.h"
 #include "ops/op_tester.h"
 
@@ -156,19 +158,20 @@ int verify_profile(const std::string& label, const std::vector<double>& got,
 template <class Launch, class Reset>
 void execute(Launch launch, Reset reset, bool graph) {
     if (!graph) {
-        launch(nullptr);
+        launch(cuda_environment().default_execution);
         cuda_synchronize();
         return;
     }
     cudaStream_t stream = nullptr;
     cuda_check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "create stream");
+    const auto stream_execution = ninfer::test::cuda_environment().context.execution_view(stream);
     {
         DecodeGraphDefinition definition;
         DecodeGraphExecutable executable;
-        definition.capture(stream, [&] { launch(stream); });
+        definition.capture(stream, [&] { launch(stream_execution); });
         executable.instantiate(definition);
         for (int i = 0; i < 2; ++i) {
-            reset(stream);
+            reset(stream_execution);
             executable.launch(stream);
             cuda_check(cudaStreamSynchronize(stream), "graph replay synchronize");
         }
@@ -200,17 +203,18 @@ int run_pair_case(int width, int batch, int first_position, std::uint32_t seed,
     DeviceBuffer q_weight_device = to_device(q_weight_bits);
     DeviceBuffer k_weight_device = to_device(k_weight_bits);
     DeviceBuffer position_device = to_device(positions);
-    Tensor q_tensor(q_device.data(), DType::BF16, {kHeadDim, kQueryHeads, width, batch});
-    Tensor k_tensor(k_device.data(), DType::BF16, {kHeadDim, kKeyHeads, width, batch});
-    Tensor q_weight_tensor(q_weight_device.p, DType::BF16, {kHeadDim});
-    Tensor k_weight_tensor(k_weight_device.p, DType::BF16, {kHeadDim});
-    Tensor position_tensor(position_device.p, DType::I32, {width, batch});
+    Tensor q_tensor(q_device.span(), DType::BF16, {kHeadDim, kQueryHeads, width, batch});
+    Tensor k_tensor(k_device.span(), DType::BF16, {kHeadDim, kKeyHeads, width, batch});
+    Tensor q_weight_tensor(q_weight_device.span(), DType::BF16, {kHeadDim});
+    Tensor k_weight_tensor(k_weight_device.span(), DType::BF16, {kHeadDim});
+    Tensor position_tensor(position_device.span(), DType::I32, {width, batch});
     execute(
-        [&](cudaStream_t stream) {
+        [&](CudaExecutionView cuda) {
             ops::rmsnorm_rope(position_tensor, q_weight_tensor, k_weight_tensor, q_tensor, k_tensor,
-                              stream);
+                              cuda);
         },
-        [&](cudaStream_t stream) {
+        [&](CudaExecutionView cuda) {
+            const auto stream = cuda.stream();
             cuda_check(cudaMemcpyAsync(q_device.data(), q_bits.data(), q_device.bytes(),
                                        cudaMemcpyHostToDevice, stream),
                        "reset q");
@@ -254,14 +258,15 @@ int run_single_case(int tokens, int first_position, std::uint32_t seed, bool gra
     input_device.copy_from_host(input_bits.data(), input_device.bytes());
     DeviceBuffer weight_device   = to_device(weight_bits);
     DeviceBuffer position_device = to_device(positions);
-    Tensor input_tensor(input_device.data(), DType::BF16, {kHeadDim, kKeyHeads, tokens});
-    Tensor weight_tensor(weight_device.p, DType::BF16, {kHeadDim});
-    Tensor position_tensor(position_device.p, DType::I32, {tokens});
+    Tensor input_tensor(input_device.span(), DType::BF16, {kHeadDim, kKeyHeads, tokens});
+    Tensor weight_tensor(weight_device.span(), DType::BF16, {kHeadDim});
+    Tensor position_tensor(position_device.span(), DType::I32, {tokens});
     execute(
-        [&](cudaStream_t stream) {
-            ops::rmsnorm_rope(position_tensor, weight_tensor, input_tensor, stream);
+        [&](CudaExecutionView cuda) {
+            ops::rmsnorm_rope(position_tensor, weight_tensor, input_tensor, cuda);
         },
-        [&](cudaStream_t stream) {
+        [&](CudaExecutionView cuda) {
+            const auto stream = cuda.stream();
             cuda_check(cudaMemcpyAsync(input_device.data(), input_bits.data(), input_device.bytes(),
                                        cudaMemcpyHostToDevice, stream),
                        "reset K");
@@ -380,23 +385,23 @@ int run_gated_case(int tokens, int first_position, bool distinct_axes, std::uint
     GuardedDeviceBuffer gate_device(q_count * 2);
     GuardedDeviceBuffer k_device(kv_count * 2);
     GuardedDeviceBuffer v_device(kv_count * 2);
-    Tensor projected_tensor(projected_device.p, DType::BF16, {kGatedRows, tokens});
-    Tensor position_tensor(position_device.p, DType::I32, {tokens, 3});
-    Tensor q_weight_tensor(q_weight_device.p, DType::BF16, {kGatedDim});
-    Tensor k_weight_tensor(k_weight_device.p, DType::BF16, {kGatedDim});
-    Tensor q_tensor(q_device.data(), DType::BF16, {kGatedDim, kGatedQueryHeads, tokens});
-    Tensor gate_tensor(gate_device.data(), DType::BF16, {kGatedDim, kGatedQueryHeads, tokens});
-    Tensor k_tensor(k_device.data(), DType::BF16, {kGatedDim, kGatedKeyHeads, tokens});
-    Tensor v_tensor(v_device.data(), DType::BF16, {kGatedDim, kGatedKeyHeads, tokens});
+    Tensor projected_tensor(projected_device.span(), DType::BF16, {kGatedRows, tokens});
+    Tensor position_tensor(position_device.span(), DType::I32, {tokens, 3});
+    Tensor q_weight_tensor(q_weight_device.span(), DType::BF16, {kGatedDim});
+    Tensor k_weight_tensor(k_weight_device.span(), DType::BF16, {kGatedDim});
+    Tensor q_tensor(q_device.span(), DType::BF16, {kGatedDim, kGatedQueryHeads, tokens});
+    Tensor gate_tensor(gate_device.span(), DType::BF16, {kGatedDim, kGatedQueryHeads, tokens});
+    Tensor k_tensor(k_device.span(), DType::BF16, {kGatedDim, kGatedKeyHeads, tokens});
+    Tensor v_tensor(v_device.span(), DType::BF16, {kGatedDim, kGatedKeyHeads, tokens});
     GuardedDeviceBuffer* outputs[] = {&q_device, &gate_device, &k_device, &v_device};
     execute(
-        [&](cudaStream_t stream) {
+        [&](CudaExecutionView cuda) {
             ops::rmsnorm_rope(projected_tensor, position_tensor, q_weight_tensor, k_weight_tensor,
-                              q_tensor, gate_tensor, k_tensor, v_tensor, stream);
+                              q_tensor, gate_tensor, k_tensor, v_tensor, cuda);
         },
-        [&](cudaStream_t stream) {
+        [&](CudaExecutionView cuda) {
             for (auto* buffer : outputs) {
-                cuda_check(cudaMemsetAsync(buffer->data(), 0xff, buffer->bytes(), stream),
+                cuda_check(cudaMemsetAsync(buffer->data(), 0xff, buffer->bytes(), cuda.stream()),
                            "reset gated output");
             }
         },

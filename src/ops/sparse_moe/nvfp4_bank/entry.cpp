@@ -1,3 +1,4 @@
+#include "ops/common/host/operands.h"
 // Validation, workspace sizing and route selection of the NVFP4-bank SparseMoe overload.
 
 #include "ninfer/ops/sparse_moe.h"
@@ -146,8 +147,21 @@ std::size_t sparse_moe_workspace_capacity_bytes(LinearPolicy gate_up_policy,
 }
 
 void sparse_moe(const Tensor& x, const SparseMoeNvfp4BankWeights& weights,
-                SparseMoeEpilogue epilogue, Tensor& destination, WorkspaceArena& workspace,
-                cudaStream_t stream, Tensor* selected_experts) {
+                SparseMoeEpilogue epilogue, Tensor& destination, MemoryArena& workspace,
+                CudaExecutionView execution, Tensor* selected_experts) {
+    const auto stream = execution.stream();
+    if (x.data) common::operand::device(x.device, execution.device(), "sparse_moe", "x");
+    common::operand::device(weights.router.device, execution.device(), "sparse_moe", "weights.router");
+    common::operand::device(weights.shared_expert_gate.device, execution.device(), "sparse_moe", "weights.shared_expert_gate");
+    common::operand::device(weights.gate_up.device, execution.device(), "sparse_moe", "weights.gate_up");
+    common::operand::device(weights.down.device, execution.device(), "sparse_moe", "weights.down");
+    common::operand::device(weights.shared_gate.device, execution.device(), "sparse_moe", "weights.shared_gate");
+    common::operand::device(weights.shared_up.device, execution.device(), "sparse_moe", "weights.shared_up");
+    common::operand::device(weights.shared_down.device, execution.device(), "sparse_moe", "weights.shared_down");
+    if (destination.data) common::operand::device(destination.device, execution.device(), "sparse_moe", "destination");
+    common::operand::device(workspace.device(), execution.device(), "sparse_moe", "workspace");
+    if (selected_experts != nullptr) common::operand::device((*selected_experts).device, execution.device(), "sparse_moe", "(*selected_experts)");
+
     if (epilogue != SparseMoeEpilogue::Store) {
         throw std::invalid_argument("sparse_moe: the NVFP4-bank profile supports only Store");
     }
@@ -184,11 +198,11 @@ void sparse_moe(const Tensor& x, const SparseMoeNvfp4BankWeights& weights,
     const bool a4              = allows_bank_a4(weights.gate_up.policy, weights.down.policy);
     const Nvfp4MoeRoute route  = detail::resolve_nvfp4_moe_route(tokens, a4);
     const std::size_t required = detail::nvfp4_moe_workspace_bytes(tokens, route);
-    if (workspace.base() == nullptr || workspace.capacity() < required ||
+    if (workspace.storage().data == nullptr || workspace.capacity() < required ||
         workspace.used() > workspace.capacity() - required) {
         throw std::invalid_argument("sparse_moe: insufficient workspace capacity");
     }
-    ranges.push_back(address_range(workspace.base(), workspace.capacity(), "workspace"));
+    ranges.push_back(address_range(workspace.storage().data, workspace.capacity(), "workspace"));
     require_disjoint(ranges);
 
     nvtx::ScopedRange range(route == Nvfp4MoeRoute::Decode ? nvtx::Name::SparseMoeDecode

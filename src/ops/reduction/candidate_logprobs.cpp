@@ -1,3 +1,4 @@
+#include "ops/common/host/operands.h"
 // ninfer::ops - candidate_logprobs wrapper: public contract validation and launcher dispatch.
 #include "ninfer/ops/candidate_logprobs.h"
 
@@ -41,8 +42,18 @@ bool overlaps(const Tensor& lhs, const Tensor& rhs) {
 
 void candidate_logprobs(const Tensor& logits, std::int32_t valid_rows, const Tensor& sampled_ids,
                         const Tensor* candidate_ids, const Tensor* allowed, Tensor& sampled_out,
-                        Tensor* candidates_out, cudaStream_t stream, Tensor* top_ids_out,
+                        Tensor* candidates_out, CudaExecutionView execution, Tensor* top_ids_out,
                         Tensor* top_out) {
+    const auto stream = execution.stream();
+    if (logits.data) common::operand::device(logits.device, execution.device(), "candidate_logprobs", "logits");
+    if (sampled_ids.data) common::operand::device(sampled_ids.device, execution.device(), "candidate_logprobs", "sampled_ids");
+    if (candidate_ids != nullptr) common::operand::device((*candidate_ids).device, execution.device(), "candidate_logprobs", "(*candidate_ids)");
+    if (allowed != nullptr) common::operand::device((*allowed).device, execution.device(), "candidate_logprobs", "(*allowed)");
+    if (sampled_out.data) common::operand::device(sampled_out.device, execution.device(), "candidate_logprobs", "sampled_out");
+    if (candidates_out != nullptr) common::operand::device((*candidates_out).device, execution.device(), "candidate_logprobs", "(*candidates_out)");
+    if (top_ids_out != nullptr) common::operand::device((*top_ids_out).device, execution.device(), "candidate_logprobs", "(*top_ids_out)");
+    if (top_out != nullptr) common::operand::device((*top_out).device, execution.device(), "candidate_logprobs", "(*top_out)");
+
     if (logits.dtype != DType::BF16) { fail("logits must be BF16"); }
     if (logits.ne[0] <= 0 || logits.ne[1] <= 0 || logits.ne[2] != 1 || logits.ne[3] != 1) {
         fail("logits must be rank-2 with positive dimensions");

@@ -88,15 +88,14 @@ StateImageHostLayout plan_host_state_image(const StateImageSpec& spec) {
     LayoutBuilder builder;
     StateImageHostLayout host;
     host.spec = spec;
-    const Tensor conv_slot(nullptr, spec.linear.conv_dtype,
+    const Tensor conv_slot = Tensor::metadata(spec.linear.conv_dtype,
                            {spec.linear.conv_channels, spec.linear.conv_width});
-    const Tensor recurrent_slot(
-        nullptr, DType::FP32,
+    const Tensor recurrent_slot = Tensor::metadata(DType::FP32,
         {spec.linear.key_head_dim, spec.linear.value_head_dim, spec.linear.value_heads});
-    const Tensor keys_slot(nullptr, DType::BF16, {mixer.indexer_dim, mixer.indexer_block});
-    const Tensor positions_slot(nullptr, DType::I32, {kMropeAxes, mixer.indexer_block});
-    const Tensor ple_slot(nullptr, DType::BF16, {mixer.ple_channels, mixer.ple_history});
-    const Tensor hidden_slot(nullptr, DType::BF16, {spec.hidden});
+    const Tensor keys_slot = Tensor::metadata(DType::BF16, {mixer.indexer_dim, mixer.indexer_block});
+    const Tensor positions_slot = Tensor::metadata(DType::I32, {kMropeAxes, mixer.indexer_block});
+    const Tensor ple_slot = Tensor::metadata(DType::BF16, {mixer.ple_channels, mixer.ple_history});
+    const Tensor hidden_slot = Tensor::metadata(DType::BF16, {spec.hidden});
 
     host.linear_conv_layer_bytes = conv_slot.bytes();
     host.linear_conv = builder.add(checked_mul(host.linear_conv_layer_bytes, spec.linear.layers,
@@ -285,7 +284,7 @@ std::byte* HostStatePool::slot_data(std::uint32_t index) const noexcept {
     return slots_[index].storage.data();
 }
 
-StateImageDevicePool::StateImageDevicePool(DeviceSpan backing, const StateImageDeviceLayout& layout)
+StateImageDevicePool::StateImageDevicePool(MemorySpan backing, const StateImageDeviceLayout& layout)
     : linear_(backing, layout.linear),
       continuation_hidden_(layout.continuation_hidden.bind(backing)),
       continuation_positions_(layout.continuation_positions.bind(backing)),

@@ -48,8 +48,8 @@ std::size_t q5_linear_add_capacity_workspace_bytes(std::int32_t rows, std::int32
                                                    std::int32_t max_cols);
 
 void q5_linear_add_execute_plan(const Q5LinearAddPlan& plan, const Tensor& x, const Weight& w,
-                                Tensor& residual_out, WorkspaceArena& ws, cudaStream_t stream);
+                                Tensor& residual_out, MemoryArena& ws, cudaStream_t stream);
 void q5_linear_add_dispatch(const Tensor& x, const Weight& w, Tensor& residual_out,
-                            WorkspaceArena& ws, cudaStream_t stream);
+                            MemoryArena& ws, cudaStream_t stream);
 
 } // namespace ninfer::ops::detail
