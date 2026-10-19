@@ -1,13 +1,14 @@
 # Upstream ports
 
-Updated: October 8, 2026.
+Updated: October 19, 2026.
 
 This is the living record of how this workstation fork ([igorls/ninfer](https://github.com/igorls/ninfer))
 tracks [Neroued/ninfer](https://github.com/Neroued/ninfer): the reviewed upstream point, the fork
 features carried onto upstream v3, deliberate divergences, dropped and deferred work, qualification
-evidence. The first priority is **Qwen3.8-27B NVFP4 on native Windows and the RTX PRO
-6000 Blackwell**. RTX 5090 results remain useful evidence for that device; they do not qualify the
-workstation.
+evidence. **RTX 5090 and RTX PRO 6000 Blackwell are both first-class fork targets;
+native Windows remains supported beside Linux.** Preserve the resident-GPU path
+when the selected model fits, and assess bounded offload for larger working sets.
+Qualification and performance evidence remain specific to each device and route.
 
 ## Sync state and method
 
@@ -17,6 +18,7 @@ workstation.
 | Last reviewed upstream commit | [`81c8ce09`](https://github.com/Neroued/ninfer/commit/81c8ce093b2c1646a87566a8e59d807fcf0ec95c) (October 8, 2026), merged on `sync/upstream-81c8ce09` |
 | Pre-v3 fork line | `research/qwen4-flash-next` at `87812bc8` (September 26); the source for Flash-Next |
 | Current sync | All 44 commits in `d44ab584..81c8ce09`; upstream preemptive runtime adopted and Flash-Next migrated |
+| Current assessment target | `64d10fbf` (October 16, 2026); 77 incoming commits reviewed on October 19, not merged; see the assessment below |
 
 The fork syncs by merging `origin/master` into the fork line, never by rebasing or cherry-picking
 upstream work. Each merge records every upstream change it brings in here as integrated, deferred
@@ -38,6 +40,188 @@ model and workload, the fork commit, qualification and remaining work. Status va
 Source integration and hardware qualification are separate claims. Detailed performance results live in
 [performance](../performance.md) and its [RTX PRO 6000 records](../performance/rtx-pro-6000.md);
 link them here.
+
+## Upstream `81c8ce09..64d10fbf` (assessment, October 19, 2026)
+
+**Status: Candidate; not merged or GPU-qualified.** A contained Windows CPU grammar
+trial is complete; the remaining integration is source review only. The comparison is committed
+`workstation` at `2b62e8e5` against upstream
+[`64d10fbf`](https://github.com/Neroued/ninfer/commit/64d10fbf9f8e6bfc79ab0570b94674c5b9997929).
+There are 77 upstream commits and 166 fork-only commits after the common ancestor
+`81c8ce09`. A dry merge reports 187 unique unmerged paths, including 59 in Ops,
+25 in the native Qwen4Exp package, 16 in Qwen3.5 and 27 in tests. Directory-rename
+messages are additional to that path count. Similar features exist on both sides;
+patch-equivalence filtering does not eliminate any of the 77 upstream commits.
+
+The user's target is **both RTX 5090 and RTX PRO 6000 Blackwell, with native Windows
+retained**, and a fork that can add capabilities beyond upstream. Preserve the
+GPU-resident Flash-Next execution route. Also assess upstream's CPU/GPU expert
+execution as a useful route for the 5090; do not blanket-reject it because the PRO
+6000 has more VRAM. Runtime placement should follow the supported model's actual
+resource plan, with separate qualification for resident and offloaded execution.
+
+### What upstream's Flash-Next design addresses
+
+The upstream model reference accounts for 63.281433 GiB of Main routed experts,
+27.126954 GiB of PLE NF4 tables and about 10.257616 GiB of fixed GPU weights with
+all components enabled. It places the complete Main expert source on Host, PLE on
+disk, and a capacity-bounded expert subset on GPU. Small-column missing experts
+run on CPU; larger columns stream complete bank windows to GPU.
+`qwen4_exp::Startup::plan` rejects the non-Host candidate, and `materialize`
+requires Host backing. This is a different execution/representation choice from
+the fork's existing resident expert banks, mapped U4Z8 PLE and offline-baked MTP
+banks.
+
+This design is consistent with upstream's stated RTX 5090 target; that attribution
+is an inference from the documented target and placement. It is not evidence of
+a speed gain or loss. At this revision upstream's performance index explicitly
+says that Flash-Next has no published result page in its serving campaign.
+See the upstream [model/weight accounting](https://github.com/Neroued/ninfer/blob/64d10fbf/docs/maintainer/qwen4_exp-model.md)
+and [execution reference](https://github.com/Neroued/ninfer/blob/64d10fbf/docs/maintainer/qwen4_exp-execution.md).
+
+### Improvements worth evaluating
+
+| Priority | Change | Recommendation and limits |
+|---|---|---|
+| First contained trial | `0a8530d4`: length-bounded JSON string masks | Bring forward if the native CPU grammar and independent schema/language checks pass. Counted character-unit state avoids expanding each remaining length into a separate matching state; upstream adds boundary, UTF-8/escape, speculative-preview and rollback cases. It applies to either GPU. No model throughput improvement is established. |
+| High | `19367582`: calibrate the actual configured CUDA Graph set before final KV sizing | Adapt. Our startup queries device-wide free memory and enforces a desktop reserve, but that does not replace measuring graph allocation and retained driver memory. Carry both protections into the combined planner. Keep explicit KV capacity/features, bounded OOM recovery and truthful startup telemetry. The upstream commit itself discloses an unexplained 14 ms decode regression in one comparison, versus about 1 ms in reverse order; no inference gain is established. |
+| High for 5090 Flash-Next | Main expert cache, CPU/GPU MoE and bounded PLE preparation | Adapt as additional native placement/execution capability, while retaining GPU-resident execution when it fits. This is a capacity feature, not yet a demonstrated speed improvement over resident execution. Account for full Host backing, registered ranges, worker CPU cost, GPU cache/windows, RAM, disk I/O and desktop headroom. |
+| Kernel candidates | HC, QSA, fused PLE gate, 10240-wide offset RMSNorm, NVFP4/block-FP8 MoE | Compare against the fork's actual kernels and operands. The fork already carries optimized HC/PLE/QSA and recent FP8/NVFP4 dispatch tuning. A new upstream implementation is not automatically an improvement over those paths. Check supported widths, public BF16 rounding boundaries and independent numerical oracles before A/B timing on either GPU. |
+| Architecture/maintenance | Op family organization, LinearSplit, shared Qwen frontend, complete continuation and KV-prefix ownership | Adopt deliberately across callers and both native architectures. Explicit ownership and fewer duplicated context implementations can benefit maintenance; the moved files alone are not a runtime speed result. Preserve recovery, scoring, grammar, readouts, expert tracing and fork prefix-admission behavior. |
+| Representation/quality candidate | NF4 PLE, imported block-FP8 MTP, source-backed converter and dedicated Flash-Next template | Evaluate independently of offload. These alter actual stored operands, logical bindings and/or template behavior. Importing the MTP block-FP8 representation avoids the fork's NVFP4 bake, but changes memory requirements and numerical inputs; quality, acceptance rate and speed are unmeasured. Existing v3 framing does not make the two Flash-Next artifacts interchangeable. |
+
+### Portability and fork protections
+
+A straight merge does not satisfy native Windows:
+
+- `src/core/CMakeLists.txt` unconditionally requires Linux x86-64, including for
+  resident-only use. Core also links `hwloc>=2.5` and `liburing>=2.5`.
+- CPU topology/ISA discovery uses `<cpuid.h>`, and MoE worker compilation uses
+  GCC/Clang `-mavx*` flags. Port discovery, affinity, floating-point mode and
+  per-ISA compilation/dispatch to MSVC without making CPU support a configure
+  failure for an otherwise supported GPU route.
+- The new Core file/read-queue layer replaces the fork's Windows-aware Artifact
+  file I/O with POSIX direct reads, `io_uring`, `eventfd` and `poll`. Preserve
+  alignment, exact-read/error handling, cancellation, buffer ownership and
+  completion-before-reuse with a native Windows implementation.
+- Graph calibration and new startup candidates must retain NVML device-wide
+  accounting, the configured desktop reserve, optional concurrency clamping and
+  the fork's blocking CUDA synchronization default.
+- Forward-port fork tuning and correctness changes through renamed files. In
+  particular, upstream's moved FP8 TMA kernel still releases an input stage once
+  per consumer warp, while the fork counts/releases every consumer thread.
+  Do not overwrite the fork's staged-input handoff fix. Re-run its alternating
+  identical-weight/cold-buffer regression after migration.
+- The comparison baseline excludes the shared checkout's 35 tracked modifications
+  and five untracked path entries. Active HC fusion, MTP/proposal and FP8 work
+  overlaps this sync. Reconcile those changes when their owner finishes; absence
+  from this committed baseline does not mean their behavior is superseded.
+
+### Complete change inventory
+
+Every one of the 77 upstream commits appears once below. Candidate means reviewed
+for purpose and integration constraints; it does not mean implementation,
+numerical qualification or hardware performance qualification has passed.
+
+| Area | Upstream commits | Initial disposition |
+|---|---|---|
+| References and planning | `84d1cf02` `dc8b58fb` `30e3a92f` `be9ad8a3` `fbd285b5` `c6f47b52` `f1ace85e` `6e772ee3` `93fb1874` `64d10fbf` | Candidate: reconcile active references with dual-GPU and Windows contracts; completed task plans should not become new permanent authorities. |
+| Qwen4Exp Ops | `f2620157` `be12563a` `d6a8de0e` `1a9d676e` `30b489f6` `d02703e2` `fc4e3331` `e70fc17f` `47cdc08a` `fbcd8504` `6a4104fd` `f7d3090b` `70a11f12` `5989682a` `642d588f` | Candidate: compare GDN, HC, PLE and QSA with fork implementations and preserve observable rounding/state semantics. Benchmark relevant production shapes on both GPUs before replacing optimized kernels. |
+| Conversion and representations | `d8c0fa6f` `7c4c5e3e` `9cdbf221` `4de9e425` | Candidate: review NF4 PLE, bank bindings, block-FP8 MTP and dedicated template. These change artifact operands/semantics; no checkpoint conversion or source download is authorized by this assessment. |
+| Mixed-row KV | `a0d27b22` | Candidate: useful for QSA row densities; validate exact KV publication, prefix and Main/MTP frontiers. |
+| Op family organization | `3124dffe` `90d25edd` `7ee63999` `20d3a13f` `1844d861` `4eb2c042` `d53eb7ae` `6733be72` `c012155c` `4366c7b6` `8cc45088` `e6585d15` `ae54c1a9` | Candidate: adopt explicit family ownership and LinearSplit where useful; migrate fork callers, tuning and correctness fixes rather than taking renamed upstream files wholesale. |
+| Core memory/execution split | `6a42de35` | Candidate: separate physical backing from execution views while retaining native Windows allocation, device-wide memory accounting and the desktop reserve. |
+| CPU/GPU expert execution | `74671a4e` `c18d72db` `610f79e9` `8cf26bb6` `8e3dff94` `c7c36e88` `fddba033` `c996baa8` `7ff78ee8` `545a171a` `17bea0bc` `7e691b0b` | Candidate: important for 5090 Flash-Next feasibility. Port platform/ISA contracts; retain an all-GPU route when the complete selected model and runtime fit. Offload is no longer blanket-deferred. |
+| Graph startup calibration | `19367582` | Candidate, high priority: use actual configured graph allocation, bounded recovery and truthful memory diagnostics; preserve NVML accounting, explicit capacity and desktop headroom. |
+| PLE preparation pipeline | `8cea711b` `333b4808` `5ac4d9f0` | Candidate: bounded async row preparation and cache can help RAM-limited execution. Adapt Linux io_uring to Windows completion semantics and measure I/O/CPU/latency costs. |
+| PLE gate and RMSNorm | `1b50c72d` `569861a3` | Candidate: inspect fused PLE and 10240-wide norm at actual fork call sites; distinguish new format/semantic support from improvements to existing fused paths. |
+| NVFP4 and block-FP8 GPU MoE | `69c098bf` `df4ff5fe` | Candidate: compare resident decode, speculative widths and prefill with the fork's NVFP4 bank kernels; block-FP8 expands supported stored operands, with additional memory cost. |
+| Bounded JSON string masks | `0a8530d4` | Candidate, first isolated trial: CPU-only grammar change and independent language/schema regressions; applicable to both GPUs without changing model placement. |
+| Shared Qwen and context ownership | `9cfd5646` `48d8d185` `e9a7de36` `ee5a5ffa` `4423e0ac` | Candidate: reduce duplicate frontend/context ownership and make complete continuation/KV-prefix lifetimes explicit; preserve fork scoring/readouts, prefix admission policy and pressure recovery. |
+| Qwen4Exp integration and cache priorities | `088e8da4` `985121d4` `4f31ad4a` `afe43480` `439e1075` `3444964f` `f8a774f7` | Candidate: adapt into the native architecture rather than wholesale replacing the resident fork implementation with compulsory host backing. Qualify text, Vision, MTP, eager/graphs, scoring, reuse and trace hooks on each route. |
+
+### Merge boundaries and acceptance
+
+Dry merges from the same committed fork baseline give these candidate boundaries.
+These are conflict counts for independent previews, not predicted effort or a
+count of new failures after an earlier stage has been resolved.
+
+| Upstream boundary | Cumulative incoming commits | Unique unmerged paths | Main concern |
+|---|---:|---:|---|
+| `f1ace85e` | 24 | 52 | Overlapping Qwen4 Ops, conversion and documentation |
+| `6e772ee3` | 38 | 99 | Move fork Ops/callers/tests/tuning into the new family ownership |
+| `6a42de35` | 39 | 111 | Explicit memory backing and CUDA execution views |
+| `19367582` | 52 | 134 | Windows CPU execution, expert placement and graph-calibrated startup |
+| `4423e0ac` | 68 | 157 | PLE I/O, new MoE/grammar, shared context and snapshot ownership |
+| `64d10fbf` | 77 | 187 | Reconcile complete Qwen4Exp Text/Vision/MTP and graph composition |
+
+Keep the merge-based sync method. A contained trial can apply an upstream diff in
+an isolated checkout for evidence; that is not a cherry-picked sync or a claim
+that upstream ancestry has advanced. Record integrated/deferred/reverted decisions
+when the actual merges are prepared. Do not create a cosmetic zero-behind merge
+that silently drops useful upstream work.
+
+Completion requires the selected design across native Windows and Linux, with
+both RTX 5090 and RTX PRO 6000 treated as supported targets. Report unavailable
+hardware runs separately; neither upstream 5090 results nor PRO 6000 runs qualify
+the other GPU. Use explicit artifacts and select resident/offload baselines and
+workloads before measurement:
+
+- Native builds and affected host/protocol tests, including Supervisor and the
+  serving extensions. A CPU-only grammar trial does not qualify the full merge.
+- Each changed production Op against its independent FP32/FP64 oracle or exact
+  codec reference, with independently decoded stored scales and relevant model
+  shapes. Preserve defined intermediate/state boundaries.
+- Public Engine tests for Qwen3.8-27B and Flash-Next: ordinary/speculative execution,
+  eager/graphs, ragged batches, Vision, scoring/logprobs, grammar/tools,
+  prefix reuse, Snapshot/Replay, cancellation and resource release.
+- Matched whole-Engine measurements at representative prompt lengths,
+  cache-hit ratios, concurrency and speculative widths on each GPU. Compare to
+  the fork's optimized baseline, with identical operands/configuration for a
+  kernel comparison; report artifact/representation changes separately.
+  Include TTFT/prefill, decode, complete latency/throughput, MTP acceptance,
+  worst cases, VRAM, Host/pinned memory, CPU and I/O costs.
+- Offload additionally needs capacity/working-set boundaries, cache-miss and
+  streaming behavior, startup/graph OOM recovery, transfer completion and
+  desktop-coexistence evidence. Performance and memory benefit remain
+  unverified until these measurements exist.
+
+### Contained grammar trial
+
+Upstream `0a8530d4` applies cleanly to an isolated `2b62e8e5` checkout, preserving
+the fork's existing MSVC adaptations. Release builds of `ninfer_grammar_test`,
+`ninfer_json_schema_test` and `ninfer_regex_choice_test` pass with MSVC 19.51 and
+CUDA toolkit 13.3.33 configured; these targets execute entirely on CPU.
+All five selected CTest entries pass, including independent Python 3.11.15 JSON
+Schema and regex/choice oracles. The baseline also passes the three native tests
+and both Python oracles with the corrected environment. The candidate adds
+counted-unit/rollback/speculative-mask tests, boundary lengths through 200,
+UTF-8/escape checks and a dense-token mask oracle.
+
+The first oracle invocation inherited Python 3.14 and Windows CP1252; Unicode pipe
+encoding failed and the run was stopped. An attempted Python reconfiguration
+also referenced a transient uv environment that no longer existed. Both setup
+issues were corrected with a persistent task-local Python 3.11 environment and
+`PYTHONUTF8=1`; the subsequent baseline and candidate runs pass. Existing MSVC
+vendor conversion and nodiscard warnings remain. The unpaired Python schema
+oracle runs took 3.44 s on baseline and 6.33 s on candidate; they are correctness
+runs, not a controlled suite-performance comparison, and the elapsed increase
+is unexplained.
+
+A matched, alternating CPU probe comparison passes every independent acceptance
+check. For `minLength=256,maxLength=512`, median cold-process/compile/mask time
+falls from 94.36 to 22.48 ms (76.2% lower). The three shorter-bound workloads
+instead rise by 1.6%, 7.2% and 7.6%; worst median increase is 1.01 ms. These
+costs are retained, not dismissed as noise. This is a 257-token byte/EOS probe,
+not the production tokenizer, serving TTFT or model decode. See the full
+[method and results](../performance.md#bounded-string-grammar-trial-2026-10-19).
+Recommendation: carry the candidate into the sync for bounded-string handling,
+with the small-case costs and production-vocabulary uncertainty explicit.
+
+Source/history review, dry merges and this contained Windows CPU trial are
+complete. The full integration, model numerical comparison, model conversion and
+dual-GPU qualification remain open. No upstream merge, commit, push or deployment
+has occurred.
 
 ## Upstream through `bace20dc`
 

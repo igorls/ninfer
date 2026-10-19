@@ -335,6 +335,49 @@ for example 135.87 against 135.84 tok/s. The retuned table does not touch the de
 Peak Engine workspace at chunk 1024 drops from 135.2 to 122.7 MiB. At chunk 8192 it is 981.8 MiB
 in both builds.
 
+## Bounded-string grammar trial (2026-10-19)
+
+This is a Windows CPU grammar-probe measurement in an isolated checkout, not a
+model/serving benchmark. Baseline is committed `workstation` at `2b62e8e5`;
+candidate is that tree plus upstream `0a8530d4` (length-bounded JSON string masks).
+MSVC 19.51.36260, Release, Windows x64; the build is configured with CUDA
+13.3.33 but the measured executables use no GPU. The machine's shared GPU and
+serving process were not exercised by this experiment.
+
+Each process runs `ninfer_json_schema_test --probe` with the same 257-token
+byte/EOS vocabulary and 4-MiB grammar cache. Input is one bounded-string schema
+and 20/37/31/37 candidate strings for the four rows below. Candidates cover
+minimum/maximum neighbors, ASCII, multibyte Unicode, newline, backslash and NUL.
+Python 3.11.15 with JSON Schema 4.26 independently determines acceptance; every
+baseline and candidate result agrees. Native counted-unit/preview/rollback,
+schema-boundary/dense-token and regex/choice checks also pass.
+
+Timing covers process launch, cold grammar construction and all token masks for
+that row. One warm-up per arm/row is excluded, followed by five repetitions with
+alternating arm order. Reported values are per-row medians and observed ranges;
+there is no average across workloads or assumed engine-speed acceptance gate.
+The decision criteria are correct language/mask behavior and an explicit account
+of both the intended large-bound benefit and small-bound costs.
+
+| minLength / maxLength | Baseline median ms (min–max) | Candidate median ms (min–max) | Median time change |
+|---|---:|---:|---:|
+| 0 / 1 | 13.40 (12.48–14.50) | 14.37 (13.77–17.48) | +7.2% |
+| 16 / 32 | 14.61 (13.32–16.51) | 14.85 (12.78–19.08) | +1.6% |
+| 127 / 128 | 13.32 (13.21–13.63) | 14.33 (13.86–15.40) | +7.6% |
+| 256 / 512 | 94.36 (90.59–96.55) | 22.48 (20.63–33.01) | -76.2% |
+
+The large-bound workload improves; all three smaller-bound medians worsen.
+The worst small-case median cost is 1.01 ms and the largest paired observed
+candidate increase is 4.47 ms (16/32, one pair). These increases are not dismissed
+as noise. Production vocabulary/cache residency, CPU utilization and peak memory
+were not measured; neither GPU inference nor end-to-end serving improvement is
+established. Correctness-oracle wall times and initial interpreter/encoding
+setup failures are recorded in the [port assessment](maintainer/upstream-ports.md#contained-grammar-trial).
+
+The candidate remains an uncommitted isolated trial. It has not advanced the
+fork's upstream merge-base. See the [sync assessment](maintainer/upstream-ports.md#upstream-81c8ce0964d10fbf-assessment-october-19-2026)
+for the remaining integration and dual-GPU qualification.
+
 ## FP8 TMA staged-input handoff (2026-10-08)
 
 Upstream-sync qualification exposed intermittent first-token corruption in the existing FP8 TMA

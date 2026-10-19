@@ -86,9 +86,12 @@ applies with these additions, which take precedence where they differ:
 - Windows 11 with MSVC and CUDA 13.3 is a native build and runtime platform beside Linux
   ([build system](docs/maintainer/build-system.md#windows-msvc)). Release builds bundle only the
   LGPL FFmpeg.
-- The fork targets one RTX PRO 6000 Blackwell (`sm_120a`, 96 GB) running Qwen3.8-27B NVFP4 on a
-  shared desktop. Performance decisions for the fork are measured on that device, and the engine
-  must leave the desktop usable (memory reserve, no whole-GPU assumptions).
+- The fork targets both RTX 5090 and the 96-GB RTX PRO 6000 Blackwell (`sm_120a`), with native
+  Windows and Linux retained. Both GPUs are first-class targets. Preserve resident-GPU execution
+  when the selected model fits; assess bounded expert offload for larger models on smaller GPUs.
+  Qualify numerical behavior, performance and resource costs separately on each device and route.
+  On a shared desktop the engine must leave the desktop usable (memory reserve, no whole-GPU
+  assumptions).
 - The fork carries the supervisor app, serving extensions (structured output, token logprobs and
   `/v1/score`, System One, admin/telemetry endpoints) and the OrcaRouter checkpoint on v3;
   Qwen3.8-Flash-Next has a second native architecture package for text, MTP and Vision;
