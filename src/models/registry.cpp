@@ -1,5 +1,4 @@
 #include "models/registry.h"
-
 #include "artifact/schema.h"
 
 #include <stdexcept>

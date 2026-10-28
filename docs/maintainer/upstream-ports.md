@@ -1,6 +1,6 @@
 # Upstream ports
 
-Updated: October 19, 2026.
+Updated: October 28, 2026.
 
 This is the living record of how this workstation fork ([igorls/ninfer](https://github.com/igorls/ninfer))
 tracks [Neroued/ninfer](https://github.com/Neroued/ninfer): the reviewed upstream point, the fork
@@ -15,10 +15,362 @@ Qualification and performance evidence remain specific to each device and route.
 | Item | Value |
 |---|---|
 | Fork line | `workstation` (named `port/upstream-v3` until September 28, 2026), based on upstream [`bace20dc`](https://github.com/Neroued/ninfer/commit/bace20dc70249eed6402b66d4852c6c3f9612905) (September 24, 2026) and merged with upstream `e31bc99b` in `e2a149f1` and `d44ab584` in `d29866c9` |
-| Last merged upstream commit | [`6a42de35`](https://github.com/Neroued/ninfer/commit/6a42de35) on the local `sync/upstream-64d10fbf` branch; hardware qualification is in progress |
+| Last merged upstream commit | [`64d10fbf`](https://github.com/Neroued/ninfer/commit/64d10fbf9f8e6bfc79ab0570b94674c5b9997929) on the local `sync/upstream-64d10fbf` branch; physical RTX 5090/native Windows GPU qualification remains outstanding |
 | Pre-v3 fork line | `research/qwen4-flash-next` at `87812bc8` (September 26); the source for Flash-Next |
-| Current sync | The earlier 44-commit sync through `81c8ce09` is followed by the first 39 of the 77 reviewed incoming commits; CPU/GPU expert execution and graph calibration are next |
-| Current target | `64d10fbf` (October 16, 2026); full source integration and qualification remain incomplete; see the assessment below |
+| Current sync | All reviewed incoming work through `64d10fbf` is recorded in the local sync merge with the fork adaptations and regression repairs. Linux G4 resident/bounded Engine qualification and Windows build/CPU checks pass |
+| Current target | `64d10fbf` (October 16, 2026); source adaptation and G4 regression repairs are qualified, with retained measurement/resource costs and outstanding physical RTX 5090/native Windows GPU qualification |
+
+### Final-tip adaptation (October 23–28)
+
+The October 28 repair addresses dense MTP and ordinary Flash decode before the
+merge commit. The original baseline and workload remain the comparison
+authorities. Dense target verification accidentally repeated its final
+normalization, vocabulary projection and argmax; the duplicate is removed.
+The dense acceptance divergence begins at one BF16 SiLU-gated D128 norm output
+in prefill. The specialization now uses the generic row's BF16x2 pair grouping,
+restoring baseline tokens and acceptance in the focused probes. Plain and
+Sigmoid-gated profiles retain their upstream grouping. Both SiLU profiles satisfy
+the existing FP64 accuracy budget; this is a consistency/performance choice,
+with no claim of improved general accuracy.
+
+The Flash candidate uses a fixed local sorting network for the 512-expert,
+top-10 router and a vectorized single-token NVFP4 Down projection that includes
+the prepared shared term. Other router shapes retain their original sorting.
+All NVFP4 vector widths use the same two FP32 accumulation chains, and separate
+and fused shared Down use the same dot reduction. There is no new activation
+cast, workspace allocation or runtime weight packing. The first fast fusion
+passed its independent Op oracle but failed two of 26 real Engine cases at a
+0.125-nat reference gap, beyond the unchanged 0.05 criterion. The split control
+passed both. Aligning the vector reductions fixes those two cases, and all 26
+resident Engine cases pass on the corrected source. The expanded independent
+MoE residual-output oracle, RMSNorm/gated-norm suites and both dense MTP
+integration checks pass. Windows CLI/server/Supervisor and affected test targets
+build; an earlier stale-object link failure is resolved by a coherent rebuild,
+with the existing LIBCMT warning retained. Ordinary/MTP K=3 Host execution passes
+in eager and graph modes at both 32 and 28 GiB, registering 67,948,068,864 Host
+expert bytes with 16 workers. The original paired method and baseline are retained.
+
+The first complete repair comparison validates 48 process records and improves
+15 of 16 wave medians. The remaining C1/P512 Flash ordinary median costs 0.453%
+(-0.316 to +1.143%). A paired profile shows more GPU work despite less GPU idle
+time. The follow-up splits single-query BF16 sparse-GQA value columns across two
+CTAs, preserving the key partitions, probability scaling and warp reductions.
+It duplicates key/cache tile work, with no new workspace. The independent BF16
+oracle and cross-width invariance checks pass, as do all 26 resident Engine
+cases on this selected source. Bounded Host checks also pass at both budgets.
+Other query counts and quantized-cache schedules retain their existing implementation.
+The final comparison validates 24 new Flash processes and the 24 unaffected dense
+processes. Fifteen of 16 wave medians improve: dense MTP improves 0.12–1.49%,
+and Flash ordinary C4 improves 2.97–3.30%. Flash C1/P2048 improves 1.55%; C1/P512
+retains +0.021% (-1.070 to +0.236%), despite a lower mean wave time. Its paired
+decode-rate median is 0.233% lower despite a higher mean rate. Independent
+baseline/self pairs exhibit P512 wave drift of +0.032 to +0.133%; this quantifies
+measurement limits without proving equivalence or removing the adverse A/B result.
+Dense C4 MTP also retains small decode-rate losses and one +0.301% wave pair.
+Short Flash MTP gains are smaller than the pre-repair candidate's, while long
+MTP improves. All ranges, numerical tradeoffs and CPU/RSS/sequence/workspace/
+startup GPU costs remain in the [repair comparison](../performance.md#final-repair-comparison).
+
+Earlier shared-Down scalar/four-row fusions and shared Gate/Up fusion passed
+their oracles but were slower and are removed. Sparse-attention query staging
+passed all five cache-format oracles but added 8 KiB of shared memory without a
+consistent timing gain and is removed. An iterative top-k alternative likewise
+provided no consistent benefit over the sorting network and is removed. The
+complete measurements and rejected approaches are retained in performance.
+The shared Gate/Up two-chain, value-column-per-warp and four-CTA attention
+alternatives also pass their affected oracles but give mixed timing; they are
+removed. The selected two-CTA source is restored and rebuilt after these trials.
+
+October 28 continuation: the prior managed checkout had been removed, but its
+Git recovery snapshot preserved the complete pending merge. That source has been
+restored into a fresh isolated checkout, with `64d10fbf` still the merge target.
+The shared workstation checkout has not been changed. New build/test evidence
+is saved outside the managed checkout. The recovered merge and qualified repairs
+are committed on the local sync branch; publication and deployment are separate.
+
+The initial matched campaign and focused profiles exposed resident launch and
+HC injection costs; their complete workload table, unfavorable results and
+resource costs are retained in [performance](../performance.md#initial-matched-comparison-before-resident-graph-optimization).
+The follow-up captures the immutable resident traversal in two graphs around PLE
+instead of per-layer cache/CPU handoffs, while Host placement keeps those handoffs.
+HC injection assigns one 256-thread CTA to each stream with a uniform reduction
+across token widths. The October 28 Linux candidate/baseline builds, affected
+HC/MoE mathematical checks, 116 Python tests and independent template comparison
+pass. Windows CLI/server/Supervisor and selected test targets also build; all
+three Windows CPU NVFP4 dispatch tests pass. The new resident candidate passes
+all 26 public Engine cases, including exact chunk invariance, ordinary/MTP
+graph/eager and batch parity, Vision, scoring, trace neutrality, restoration and
+concurrent reuse. Bounded Host execution also passes ordinary/MTP K=3 in eager
+and graph modes under both 32 and 28 GiB Engine budgets, at the unchanged target
+parity criterion. Each run registers 67,948,068,864 Host expert bytes. The complete
+matched follow-up results and remaining costs are recorded in performance. The older
+26-case pass below predates these two performance changes.
+
+The first follow-up measurements still show a material ordinary-decode cost.
+The maintained converter groups HC Down/injection into one native parent, but
+the legacy reframer left them independent and therefore selected a separate
+injection traversal. An exact-byte regression reproduces the missing parent for
+Text and MTP. The reframer now copies those operands into the maintained packing
+without requantization; its five focused Windows tests pass. Python 3.11 passes
+117 tests and eight subtests on the G4, and the corrected artifact passes all
+26 resident public Engine cases with unchanged criteria. Final bounded Host
+ordinary/MTP K=3 eager/graph runs also pass at 32 and 28 GiB. Before the repair
+above, the native-HC checkpoint used 24 new Flash processes and 24 unaffected
+dense processes, with three paired processes per point. At that checkpoint,
+Flash ordinary wave medians remained 0.14–7.56% slower;
+short-prompt MTP improves 19.92–22.86%, while long-prompt wave medians are near
+neutral and their per-request decode rates still fell. Dense MTP remained
+1.54–12.74% slower. Full ranges, acceptance, CPU/RSS/workspace and startup costs
+are retained in the [final measurement](../performance.md#final-native-hc-comparison-2026-10-28).
+
+The same profile attributes 26.559 ms to the separate shared-expert Down kernel
+at Flash C1K0 P512. A subsequent NVFP4 vector prototype folded that projection
+into routed Down, preserving per-lane FMA order, warp reductions, expert-rank
+summation and the final shared contribution. It built on Linux and Windows and
+passed the unchanged block-scaled oracle. A one-process timing probe failed to
+show a benefit at either P512 or P2048, with longer wave times than the preceding
+HC-parent-only probe. This unpaired probe does not establish a stable slowdown,
+but provides no performance reason to retain the added complexity. All seven
+prototype files were restored at that checkpoint. The later selected single-row
+vector route above uses a different geometry.
+
+The adaptation through `64d10fbf` is committed on the local `sync/upstream-64d10fbf` branch.
+Linux G4 runtime checks pass; physical RTX 5090 and native Windows GPU acceptance
+remain outstanding.
+The combined native Qwen4Exp package keeps resident CUDA experts and adds upstream's
+bounded Host expert placement. Its public Engine route also carries the fork's
+logprob/scoring readouts, repetition penalty with prompt membership, and routed-expert
+observation. The common startup also restores optional concurrency clamping using
+complete KV page groups, preserves an explicit pool's tail pages after clamping,
+and owns the metadata needed to retry Host placement after discarding a resident
+candidate. Their Linux resident/bounded runtime checks pass on the mixed artifact;
+the other hardware and artifact qualification limits above remain applicable.
+
+The converter now uses the canonical Qwen4Exp logical bindings, batched NVFP4 layout,
+per-Use activation divisors, dedicated Flash-Next template and shared frontend.
+`qwen3_8_flash_next` selects upstream's NVIDIA-backed representation;
+`qwen3_8_flash_next_mixed` encodes the fork's mixed allocation from official BF16
+sources. They are distinct recipes with distinct numerical inputs. The retired
+private expert-layout alias is not accepted by the canonical loader or codecs.
+Existing fork packed-v3 artifacts require the explicit
+`python -m tools.convert.reframe_qwen4_exp SOURCE DESTINATION` command beside their
+continuation files. It preserves the original payload and companions, packs byte-exact
+BF16 HC Down/injection parents and router/shared-score controls, deinterleaves
+per-head attention query/gate code rows and their FP8 scale words, joins adjacent
+shared gate/up views, and stores the
+previously implicit unit activation divisor. It does not quantize at load time.
+The reframing tests cover cross-file tensors, exact control copies, preservation of
+the original files, exclusive creation, and removal of partial output after I/O failure.
+
+October 23 qualification history follows. Intermediate failures and incomplete
+runs are retained; later explicit passes supersede only the affected checks.
+The October 28 continuation above governs the resident graph/HC follow-up.
+
+- Before the resident graph/HC injection follow-up, the resident candidate passes all 26 Flash-Next public Engine cases on
+  the replacement G4, including ordinary/MTP Text and Vision, graph/eager, batch
+  parity, scoring, exact 3,599-score chunk equality, tracing, context restoration
+  and concurrent reuse. The five affected HC/MoE/FP8/QSA oracle suites pass.
+  These supersede the intermediate failures below for the resident route.
+  The broader run and focused corrections cover 179 selected CTest entries:
+  177 pass, with OrcaRouter tokenizer and reasoning-feature real tests skipped
+  for missing artifacts. Three script oracles initially
+  failed because the test runner had deleted their native probes; rebuilding the
+  probes makes all three pass. The maintained template failure below was a source
+  defect and was fixed separately. The initial whole-inference timing results
+  and their regressions are recorded in performance; follow-up acceptance is pending.
+- The initial extension of bounded Host execution to MTP K=3 exposes a target-parity failure at
+  both 32 and 28 GiB Engine budgets: the first differing decision has a 0.125-nat
+  reference gap, beyond the unchanged 0.05 criterion. Ordinary graph/eager passes
+  at both budgets. Each configuration registers 67,948,068,864 Host expert bytes;
+  MTP leaves less Main expert-cache capacity. This blocks acceptance until the
+  CPU and router corrections below.
+- A direct CPU NVFP4 column-invariance regression reproduces batch-dependent
+  expert sum order. Fixed route-rank accumulation closes the ordinary regression.
+  A second regression with a tiny BF16 neighbour exposes a group-wide switch from
+  BF16 dot products to FP32; the safety choice is now per column. All three CPU
+  qualification routes (native dispatch, forced AVX2 and forced FMA) pass both
+  exact-column checks and their unchanged independent FP64 criteria on the G4.
+  The fixed-rank output tile uses 160 KiB of worker stack rather than 16 KiB;
+  full 256-column grouping adds 10 KiB of member metadata. The three CPU checks
+  and selected product rebuild also pass on Windows. This correction alone does
+  not close the real 32 GiB MTP failure: its gap remains 0.125. The 28 GiB rerun
+  now passes ordinary/MTP eager and graphs; its remaining first divergence has
+  a zero reference gap. Timing is unmeasured.
+- Fixing cache capacity at 22 GiB and waiting for all extra experts to become ready
+  still leaves a 0.125-gap MTP failure after the longer prompt; those diagnostic
+  policies were restored. The standalone 512-expert router separately used a
+  vector reduction only at T=1 and MMA at wider windows. Its new exact-column
+  regression fails across the short widths. The router now retains the complete
+  NVFP4 route's continuous per-lane reduction through 48 columns. The independent
+  block-scaled oracle and exact-column checks pass, as do integer MoE and common
+  mixed-execution checks. The real 32 GiB ordinary/MTP eager/graph rerun now
+  passes at the unchanged criterion, as does the Windows product and affected
+  target build. The 28 GiB rerun also passes ordinary/MTP eager and graph
+  execution. No cache cap or additional cache wait is retained. Router timing
+  is unmeasured; these budget tests do not qualify physical RTX 5090 execution.
+- Windows 11, MSVC 19.51 and CUDA 13.3: CLI, server and Supervisor built. Eleven
+  focused CPU/public-header/I/O/PLE/schema/metrics tests passed, including NF4 and
+  U4 split-plane disk reads, cache reuse, cancellation and corruption handling.
+  CUDA event-record fault injection uses the Linux linker wrapper; it was not
+  exercised on Windows. The `LIBCMT` linker warning remains.
+- Python 3.11 on Windows: 113 artifact/converter/serving-corpus tests passed; three CUDA-only
+  conversion tests were skipped. Synthetic text-only and multimodal official
+  checkpoints are read back against independent BF16, FP8, NVFP4 and U4 oracles.
+- Colab RTX PRO 6000 Blackwell Server Edition, CUDA 13.3: the first final-tip
+  product build and HC/LinearSplit/U4 focused checks passed. Three A8 QSA K/V
+  oracle failures were fixed by retaining A8 for Q/G and using A16 activations
+  for the narrow K/V tail. Criteria were unchanged; the performance cost has
+  not been measured. The initial real graph/eager run failed before execution
+  because the old router/shared operands were not one contiguous native parent.
+  The explicit reframe now prepares those parents; its real-model acceptance
+  remains pending.
+- On the October 23 replacement G4, both baseline and candidate selected products
+  built. Eight focused HC/LinearSplit/U4/MoE/PLE checks passed, including the
+  independent selected-expert ID oracles and NF4/U4 disk preparation. A final
+  startup recompile and canonical real-model acceptance remain in progress.
+- The explicit reframe and full loading/materialization retry now pass on that G4.
+  The loader test's upstream-only FP8 MTP assertion was corrected to check the
+  mixed artifact's NVFP4 operands and explicit unit activation divisors separately.
+  The resident scheduler initially exhausted eight reader slots on 48 layers;
+  its shared plan now sizes those slots from the traversal. The first real Engine
+  run after that fix still fails graph/eager parity, batched near-tie criteria and
+  Host/Device continuation parity, with malformed text. Differential probes found
+  exact embedding and PLE values but a 171% relative-L2 jump at the first QSA output.
+  The old packed attention parent interleaves query/gate rows per head; the initial
+  reframe incorrectly treated them as two contiguous groups. Reframing now copies
+  those rows and their FP8 scales into canonical order. An exact BF16/FP8 regression
+  test failed before this correction and passes afterward. The corrected artifact
+  restores coherent text. The first complete rerun passes 16 of 25 Engine cases:
+  admission, page-based concurrency clamping, catalog turnover, conversation chains,
+  ordinary tracing, ordinary/MTP structured output and logprobs, causal score,
+  Vision/reuse, MTP/reuse, MTP graph/ragged execution, long FP8 MTP, ordinary/MTP
+  long concurrent reuse, shared promotion and the materialization ledger. Graph/eager,
+  B=2/4/8 target parity, ordinary/MTP Host continuation, MTP tracing, causal prefix
+  independence, chunk invariance, hidden readout and MTP target parity fail.
+  Bounded Host execution also fails graph/eager parity. Dense 27B prefix, preemption,
+  tools and scoring pass; grammar fails with a KV page-reservation error.
+  These are unresolved gates, not final-model acceptance or performance evidence.
+- The NVFP4 GPU MoE dispatch restores the fork's A16 vector route through 48
+  columns in both complete and routed expert Ops. An isolated two-prompt B=2
+  check fails with upstream's T=1-only policy and passes with T<=48 at the same
+  near-tie criterion. Independent FP64 oracle coverage now includes T=47/48/49;
+  the NVFP4 oracle rerun passes. Both ordinary and MTP Host/Device continuation
+  checks now pass, while graph/eager still differs on prompt 4. This route change can
+  also affect short prefill; no performance or memory improvement is claimed.
+- MTP expert tracing now maps valid logical columns to their physical mirror
+  offsets and excludes inactive proposal rows and padded verification columns.
+  The trace fixture permits the ordinary final decode when only one output remains
+  and checks the actual proposal/verification extents. The short ragged-row
+  regression fails before the fix and passes afterward, alongside ordinary and
+  MTP trace output-neutrality checks on the real artifact.
+- NVFP4 prefill uses fixed expert-rank reduction instead of atomic output
+  accumulation. With the A16 policy held fixed, the causal-prefix check improves
+  from a 4.86628-nat worst difference to zero, and exact hidden-readout equality
+  passes. Graph/eager still fails with either reduction, so that remains a
+  separate issue. Fixed reduction stores ten FP32 expert contributions per token
+  instead of one routed sum; its buffer is 360 MiB larger at T=4096. Total planned
+  workspace and performance costs remain to be measured. The oracle also checks
+  repeated identical FP32-output prefill calls without relaxing numerical criteria.
+- Runtime rechecks native context-copy dependencies immediately before executing
+  a reserved unit. Concurrent grammar requests exposed a fresh admission pinning
+  a shared KV tail after the resident's unit was reserved; executing the stale
+  runnable decision then required an unreserved COW page. The corrected scheduling
+  check passes the dense grammar run, including mixed constrained/unconstrained
+  requests that previously failed. Flash-Next and broader recovery checks are pending.
+- Eager and captured decode now share the same finite QSA context envelope.
+  With all other arithmetic held fixed, the eight-prompt graph/eager test fails
+  with exact-length eager envelopes and passes with the graph's rounded envelopes.
+  MTP proposal and target calls use the same rule. The envelope-only prefill
+  trial still fails chunk invariance (worst difference 7.6695 nats, versus 9.4893
+  with the original envelopes); it was insufficient. The later joint HC/norm/QSA
+  correction below also fixes the prefill envelope.
+- The first new repeat-output oracle fixture incorrectly requested FP32 output
+  from complete MoE, whose public output is BF16; it was rejected during graph
+  capture. The fixture now checks routed FP32 and complete BF16 outputs at their
+  actual public boundaries. The corrected NVFP4 oracle suite passes, including
+  repeated identical prefill outputs and the 47/48/49-column boundary.
+- The next complete Engine run passes 23 of 26 cases. Remaining failures are
+  ordinary batching, MTP target parity and prefill chunk invariance. B=1 tokens
+  and their top-2 readouts now come from the same generation, removing the earlier
+  fixture's dependency on a separate graph run. Both ordinary/MTP Host restoration,
+  all three trace cases, causal-prefix independence and exact hidden readout pass.
+  Bounded Host execution also passes graph/eager parity under a 32 GiB budget;
+  this is Server Edition correctness evidence, not RTX 5090 hardware qualification.
+- HC prefill Down now uses four K partitions across the wide-window schedules.
+  Its new exact-prefix regression fails on the variable-partition schedules and
+  passes with fixed partitioning, alongside the unchanged FP64 HC oracle. This
+  alone does not fix model chunk invariance: the worst score difference is still
+  8.03798 nats. Boundary captures then find two differing BF16 values at the first
+  HC mix, caused by the earlier normalization schedule changing with window size.
+  The normalization prefix regression fails on ExpandNorm and CombineNorm before
+  retaining the paired 256-thread reduction, then all three norm suites pass with
+  unchanged FP64 criteria. With fixed HC partitioning, fixed normalization and an
+  instance-wide QSA prefill envelope together, all 3,599 scores match exactly for
+  1,024-, 1,536- and 4,096-token chunks. Fixed normalization alone still fails at
+  up to 8.8505 nats. These are joint requirements; an envelope change alone was
+  insufficient. The HC/QSA timing and resource tradeoffs have not been measured.
+- The cleaned-up HC/MoE implementation passes all five affected CUDA suites on
+  the replacement G4, with the existing FP64 numerical criteria. The complete
+  dense 27B prefix, preemption, grammar, tools and scoring rerun passes, as does
+  page-based concurrency clamping. Python 3.11 passes all 116 tests, including
+  the three CUDA-only conversion tests skipped on Windows. The first Linux
+  Python attempt lacked pytest; installing the test dependencies resolves it.
+  The current Windows build and all eleven focused CPU checks pass again.
+- Flash-Next ordinary and MTP batch parity still fail after the joint chunk fix.
+  Ordinary B=2/4 first differs at a reference gap of 0.125; MTP K=3 also has a
+  3.375-gap failure. These block acceptance. FP64 dot products against captured
+  head weights locate the difference before the vocabulary head. Layer and
+  attention captures then find differing BF16 query/gate values from identical
+  attention inputs: single-column and segmented batched projection use different
+  K reductions. Earlier small-HC and shared-expert vector-policy trials
+  did not close parity and were restored; the combined trial also introduced
+  larger MTP failures. No timing gain is claimed for these trials.
+- The segmented FP8 attention projection now retains one A16 reduction through
+  48 columns. Its new seeded finite-code regression fails at T=2/8/16 as well as
+  the former A8 widths and passes after the fix, alongside independently decoded
+  FP64 checks. Permissive-policy cases through 48 now use the existing A16
+  criterion, matching the selected arithmetic, rather than the former A8 budget.
+  Ordinary B=2/4/8 generation passes its 48-token check. The longer ordinary
+  control still fails at a 0.875 reference gap, and MTP still fails at this stage.
+- The joint short-window correction also keeps HC Down/Up schedules uniform,
+  retains FP32 shared-expert activation through the vector route, and keeps A16
+  activations in the FP8 output projection through 48 columns. The eight-prompt,
+  96-token ordinary control and MTP K=1/3/5 now match exactly in the focused run.
+  The HC, NVFP4 MoE and FP32-scale FP8 suites pass their FP64 oracles. Omitting
+  shared-vector execution reintroduces a 1.375-gap ordinary failure and MTP
+  failures; omitting output A16 reintroduces MTP gaps up to 2.75; omitting uniform
+  HC reintroduces 0.125-gap ordinary/MTP failures. All three are necessary for
+  this workload. Broader final-configuration acceptance and matched timing and
+  resource comparisons remain pending.
+- QSA short-window probability partitions restore the fork's
+  width-independent policy. FP16 probabilities depend on each partition's
+  maximum; varying the partition count changes represented values. The direct
+  single-query versus 48-query regression fails on the upstream partition policy
+  at 512- and 2,053-token histories and passes with fixed partitions. The full
+  sparse-attention suite passes across all five KV encodings with unchanged FP64
+  criteria, including the new exact-column check.
+  Its first build exposed a test-helper argument mismatch, now corrected. The
+  Windows fixture uses the existing independent software FP16 codec where MSVC
+  lacks `_Float16`; Linux keeps its native FP16 oracle.
+  The latest Windows CLI, server, Supervisor and affected Op test builds pass;
+  native Windows GPU execution is still unqualified.
+- The broader suite finds a maintained Flash-Next template continuation failure:
+  thinking-off assistant prefill omitted the empty think block required by the
+  serving contract. The template now matches generation's prologue while retaining
+  exact content whitespace. The earlier dedicated whitespace fixture conflicted
+  with that contract; it now checks both the required prologue and unchanged
+  whitespace. All nine template tests, including the independent Python/C++
+  renderer comparison, pass on Windows after the correction.
+- A previous replacement Colab session expired before its final logs were saved.
+  An unrestricted test/microbenchmark build exhausted its disk while copying the
+  new entry. That copy and affected links are invalid and must be repeated after
+  reclaiming task-owned build outputs. Completed focused results above are not
+  a full-suite or final-model pass. The new instance builds selected targets and
+  saves completed logs locally.
+
+RTX 5090 and native Windows GPU execution remain qualification gates. Matched G4
+resident results against the pre-sync fork are complete and retain the regressions
+above. Server Edition results do not qualify the desktop PRO 6000 or an RTX 5090.
 
 The fork syncs by merging `origin/master` into the fork line, never by rebasing or cherry-picking
 upstream work. Each merge records every upstream change it brings in here as integrated, deferred

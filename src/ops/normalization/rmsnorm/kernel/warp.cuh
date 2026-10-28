@@ -95,7 +95,13 @@ __launch_bounds__(Block) __global__
     const __nv_bfloat162 value1 = x[row_base + pair1];
     const float2 x0             = __bfloat1622float2(value0);
     const float2 x1             = __bfloat1622float2(value1);
-    float sum                   = x0.x * x0.x + x0.y * x0.y + x1.x * x1.x + x1.y * x1.y;
+    float sum = x0.x * x0.x + x0.y * x0.y;
+    if constexpr (Kind == Epilogue::SiluGated) {
+        // Use the generic SiLU-gated row's BF16x2 pair grouping at the output cast boundary.
+        sum += x1.x * x1.x + x1.y * x1.y;
+    } else {
+        sum = sum + x1.x * x1.x + x1.y * x1.y;
+    }
     sum                         = common::warp_reduce_sum(sum);
     float inv                   = lane == 0 ? rsqrtf(sum * (1.0f / 128.0f) + eps) : 0.0f;
     inv                         = __shfl_sync(common::kFullWarpMask, inv, 0);

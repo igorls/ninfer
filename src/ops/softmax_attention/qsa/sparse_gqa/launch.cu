@@ -5,7 +5,7 @@
 
 namespace ninfer::ops::detail::qsa {
 namespace {
-template <KvCacheStorage Storage, bool VectorCache>
+template <KvCacheStorage Storage, bool VectorCache, bool SplitValues = false>
 void launch(SparseGqaArguments a, SparseGqaPlan plan, SparseGqaLoad load_policy, int queries,
             CudaExecutionView execution) {
     constexpr bool Async = kSparseQuantized<Storage> && VectorCache;
@@ -21,18 +21,18 @@ void launch(SparseGqaArguments a, SparseGqaPlan plan, SparseGqaLoad load_policy,
             <<<dim3(queries * 24, a.splits), 256, 0, execution.stream()>>>(a);
     } else if constexpr (Async) {
         if (load_policy == SparseGqaLoad::InPlace)
-            sparse_gqa_mma_kernel<Storage, 32, 2, VectorCache, SparseGqaLoad::InPlace>
-                <<<dim3(queries * 2, a.splits), 64,
+            sparse_gqa_mma_kernel<Storage, 32, 2, VectorCache, SparseGqaLoad::InPlace, SplitValues>
+                <<<dim3(queries * 2, a.splits, SplitValues ? 2 : 1), 64,
                    sizeof(SparseGqaStorage<Storage, 32, 2, SparseGqaLoad::InPlace>),
                    execution.stream()>>>(a);
         else
-            sparse_gqa_mma_kernel<Storage, 32, 2, VectorCache, SparseGqaLoad::Staged>
-                <<<dim3(queries * 2, a.splits), 64,
+            sparse_gqa_mma_kernel<Storage, 32, 2, VectorCache, SparseGqaLoad::Staged, SplitValues>
+                <<<dim3(queries * 2, a.splits, SplitValues ? 2 : 1), 64,
                    sizeof(SparseGqaStorage<Storage, 32, 2, SparseGqaLoad::Staged>),
                    execution.stream()>>>(a);
     } else {
-        sparse_gqa_mma_kernel<Storage, 32, 2, VectorCache>
-            <<<dim3(queries * 2, a.splits), 64, sizeof(SparseGqaStorage<Storage, 32, 2>),
+        sparse_gqa_mma_kernel<Storage, 32, 2, VectorCache, SparseGqaLoad::Direct, SplitValues>
+            <<<dim3(queries * 2, a.splits, SplitValues ? 2 : 1), 64, sizeof(SparseGqaStorage<Storage, 32, 2>),
                execution.stream()>>>(a);
     }
     if (plan.partial)
@@ -79,6 +79,15 @@ void launch_sparse_gqa(const Tensor& query, const Tensor& gate, const PagedKVBat
         const auto selected_launch =
             select_sparse_gqa_launch(cache, plan, n, execution.multiprocessor_count());
         const auto dispatch = [&]<KvCacheStorage Storage>() {
+            if constexpr (Storage == KvCacheStorage::BFloat16) {
+                if (selected_launch.split_values) {
+                    if (selected_launch.vector_cache)
+                        launch<Storage, true, true>(a, plan, selected_launch.load, n, execution);
+                    else
+                        launch<Storage, false, true>(a, plan, selected_launch.load, n, execution);
+                    return;
+                }
+            }
             if (selected_launch.vector_cache)
                 launch<Storage, true>(a, plan, selected_launch.load, n, execution);
             else

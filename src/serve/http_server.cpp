@@ -27,6 +27,24 @@
 namespace ninfer::serve {
 namespace {
 
+nlohmann::json admin_context_transfers(const ContextTransferStats& stats) {
+    const auto directions = [](const auto& values) {
+        nlohmann::json result;
+        constexpr const char* names[]{"d2h", "h2d", "d2d"};
+        for (std::size_t i = 0; i < 3; ++i) {
+            const auto& value = values[i];
+            result[names[i]] = {{"bytes", value.bytes}, {"seconds", value.seconds},
+                                {"images", value.images}, {"page_groups", value.page_groups},
+                                {"copy_operations", value.copy_operations}};
+        }
+        return result;
+    };
+    auto pools = nlohmann::json::array();
+    for (std::size_t i = 0; i < stats.kv.size(); ++i)
+        pools.push_back({{"pool_id", i}, {"transfers", directions(stats.kv[i])}});
+    return {{"state", directions(stats.state)}, {"kv_pools", std::move(pools)}};
+}
+
 void write_exception(httplib::Response& res, const std::exception& ex) {
     ApiError error;
     error.status  = 500;
@@ -94,24 +112,13 @@ bool report_has_activity(const ThroughputReport& report) {
            report.current.materialization_state_forks !=
                report.previous.materialization_state_forks ||
            report.current.state_restores != report.previous.state_restores ||
-           report.current.state_d2h_count != report.previous.state_d2h_count ||
-           report.current.state_h2d_count != report.previous.state_h2d_count ||
-           report.current.state_d2d_count != report.previous.state_d2d_count ||
-           report.current.main_kv_d2h_pages != report.previous.main_kv_d2h_pages ||
-           report.current.main_kv_h2d_pages != report.previous.main_kv_h2d_pages ||
-           report.current.main_kv_d2d_pages != report.previous.main_kv_d2d_pages ||
-           report.current.backend_kv_d2h_pages != report.previous.backend_kv_d2h_pages ||
-           report.current.backend_kv_h2d_pages != report.previous.backend_kv_h2d_pages ||
-           report.current.backend_kv_d2d_pages != report.previous.backend_kv_d2d_pages ||
+           report.current.context_transfers != report.previous.context_transfers ||
            report.current.pressure_spill_pages != report.previous.pressure_spill_pages ||
            report.current.partial_tail_cow_pages != report.previous.partial_tail_cow_pages ||
            report.current.device_state_occupied_slots !=
                report.previous.device_state_occupied_slots ||
            report.current.host_state_occupied_slots != report.previous.host_state_occupied_slots ||
-           report.current.device_main_kv_occupied_pages !=
-               report.previous.device_main_kv_occupied_pages ||
-           report.current.device_backend_kv_occupied_pages !=
-               report.previous.device_backend_kv_occupied_pages ||
+           report.current.kv_pools != report.previous.kv_pools ||
            report.current.host_kv_occupied_bytes != report.previous.host_kv_occupied_bytes ||
            report.current.host_context_occupied_bytes !=
                report.previous.host_context_occupied_bytes ||
@@ -254,7 +261,7 @@ HttpServer::HttpServer(ServeOptions options, std::shared_ptr<spdlog::logger> log
         static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests;
     const std::size_t worker_count = queued_requests + 1;
     server_.new_task_queue         = [queued_requests, worker_count] {
-        return new httplib::ThreadPool(worker_count, worker_count, queued_requests);
+        return make_http_task_queue(worker_count, queued_requests).release();
     };
     server_.set_socket_options(configure_http_server_socket);
     server_.set_payload_max_length(options_.max_request_bytes);
@@ -685,9 +692,10 @@ void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& r
         {"available_after_startup_bytes", memory.available_after_startup_bytes},
         {"planned_slack_bytes", memory.planned_slack_bytes},
         {"workspace_logical_peak_bytes", memory.workspace_logical_peak_bytes},
-        // Inside the reservation but never allocated: headroom for CUDA graphs captured later.
-        // A check of the form "reservation should equal resident bytes" is wrong by this much.
-        {"cuda_graph_allowance_bytes", memory.cuda_graph_allowance_bytes},
+        {"cuda_graph_rebuild_estimate_bytes", memory.cuda_graph ? memory.cuda_graph->rebuild_estimate_bytes : 0},
+        {"cuda_graph_prepare_increment_bytes", memory.cuda_graph ? memory.cuda_graph->preparation_increment_bytes : 0},
+        {"cuda_graph_calibration_increment_bytes", memory.cuda_graph ? memory.cuda_graph->calibration_increment_bytes : 0},
+        {"cuda_graph_calibration_retained_bytes", memory.cuda_graph ? memory.cuda_graph->calibration_retained_bytes : 0},
         {"kv_capacity_headroom_bytes", memory.kv_capacity_headroom_bytes}};
 
     nlohmann::json arenas = {{"weights", arena_json(memory.weights)},
@@ -810,18 +818,7 @@ void HttpServer::handle_admin_stats(const httplib::Request&, httplib::Response& 
         {"replayed_tokens", s.replayed_tokens},
         {"paused_requests", s.paused_requests},
         {"reused_prompt_tokens", s.reused_prompt_tokens},
-        {"state_d2h_count", s.state_d2h_count},
-        {"state_h2d_count", s.state_h2d_count},
-        {"state_d2d_count", s.state_d2d_count},
-        {"state_d2h_seconds", s.state_d2h_seconds},
-        {"state_h2d_seconds", s.state_h2d_seconds},
-        {"state_d2d_seconds", s.state_d2d_seconds},
-        {"main_kv_d2h_pages", s.main_kv_d2h_pages},
-        {"main_kv_h2d_pages", s.main_kv_h2d_pages},
-        {"main_kv_d2d_pages", s.main_kv_d2d_pages},
-        {"main_kv_d2h_seconds", s.main_kv_d2h_seconds},
-        {"main_kv_h2d_seconds", s.main_kv_h2d_seconds},
-        {"main_kv_d2d_seconds", s.main_kv_d2d_seconds},
+        {"context_transfers", admin_context_transfers(s.context_transfers)},
         {"actual_context_transfer_seconds", s.actual_context_transfer_seconds},
     };
     res.status = 200;

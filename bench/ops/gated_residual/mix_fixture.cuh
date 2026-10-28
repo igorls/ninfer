@@ -30,20 +30,23 @@ struct MixFixture {
           output(make_zeros(std::size_t(kWidth) * m * sizeof(__nv_bfloat16))),
           injection(op == Op::BlockMix ? make_zeros(std::size_t(kStreams) * m * sizeof(float))
                                        : DeviceBuffer{}),
-          wd(bf16_weight(down, kRank + (op == Op::BlockMix ? kStreams : 0), kWidth * kStreams)),
+          wd(bf16_weight(down, kRank, kWidth * kStreams)),
+          wi([&] { auto w = bf16_weight(down, kStreams, kWidth * kStreams);
+                    w.qdata = static_cast<const std::byte*>(w.qdata) + std::size_t(kRank) * kWidth * kStreams * 2;
+                    return w; }()),
           wu(bf16_weight(up, kWidth * kStreams, kRank)),
           z(input.span(), DType::BF16, {kWidth, kStreams, m}),
           x(output.span(), DType::BF16, {kWidth, m}),
           j(injection.size() ? Tensor(injection.span(), DType::FP32, {kStreams, m}) : Tensor{}),
           capacity(
               op == Op::BlockMix
-                  ? ops::hc_mix_workspace_capacity_bytes(ops::HcMixWeights{wd, wu}, m, m)
+                  ? ops::hc_mix_workspace_capacity_bytes(ops::HcMixWeights{wd, wi, wu}, m, m)
                   : ops::hc_mix_workspace_capacity_bytes(ops::HcFinalMixWeights{wd, wu}, m, m)),
           arena_storage(make_buffer(capacity)), arena(arena_storage.span()) {}
 
     void launch(CudaExecutionView execution) {
         if (op == Op::BlockMix)
-            ops::hc_mix(z, ops::HcMixWeights{wd, wu}, arena, x, j, execution);
+            ops::hc_mix(z, ops::HcMixWeights{wd, wi, wu}, arena, x, j, execution);
         else
             ops::hc_mix(z, ops::HcFinalMixWeights{wd, wu}, arena, x, execution);
     }
@@ -61,7 +64,7 @@ struct MixFixture {
     DeviceBuffer up;
     DeviceBuffer output;
     DeviceBuffer injection;
-    Weight wd, wu;
+    Weight wd, wi, wu;
     Tensor z, x, j;
     std::size_t capacity;
     DeviceBuffer arena_storage;

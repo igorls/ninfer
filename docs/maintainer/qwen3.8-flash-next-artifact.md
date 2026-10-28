@@ -1,17 +1,18 @@
 # Qwen3.8-Flash-Next v3 artifact
 
-This reference defines the v3 `.ninfer` artifact for Qwen3.8-Flash-Next (transformers
-`Qwen4ExpForConditionalGeneration`, text `qwen4_exp_text`), the input of the `qwen4_exp`
-architecture package. Framing, numeric semantics and layouts are defined by
-[`artifact-container.md`](artifact-container.md), [`tensor-formats.md`](tensor-formats.md) and
-[`storage-layouts.md`](storage-layouts.md).
+This reference records the published fork packed-v3 source artifact and its
+derivation. The current canonical logical bindings and native execution are owned
+by [Qwen4Exp model and weights](qwen4_exp-model.md) and
+[execution and state](qwen4_exp-execution.md). The published source below requires
+an explicit offline reframe before the current loader can bind it. Source
+integration and hardware qualification are recorded in [upstream ports](upstream-ports.md).
 
 ## 1. Download and derivation
 
 The current v3 artifact is published on
 [Hugging Face](https://huggingface.co/igorls/Qwen3.8-Flash-Next-mixed-NInfer#ninfer-v3-artifact-re-derived-2026-10-11)
 at revision `ef61b3c856f91e58a58e41a5a6269b6c8648d266`. Download the v3 entry and all three
-part files; keep them in one directory and load the entry file:
+part files; keep them in one directory:
 
 ```bash
 hf download igorls/Qwen3.8-Flash-Next-mixed-NInfer \
@@ -24,73 +25,71 @@ hf download igorls/Qwen3.8-Flash-Next-mixed-NInfer \
   --local-dir models/flash-next
 ```
 
-The entry is `qwen3_8_flash_next_mixed.v3.ninfer`, with `.part-0001`, `.part-0002`, and
-`.part-0003` beside it. This is the October 11 derivation with `eos_token_id` and the maintained
-chat template; the earlier October 10 v3 upload is rejected by the current loader. The published
-manifest's artifact ID and four file digests match the pins below and in `source.V3_FILE_SHA256`.
+The source entry is `qwen3_8_flash_next_mixed.v3.ninfer`, with `.part-0001`,
+`.part-0002`, and `.part-0003` beside it. Reframe into a distinct canonical entry:
 
-For reproducible derivation from the pinned v2 input, use
-[`tools/convert/qwen4_exp`](../../tools/convert/qwen4_exp). A local upgrade is optional when
-downloading the current published v3 artifact.
+```bash
+python -m tools.convert.reframe_qwen4_exp \
+  models/flash-next/qwen3_8_flash_next_mixed.v3.ninfer \
+  models/flash-next/qwen3_8_flash_next_mixed.canonical.ninfer
+```
+
+Load the canonical entry and retain the original continuation files beside it.
+The command copies the original root payload unchanged, packs byte-exact BF16
+HC Down/injection parents and router controls, deinterleaves each attention head's
+query/gate rows (including FP8 row scales), adds explicit unit activation divisors, and adopts the
+canonical bindings and layout names. It needs approximately 31 GiB of additional
+disk space for this artifact and verifies the copied payload before succeeding.
+A failed write removes its partial output; existing files are never overwritten.
+
+Reframing preserves the source's embedded tokenizer and chat template. To use
+the maintained template, including the thinking-off assistant-continuation
+prologue, pass `--chat-template tools/chat_templates/qwen3_8_flash_next.jinja`
+to the CLI or server. Fresh recipe conversions embed the maintained template.
+
+The remaining sections document the original stored representation and historical
+derivation pins. The former private v2 derivation commands were retired. For a new
+conversion from official safetensors, use the current
+[mixed recipe](../weight-conversion.md#qwen4-family-qwen4_exp-from-official-safetensors).
 
 | Input | Pin |
 |---|---|
 | v2 artifact | `igorls/Qwen3.8-Flash-Next-mixed-NInfer@5f0ee7e24279cbadf8d4a90c93c2ff5ea6b00688`, `qwen3_8_flash_next_mixed.ninfer`, 113,298,397,952 bytes, SHA256 `3d383e51963aafd4318dfd04c8dc63ee7df11768de19d9ab58dbba44460d1d02` |
-| model config | official `Qwen/Qwen3.8-Flash-Next@de4b8e4d43b917e7706784d8bb445c9af86a3540` `config.json`, stored as `tools/convert/qwen4_exp/source_config.json` |
+| model config | official `Qwen/Qwen3.8-Flash-Next@de4b8e4d43b917e7706784d8bb445c9af86a3540` `config.json`, recorded in the official source checkpoint |
 | weight sources of the v2 artifact | `primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8@a4e813ed` (without the BF16 PLE table) and `primitive-ai/Qwen3.8-Flash-Next-PLE-quant@da8b3958` (`ples_int4`), recipe `qwen3_8_flash_next_mixed-v1` |
 
-```bash
-# Linux, unattended and resumable (downloads, upgrades in place, verifies):
-python -m tools.convert.qwen4_exp.derive WORKDIR --verify
-# Any platform, from an existing v2 file (needs ~102 GiB beside the input):
-python -m tools.convert.qwen4_exp.upgrade V2.ninfer V3.ninfer
-python -m tools.convert.qwen4_exp.verify V3.ninfer --file-digests
-```
-
-`upgrade` reads the v2 file once, in order. That single pass:
-
-1. checks the closed v2 inventory (Section 3) against the official config;
-2. copies every object's payload byte for byte into the v3 file set and hashes every v2 object
-   range;
-3. bakes the two BF16 MTP expert banks into NVFP4 expert banks (Section 4);
-4. hashes the whole input and rejects it unless it equals the published SHA256;
-5. with `--release-input` (Linux), punches the consumed input range out of the v2 file, so peak
-   disk stays about one artifact.
-
-The v3 `artifact_id` is the first 16 bytes of a SHA256 over the v2 digest and the directory
-content, so a derivation is reproducible byte for byte on every machine. `verify` re-reads the
-result through the generic reader: every object's encoding, size and alignment, every unchanged
-object against its v2 digest, and the MTP banks against the pinned loader-oracle digests.
-`derive` restarts an interrupted in-place upgrade by discarding the partly released input, because
-a hole-punched file keeps its length and would pass a resumed download as complete.
-
-The generic `tools/upgrade_ninfer_v2_to_v3.py` rejects the Flash-Next identity and points here.
+The historical v2-to-packed-v3 derivation copied the non-MTP objects byte for
+byte and baked the two BF16 MTP expert banks into NVFP4. Its input digests and
+represented words below remain the source provenance. The current converter
+creates canonical artifacts directly; it does not expose the retired v2 upgrade.
 
 The current derivation is `artifact_id 3cade505298b575e009fe78877b76a33`: four files,
 109,681,106,432 bytes (payload 109,680,553,472), with SHA256
 `f05abe459b4062af844e6c4ba6585feb97b8e3c9f016bac02815d483e2d51797` (entry),
 `69425b82468c039cb837335289daa9c9eaea17216c957dae3f633bdc7aa92ea3`,
 `a39946035aa14f8f9e910ba371662b1dfb33d6f3df27af41ec31b875a8e8216e` and
-`1deec0ae25095afcd18f2e8c8e8471bf2dda631fc506960304b791d60a477be4` (parts 1 to 3), pinned in
-`source.V3_FILE_SHA256` and checked by `verify --file-digests`. It carries the text config's
+`1deec0ae25095afcd18f2e8c8e8471bf2dda631fc506960304b791d60a477be4` (parts 1 to 3), recorded in
+the published `SHA256SUMS.v3`. It carries the text config's
 `eos_token_id` and the maintained chat template (Section 2); 1,563 of its 1,566 objects equal the
 v2 objects. The earlier published derivation (`artifact_id 1e7e026e9f634926ae26b80f0fc8591e`,
-entry SHA256 `0de7b5f6...02282714`) lacks both and is rejected by the current loader. On Windows
-the upgrade takes about 7 minutes from a local v2 file; on a Colab G4 an unattended `derive` takes
-~13 minutes (6.5 min download, 6.7 min upgrade) plus ~2 minutes of optional verification.
+entry SHA256 `0de7b5f6...02282714`) lacks both. Historical v2 upgrade measurements were about
+7 minutes on Windows and 6.7 minutes on Colab G4, excluding download; these do not measure the
+current canonical reframe.
 
 A native route from the official BF16 safetensors also exists:
-`python -m tools.convert --recipe qwen3_8_flash_next` (see the
+`python -m tools.convert --recipe qwen3_8_flash_next_mixed` (see the
 [conversion guide](../weight-conversion.md#qwen4-family-qwen4_exp-from-official-safetensors)). It
-shares this artifact's config normalizer and reproduces its components, Bindings, Uses, object
-shapes, formats and layouts (Sections 2, 3 and 5). It differs in two ways:
+uses the canonical Qwen4Exp bindings and layouts. Its stored mathematics follows the mixed
+representation recorded below, with these differences from importing the published source:
 
 - object ids, order and offsets follow the generic converter;
 - FP8, NVFP4 and U4Z8 words are encoded from BF16 rather than imported from the third-party
   quantizations.
 
-That route is checked only on synthetic checkpoints and against the official tensor headers. It is
-not qualified; the published v3 artifact and its pinned v2 derivation remain the qualified routes.
+That route is checked on synthetic checkpoints and against the official tensor headers.
+Real-model qualification of the canonical converter and reframed source is tracked separately
+in [upstream ports](upstream-ports.md); the historical packed-v3 execution results do not qualify
+the new execution implementation.
 
 ## 2. Components and resources
 
@@ -215,9 +214,12 @@ The activation policy follows the stored format: `AllowA4` for NVFP4 expert bank
 the FP32-scaled FP8 projections, `A16Only` otherwise. The artifact has no activation-divisor
 auxiliaries: v2 carried none, so an A4 expert path scales its activations dynamically.
 
-## 6. Loading (`src/models/qwen4_exp`)
+## 6. Historical packed-v3 loading
 
-The `qwen4_exp` loader consumes this contract exactly. With Vision and MTP selected it binds all
+This section records the retired private loader. Current loading uses the canonical
+Qwen4Exp bindings, explicit activation divisors and disk preparation described in
+[model and weights](qwen4_exp-model.md) and [execution and state](qwen4_exp-execution.md).
+The old `qwen4_exp` loader consumed this contract exactly. With Vision and MTP selected it bound all
 1,668 Bindings and 959 Uses and fails on a missing or unconsumed one; a narrower selection may
 leave only `vision/` or `mtp/` entries (and the `text/output_head` Use at `mtp/final_hidden`)
 unbound. Residency follows the role:
@@ -240,7 +242,11 @@ streams, head width 160, a four-tap dilation-3 convolution, RMSNorm epsilon 1e-6
 is planned.
 
 
-## 7. Execution
+## 7. Historical packed-v3 execution
+
+The execution details and measurements below describe the previous fork implementation.
+They remain provenance for the published artifact; current support and qualification
+are recorded in the Qwen4Exp references and [upstream ports](upstream-ports.md).
 
 The public Engine selects `qwen4_exp` from the text architecture/config pair. CLI, serving and
 causal scoring use that same Program. Text uses four hyper-connection streams, 36 GDN layers,

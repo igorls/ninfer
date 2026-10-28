@@ -53,6 +53,15 @@ class U4Z8Format:
 
 
 @dataclass(frozen=True, slots=True)
+class Fp8BlockFormat:
+    """E4M3FN weights with one BF16 multiplier per 128-by-128 block."""
+
+    name: str
+    block_rows: int = 128
+    block_columns: int = 128
+
+
+@dataclass(frozen=True, slots=True)
 class Nf4Format:
     """Fixed NF4 codebook, K16 E4M3FN scales and an FP32 divisor."""
 
@@ -61,7 +70,7 @@ class Nf4Format:
 
 
 NumericFormat: TypeAlias = (
-    DirectFormat | QuantFormat | Nvfp4Format | Fp8RowFormat | U4Z8Format | Nf4Format
+    DirectFormat | QuantFormat | Nvfp4Format | Fp8RowFormat | U4Z8Format | Fp8BlockFormat | Nf4Format
 )
 
 
@@ -78,6 +87,7 @@ NVFP4 = Nvfp4Format("nvfp4", 16)
 FP8_E4M3FN_ROW_BF16 = Fp8RowFormat("fp8_e4m3fn_row_bf16", 2)
 FP8_E4M3FN_ROW_FP32 = Fp8RowFormat("fp8_e4m3fn_row_fp32", 4)
 U4Z8_G16_FP16 = U4Z8Format("u4z8_g16_fp16", 16)
+FP8_E4M3FN_BLOCK128X128_BF16 = Fp8BlockFormat("fp8_e4m3fn_block128x128_bf16")
 NF4_G16_E4M3FN = Nf4Format("nf4_g16_e4m3fn")
 NF4_CODEBOOK_WORDS = (
     0xBF800000,
@@ -113,6 +123,9 @@ FP8_ROW_FORMATS = MappingProxyType(
     {item.name: item for item in (FP8_E4M3FN_ROW_BF16, FP8_E4M3FN_ROW_FP32)}
 )
 U4Z8_FORMATS = MappingProxyType({U4Z8_G16_FP16.name: U4Z8_G16_FP16})
+FP8_BLOCK_FORMATS = MappingProxyType(
+    {FP8_E4M3FN_BLOCK128X128_BF16.name: FP8_E4M3FN_BLOCK128X128_BF16}
+)
 NF4_FORMATS = MappingProxyType({NF4_G16_E4M3FN.name: NF4_G16_E4M3FN})
 NUMERIC_FORMATS = MappingProxyType(
     {
@@ -121,6 +134,7 @@ NUMERIC_FORMATS = MappingProxyType(
         **NVFP4_FORMATS,
         **FP8_ROW_FORMATS,
         **U4Z8_FORMATS,
+        **FP8_BLOCK_FORMATS,
         **NF4_FORMATS,
     }
 )
@@ -223,6 +237,7 @@ __all__ = [
     "FP8_E4M3FN_ROW_BF16",
     "FP8_E4M3FN_ROW_FP32",
     "U4Z8_G16_FP16",
+    "FP8_E4M3FN_BLOCK128X128_BF16",
     "NF4_G16_E4M3FN",
     "NF4_CODEBOOK_WORDS",
     "NF4_CODEBOOK",
@@ -233,12 +248,14 @@ __all__ = [
     "NVFP4_FORMATS",
     "FP8_ROW_FORMATS",
     "U4Z8_FORMATS",
+    "FP8_BLOCK_FORMATS",
     "NUMERIC_FORMATS",
     "DirectFormat",
     "QuantFormat",
     "Nvfp4Format",
     "Fp8RowFormat",
     "U4Z8Format",
+    "Fp8BlockFormat",
     "NumericFormat",
     "get_format",
     "decode_e2m1_word",

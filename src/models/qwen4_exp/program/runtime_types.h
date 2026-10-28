@@ -1,15 +1,18 @@
 #pragma once
-#include "models/qwen4_exp/frontend.h"
+
 #include "models/qwen4_exp/program/program.h"
+#include "models/qwen4_exp/execution/parameters.h"
 
 namespace ninfer::models::qwen4_exp {
 struct RuntimeTypes {
-    using Frontend          = qwen4_exp::Frontend;
-    using PreparedPrompt    = qwen4_exp::PreparedPrompt;
-    using OutputSession     = qwen4_exp::OutputSession;
-    using PublishedOutput   = qwen4_exp::PublishedOutput;
-    using SequencePlanner   = qwen4_exp::SequencePlanner;
-    using SequencePlan      = qwen4_exp::SequencePlan;
+    using Model             = qwen4_exp::Model;
+    using Parameters        = execution::Parameters;
+    using Profile           = execution::ModelProfile;
+    using Frontend          = qwen::Frontend;
+    using PreparedPrompt    = qwen::PreparedPrompt;
+    using OutputSession     = qwen::OutputSession;
+    using PublishedOutput   = qwen::PublishedOutput;
+    using SequencePlan      = qwen4_exp::ExecutionPlan;
     using RequestBasePlan   = qwen4_exp::RequestBasePlan;
     using SequenceHandle    = qwen4_exp::SequenceHandle;
     using CheckpointHandle  = qwen4_exp::CheckpointHandle;
@@ -27,6 +30,6 @@ struct RuntimeTypes {
     using FinishResult      = qwen4_exp::FinishResult;
     using AbortResult       = qwen4_exp::AbortResult;
     using Program           = qwen4_exp::Program;
-    using CacheSessionKey   = qwen4_exp::PreparedSessionKey;
+    using CacheSessionKey   = qwen::PreparedSessionKey;
 };
 } // namespace ninfer::models::qwen4_exp

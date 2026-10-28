@@ -30,8 +30,37 @@ the same fixture, seed, cache policy, and timing mode.
 ## Build
 
 `CMakeLists.txt` includes explicit registrations from `ops/`, `inference/`, `context_cost/`
-and `models/qwen3_5/`. All executables remain under `build/bench/`; the Op registration helper
+and `models/`. All executables remain under `build/bench/`; the Op registration helper
 lives in `cmake/NinferBenchmarks.cmake`.
+
+`ninfer_cpu_execution_bench` measures synchronous collective dispatch and eight team barriers.
+For example: `./build/bench/ninfer_cpu_execution_bench --workers 8 --samples 500 --idle-us 1000`.
+Workers select physical cores from the allowed topology; `--caller-cpu ID` optionally binds the
+submitter. The benchmark prints actual affinity and ISA facts and P50/P95/max call latency.
+Process CPU/wall cost is averaged over a separate run lasting at least 250 ms at the same cadence,
+including each post-call idle interval; `cpu_calls` is that run's call count. This avoids interpreting
+sub-millisecond OS accounting samples as steady CPU cost. Setup and warmup are excluded.
+These are scheduling costs, not CPU arithmetic throughput or model performance.
+
+`ninfer_ple_disk_prepare_bench` measures Qwen4Exp disk preparation and its independent upload slots
+using an explicit NF4 artifact and a raw little-endian U32 token corpus:
+
+```bash
+build/bench/ninfer_ple_disk_prepare_bench /explicit/model.ninfer /explicit/corpus.u32 8 16 6 64 \
+  --read-budget-mib 64
+```
+
+Arguments after the paths are B, T, sample count and raw-row cache MiB (zero disables it).
+CSV records IDs-ready to HostReady/upload-complete time, actual PLE reads and row reuse. Each process
+starts with an empty application cache; successive windows consume consecutive corpus segments.
+Lane b starts at corpus index `100002+b*100003`, matching the retained SSD experiment's trace.
+The first sample is retained. The read budget bounds requested PLE data bytes; startup metadata and
+optional projection-weight loading are separate. No table is generated or rewritten.
+`--incremental-us N` models candidate arrival intervals and also reports time remaining after the
+last append. `--overlap N` runs N independent real merged K/V projections, then consumes E; CUDA
+events measure the work interval and the exposed wait before that consumer. This measures component
+overlap, not complete model scheduling or generation speed. `--dump PATH` emits the first input,
+Host/Device E and optional projection output for independent qualification, outside timing.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNINFER_BUILD_BENCHMARKS=ON
@@ -83,6 +112,8 @@ ninfer_bench --weights <artifact.ninfer>
 ```
 
 With no `-p`, `-n`, or `-pg`, the matrix is `pp512` and `tg128`.
+`--prefill-chunk` accepts a positive multiple of 128. When omitted, Engine uses 1024 for resident
+models or 4096 for CPU expert offload.
 
 Example:
 
@@ -593,16 +624,22 @@ at graph construction; eager timing includes their submission on every call.
   --op record --value-heads 48 --tokens 2,8,16 --batch 8 --valid mixed
 ```
 
-## PLE convolution and state extraction
+## PLE gate, convolution and state extraction
 
-`ninfer_ple_bench` measures `--op conv-add|conv-add-norm|state-extract` at H=2560,
+`ninfer_ple_bench` measures `--op gate|conv-add|conv-add-norm|state-extract` at H=2560,
 four streams, dilation=3 and nine history columns. It uses the shared Op measurement harness
 described above, with zero global workspace. `--valid` and `--accepted` accept `dense`, `mixed`,
-or comma-separated per-row counts; zero counts are supported. `--offset` selects the convolution
+or comma-separated per-row counts; zero counts are supported. `--offset` selects the Gate/Conv
 record window. `--inplace` updates the residual or selected history slots and restores the input
 before each measurement. CSV includes the actual counts, record offset and alias mode.
+Gate consumes slices of one packed BF16 `[12800,T,B]` K/V parent and writes U plus N records.
+It has no in-place form. Its unique activation traffic is 85 KiB per active token, plus U zero
+writes for inactive tokens; the three norm vectors total 60 KiB and are reused across tokens.
+This logical-byte count is not a measurement of DRAM traffic or cache reuse.
 
 ```bash
+./build/bench/ninfer_ple_bench --op gate --tokens 1,16,256,1024,2048,4096 --cache both
+./build/bench/ninfer_ple_bench --op gate --tokens 5,16 --batch 8 --valid mixed --offset 5
 ./build/bench/ninfer_ple_bench --op conv-add-norm --tokens 1,16,1024,2048,4096 --cache cold
 ./build/bench/ninfer_ple_bench --op conv-add --tokens 16 --batch 8 --valid mixed --offset 5
 ./build/bench/ninfer_ple_bench --op state-extract --tokens 16 --batch 8 \
@@ -1081,42 +1118,90 @@ roofline.
   --context-capacity 262144 --execution graph --cache both
 ```
 
-## 35B sparse-MoE dFlash benchmark
+## MoE benchmark
 
-`ninfer_sparse_moe_bench` measures the complete routed-plus-shared post-mixer Op for the 35B Text
-Q4+Q5/Q6 profiles and the MTP Q8+Q8 profile. It is a long-lived public Op benchmark: fixture setup
-uses `sparse_moe_workspace_capacity_bytes()`, and every eager or captured measurement calls only
-`ninfer::ops::sparse_moe()`. Production dispatch exclusively owns decode, Small-T, prefill,
-workspace views, launch decomposition, and schedule selection.
-
-CUDA Graph replay is the default and authoritative execution mode. The benchmark eagerly
-materializes the public call, captures it with stable tensor and workspace addresses, instantiates
-the graph, and primes one replay before configured warmup. Timing-enabled external event nodes
-surround the captured public call, so `graph_replay` reports the complete device-side SparseMoe
-body while excluding fixture reset, L2 eviction, graph capture/instantiation/prime, host launch,
-and host synchronization. `eager` uses the same public-call lambda and is only a comparison mode.
+`ninfer_moe_bench` calls the public MoE interfaces over the 35B Q4+Q5/Q6 and Q8+Q8 profiles.
+`--op complete` measures router, routed/shared SwiGLU and BF16 residual addition; `route` measures
+routing only. `routed` and `routed-shared` consume routes prepared outside timing and write FP32.
+The latter includes the shared branch. Their `--subset all|mask-ones|mask-zeros|none` selects the
+logical expert assignments; the fixture's mask assigns odd IDs to the 1 side.
 
 ```bash
-cmake --build build --parallel --target ninfer_sparse_moe_bench
-./build/bench/ninfer_sparse_moe_bench \
-  --codec q4-q5 --tokens 1 --execution graph --cache both \
-  --distribution trace-like --warmup 20 --repeat 200
-./build/bench/ninfer_sparse_moe_bench \
-  --codec q4-q5 --sweep 1:128:1 --execution graph --cache cold \
-  --distribution trace-like --warmup 5 --repeat 50 \
-  --csv-out profiles/bench/sparse_moe_public_graph.csv
+./build/bench/ninfer_moe_bench --codec q4-q5 --tokens 1 --execution graph --cache both
+./build/bench/ninfer_moe_bench --codec all --sweep 1:64:1 --distribution trace-like \
+  --execution graph --cache both --warmup 10 --repeat 80 --csv-out /tmp/moe.csv
+./build/bench/ninfer_moe_bench --op routed-shared --codec q4-q5 --tokens 32 \
+  --subset mask-ones --execution graph --cache cold
 ```
 
-Each cold sample flushes 256 MiB before the timed interval. `trace-like` is the primary
-single-sequence verification distribution; `independent` and `same` bound zero and complete expert
-overlap. `--execution eager|graph|both` and `--cache cold|warm|both` change only the harness around
-the same public call. The CSV `timed_scope` is `full_sparse_moe_device_body`; it contains no private
-route, candidate, grid, block, or launch-count fields.
+Graph replay is the default and authoritative timing mode. External event nodes bracket only the
+public Op's device work. Input preparation, residual reset, L2 eviction, Graph setup/prime, Host
+submission and synchronization are outside that interval. `eager` measures the same public call.
+Cold samples flush 256 MiB; warm samples reuse the working set. `trace-like` provides repeated but
+changing experts; `independent` and `same` cover low and full overlap. Production code alone chooses
+the implementation.
 
-`unique_weight_gbps` counts the router, shared weights, and each selected expert's encoded weights
-once, so it is a distribution-aware useful-traffic lower bound rather than measured DRAM traffic.
-Its peak percentage uses the device's theoretical DDR bandwidth. `logical_tflops` counts the
-router plus eight routed and one shared gate/up and down matrix products.
+CSV rows identify the Op, subset, selected assignment count, distribution, cache state and execution
+mode. They report median/min/p95 latency, workspace, useful encoded-weight bandwidth and logical
+FLOP/s. `unique_weight_gbps` counts each selected expert once, plus the control/shared matrices
+actually used by that Op; it is a useful-traffic lower bound, not measured DRAM traffic.
+`memory_lower_bound_us` divides these bytes by theoretical device bandwidth. For a measured
+roofline, substitute sustained bandwidth and include private reloads, staging traffic and padded
+computation when interpreting the gap. Logical FLOP/s counts only the requested matrix products.
+The complete call uses empty external read-ahead hints; next-projection cache warming and its
+downstream effect are covered by Engine measurements.
+
+`ninfer_moe_block_scaled_bench` measures H2560/I640/E512/top-10 through the same public
+interfaces. `--format nvfp4|fp8` selects NVFP4 or block-FP8 weights (default: `nvfp4`). `--operation routed|routed-shared|complete|route` selects the semantic scope; outputs
+are BF16 Write. It uses the graph-body timing and 256 MiB cold-cache eviction described above.
+`--tokens` is a comma-separated list of total columns (`T*B`); `independent`, `same`, and `mixed`
+select uniform distinct top-10 routes, one shared top-10 set, or six shared experts plus four
+independently sampled tail experts. All 512 experts have distinct physical backing. Input/router
+construction makes the complete entry produce the same selected routes as the routed entry.
+
+```bash
+./build/bench/ninfer_moe_block_scaled_bench --format nvfp4 --operation routed \
+  --tokens 1,8,16,32,64,128,256,512,1024,2048,4096 --distribution all --cache both
+./build/bench/ninfer_moe_block_scaled_bench --format fp8 --operation complete \
+  --tokens 1024,2048,4096 --repeat 50 > /tmp/moe-fp8.csv
+```
+
+CSV reports median/P95/min, complete workspace, and useful matrix FLOP/s. For routed/complete
+calls, `unique_weight_GBps` counts unique routed expert payloads and divisors only; for `route`,
+it counts the control matrix. It excludes reloads, activations and output traffic, so it is not
+measured DRAM bandwidth. Use profiler traffic when constructing a kernel or complete-Op roofline.
+
+`ninfer_moe_cpu_bench` measures the complete synchronous CPU `routed_swiglu` call, including
+validation, grouping, decoding, arithmetic and worker publication/join. Setup and CPU/GPU transfers
+are excluded. `--format q4-q5|q4-q6|nvfp4` selects the native format and geometry. Native Host
+banks stay alive for the whole run. `repeat` reuses a fixed subset;
+`stream` rotates selected experts across prefaulted banks (by default at least four times reported
+LLC in actually selected weights). `same`, `skew` and `independent` vary reuse within each call.
+Full contributions route across the complete expert domain; partial CPU contributions use one
+masked half. NVFP4 supports zero through ten selected CPU experts per token.
+
+```bash
+./build/bench/ninfer_moe_cpu_bench --format q4-q5 --workers 15 --caller-cpu 31 \
+  --tokens 1,8,72 --active 1,8 --cache stream --distribution same --samples 240 --read-reference
+./build/bench/ninfer_moe_cpu_bench --format nvfp4 --workers 16 --caller-cpu 31 \
+  --tokens 1,8,72,256 --active 1,4,10 --cache stream --distribution independent --samples 51 --read-reference
+```
+
+Output includes min/median/p95/max wall time, useful encoded-weight GiB/s, logical GFLOP/s,
+workspace and reuse footprint. Process CPU cost uses a separate interval of at least 250 ms at
+the same cadence; `--gap-us` is excluded from call latency and included in that accounting.
+`--keep-active` keeps the worker team polling between calls, including those gaps; the default
+allows workers to park after their bounded spin interval.
+`encoded_read_bytes` models the selected four/two/one-column tiles and eight-token chunks; it
+includes repeated weight reads, but is not a hardware traffic counter. `--read-reference` times
+the same bank/column grouping and row ownership with decode and arithmetic removed. Its median
+is an access-pattern reference, not a strict roofline or an end-to-end offload result.
+The tile-read model and matching access-pattern reference apply only to the integer formats;
+their CSV fields are `NA` for NVFP4, whose scales use the native swizzle.
+That option also reports sustained sequential read GB/s over the complete native-bank corpus,
+using the same worker team. Unique encoded bytes divided by this bandwidth give a compulsory-read
+memory roofline reference for a streaming call; repeated tile reads may hit cache and must not all
+be charged as DRAM bytes. No compute-peak or Engine-throughput claim follows from either reference.
 
 ## Q8 context K/V LinearPair benchmark
 
@@ -1304,13 +1389,14 @@ are the row profiles the entry admits: `--channels 8192` gives (2048, 2048, 4096
 
 Table, JSON, and CSV reports identify the architecture, model instance, artifact, Engine configuration,
 load summary, memory capacity, KV payload, workspace peak, phase throughput, and speculative
-statistics. JSON schema version 19 records the public value objects directly:
+statistics. JSON schema version 24 records the public value objects directly:
 
 - `config`: constraint type, source/file, literal choices and mixed-request selection, alongside execution settings;
 - `load`: architecture, public name, actual formats, prefill signature, load/upload time,
   file/H2D/staging bytes and Device/Host object counts;
 - `memory`: weights/sequence/unified-workspace arenas, the optional non-additive Vision layout,
-  planned context, KV storage, CUDA Graph allowance, and KV payload;
+  planned context, KV storage, CUDA Graph rebuild estimate and preparation increment, KV payload, Device budget and optional MoE
+  Host/cache/bridge resources; MoE `uploaded_bytes` here is the startup snapshot;
 - `repetition_wall_seconds`: each concurrent repetition's submit-to-completion interval;
 - each request sample's `timings`: prepare, Vision, prefill, decode, and total seconds;
 - each request sample's `constraint`: committed completion/branch, compilation cache access, CPU
@@ -1323,6 +1409,8 @@ acceptance.
 Each test reports `workspace_peak_bytes` from the planned phase markers, including CUDA Graph
 replay, and `workspace_allocator_peak_bytes` from host-side arena allocation activity. These are
 intentionally separate: replay reuses captured addresses without advancing the host allocator.
+`expert_upload_bytes` counts expert payload submitted during measured repetitions, excluding
+startup and warmup. It includes all requests in those repetitions.
 
 `reps` contains request samples in repetition-major order, with explicit `repetition` and `row`.
 `output_tok_s` divides each repetition's actual outputs by its wall time.
@@ -1333,3 +1421,72 @@ interpret a local measurement.
 
 Raw reports and profiler captures remain local under `profiles/bench`, `profiles/ncu`, and
 `profiles/nsys`.
+
+## Expert replica transport
+
+`ninfer_expert_cache_bench` uses real encoded bank parents through the production loader and cache.
+Initialization is outside the transfer samples. It reports five cold-replica samples with warm RAM
+sources, min/median/max wall latency, Host planning/submission, upload-stream timeline,
+data/index bytes and copy API calls. These calls are not a hardware DMA transaction count.
+All-hit Host timing has 101 samples with a real GPU code-plane reader between acquire and release;
+its launch and device time are excluded from the Host timing. The H2D roofline reads the same
+registered source backing in contiguous chunks, with 128 MiB warmup and at least 1 GiB measured.
+Registered Host bytes and registration time are reported separately from steady-state transport.
+The scattered samples use a fixed shuffled expert set. These measurements do not measure MoE computation.
+The overlap case uses four synthetic GPU reads of the current cached bank while loading the next.
+
+```bash
+build/bench/ninfer_expert_cache_bench --artifact out/qwen3_8_flash_next.ninfer \
+  --bank text/layers/0/moe/experts --experts 512
+build/bench/ninfer_expert_cache_bench --artifact out/qwen3_6_35b_a3b.ninfer \
+  --bank text/layers/0/moe/experts --experts 256
+```
+
+Layer 34 of the 35B artifact selects its Q6 down bank. `--batch-mib N` changes the maximum payload
+per upload batch; default is 96 MiB, with three in-flight slots. Slots contain index snapshots and
+descriptors, not weight payloads. `--resident` checks direct GPU plane access without dynamic replicas,
+for example Flash Next `--bank mtp/layers/0/moe/experts --experts 512 --resident`.
+
+## Single-layer mixed MoE execution
+
+`ninfer_qwen3_5_moe_execution_bench` materializes one selected 35B layer's native expert parents,
+control and shared weights. Its shared MoE execution entry includes route, actual ExpertCache use,
+D2H, CPU/GPU contributions, H2D and residual merge. This is a layer microbenchmark, not Engine
+generation. `--gpu-experts N` assigns logical IDs `[0,N)` by default; `--gpu-selection shuffled`
+selects the first N IDs of a deterministic shuffled permutation. The remaining routed assignments
+use CPU.
+
+`--execution eager|graph` selects submission for the production parallel schedule (default eager).
+Graph mode captures the GPU front for each fixed corpus input and performs the CPU handoff and
+conditional completion outside the graph. Capture/upload are excluded from timing; the serial
+comparison remains eager. The header records the selected execution mode.
+
+```bash
+build/bench/ninfer_qwen3_5_moe_execution_bench \
+  --artifact out/qwen3_6_35b_a3b.ninfer --layer 0 --tokens 128 --gpu-experts 128 \
+  --workers 15 --caller-cpu 31 --samples 256 --distribution independent --schedule both
+```
+
+Layer 34 selects Q6 down. The 32-input synthetic BF16 Gaussian corpus uses either independent
+columns or identical columns within each batch (`--distribution same`). Initial expert upload
+is reported separately; measured calls reuse the fixed GPU assignment and must not upload expert data. Source,
+cache, frame/scratch capacities, actual assignment counts and unique encoded weight bytes are
+reported. Corpus bytes and per-call unique bytes are logical traffic, not measured DRAM traffic.
+Bridge H2D bytes are averaged over the corpus; batches with no CPU assignments transfer no CPU
+contribution in either schedule. The report includes the number of batches with CPU work.
+
+Timing is Host wall time through final compute-stream completion. Warmup covers at least 100 ms
+and the complete corpus. `--schedule parallel` measures the production entry; `serial` is a
+standalone combination of the same Ops/transfers/team with GPU experts following CPU work. It
+does not include the model entry's validation/frame binding, so its difference is a scheduling
+reference, not an isolated measurement of overlap. `both` alternates order, reversing each
+input's order on successive corpus passes, and reports min/median/p95/max and paired differences.
+`--gap-us N` adds an excluded inter-call gap. Select a CPU affinity allowed on the current machine.
+`--keep-active` keeps workers polling throughout warmup and measurement; without it, the team
+uses its ordinary bounded spin and park policy. This layer benchmark does not apply the Program's
+adaptive waiting policy.
+
+For a timeline, capture this executable with `nsys --trace=cuda,nvtx`; the model marks CPU input
+wait and CPU computation separately. `--profile` brackets measured calls with CUDA profiler API
+calls when capture by that API is appropriate. Profiled durations do not replace ordinary wall
+measurements.

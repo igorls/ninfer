@@ -1,13 +1,30 @@
 #pragma once
 
 #include "core/memory.h"
+#include "core/device_memory.h"
 
 #include <cuda_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
 namespace ninfer {
+
+// Only Device allocations use this error; pinned Host allocation failures are distinct.
+class DeviceAllocationError : public std::runtime_error {
+public:
+    DeviceAllocationError(const char* operation, std::size_t requested_bytes = 0);
+
+    [[nodiscard]] std::size_t requested_bytes() const noexcept { return requested_bytes_; }
+
+private:
+    std::size_t requested_bytes_;
+};
+
+[[nodiscard]] DeviceMemorySnapshot device_memory_snapshot(Device);
+[[nodiscard]] std::int64_t device_memory_growth(DeviceMemorySnapshot before,
+                                                DeviceMemorySnapshot after);
 
 void cuda_check(cudaError_t err, const char* expr, const char* file, int line);
 
@@ -84,6 +101,21 @@ public:
 private:
     int previous_ = -1;
     bool changed_ = false;
+};
+
+// An additional nonblocking stream. Its owner orders and completes borrowed buffer uses.
+class CudaStream {
+public:
+    explicit CudaStream(const DeviceContext& device);
+    ~CudaStream();
+    CudaStream(const CudaStream&)            = delete;
+    CudaStream& operator=(const CudaStream&) = delete;
+
+    [[nodiscard]] cudaStream_t stream() const noexcept { return stream_; }
+
+private:
+    Device device_;
+    cudaStream_t stream_ = nullptr;
 };
 
 class CudaEventTimer {

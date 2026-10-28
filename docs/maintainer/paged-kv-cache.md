@@ -69,13 +69,13 @@ DFlash / DFlash2:
     Draft Full, when the selected draft config contains full-attention layers
 ```
 
-Speculative backends 在一个 Engine 内互斥，因此当前最多有两个 growing pools。官方 DFlash2
+Qwen3_5 的 speculative backends 在一个 Engine 内互斥，因此该架构当前最多有两个 growing pools。公共资源合同使用启动固定的 pool ID，并不限制模型的 pool 数量。官方 DFlash2
 配置的五层全部是 local attention，只需要 Main growing pool，其 draft context 使用 cyclic storage。
 
 | Pool | 内容 | 逻辑 frontier |
 |---|---|---|
-| Main Text | target full-attention K/V 与其 code/scale planes | target materialized KV frontier |
-| MTP | MTP persistent K/V 与其 code/scale planes | MTP KV frontier |
+| Main Text | target attention K/V、code/scale 及模型声明的压缩 index planes | target materialized KV frontier |
+| MTP | MTP persistent K/V、code/scale 及模型声明的压缩 index planes | MTP KV frontier |
 | Draft Full | selected draft 的 full-context K/V | draft context frontier |
 
 Main Text 与 MTP 使用 Engine 选择的 BF16、INT8-G64、FP8-E4M3FN-row256、NVFP4-G16 或 K8V4
@@ -86,8 +86,10 @@ FP8-E4M3FN-row256，V 固定为 NVFP4-G16。
 `PagedKVStorageLayout` 将选定的 closed profile 解析为 K/V data/scale plane schema；target planner 按
 layer 展开该 schema 并确定 plane ordinal。Common pool implementation 仍只接收已展开的
 `KVPageGeometry`、plane inventory 和 capacity，不解释 storage mode。
-上述 Qwen3.5 K/V data 与 scale planes 均使用 `tokens_per_row=1`；通用存储层同时支持第 4 节的
-四-token 行几何，具体 plane 的数学含义与消费支持由模型和 Op 定义。
+Qwen3.5 与 Qwen4Exp 的主 K/V data/scale planes 均使用 `tokens_per_row=1`。
+Qwen4Exp 在每个 QSA 层追加 BF16 index plane，使用 `tokens_per_row=4`，与该层主 KV
+共享页组和原 token coverage；未完成块的 raw tail 保存在 StateImage。其数学与模型交接见
+[Qwen4Exp 执行](qwen4_exp-execution.md)，通用行几何见第 4 节。
 
 ### 3.2 Main capacity
 
@@ -122,20 +124,21 @@ M=\left\lceil K_{main}/P\right\rceil
 
 ### 3.3 Automatic capacity
 
-Automatic policy 在权重加载后，以当前可用显存 \(F\) 和要求保留的 headroom \(R\) 解析一次 \(M\)。
+Automatic policy 在权重加载、Graph 校准资源销毁后，以预算内剩余显存 \(F\)、规划余量 \(R\)
+和 Graph 重建估计 \(G\) 解析 \(M\)。驱动保留开销已反映在 \(F\) 中，不再重复扣除。
 模型 planner 根据已绑定参数和选定执行域提供 affine `SequenceCapacityCurve`：
 
 \[
 B(M)=B_{min}+(M-M_{min})B_{step}
 \]
 
-其中 \(B(M)\) 是该 Main capacity 对应的完整 runtime Device reservation，包含：
+其中 \(B(M)\) 是该 Main capacity 对应的显式 runtime Device backing，包含：
 
 - Main 与 selected backend typed pools；
 - active/checkpoint State storage；
 - block tables 与固定 persistent state；
 - unified workspace；
-- CUDA Graph allowance。
+- 启用 offload 时的 MoE backing。
 
 Automatic 选择：
 
@@ -145,14 +148,15 @@ M=
 M_{max},
 M_{min}+
 \left\lfloor
-\frac{F-R-B_{min}}{B_{step}}
+\frac{F-R-G-B_{min}}{B_{step}}
 \right\rfloor
 \right)
 \]
 
-并要求 \(F\ge R+B_{min}\)。当 \(M_{min}=M_{max}\) 时直接取该单点。Target 用同一生产 layout builder
+并要求 \(F\ge R+G+B_{min}\)。当 \(M_{min}=M_{max}\) 时直接取该单点。Target 用同一生产 layout builder
 生成 \(B_{min}\)、\(B_{step}\) 和最终 layout，并验证 capacity curve；resolver 不复制模型维度公式，也不靠
-allocation probing 猜测容量。
+allocation probing 猜测显式布局大小。MoE offload 的自动策略先保留一条完整上下文，再将剩余预算
+用于 expert cache；Graph 变体改变时重新校准，见[引擎架构](engine-architecture.md#7-物理执行与-cuda-graph)。
 
 最终公开的 Main KV capacity 为 \(M\,P\) token-equivalents。Page rounding 只增加 physical padding，
 不会扩大单 sequence 的 logical ceiling \(S\)。
@@ -165,9 +169,9 @@ Selected backend 的 logical page capacity仍为 \(L\)。Physical capacity从 Ma
 backend off:
     Main physical pages = M
 
-MTP with draft window K:
+MTP with D draft tokens (verification width D+1):
     Main physical pages = M
-    MTP physical pages  = M + C * ceil((K - 1) / P)
+    MTP physical pages  = M + C * ceil(D / P)
 
 DFlash / DFlash2 with full-attention layers:
     Main physical pages        = M
@@ -202,7 +206,7 @@ ceiling。输入、请求 ledger 与其他 CPU 数据有各自的生命周期，
 4. 使用相同 page size；
 5. 没有独立释放或独立容量复用的语义。
 
-因此 Main layers 的 K、V、code 和 scale 可以共享一个 page-group ID；Main、MTP 与 DFlash Full
+因此 Main layers 的 K、V、code、scale 和压缩 index 可以共享一个 page-group ID；Main、MTP 与 DFlash Full
 必须属于不同 pools。
 
 ### 4.2 Page group
@@ -280,7 +284,8 @@ address=base+d\,nb_0+r\,nb_1+g\,nb_2+h\,nb_3
 所有 grouped planes 使用同一个 \(g\)，但使用各自的行跨度、leading coordinate 和 Tensor strides。
 Feature 轴连续，地址和容量计算使用能覆盖完整 Tensor span 的整数类型。
 Exact persistent codec 由 [`kv_cache_append.h`](../../include/ninfer/ops/kv_cache_append.h) 定义，
-consumer arithmetic 由 [`softmax_attention.h`](../../include/ninfer/ops/softmax_attention.h) 定义；
+consumer arithmetic 由 [`softmax_attention.h`](../../include/ninfer/ops/softmax_attention.h) 与
+[`qsa.h`](../../include/ninfer/ops/qsa.h) 定义；
 allocator 只解释 plane bytes、order 和 page-group identity。
 
 D256 Main/MTP profile 的单 token/head 物理 payload 为：
@@ -358,10 +363,10 @@ LogicalKVPage
 ├── object generation
 ├── content epoch
 ├── committed columns [0, P]
-├── protected columns
-├── address-space references
+├── required/protected columns
+├── history references
 ├── active references and writer state
-├── optional Device page-group lease
+├── optional Device page-group lease + valid columns
 ├── optional Host extent membership
 └── transaction pins
 ```
@@ -370,8 +375,8 @@ LogicalKVPage
 Committed/protected columns 始终计原 token，跨度不同的 planes 由此推导有效行数。
 Speculative 或尚未提交的 bytes 不扩展 committed coverage。
 
-同一 logical page 在所有引用它的 address space 中保持相同页序号。Fork 和 view 按原位置共享
-前缀，COW 与增长创建新 logical page，截断只删除后缀；一个 address space 内也不重复引用同一页。
+同一 logical page 在所有引用它的 history 中保持相同页序号。Fork 和 view 按原位置共享
+前缀，COW 与增长创建新 logical page，截断只删除后缀；一个 history 内也不重复引用同一页。
 因此，核对选中页的完整持有者时，可以在各检查点覆盖内按该页序号查询实际 handle。
 
 Replica 对 checkpoint 所需前 \(n\) 列有效，当且仅当：
@@ -416,6 +421,11 @@ Host arena 是有界 variable-size allocator。State 与不同 KV layouts 竞争
 配额。申请必须满足 alignment 和连续 extent geometry；`free_bytes` 只是占用摘要，不是可分配性的
 充分证明。共享 Host extent 按实际 allocation 计一次，pending destination 在 publication 前已经占用容量。
 
+每个复制读者持有具体副本的 epoch 与 coverage。Host 与 Device 读者分别保护实际来源；移除最后
+一个 history/checkpoint 引用不会回收仍被复制读取的 bytes。Host extent 可在其他成员退役时分裂，
+被读的页范围保持原地址，新的成员 capability 不影响已提交 DMA。Host 副本替换持有独立目的
+claim，发布前不能取得指向旧副本的新 Host 读者。
+
 ### 5.4 Replica transfer
 
 Device COW 与 D2H/H2D transfer 复制页组的全部 plane payload，按各 plane 的实际行数、bytes 和
@@ -423,7 +433,9 @@ offset 搬运原 words。不同密度的 plane 不单独分配、保留或回收
 合并成更少的 transfer runs。
 Core 按已绑定的 plane geometry 选择 2D copy：短 PageMajor run 可以合并等宽、等间距的 planes，
 HeadMajor 可以选择 page 或 head 作为提交外层。只在减少调用数且 pitch 合法时使用合并路径；
-Host layout 与 payload 不变。Native 从 Core 返回值记录实际搬运字节和调用数。
+Host layout 与 payload 不变。迁移批次在目的位置确定后形成真实 Host/Device runs，Core 的同一
+几何规则给出计划与实际提交工作量；迁移观测记录实际字节和 copy operations。来源选择时尚无
+目的物理 ID，只按已知 Host runs 给出名义连续传输估计，不能将它当作实际提交次数。
 一个 replacement replica 的 publication 顺序为：
 
 ```text
@@ -434,7 +446,7 @@ reserve destination
   -> release source when no longer required
 ```
 
-Copy 进行时 source 与 destination 都被 pin。Copy 完成前，destination 不进入 address space 或 execution
+Copy 进行时 source 与 destination 都被 pin。Copy 完成前，目的副本不进入已发布的 execution
 table；唯一有效 source 也不能先释放。
 
 ### 5.5 Descriptor lifetime
@@ -444,55 +456,29 @@ Logical descriptor 不构成第三份 payload。它可以在 Device-only、Host-
 
 ---
 
-## 6. KV history 与 address space
+## 6. KV history 与前缀引用
 
-### 6.1 共享历史与独立视图
-
-一个 `KVHistory` 持有 Main 和可选 backend 的 address spaces。私有 continuation 的当前执行状态及
-内部恢复点共享同一个 history，各恢复点分别记录所需 frontier 和 StateImage。
-
-```text
-private continuation
-├── current sequence ───────────┐
-├── input recovery checkpoint ──┼── KVHistory
-└── recent boundary checkpoint ─┘   ├── Main address space
-                                   └── selected backend address space
-```
-
-History 的目录可以继续 append；旧恢复点只读取自己已保护的 prefix。保留多个恢复点不复制完整 KV
-目录，也不重复计费前缀页。Program 根据存活恢复点的最大 Main/backend frontier 维护保护范围。
-
-独立分支和公开共享前缀持有自己的 history。它们可以共享完整的物理前缀页，但不共享可变目录的
-suffix。相同 token identity 的两个独立计算结果仍是不同内容对象；State 与 KV 必须来自同一实际历史。
-
-### 6.2 Address space
+`KVHistory` 是一个 pool 的唯一可写 owner，`KVPrefixRef` 持有同一实际历史的 `[0, F)`。
+引用只拥有逻辑内容，不固定 Device residency。Main 与 backend 使用各自的 owner；它们的前沿
+关系由模型决定。完整快照将各 pool 前缀与同次执行的 StateImage、metadata 和输入身份一起保存。
 
 ```text
-KVAddressSpace
-├── logical-block -> LogicalKVPage directory
-├── committed frontier
-├── checkpoint-protected frontier
-├── active/inactive state
-├── unit / recovery growth reservation
+KVHistoryStore
+├── generation-checked history descriptors
+├── shared prefix directory / private append path
+├── committed frontier and provisional memberships
+├── counted retained frontiers
+├── unit / recovery page reservation
 └── optional execution-row lease
 ```
 
-目录通过共享不可变 prefix 节点与私有 append path 维护 ordered membership。Block table 是 active
-Device mapping 的执行镜像。Inactive history 不占 execution row，也不绑定原 lane。
+每个 history 对其页面贡献一次 required coverage，并按最深存活前缀贡献 protection。
+引用增减只更新改变的范围，不扫描 Program 的 checkpoint 表。释放可写 owner 后，目录缩到最深
+存活前缀；最后一个引用消失后释放其页引用。目录节点的结构共享不决定内容保护或资源归属。
 
-每个 address space 分别记录：
-
-| 事实 | 含义 |
-|---|---|
-| membership | 已属于该地址空间的 logical pages |
-| committed frontier | 已形成 canonical content 的 token prefix |
-| protected frontier | 仍有 checkpoint 需要的最大 coverage |
-| growth reservation | 已为 unit 或完整恢复覆盖取得、尚未物化的增量页 |
-
-Membership 可以覆盖 speculative window 等 provisional suffix，其 bytes 在提交前不可作为完整恢复点。
-Main/backend 的 frontier 可以不同，它们的语义关系由模型 schedule 确定。
-
-### 6.3 Execution rows
+保存非对齐前缀不复制尾页。同一个 writer 可以继续追加，读取者只读自己保留的前沿。
+回退将覆盖保留内容、或独立 writer 竞争同一 partial tail 时，先分支目录并建立私有 COW 页。
+公共发布与私有保存使用同一前缀机制，不因保留用途改变物理布局。
 
 每个 pool 在启动时建立固定地址的 Device block-table matrix：
 
@@ -500,110 +486,75 @@ Main/backend 的 frontier 可以不同，它们的语义关系由模型 schedule
 block\_tables[N_{logical},C]
 \]
 
-其中 \(N_{logical}=L\)，\(C=max\_concurrency\)。每个 active address space lease 一行，条目为 I32
-pool-local physical page ID。Activation 批量发布 membership 的 Device page IDs；恢复可以租用另一行。
-Execution row 不拥有 logical pages、frontier 或 reservation。
+其中 `N_logical=L`，`C=max_concurrency`。活动 history 租用一行，条目为 pool-local I32
+physical page ID。绑定发布完整 mapping，追加或 COW 只发布改变的 slice。Execution row 不拥有
+logical pages 或 frontier；暂停后恢复可以租用另一行。
 
-## 7. 有限执行单元与生命周期
+## 7. 绑定、写入与结算
 
 ### 7.1 绑定
 
-从 root 或 checkpoint 初次绑定时，Program 统一准备 State、全部 enabled KV pools 及首个合法 unit。
-暂停恢复则准备完整恢复覆盖：旧 frontier、后端规范化/bridge 与首个真实新单元所需的峰值。
+`binding_demand` 根据来源前缀、目标位置与峰值位置计算缺失副本、COW 和增长页。
+它接受本次授权退休的前缀列表，计算退休后的实际保护；查询本身不消费来源。
+`KVBinding` 随后持有来源引用、目的 history、Device reservation、待恢复副本和 execution row：
 
 ```text
-lease source and acquire destination
-  -> reserve missing replicas, private tails and unit/recovery growth
-  -> restore missing Host-only pages
-  -> Move or Fork memberships
-  -> lease execution rows and publish mappings
-  -> publish complete sequence
+reserve complete binding
+  -> enqueue restore, conflicting-tail COW and reserved-row mapping
+  -> wait for this batch's completion event
+  -> publish replicas and consume transferred source ownership
+  -> adopt writer
 ```
 
-任一 pool 的不足都会阻止完整绑定。Source lease 覆盖所需传输与安装；不可逆接管前失败会清理
-destination，保留来源。接管提交后，旧 checkpoint 可能已经消费，后续异常进入 Engine failure
-cleanup。一次绑定的 State 和 KV 不从不同计算历史拼接。
+已有只读前缀可以保留在被接管的 history 上。即使首个 unit 不追加 token，绑定仍取得 partial
+尾页的 writer 身份，防止多个待运行请求同时把它报价为零 COW。MTP 等需要从较早位置开始的
+情况由原生模型提供目标位置；消费来源前，原前沿与内容继续有效。
 
-### 7.2 Unit reservation 与物化
+Program 统一检查 State 与所有 enabled pools。暂停恢复取得“重建至旧 frontier + 首个真实新单元”
+的完整覆盖。任一 pool 不足则不执行授权退役。已经接纳的退役按请求合同生效；未采用目的的
+取消必须结束实际 DMA 后再释放 reservation 与来源引用。
+复制期间按 logical page 的实际 writer 阻塞冲突执行；来源前缀所在的 history 不能替代写入者身份。
 
-Program 计算选定 prefill、Replay、decode、control 或 normalization unit 在每个 pool 的最大写入位置。
-已有 membership 不重复 reserve；先检查一个调用集合的全部 typed 需求，再安装许可。许可固定 unit
-kind、token 参数和 typed frontier，执行必须匹配。Engine 通过逐行申请组成可运行子集。
+### 7.2 显式写入区间
 
-完整恢复许可与当前 unit 参数分离：address space 持有到恢复覆盖终点所需的 reservation，当前
-Replay chunk 只物化其中所需部分。恢复期间每个 unit 都必须落在这个已取得的覆盖内，其他请求
-不能占用尚未消费的余额。
+`write_pages(history, begin, end)` 计算增长与 COW 需求。`prepare_write(owner, begin, end, stream)`
+从实际写入起点处理保护、分支和映射，在已取得的 reservation 内物化页面；它不推进 committed
+frontier。已准备的更长 speculative mapping 可以保留到结算，较短的写入请求不隐式裁剪它。
 
-`ensure_mapped_to_tokens()` 接收本阶段所需覆盖下界：已有 membership 足够就直接返回；不足时将
-该 address 的 reservation 转为 physical pages，并发布 table slice。它不推进 committed frontier，
-不裁剪更长的 speculative mapping。所需页数超过 `membership + reservation` 属于许可违约。
+Program 先取得调用集合的完整 typed 许可，再执行。普通 unit 只预留当前峰值；恢复 reservation
+跨 chunk 保留到完整恢复覆盖，其他请求不能使用其余额。算子与 Graph 继续只消费 typed views、
+selectors 和固定地址的 block tables。
 
-Target prefill/verify 保障 Main KV；MTP 和 DFlash Full 分别保障 backend KV。DFlash2 的 local draft
-context 使用固定 cyclic state。Ordinary decode 通常只在跨页时物化一个 Main page。
+### 7.3 提交与回退
 
-### 7.3 提交与 rollback
+模型采用实际接受前缀的 State 与 metadata，再提交各 pool 的 KV frontier。Rejected suffix 的
+bytes 可以残留，但不扩大有效范围。不同密度的 plane 仍使用 `floor(coverage/tokens_per_row)`。
 
-Unit 成功后，Program 提交对应 State 与 canonical KV frontiers。Speculative 路径先完成 accepted
-prefix 所需 recurrent state、hidden 和 backend context，再发布 frontier。Consumer 不读取 rejected
-suffix；partial page 中残留 bytes 不扩大有效范围。
+`trim` 删除超出采用前沿的 provisional memberships；若旧前缀仍需更长内容，则为 writer 分支，
+保留旧目录。真正覆盖 partial tail 前由 `prepare_write` 执行必要 COW。普通结算归还未用页，
+恢复结算保留到目标覆盖所需的余额；到达旧 frontier 本身不结束恢复保护。
 
-结算时显式 truncate 未提交的尾页，dematerialize 后，普通 unit 释放余额；恢复期间保留到完整
-恢复覆盖所需的剩余页。到达旧 frontier 本身不释放，真实新 prefill/token 提交或终态才结束保护。
-`truncate` 不能删除 surviving checkpoint 的保护范围，也不能覆盖其他 reader 需要的 partial tail。
-仅仅请求更短的
-coverage 不会触发裁剪。
+### 7.4 释放与共享计费
 
-### 7.4 暂停、结束与释放
+暂停或结束释放 execution row、active references 与未用 reservation，完整快照继续持有其精确
+前缀。删除 checkpoint 只撤销相应引用。`released_pages` 按本次实际删除的前缀集合计算最后
+物理持有者，公共别名与共享完整页不重复计费；StateImage 也按实际内容引用数结算。
 
-暂停或结束时释放 execution row、active references 和未用 growth reservation。需要保留的恢复点
-继续持有完整 State/KV coverage；Snapshot 可以迁移至 Host，或在放弃物理加速副本后通过 Replay 恢复。
+从 mapping publication 到 GPU unit 完成，selected rows、页成员和实际消费的 payload 保持稳定。
+前缀引用更新、COW、提交和 row 回收在 worker 的 GPU 稳定边界完成。
 
-移除一个 checkpoint 只撤销它的 State 与 history 引用。其他 checkpoint、active sequence 或 transaction
-仍需要的目录和 replicas 保持有效。最后一个 history owner 析构时释放 Main/backend address spaces；
-最后一个 physical reference 消失时归还对应 replica。
+## 8. 部分页与副本 coverage
 
-### 7.5 稳定边界
+一个页组的 Device 与 Host 副本可以覆盖不同长度。例如 Device 已有前 48 列，Host 只保存前
+40 列：Host 对 `[0,40)` 仍有效；若仍有引用需要 48 列，则不能丢弃 Device 或从该 Host 恢复 48 列。
+最后需要较长范围的引用释放后，可直接使用较短 Host 副本保留剩余前缀。
 
-从 block-table publication 到 GPU unit 完成，selected rows、membership、可读 frontier 和被访问
-payload 均保持稳定。Mapping 更新、frontier commit、truncate 和 row recycling 在 GPU 边界完成；
-allocator 与 transfer ownership 不进入 kernel。
+写入准备只允许修改未被其他内容 owner 保留的范围。原位改写会缩小 Host 的有效 coverage，
+随后 Device 提交扩展自己的有效范围。需要卸载更长前缀时，先申请新 Host extent 并完成复制，
+再替换旧 membership；报价包含新旧副本暂时共存的 Host 空间。共享 extent 的其他页继续保留。
 
-## 8. Move、Fork 与 active prefix view
-
-### 8.1 私有 history 的接管
-
-私有 continuation 可以接管既有 history，在同一目录上继续 append。内部恢复点保留自己的 State
-和 frontier；它们不会强制当前 sequence 在每次续接时复制全部 KV。若从较浅恢复点 rewind，先解除
-失效的较深保护，再由 stores 验证并裁剪 suffix。
-
-State 的 Move/Fork 与 KV history 的 Move/Fork 分别判断；完整 source coverage 与实际 reader lease
-决定能否复用现有 writer，不能只看逻辑 checkpoint 数量。
-
-### 8.2 独立分支
-
-分支取得独立 history 和执行 row，共享 frontier 前的完整 logical pages。若边界落在 partial page，
-先复制所需 tail 到私有 destination，再开始 append。
-
-例如 \(P=64\)、frontier \(F=1000\)：共享前 15 个完整页，为最后 40 个有效 token 复制一页私有 tail。
-Checkpoint 仍精确位于 token 1000，allocation 不把 hit frontier 向下取整到 960。
-
-### 8.3 从 active history 导出不可变 prefix
-
-`KVActivePrefixViewReservation` 从停在稳定边界的 active history 导出一个独立视图：
-
-- source 保有 execution row、growth reservation、suffix 与 writer；
-- destination 共享完整 prefix pages；
-- non-aligned frontier 的 tail 复制到独立 page；
-- destination 在复制完成后一次性获得 immutable membership。
-
-导出期间 source 停止执行，reservation 与 source pins 保障内容有效。导出完成不更换 source row，
-不截断其 suffix，也不重新发布它的 block table。它用于共享发布和仍在执行中的历史分支。
-
-### 8.4 写保护
-
-Stores 同时检查 protected coverage、active references、writer、epoch 与 transaction pins。
-多个只读引用可以共享同一页；append 不覆盖任何 surviving checkpoint 的有效 prefix。
-分支要写入共享 partial tail 时先取得私有 COW page。Refcount 本身不赋予写权限。
+独立 writer 的 COW 复制全部 plane 原 words，前沿仍精确到原 token。例如 (P=64,F=1000)，
+两个 writer 共享前 15 个完整页，各自写入最后 40 列所在的 partial page；只读保存本身无需复制。
 
 ---
 
@@ -744,11 +695,11 @@ consumer，且 replay in-flight期间不得改写同一 row。
 6. Valid frontier精确到原 token；plane 有效完整行数为 floor(coverage/tokens_per_row)。
    Page boundary不改变Attention或checkpoint语义。
 7. Published checkpoint所需coverage不可被writer覆盖；任一logical page至多一个writer。
-8. Shared full pages immutable；non-aligned writable tail先建立private COW page。
+8. 只读前缀不复制尾页；writer 冲突或覆盖受保护内容时必须先分支并 COW。
 9. Host/Device replacement在copy与epoch/coverage验证完成后才发布。
 10. 普通 unit 结算归还未用容量；恢复 reservation 跨 chunk 保留至真实新进展或终态。
 11. 一个GPU execution unit内membership、block tables、replicas与read frontier稳定。
-12. Inactive address space不占execution row；execution row不拥有logical pages。
+12. 无活动 writer 的 history 不占 execution row；execution row 不拥有 logical pages。
 13. Main与backend pools分别reserve、materialize、commit和truncate。
 14. Growing-cache consumer只通过paged view和block table访问KV，不取得allocator或ownership authority。
 15. Kernel correctness不依赖physical page ID连续性，也不通过gather建立request-contiguous KV。
@@ -763,10 +714,13 @@ consumer，且 replay in-flight期间不得改写同一 row。
 | Device page pools、reservations与execution tables | `src/core/paged_kv_cache.*` |
 | closed K/V data/scale plane schema | `src/core/paged_kv_storage.h` |
 | 统一 Host backing、typed KV layout 与 allocation | `src/core/host_context_arena.*`, `src/core/host_kv_arena.*` |
-| logical pages、replicas 与 references | `src/models/qwen3_5/program/storage/logical_kv_store.h` |
-| address spaces、目录与 views | `src/models/qwen3_5/program/storage/kv_address_space.h` |
-| history 与 checkpoint 生命周期 | `src/models/qwen3_5/program/storage/checkpoints.cpp`, `sequence.cpp` |
-| Host extent membership | `src/models/qwen3_5/program/storage/host_kv_store.h` |
+| logical pages、replicas 与 references | `src/models/common/context/logical_kv_store.*` |
+| history、前缀引用、写入与绑定 | `src/models/common/context/kv_history.*` |
+| State/KV 异步迁移与完成依赖 | `src/models/common/context/migration.*` |
+| StateImage 布局、逻辑身份与副本事务 | `src/core/state_image.*`, `src/models/common/context/state_store.*`；架构声明字段与类型化视图 |
+| 完整快照与记录 lease | `src/models/common/context/snapshot.h`, `checkpoint_store.h` |
+| 原生 checkpoint 生命周期 | `src/models/qwen3_5/program/storage/checkpoints.cpp`, `sequence.cpp` |
+| Host extent membership | `src/models/common/context/host_kv_store.*` |
 | unit 许可与上下文事务 | `src/models/qwen3_5/program/planning/request_plan.cpp`, `transactions/` |
 | model pool layout与capacity curve | `src/models/qwen3_5/program/planning/startup.cpp` |
 | public paged consumer views | `src/core/paged_kv_cache.h` |

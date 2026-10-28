@@ -1,244 +1,115 @@
 #include "models/qwen4_exp/execution/parameters.h"
 
-#include "core/weight_view.h"
-#include "ninfer/ops/ple_ngram.h"
-
-#include <array>
-#include <limits>
-#include <stdexcept>
-#include <string>
-
 namespace ninfer::models::qwen4_exp::execution {
 namespace {
-
-template <class Function>
-auto with_context(const std::string& context, Function&& function) {
-    try {
-        return function();
-    } catch (const std::invalid_argument& error) {
-        throw std::invalid_argument(context + ": " + error.what());
-    }
-}
-
 class Prepare {
 public:
     explicit Prepare(const Model& model) : model_(model) {}
 
-    LinearParameters linear(WeightId id) const {
-        return with_context(model_.weight(id).name,
-                            [&] { return ops::prepare_linear_weight(model_.input(id)); });
+    LinearParameters linear(std::initializer_list<WeightId> ids) const {
+        std::vector<ops::WeightInput> inputs;
+        for (const auto id : ids) inputs.push_back(model_.input(id));
+        return ops::prepare_linear_weight(inputs);
     }
 
-    LinearParameters linear(WeightUseId id) const {
-        return with_context(model_.weight(id.parameter).name,
-                            [&] { return ops::prepare_linear_weight(model_.input(id)); });
+    Tensor tensor(WeightId id) const { return parameter_tensor(model_.weight(id)); }
+
+    Tensor hc_norm(WeightId id) const {
+        const auto& c = model_.config().text;
+        return tensor(id).view({dimension(c.hidden), dimension(c.hc.streams)});
     }
 
-    // A BF16 matrix consumed whole by a non-linear Op (hyper mixing, MoE router and shared
-    // expert, GDN controls). Its single Use carries the A16 policy those Ops require.
-    Weight matrix(WeightId id) const {
-        return with_context(model_.weight(id).name, [&] {
-            const auto prepared = ops::prepare_linear_weight(model_.input(id));
-            if (prepared.policy != ops::LinearPolicy::A16Only) {
-                throw std::invalid_argument("expected an A16-only BF16 parameter");
-            }
-            return prepared.weight;
-        });
+    ops::ProjectionWeights projection(std::initializer_list<WeightId> ids) const {
+        std::vector<ops::WeightInput> inputs;
+        for (const auto id : ids) inputs.push_back(model_.input(id));
+        return ops::prepare_projection_weights(inputs);
     }
 
-    Tensor tensor(WeightId id) const {
-        const auto& bound = model_.weight(id);
-        return with_context(bound.name, [&] {
-            const auto& view = bound.view;
-            if (view.shape.size() > 4) {
-                throw std::invalid_argument("direct parameter exceeds Tensor rank");
-            }
-            std::array<std::int32_t, 4> axes{1, 1, 1, 1};
-            for (std::size_t i = 0; i < view.shape.size(); ++i) {
-                const auto extent = view.shape[view.shape.size() - 1 - i];
-                if (extent > std::uint64_t(std::numeric_limits<std::int32_t>::max())) {
-                    throw std::invalid_argument("direct parameter exceeds Tensor extent");
-                }
-                axes[i] = static_cast<std::int32_t>(extent);
-            }
-            return weight_tensor(view, {axes[0], axes[1], axes[2], axes[3]});
-        });
+    HcParameters hc(const HcWeights& w) const {
+        return {hc_norm(w.norm),
+                {linear({w.down}).weight, linear({w.injection.value()}).weight, linear({w.up}).weight}};
     }
 
-    ops::HyperConnectionWeights mixing(WeightId norm, WeightId down, WeightId up) const {
-        return {tensor(norm), matrix(down), matrix(up)};
+    FinalHcParameters final_hc(const HcWeights& w) const {
+        return {hc_norm(w.norm), {linear({w.down}).weight, linear({w.up}).weight}};
     }
 
-    HyperParameters hyper(const HyperConnectionWeights& w) const {
-        return {mixing(w.norm, w.input_mix_down, w.input_mix_up), matrix(w.block_inject)};
-    }
-
-    ops::SparseMoeNvfp4BankWeights moe(const MoeWeights& w) const {
-        return with_context(model_.weight(w.router).name, [&] {
-            return ops::SparseMoeNvfp4BankWeights{
-                .router             = matrix(w.router),
-                .shared_expert_gate = matrix(w.shared_expert_gate),
-                .gate_up = ops::prepare_nvfp4_expert_bank_weight(model_.input(w.experts_gate_up)),
-                .down    = ops::prepare_nvfp4_expert_bank_weight(model_.input(w.experts_down)),
-                .shared_gate = matrix(w.shared_gate),
-                .shared_up   = matrix(w.shared_up),
-                .shared_down = matrix(w.shared_down),
-            };
-        });
-    }
-
-    BlockParameters block(const BlockWeights& w) const {
+    BlockParameters block(const BlockWeights& w, const BlockProfile& profile, bool mtp) const {
         BlockParameters out;
-        out.attention_hyper = hyper(w.attention_hyper);
-        out.mlp_hyper       = hyper(w.mlp_hyper);
-        if (const auto* a = std::get_if<AttentionWeights>(&w.mixer)) {
-            out.mixer = AttentionParameters{
-                .projection         = linear(a->query_gate_key_value),
-                .query_norm         = tensor(a->query_norm),
-                .key_norm           = tensor(a->key_norm),
-                .indexer_projection = linear(a->indexer_query_key),
-                .indexer_query_norm = tensor(a->indexer_query_norm),
-                .indexer_key_norm   = tensor(a->indexer_key_norm),
-                .output             = linear(a->output),
-            };
+        out.attention_hc = hc(w.attention_hc);
+        out.moe_hc       = hc(w.moe_hc);
+        if (const auto* g = std::get_if<GdnWeights>(&w.mixer)) {
+            out.mixer = GdnParameters{
+                projection({g->query, g->key, g->value, g->z}),
+                ops::prepare_gdn_control_proj_weights(model_.input(g->a), model_.input(g->b)),
+                tensor(g->a_log),
+                tensor(g->dt_bias),
+                tensor(g->convolution),
+                tensor(g->norm),
+                linear({g->output})};
         } else {
-            const auto& g = std::get<GdnWeights>(w.mixer);
-            out.mixer     = GdnParameters{
-                    .projection  = linear(g.query_key_value_z),
-                    .control     = matrix(g.a_b_projection),
-                    .a_log       = tensor(g.a_log),
-                    .dt_bias     = tensor(g.dt_bias),
-                    .convolution = tensor(g.convolution),
-                    .norm        = tensor(g.norm),
-                    .output      = linear(g.output),
-            };
+            const auto& q = std::get<QsaWeights>(w.mixer);
+            QsaParameters p;
+            if (std::holds_alternative<PackedQsaProjectionProfile>(std::get<QsaProfile>(profile.mixer).input))
+                p.input = PackedQsaProjection{linear({q.query,q.gate,q.key,q.value}), linear({q.index_query,q.index_key})};
+            else if (mtp)
+                p.input = linear({q.query, q.key, q.gate, q.value, q.index_query, q.index_key});
+            else
+                p.input = MainQsaProjection{linear({q.query, q.gate}),
+                                            linear({q.key, q.value, q.index_query, q.index_key})};
+            p.prepare = {tensor(q.query_norm),
+                         tensor(q.key_norm),
+                         tensor(q.index_query_norm),
+                         tensor(q.index_key_norm),
+                         model_.config().text.norm_epsilon,
+                         model_.config().text.qsa.rope_theta,
+                         model_.config().text.qsa.rotary_dim,
+                         model_.config().text.qsa.rope_sections,
+                         model_.config().text.qsa.rope_interleaved};
+            p.output  = linear({q.output});
+            out.mixer = std::move(p);
         }
-        out.moe = moe(w.moe);
+        const auto& m               = w.moe;
+        out.moe.profile             = profile.moe.math;
+        out.moe.bank                = m.bank;
+        out.moe.activation_divisors = profile.moe.activation_divisors;
+        out.moe.control             = linear({m.router, m.shared_score}).weight;
+        out.moe.shared   = {linear({m.shared_gate, m.shared_up}), linear({m.shared_down})};
+        const auto& bank = model_.expert_banks()[m.bank.index];
+        if (bank.gate_up.parent->device.type() == DeviceType::CUDA)
+            out.moe.resident = device_expert_bank(bank.gate_up, bank.down);
         return out;
     }
-
-    NormParameters norm(const NormWeights& w) const { return {tensor(w.weight), tensor(w.bias)}; }
-
-    std::optional<Tensor> joined_bias(const std::array<WeightId, 3>& ids) const {
-        WeightView view;
-        std::uint64_t count = 0;
-        for (const auto id : ids) {
-            const auto& input = model_.weight(id).view;
-            count += weight_element_count(input.shape);
-            for (const auto& part : input.parts) {
-                if (!view.parts.empty() && (view.parts.back().parent != part.parent ||
-                                            view.parts.back().end != part.begin)) {
-                    return std::nullopt;
-                }
-                view.parts.push_back(part);
-            }
-        }
-        if (count > std::uint64_t(std::numeric_limits<std::int32_t>::max())) {
-            throw std::invalid_argument("Vision bias exceeds Tensor extent");
-        }
-        view.shape = {count};
-        return weight_tensor(view, {static_cast<std::int32_t>(count)});
-    }
-
-    VisionParameters vision(const VisionWeights& w) const {
-        VisionParameters out;
-        out.patch_embedding      = linear(w.patch_embedding);
-        out.patch_embedding_bias = tensor(w.patch_embedding_bias);
-        out.position_embedding   = tensor(w.position_embedding);
-        out.layers.reserve(w.layers.size());
-        for (std::size_t i = 0; i < w.layers.size(); ++i) {
-            out.layers.push_back(with_context("vision/layers/" + std::to_string(i), [&] {
-                const auto& layer = w.layers[i];
-                const std::array qkv{model_.input(layer.query), model_.input(layer.key),
-                                     model_.input(layer.value)};
-                const std::array ids{layer.query_bias, layer.key_bias, layer.value_bias};
-                const auto bias = joined_bias(ids);
-                if (!bias) {
-                    throw std::invalid_argument(
-                        "Vision QKV bias: this fixed call requires a contiguous bias bank");
-                }
-                return VisionBlockParameters{norm(layer.norm1),
-                                             norm(layer.norm2),
-                                             ops::prepare_linear_weight(qkv),
-                                             *bias,
-                                             linear(layer.output),
-                                             linear(layer.fc1),
-                                             linear(layer.fc2),
-                                             tensor(layer.output_bias),
-                                             tensor(layer.fc1_bias),
-                                             tensor(layer.fc2_bias)};
-            }));
-        }
-        out.merger_norm     = norm(w.merger_norm);
-        out.merger_fc1      = linear(w.merger_fc1);
-        out.merger_fc2      = linear(w.merger_fc2);
-        out.merger_fc1_bias = tensor(w.merger_fc1_bias);
-        out.merger_fc2_bias = tensor(w.merger_fc2_bias);
-        return out;
-    }
-
 private:
     const Model& model_;
 };
-
 } // namespace
 
-void require_supported_ple(const TextConfig& config) {
-    // The PLE convolution's dilation is the n-gram size (transformers Qwen4ExpTextPLELayer).
-    ops::require_ple_ngram_geometry({
-        .stream_width = config.hidden_size, .streams      = config.hyper_connection.streams, .row_width    = config.ple.head_width(), .taps         = config.ple.conv_kernel_size, .dilation     = config.ple.ngram_size, .epsilon      = config.rms_norm_eps, });
+Parameters::Parameters(const Model& model, std::shared_ptr<const ModelProfile> profile)
+    : model(model), profile(profile ? std::move(profile) : describe_model(model)) {
+    const Prepare p(model);
+    const auto& w  = model.weights();
+    text.embedding = native_weight(model.weight(w.text.embedding).view);
+    text.head      = p.linear({w.text.head});
+    text.final_hc  = p.final_hc(w.text.final_hc);
+    for (std::size_t i = 0; i < w.text.layers.size(); ++i)
+        text.layers.push_back(p.block(w.text.layers[i], this->profile->text.layers.at(i), false));
+    const auto& ple = w.text.ple;
+    text.ple        = {p.projection({ple.key, ple.value}),
+                       {p.hc_norm(ple.norm_key), p.hc_norm(ple.norm_query), p.hc_norm(ple.norm_conv),
+                        model.config().text.norm_epsilon},
+                       p.tensor(ple.convolution)};
+    if (w.mtp) {
+        const auto& m = *w.mtp;
+        mtp           = {native_weight(model.weight(m.embedding).view),
+                         p.linear({m.head}),
+                         p.linear({m.fc_embedding}),
+                         p.linear({m.fc_hidden}),
+                         p.tensor(m.embedding_norm),
+                         p.tensor(m.hidden_norm),
+                         p.block(m.layer, this->profile->mtp.value().layer, true),
+                         p.final_hc(m.final_hc)};
+    }
+    if (w.vision) vision = qwen::prepare_vision(model.weight_data(), *w.vision);
 }
-
-Parameters::Parameters(const Model& source) : model(source) {
-    const Prepare prepare(model);
-    const auto& w        = model.weights().text;
-    text.token_embedding = native_weight(model.weight(w.token_embedding).view);
-    text.output_head     = prepare.linear(w.output_head_use);
-    text.layers.reserve(w.layers.size());
-    for (std::size_t i = 0; i < w.layers.size(); ++i) {
-        text.layers.push_back(with_context("text/layers/" + std::to_string(i),
-                                           [&] { return prepare.block(w.layers[i]); }));
-    }
-    const auto& config = model.config().text;
-    with_context("text/ple", [&] { require_supported_ple(config); });
-    text.ple.reserve(w.ple.size());
-    for (std::size_t i = 0; i < w.ple.size(); ++i) {
-        const std::uint32_t layer = config.ple.layers.at(i);
-        text.ple.push_back(with_context("text/layers/" + std::to_string(layer) + "/ple", [&] {
-            return PleParameters{
-                .layer            = layer,
-                .key_projection   = prepare.linear(w.ple[i].key_projection),
-                .value_projection = prepare.linear(w.ple[i].value_projection),
-                .query_norm       = prepare.tensor(w.ple[i].query_norm),
-                .key_norm         = prepare.tensor(w.ple[i].key_norm),
-                .conv_norm        = prepare.tensor(w.ple[i].conv_norm),
-                .convolution      = prepare.tensor(w.ple[i].convolution),
-            };
-        }));
-    }
-    text.final_mixer = with_context("text/hyper_connection", [&] {
-        return prepare.mixing(w.final_mixer.norm, w.final_mixer.input_mix_down,
-                              w.final_mixer.input_mix_up);
-    });
-    if (model.weights().vision) {
-        vision = with_context("vision", [&] { return prepare.vision(*model.weights().vision); });
-    }
-    if (model.weights().mtp) {
-        const auto& m = *model.weights().mtp;
-        mtp = with_context("mtp", [&] {
-            return MtpParameters{
-                .embedding_projection = prepare.linear(m.embedding_projection),
-                .hidden_projection = prepare.linear(m.hidden_projection),
-                .embedding_norm = prepare.tensor(m.embedding_norm),
-                .hidden_norm = prepare.tensor(m.hidden_norm),
-                .layer = prepare.block(m.layer),
-                .final_mixer = prepare.mixing(m.final_mixer.norm, m.final_mixer.input_mix_down,
-                                              m.final_mixer.input_mix_up),
-                .token_embedding = native_weight(model.weight(m.token_embedding).view),
-                .output_head = prepare.linear(m.output_head_use),
-            };
-        });
-    }
-}
-
 } // namespace ninfer::models::qwen4_exp::execution

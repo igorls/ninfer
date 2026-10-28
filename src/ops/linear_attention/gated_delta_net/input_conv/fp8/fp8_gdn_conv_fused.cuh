@@ -78,6 +78,7 @@ void fp8_gdn_snapshot_batch_one(const Tensor& x, const Weight& weight, const Ten
         Fp8A16SimtSchedule<4, 2, 8, BatchTile, 4, Fp8SimtActivationAccess::SharedPhase,
                            Fp8CodeCache::Default, 2, Fp8SimtBlockOrder::RowsContiguous, 2>;
     const SnapshotHistoryPublish publish{static_cast<__nv_bfloat16*>(conv_states.data),
+                                       conv_states.nb[2] / 2,
                                          static_cast<const std::int32_t*>(snapshot_base_slot.data),
                                          GdnConvGeometry<6144>::channels};
     Fp8GdnBatchSnapshotOutput output{make_gdn_conv_output<GdnConvGeometry<6144>, 1>(
@@ -159,6 +160,7 @@ void fp8_gdn_snapshot_fused(const Tensor& x, const Weight& weight, const Tensor&
                 x, weight, conv_weight, conv_states, valid_columns, initial_slot, query, key, value,
                 z,
                 SnapshotHistoryPublish{static_cast<__nv_bfloat16*>(conv_states.data),
+                                       conv_states.nb[2] / 2,
                                        static_cast<const std::int32_t*>(snapshot_base_slot.data),
                                        GdnConvGeometry<6144>::channels},
                 stream);
@@ -184,6 +186,7 @@ void fp8_gdn_snapshot_fused(const Tensor& x, const Weight& weight, const Tensor&
         throw std::invalid_argument("fp8 GDN snapshot fused: unsupported B/W");
     }
     const SnapshotHistoryPublish publish{static_cast<__nv_bfloat16*>(conv_states.data),
+                                       conv_states.nb[2] / 2,
                                          static_cast<const std::int32_t*>(snapshot_base_slot.data),
                                          GdnConvGeometry<6144>::channels};
     if (x.ne[1] == 1) {

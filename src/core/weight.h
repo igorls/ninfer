@@ -8,30 +8,32 @@
 namespace ninfer {
 
 enum class QType : std::uint16_t {
-    Q4_G64_FP16         = 0,
-    Q5_G64_FP16         = 1,
-    Q6_G64_FP16         = 2,
-    Q8_G32_FP16         = 3,
-    BF16                = 4,
-    FP32                = 5,
-    INT32               = 6,
-    NVFP4               = 7,
-    FP8_E4M3FN_ROW_BF16 = 8,
+    Q4_G64_FP16                  = 0,
+    Q5_G64_FP16                  = 1,
+    Q6_G64_FP16                  = 2,
+    Q8_G32_FP16                  = 3,
+    BF16                         = 4,
+    FP32                         = 5,
+    INT32                        = 6,
+    NVFP4                        = 7,
+    FP8_E4M3FN_ROW_BF16          = 8,
+    NF4_G16_E4M3FN               = 12,
+    FP8_E4M3FN_BLOCK128X128_BF16 = 13,
     FP8_E4M3FN_ROW_FP32 = 9,
-    U4Z8_G16_FP16       = 10,
-    INT64               = 11,
-    NF4_G16_E4M3FN      = 12,
+    U4Z8_G16_FP16 = 10,
+    INT64 = 11,
 };
 
 enum class QuantLayout : std::uint16_t {
-    RowSplit                  = 0,
-    Contiguous                = 1,
-    BlockScaleK16M128x4       = 2,
-    RowScale                  = 3,
-    RowScaleFp32              = 4,
-    ExpertBlockScaleK16M128x4 = 5,
-    PackedU4G16               = 6,
-    RowPagedG16_4K            = 7,
+    RowSplit                   = 0,
+    Contiguous                 = 1,
+    BlockScaleK16M128x4        = 2,
+    RowScale                   = 3,
+    RowPagedG16_4K             = 7,
+    BatchedBlockScaleK16M128x4 = 5,
+    BlockScaleM128K128         = 9,
+    RowScaleFp32 = 4,
+    PackedU4G16 = 6,
 };
 
 struct Weight {

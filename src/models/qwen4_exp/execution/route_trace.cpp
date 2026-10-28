@@ -82,10 +82,12 @@ void RouteTrace::record_text(ExpertRouteKind kind, std::span<const RouteTraceCol
                             .columns     = {columns.begin(), columns.end()}};
     record.experts.reserve(columns.size() * text_layers_ * kRouteTraceTopK);
     for (std::size_t column = 0; column < columns.size(); ++column) {
+        if (columns[column].source_column >= static_cast<std::uint32_t>(columns_))
+            throw std::out_of_range("routed-expert source column exceeds the mirrored buffer");
         for (std::uint32_t layer = 0; layer < text_layers_; ++layer) {
             const std::int32_t* ids = host_ +
                                       static_cast<std::size_t>(layer) * kRouteTraceTopK * columns_ +
-                                      column * kRouteTraceTopK;
+                                      columns[column].source_column * kRouteTraceTopK;
             for (std::int32_t rank = 0; rank < kRouteTraceTopK; ++rank) {
                 record.experts.push_back(expert(ids[rank]));
             }
@@ -94,29 +96,28 @@ void RouteTrace::record_text(ExpertRouteKind kind, std::span<const RouteTraceCol
     records_.push_back(std::move(record));
 }
 
-void RouteTrace::record_proposals(std::int32_t steps, std::int32_t batch,
-                                  std::span<const RouteTraceColumn> columns) {
-    if (steps <= 0 || steps > proposal_steps_ || batch <= 0 || batch > proposal_columns_ ||
-        columns.size() != static_cast<std::size_t>(steps) * static_cast<std::size_t>(batch)) {
+void RouteTrace::record_proposal(std::int32_t step, std::span<const RouteTraceColumn> columns) {
+    if (step < 0 || step >= proposal_steps_ || columns.empty() ||
+        columns.size() > static_cast<std::size_t>(proposal_columns_)) {
         throw std::out_of_range("routed-expert proposal record does not match its slots");
     }
     const std::int32_t* slots =
         host_ + static_cast<std::size_t>(kRouteTraceTopK) * columns_ * slices_;
-    for (std::int32_t step = 0; step < steps; ++step) {
-        RouteTraceRecord record{
-            .kind        = ExpertRouteKind::MtpProposal,
-            .first_layer = static_cast<std::uint16_t>(mtp_layer()),
-            .layer_count = 1,
-            .columns     = {columns.begin() + static_cast<std::ptrdiff_t>(step) * batch,
-                            columns.begin() + static_cast<std::ptrdiff_t>(step + 1) * batch}};
-        record.experts.reserve(static_cast<std::size_t>(batch) * kRouteTraceTopK);
-        const std::int32_t* ids =
-            slots + static_cast<std::size_t>(step) * proposal_columns_ * kRouteTraceTopK;
-        for (std::int32_t i = 0; i < batch * kRouteTraceTopK; ++i) {
-            record.experts.push_back(expert(ids[i]));
-        }
-        records_.push_back(std::move(record));
+    RouteTraceRecord record{
+        .kind        = ExpertRouteKind::MtpProposal,
+        .first_layer = static_cast<std::uint16_t>(mtp_layer()),
+        .layer_count = 1,
+        .columns     = {columns.begin(), columns.end()}};
+    record.experts.reserve(columns.size() * kRouteTraceTopK);
+    const std::int32_t* ids =
+        slots + static_cast<std::size_t>(step) * proposal_columns_ * kRouteTraceTopK;
+    for (const auto& column : columns) {
+        if (column.source_column >= static_cast<std::uint32_t>(proposal_columns_))
+            throw std::out_of_range("routed-expert proposal row exceeds its mirrored slot");
+        for (std::int32_t rank = 0; rank < kRouteTraceTopK; ++rank)
+            record.experts.push_back(expert(ids[column.source_column * kRouteTraceTopK + rank]));
     }
+    records_.push_back(std::move(record));
 }
 
 std::vector<RouteTraceRecord> RouteTrace::take() noexcept {

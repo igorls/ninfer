@@ -1,7 +1,7 @@
 # Build system
 
 NInfer builds from its source tree with CMake 3.28+ and C++/CUDA 20.
-The supported architecture is `sm_120a`; CUDA 13.1 is the validated development toolkit.
+The supported architecture is `sm_120a`; CUDA 13.4 is the validated development toolkit.
 Product commands and prerequisites are in the
 [README](../../README.md#quick-start); test and measurement workflows live in
 [tests](../../tests/README.md) and [benchmarks](../../bench/README.md).
@@ -25,9 +25,14 @@ to model media decoding and remains required when apps are disabled. Curl and sp
 only for product support. A Python 3 interpreter is found when tests are configured. The larger Python
 pytest suites and conversion/evaluation scripts run separately from CMake and CTest.
 
-CUDA 13.1 and Python 3.11 describe the maintained environment, not configuration version gates.
+CUDA 13.4 and Python 3.11 describe the maintained environment, not configuration version gates.
 CMake also discovers FFmpeg without imposing library version floors. Actual language/API support
-is exercised by compilation and tests. The libcurl 7.85 minimum has a concrete API basis:
+is exercised by compilation and tests. CPU facilities target Linux x86-64 and use hwloc >= 2.5
+for topology discovery without changing the caller's binding. The internal `ninfer_cpu` target
+is ordinary C++, links hwloc/Threads, and can run its tests without CUDA initialization or linkage.
+Core direct-file I/O uses liburing >= 2.5, discovered through pkg-config. Its registered files and
+buffers are owned by the read queue's caller; the queue creates no CUDA resources or worker threads.
+The libcurl 7.85 minimum has a concrete API basis:
 media acquisition uses `CURLOPT_PROTOCOLS_STR` and `CURLOPT_REDIR_PROTOCOLS_STR`, introduced in
 [that release](https://curl.se/libcurl/c/CURLOPT_PROTOCOLS_STR.html).
 
@@ -133,9 +138,11 @@ with `CMAKE_CURRENT_LIST_DIR`; `include()` does not change `CMAKE_CURRENT_SOURCE
   preparation and compile policy are owned by `src/ops/CMakeLists.txt`.
 - Linear separates shared kernel and projection manifests. Format manifests list explicit sources
   and shape filenames with their actual `.cpp`/`.cu` extensions.
-- Models separate loading, frontend, execution and Program source lists while retaining the
-  distinct immutable-loading and mutable-runtime targets. Checkpoints/recipes do not define
-  additional compile owners.
+- Models retain distinct immutable-loading and mutable-runtime targets. Native loading, execution
+  and Program manifests own architecture code; `common/qwen/sources.cmake` owns shared Frontend
+  and Vision sources. Shared bindings and context/MoE mechanisms have explicit target entries.
+  Runtime startup orchestration links model runtime; native startup planners only depend on
+  runtime support/contracts. Checkpoints/recipes do not define additional compile owners.
 - New files require an explicit manifest edit. New families require an explicit parent include.
   There is no recursive glob, directory discovery or generated shape/dispatch registry.
 

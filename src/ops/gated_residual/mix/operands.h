@@ -12,6 +12,7 @@ struct Weights {
     Kind kind;
     const Weight& down;
     const Weight& up;
+    const Weight* injection = nullptr;
 };
 
 struct Operands {
@@ -21,6 +22,7 @@ struct Operands {
     void* output;
     float* injection;
     std::int32_t columns;
+    const void* separate_injection = nullptr;
 };
 
 void describe_weights(Weights weights);

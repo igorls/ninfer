@@ -15,21 +15,21 @@ struct Scratch {
 
 // The same allocation recipe runs on WorkspaceLayoutBuilder and on the call-local arena.
 template <class Allocator>
-Scratch allocate_workspace(Allocator& allocator, const WeightOperands& weights, ProjectionPlan plan,
+Scratch allocate_workspace(Allocator& allocator, const WeightProfile& weights, ProjectionPlan plan,
                            std::int32_t columns, bool materialized_snapshot = false) {
     Scratch out;
     if (materialized_snapshot)
         out.projected = allocator.alloc(DType::BF16, {weights.geometry.channels(), columns}, 256);
     if (plan.compute == Compute::A8)
         out.fp8 = allocate_fp8_a8_workspace(allocator, columns, weights.geometry.input_rows,
-                                            find_fp8_gdn_input_profile(weights.first->qtype, weights.first->n,
-                                                                         weights.first->k)->a8_partial_bytes(columns));
+                                            find_fp8_gdn_input_profile(weights.qtype, 16384,
+                                                                      weights.geometry.input_rows)->a8_partial_bytes(columns));
     if (plan.compute == Compute::A4)
         out.nvfp4 = allocate_nvfp4_a4_workspace(allocator, columns, weights.geometry.input_rows);
     return out;
 }
 
-inline std::size_t workspace_bytes(const WeightOperands& weights, ProjectionPlan plan,
+inline std::size_t workspace_bytes(const WeightProfile& weights, ProjectionPlan plan,
                                    std::int32_t columns, bool materialized_snapshot = false) {
     WorkspaceLayoutBuilder layout;
     (void)allocate_workspace(layout, weights, plan, columns, materialized_snapshot);

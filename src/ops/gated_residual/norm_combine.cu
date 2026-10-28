@@ -7,26 +7,18 @@
 
 namespace ninfer::ops::detail::hc {
 namespace {
-enum class NormSchedule { Pairs256, Vectors320, StreamingVectors320 };
-
-constexpr int kExpandVectorStart        = 2048;
-constexpr int kGroupedStreamingStart    = 2816;
-constexpr int kDisjointStreamingStart   = 1536;
 constexpr int kDisjointMaterializeStart = 1841;
 constexpr int kDisjointMaterializeEnd   = 3072;
 constexpr int kInPlaceMaterializeStart  = 1824;
 constexpr int kInPlaceMaterializeEnd    = 3680;
 
-template <Form Kind, NormSchedule Schedule = NormSchedule::Pairs256>
+// One reduction tree preserves the BF16 normalization boundary across prefill windows.
+template <Form Kind>
 void launch_norm_rows(Operands o, CudaExecutionView e) {
     const std::int64_t rows = std::int64_t(o.columns) * kStreams;
     for (std::int64_t first = 0; first < rows;) {
         const auto count = std::min(rows - first, std::int64_t(std::numeric_limits<int>::max()));
-        if constexpr (Schedule != NormSchedule::Pairs256)
-            norm_vector_kernel<Kind, Schedule == NormSchedule::StreamingVectors320>
-                <<<unsigned(count), 320, 0, e.stream()>>>(o, first);
-        else
-            norm_kernel<Kind, 256><<<unsigned(count), 256, 0, e.stream()>>>(o, first);
+        norm_kernel<Kind, 256><<<unsigned(count), 256, 0, e.stream()>>>(o, first);
         CUDA_CHECK(cudaGetLastError());
         first += count;
     }
@@ -59,8 +51,6 @@ using Launch = void (*)(Operands, CudaExecutionView);
 template <Form Kind>
 Launch select_combine_norm(Operands o) {
     const bool in_place = o.input == o.residual;
-    if (!in_place && o.columns >= kDisjointStreamingStart && o.columns < kDisjointMaterializeStart)
-        return launch_norm_rows<Kind, NormSchedule::StreamingVectors320>;
     const bool materialize =
         in_place ? o.columns >= kInPlaceMaterializeStart && o.columns <= kInPlaceMaterializeEnd
                  : o.columns >= kDisjointMaterializeStart && o.columns <= kDisjointMaterializeEnd;
@@ -70,13 +60,9 @@ Launch select_combine_norm(Operands o) {
 Launch select_implementation(Form form, Operands o) {
     switch (form) {
     case Form::ExpandNorm:
-        return o.columns >= kExpandVectorStart
-                   ? launch_norm_rows<Form::ExpandNorm, NormSchedule::Vectors320>
-                   : launch_norm_rows<Form::ExpandNorm>;
+        return launch_norm_rows<Form::ExpandNorm>;
     case Form::GroupedNorm:
-        return o.columns >= kGroupedStreamingStart
-                   ? launch_norm_rows<Form::GroupedNorm, NormSchedule::StreamingVectors320>
-                   : launch_norm_rows<Form::GroupedNorm>;
+        return launch_norm_rows<Form::GroupedNorm>;
     case Form::Combine:
         return launch_combine<Form::Combine>;
     case Form::CombineNorm:

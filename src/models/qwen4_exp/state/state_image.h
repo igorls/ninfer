@@ -1,207 +1,61 @@
 #pragma once
 
-#include "core/arena.h"
-#include "core/host_context_arena.h"
-#include "core/layout.h"
 #include "core/linear_attention_state.h"
-#include "core/tensor.h"
-#include "core/transfer_work.h"
-
-#include <cuda_runtime_api.h>
-
-#include <cstddef>
-#include <cstdint>
-#include <optional>
-#include <vector>
+#include "models/common/context/state_store.h"
+#include "models/qwen4_exp/config.h"
+#include "ninfer/ops/qsa.h"
+#include "ninfer/ops/ple.h"
 
 namespace ninfer::models::qwen4_exp {
-
-// Per-sequence state of the QSA indexer and the per-layer n-gram embedding that lives beside the
-// GDN state: the raw keys and MRoPE positions of each attention layer's forming four-token block
-// (ops::QsaIndexerKeyState) and, per PLE layer, the BF16 history columns of its dilated
-// convolution.
-struct TokenMixerStateSpec {
-    std::uint32_t indexer_layers = 0;
-    std::int32_t indexer_dim     = 0;
-    std::int32_t indexer_block   = 0;
-    std::uint32_t ple_layers     = 0;
-    std::int32_t ple_channels    = 0;
-    std::int32_t ple_history     = 0;
-    // Extra QSA/PLE slots for a pending verification block; never cache-owned.
-    std::int32_t transient_slots = 0;
+struct QsaTailLayout {
+    StateField raw_keys, first_rope;
 };
 
-struct StateImageSpec {
-    LinearAttentionStatePoolSpec linear;
-    TokenMixerStateSpec token_mixer;
-    // The four-stream residual of the last executed position (before the final mixer).
-    std::int32_t hidden = 0;
+struct StateLayout {
+    StateImageLayout images;
+    LinearAttentionStateLayout gdn;
+    QsaTailLayout main_qsa;
+    StateField ple_history, sample_hidden;
+    std::optional<StateField> conditioning;
+    std::optional<QsaTailLayout> mtp_qsa;
 };
 
-struct StateImageHostLayout {
-    StateImageSpec spec;
-    LayoutRegion linear_conv;
-    std::size_t linear_conv_layer_bytes = 0;
-    LayoutRegion linear_recurrent;
-    std::size_t linear_recurrent_layer_bytes = 0;
-    LayoutRegion indexer_keys;
-    std::size_t indexer_keys_layer_bytes = 0;
-    LayoutRegion indexer_positions;
-    std::size_t indexer_positions_layer_bytes = 0;
-    LayoutRegion ple_history;
-    std::size_t ple_history_layer_bytes = 0;
-    LayoutRegion continuation_hidden;
-    LayoutRegion continuation_positions;
-    std::size_t image_bytes = 0;
+[[nodiscard]] StateLayout plan_state_image(LayoutBuilder&, const Config&, std::int32_t slots);
+
+struct ContinuationMetadata {
+    std::uint32_t main_frontier = 0;
+    std::int32_t rope_delta     = 0;
+    std::array<std::int32_t, 2> ple_raw_tail{};
+    std::optional<std::uint32_t> mtp_frontier;
 };
 
-struct StateImageDeviceLayout {
-    LinearAttentionStatePoolLayout linear;
-    std::vector<TensorRegion> indexer_keys;      // BF16 [dim, block, slots] per attention layer
-    std::vector<TensorRegion> indexer_positions; // I32 [3, block, slots] per attention layer
-    std::vector<TensorRegion> ple_history;       // BF16 [channels, history, slots] per PLE layer
-    TensorRegion continuation_hidden;            // BF16 [hidden, slots]
-    TensorRegion continuation_positions;         // I32 [3, slots]
-    StateImageHostLayout host;
-};
+[[nodiscard]] inline std::uint32_t mtp_history_frontier(std::uint32_t main_frontier) {
+    return main_frontier ? main_frontier - 1 : 0;
+}
 
-[[nodiscard]] TransferWork state_image_transfer_work(const StateImageHostLayout& layout);
+using Continuation = context::Continuation<ContinuationMetadata>;
 
-[[nodiscard]] StateImageDeviceLayout plan_state_image_device_pool(LayoutBuilder& builder,
-                                                                  const StateImageSpec& spec);
-
-struct HostStateImageView {
-    std::byte* data                    = nullptr;
-    const StateImageHostLayout* layout = nullptr;
-};
-
-struct HostStateImageConstView {
-    const std::byte* data              = nullptr;
-    const StateImageHostLayout* layout = nullptr;
-};
-
-class HostStatePool;
-
-struct HostStateSlotHandle {
-    std::uint32_t index        = 0;
-    std::uint32_t generation   = 0;
-    const HostStatePool* owner = nullptr;
-};
-
-/** Typed StateImage descriptors backed on demand by the shared Host arena; owns no cache policy.
- */
-class HostStatePool {
+class StateViews {
 public:
-    HostStatePool(HostContextArena& arena, StateImageHostLayout layout);
+    StateViews(MemorySpan, const StateLayout&);
 
-    HostStatePool(const HostStatePool&)            = delete;
-    HostStatePool& operator=(const HostStatePool&) = delete;
-    HostStatePool(HostStatePool&&)                 = delete;
-    HostStatePool& operator=(HostStatePool&&)      = delete;
+    [[nodiscard]] StateImageStorage& storage() { return storage_; }
 
-    [[nodiscard]] std::optional<HostStateSlotHandle> allocate() noexcept;
-    [[nodiscard]] bool can_allocate() const noexcept;
-    [[nodiscard]] bool publish(HostStateSlotHandle handle) noexcept;
-    [[nodiscard]] bool release(HostStateSlotHandle handle) noexcept;
+    [[nodiscard]] const StateImageStorage& storage() const { return storage_; }
 
-    [[nodiscard]] HostStateImageView writable_view(HostStateSlotHandle handle);
-    [[nodiscard]] HostStateImageConstView view(HostStateSlotHandle handle) const;
+    [[nodiscard]] const LinearAttentionStateView& gdn() const { return gdn_; }
 
-    [[nodiscard]] std::uint32_t capacity() const noexcept;
-
-    [[nodiscard]] std::uint32_t occupied() const noexcept { return occupied_; }
-
-    [[nodiscard]] std::size_t occupied_bytes() const noexcept {
-        return static_cast<std::size_t>(occupied_) * layout_.image_bytes;
-    }
-
-    [[nodiscard]] const StateImageHostLayout& layout() const noexcept { return layout_; }
-
+    [[nodiscard]] ops::QsaTailStateView main_tail(std::uint32_t layer, Tensor slots) const;
+    [[nodiscard]] ops::QsaTailStateView mtp_tail(Tensor slots) const;
+    [[nodiscard]] ops::PleConvStateView ple(Tensor slots) const;
+    [[nodiscard]] Tensor sample_hidden() const;
+    [[nodiscard]] Tensor conditioning() const;
+    // Initializes a reserved physical image; logical publication belongs to the caller.
+    [[nodiscard]] ContinuationMetadata initialize(std::int32_t slot, std::int32_t eos,
+                                                  CudaExecutionView) const;
 private:
-    struct Slot {
-        HostContextAllocation storage;
-        std::uint32_t generation = 1;
-    };
-
-    [[nodiscard]] bool valid(HostStateSlotHandle handle) const noexcept;
-    [[nodiscard]] std::byte* slot_data(std::uint32_t index) const noexcept;
-
-    StateImageHostLayout layout_;
-    HostContextArena* arena_ = nullptr;
-    std::vector<Slot> slots_;
-    std::vector<std::uint32_t> free_slots_;
-    std::uint32_t free_count_ = 0;
-    std::uint32_t occupied_   = 0;
+    StateLayout layout_;
+    StateImageStorage storage_;
+    LinearAttentionStateView gdn_;
 };
-
-// The QSA indexer forming-block state of one attention layer across every slot, the form
-// ops::qsa_indexer_append consumes.
-struct IndexerStateView {
-    Tensor raw_keys;
-    Tensor raw_positions;
-};
-
-/**
- * Caller-backed fixed storage for Qwen4Exp continuation state.
- *
- * Every absolute slot holds the GDN convolution and recurrent state, the QSA indexer forming
- * blocks, the PLE convolution history and the continuation hidden of one frontier. The pool owns
- * neither slot roles nor logical checkpoint identity.
- */
-class StateImageDevicePool {
-public:
-    StateImageDevicePool(MemorySpan backing, const StateImageDeviceLayout& layout);
-
-    StateImageDevicePool(const StateImageDevicePool&)            = delete;
-    StateImageDevicePool& operator=(const StateImageDevicePool&) = delete;
-    StateImageDevicePool(StateImageDevicePool&&)                 = delete;
-    StateImageDevicePool& operator=(StateImageDevicePool&&)      = delete;
-
-    [[nodiscard]] std::int32_t slot_count() const noexcept { return linear_.slot_count(); }
-
-    [[nodiscard]] Tensor continuation_hidden_slot(std::int32_t slot) const;
-    [[nodiscard]] Tensor continuation_positions_slot(std::int32_t slot) const;
-
-    // Publish just the token-mixer part of one transient verification snapshot.
-    void commit_token_mixer(std::int32_t snapshot, std::int32_t destination, cudaStream_t stream);
-
-    [[nodiscard]] LinearAttentionStatePool& linear() noexcept { return linear_; }
-
-    [[nodiscard]] const LinearAttentionStatePool& linear() const noexcept { return linear_; }
-
-    [[nodiscard]] IndexerStateView indexer(std::uint32_t layer) const;
-
-    // PLE layer `index` (TextConfig::ple.layers order): BF16 [channels, history, slots].
-    [[nodiscard]] const Tensor& ple_history(std::size_t index) const;
-
-    [[nodiscard]] Tensor ple_history_slot(std::size_t index, std::int32_t slot) const;
-
-    [[nodiscard]] Tensor& continuation_hidden_store() noexcept { return continuation_hidden_; }
-
-    [[nodiscard]] const Tensor& continuation_hidden_store() const noexcept {
-        return continuation_hidden_;
-    }
-
-    [[nodiscard]] const StateImageHostLayout& host_layout() const noexcept { return host_layout_; }
-
-    void zero_slot(std::int32_t slot, cudaStream_t stream = nullptr);
-    void zero_all(cudaStream_t stream = nullptr);
-    void copy_slot(std::int32_t source, std::int32_t destination, cudaStream_t stream = nullptr);
-    void copy_to_host(std::int32_t source, HostStateImageView destination,
-                      cudaStream_t stream = nullptr) const;
-    void copy_from_host(HostStateImageConstView source, std::int32_t destination,
-                        cudaStream_t stream = nullptr);
-
-private:
-    void validate_host_layout(const StateImageHostLayout* layout, const std::byte* data) const;
-
-    LinearAttentionStatePool linear_;
-    std::vector<Tensor> indexer_keys_;
-    std::vector<Tensor> indexer_positions_;
-    std::vector<Tensor> ple_history_;
-    Tensor continuation_hidden_;
-    Tensor continuation_positions_;
-    StateImageHostLayout host_layout_;
-};
-
 } // namespace ninfer::models::qwen4_exp

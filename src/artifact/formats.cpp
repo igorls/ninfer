@@ -21,6 +21,8 @@ constexpr std::array kFormats = {
     std::pair{QType::U4Z8_G16_FP16, std::string_view{"u4z8_g16_fp16"}},
     std::pair{QType::INT64, std::string_view{"int64"}},
     std::pair{QType::NF4_G16_E4M3FN, std::string_view{"nf4_g16_e4m3fn"}},
+    std::pair{QType::FP8_E4M3FN_BLOCK128X128_BF16,
+              std::string_view{"fp8_e4m3fn_block128x128_bf16"}},
 };
 constexpr std::array kLayouts = {
     std::pair{QuantLayout::Contiguous, std::string_view{"contiguous_le_v1"}},
@@ -29,9 +31,10 @@ constexpr std::array kLayouts = {
     std::pair{QuantLayout::RowPagedG16_4K, std::string_view{"row_paged_g16_4k_v1"}},
     std::pair{QuantLayout::BlockScaleK16M128x4, std::string_view{"block_scale_k16_m128x4_v1"}},
     std::pair{QuantLayout::RowScaleFp32, std::string_view{"row_scale_fp32_v1"}},
-    std::pair{QuantLayout::ExpertBlockScaleK16M128x4,
-              std::string_view{"expert_block_scale_k16_m128x4_v1"}},
     std::pair{QuantLayout::PackedU4G16, std::string_view{"packed_u4_g16_v1"}},
+    std::pair{QuantLayout::BatchedBlockScaleK16M128x4,
+              std::string_view{"batched_block_scale_k16_m128x4_v1"}},
+    std::pair{QuantLayout::BlockScaleM128K128, std::string_view{"block_scale_m128_k128_v1"}},
 };
 
 } // namespace

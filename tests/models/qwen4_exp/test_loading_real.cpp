@@ -1,400 +1,280 @@
-#include "artifact/fixture.h"
-#include "artifact/reader.h"
-#include "core/device_memory.h"
-#include "models/qwen3_5/frontend/digest.h"
-#include "models/qwen3_5/frontend/frontend.h"
 #include "models/qwen4_exp/load.h"
+#include "models/qwen4_exp/startup.h"
+#include "models/qwen4_exp/program/resources.h"
+#include "artifact/fixture.h"
+#include "core/transfer.h"
 
-#include <cuda_runtime.h>
-
-#include <algorithm>
-#include <atomic>
-#include <cmath>
+#include <chrono>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
 #include <iostream>
-#include <map>
-#include <memory>
-#include <mutex>
-#include <set>
-#include <string>
 #include <thread>
-#include <vector>
+#ifdef _WIN32
+#include <Windows.h>
+#include <psapi.h>
+#else
+#include <sys/resource.h>
+#endif
 
 namespace {
-
 using namespace ninfer;
-using namespace ninfer::models;
-namespace flash = ninfer::models::qwen4_exp;
-using ninfer::test::artifact_fixture::require;
+namespace q4 = models::qwen4_exp;
+using test::artifact_fixture::require;
+constexpr std::size_t GiB = 1024ULL * 1024 * 1024;
 
-struct Sample {
-    std::uint64_t offset;
-    std::vector<std::byte> bytes;
-};
-
-// Byte samples at the start, middle, end and plane boundaries of one stored object.
-std::vector<Sample> read_samples(const artifact::Reader& reader, artifact::ObjectHandle handle) {
-    const auto& object   = reader.directory().tensor(handle);
-    const auto& geometry = reader.geometry(handle);
-    const auto size      = std::min<std::uint64_t>(64, object.bytes);
-    std::set<std::uint64_t> offsets{0, (object.bytes - size) / 2, object.bytes - size};
-    if (geometry.scale_bytes) { offsets.insert(geometry.scale_offset); }
-    if (geometry.divisor_offset) { offsets.insert(geometry.divisor_offset); }
-    std::vector<Sample> out;
-    for (const auto offset : offsets) {
-        const auto count = std::min<std::uint64_t>(size, object.bytes - offset);
-        out.push_back({offset, reader.read_range(object.offset + offset, count)});
-    }
-    return out;
+void placement(const q4::LoadPlan& load, Device device) {
+    const auto plan = load.placement(device, Device::cpu());
+    require(plan.registered_host_objects.size() == 96,
+            "Main banks must have one Host backing per parent");
+    require(plan.registered_host_bytes >= 67947921408ULL &&
+                plan.registered_host_bytes < 67947921408ULL + 2 * 1024 * 1024,
+            "Main Host bank capacity differs");
+    require(plan.device_capacity_bytes < 11 * GiB, "PLE or Main banks were placed on GPU");
+    require(load.ple_table().parameters().rows == 320001536, "PLE table extent");
 }
 
-std::string hex_digest(std::span<const std::byte> bytes) {
-    return qwen3_5::frontend::sha256_hex(qwen3_5::frontend::sha256(
-        {reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()}));
-}
-
-// SHA256 of every Device parent (read back) and every mapped parent, keyed by object id.
-void write_digests(const std::filesystem::path& path,
-                   const std::vector<std::pair<std::string, const WeightParent*>>& device,
-                   const std::vector<std::pair<std::string, const WeightParent*>>& mapped) {
-    std::map<std::string, std::string> device_digests;
-    std::map<std::string, std::string> mapped_digests;
-    std::mutex lock;
-    std::atomic<std::size_t> next{0};
-    std::exception_ptr failure;
-    const auto total   = device.size() + mapped.size();
-    const auto workers = std::max(1U, std::min(32U, std::thread::hardware_concurrency()));
-    std::vector<std::thread> threads;
-    for (unsigned worker = 0; worker < workers; ++worker) {
-        threads.emplace_back([&] {
-            try {
-                CUDA_CHECK(cudaSetDevice(0));
-                std::vector<std::byte> host;
-                for (auto i = next++; i < total; i = next++) {
-                    const bool on_device       = i < device.size();
-                    const auto& [name, parent] = on_device ? device[i] : mapped[i - device.size()];
-                    const auto bytes           = static_cast<std::size_t>(parent->geometry.bytes);
-                    std::string digest;
-                    if (on_device) {
-                        host.resize(bytes);
-                        CUDA_CHECK(
-                            cudaMemcpy(host.data(), parent->data, bytes, cudaMemcpyDeviceToHost));
-                        digest = hex_digest(host);
-                    } else {
-                        digest = hex_digest({parent->data, bytes});
-                    }
-                    const std::lock_guard guard(lock);
-                    (on_device ? device_digests : mapped_digests)[name] = digest;
-                }
-            } catch (...) {
-                const std::lock_guard guard(lock);
-                failure = std::current_exception();
-            }
-        });
-    }
-    for (auto& thread : threads) { thread.join(); }
-    if (failure) { std::rethrow_exception(failure); }
-    std::ofstream out(path);
-    out << "{\n  \"device\": {";
-    const char* separator = "\n";
-    for (const auto& [name, digest] : device_digests) {
-        out << separator << "    \"" << name << "\": \"" << digest << '"';
-        separator = ",\n";
-    }
-    out << "\n  },\n  \"mapped\": {";
-    separator = "\n";
-    for (const auto& [name, digest] : mapped_digests) {
-        out << separator << "    \"" << name << "\": \"" << digest << '"';
-        separator = ",\n";
-    }
-    out << "\n  }\n}\n";
-    require(out.good(), "cannot write the digest file");
-}
-
-// Exercise native preparation of every mathematical Use after Reader destruction.
-void check_native_inputs(const flash::Model& model) {
-    const auto linear = [&](flash::WeightId id) {
-        (void)ops::prepare_linear_weight(model.input(id));
-    };
-    const auto direct = [&](flash::WeightId id) {
-        const auto& view = model.weight(id).view;
-        (void)weight_tensor(view, {static_cast<std::int32_t>(weight_element_count(view.shape))});
-    };
-    const auto hyper = [&](const flash::HyperConnectionWeights& weights) {
-        direct(weights.norm);
-        linear(weights.input_mix_down);
-        linear(weights.input_mix_up);
-        linear(weights.block_inject);
-    };
-    const auto mixer = [&](const flash::HyperMixerWeights& weights) {
-        direct(weights.norm);
-        linear(weights.input_mix_down);
-        linear(weights.input_mix_up);
-    };
-    std::size_t banks      = 0;
-    const auto expert_bank = [&](flash::WeightId id) {
-        const auto bank = ops::prepare_nvfp4_expert_bank_weight(model.input(id));
-        require(bank.policy == ops::LinearPolicy::AllowA4,
-                "expert bank lost its dynamic A4 activation policy");
-        std::vector<float> divisors(static_cast<std::size_t>(bank.experts));
-        CUDA_CHECK(cudaMemcpy(divisors.data(), bank.weight_scale_divisors,
-                              divisors.size() * sizeof(float), cudaMemcpyDeviceToHost));
-        for (const float divisor : divisors) {
-            require(std::isfinite(divisor) && divisor > 0,
-                    "expert bank holds a non-positive per-expert weight divisor");
+void payloads(const artifact::Reader& reader, const q4::Model& model) {
+    const auto& w = model.weights();
+    const auto& g = std::get<q4::GdnWeights>(w.text.layers[0].mixer);
+    const auto& q = std::get<q4::QsaWeights>(w.text.layers[3].mixer);
+    for (const auto id :
+         {w.text.embedding, w.text.head, g.convolution, g.query, q.key, q.gate,
+          w.text.layers.back().moe.gate, w.mtp->layer.moe.down, w.vision->layers[0].fc1}) {
+        const auto& weight = model.weight(id);
+        const auto& parent = *weight.view.parts.front().parent;
+        const auto& object = reader.directory().tensor(
+            reader.directory().object_index.at(weight.source_objects.front()));
+        for (const auto offset : {std::uint64_t{0}, parent.geometry.bytes - 64}) {
+            std::array<std::byte, 64> expected{}, actual{};
+            reader.read_into(object.offset + offset, expected);
+            if (parent.device == Device::cpu())
+                std::memcpy(actual.data(), parent.data + offset, 64);
+            else
+                CUDA_CHECK(
+                    cudaMemcpy(actual.data(), parent.data + offset, 64, cudaMemcpyDeviceToHost));
+            require(expected == actual, "materialized words differ from the artifact");
         }
-        ++banks;
-    };
-    const auto block = [&](const flash::BlockWeights& weights) {
-        hyper(weights.attention_hyper);
-        hyper(weights.mlp_hyper);
-        if (const auto* attention = std::get_if<flash::AttentionWeights>(&weights.mixer)) {
-            linear(attention->query_gate_key_value);
-            linear(attention->output);
-            linear(attention->indexer_query_key);
-            direct(attention->query_norm);
-            direct(attention->key_norm);
-            direct(attention->indexer_query_norm);
-            direct(attention->indexer_key_norm);
-        } else {
-            const auto& gdn = std::get<flash::GdnWeights>(weights.mixer);
-            linear(gdn.query_key_value_z);
-            linear(gdn.a_b_projection);
-            linear(gdn.output);
-            direct(gdn.a_log);
-            direct(gdn.dt_bias);
-            direct(gdn.norm);
+    }
+}
+
+void check_parameters(const q4::Model& model, const q4::execution::Parameters& p) {
+    require(model.expert_banks().size() == 49, "Main/MTP bank count");
+    for (std::size_t l = 0; l < 48; ++l) {
+        const auto& source = model.expert_banks()[l];
+        require(source.gate_up.parent->device == Device::cpu() &&
+                    source.gate_up_upload.device_address,
+                "Main source must remain registered Host memory");
+        require(!p.text.layers[l].moe.resident.count, "Main Parameters acquired mutable GPU cache");
+        for (std::uint32_t e : {0U, 17U, 511U}) {
+            const auto gu   = matrix_weight(source.gate_up, e);
+            const auto down = matrix_weight(source.down, e);
+            require(gu.n == 1280 && gu.k == 2560 && down.n == 2560 && down.k == 640,
+                    "expert native geometry");
+            require(gu.weight_scale_divisor == source.gate_up.divisor(e) &&
+                        down.weight_scale_divisor == source.down.divisor(e),
+                    "expert divisor addressing");
         }
-        const auto& moe = weights.moe;
-        linear(moe.router);
-        linear(moe.shared_expert_gate);
-        linear(moe.shared_gate);
-        linear(moe.shared_up);
-        linear(moe.shared_down);
-        expert_bank(moe.experts_gate_up);
-        expert_bank(moe.experts_down);
-    };
-    const auto& weights = model.weights();
-    (void)native_weight(model.weight(weights.text.token_embedding).view);
-    (void)ops::prepare_linear_weight(model.input(weights.text.output_head_use));
-    for (const auto& layer : weights.text.layers) { block(layer); }
-    for (const auto& ple : weights.text.ple) {
-        linear(ple.key_projection);
-        linear(ple.value_projection);
     }
-    mixer(weights.text.final_mixer);
-    if (weights.mtp) {
-        const auto& mtp = *weights.mtp;
-        linear(mtp.embedding_projection);
-        linear(mtp.hidden_projection);
-        direct(mtp.embedding_norm);
-        direct(mtp.hidden_norm);
-        block(mtp.layer);
-        mixer(mtp.final_mixer);
-        (void)ops::prepare_linear_weight(model.input(mtp.output_head_use));
+    require(p.mtp && p.vision && p.mtp->embedding.qdata == p.text.embedding.qdata &&
+                p.mtp->head.weight.qdata == p.text.head.weight.qdata,
+            "MTP shared matrices");
+    const auto& mtp = p.mtp->layer.moe;
+    const auto& bank = model.expert_banks()[mtp.bank.index];
+    const auto& ffn = mtp.profile.routed.ffn;
+    require(mtp.resident.count == 512 && bank.gate_up.parent->device.type() == DeviceType::CUDA &&
+                bank.down.parent->device.type() == DeviceType::CUDA, "MTP resident bank");
+    if (bank.gate_up.layout.format == QType::NVFP4) {
+        require(bank.down.layout.format == QType::NVFP4 &&
+                    ffn.gate_up_type == QType::NVFP4 && ffn.down_type == QType::NVFP4 &&
+                    ffn.gate_up_policy == ops::LinearPolicy::AllowA4 &&
+                    ffn.down_policy == ops::LinearPolicy::AllowA4 &&
+                    mtp.activation_divisors.gate_up == 1.0F &&
+                    mtp.activation_divisors.down == 1.0F,
+                "mixed-recipe MTP NVFP4 operands and unit activation divisors");
+    } else {
+        require(bank.gate_up.layout.format == QType::FP8_E4M3FN_BLOCK128X128_BF16 &&
+                    bank.down.layout.format == QType::FP8_E4M3FN_BLOCK128X128_BF16 &&
+                    ffn.gate_up_type == QType::FP8_E4M3FN_BLOCK128X128_BF16 &&
+                    ffn.down_type == QType::FP8_E4M3FN_BLOCK128X128_BF16 &&
+                    ffn.gate_up_policy == ops::LinearPolicy::AllowA8 &&
+                    ffn.down_policy == ops::LinearPolicy::AllowA8 &&
+                    !mtp.activation_divisors.gate_up && !mtp.activation_divisors.down,
+                "NVIDIA-recipe MTP block-FP8 operands");
     }
-    if (weights.vision) {
-        const auto& vision = *weights.vision;
-        linear(vision.patch_embedding);
-        for (const auto& layer : vision.layers) {
-            const std::array qkv{model.input(layer.query), model.input(layer.key),
-                                 model.input(layer.value)};
-            (void)ops::prepare_linear_weight(qkv);
-            linear(layer.output);
-            linear(layer.fc1);
-            linear(layer.fc2);
-        }
-        linear(vision.merger_fc1);
-        linear(vision.merger_fc2);
-    }
-    const std::size_t expected_banks =
-        2 * (weights.text.layers.size() + (weights.mtp.has_value() ? 1 : 0));
-    require(banks == expected_banks, "not every expert bank was admitted");
-    if (weights.mtp) {
-        ninfer::test::artifact_fixture::rejects<std::invalid_argument>(
-            [&] { (void)model.input(weights.text.output_head); },
-            "ambiguous shared output-head Use was silently selected");
-    }
+    const auto& gdn = std::get<q4::execution::GdnParameters>(p.text.layers[0].mixer);
+    require(gdn.convolution.ne[0] == 10240 && gdn.convolution.ne[1] == 4 &&
+                p.text.ple.convolution.ne[0] == 10240,
+            "stored convolution layout");
 }
 
-void check_ple_table(const flash::PleTable& table, const flash::PleConfig& ple,
-                     std::uint32_t layer) {
-    require(table.shards.size() == ple.shards && table.layer_multipliers.size() == ple.ngram_size &&
-                table.ngram_head_offsets.size() == ple.heads() &&
-                table.ngram_head_vocab_sizes.size() == ple.heads(),
-            "PLE table lost shards or index tables");
-    for (const auto& shard : table.shards) {
-        require(shard.parts.size() == 1 && shard.shape[0] == table.rows_per_shard() &&
-                    shard.shape[1] == ple.head_width() &&
-                    shard.parts[0].parent->geometry.format == QType::U4Z8_G16_FP16,
-                "PLE shard view differs from its table geometry");
-        cudaPointerAttributes attributes{};
-        CUDA_CHECK(cudaPointerGetAttributes(&attributes, shard.parts[0].parent->data));
-        require(attributes.type == cudaMemoryTypeUnregistered,
-                "PLE shard is not a plain Host mapping");
+void ple_window(q4::Resources& resources, const q4::Model& model, DeviceContext& device) {
+    const std::array<std::int32_t, 3> ids{123, 456, 789};
+    const auto eos = model.config().text.ple.eos;
+    const q4::ple::InputRow row{{1, 1, 0, {eos, eos}}, ids};
+    const auto ticket = resources.ple_prepare->prepare(3, {&row, 1});
+    require(ticket.has_value(), "PLE slot unavailable");
+    const std::array<std::uint32_t, 1> valid{3};
+    resources.ple_prepare->seal(*ticket, valid);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    for (;;) {
+        const auto status = resources.ple_prepare->poll(*ticket);
+        if (status.error) std::rethrow_exception(status.error);
+        if (status.status == q4::ple::disk::PrepareStatus::HostReady && status.drained) break;
+        require(std::chrono::steady_clock::now() < deadline, "PLE timed out");
+        std::this_thread::yield();
     }
-    std::cout << "PLE: layer=" << layer << " shards=" << table.shards.size()
-              << " rows_per_shard=" << table.rows_per_shard() << " multipliers=";
-    for (const auto value : table.layer_multipliers) { std::cout << value << ' '; }
-    std::cout << "head_rows="
-              << table.ngram_head_offsets.back() + table.ngram_head_vocab_sizes.back() << '\n';
+    const auto host = resources.ple_prepare->embedding(*ticket);
+    resources.ple_upload->upload(host, resources.ple_transfer());
+    auto e = resources.ple_upload->embedding(*ticket, device.execution_view());
+    DeviceBuffer copy(device.device(), e.bytes());
+    copy_bytes_async(copy.span(), {e.data, e.bytes(), device.device()}, device.execution_view());
+    resources.ple_upload->record_consumed(*ticket, device.execution_view());
+    device.synchronize();
+    std::vector<std::byte> bytes(e.bytes());
+    copy.copy_to_host(bytes.data(), bytes.size());
+    require(std::memcmp(bytes.data(), host.values.data, bytes.size()) == 0,
+            "PLE upload changed words");
+    require(resources.ple_upload->try_release(*ticket), "PLE consumer did not retire");
+    resources.ple_prepare->release(*ticket);
 }
-
-void check_ple(const flash::Model& model) {
-    const auto& ple = model.config().text.ple;
-    require(model.ple_tables().size() == ple.layers.size(), "PLE tables differ from PLE layers");
-    for (std::size_t index = 0; index < ple.layers.size(); ++index) {
-        check_ple_table(model.ple_tables()[index], ple, ple.layers[index]);
-    }
-}
-
-void check_frontend(const flash::Model& model) {
-    const auto frontend = qwen3_5::make_frontend(
-        model.resources(), {.architecture   = Architecture::Qwen4Exp,
-                            .vision_enabled = model.config().vision.has_value(),
-                            .max_context    = 8192});
-    const auto ids = frontend.tokenize_text("Hello, Flash-Next");
-    require(!ids.empty(), "Frontend did not tokenize text");
-    std::string decoded;
-    for (const auto id : ids) { decoded += frontend.token_bytes(id); }
-    require(decoded == "Hello, Flash-Next", "tokenizer did not round-trip text");
-    PromptInput input;
-    ChatMessage message;
-    message.parts.push_back(
-        MessagePart{.kind = MessagePartKind::Text, .text = "Name three primes.", .media = {}});
-    input.messages.push_back(std::move(message));
-    const auto prompt = frontend.prepare(std::move(input));
-    require(prompt.summary().prompt_tokens > ids.size(),
-            "the carried chat template did not render a prompt");
-    std::cout << "Frontend: V=" << model.resources().public_token_count
-              << " chat prompt tokens=" << prompt.summary().prompt_tokens << '\n';
-}
-
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc < 2) return 77;
     try {
-        std::filesystem::path path;
-        std::filesystem::path digests;
-        LoadOptions options{.vision = true, .speculative = SpeculativeBackend::Mtp};
-        for (int i = 1; i < argc; ++i) {
-            const std::string arg(argv[i]);
-            const auto value = [&]() -> std::string {
-                if (++i >= argc) { throw std::invalid_argument("missing value for " + arg); }
-                return argv[i];
-            };
-            if (arg == "--artifact") {
-                path = value();
-            } else if (arg == "--digests") {
-                digests = value();
-            } else if (arg == "--text-only") {
-                options = {};
-            } else {
-                throw std::invalid_argument(
-                    "expected --artifact PATH [--digests OUT] [--text-only]");
-            }
-        }
-        if (path.empty()) {
-            std::cout << "SKIP: supply an explicit --artifact\n";
-            return 77;
-        }
-        std::unique_ptr<DeviceContext> device;
-        std::unique_ptr<flash::Model> model;
-        std::map<std::string, std::vector<Sample>> samples;
-        std::uint64_t expected_h2d    = 0;
-        std::uint64_t expected_mapped = 0;
-        std::size_t bindings          = 0;
-        const auto before             = query_device_memory(0);
+        DeviceContext device;
+        const bool materialize = argc > 2 && std::string_view(argv[2]) == "--materialize";
+        std::unique_ptr<q4::Model> model;
+        std::shared_ptr<const q4::execution::ModelProfile> profile;
+        std::optional<q4::ExecutionPlan> selected;
         {
-            artifact::Reader reader(path);
-            auto plan = flash::plan_load(reader, options);
-            bindings  = plan.binding_count();
-            if (options.vision && options.mtp()) {
-                require(bindings == reader.directory().bindings.size(),
-                        "a full load did not bind every artifact Binding");
+            artifact::Reader reader(argv[1]);
+            {
+                auto scoring           = EngineOptions{};
+                scoring.purpose        = EnginePurpose::CausalScoring;
+                scoring.use_cuda_graph = false;
+                scoring.enable_vision  = false;
+                scoring.max_context    = 4096;
+                scoring.prefill_chunk  = 4096;
+                scoring.kv_capacity    = KvCapacityPolicy::explicit_capacity(4096);
+                scoring.context_cache  = {
+                     .enabled = false, .device_state_slots = 0, .host_capacity_bytes = 0};
+                auto load       = q4::plan_load(reader, models::load_options(scoring));
+                auto p          = q4::execution::describe_model(load);
+                const auto plan = q4::plan_execution(p, load.ple_table(), scoring, device, 8 * GiB, true);
+                require(plan && !plan->persistent.buffers.logits &&
+                            !plan->persistent.buffers.token_counts &&
+                            plan->pinned_output_bytes > 0 &&
+                            plan->pinned_output_bytes <= 1024 * (3 + kMaximumCausalReferenceTokens) * sizeof(float) &&
+                            plan->workspace.finish > 0,
+                        "scoring resource lifetime");
             }
-            for (const auto& item : plan.materialization().device_objects) {
-                expected_h2d += reader.directory().tensor(item.object).bytes;
-                samples[reader.directory().tensor(item.object).id] =
-                    read_samples(reader, item.object);
-            }
-            for (const auto handle : plan.materialization().mapped_objects) {
-                expected_mapped += reader.directory().tensor(handle).bytes;
-                samples[reader.directory().tensor(handle).id] = read_samples(reader, handle);
-            }
-            device = std::make_unique<DeviceContext>();
-            model  = flash::materialize_model(std::move(plan), *device);
-        }
-        const auto& stats = model->storage_stats();
-        require(stats.h2d_bytes == expected_h2d, "H2D did not cover all selected parent bytes");
-        require(stats.mapped_bytes == expected_mapped &&
-                    stats.mapped_object_count == model->config().text.ple.shards,
-                "mapped residency did not cover the PLE table");
-        std::vector<std::pair<std::string, const WeightParent*>> device_parents;
-        std::vector<std::pair<std::string, const WeightParent*>> mapped_parents;
-        std::set<const WeightParent*> visited;
-        const auto check_parent = [&](const std::string& object, const WeightParent* parent,
-                                      bool on_device) {
-            if (!visited.insert(parent).second) { return; }
-            (on_device ? device_parents : mapped_parents).emplace_back(object, parent);
-            for (const auto& sample : samples.at(object)) {
-                std::vector<std::byte> received(sample.bytes.size());
-                if (on_device) {
-                    CUDA_CHECK(cudaMemcpy(received.data(), parent->data + sample.offset,
-                                          received.size(), cudaMemcpyDeviceToHost));
-                } else {
-                    std::memcpy(received.data(), parent->data + sample.offset, received.size());
+            for (const bool vision : {false, true})
+                for (const bool mtp : {false, true}) {
+                    EngineOptions options;
+                    options.use_cuda_graph  = false;
+                    options.enable_vision   = vision;
+                    options.max_context     = 4096;
+                    options.prefill_chunk   = 4096;
+                    options.max_concurrency = 1;
+                    options.kv_capacity     = KvCapacityPolicy::explicit_capacity(4096);
+                    options.context_cache.host_capacity_bytes = 256 * 1024 * 1024;
+                    if (mtp) {
+                        options.speculative.backend      = SpeculativeBackend::Mtp;
+                        options.speculative.draft_tokens = 5;
+                    }
+                    auto load = q4::plan_load(reader, models::load_options(options));
+                    profile   = q4::execution::describe_model(load);
+                    placement(load, device.device());
+                    const auto weights = load.placement(device.device(), Device::cpu()).device_capacity_bytes;
+                    selected = q4::plan_execution(profile, load.ple_table(), options, device,
+                                                  16 * GiB - weights - 256 * 1024 * 1024, true);
+                    require(selected.has_value(), "16 GiB plan must fit this context");
+                    require(selected->ple.max_positions == 4096,
+                            "PLE Mmax differs from actual call capacity");
+                    require(selected->profile->mtp.has_value() == mtp &&
+                                selected->persistent.mtp.has_value() == mtp,
+                            "MTP selection leaked resources");
+                    if (vision) {
+                        auto long_context        = options;
+                        long_context.max_context = 65536;
+                        const auto workspace     = q4::execution::plan_workspace(
+                            *profile, long_context, 4096, device.multiprocessor_count(), nullptr);
+                        require(workspace.vision->max_merged_tokens == 16384,
+                                "Vision encoder reserved aggregate prompt capacity");
+                    }
+                    std::cout << "vision=" << vision << " mtp=" << mtp << " weights=" << weights
+                              << " state_stride=" << selected->persistent.state.images.image_stride
+                              << " persistent=" << selected->persistent.bytes
+                              << " workspace=" << selected->workspace.bytes
+                              << " cache=" << selected->moe->cache.config.capacity_bytes
+                              << " windows=" << selected->moe->window_count
+                              << " runtime=" << selected->device_bytes()
+                              << " ple_host=" << selected->ple_prepare_bytes << '\n';
+                    if (vision == mtp) {
+                        auto multi            = options;
+                        multi.max_concurrency = 8;
+                        multi.kv_capacity     = KvCapacityPolicy::automatic();
+                        for (const auto format :
+                             {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64,
+                              KvCacheStorage::Fp8E4M3Row256, KvCacheStorage::Nvfp4Group16,
+                              KvCacheStorage::Fp8KeyNvfp4Value}) {
+                            multi.kv_cache = format;
+                            const auto resident = q4::plan_execution(
+                                profile, load.ple_table(), multi, device, 16 * GiB, false);
+                            require(resident && resident->capacity.resolved_tokens ==
+                                        multi.max_context * multi.max_concurrency &&
+                                        resident->capacity.runtime_reservation_bytes == resident->device_bytes(),
+                                    "resident automatic KV did not match its actual allocation");
+                            auto plan = q4::plan_execution(profile, load.ple_table(), multi, device,
+                                                           16 * GiB - weights - 256 * 1024 * 1024, true);
+                            require(plan && plan->capacity.resolved_tokens == 4096 &&
+                                        plan->ple.max_positions == 4096,
+                                    "mixed-batch automatic capacity");
+                            require(plan->device_bytes() <= 16 * GiB - weights - 256 * 1024 * 1024,
+                                    "execution exceeds Device budget");
+                        }
+                        require(!q4::plan_execution(profile, load.ple_table(), options, device, 1, true),
+                                "insufficient Device budget admitted");
+                    }
+                    if (vision && mtp && materialize) {
+                        q4::Startup startup(reader, options, device.device());
+                        // Replanning after discarding a materialized candidate must not borrow
+                        // that candidate's table or consume the sole source plan permanently.
+                        model = startup.materialize(device, true, {});
+                        model.reset();
+                        require(startup.plan(device, options, true, 16 * GiB - weights).has_value(),
+                                "retry planning lost immutable PLE metadata");
+                        model = startup.materialize(device, true, {});
+                        payloads(reader, *model);
+                    }
                 }
-                require(received == sample.bytes, "resident parent differs from its object bytes");
-            }
-        };
-        for (const auto& weight : model->weight_data()) {
-            require(weight.view.parts.size() == weight.source_objects.size(),
-                    "diagnostic parent association lost");
-            for (std::size_t i = 0; i < weight.view.parts.size(); ++i) {
-                check_parent(weight.source_objects[i], weight.view.parts[i].parent, true);
-            }
         }
-        const auto& ple = model->config().text.ple;
-        for (std::size_t index = 0; index < ple.layers.size(); ++index) {
-            const auto& table = model->ple_tables()[index];
-            for (std::size_t i = 0; i < table.shards.size(); ++i) {
-                check_parent("text/layers/" + std::to_string(ple.layers[index]) +
-                                 "/ple/embedding/shards/" + std::to_string(i),
-                             table.shards[i].parts[0].parent, false);
-            }
+        if (materialize) {
+            const q4::execution::Parameters parameters(*model, profile);
+            check_parameters(*model, parameters);
+            q4::Resources resources(parameters, std::move(*selected), device);
+            ple_window(resources, *model, device);
+
+#ifdef _WIN32
+            PROCESS_MEMORY_COUNTERS usage{};
+            require(GetProcessMemoryInfo(GetCurrentProcess(), &usage, sizeof(usage)),
+                    "process memory accounting");
+            const auto rss_kib = usage.PeakWorkingSetSize / 1024;
+#else
+            struct rusage usage {};
+            getrusage(RUSAGE_SELF, &usage);
+            const auto rss_kib = usage.ru_maxrss;
+#endif
+            const auto& s = model->storage_stats();
+            std::cout << "loaded host=" << s.host_capacity_bytes
+                      << " registered=" << s.registered_host_bytes
+                      << " gpu=" << s.device_capacity_bytes << " staging=" << s.peak_staging_bytes
+                      << " read=" << s.read_bytes << " rss_kib=" << rss_kib << '\n';
         }
-        require(visited.size() == samples.size(),
-                "some resident parents are not reachable from the model");
-        check_native_inputs(*model);
-        check_ple(*model);
-        check_frontend(*model);
-        device->synchronize();
-        const auto after = query_device_memory(0);
-        std::cout << path.filename().string() << ": qwen4_exp loading passed, bindings=" << bindings
-                  << " device_parents=" << device_parents.size()
-                  << " device_bytes=" << stats.device_capacity_bytes << " ("
-                  << format_device_memory_bytes(stats.device_capacity_bytes)
-                  << ") mapped_parents=" << mapped_parents.size()
-                  << " mapped_bytes=" << stats.mapped_bytes
-                  << " mapped_copies=" << stats.mapped_copy_count
-                  << " mapped_warm_s=" << stats.mapped_warm_seconds
-                  << " upload_s=" << stats.upload_seconds << " device_used_delta="
-                  << format_device_memory_bytes(before.free_bytes > after.free_bytes
-                                                    ? before.free_bytes - after.free_bytes
-                                                    : 0)
-                  << '\n';
-        if (!digests.empty()) {
-            write_digests(digests, device_parents, mapped_parents);
-            std::cout << "digests: " << digests.string() << '\n';
-        }
-        model.reset();
-        device->synchronize();
+        std::cout << "PASS\n";
         return 0;
-    } catch (const std::exception& error) {
-        std::cerr << error.what() << '\n';
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << '\n';
         return 1;
     }
 }

@@ -4,6 +4,7 @@
 #include "core/tensor.h"
 #include "core/arena.h"
 #include "core/weight.h"
+#include "ninfer/ops/projection_weights.h"
 
 namespace ninfer::ops {
 
@@ -75,7 +76,8 @@ void hc_combine_norm(const Tensor& residual, const Tensor& block_output,
                      Tensor& normalized, CudaExecutionView execution);
 
 struct HcMixWeights {
-    Weight down_injection; // BF16 Contiguous [324,10240], rows [320,324) are injection.
+    Weight down;      // BF16 Contiguous [320,10240].
+    Weight injection; // BF16 Contiguous [4,10240]; may follow down in the same parent.
     Weight up;             // BF16 Contiguous [10240,320], row=s*2560+d.
 };
 
@@ -84,9 +86,17 @@ struct HcFinalMixWeights {
     Weight up;   // BF16 Contiguous [10240,320], row=s*2560+d.
 };
 
+struct HcMixProfile {
+    LinearProfile down, injection, up;
+};
+
+struct HcFinalMixProfile {
+    LinearProfile down, up;
+};
+
 /**
  * Low-rank mixing, independently for each column:
- *   [a,b] = down_injection * flatten(normalized), with a:320 and b:4
+ *   a = down * flatten(normalized); b = injection * flatten(normalized), with a:320 and b:4
  *   u = SiLU(a/4); g = up*u
  *   block_input[d,m] = sum_s sigmoid(g[s*H+d,m])*normalized[d,s,m]/4
  *   injection[s,m] = 2*sigmoid(b[s,m]/4).
@@ -124,6 +134,14 @@ void hc_mix(const Tensor& normalized, const HcFinalMixWeights& weights, MemoryAr
                                                           std::int32_t min_tokens,
                                                           std::int32_t max_tokens);
 [[nodiscard]] std::size_t hc_mix_workspace_capacity_bytes(const HcFinalMixWeights& weights,
+                                                          std::int32_t min_tokens,
+                                                          std::int32_t max_tokens);
+
+// Address-free forms use the same admission and capacity rules as bound weights.
+[[nodiscard]] std::size_t hc_mix_workspace_capacity_bytes(const HcMixProfile& profile,
+                                                          std::int32_t min_tokens,
+                                                          std::int32_t max_tokens);
+[[nodiscard]] std::size_t hc_mix_workspace_capacity_bytes(const HcFinalMixProfile& profile,
                                                           std::int32_t min_tokens,
                                                           std::int32_t max_tokens);
 

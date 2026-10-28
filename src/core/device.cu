@@ -60,6 +60,20 @@ void destroy_event(cudaEvent_t& event) noexcept {
 
 } // namespace
 
+DeviceAllocationError::DeviceAllocationError(const char* operation, std::size_t requested_bytes)
+    : std::runtime_error(std::string(operation) + ": insufficient Device memory"),
+      requested_bytes_(requested_bytes) {}
+
+DeviceMemorySnapshot device_memory_snapshot(Device device) {
+    CudaDeviceScope scope(device);
+    return query_device_memory(device.index());
+}
+
+std::int64_t device_memory_growth(DeviceMemorySnapshot before, DeviceMemorySnapshot after) {
+    return static_cast<std::int64_t>(before.free_bytes) -
+           static_cast<std::int64_t>(after.free_bytes);
+}
+
 void cuda_check(cudaError_t err, const char* expr, const char* file, int line) {
     if (err == cudaSuccess) { return; }
     std::fprintf(stderr, "%s:%d: CUDA_CHECK(%s) failed: %s: %s\n", file, line, expr,
@@ -192,6 +206,23 @@ CudaDeviceScope::~CudaDeviceScope() {
     if (changed_) { log_cuda_error("restore CUDA device", cudaSetDevice(previous_)); }
 }
 
+CudaStream::CudaStream(const DeviceContext& device) : device_(device.device()) {
+    CudaDeviceScope scope(device_);
+    const auto error = cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking);
+    if (error != cudaSuccess) {
+        throw std::runtime_error(cuda_error_message("cudaStreamCreateWithFlags failed", error));
+    }
+}
+
+CudaStream::~CudaStream() {
+    try {
+        CudaDeviceScope scope(device_);
+        destroy_stream(stream_);
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "CUDA stream cleanup failed: %s\n", error.what());
+    }
+}
+
 std::size_t DeviceContext::total_vram() const noexcept { return props_.totalGlobalMem; }
 
 const char* DeviceContext::sync_mode() const {
@@ -300,21 +331,30 @@ void CudaCompletionEvent::record(cudaStream_t stream) {
     if (event_ == nullptr || stream == nullptr) {
         throw std::logic_error("CUDA completion event is not recordable");
     }
-    CUDA_CHECK(cudaEventRecord(event_, stream));
+    const auto status = cudaEventRecord(event_, stream);
+    if (status != cudaSuccess) {
+        throw std::runtime_error(cuda_error_message("cudaEventRecord failed", status));
+    }
 }
 
 void CudaCompletionEvent::wait(cudaStream_t stream) const {
     if (event_ == nullptr || stream == nullptr) {
         throw std::logic_error("CUDA completion event is not waitable");
     }
-    CUDA_CHECK(cudaStreamWaitEvent(stream, event_, 0));
+    const auto status = cudaStreamWaitEvent(stream, event_, 0);
+    if (status != cudaSuccess) {
+        throw std::runtime_error(cuda_error_message("cudaStreamWaitEvent failed", status));
+    }
 }
 
 void CudaCompletionEvent::record_external(cudaStream_t stream) {
     if (event_ == nullptr || stream == nullptr) {
         throw std::logic_error("CUDA completion event is not recordable");
     }
-    CUDA_CHECK(cudaEventRecordWithFlags(event_, stream, cudaEventRecordExternal));
+    const auto status = cudaEventRecordWithFlags(event_, stream, cudaEventRecordExternal);
+    if (status != cudaSuccess) {
+        throw std::runtime_error(cuda_error_message("cudaEventRecordWithFlags failed", status));
+    }
 }
 
 bool CudaCompletionEvent::ready() const {
@@ -322,13 +362,15 @@ bool CudaCompletionEvent::ready() const {
     const cudaError_t status = cudaEventQuery(event_);
     if (status == cudaSuccess) { return true; }
     if (status == cudaErrorNotReady) { return false; }
-    CUDA_CHECK(status);
-    return false;
+    throw std::runtime_error(cuda_error_message("cudaEventQuery failed", status));
 }
 
 void CudaCompletionEvent::synchronize() const {
     if (event_ == nullptr) { throw std::logic_error("CUDA completion event is empty"); }
-    CUDA_CHECK(cudaEventSynchronize(event_));
+    const auto status = cudaEventSynchronize(event_);
+    if (status != cudaSuccess) {
+        throw std::runtime_error(cuda_error_message("cudaEventSynchronize failed", status));
+    }
 }
 
 } // namespace ninfer

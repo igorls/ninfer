@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ops/common/quant/nvfp4.h"
 #include "ops/common/numeric/convert.cuh"
 #include "ops/common/quant/fp8.cuh"
 
@@ -8,12 +9,6 @@
 #include <cstdint>
 
 namespace ninfer::ops::common {
-
-// Byte offset of a group scale in the BlockScaleK16M128x4 representation.
-__device__ __forceinline__ std::int64_t nvfp4_scale_byte_offset(int row, int group, int k) {
-    return static_cast<std::int64_t>((row / 128) * (k / 64) + group / 4) * 512 + (row & 31) * 16 +
-           ((row & 127) >> 5) * 4 + (group & 3);
-}
 
 __device__ __forceinline__ float2 decode_nvfp4_e2m1x2(std::uint8_t storage) {
     __nv_fp4x2_e2m1 value;
@@ -89,6 +84,24 @@ pack_nvfp4_e2m1x16(const float2 (&values)[8], std::uint32_t& codes_lo, std::uint
                    "f"(values[6].x), "f"(values[6].y), "f"(values[7].x), "f"(values[7].y));
 }
 
+// Calibrated activation profile, shared by BF16 inputs and FP32 MMA epilogues.
+__device__ __forceinline__ std::uint8_t nvfp4_activation_scale(float maximum, float divisor) {
+    return __nv_cvt_float_to_fp8(__fdiv_rn(divisor * maximum, 6.0F), __NV_SATFINITE, __NV_E4M3);
+}
+
+__device__ __forceinline__ float2 nvfp4_activation_values(float2 values, float divisor,
+                                                          float decoded_scale) {
+    return make_float2(__fdiv_rn(values.x * divisor, decoded_scale),
+                       __fdiv_rn(values.y * divisor, decoded_scale));
+}
+
+__device__ __forceinline__ std::uint8_t quantize_nvfp4_activation_pair(float2 values, float divisor,
+                                                                       std::uint8_t scale) {
+    if (scale == 0) { return 0; }
+    return __nv_cvt_float2_to_fp4x2(nvfp4_activation_values(values, divisor, decode_e4m3(scale)),
+                                    __NV_E2M1, cudaRoundNearest);
+}
+
 // BF16 input, group size 16, explicit tensor divisor. Codes use the rounded E4M3
 // group scale; a scale that rounds to zero produces zero codes.
 __device__ __forceinline__ Nvfp4QuantizedK16 quantize_nvfp4_k16(const __nv_bfloat16* source,
@@ -109,15 +122,13 @@ __device__ __forceinline__ Nvfp4QuantizedK16 quantize_nvfp4_k16(const __nv_bfloa
     }
 
     Nvfp4QuantizedK16 result{};
-    const float scale_unencoded = __fdiv_rn(input_scale_divisor * max_abs, 6.0F);
-    result.scale                = __nv_cvt_float_to_fp8(scale_unencoded, __NV_SATFINITE, __NV_E4M3);
+    result.scale = nvfp4_activation_scale(max_abs, input_scale_divisor);
     if (result.scale == 0) { return result; }
 
     const float decoded_scale = decode_e4m3(result.scale);
 #pragma unroll
     for (int pair = 0; pair < 8; ++pair) {
-        values[pair].x = __fdiv_rn(values[pair].x * input_scale_divisor, decoded_scale);
-        values[pair].y = __fdiv_rn(values[pair].y * input_scale_divisor, decoded_scale);
+        values[pair] = nvfp4_activation_values(values[pair], input_scale_divisor, decoded_scale);
     }
     pack_nvfp4_e2m1x16(values, result.codes_lo, result.codes_hi);
     return result;

@@ -4,13 +4,10 @@
 
 namespace ninfer::ops::detail::hc::mix {
 enum class Down {
-    Gemv,
     Simt,
-    Split8x16,
     Split8x32,
     TmaSplit2,
     TmaSplit4,
-    Tma80,
     Tma96Split4,
     Tma96Split8
 };
@@ -28,7 +25,6 @@ struct Plan {
 
 constexpr int split_factor(Down down) {
     switch (down) {
-    case Down::Split8x16:
     case Down::Split8x32:
     case Down::Tma96Split8:
         return 8;

@@ -23,7 +23,7 @@ void mtp_bridge_and_propose(PrefillContext& state, const Tensor& next_token,
     TextContext card(state.execution.device, state.execution.parameters, state.execution.work,
                      state.text_cache, state.execution.linear_attention, state.execution.io,
                      state.execution.prefill_hidden, state.execution.prefill_chunk,
-                     state.text_kv_base, state.mtp_kv, state.mtp_cache);
+                     state.text_kv_base, state.mtp_kv, state.mtp_cache, state.execution.moe);
     configure_text_card(card, state.execution, state.sampling, state.state_source_slot,
                         state.state_destination_slot, state.mtp_proposal_extent);
 
@@ -77,7 +77,7 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
         qwen3_5::MtpDecodeState& frame = state.frame;
         const std::int32_t width       = static_cast<std::int32_t>(k) + 1;
         state.execution.work.reset();
-        if (phase == SpeculativePhase::Forward) {
+        if (phase == SpeculativePhase::Forward && emit_forward_gpu(state.execution.text_graph)) {
             CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, &state.host_ingress,
                                        sizeof(qwen3_5::MtpDecodeIngress), cudaMemcpyHostToDevice,
                                        state.execution.cuda.stream()));
@@ -86,7 +86,8 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
         TextContext card(state.execution.device, state.execution.parameters, state.execution.work,
                          state.text_cache, state.execution.linear_attention, state.execution.io,
                          state.execution.prefill_hidden, state.execution.prefill_chunk, 0, {},
-                         &state.mtp_cache);
+                         &state.mtp_cache, state.execution.moe);
+        card.set_graph_run(state.execution.text_graph);
         Tensor anchors            = frame.anchors.slice(0, 0, batch_size);
         Tensor frontiers          = frame.base_frontiers.slice(0, 0, batch_size);
         Tensor budgets            = frame.remaining_budgets.slice(0, 0, batch_size);
@@ -141,7 +142,10 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
             .sampling                = frame.sampling,
         };
         if (phase == SpeculativePhase::Forward) {
-            ops::prepare_verify_inputs(anchors, current_drafts, frontiers, current_extents, verify_ids, target_positions, state.execution.cuda);
+            if (emit_forward_gpu(state.execution.text_graph)) {
+                ops::prepare_verify_inputs(anchors, current_drafts, frontiers, current_extents,
+                                           verify_ids, target_positions, state.execution.cuda);
+            }
             nvtx::ScopedRange target_range(nvtx::Name::DecodeMtpTarget, nvtx::Category::Mtp,
                                            static_cast<std::uint64_t>(width) * batch_size);
             target_verify_forward(card, verify, envelopes.target_verify);

@@ -37,15 +37,17 @@ common::operand::Range tensor(const Tensor& t, DType dtype, int a, int b, int c,
     return common::operand::range(t.data, t.bytes(), kOp);
 }
 
-std::array<common::operand::Range, 3> input_ranges(Weights weights, const Tensor& normalized) {
+std::array<common::operand::Range, 4> input_ranges(Weights weights, const Tensor& normalized) {
     return {common::operand::range(normalized.data, normalized.bytes(), kOp),
             common::operand::range(weights.down.qdata, weight_bytes(weights.down), kOp),
-            common::operand::range(weights.up.qdata, weight_bytes(weights.up), kOp)};
+            common::operand::range(weights.up.qdata, weight_bytes(weights.up), kOp),
+            weights.injection ? common::operand::range(weights.injection->qdata, weight_bytes(*weights.injection), kOp) : common::operand::Range{}};
 }
 } // namespace
 
 void describe_weights(Weights weights) {
-    describe_matrix(weights.down, down_rows(weights.kind), kResidualWidth);
+    describe_matrix(weights.down, kRank, kResidualWidth);
+    if (weights.injection) describe_matrix(*weights.injection, kStreams, kResidualWidth);
     describe_matrix(weights.up, kResidualWidth, kRank);
 }
 
@@ -58,6 +60,10 @@ Operands validate(Weights weights, const Tensor& normalized, Tensor& output, Ten
     describe_weights(weights);
     common::operand::device(weights.down.device, execution.device(), kOp, "down weight");
     common::operand::device(weights.up.device, execution.device(), kOp, "up weight");
+    if (weights.injection) {
+        common::operand::device(weights.injection->device, execution.device(), kOp, "injection weight");
+        require(common::operand::aligned(weights.injection->qdata, 16), "injection weight requires aligned backing");
+    }
     require(common::operand::aligned(weights.down.qdata, 16) &&
                 common::operand::aligned(weights.up.qdata, 16),
             "weights require aligned device backing");
@@ -77,7 +83,7 @@ Operands validate(Weights weights, const Tensor& normalized, Tensor& output, Ten
             weights.up.qdata,
             output.data,
             injection ? static_cast<float*>(injection->data) : nullptr,
-            m};
+            m, weights.injection && weights.kind == Kind::Final ? weights.injection->qdata : nullptr};
 }
 
 void validate_scratch(Weights weights, const Tensor& normalized, const Tensor& output,

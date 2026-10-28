@@ -2,6 +2,9 @@
 
 #include "core/dtype.h"
 #include "ninfer/types.h"
+#if defined(_MSC_VER)
+#include "ops/quantized_weight.h"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -65,10 +68,20 @@ inline void write_u16(std::vector<std::uint8_t>& bytes, std::size_t offset, std:
 }
 
 inline std::uint16_t fp16_encode(float x) {
+#if defined(_MSC_VER)
+    return quantized_weight::detail::f32_to_f16(x);
+#else
     return std::bit_cast<std::uint16_t>(static_cast<_Float16>(x));
+#endif
 }
 
-inline float fp16_decode(std::uint16_t x) { return float(std::bit_cast<_Float16>(x)); }
+inline float fp16_decode(std::uint16_t x) {
+#if defined(_MSC_VER)
+    return quantized_weight::detail::f16_to_f32(x);
+#else
+    return float(std::bit_cast<_Float16>(x));
+#endif
+}
 
 inline double positive_fp8(int code) {
     const int exponent = code >> 3, fraction = code & 7;

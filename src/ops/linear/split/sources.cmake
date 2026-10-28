@@ -37,3 +37,8 @@ target_sources(ninfer_nvfp4_non_rdc PRIVATE
 )
 
 target_sources(ninfer_ops PRIVATE "${CMAKE_CURRENT_LIST_DIR}/fp8/shapes/n16384_k2560/shape.cu")
+
+target_sources(ninfer_ops PRIVATE
+  "${CMAKE_CURRENT_LIST_DIR}/bf16/shapes/n13312_k2560.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/bf16/shapes/n640_k2560.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/fp8/shapes/n13312_k2560/shape.cu")

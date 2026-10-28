@@ -99,6 +99,16 @@ bool fail(const std::string& message) {
 template <class Body>
 bool with_engine(ninfer::EngineOptions options, Body&& body) {
     ninfer::Engine engine(std::move(options));
+    if (std::getenv("NINFER_TEST_EXPECT_HOST_EXPERTS")) {
+        const auto memory = engine.memory_summary();
+        if (!memory.moe || !memory.moe->host_weights_bytes || !memory.moe->cpu_workers)
+            return fail("the bounded run did not select Host expert execution");
+        std::cout << "Host experts=" << memory.moe->host_weights_bytes
+                  << " registered=" << memory.moe->registered_host_bytes
+                  << " cache=" << memory.moe->cache_bytes
+                  << " workers=" << memory.moe->cpu_workers
+                  << " device_budget=" << memory.device_budget_bytes << std::endl;
+    }
     return body(engine);
 }
 
@@ -124,6 +134,93 @@ bool rejects_backends_before_loading() {
     mtp.speculative.backend      = ninfer::SpeculativeBackend::Mtp;
     mtp.speculative.draft_tokens = 99;
     return rejected(mtp, "MTP");
+}
+
+bool concurrency_clamp_matches_pool() {
+    for (const bool graphs : {false, true}) {
+        for (const bool clamp : {false, true}) {
+            auto options = base_options();
+            options.max_concurrency = 8;
+            // A 769-token context needs thirteen 64-token page groups, so 4096
+            // tokens back four complete contexts rather than floor(4096/769)=5.
+            options.max_context = graphs ? 4096 : 769;
+            options.use_cuda_graph = graphs;
+            options.clamp_concurrency_to_pool = clamp;
+            options.context_cache.enabled = false;
+            if (!with_engine(options, [&](ninfer::Engine& engine) {
+                    const auto expected = clamp ? (graphs ? 1U : 4U) : 8U;
+                    if (engine.options().max_concurrency != expected ||
+                        engine.memory_summary().kv_capacity != 4096) {
+                        return fail("pool clamp changed the explicit KV capacity or lane policy");
+                    }
+                    std::vector<ninfer::GenerationHandle> requests;
+                    for (unsigned i = 0; i < 2; ++i) {
+                        requests.push_back(engine.submit(
+                            engine.prepare(user_prompt(prompts()[i])), greedy(8, false)));
+                    }
+                    for (auto& request : requests) {
+                        if (request.wait().generated_token_ids.size() != 8)
+                            return fail("generation after concurrency clamp missed its budget");
+                    }
+                    return true;
+                })) return false;
+        }
+    }
+    return true;
+}
+
+bool bounded_expert_execution() {
+    std::vector<ninfer::GenerationResult> ordinary;
+    for (const bool mtp : {false, true}) {
+        std::vector<std::vector<ninfer::TokenId>> eager;
+        for (const bool graphs : {false, true}) {
+            auto options = base_options();
+            options.use_cuda_graph = graphs;
+            options.context_cache.enabled = false;
+            if (mtp) {
+                options.speculative.backend = ninfer::SpeculativeBackend::Mtp;
+                options.speculative.draft_tokens = 3;
+            }
+            if (!with_engine(options, [&](ninfer::Engine& engine) {
+                    for (unsigned row = 0; row < 2; ++row) {
+                        auto ids = engine.tokenize_text(prompts()[row]);
+                        if (row) {
+                            const auto seed = ids;
+                            while (ids.size() < 257) ids.insert(ids.end(), seed.begin(), seed.end());
+                            ids.resize(257);
+                        }
+                        auto request = greedy(12, false);
+                        request.execution.logprobs.enabled = !mtp && !graphs;
+                        request.execution.logprobs.top = request.execution.logprobs.enabled ? 2 : 0;
+                        const auto result = engine.generate(engine.prepare_tokens(ids), request);
+                        if (result.generated_token_ids.size() != 12)
+                            return fail("bounded expert generation missed its output budget");
+                        if (mtp && result.speculative.rounds == 0)
+                            return fail("bounded expert generation did not execute MTP");
+                        if (!graphs) eager.push_back(result.generated_token_ids);
+                        else if (eager[row] != result.generated_token_ids)
+                            return fail("bounded expert graph replay differs from eager execution");
+                        if (!mtp && !graphs) ordinary.push_back(result);
+                        if (mtp) {
+                            const auto& reference = ordinary[row];
+                            for (std::size_t i = 0; i < result.generated_token_ids.size(); ++i) {
+                                if (result.generated_token_ids[i] == reference.generated_token_ids[i])
+                                    continue;
+                                const auto& top = reference.token_logprobs[i].top;
+                                const auto gap = top[0].raw_logprob - top[1].raw_logprob;
+                                std::cout << "bounded MTP graphs=" << graphs << " row=" << row
+                                          << " first divergence=" << i << " gap=" << gap << '\n';
+                                if (gap > 0.05F)
+                                    return fail("bounded MTP changes a target decision away from a tie");
+                                break;
+                            }
+                        }
+                    }
+                    return true;
+                })) return false;
+        }
+    }
+    return true;
 }
 
 // Greedy generation replays CUDA Graphs; the eager schedule is the same Op sequence, so the
@@ -162,8 +259,9 @@ bool graph_matches_eager(std::vector<std::vector<ninfer::TokenId>>& graph_tokens
 // B rows decode through batched Op routes whose reductions differ from B=1, so a row may leave
 // the B=1 trajectory only where B=1 itself was undecided: the first differing position must be a
 // near tie of the B=1 distribution.
-bool batched_matches_single(std::vector<std::vector<ninfer::TokenId>> single) {
+bool batched_matches_single() {
     constexpr float kNearTie = 0.05F;
+    std::vector<std::vector<ninfer::TokenId>> single;
     std::vector<std::vector<ninfer::TokenLogprobs>> single_logprobs;
     {
         ninfer::EngineOptions options = base_options();
@@ -175,9 +273,7 @@ bool batched_matches_single(std::vector<std::vector<ninfer::TokenId>> single) {
                 request.execution.logprobs.top     = 2;
                 const auto result = engine.generate(engine.prepare(user_prompt(text)), request);
                 single_logprobs.push_back(result.token_logprobs);
-                if (single.size() < prompts().size()) {
-                    single.push_back(result.generated_token_ids);
-                }
+                single.push_back(result.generated_token_ids);
             }
             return true;
         });
@@ -249,14 +345,14 @@ bool host_round_trip_is_exact(bool mtp = false) {
                 return fail("the follow-up did not reuse its retained prefix");
             }
             const bool through_host =
-                demoted.state_d2h_count > before.state_d2h_count &&
-                after.state_h2d_count > demoted.state_h2d_count &&
-                after.main_kv_h2d_pages > demoted.main_kv_h2d_pages &&
-                (!mtp || after.backend_kv_h2d_pages > demoted.backend_kv_h2d_pages);
+                demoted.context_transfers.state[0].images > before.context_transfers.state[0].images &&
+                after.context_transfers.state[1].images > demoted.context_transfers.state[1].images &&
+                after.context_transfers.kv.at(0)[1].page_groups > demoted.context_transfers.kv.at(0)[1].page_groups &&
+                (!mtp || after.context_transfers.kv.at(1)[1].page_groups > demoted.context_transfers.kv.at(1)[1].page_groups);
             std::cout << "restore expected_host=" << expect_host
-                      << " d2h=" << demoted.state_d2h_count - before.state_d2h_count
-                      << " h2d=" << after.state_h2d_count - demoted.state_h2d_count
-                      << " kv_h2d=" << after.main_kv_h2d_pages - demoted.main_kv_h2d_pages
+                      << " d2h=" << demoted.context_transfers.state[0].images - before.context_transfers.state[0].images
+                      << " h2d=" << after.context_transfers.state[1].images - demoted.context_transfers.state[1].images
+                      << " kv_h2d=" << after.context_transfers.kv.at(0)[1].page_groups - demoted.context_transfers.kv.at(0)[1].page_groups
                       << std::endl;
             if (through_host != expect_host) {
                 return fail(std::string("the resume ") + (expect_host ? "did not go" : "went") +
@@ -478,7 +574,8 @@ bool expert_route_trace(bool mtp) {
         std::lock_guard lock(collector->mutex);
         std::uint32_t prefill_end = 0;
         std::uint32_t next_decode = result.prompt.prompt_tokens;
-        std::size_t decodes = 0, proposals = 0, verifies = 0;
+        std::size_t decodes = 0, proposals = 0, verifies = 0, verified_proposals = 0;
+        std::vector<std::uint32_t> pending_proposals;
         for (const auto& record : collector->records) {
             if (record.top_k != 10 || record.columns.empty() ||
                 record.experts.size() != record.columns.size() * record.layer_count * 10U) {
@@ -508,22 +605,36 @@ bool expert_route_trace(bool mtp) {
                 }
                 break;
             case ninfer::ExpertRouteKind::Decode:
-                if (mtp || !text || record.columns.size() != 1 ||
-                    record.columns.front().position != next_decode++) {
+                if (!text || record.columns.size() != 1 ||
+                    (!mtp && record.columns.front().position != next_decode++) ||
+                    (mtp && (!pending_proposals.empty() || decodes != 0 ||
+                             record.columns.front().position !=
+                                 result.prompt.prompt_tokens + result.generated_token_ids.size() - 2))) {
                     return fail("decode record is not one column at the next position");
                 }
                 ++decodes;
                 break;
             case ninfer::ExpertRouteKind::MtpProposal:
-                if (!mtp || record.first_layer != 48 || record.layer_count != 1) {
+                if (!mtp || record.first_layer != 48 || record.layer_count != 1 ||
+                    record.columns.size() != 1) {
                     return fail("MTP proposal record is not the MTP layer");
                 }
                 ++proposals;
+                pending_proposals.push_back(record.columns.front().position);
                 break;
             case ninfer::ExpertRouteKind::MtpVerify:
-                if (!mtp || !text || record.columns.size() != 4) {
-                    return fail("MTP verify record is not four text columns");
+                if (!mtp || !text || record.columns.size() < 2 || record.columns.size() > 4 ||
+                    pending_proposals.size() + 1 != record.columns.size()) {
+                    return fail("MTP verify columns do not match the actual proposals");
                 }
+                for (std::size_t j = 0; j < record.columns.size(); ++j) {
+                    if (record.columns[j].position != record.columns.front().position + j ||
+                        (j < pending_proposals.size() &&
+                         pending_proposals[j] + 1 != record.columns[j].position))
+                        return fail("MTP proposal and verification positions are inconsistent");
+                }
+                verified_proposals += pending_proposals.size();
+                pending_proposals.clear();
                 ++verifies;
                 break;
             }
@@ -536,10 +647,63 @@ bool expert_route_trace(bool mtp) {
         if (!mtp && decodes + 1 != result.generated_token_ids.size()) {
             return fail("decode records do not match the decoded tokens");
         }
-        if (mtp && (proposals == 0 || verifies == 0 || proposals != 3 * verifies)) {
-            return fail("MTP rounds did not report three proposals per verification");
+        if (mtp && (proposals == 0 || verifies == 0 || proposals != verified_proposals ||
+                    !pending_proposals.empty())) {
+            return fail("MTP rounds did not report every executed proposal");
         }
         return true;
+    });
+}
+
+// Ragged MTP rows execute through a fixed physical width. Observers must receive only
+// logical input positions, including a shorter final verification, with each row's IDs.
+bool mtp_ragged_route_trace() {
+    auto options = base_options();
+    options.max_concurrency = 2;
+    options.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(8192);
+    options.context_cache.enabled = false;
+    options.speculative.backend = ninfer::SpeculativeBackend::Mtp;
+    options.speculative.draft_tokens = 3;
+    auto collector = std::make_shared<RouteCollector>();
+    options.expert_route_observer = collector;
+    return with_engine(options, [&](ninfer::Engine& engine) {
+        std::vector<ninfer::PreparedPrompt> prepared;
+        for (unsigned row = 0; row < 2; ++row)
+            prepared.push_back(engine.prepare(user_prompt(prompts()[row])));
+        std::vector<ninfer::GenerationHandle> handles;
+        for (unsigned row = 0; row < 2; ++row) {
+            ninfer::GenerationObservationOptions observation;
+            observation.route_tag = 700 + row;
+            handles.push_back(engine.submit(std::move(prepared[row]), greedy(row ? 8 : 3, false),
+                                            ninfer::OutputConsumerMode::Aggregate, observation));
+        }
+        std::vector<ninfer::GenerationResult> results;
+        for (auto& handle : handles) results.push_back(handle.wait());
+        std::size_t short_verifications = 0;
+        std::lock_guard lock(collector->mutex);
+        for (const auto& record : collector->records) {
+            if (record.columns.empty() || record.top_k != 10 ||
+                record.experts.size() != record.columns.size() * record.layer_count * 10U)
+                return fail("ragged route trace has invalid geometry");
+            for (std::size_t c = 0; c < record.columns.size(); ++c) {
+                const auto& column = record.columns[c];
+                if (column.request_tag < 700 || column.request_tag > 701)
+                    return fail("ragged trace lost its row's tag");
+                const auto& result = results[column.request_tag - 700];
+                if (column.position > result.prompt.prompt_tokens +
+                                          result.generated_token_ids.size() - 2)
+                    return fail("ragged trace published a padded input position");
+                for (std::uint32_t layer = 0; layer < record.layer_count; ++layer) {
+                    const auto* ids = record.experts.data() + (c * record.layer_count + layer) * 10;
+                    for (unsigned rank = 0; rank < 10; ++rank)
+                        if (ids[rank] >= 512 || std::count(ids, ids + 10, ids[rank]) != 1)
+                            return fail("ragged trace did not retain ten distinct expert IDs");
+                }
+                if (record.kind == ninfer::ExpertRouteKind::MtpVerify && column.request_tag == 700)
+                    ++short_verifications;
+            }
+        }
+        return short_verifications > 0 ? true : fail("short row never executed verification");
     });
 }
 
@@ -916,6 +1080,7 @@ bool mtp_batch_target_parity() {
     options.prefill_chunk         = 128;
     options.context_cache.enabled = false;
     std::vector<ninfer::GenerationResult> reference;
+    bool ok = true;
     // The oracle here is the ordinary target route, not MTP with zero accepted drafts.
     // Keep only one resident model; each Engine is destroyed before the next is loaded.
     if (!with_engine(options, [&](ninfer::Engine& engine) {
@@ -925,7 +1090,7 @@ bool mtp_batch_target_parity() {
                 request.execution.logprobs.top     = 2;
                 reference.push_back(engine.generate(engine.prepare(user_prompt(text)), request));
             }
-            // Diagnostic control: ordinary B=8 isolates batching from speculation.
+            // The longer ordinary control checks batching independently of speculation.
             std::vector<ninfer::GenerationHandle> controls;
             for (const auto& text : prompts()) {
                 controls.push_back(engine.submit(engine.prepare(user_prompt(text)),
@@ -941,13 +1106,14 @@ bool mtp_batch_target_parity() {
                               << " reference gap=" << top[0].raw_logprob - top[1].raw_logprob
                               << " batched=" << result.generated_token_ids[i]
                               << " single=" << reference[row].generated_token_ids[i] << std::endl;
+                    if (top[0].raw_logprob - top[1].raw_logprob > 0.05F)
+                        ok = fail("ordinary batch changes a target decision away from a tie") && ok;
                     break;
                 }
             }
             return true;
         }))
         return false;
-    bool ok = true;
     for (const auto drafts : {1U, 3U, 5U}) {
         options.speculative.backend      = ninfer::SpeculativeBackend::Mtp;
         options.speculative.draft_tokens = drafts;
@@ -1329,16 +1495,18 @@ int main() {
     }
     try {
         std::vector<std::vector<ninfer::TokenId>> single;
-        const std::vector<std::pair<const char*, std::function<bool()>>> cases{
+        std::vector<std::pair<const char*, std::function<bool()>>> cases{
             {"rejects unavailable backends", rejects_backends_before_loading},
+            {"concurrency clamp matches pool", concurrency_clamp_matches_pool},
             {"graph matches eager", [&] { return graph_matches_eager(single); }},
-            {"batched matches single", [&] { return batched_matches_single(single); }},
+            {"batched matches single", batched_matches_single},
             {"host round trip", [] { return host_round_trip_is_exact(); }},
             {"mtp host round trip", [] { return host_round_trip_is_exact(true); }},
             {"reuse survives catalog turnover", reuse_survives_catalog_turnover},
             {"conversation chain survives a full cache", conversation_chain_survives_a_full_cache},
             {"expert route trace", [] { return expert_route_trace(false); }},
             {"mtp expert route trace", [] { return expert_route_trace(true); }},
+            {"mtp ragged route trace", mtp_ragged_route_trace},
             {"logprobs and structured output", [] { return logprobs_and_structured_output(); }},
             {"mtp logprobs and structured output",
              [] { return logprobs_and_structured_output(true); }},
@@ -1356,6 +1524,8 @@ int main() {
             {"mtp shared prefix promotion", mtp_shared_prefix_promotion},
             {"mtp staged materialization ledger", mtp_staged_materialization_ledger},
         };
+        if (std::getenv("NINFER_TEST_EXPECT_HOST_EXPERTS"))
+            cases.emplace_back("bounded expert execution", bounded_expert_execution);
         bool passed         = true;
         const char* filter  = std::getenv("NINFER_TEST_CASE");
         std::size_t matched = 0;

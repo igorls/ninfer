@@ -30,7 +30,7 @@ inline nlohmann::json model_reserve_budget(const nlohmann::json& admin,
         const double available = plan.at("available_after_weights_bytes").get<double>();
         const double configured = reserve.at("configured_bytes").get<double>();
         const double free = admin.at("device").at("free_bytes").get<double>();
-        const double graphs = plan.at("cuda_graph_allowance_bytes").get<double>();
+        const double graphs = plan.at("cuda_graph_rebuild_estimate_bytes").get<double>();
         // Match serve_options: explicit capacity uses zero sizing slack. Auto
         // uses max(1 GiB automatic headroom, the requested/default slack floor).
         bool automatic = false;

@@ -2,6 +2,7 @@ add_library(ninfer_runtime_support STATIC
   engine/context_cache/context_cost.cpp
   engine/context_cache/context_cost_defaults.cpp
   engine/kv_capacity.cpp
+  engine/startup_memory.cpp
   engine/public_types.cpp
 )
 ninfer_internal_includes(ninfer_runtime_support)
@@ -9,7 +10,7 @@ target_link_libraries(ninfer_runtime_support PUBLIC ninfer_core PRIVATE ninfer::
 
 # Public Engine and common contracts; model execution remains in the model layer.
 add_library(ninfer_engine STATIC
-  engine/model_instance.cpp
+  engine/model_construction.cpp
   contract/sampling.cpp
   engine/engine.cpp
 )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fnmatch import fnmatchcase
+from math import prod
 import json
 
 from .methods import (
@@ -11,18 +12,32 @@ from .methods import (
     fp8_row_maxabs,
     grouped_absmax,
     import_encoded,
-    nvfp4_expert_maxabs,
     nvfp4_maxabs,
+    nvfp4_batched_maxabs,
+    stored_scale_mse,
     u4z8_maxabs,
 )
+from .recipe import AuxiliaryReference
+from .sources.fp8_block import fp8_block_source
+from .sources.modelopt_nvfp4 import ModelOptNvfp4
+from .sources.safetensors import tensor_source
+from .sources.logical import LogicalSource
+
+FP8_FP32 = "fp8_e4m3fn_row_fp32"
+U4Z8 = "u4z8_g16_fp16"
+_QWEN4_ROLES = {
+    "mixer": ("text/layers/*/attention/query", "text/layers/*/attention/key", "text/layers/*/attention/output_gate", "text/layers/*/attention/value", "text/layers/*/attention/output", "text/layers/*/gdn/query", "text/layers/*/gdn/key", "text/layers/*/gdn/value", "text/layers/*/gdn/z", "text/layers/*/gdn/output"),
+    "experts": ("text/layers/*/moe/experts/gate", "text/layers/*/moe/experts/up", "text/layers/*/moe/experts/down"),
+    "mtp_mixer": ("mtp/layers/0/attention/*",),
+    "mtp_experts": ("mtp/layers/0/moe/experts/gate", "mtp/layers/0/moe/experts/up", "mtp/layers/0/moe/experts/down"),
+    "ple": ("text/layers/*/ple/table",),
+}
 
 Q4 = "q4_g64_fp16"
 Q5 = "q5_g64_fp16"
 Q6 = "q6_g64_fp16"
 Q8 = "q8_g32_fp16"
 FP8 = "fp8_e4m3fn_row_bf16"
-FP8_FP32 = "fp8_e4m3fn_row_fp32"
-U4Z8 = "u4z8_g16_fp16"
 
 
 def _assign(recipe, name, format, *, source=None):
@@ -188,6 +203,210 @@ def qwen3_8_27b_nvfp4(model, recipe, sources):
         )
 
 
+def qwen3_8_flash_next(model, recipe, sources):
+    """Qwen4Exp: NVIDIA NVFP4/FP8 expert banks, Q8 projections and paged NF4 PLE."""
+    recipe.provenance.update(
+        mapping="qwen4_exp_v1",
+        nvidia_nvfp4="preserve_codes_scales; RN_FP32(1/multiplier) divisors",
+        nvidia_mtp="preserve_e4m3fn_codes_bf16_block128x128_scales",
+        stored_scale_mse="g16_fp64_exhaustive_e4m3fn_v1",
+        q_gate_order="all_query_heads_then_all_gate_heads",
+        convolution_order="tap_channel",
+    )
+    cfg = model.config
+    expected = {
+        "architectures": ["Qwen4ExpForCausalLM"],
+        "hidden_size": 2560,
+        "vocab_size": 248320,
+        "num_hidden_layers": 48,
+        "num_experts": 512,
+        "moe_intermediate_size": 640,
+        "shared_expert_intermediate_size": 640,
+        "hc_count": 4,
+        "hc_lowrank": 320,
+        "num_attention_heads": 24,
+        "num_key_value_heads": 2,
+        "head_dim": 256,
+        "linear_num_key_heads": 16,
+        "linear_num_value_heads": 48,
+        "linear_key_head_dim": 128,
+        "linear_value_head_dim": 128,
+        "linear_conv_kernel_dim": 4,
+        "indexer_n_heads": 4,
+        "indexer_kv_heads": 1,
+        "indexer_head_dim": 128,
+        "ple_layer_ids": [1],
+        "split_ngram_parts": 128,
+        "ple_shard_shape": [2500012, 160],
+        "ple_embed_dim": 2560,
+        "layer_types": [
+            "indexed_attention" if l % 4 == 3 else "linear_attention" for l in range(48)
+        ],
+    }
+    for key, value in expected.items():
+        if cfg.get(key) != value:
+            raise ValueError(f"qwen3_8_flash_next requires {key}={value!r}")
+    recipe.place("text/*", (0,))
+    for component in ("vision", "mtp"):
+        if component in model.components:
+            recipe.place(component + "/*", (1 if component == "vision" else 2, 0))
+    for name in model.parameters:
+        if name.startswith("text/layers/") and name.endswith(
+            (
+                "/gdn/query",
+                "/gdn/key",
+                "/gdn/value",
+                "/gdn/z",
+                "/gdn/output",
+                "/attention/query",
+                "/attention/output_gate",
+                "/attention/output",
+            )
+        ):
+            _assign(recipe, name, Q8)
+
+    h, intermediate, experts = 2560, 640, 512
+    width = h * intermediate
+    nvidia = ModelOptNvfp4(sources["nvidia"])
+    controls = []
+    covered = set()
+    for layer in range(48):
+        p = f"text/layers/{layer}/moe/experts/"
+        layer_inputs = None
+        gate_up_parts = []
+        down_parts = []
+        for expert in range(experts):
+            prefix = f"model.language_model.layers.{layer}.mlp.experts.{expert}."
+            refs = {}
+            scalars = {}
+            for role in ("gate", "up", "down"):
+                source = prefix + role + "_proj"
+                refs[role] = nvidia.matrix(
+                    source, (h, intermediate) if role == "down" else (intermediate, h)
+                )
+                scalars[role] = nvidia.scales(source)
+                covered.update(
+                    source + "." + field
+                    for field in (
+                        "weight",
+                        "weight_scale",
+                        "weight_scale_2",
+                        "input_scale",
+                    )
+                )
+            if scalars["gate"] != scalars["up"]:
+                raise ValueError(f"{prefix}: gate/up multiplier words differ")
+            input_words = (scalars["gate"][2], scalars["down"][2])
+            if layer_inputs is None:
+                layer_inputs = input_words
+                controls.extend((scalars["gate"][3], scalars["down"][3]))
+            elif layer_inputs != input_words:
+                raise ValueError(
+                    f"{prefix}: activation multipliers differ within the layer"
+                )
+            first, last = expert * width, (expert + 1) * width
+            gate_up_parts.extend(
+                (p + role, first, last, refs[role]) for role in ("gate", "up")
+            )
+            down_parts.append((p + "down", first, last, refs["down"]))
+        for part, shape, order in (
+            (gate_up_parts, (experts, 2 * intermediate, h), 0),
+            (down_parts, (experts, h, intermediate), 1),
+        ):
+            recipe.parent(
+                part,
+                shape=shape,
+                format="nvfp4",
+                method=import_encoded,
+                layout="batched_block_scale_k16_m128x4_v1",
+                order=(3, layer, order),
+            )
+    expected_experts = {
+        key
+        for key in nvidia.store.weight_map
+        if key.startswith("model.language_model.layers.") and ".mlp.experts." in key
+    }
+    if covered != expected_experts:
+        raise ValueError("NVIDIA source must contain the complete main expert tensors")
+    recipe.auxiliary_tensor(
+        "expert_activation_divisors",
+        AuxiliaryValue("fp32", (48, 2), b"".join(controls)),
+    )
+    for layer in range(48):
+        for role in ("gate", "up", "down"):
+            name = f"text/layers/{layer}/moe/experts/{role}"
+            recipe.use(
+                name,
+                model.parameters[name].inputs[0],
+                activation_policy="AllowA4",
+                auxiliaries={
+                    "activation_input_divisor": AuxiliaryReference(
+                        "expert_activation_divisors", 2 * layer + int(role == "down")
+                    )
+                },
+            )
+
+    if "mtp" in model.components:
+        for role in ("token_embedding", "output_head"):
+            recipe.share("mtp/" + role, "text/" + role)
+        for name, parameter in model.parameters.items():
+            if name.startswith("mtp/") and parameter.source_factory is not None:
+                recipe.assign(name, source=model.source(name, nvidia.store))
+        p = "mtp/layers/0/moe/experts/"
+        gate_up_parts = []
+        down_parts = []
+        for expert in range(experts):
+            refs = {}
+            for role in ("gate", "up", "down"):
+                refs[role] = fp8_block_source(
+                    nvidia.store,
+                    f"mtp.layers.0.mlp.experts.{expert}.{role}_proj",
+                    (h, intermediate) if role == "down" else (intermediate, h),
+                )
+            first, last = expert * width, (expert + 1) * width
+            gate_up_parts.extend(
+                (p + role, first, last, refs[role]) for role in ("gate", "up")
+            )
+            down_parts.append((p + "down", first, last, refs["down"]))
+        for part, shape, order in (
+            (gate_up_parts, (experts, 2 * intermediate, h), 0),
+            (down_parts, (experts, h, intermediate), 1),
+        ):
+            recipe.parent(
+                part,
+                shape=shape,
+                format="fp8_e4m3fn_block128x128_bf16",
+                method=import_encoded,
+                order=(2, 1, order),
+            )
+        for role in ("gate", "up", "down"):
+            name = p + role
+            recipe.use(
+                name,
+                model.parameters[name].inputs[0],
+                activation_policy="AllowA8",
+            )
+
+    rows, k = cfg["ple_shard_shape"]
+    for shard in range(cfg["split_ngram_parts"]):
+        name = f"model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_{shard}.weight"
+        source = tensor_source(sources["base"], name, (rows, k))
+        recipe.parent(
+            [
+                (
+                    "text/layers/1/ple/table",
+                    shard * rows * k,
+                    (shard + 1) * rows * k,
+                    source,
+                )
+            ],
+            shape=(rows, k),
+            format="nf4_g16_e4m3fn",
+            method=stored_scale_mse,
+            order=(4, shard),
+        )
+
+
 def qwen3_8_27b_orcarouter_nvfp4(model, recipe, sources):
     """OrcaRouter's compressed-tensors checkpoint is the base: its NVFP4/FP8 matrix codes are
     imported as published, and its BF16 token embedding and full output head stay BF16."""
@@ -238,7 +457,7 @@ def _nvfp4full_site(layer: int, family: str, role: str) -> str:
 
 
 def nvfp4full_local_sites(layer_types) -> set[str]:
-    """Activation-divisor sites of the locally encoded nvfp4full parents (135 for Qwen3.8-27B)."""
+    """Activation-divisor sites of locally encoded nvfp4full parents."""
     sites = set()
     for layer, kind in enumerate(layer_types):
         mixer = "attention" if kind == "full_attention" else "gdn"
@@ -295,27 +514,6 @@ def qwen3_8_27b_nvfp4full(model, recipe, sources):
             recipe.use(name, input_name, auxiliaries={"activation_input_divisor": divisor})
 
 
-# Qwen4 family (qwen4_exp). Unassigned parameters keep the adapter default: BF16 (INT64 for the
-# PLE index tables), A16Only.
-_QWEN4_ROLES = {
-    "mixer": (
-        "text/layers/*/attention/query_gate_key_value",
-        "text/layers/*/attention/output",
-        "text/layers/*/gdn/query_key_value_z",
-        "text/layers/*/gdn/output",
-    ),
-    "experts": ("text/layers/*/mlp/experts/gate_up", "text/layers/*/mlp/experts/down"),
-    "dense_mlp": ("text/layers/*/mlp/gate", "text/layers/*/mlp/up", "text/layers/*/mlp/down"),
-    "mtp_mixer": (
-        "mtp/layers/0/attention/query_gate_key_value",
-        "mtp/layers/0/attention/output",
-    ),
-    "mtp_experts": ("mtp/layers/0/mlp/experts/gate_up", "mtp/layers/0/mlp/experts/down"),
-    "mtp_dense_mlp": ("mtp/layers/0/mlp/gate", "mtp/layers/0/mlp/up", "mtp/layers/0/mlp/down"),
-    "ple": ("text/layers/*/ple/embedding/shards/*",),
-}
-
-
 def _require_qwen4(model, *, moe: bool | None = None):
     if model.config.get("architectures") != ["Qwen4ExpForCausalLM"]:
         raise ValueError("this recipe requires the qwen4_exp architecture")
@@ -327,12 +525,9 @@ def _require_qwen4(model, *, moe: bool | None = None):
 def qwen4_allocation(model, recipe, **formats):
     """Assign formats to Qwen4 parameter roles; a recipe for a new checkpoint is one call.
 
-    Roles are the keys of ``_QWEN4_ROLES``: ``mixer`` (Text attention and GDN input/output
-    projections), ``experts``, ``dense_mlp``, their ``mtp_`` counterparts, and ``ple`` (the PLE
-    table shards). Matrix roles accept ``fp8_e4m3fn_row_fp32``/``fp8_e4m3fn_row_bf16``
-    (``fp8_row_maxabs``, AllowA8); expert banks ``nvfp4`` (``nvfp4_expert_maxabs``, AllowA4 with
-    dynamically quantized activations); ``ple`` ``u4z8_g16_fp16`` (``u4z8_maxabs``). Roles
-    absent from the model, such as experts of a dense checkpoint, are skipped.
+    ``mixer`` selects Text projections, ``experts`` and ``mtp_experts`` select native
+    batched NVFP4 banks, and ``ple`` selects the U4Z8 table. NVFP4 Uses store an explicit
+    unit global activation divisor; their K16 UE4M3 scales remain dynamic.
     """
     _require_qwen4(model)
     for role, format in formats.items():
@@ -342,27 +537,77 @@ def qwen4_allocation(model, recipe, **formats):
             name
             for name in model.parameters
             if any(fnmatchcase(name, pattern) for pattern in _QWEN4_ROLES[role])
+            and (role == "ple" or model.parameters[name].projection)
         ]
         if format is None or not names:
             continue
         if role == "ple":
             if format != U4Z8:
                 raise ValueError("PLE tables use u4z8_g16_fp16")
-            recipe.assign(names, format=U4Z8, method=u4z8_maxabs)
+            shape = tuple(model.config["ple_shard_shape"])
+            size = prod(shape)
+            for name in names:
+                source = model.parameters[name].source
+                for shard in range(model.config["split_ngram_parts"]):
+                    origin = shard * size
+                    fragment = LogicalSource(shape, source.label + f"/shard/{shard}",
+                        lambda a, b, parent=source, origin=origin:
+                            parent.values(origin + a, origin + b))
+                    recipe.parent([(name, origin, origin + size, fragment)], shape=shape,
+                                  format=U4Z8, method=u4z8_maxabs, order=(4, shard))
         elif role.endswith("experts"):
             if format != "nvfp4":
                 raise ValueError("expert banks use nvfp4")
-            recipe.assign(
-                names, format="nvfp4", method=nvfp4_expert_maxabs, activation_policy="AllowA4"
-            )
+            roots = sorted({name.rsplit("/", 1)[0] + "/" for name in names})
+            e, h, i = (model.config[key] for key in
+                       ("num_experts", "hidden_size", "moe_intermediate_size"))
+            width = i * h
+            for root in roots:
+                gate_up, down = [], []
+                for expert in range(e):
+                    first, last = expert * width, (expert + 1) * width
+                    for part in ("gate", "up", "down"):
+                        name = root + part
+                        source = model.parameters[name].source
+                        shape = (h, i) if part == "down" else (i, h)
+                        fragment = LogicalSource(shape, source.label + f"/expert/{expert}",
+                            lambda a, b, parent=source, origin=first:
+                                parent.values(origin + a, origin + b))
+                        (down if part == "down" else gate_up).append(
+                            (name, first, last, fragment))
+                for parts, shape in ((gate_up, (e, 2 * i, h)), (down, (e, h, i))):
+                    recipe.parent(parts, shape=shape, format="nvfp4",
+                                  method=nvfp4_batched_maxabs,
+                                  layout="batched_block_scale_k16_m128x4_v1")
+                for part in ("gate", "up", "down"):
+                    name = root + part
+                    for input_name in model.parameters[name].inputs:
+                        recipe.use(name, input_name, activation_policy="AllowA4",
+                            auxiliaries={"activation_input_divisor":
+                                         AuxiliaryValue.activation_divisor(1.0)})
         elif format in (FP8, FP8_FP32):
             recipe.assign(names, format=format, method=fp8_row_maxabs, activation_policy="AllowA8")
+            if role == "mixer":
+                # Keep the fork's Q,G,K,V parent and separate BF16 index parent.
+                # This is a native layout supported by the public split Op.
+                for name in names:
+                    if not name.endswith("/attention/query"):
+                        continue
+                    root = name.removesuffix("query")
+                    for roles, stored, method in (
+                        (("query", "output_gate", "key", "value"), format, fp8_row_maxabs),
+                        (("index_query", "index_key"), "bf16", cast_direct),
+                    ):
+                        parameters = [model.parameters[root + part] for part in roles]
+                        recipe.parent([(p.name, 0, prod(p.shape), p.source) for p in parameters],
+                            shape=(sum(p.shape[0] for p in parameters), parameters[0].shape[1]),
+                            format=stored, method=method)
         else:
             # NVFP4 matrices need calibrated activation divisors; assign them in a custom recipe.
             raise ValueError(f"{role}: unsupported qwen4 allocation format {format!r}")
 
 
-def qwen3_8_flash_next(model, recipe, sources):
+def qwen3_8_flash_next_mixed(model, recipe, sources):
     """Qwen3.8-Flash-Next from the official BF16 checkpoint in the qualified v3 allocation.
 
     The 48 Text and the MTP expert banks are NVFP4 with one divisor per expert, the Text
@@ -380,15 +625,19 @@ def qwen3_8_flash_next(model, recipe, sources):
         mtp_experts="nvfp4",
         ple=U4Z8,
     )
+    if "mtp" in model.components:
+        recipe.share("mtp/token_embedding", "text/token_embedding")
+        recipe.share("mtp/output_head", "text/output_head")
 
 
 RECIPES = {
     "qwen3_6_27b": qwen3_6_27b,
     "qwen3_6_27b_nvfp4": qwen3_6_27b_nvfp4,
+    "qwen3_8_27b_orcarouter_nvfp4": qwen3_8_27b_orcarouter_nvfp4,
+    "qwen3_8_27b_nvfp4full": qwen3_8_27b_nvfp4full,
+    "qwen3_8_flash_next_mixed": qwen3_8_flash_next_mixed,
     "qwen3_8_27b": qwen3_8_27b,
     "qwen3_8_27b_nvfp4": qwen3_8_27b_nvfp4,
-    "qwen3_8_27b_nvfp4full": qwen3_8_27b_nvfp4full,
-    "qwen3_8_27b_orcarouter_nvfp4": qwen3_8_27b_orcarouter_nvfp4,
     "qwen3_6_35b_a3b": qwen3_6_35b_a3b,
     "qwen3_8_flash_next": qwen3_8_flash_next,
 }

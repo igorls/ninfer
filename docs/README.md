@@ -59,8 +59,11 @@ other references own narrower contracts:
 | [Artifact container](maintainer/artifact-container.md) | v3 directory, objects, logical bindings, Uses, resources and file framing/sharding |
 | [Numeric formats](maintainer/tensor-formats.md) | represented values, codes/scales, conversion arithmetic and numerical interpretation |
 | [Storage layouts](maintainer/storage-layouts.md) | packing, plane offsets, padding, encoded sizes and view addressing |
-| [Qwen3.8-Flash-Next artifact](maintainer/qwen3.8-flash-next-artifact.md) | v3 artifact derived from the published v2 file (and the native official-safetensors route): inventory, baked MTP banks, bindings, native text/MTP/Vision execution |
+| [Qwen3.8-Flash-Next artifact](maintainer/qwen3.8-flash-next-artifact.md) | Published packed-v3 source provenance, historical inventory and canonical reframe; current bindings and execution are in the Qwen4Exp references |
 | [Qwen3.5 model](maintainer/qwen3_5-model.md) | Dense/MoE mathematics, instance config, logical parameters, MTP, Vision and state semantics |
+| [Qwen4Exp model and weights](maintainer/qwen4_exp-model.md) | Flash Next architecture, quantization recipe, merged projections, expert banks and PLE representation |
+| [Qwen4Exp execution and state](maintainer/qwen4_exp-execution.md) | current support, layer flow, PLE pipeline, MTP/Vision, continuation, resource planning and CUDA Graph |
+| [Expert weight cache](maintainer/expert-weight-cache.md) | Host/GPU bank sources, replica cache, mixed CPU/GPU execution, streaming and graph handoffs |
 | [DFlash and DFlash2](maintainer/dflash.md) | conditioning, masked draft computation, proposal distributions and backend state |
 | [Constrained decoding](maintainer/constrained-decoding.md) | GBNF/JSON/choice/regex, tool policies, masks, speculative transactions and observations |
 | [Resource scheduling and context cache](maintainer/resource-scheduling-and-context-cache.md) | core design for continuation, retention, incremental resources, preemption and recovery |
@@ -68,7 +71,7 @@ other references own narrower contracts:
 | [ReplaySSM GDN](maintainer/replayssm-gdn.md) | raw transition records and faithful commitment of the verified state prefix |
 | [Op development](maintainer/op-development.md) | semantic boundaries, source ownership, numerical qualification and performance evidence |
 | [Operational logging](maintainer/logging.md) | log ownership, presentation, severity and data policy |
-| [Linear benchmark](maintainer/linear-benchmark.md) | pure Linear measurement, metrics and suites |
+| [Linear benchmarks](../bench/README.md) | pure Linear measurement, metrics and suites |
 | [Linear tuning and reports](maintainer/linear-tuning.md) | tuning ranges, priority points, dispatch tradeoffs and final performance report format |
 | [Upstream ports](maintainer/upstream-ports.md) | the fork's reviewed upstream point, carried features, divergences, dropped and deferred work, qualification and deployment |
 
@@ -76,3 +79,12 @@ Model cards contain official artifact facts and source provenance. The
 [conversion guide](weight-conversion.md) is the entry point for making an artifact. Exact config
 fields, parameter expansion and native supported domains are maintained by the code linked from
 these references.
+
+Qwen3.8-Flash-Next is the Qwen4Exp instance; Qwen3.8-27B uses the Qwen3.5 architecture.
+The model references own mathematical and stored-representation facts, and the execution reference
+owns integrated support and its limits. Concrete Op contracts live in `include/ninfer/ops/`.
+
+## Planned work
+
+[Linear test maintenance](maintainer/linear-test-reorganization-plan.md) tracks the pending
+consolidation of test runners and explicit case contracts.

@@ -1,18 +1,12 @@
 #pragma once
 
+#include "models/common/moe/weights.h"
 #include "models/qwen4_exp/model.h"
 
-#include <filesystem>
-#include <memory>
-
-namespace ninfer::artifact {
-class Reader;
-} // namespace ninfer::artifact
-
 namespace ninfer::models::qwen4_exp {
+class ResolvedLoadPlan;
 
-// Cold load plan borrows its Reader until materialization. Every artifact Binding and Use of the
-// selected components is resolved here; a missing or unconsumed one fails the plan.
+// Reads metadata and small resources. Main expert payload is materialized only after placement.
 class LoadPlan {
 public:
     ~LoadPlan();
@@ -22,22 +16,42 @@ public:
     LoadPlan& operator=(const LoadPlan&) = delete;
 
     [[nodiscard]] const Config& config() const;
+    [[nodiscard]] const LoadOptions& options() const;
     [[nodiscard]] const ModelWeights& weights() const;
-    [[nodiscard]] const FrontendResources& resources() const;
-    [[nodiscard]] const artifact::MaterializationPlan& materialization() const;
-    [[nodiscard]] std::size_t binding_count() const;
+    [[nodiscard]] const qwen::FrontendResources& resources() const;
+    [[nodiscard]] const ple::disk::Table& ple_table() const;
+    [[nodiscard]] ops::WeightInput input(WeightId) const;
+    [[nodiscard]] std::span<const moe::BankDescription> expert_banks() const;
+    [[nodiscard]] artifact::MaterializationPlan placement(Device, Device experts) const;
 
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
-    explicit LoadPlan(std::unique_ptr<Impl> impl);
+    explicit LoadPlan(std::unique_ptr<Impl>);
     friend LoadPlan plan_load(const artifact::Reader&, LoadOptions);
-    friend std::unique_ptr<Model> materialize_model(LoadPlan&&, DeviceContext&,
+    friend ResolvedLoadPlan resolve_load(LoadPlan&&, Device, Device experts);
+    friend std::unique_ptr<Model> materialize_model(ResolvedLoadPlan&&, DeviceContext&,
                                                     const StartupObserver*);
 };
 
-[[nodiscard]] LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options = {});
-[[nodiscard]] std::unique_ptr<Model> materialize_model(LoadPlan&& plan, DeviceContext& device,
-                                                       const StartupObserver* observer = nullptr);
+class ResolvedLoadPlan {
+public:
+    [[nodiscard]] const artifact::MaterializationPlan& materialization() const {
+        return placement_;
+    }
+private:
+    friend ResolvedLoadPlan resolve_load(LoadPlan&&, Device, Device experts);
+    friend std::unique_ptr<Model> materialize_model(ResolvedLoadPlan&&, DeviceContext&,
+                                                    const StartupObserver*);
+    ResolvedLoadPlan(LoadPlan&&, artifact::MaterializationPlan, std::vector<Device>,
+                     std::vector<Device>);
+    LoadPlan logical_;
+    artifact::MaterializationPlan placement_;
+    std::vector<Device> weights_, banks_;
+};
 
+[[nodiscard]] LoadPlan plan_load(const artifact::Reader&, LoadOptions = {});
+[[nodiscard]] ResolvedLoadPlan resolve_load(LoadPlan&&, Device, Device experts);
+[[nodiscard]] std::unique_ptr<Model> materialize_model(ResolvedLoadPlan&&, DeviceContext&,
+                                                       const StartupObserver* = nullptr);
 } // namespace ninfer::models::qwen4_exp

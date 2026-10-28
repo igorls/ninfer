@@ -37,6 +37,28 @@ else()
   add_library(ninfer::ffmpeg ALIAS PkgConfig::FFMPEG)
 endif()
 
+
+if(WIN32)
+  set(HWLOC_ROOT "" CACHE PATH "hwloc >= 2.5 shared distribution (include/, lib/, bin/)")
+  find_path(HWLOC_INCLUDE_DIR NAMES hwloc.h HINTS "${HWLOC_ROOT}/include" REQUIRED)
+  find_library(HWLOC_LIBRARY NAMES libhwloc hwloc HINTS "${HWLOC_ROOT}/lib" REQUIRED)
+  find_file(HWLOC_LICENSE_FILE NAMES COPYING.txt COPYING LICENSE
+    HINTS "${HWLOC_ROOT}" REQUIRED NO_DEFAULT_PATH)
+  file(STRINGS "${HWLOC_INCLUDE_DIR}/hwloc.h" hwloc_version_line
+    REGEX "^#define HWLOC_API_VERSION[ \t]+0x")
+  string(REGEX MATCH "0x[0-9A-Fa-f]+" hwloc_version "${hwloc_version_line}")
+  if(NOT hwloc_version OR hwloc_version LESS 0x00020500)
+    message(FATAL_ERROR "hwloc >= 2.5 required under HWLOC_ROOT")
+  endif()
+  add_library(ninfer::hwloc INTERFACE IMPORTED GLOBAL)
+  target_include_directories(ninfer::hwloc INTERFACE "${HWLOC_INCLUDE_DIR}")
+  target_link_libraries(ninfer::hwloc INTERFACE "${HWLOC_LIBRARY}")
+else()
+  pkg_check_modules(HWLOC REQUIRED IMPORTED_TARGET GLOBAL hwloc>=2.5)
+  pkg_check_modules(URING REQUIRED IMPORTED_TARGET GLOBAL liburing>=2.5)
+  add_library(ninfer::hwloc ALIAS PkgConfig::HWLOC)
+endif()
+
 # Repository-pinned header dependencies. No configure-time downloads.
 add_library(ninfer::json INTERFACE IMPORTED GLOBAL)
 target_include_directories(ninfer::json INTERFACE
@@ -82,7 +104,7 @@ endif()
 # executables load at run time to PATH.
 set(NINFER_RUNTIME_DLL_DIRS "${CUDAToolkit_BIN_DIR}" "${CUDAToolkit_BIN_DIR}/x64")
 if(WIN32)
-  list(APPEND NINFER_RUNTIME_DLL_DIRS "${FFMPEG_ROOT}/bin")
+  list(APPEND NINFER_RUNTIME_DLL_DIRS "${FFMPEG_ROOT}/bin" "${HWLOC_ROOT}/bin")
   if(NINFER_BUILD_PRODUCT_SUPPORT)
     list(APPEND NINFER_RUNTIME_DLL_DIRS "${CURL_ROOT}/bin")
   endif()

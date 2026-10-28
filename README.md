@@ -93,8 +93,9 @@ hf download neroued/Qwen3.8-27B-nvfp4-NInfer qwen3_8_27b_nvfp4.ninfer --local-di
 ```
 
 For **Flash-Next**, use the [v3 download command](docs/maintainer/qwen3.8-flash-next-artifact.md#1-download-and-derivation)
-to fetch the entry file and all three parts. Keep them in one directory and load
-`qwen3_8_flash_next_mixed.v3.ninfer`. Existing v2 files have separate
+to fetch the entry file and all three parts, then perform the documented offline
+reframe and load the canonical entry. Keep the original parts beside it.
+Existing v2 files have separate
 [upgrade instructions](docs/weight-conversion.md#upgrade-an-existing-v2-artifact).
 
 ### Start the server

@@ -3,6 +3,7 @@ set(ninfer_op_tests
   gelu
   silu_mul
   residual_add
+  sum_contributions
   sigmoid_mul
   rmsnorm_pack_tail
   l2norm
@@ -72,9 +73,7 @@ ninfer_add_op_test(ninfer_prepare_masked_block_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_prepare_masked_block.cpp"
   LIBRARIES ninfer_ops)
 
-ninfer_add_op_test(ninfer_sparse_moe_test
-  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_sparse_moe.cpp"
-  LIBRARIES ninfer_ops)
+include("${CMAKE_CURRENT_LIST_DIR}/moe/tests.cmake")
 
 ninfer_add_op_test(ninfer_mtp_pack_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_mtp_pack.cpp"
@@ -103,7 +102,6 @@ include("${CMAKE_CURRENT_LIST_DIR}/hyper_connection/tests.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/ple_ngram/tests.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/qsa_indexer/tests.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/selected_block_attention/tests.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/sparse_moe_nvfp4/tests.cmake")
 
 include("${CMAKE_CURRENT_LIST_DIR}/gdn_input_proj/tests.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/ple/tests.cmake")

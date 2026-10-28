@@ -11,7 +11,8 @@ ownership contracts are defined in [Engine architecture](../docs/maintainer/engi
   materialization and Python-writer/C++-reader interoperability;
 - `convert/` — source interpretation, Qwen logical mapping, recipe overrides/sharing, optional
   components, resources, proposals and numerical conversion methods;
-- `models/qwen3_5/` — config/binding, frontend, state/context stores, workspace, MTP alignment and
+- `models/common/` — shared Qwen frontend/tools, visual scatter, logical context stores and MoE;
+- `models/qwen3_5/` — native config/binding, state layout, workspace, MTP alignment and
   opt-in real Engine integration;
 - `models/qwen4_exp/` — Flash-Next binding, complete continuation-state round trips, and real
   Engine text/MTP/image/video, graph, batch, cache, scoring, causal-prefix independence and
@@ -19,6 +20,11 @@ ownership contracts are defined in [Engine architecture](../docs/maintainer/engi
 - `ops/` — semantic Op qualification with independent mathematical or state-transition oracles;
   Linear and fused Linear suites are separated by their supported weight/activation paths;
 - `runtime/` — scheduler fairness, cache resource policy, capacity and context-cost calculations;
+- `cpu/` — topology/ISA, bounded task admission, bound collectives, publication and shutdown;
+- `io/` — bounded direct reads, partial submission, completion, wakeup and borrowed-buffer lifetime;
+- `models/qwen4_exp/` — native bank binding, state/page-group layouts and transfers, plus PLE
+  disk binding, exact hash/NF4 reconstruction, incremental windows,
+  cancellation and Host/CUDA buffer lifetimes;
 - `bench/ttft/` — HTTP measurements, campaign orchestration and workload construction;
 - root C++ tests — core storage, public API, serving protocols, logging, benchmark reports and
   causal-scoring evaluation;
@@ -26,8 +32,8 @@ ownership contracts are defined in [Engine architecture](../docs/maintainer/engi
   consumer.
 
 Tests are grouped by observable risk, not by mirroring every source file or class.
-`CMakeLists.txt` includes explicit registrations from `cmake/`, `artifact/`, `models/qwen3_5/`,
-`models/qwen4_exp/` and `ops/`. Registration helpers live in `cmake/NinferTests.cmake`; included manifests keep
+`CMakeLists.txt` includes explicit registrations from `cmake/`, `artifact/`, the model directories
+and `ops/`. Registration helpers live in `cmake/NinferTests.cmake`; included manifests keep
 executables and CTest working directories under `build/tests/`.
 `ops/op_tester.h` and `ops/op_check.h` own reusable device/guard and comparison mechanics.
 `ops/linear_common.h` shares extent checks, explicit sampling recipes, payload preservation and
@@ -64,6 +70,21 @@ After building, `ctest --preset dev` runs the same CTest suite. See
 [Build system](../docs/maintainer/build-system.md) for local interpreter presets.
 
 The chat-template reference test uses Python Jinja2.
+
+PLE reading foundations run with
+`ctest --test-dir build -R 'ninfer_(nf4|read_queue|artifact_backing|ple_(disk|upload))' --output-on-failure`.
+The NF4 oracle uses exact Python fractions. The PLE fixture includes a row split across three files.
+`ninfer_ple_upload_test` checks exact Host-to-Device E and slot retirement using a direct Host
+producer, without a table or disk service. Disk preparation tests separately cover their composition.
+These tests use small synthetic files to check addressing, decoded values and queue lifecycle.
+Real-weight I/O throughput measurements belong to separate, explicitly selected benchmarks.
+The Host preparation test runs without visible CUDA devices. The GPU test delays upload/consumption,
+injects event-record failures and checks graph consumption against independently reconstructed E.
+
+CPU foundation tests link only the C++ `ninfer_cpu` target and need no GPU:
+`ctest --test-dir build -R '^ninfer_cpu_.*_test$' --output-on-failure`.
+The memory test also exercises CPU Tensor/arena computation. Frontend and HTTP transport tests
+cover the task-pool consumers, including restricted media affinity and HTTP queue saturation.
 
 Run a focused target for a localized change:
 
@@ -116,6 +137,10 @@ ctest --test-dir build --output-on-failure \
 HC suites qualify the public [gated residual forms](../include/ninfer/ops/gated_residual.h),
 including Mix, using [family-owned criteria](ops/gated_residual/criteria.h). Exact copying and
 mathematical outputs retain their respective references and the public BF16 residual boundary.
+
+PLE GPU Ops run with `ctest --test-dir build -R '^ninfer_ple_(gate|conv|state_extract)_test$'`.
+Gate uses an independent FP64 oracle for U and norm(actual BF16 U), including strided projections,
+record windows, masks, Graph replay and the Conv/StateExtract handoff. These tests perform no file I/O.
 
 Linear tests are independently runnable by weight and activation-compute profile:
 
@@ -177,6 +202,48 @@ NINFER_TEST_ARTIFACT=$PWD/out/qwen3_8_27b_nvfp4.ninfer \
   ctest --test-dir build -R ninfer_qwen3_5_score_real_test --output-on-failure
 ```
 
+`ninfer_moe_test` qualifies the integer routing, complete MoE and routed SwiGLU profiles.
+`ninfer_moe_block_scaled_test` qualifies NVFP4 A4 and block-FP8 A8/G128 experts with BF16
+control/shared and small-token A16 routes. It uses independent FP64 formulas and encoded-weight
+decoders, covering per-expert divisors, K128 scales, zero groups, affine/indexed banks, masks,
+changed Graph contents, private route boundaries and workspace guards. Optional `nvfp4` or `fp8`
+arguments select one format; CTest runs both.
+`ninfer_sum_contributions_test` covers FP32 partial summation with optional BF16 residual.
+Their independent FP64 oracles start from represented inputs and decoded logical weights. The MoE
+suite covers the resident codec profiles, FP32/BF16 outputs, residual modes, expert masks, strided/indexed
+banks, empty GPU assignments, Graph relocation and workspace guards. The complete MoE retains
+its existing numerical samples and criteria.
+
+`ninfer_moe_cpu_groupwise_int_test` qualifies Q4+Q5/Q6 CPU routed SwiGLU against decoded-input
+FP64 mathematics,
+using an FP32 forward-error budget for dot products, SiLU, multiplication and weighted reduction.
+`ninfer_moe_cpu_groupwise_int_avx2_test` and `ninfer_moe_cpu_groupwise_int_fma_test` use the same
+public entry and oracle with
+restricted test-only dispatch. All three run with CUDA devices hidden. They cover mask/None
+semantics, arbitrary token tails through T=72, affine and strided parent banks, workspace and alias
+checks, signed code domains, scale extremes and tiny-BF16 cancellation around the BF16-dot guard.
+`ninfer_moe_cpu_nvfp4_test` and its `_avx2`/`_fma` variants qualify native NVFP4 banks against
+independent FP64 mathematics, including scale swizzles, per-expert divisors, masked metadata,
+column and chunk tails, full-precision products and tiny inputs. These CPU tests do not load
+model files or use GPU memory.
+The NVFP4 variants also compare each column exactly with its standalone evaluation,
+including changing expert-group order, complementary masks and mixed tiny/safe BF16 inputs.
+`ninfer_moe_test` also qualifies complementary CPU/GPU subsets plus GPU shared/residual composition.
+
+`ninfer_moe_execution_test` qualifies the shared single-layer execution and the Program-owned
+multi-layer fixed-cache and streaming-window schedule against the same independent complete-MoE oracle. It uses registered native Host banks and the real ExpertCache,
+covering Write/AddResidual outputs, absent CPU-only replicas, explicit region replacement,
+All/None/partial partitions, bank IDs independent of traversal order, variable frame reuse through
+T=1024, delayed bridge progress, failed acquisition and asynchronous teardown. Eager and segmented
+Graph handoffs use the same oracle; Graph cases also cover expert relocation and streaming-window
+transitions through the real cache schedule. The compact Graph calibration storage also runs
+All/None/partial contributions against the same oracle while reusing one bank window.
+
+```bash
+ctest --test-dir build -R '^ninfer_moe(_block_scaled|_cpu_(groupwise_int|nvfp4)(_avx2|_fma)?)?_test$' --output-on-failure
+ctest --test-dir build -R '^ninfer_moe_execution_test$' --output-on-failure
+```
+
 Run the 35B-A3B MoE route independently:
 
 ```bash
@@ -184,10 +251,12 @@ NINFER_TEST_ARTIFACT=$PWD/out/qwen3_6_35b_a3b.ninfer \
   ctest --test-dir build -R ninfer_qwen3_5_moe_real_test --output-on-failure
 ```
 
-Run Flash-Next with its derived v3 artifact, including Vision and MTP components:
+Run Flash-Next with its canonical v3 artifact, including Vision and MTP components.
+For the published fork packed-v3 source, first run the explicit
+[reframe](../docs/maintainer/qwen3.8-flash-next-artifact.md#1-download-and-derivation):
 
 ```bash
-NINFER_TEST_ARTIFACT=/path/to/qwen3_8_flash_next_mixed.ninfer \
+NINFER_TEST_ARTIFACT=/path/to/qwen3_8_flash_next_mixed.canonical.ninfer \
   ctest --test-dir build -R '^ninfer_qwen4_exp_' --output-on-failure
 ```
 
@@ -199,6 +268,13 @@ a first divergence is allowed only at a reference top-two gap of at most 0.05 na
 speculative target semantics; independent FP64 Op tests qualify the underlying mathematics.
 The default runs every case and reports each failure. The small video fixture is synthetic; its generation command is
 in `models/qwen4_exp/fixtures/README.md`.
+
+`ninfer_qwen3_5_moe_offload_real_test` uses the same artifact with a 16 GiB Device budget and
+segmented CUDA Graph execution (`NINFER_TEST_EAGER=1` selects eager). It covers MTP, prefix reuse, Vision, per-layer expert priorities,
+eight resident rows, and stable small-T cache reuse. The DFlash and
+preemption real tests also accept `NINFER_TEST_EAGER=1`; combine it with
+`NINFER_VRAM_BUDGET_MIB` to exercise eager offload, or set only the budget for Graph offload.
+CausalScoring always uses eager execution.
 
 Without `NINFER_TEST_ARTIFACT`, CTest marks these real Engine tests as skipped. Real-artifact targets
 carry the `real` label and `RUN_SERIAL` so CTest runs them alone. Run directly invoked GPU
@@ -257,7 +333,7 @@ call/result prefix reuse, and required-tool → JSON continuation with committed
 streaming and mixed strict/basic/free rows. Snapshot/Replay modes force resource pressure and
 validate the completed argument value after recovery; `cancel` interrupts the paused request.
 `NINFER_TEST_TOOL_REPORT` appends schema/output/timing JSONL.
-`python3 tests/models/qwen3_5/test_tool_schema.py` checks the native Qwen grammar and decoder against
+`python3 tests/models/common/qwen/test_tool_schema.py` checks the native Qwen grammar and decoder against
 `jsonschema` (dependencies in `tests/text/requirements.txt`), including string pattern/Unicode-length
 intersections. The JSON Schema oracle also covers finite-value filtering, reference/union siblings,
 closed-object and positional-array intersections, draft-07 tuples, recursive conjunctions,
@@ -341,6 +417,13 @@ Performance-only assertions belong in benchmarks and profiler review. Source sca
 implementation-shape assertions, trivial getters/configuration, retired command surfaces, and
 broad additions without a concrete regression risk do not belong in the permanent suite.
 
+`ninfer_context_store_test` checks StateImage transitions and replicas. `ninfer_kv_history_test`
+checks prefix retention, conflicting-writer COW, reservations, cancellation and Host extent lifetime.
+It compares page bytes against an independent CPU layout oracle and restores a complete mixed
+StateImage/KV snapshot at frontier 7, where `tokens_per_row=4` leaves one valid index row and a
+three-entry raw tail. Native transaction tests exercise the corresponding model-owned source,
+capture, retirement, recovery and consecutive decode/terminal paths.
+
 ## DFlash2 Engine integration
 
 The DFlash prefill regression checks actual KV contents after a StateImage fork and a conflicting
@@ -376,3 +459,60 @@ Arguments are K, Graph enabled, optimized head enabled, maximum B, target KV (`b
 `15 1 1 8 bf16 0 3`. Run GPU integration tests serially. The individual Op suites remain the
 numerical/state-transition oracle; the fixed Engine fixture does not define bit parity across
 arbitrary floating-point routes.
+
+## Expert sources and replicas
+
+`ninfer_weight_bank_test` checks local matrix/plane addressing for INT, NVFP4 and block-FP8.
+`ninfer_expert_cache_test` checks encoded bytes, variable entry sizes, bounded upload batches, required-set
+changes, immutable fixed regions, window reconstruction, interrupted restoration, partial uploads, delayed consumers, Graph replay, independent prefetch readiness and failed
+submission cleanup. The byte oracle is the immutable source representation, not another cache.
+`ninfer_artifact_cpu_materialization_test` runs with CUDA devices hidden and verifies aligned Host
+backing and retained resource lifetimes. The materialization suite also checks dual-destination I/O,
+registered/ordinary Host regions and registered backing moves. Registered transfer views and pitched
+copies are also exercised by `ninfer_arena_test`.
+
+The opt-in loader test accepts `--host-experts` to put Main experts in registered RAM while retaining MTP and
+fixed tensors on GPU. This checks storage and binding, not mixed MoE execution:
+
+```bash
+build/tests/ninfer_qwen3_5_loading_real_test --artifact out/qwen3_6_35b_a3b.ninfer \
+  --vision --speculative mtp --host-experts
+```
+
+Qwen4Exp loading/resources can be checked independently of the public Engine route:
+
+```bash
+./build/tests/ninfer_qwen4_exp_loading_real_test out/qwen3_8_flash_next.ninfer
+./build/tests/ninfer_qwen4_exp_loading_real_test out/qwen3_8_flash_next.ninfer --materialize
+```
+
+The Flash-Next public Engine suite includes the explicit KV-pool concurrency clamp,
+with eager and CUDA Graph execution, plus MTP route tracing with short ragged rows
+that must exclude padding. Batched target decisions use B=1 tokens and their top-2
+readouts from the same generation. To qualify bounded Host expert execution on a
+larger Blackwell GPU, select a 32 GiB Engine budget and require Host placement:
+
+```bash
+NINFER_TEST_ARTIFACT=out/qwen3_8_flash_next.ninfer \
+NINFER_VRAM_BUDGET_MIB=32768 NINFER_TEST_EXPECT_HOST_EXPERTS=1 \
+NINFER_TEST_CASE='bounded expert execution' \
+  ./build/tests/ninfer_qwen4_exp_engine_real_test
+```
+
+This bounded case compares eager and graph execution for ordinary decoding and
+MTP K=3, requires actual speculative rounds, and checks MTP target decisions
+against ordinary tokens and their paired top-two readouts. Repeat with a lower
+budget, such as 28 GiB, to exercise less expert-cache capacity; this is capacity
+and behavior evidence on the test GPU, not qualification of another device.
+
+This checks two prompts (including a 257-token prefill), twelve generated tokens each,
+and eager/graph parity on the actual test device; it does not qualify RTX 5090
+performance or native Windows GPU execution.
+
+The first command plans component combinations, KV formats and concurrency without loading weight
+payloads. `--materialize` additionally loads one full-component model, checks stored words and
+parameter sharing, constructs its execution resources, and reads/uploads a PLE window. It needs
+about 64 GiB of available Host memory plus system headroom. These are loading/resource checks;
+Text/Vision/MTP generation, eager or CUDA Graph decode, and text causal scoring use the public Engine,
+with current support described in the [execution reference](../docs/maintainer/qwen4_exp-execution.md)
+and commands in the [CLI guide](../docs/cli.md).

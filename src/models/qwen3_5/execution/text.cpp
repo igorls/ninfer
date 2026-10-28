@@ -1,15 +1,18 @@
 #include "models/qwen3_5/program/internal.h"
 #include "models/qwen3_5/execution/text.h"
+#include "models/qwen3_5/program/speculative/mtp_alignment.h"
+#include "models/common/moe/resources.h"
+#include "models/qwen3_5/program/text_graph.h"
 #include "models/qwen3_5/execution/attention.h"
+#include "models/qwen3_5/execution/dense_mlp.h"
 #include "models/qwen3_5/execution/gdn.h"
-#include "models/qwen3_5/execution/ffn.h"
+#include "models/common/moe/execution.h"
 #include "models/qwen3_5/execution/mtp.h"
 #include "models/qwen3_5/execution/workspace.h"
 
 #include "core/nvtx.h"
-#include "models/qwen3_5/execution/visual_scatter.h"
-#include "models/qwen3_5/execution/vision.h"
-#include "models/qwen3_5/program/vision_control.h"
+#include "models/common/qwen/vision/prefill.h"
+#include "models/common/qwen/vision/control.h"
 #include "ninfer/ops/argmax.h"
 #include "ninfer/ops/candidate_logprobs.h"
 #include "ninfer/ops/causal_conv1d_silu.h"
@@ -26,7 +29,7 @@
 #include "ninfer/ops/position.h"
 #include "ninfer/ops/residual_add.h"
 #include "ninfer/ops/rope.h"
-#include "ninfer/ops/sparse_moe.h"
+#include "ninfer/ops/moe.h"
 #include "ninfer/ops/scalar.h"
 #include "ninfer/ops/sigmoid_mul.h"
 #include "ninfer/ops/silu_mul.h"
@@ -227,11 +230,11 @@ void DFlashFeatureSink::consume_prefill_chunk(std::int32_t tokens, bool rewrite_
 
 TextContext::TextContext(DeviceContext& ctx, const execution::Parameters& weights,
                          MemoryArena& work, const qwen3_5::PagedKVCache& batch_text_kv,
-                         LinearAttentionStatePool& state, qwen3_5::RoundState& io,
+                         LinearAttentionStateView& state, qwen3_5::RoundState& io,
                          Tensor& prefill_hidden, std::uint32_t prefill_chunk,
                          std::uint32_t text_kv_base, qwen3_5::PagedKVCacheView mtp_kv,
-                         const qwen3_5::PagedKVCache* batch_mtp_kv)
-    : ctx_(ctx), execution_(ctx.execution_view()), parameters_(weights),
+                         const qwen3_5::PagedKVCache* batch_mtp_kv, moe::Resources* moe)
+    : moe_(moe), ctx_(ctx), execution_(ctx.execution_view()), parameters_(weights),
       config_(weights.model.config().text), work_(work), mtp_kv_(mtp_kv),
       batch_text_kv_(batch_text_kv), batch_mtp_kv_(batch_mtp_kv), state_(state), io_(io),
       prefill_hidden_(prefill_hidden), prefill_chunk_(prefill_chunk), text_kv_base_(text_kv_base) {
@@ -392,7 +395,7 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
                                    const Tensor& rope_positions,
                                    ops::CausalAttentionExecutionEnvelope envelope,
                                    Tensor& mtp_hidden) {
-    const int T    = x.ne[1];
+    const int T = x.ne[1];
 
     const auto projection = workspace::mtp_attention_projection(work_, config_, T);
     Tensor q              = projection.query.view({dimension(config_.attention->head_dim),
@@ -460,7 +463,13 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
 
     {
         auto post_mixer_scope = work_.scope();
-        ffn(mh, mtp_->ffn, x, {}, work_, ctx_.execution_view());
+        if (const auto* dense = std::get_if<DenseParameters>(&mtp_->ffn)) {
+            dense_mlp(mh, *dense, x, work_, execution_);
+        } else {
+            const auto& parameters = std::get<moe::Parameters>(mtp_->ffn);
+            moe::execute(mh, parameters, parameters.resident, ops::MoeEpilogue::AddResidual, x,
+                         work_, execution_);
+        }
     }
 
     Tensor flat_mtp_hidden = mtp_hidden.view({dimension(config_.hidden_size), T});
@@ -604,7 +613,13 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
         ops::rmsnorm(x_last, mtp_->post_attention_norm, config_.rms_norm_eps, true, mh, execution_);
         {
             auto post_mixer_scope = work_.scope();
-            ffn(mh, mtp_->ffn, x_last, {}, work_, ctx_.execution_view());
+            if (const auto* dense = std::get_if<DenseParameters>(&mtp_->ffn)) {
+                dense_mlp(mh, *dense, x_last, work_, execution_);
+            } else {
+                const auto& parameters = std::get<moe::Parameters>(mtp_->ffn);
+                moe::execute(mh, parameters, parameters.resident, ops::MoeEpilogue::AddResidual,
+                             x_last, work_, execution_);
+            }
         }
         ops::rmsnorm(x_last, mtp_->final_norm, config_.rms_norm_eps, true, *final_hidden, execution_);
         proposal_argmax(*final_hidden, *logits, *draft_token);
@@ -745,11 +760,13 @@ void TextContext::ordinary_decode_batch(const Tensor& ids, const Tensor& cache_p
         ScopedValue<std::int32_t> width_binding(active_sequence_width_, 1);
 
         Tensor x = work_.alloc(DType::BF16, {dimension(config_.hidden_size), batch});
-        ops::embedding(ids, *embed_, x, execution_);
+        if (emit_forward_gpu(graphs_)) ops::embedding(ids, *embed_, x, execution_);
         NullTap tap;
         run_layers(x, Phase::Verify, tap);
-        ops::rmsnorm(x, *final_norm_, config_.rms_norm_eps, true, hidden, execution_);
-        project(hidden, *lm_head_, logits, work_, execution_);
+        if (emit_forward_gpu(graphs_)) {
+            ops::rmsnorm(x, *final_norm_, config_.rms_norm_eps, true, hidden, execution_);
+            project(hidden, *lm_head_, logits, work_, execution_);
+        }
     }
     work_.reset();
 }
@@ -798,18 +815,21 @@ void TextContext::target_verify_batch_impl(const Tensor& ids, const Tensor& cach
 
         Tensor x        = work_.alloc(DType::BF16, {dimension(config_.hidden_size), columns});
         Tensor flat_ids = ids.view({columns});
-        ops::embedding(flat_ids, *embed_, x, execution_);
+        if (emit_forward_gpu(graphs_)) ops::embedding(flat_ids, *embed_, x, execution_);
         if constexpr (Tap::enabled) { tap.begin(x); }
         run_layers(x, Phase::Verify, tap);
-        if constexpr (requires { tap.capture_positions(cache_positions, execution_); }) {
-            tap.capture_positions(cache_positions, execution_);
+        if (emit_forward_gpu(graphs_)) {
+            if constexpr (requires { tap.capture_positions(cache_positions, execution_); }) {
+                tap.capture_positions(cache_positions, execution_);
+            }
+            Tensor flat_hidden = hidden.view({dimension(config_.hidden_size), columns});
+            Tensor flat_logits = logits.view({dimension(config_.vocab_size), columns});
+            Tensor flat_tokens = target_tokens.view({columns});
+            ops::rmsnorm(x, *final_norm_, config_.rms_norm_eps, true, flat_hidden, execution_);
+            project(flat_hidden, *lm_head_, flat_logits, work_, execution_);
+            ops::argmax(flat_logits, flat_tokens,
+                        dimension(parameters_.model.resources().public_token_count), execution_);
         }
-        Tensor flat_hidden = hidden.view({dimension(config_.hidden_size), columns});
-        Tensor flat_logits = logits.view({dimension(config_.vocab_size), columns});
-        Tensor flat_tokens = target_tokens.view({columns});
-        ops::rmsnorm(x, *final_norm_, config_.rms_norm_eps, true, flat_hidden, execution_);
-        project(flat_hidden, *lm_head_, flat_logits, work_, execution_);
-        ops::argmax(flat_logits, flat_tokens, dimension(parameters_.model.resources().public_token_count), execution_);
     }
     work_.reset();
 }
@@ -881,8 +901,8 @@ void TextContext::mtp_propose_batch(const Tensor& hidden, Tensor& logits, Tensor
 }
 
 void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase ph) {
-    const auto& p  = std::get<AttentionParameters>(w.mixer);
-    const int T    = x.ne[1];
+    const auto& p = std::get<AttentionParameters>(w.mixer);
+    const int T   = x.ne[1];
     if (active_causal_attention_envelope_ == nullptr) {
         throw std::logic_error("Text GQA execution envelope is not set");
     }
@@ -955,8 +975,8 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase 
 }
 
 void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase ph) {
-    const auto& p  = std::get<GdnParameters>(w.mixer);
-    const int T    = x.ne[1];
+    const auto& p = std::get<GdnParameters>(w.mixer);
+    const int T   = x.ne[1];
 
     const auto control = workspace::gdn_control(work_, config_, T);
     Tensor h           = control.hidden;
@@ -1077,59 +1097,103 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
     ops::linear_add(on.view({dimension(config_.gdn->value_width()), T}), p.output.weight, x, p.output.policy, work_, execution_);
 }
 
-ops::SparseMoeHints TextContext::next_projection_hints(int layer) const {
+ops::MoeExecutionHints TextContext::next_projection_hints(int layer) const {
     const auto next = static_cast<std::size_t>(layer) + 1;
     return next < parameters_.text.layers.size() ? parameters_.text.layers[next].projection_prefetch
-                                                 : ops::SparseMoeHints{};
+                                                 : ops::MoeExecutionHints{};
 }
 
-void TextContext::mlp_tail(const BlockParameters& weights, Tensor& x, Phase,
-                           const ops::SparseMoeHints& hints) {
+void TextContext::post_mixer(const BlockParameters& weights, Tensor& x, int layer) {
     Tensor h = workspace::post_mixer_hidden(work_, config_, x.ne[1]);
     ops::rmsnorm(x, weights.post_attention_norm, config_.rms_norm_eps, true, h, execution_);
-    ffn(h, weights.ffn, x, hints, work_, execution_);
+    if (const auto* dense = std::get_if<DenseParameters>(&weights.ffn)) {
+        dense_mlp(h, *dense, x, work_, execution_);
+    } else {
+        const auto& parameters = std::get<moe::Parameters>(weights.ffn);
+        if (moe_) {
+            moe_->execute(parameters.bank, h, x, work_, next_projection_hints(layer));
+        } else {
+            moe::execute(h, parameters, parameters.resident, ops::MoeEpilogue::AddResidual, x,
+                         work_, execution_, next_projection_hints(layer));
+        }
+    }
 }
 
 template <class Tap>
 void TextContext::run_layers(Tensor& x, Phase ph, Tap& tap) {
-    const bool prefill = ph == Phase::Prefill;
+    const bool prefill   = ph == Phase::Prefill;
+    const bool recording = graphs_ && graphs_->recording();
+    if (graphs_) graphs_->begin_layers();
+    const auto cpu_activity = moe_ && !recording ? moe_->begin(x.ne[1]) : std::nullopt;
     for (std::size_t layer = 0; layer < parameters_.text.layers.size(); ++layer) {
         const auto& block  = parameters_.text.layers[layer];
+        const auto* routed = std::get_if<moe::Parameters>(&block.ffn);
         const bool full    = config_.layer_types[layer] == MixerKind::FullAttention;
         const auto compact = dimension(config_.compact_layer_indices[layer]);
         nvtx::ScopedRange layer_range(
             full ? (prefill ? nvtx::Name::PrefillLayerFull : nvtx::Name::VerifyLayerFull)
                  : (prefill ? nvtx::Name::PrefillLayerGdn : nvtx::Name::VerifyLayerGdn),
             full ? nvtx::Category::Attention : nvtx::Category::Gdn, layer);
+        const auto mixer = [&] {
+            nvtx::ScopedRange range(
+                full ? (prefill ? nvtx::Name::PrefillAttention : nvtx::Name::VerifyAttention)
+                     : (prefill ? nvtx::Name::PrefillGdn : nvtx::Name::VerifyGdn),
+                full ? nvtx::Category::Attention : nvtx::Category::Gdn, layer);
+            auto scope = work_.scope();
+            if (full)
+                attn_mix(block, x, compact, ph);
+            else
+                gdn_mix(block, x, compact, ph);
+        };
+        const auto gpu_moe = [&](const moe::PreparedExecution& call, moe::GpuSubmission mode) {
+            auto scope    = work_.scope();
+            Tensor hidden = workspace::post_mixer_hidden(work_, config_, x.ne[1]);
+            ops::rmsnorm(x, block.post_attention_norm, config_.rms_norm_eps, true, hidden,
+                         execution_);
+            moe::enqueue_gpu(hidden, call, x, work_, mode,
+                             next_projection_hints(static_cast<int>(layer)));
+        };
         try {
-            {
-                nvtx::ScopedRange mixer_range(
-                    full ? (prefill ? nvtx::Name::PrefillAttention : nvtx::Name::VerifyAttention)
-                         : (prefill ? nvtx::Name::PrefillGdn : nvtx::Name::VerifyGdn),
-                    full ? nvtx::Category::Attention : nvtx::Category::Gdn, layer);
-                auto scope = work_.scope();
-                if (full) {
-                    attn_mix(block, x, compact, ph);
-                } else {
-                    gdn_mix(block, x, compact, ph);
+            if (!graphs_) {
+                if (moe_ && routed) moe_->before_layer(routed->bank);
+                mixer();
+                {
+                    nvtx::ScopedRange range(prefill ? nvtx::Name::PrefillPostMixer
+                                                    : nvtx::Name::VerifyPostMixer,
+                                            nvtx::Category::PostMixer, layer);
+                    auto scope = work_.scope();
+                    post_mixer(block, x, static_cast<int>(layer));
                 }
+                if constexpr (Tap::enabled)
+                    tap.capture_layer(static_cast<int>(layer), x, execution_);
+                continue;
             }
-            {
-                nvtx::ScopedRange range(prefill ? nvtx::Name::PrefillPostMixer
-                                                : nvtx::Name::VerifyPostMixer,
-                                        nvtx::Category::PostMixer, layer);
-                auto scope = work_.scope();
-                mlp_tail(block, x, ph, next_projection_hints(static_cast<int>(layer)));
+            if (!moe_ || !routed)
+                throw std::logic_error("segmented text graph requires routed MoE layers");
+            if (recording) {
+                std::function<void()> feature;
+                if constexpr (Tap::enabled) {
+                    if (std::find(tap.layers.begin(), tap.layers.end(), layer) != tap.layers.end())
+                        feature = [&] {
+                            tap.capture_layer(static_cast<int>(layer), x, execution_);
+                        };
+                }
+                graphs_->capture_layer(
+                    layer, *moe_, routed->bank, x.ne[1], mixer,
+                    [&](const moe::PreparedExecution& call) {
+                        gpu_moe(call, moe::GpuSubmission::Capture);
+                    },
+                    feature);
+            } else {
+                graphs_->replay_layer(layer, *moe_, routed->bank, x);
             }
-            if constexpr (Tap::enabled) {
-                tap.capture_layer(static_cast<int>(layer), x, execution_);
-            }
-        } catch (const std::exception& error) {
+        } catch (const DeviceAllocationError&) { throw; } catch (const std::exception& error) {
             throw std::runtime_error("text/layers/" + std::to_string(layer) +
                                      (prefill ? " prefill" : " verify") +
                                      " columns=" + std::to_string(x.ne[1]) + ": " + error.what());
         }
     }
+    if (graphs_) graphs_->end_layers();
 }
 
 void TextContext::run_layers(Tensor& x, Phase ph) {
@@ -1197,7 +1261,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
         if (split_rel > 0 && t0 < split_rel && t0 + len > split_rel) { len = split_rel - t0; }
         work_.reset();
 
-        VisionChunk vision_chunk;
+        qwen::VisionChunk vision_chunk;
         const std::uint32_t prompt_t0 = base + static_cast<std::uint32_t>(t0);
         if (multimodal != nullptr) {
             if (multimodal->vision == nullptr) {
@@ -1345,14 +1409,15 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                         work_.alloc(DType::BF16, {dimension(config_.hidden_size), len});
                     ops::embedding(mtp_ids, *embed_, mtp_input_embeddings, execution_);
                     if (vision_chunk.control != nullptr) {
-                        const qwen3_5::MtpVisualOverlap overlap = qwen3_5::shifted_visual_overlap(
-                            vision_chunk.control->scatter_indices, alignment_tokens, mtp_window);
+                        const qwen::VisualEmbeddingSlice overlap = qwen::visual_embedding_slice(
+                            vision_chunk.control->scatter_indices, alignment_tokens,
+                            mtp_window.shifted_embedding_begin, mtp_window.columns);
                         if (!overlap.empty()) {
                             Tensor shifted_indices = workspace::visual_scatter_indices(
                                 work_, static_cast<std::int32_t>(overlap.size()));
-                            qwen3_5::detail::scatter_shifted_visual_embeddings(
-                                mtp_input_embeddings, vision_chunk.embeddings, overlap,
-                                shifted_indices, execution_);
+                            qwen::scatter_visual_embeddings(mtp_input_embeddings,
+                                                            vision_chunk.embeddings, overlap,
+                                                            shifted_indices, execution_);
                         }
                     }
                     mtp_input_embeddings_ptr = &mtp_input_embeddings;
@@ -1449,9 +1514,10 @@ PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std
                         finalize_at_end);
 }
 
-PrefillChunkResult TextContext::prefill_chunk(const qwen3_5::PreparedPromptData& input,
+PrefillChunkResult TextContext::prefill_chunk(const qwen::PreparedPromptData& input,
                                               std::uint32_t begin, std::uint32_t nominal_length,
-                                              VisionPrefillSession& vision, bool finalize_at_end) {
+                                              qwen::VisionPrefillSession& vision,
+                                              bool finalize_at_end) {
     if (begin >= input.token_ids.size() || nominal_length == 0 ||
         nominal_length > input.token_ids.size() - begin) {
         throw std::invalid_argument("multimodal prefill chunk is outside the prompt");
@@ -1463,10 +1529,10 @@ PrefillChunkResult TextContext::prefill_chunk(const qwen3_5::PreparedPromptData&
                         finalize_at_end);
 }
 
-PrefillChunkResult TextContext::prefill_chunk(const qwen3_5::PreparedPromptData& input,
+PrefillChunkResult TextContext::prefill_chunk(const qwen::PreparedPromptData& input,
                                               std::uint32_t begin, std::uint32_t nominal_length,
-                                              VisionPrefillSession& vision, bool finalize_at_end,
-                                              DFlashFeatureSink& sink) {
+                                              qwen::VisionPrefillSession& vision,
+                                              bool finalize_at_end, DFlashFeatureSink& sink) {
     if (begin >= input.token_ids.size() || nominal_length == 0 ||
         nominal_length > input.token_ids.size() - begin) {
         throw std::invalid_argument("multimodal prefill chunk is outside the prompt");

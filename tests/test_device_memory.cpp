@@ -28,8 +28,8 @@ int main() {
     std::cout
         << "[test_device_memory] Running insufficient memory error message formatting test...\n";
     ninfer::DeviceMemorySnapshot mock_snap{
-        .total_bytes = 96ULL * 1024ULL * 1024ULL * 1024ULL,
         .free_bytes  = 24ULL * 1024ULL * 1024ULL * 1024ULL,
+        .total_bytes = 96ULL * 1024ULL * 1024ULL * 1024ULL,
         .used_bytes  = 72ULL * 1024ULL * 1024ULL * 1024ULL,
         .is_nvml     = true,
         .device_name = "NVIDIA RTX PRO 6000 Blackwell",

@@ -2802,7 +2802,7 @@ R"HTML(    ro.textContent = active && running ? `${(active.configured_bytes / Gi
       reserveEl.textContent = r.runtime_floor_bytes ? `${gib(r.runtime_floor_bytes)} floor · ${gib(r.free_bytes)} free` : `not enforced · ${gib(r.free_bytes)} free`;
       reserveEl.className = r.holding !== false ? 'green' : 'red';
       const p = av.plan || {};
-      reservationEl.textContent = `${gib(p.runtime_reservation_bytes)} planned · ${mib(p.cuda_graph_allowance_bytes)} graph allowance`;
+      reservationEl.textContent = `${gib(p.runtime_reservation_bytes)} planned · ${mib(p.cuda_graph_rebuild_estimate_bytes)} graph rebuild estimate`;
     } else {
       reserveEl.textContent = s.admin_vram_note || '—';
       reserveEl.className = 'dim';

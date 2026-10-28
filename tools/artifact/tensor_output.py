@@ -12,13 +12,15 @@ import numpy as np
 import torch
 
 from .codecs.direct import encode_direct
+from .codecs.fp8_block import encode_fp8_block_scaled
 from .codecs.fp8_row import encode_fp8_row_scaled
-from .codecs.nvfp4 import encode_nvfp4, encode_nvfp4_expert_bank
+from .codecs.nvfp4 import encode_nvfp4
 from .codecs.packed_u4 import encode_u4z8_g16
 from .codecs.nf4 import divisor_word, nf4_rows
 from .codecs.row_split import encode_row_split, split_row_planes
 from .formats import (
     DirectFormat,
+    Fp8BlockFormat,
     Fp8RowFormat,
     Nvfp4Format,
     Nf4Format,
@@ -27,10 +29,9 @@ from .formats import (
     get_format,
 )
 from .layouts import (
-    EXPERT_BLOCK_SCALE_K16_M128X4_V1,
     block_scale_geometry,
-    expert_block_scale_geometry,
     packed_u4_geometry,
+    fp8_block_geometry,
     row_scale_geometry,
     row_split_geometry,
     row_paged_geometry,
@@ -48,7 +49,7 @@ class TensorOutput:
         self.object = obj
         self.format = get_format(obj.format)
         self._padding_initialized = False
-        self._divisor: bytes | None = None
+        self._divisors: dict[int, bytes] = {}
         self._next_row = 0
         self._pending_rows = None
         self._pages_written = 0
@@ -78,11 +79,11 @@ class TensorOutput:
         elif isinstance(self.format, Fp8RowFormat):
             g = row_scale_geometry(self.format, obj.shape)
             gaps = ((g.code_plane_bytes, g.scale_plane_offset),)
+        elif isinstance(self.format, Fp8BlockFormat):
+            g = fp8_block_geometry(self.format, obj.shape)
+            gaps = ((g.code_plane_bytes, g.scale_plane_offset),)
         elif isinstance(self.format, Nvfp4Format):
-            if obj.layout == EXPERT_BLOCK_SCALE_K16_M128X4_V1.name:
-                g = expert_block_scale_geometry(self.format, obj.shape)
-            else:
-                g = block_scale_geometry(self.format, obj.shape)
+            g = block_scale_geometry(self.format, obj.shape)
             gaps = ((g.code_plane_bytes, g.scale_plane_offset),)
         elif isinstance(self.format, U4Z8Format):
             g = packed_u4_geometry(self.format, obj.shape)
@@ -100,15 +101,20 @@ class TensorOutput:
         codes: torch.Tensor,
         scales: torch.Tensor,
         weight_divisor: bytes | None = None,
+        *,
+        matrix: int = 0,
     ) -> None:
         obj = self.object
-        if obj.layout == EXPERT_BLOCK_SCALE_K16_M128X4_V1.name:
-            raise TypeError(f"{obj.id}: write an NVFP4 expert bank one expert at a time")
-        if len(obj.shape) != 2 or not 0 <= row_begin < obj.shape[0]:
+        matrices = obj.shape[0] if len(obj.shape) == 3 else 1
+        if len(obj.shape) not in (2, 3) or not 0 <= matrix < matrices:
+            raise ValueError(f"{obj.id}: invalid encoded matrix index {matrix}")
+        n, k = obj.shape[-2:]
+        if not 0 <= row_begin < n:
             raise ValueError(f"{obj.id}: invalid encoded row origin {row_begin}")
-        rows, k = codes.shape[0], obj.shape[1]
-        if rows <= 0 or row_begin + rows > obj.shape[0]:
-            raise ValueError(f"{obj.id}: encoded rows exceed parent")
+        rows = codes.shape[0]
+        if rows <= 0 or row_begin + rows > n:
+            raise ValueError(f"{obj.id}: encoded rows exceed matrix")
+        parent_row = matrix * n + row_begin
         self._padding()
         if isinstance(self.format, Nf4Format):
             self._write_nf4(row_begin, codes, scales, weight_divisor)
@@ -132,6 +138,19 @@ class TensorOutput:
                 g.scale_plane_offset + row_begin * self.format.scale_bytes,
                 block[local.scale_plane_offset :],
             )
+        elif isinstance(self.format, Fp8BlockFormat):
+            if row_begin % 128 or rows % 128:
+                raise ValueError(
+                    f"{obj.id}: FP8 block output needs whole 128-row tiles"
+                )
+            g = fp8_block_geometry(self.format, obj.shape)
+            local = fp8_block_geometry(self.format, (rows, k))
+            block = memoryview(encode_fp8_block_scaled(codes, scales, (rows, k)))
+            self.write_bytes(parent_row * k, block[: local.code_plane_bytes])
+            self.write_bytes(
+                g.scale_plane_offset + parent_row // 128 * g.scale_columns * 2,
+                block[local.scale_plane_offset :],
+            )
         elif isinstance(self.format, Nvfp4Format):
             if row_begin % 128 or rows % 128 or weight_divisor is None:
                 raise ValueError(
@@ -140,16 +159,19 @@ class TensorOutput:
             g = block_scale_geometry(self.format, obj.shape)
             local = block_scale_geometry(self.format, (rows, k))
             block = memoryview(encode_nvfp4(codes, scales, weight_divisor, (rows, k)))
-            self.write_bytes(row_begin * (k // 2), block[: local.code_plane_bytes])
+            divisor = bytes(block[local.weight_divisor_offset :])
+            if matrix in self._divisors and self._divisors[matrix] != divisor:
+                raise ValueError(
+                    f"{obj.id}: matrix weight divisor changed between row blocks"
+                )
+            self.write_bytes(parent_row * (k // 2), block[: local.code_plane_bytes])
             self.write_bytes(
-                g.scale_plane_offset + row_begin * (k // 16),
+                g.scale_plane_offset + parent_row * (k // 16),
                 block[local.scale_plane_offset : local.weight_divisor_offset],
             )
-            if self._divisor is None:
-                self.write_bytes(g.weight_divisor_offset, weight_divisor)
-                self._divisor = bytes(weight_divisor)
-            elif self._divisor != weight_divisor:
-                raise ValueError(f"{obj.id}: weight divisor changed between row blocks")
+            if matrix not in self._divisors:
+                self.write_bytes(g.weight_divisor_offset + matrix * 4, divisor)
+                self._divisors[matrix] = divisor
         elif isinstance(self.format, U4Z8Format):
             g = packed_u4_geometry(self.format, obj.shape)
             local = packed_u4_geometry(self.format, (rows, k))
@@ -162,48 +184,15 @@ class TensorOutput:
         else:
             raise TypeError(f"{obj.id}: {self.format.name} has no row-code encoder")
 
-    def write_expert(
-        self,
-        expert: int,
-        codes: torch.Tensor,
-        scales: torch.Tensor,
-        weight_divisor: bytes,
-    ) -> None:
-        """Write one expert of an NVFP4 expert bank: packed ``[N,K/2]`` codes, natural
-        ``[N,K/16]`` scale words and its FP32 divisor word."""
-        obj = self.object
-        if obj.layout != EXPERT_BLOCK_SCALE_K16_M128X4_V1.name:
-            raise TypeError(f"{obj.id}: expected an NVFP4 expert bank")
-        g = expert_block_scale_geometry(self.format, obj.shape)
-        if type(expert) is not int or not 0 <= expert < g.experts:
-            raise ValueError(f"{obj.id}: expert {expert} is outside the bank")
-        if len(weight_divisor) != 4:
-            raise ValueError(f"{obj.id}: expert divisor must be one FP32 word")
-        self._padding()
-        # One expert is a one-expert bank; the codec owns the scale swizzle and validation.
-        single = (1, g.n, g.k)
-        local = expert_block_scale_geometry(self.format, single)
-        divisor = torch.tensor(struct.unpack("<f", bytes(weight_divisor)), dtype=torch.float32)
-        block = memoryview(
-            encode_nvfp4_expert_bank(codes.unsqueeze(0), scales.unsqueeze(0), divisor, single)
-        )
-        self.write_bytes(expert * g.expert_code_bytes, block[: local.code_plane_bytes])
-        self.write_bytes(
-            g.scale_plane_offset + expert * g.expert_scale_bytes,
-            block[local.scale_plane_offset : local.weight_divisor_offset],
-        )
-        self.write_bytes(
-            g.weight_divisor_offset + 4 * expert, block[local.weight_divisor_offset :]
-        )
 
     def _write_nf4(self, row_begin, codes, scales, weight_divisor):
         g = row_paged_geometry(self.format, self.object.shape)
         if row_begin != self._next_row:
             raise ValueError("NF4 streaming output requires consecutive rows")
         divisor = divisor_word(weight_divisor)
-        if self._divisor is not None and self._divisor != divisor:
+        if 0 in self._divisors and self._divisors[0] != divisor:
             raise ValueError("NF4 divisor changed between row blocks")
-        self._divisor = divisor
+        self._divisors[0] = divisor
         rows = nf4_rows(codes, scales, g.k)
         self._next_row += rows.shape[0]
         if self._pending_rows is not None:

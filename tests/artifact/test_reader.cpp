@@ -47,9 +47,11 @@ void file_set_and_bindings() {
                 binder.use("row", "context").activation_policy == ActivationPolicy::AllowA8,
             "Use policy changed");
     (void)binder.resource("text", "tokenizer.json");
-    auto plan = std::move(binder).finish();
+    const std::array requests{PlacementRequest{full.binding.parts[0].object, Device::cuda(0)},
+                              PlacementRequest{row.binding.parts[0].object, Device::cuda(0)}};
+    auto plan = plan_materialization(reader, requests, std::move(binder).finish());
     require(plan.device_objects.size() == 1 && plan.device_capacity_bytes == 528 &&
-                plan.host_objects.size() == 1,
+                plan.resources.objects.size() == 1,
             "selected parent deduplication or residency failed");
 }
 
@@ -96,9 +98,10 @@ void geometry_and_views() {
                                    "complete-parent ABI accepted an FP8 submatrix");
 
     std::vector<std::byte> nvfp4(4612);
+    const std::array divisors{2.0F};
     WeightParent nv_parent{weight_geometry(QType::NVFP4, QuantLayout::BlockScaleK16M128x4,
                                            std::array<std::uint64_t, 2>{128, 64}),
-                           Device::cpu(), nvfp4.data(), 2.0F};
+                           Device::cpu(), nvfp4.data(), divisors};
     require(weight_scale_offset(nv_parent.geometry, 31, 0) == 4096 + 496 &&
                 weight_scale_offset(nv_parent.geometry, 32, 0) == 4096 + 4,
             "NVFP4 parent swizzle origin was lost");
@@ -110,7 +113,7 @@ void geometry_and_views() {
     const auto query   = native_weight(complete, 3.0F);
     const auto context = native_weight(complete, 4.0F);
     require(query.weight_scale_divisor == 2 && query.input_scale_divisor == 3 &&
-                context.input_scale_divisor == 4 && nv_parent.weight_scale_divisor == 2,
+                context.input_scale_divisor == 4 && nv_parent.weight_divisors[0] == 2,
             "per-use native parameters changed the parent");
 
     const auto paged = weight_geometry(QType::NF4_G16_E4M3FN, QuantLayout::RowPagedG16_4K,
@@ -125,64 +128,65 @@ void geometry_and_views() {
     require(nf4_code_value(0) == -1 && nf4_code_value(7) == 0 && nf4_code_value(15) == 1 &&
                 std::bit_cast<std::uint32_t>(nf4_code_value(8)) == 0x3da2faff,
             "NF4 codebook changed");
-    WeightParent paged_parent{paged, Device::cpu(), nvfp4.data(), 2.0F};
+    WeightParent paged_parent{paged, Device::cpu(), nvfp4.data(), divisors};
     rejects<std::invalid_argument>([&] { (void)weight_row_planes({&paged_parent, 0, 160}); },
                                    "paged lookup was exposed as constant-stride planes");
     rejects<std::invalid_argument>([&] { (void)weight_paged_row_offset(paged, 46); },
                                    "out-of-bounds paged row accepted");
 }
 
-void flash_next_registrations() {
-    const auto bank = weight_geometry(QType::NVFP4, QuantLayout::ExpertBlockScaleK16M128x4,
-                                      std::array<std::uint64_t, 3>{2, 128, 64});
-    require(bank.scale_offset == 8192 && bank.scale_bytes == 1024 && bank.divisor_offset == 9216 &&
-                bank.bytes == 9224,
-            "NVFP4 expert bank lost its expert-major planes or per-expert divisors");
+void bank_geometry_and_views() {
+    const std::array<std::uint64_t, 3> shape{3, 256, 128};
+    const auto geometry =
+        weight_geometry(QType::NVFP4, QuantLayout::BatchedBlockScaleK16M128x4, shape);
+    require(geometry.code_bytes == 49152 && geometry.scale_offset == 49152 &&
+                geometry.scale_bytes == 6144 && geometry.divisor_offset == 55296 &&
+                geometry.divisor_count == 3 && geometry.bytes == 55308,
+            "NVFP4 bank planes or divisor count differ from the wire layout");
+    std::vector<std::byte> payload(geometry.bytes);
+    const std::array divisors{2.0F, 3.0F, 5.0F};
+    const WeightParent parent{geometry, Device::cpu(), payload.data(), divisors};
+    const auto second_up = native_weight({{128, 128}, {{&parent, 384 * 128, 512 * 128}}}, 7);
+    require(second_up.qdata == payload.data() + 24576 &&
+                second_up.scales == payload.data() + 52224 && second_up.weight_scale_divisor == 3 &&
+                second_up.input_scale_divisor == 7 && second_up.payload == payload.data() &&
+                second_up.payload_bytes == 55308 &&
+                second_up.layout == QuantLayout::BlockScaleK16M128x4,
+            "NVFP4 bank slice lost local planes, divisor or backing extent");
+    require(weight_scale_offset(geometry, 384 + 32, 5) == 52224 + 512 + 4 + 1,
+            "NVFP4 bank scale addressing lost the local tile origin");
     rejects<std::invalid_argument>(
-        [] {
-            (void)weight_geometry(QType::NVFP4, QuantLayout::ExpertBlockScaleK16M128x4,
-                                  std::array<std::uint64_t, 2>{128, 64});
-        },
-        "expert bank accepted a matrix");
-
-    std::vector<std::byte> fp8(268);
-    const WeightParent fp8_parent{weight_geometry(QType::FP8_E4M3FN_ROW_FP32,
-                                                  QuantLayout::RowScaleFp32,
-                                                  std::array<std::uint64_t, 2>{3, 5}),
-                                  Device::cpu(), fp8.data()};
-    const auto fp8_weight = native_weight({{3, 5}, {{&fp8_parent, 0, 15}}});
-    require(fp8_parent.geometry.bytes == 268 && fp8_weight.scales == fp8.data() + 256 &&
-                fp8_weight.scale_dtype == DType::FP32 && fp8_weight.scale_nb[0] == 4,
-            "FP32 row scales were interpreted as BF16");
+        [&] { (void)native_weight({{128, 128}, {{&parent, 64 * 128, 192 * 128}}}); },
+        "NVFP4 accepted a view cutting a scale tile");
     rejects<std::invalid_argument>(
-        [] {
-            (void)weight_geometry(QType::FP8_E4M3FN_ROW_BF16, QuantLayout::RowScaleFp32,
-                                  std::array<std::uint64_t, 2>{3, 5});
-        },
-        "BF16-scaled FP8 accepted the FP32 row-scale layout");
-
-    std::vector<std::byte> u4(264);
-    const WeightParent u4_parent{weight_geometry(QType::U4Z8_G16_FP16, QuantLayout::PackedU4G16,
-                                                 std::array<std::uint64_t, 2>{2, 32}),
-                                 Device::cpu(), u4.data()};
-    const auto u4_row = weight_row_planes({&u4_parent, 32, 64});
-    require(u4_parent.geometry.bytes == 264 && u4_row.codes == u4.data() + 16 &&
-                u4_row.scales == u4.data() + 260 && u4_row.scale_row_bytes == 4,
-            "U4 row view selected the wrong code or FP16 scale row");
+        [&] { (void)native_weight({{256, 128}, {{&parent, 128 * 128, 384 * 128}}}); },
+        "NVFP4 merged independent matrix divisor domains");
     rejects<std::invalid_argument>(
-        [] {
-            (void)weight_geometry(QType::U4Z8_G16_FP16, QuantLayout::PackedU4G16,
-                                  std::array<std::uint64_t, 2>{2, 24});
-        },
-        "U4 table accepted a partial K16 group");
+        [&] { (void)weight_geometry(QType::NVFP4, QuantLayout::BlockScaleK16M128x4, shape); },
+        "single-matrix NVFP4 layout accepted a bank");
+    auto invalid            = parent;
+    invalid.weight_divisors = std::span(divisors).first(1);
+    rejects<std::invalid_argument>(
+        [&] { (void)native_weight({{256, 128}, {{&invalid, 256 * 128, 512 * 128}}}); },
+        "NVFP4 accepted missing bank divisor metadata");
 
-    const std::array<std::int64_t, 3> integers{-3, 1LL << 40, 7};
-    const WeightParent int64_parent{
-        weight_geometry(QType::INT64, QuantLayout::Contiguous, std::array<std::uint64_t, 1>{3}),
-        Device::cpu(), reinterpret_cast<const std::byte*>(integers.data())};
-    const auto table = weight_tensor({{3}, {{&int64_parent, 0, 3}}}, {3});
-    require(int64_parent.geometry.bytes == 24 && table.dtype == DType::I64,
-            "INT64 table lost its word width");
+    const auto fp8_geometry =
+        weight_geometry(QType::FP8_E4M3FN_BLOCK128X128_BF16, QuantLayout::BlockScaleM128K128,
+                        std::array<std::uint64_t, 3>{3, 256, 384});
+    require(fp8_geometry.code_bytes == 294912 && fp8_geometry.scale_bytes == 36 &&
+                fp8_geometry.bytes == 294948 && fp8_geometry.scale_block_rows == 128,
+            "block-scaled FP8 bank expanded its scale grid");
+    std::vector<std::byte> fp8_payload(fp8_geometry.bytes);
+    const WeightParent fp8{fp8_geometry, Device::cpu(), fp8_payload.data()};
+    const auto fp8_up = native_weight({{128, 384}, {{&fp8, 384 * 384, 512 * 384}}});
+    require(fp8_up.qdata == fp8_payload.data() + 147456 &&
+                fp8_up.scales == fp8_payload.data() + 294930 && fp8_up.scale_ne[0] == 3 &&
+                fp8_up.scale_ne[1] == 1 && fp8_up.scale_nb[0] == 2 && fp8_up.scale_nb[1] == 6 &&
+                weight_scale_offset(fp8_geometry, 383, 2) == 294928,
+            "block-scaled FP8 view selected a different expert or block row");
+    rejects<std::invalid_argument>(
+        [&] { (void)native_weight({{128, 384}, {{&fp8, 1 * 384, 129 * 384}}}); },
+        "block-scaled FP8 native view split a scale block");
 }
 
 void invalid_directories() {
@@ -230,7 +234,7 @@ int main(int argc, char** argv) {
     try {
         file_set_and_bindings();
         geometry_and_views();
-        flash_next_registrations();
+        bank_geometry_and_views();
         invalid_directories();
         // Optional production-writer fixture or explicitly selected real artifact.
         if (argc == 2) {

@@ -1,348 +1,271 @@
 #include "models/qwen4_exp/program/internal.h"
-#include "models/qwen4_exp/frontend.h"
-#include "models/qwen4_exp/program/planning/startup.h"
-#include "models/qwen4_exp/program/program_impl.h"
-#include <stdexcept>
-#include <utility>
+
+#include <algorithm>
+
+namespace ninfer::models::qwen4_exp::detail {
+
+ProgramImpl::ProgramImpl(const execution::Parameters& p, ExecutionPlan plan, DeviceContext& d)
+    : parameters(p), device(d), cuda(d.execution_view()), resources(p, std::move(plan), d),
+      ple(resources, d), shape(resources.plan.shape),
+      checkpoints(resources.state_store->capacity() * 8ULL), prefill_timer(d) {
+    if (const auto& trace = resources.plan.persistent.buffers.route_trace) {
+        route_host.emplace(resources.plan.pinned_trace_bytes);
+        route_trace.emplace(resources.tensor(*trace), static_cast<std::int32_t*>(route_host->data()),
+            p.text.layers.size(), p.mtp.has_value(), shape.draft_tokens, shape.max_concurrency);
+    }
+    for (std::uint16_t i = 0; i < resources.pool_count(); ++i) {
+        const auto& pool   = resources.pool(i).cache.pages();
+        const auto payload = pool.device_copy_work(1).payload_bytes;
+        const auto host    = plan_host_kv_page_layout(pool.geometry()).page_stride;
+        pools.push_back(
+            {{i}, i == 0 ? "main" : "mtp", &pool.geometry(), pool.capacity_pages(), payload, host});
+    }
+}
+
+ProgramImpl::~ProgramImpl() { cleanup(); }
+
+bool ProgramImpl::valid(SequenceHandle h) const noexcept {
+    return h.owner == this && h.lane < shape.max_concurrency && sequences[h.lane] &&
+           sequences[h.lane]->epoch == h.epoch;
+}
+
+Sequence& ProgramImpl::sequence(SequenceHandle h) const {
+    if (!valid(h)) throw std::logic_error("stale Qwen4Exp sequence");
+    return *sequences[h.lane];
+}
+
+SequenceHandle ProgramImpl::handle(const Sequence& s) const { return {this, s.lane, s.epoch}; }
+
+CaptureReservation::~CaptureReservation() {
+    if (destination.valid() && !states->release(destination)) std::terminate();
+    for (const auto& [h, role] : records) {
+        if (checkpoints->valid(h)) {
+            if (!checkpoints->erase(h)) std::terminate();
+        } else
+            checkpoints->cancel(h);
+    }
+}
+
+Suspended::~Suspended() {
+    if (snapshot && owner->checkpoints.valid(*snapshot) && !owner->checkpoints.erase(*snapshot))
+        std::terminate();
+}
+
+void ProgramImpl::clear(Sequence& s) noexcept {
+    try {
+        ple.cancel(s.id);
+        retire_vision(s);
+        s.capture.reset();
+        for (auto& history : s.histories) history.reset();
+        auto& store = *resources.state_store;
+        if (s.write_destination.valid()) {
+            store.abort_write(s.continuation.image, s.write_destination);
+            if (!store.release(s.write_destination)) std::terminate();
+            s.write_destination = {};
+        }
+        if (store.valid(s.continuation.image) &&
+            store.checkpoint_references(s.continuation.image) == 0 &&
+            !store.release(s.continuation.image))
+            std::terminate();
+        s.continuation.image = {};
+        ++epochs[s.lane];
+    } catch (...) { std::terminate(); }
+}
+
+void ProgramImpl::cleanup() noexcept {
+    try {
+        device.synchronize();
+        resources.experts->synchronize();
+        ple.drain();
+        cancel_operation();
+        for (auto& s : sequences) {
+            if (s) clear(*s);
+            s.reset();
+        }
+        checkpoints.clear();
+        pending_transaction = 0;
+        pending_members.clear();
+        pending_verify.reset();
+        graphs.reset();
+    } catch (...) { std::terminate(); }
+}
+
+PhysicalUsageSnapshot ProgramImpl::usage() const noexcept {
+    PhysicalUsageSnapshot out;
+    const auto& r            = resources;
+    out.occupied.state_slots = r.state_store->device_occupied();
+    out.capacity.state_slots = r.state_store->device_capacity();
+    for (std::uint32_t i = 0; i < r.pool_count(); ++i) {
+        const auto& pool               = r.pool(i).cache.pages();
+        out.occupied.kv_page_groups[i] = pool.allocated_pages() + pool.reserved_pages();
+        out.capacity.kv_page_groups[i] = pool.capacity_pages();
+    }
+    out.host_state_slots = r.state_store->host_occupied();
+    if (r.host_context) {
+        out.occupied.host_bytes      = r.host_context->occupied_bytes();
+        out.capacity.host_bytes      = r.host_context->capacity_bytes();
+        out.host_reserved_bytes      = r.host_context->reserved_bytes();
+        out.host_peak_occupied_bytes = r.host_context->peak_occupied_bytes();
+        const auto state_bytes =
+            std::size_t(out.host_state_slots) * r.states->storage().image_bytes();
+        out.host_kv_bytes =
+            r.host_context->live_bytes() - std::min(r.host_context->live_bytes(), state_bytes);
+    }
+    return out;
+}
+
+} // namespace ninfer::models::qwen4_exp::detail
 
 namespace ninfer::models::qwen4_exp {
 
-
-SequencePlan::SequencePlan(std::unique_ptr<detail::SequencePlanImpl> impl) noexcept
-    : impl_(std::move(impl)) {}
-
-SequencePlan::SequencePlan(SequencePlan&&) noexcept = default;
-
-SequencePlan& SequencePlan::operator=(SequencePlan&&) noexcept = default;
-
-SequencePlan::~SequencePlan() = default;
-
-std::uint32_t SequencePlan::capacity() const noexcept {
-    return impl_ != nullptr ? impl_->capacity : 0;
+Program::Program(const execution::Parameters& p, ExecutionPlan plan, DeviceContext& device)
+    : impl_(std::make_unique<detail::ProgramImpl>(p, std::move(plan), device)) {
+    impl_->initialize_graphs();
 }
 
-std::uint32_t SequencePlan::kv_capacity() const noexcept {
-    return impl_ != nullptr ? impl_->kv_capacity : 0;
-}
-
-std::uint32_t SequencePlan::max_concurrency() const noexcept {
-    return impl_ != nullptr ? impl_->max_concurrency : 0;
-}
-
-std::size_t SequencePlan::device_reservation_bytes() const noexcept {
-    return impl_ != nullptr ? impl_->device_reservation_bytes : 0;
-}
-
-std::size_t SequencePlan::workspace_capacity_bytes() const noexcept {
-    return impl_ != nullptr ? impl_->workspace.capacity : 0;
-}
-
-std::size_t SequencePlan::host_capacity_bytes() const noexcept {
-    return impl_ ? impl_->context_cache.host_capacity_bytes.value_or(0) : 0;
-}
-
-SequencePlanner::SequencePlanner(std::unique_ptr<detail::SequencePlannerImpl> impl) noexcept
-    : impl_(std::move(impl)) {}
-
-SequencePlanner::SequencePlanner(SequencePlanner&&) noexcept = default;
-
-SequencePlanner& SequencePlanner::operator=(SequencePlanner&&) noexcept = default;
-
-SequencePlanner::~SequencePlanner() = default;
-
-const runtime::SequenceCapacityCurve& SequencePlanner::capacity_curve() const noexcept {
-    static const runtime::SequenceCapacityCurve empty;
-    return impl_ != nullptr ? impl_->curve : empty;
-}
-
-SequencePlan SequencePlanner::finalize(std::uint32_t main_page_groups) && {
-    if (impl_ == nullptr) { throw std::logic_error("sequence planner is empty"); }
-    return SequencePlan(detail::finalize_sequence_plan_impl(std::move(impl_), main_page_groups));
-}
-
-RequestBasePlan::RequestBasePlan(std::shared_ptr<detail::RequestBasePlanImpl> impl) noexcept
-    : impl_(std::move(impl)) {}
-
-RequestBasePlan::RequestBasePlan(RequestBasePlan&&) noexcept = default;
-
-RequestBasePlan& RequestBasePlan::operator=(RequestBasePlan&&) noexcept = default;
-
-RequestBasePlan::~RequestBasePlan() = default;
-
-const runtime::RequestPlanSummary& RequestBasePlan::summary() const noexcept {
-    static const runtime::RequestPlanSummary empty;
-    return impl_ != nullptr ? impl_->summary : empty;
-}
-
-const PreparedContextCache& RequestBasePlan::context_cache() const noexcept {
-    static const PreparedContextCache empty;
-    return impl_ != nullptr ? impl_->context_cache : empty;
-}
-
-std::vector<std::uint32_t> RequestBasePlan::capture_frontiers() const {
-    std::vector<std::uint32_t> frontiers;
-    if (impl_) {
-        frontiers.reserve(impl_->capture_groups.size());
-        for (const auto& group : impl_->capture_groups) { frontiers.push_back(group.frontier); }
-    }
-    return frontiers;
-}
-
-std::optional<PrefixShortlistKey>
-RequestBasePlan::prefix_shortlist_key(std::uint32_t frontier) const noexcept {
-    if (impl_ == nullptr || frontier == 0 || frontier > impl_->prefix_digests.size()) {
-        return std::nullopt;
-    }
-    return PrefixShortlistKey{
-        .digests      = impl_->prefix_digests.at(frontier),
-        .frontier     = frontier,
-        .identity_tag = impl_->prefix_identity_tag,
-    };
-}
-
-ResumeState::ResumeState(std::unique_ptr<detail::ResumeStateImpl> impl) noexcept
-    : impl_(std::move(impl)) {}
-
-ResumeState::ResumeState(ResumeState&&) noexcept            = default;
-ResumeState& ResumeState::operator=(ResumeState&&) noexcept = default;
-ResumeState::~ResumeState()                                 = default;
-
-bool ResumeState::has_snapshot() const noexcept { return impl_ && impl_->snapshot.has_value(); }
-
-std::optional<CheckpointHandle> ResumeState::snapshot_handle() const noexcept {
-    return impl_ ? impl_->snapshot : std::nullopt;
-}
-
-std::uint32_t ResumeState::frontier() const noexcept { return impl_ ? impl_->frontier : 0; }
-
-Program::Program(std::unique_ptr<detail::ProgramImpl> impl) noexcept : impl_(std::move(impl)) {}
-
-Program::~Program() noexcept = default;
-
-RequestBasePlan Program::plan_request(PreparedPrompt&& prompt,
-                                      const runtime::ResolvedExecutionOptions& options) {
-    return impl_->plan_request(PreparedPromptAccess::take(std::move(prompt)), options);
-}
-
-CausalScores Program::causal_score(PreparedPrompt&& prompt, std::uint32_t first_target,
-                                   const CausalScoreReadout& readout) {
-    return impl_->causal_score(PreparedPromptAccess::take(std::move(prompt)), first_target,
-                               readout);
-}
-
-std::optional<SourceCandidate>
-Program::inspect_source(const RequestBasePlan& base, std::optional<CheckpointHandle> checkpoint,
-                        bool consume_source, std::span<const CheckpointHandle> private_points,
-                        std::span<const CheckpointHandle> retired_points) const {
-    return impl_->inspect_source(base, checkpoint, consume_source, private_points, retired_points);
-}
-
-PrefixShortlistKey Program::checkpoint_key(CheckpointHandle h, std::uint32_t f) const {
-    return impl_->checkpoint_key(h, f);
-}
-
-runtime::ContextResourceUsage
-Program::checkpoint_footprint(std::span<const CheckpointHandle> handles) const {
-    return impl_->checkpoint_footprint(handles);
-}
-
-CheckpointSummary Program::checkpoint_summary(CheckpointHandle h) const {
-    return impl_->checkpoint_summary(h);
-}
-
-CheckpointMetadata Program::checkpoint_metadata(CheckpointHandle h) const {
-    return impl_->checkpoint_metadata(h);
-}
-
-bool Program::checkpoint_matches(CheckpointHandle h, const RequestBasePlan& b) const {
-    return impl_->checkpoint_matches(h, b);
-}
-
-std::uint32_t Program::checkpoint_recovery_frontier(CheckpointHandle retained,
-                                                    const RequestBasePlan& base,
-                                                    std::uint32_t target) const {
-    return impl_->checkpoint_recovery_frontier(retained, base, target);
-}
-
-std::uint64_t Program::checkpoint_recovery_loss(std::span<const CheckpointHandle> removed,
-                                                std::span<const CheckpointHandle> surviving) const {
-    return impl_->checkpoint_recovery_loss(removed, surviving);
-}
-
-bool Program::valid_checkpoint(CheckpointHandle h) const noexcept {
-    return impl_->valid_checkpoint(h);
-}
-
-bool Program::release_checkpoint(CheckpointHandle h) noexcept {
-    return impl_->release_checkpoint(h);
-}
-
-bool Program::revoke_snapshot(ResumeState& paused) noexcept {
-    return impl_->revoke_snapshot(paused);
-}
-
-runtime::ContextResourceUsage Program::snapshot_resources(const ResumeState& paused) const {
-    return impl_->snapshot_resources(paused);
-}
-
-std::size_t Program::host_bytes_released(std::span<const CheckpointHandle> checkpoints) const {
-    return impl_->host_bytes_released(checkpoints);
-}
-
-std::optional<std::size_t> Program::pause_host_bytes(SequenceHandle sequence) const {
-    return impl_->pause_host_bytes(sequence);
-}
-
-std::size_t Program::release_redundant_host(std::span<const CheckpointHandle> excluded,
-                                            std::optional<SequenceHandle> pending_backup) {
-    return impl_->release_redundant_host(excluded, pending_backup);
-}
-
-runtime::ResourceReservation Program::reserve_units(std::span<const ExecutionUnit> units) {
-    return impl_->reserve_units(units);
-}
-
-bool Program::reclaim_capture_reservation(runtime::ContextResourceUsage shortage) {
-    return impl_->reclaim_capture_reservation(shortage);
-}
-
-void Program::release_units(std::span<const SequenceHandle> units) noexcept {
-    impl_->release_units(units);
-}
-
-BindingReservation Program::start_binding(const RequestBasePlan& base, runtime::LaneId lane,
-                                          const SourceCandidate& source, ResumeState* resume,
-                                          ExecutionUnitKind kind, std::uint32_t tokens) {
-    return impl_->start_binding(base, lane, source, resume, kind, tokens);
-}
-
-bool Program::start_capture(SequenceHandle h) { return impl_->start_capture(h); }
-
-bool Program::capture_is_input(SequenceHandle h) const { return impl_->capture_is_input(h); }
-
-bool Program::capture_is_discovered_prefix(SequenceHandle h) const {
-    return impl_->capture_is_discovered_prefix(h);
-}
-
-std::optional<CapturePreparation> Program::prepare_capture(SequenceHandle h) {
-    return impl_->prepare_capture(h);
-}
-
-void Program::skip_capture(SequenceHandle h) { impl_->skip_capture(h); }
-
-bool Program::start_demote(const ContextDemotion& plan) { return impl_->start_demote(plan); }
-
-ContextReclaimPlan Program::plan_reclaim(std::span<const CheckpointHandle> allowed,
-                                         std::span<const CheckpointHandle> excluded,
-                                         runtime::ContextResourceUsage shortage) const {
-    return impl_->plan_reclaim(allowed, excluded, shortage);
-}
-
-std::vector<ContextRelease> Program::plan_releases(std::span<const CheckpointHandle> allowed,
-                                                   std::span<const CheckpointHandle> excluded,
-                                                   runtime::ContextResourceUsage shortage) const {
-    return impl_->plan_releases(allowed, excluded, shortage);
-}
-
-bool Program::start_pause(SequenceHandle h, bool save, runtime::ExecutionTiming* timing) {
-    return impl_->start_pause(h, save, timing);
-}
-
-ContextProgress Program::poll_context(runtime::CancellationFlagView c) {
-    return impl_->poll_context(c);
-}
-
-bool Program::context_blocks(SequenceHandle sequence) const noexcept {
-    return impl_->context_blocks(sequence);
-}
-
-bool Program::recovery_pending(SequenceHandle sequence) const noexcept {
-    return impl_->recovery_pending(sequence);
-}
-
-bool Program::has_context_transaction() const noexcept { return impl_->has_context_transaction(); }
-
-PrefillProgress Program::advance_prefill(SequenceHandle h, runtime::ExecutionTiming* t,
-                                         runtime::TokenMaskProvider* m) {
-    return impl_->advance_prefill(h, t, m);
-}
-
-ReplayProgress Program::advance_replay(SequenceHandle h, runtime::ExecutionTiming* t) {
-    return impl_->advance_replay(h, t);
-}
-
-PendingBatch Program::decode(std::span<const SequenceHandle> s,
-                             std::span<const runtime::RoundBudget> b, runtime::ExecutionTiming* t,
-                             runtime::TokenMaskProvider* m) {
-    return impl_->decode(s, b, t, m);
-}
-
-runtime::ExecutionTiming Program::append_forced_tokens(
-    std::span<const SequenceHandle> s, std::span<const TokenId> ids, std::uint32_t stride,
-    std::span<const std::optional<std::uint32_t>> splits, runtime::ExecutionTiming* t) {
-    return impl_->append_forced_tokens(s, ids, stride, splits, t);
-}
-
-CommitResult Program::commit(PendingBatch&& p, std::span<const runtime::CommitDecision> d,
-                             runtime::CommitObservation o, runtime::ExecutionTiming* t) {
-    return impl_->commit(std::move(p), d, o, t);
-}
-
-DiscardResult Program::abort_pending(PendingBatch&& p) noexcept {
-    return impl_->abort_pending(std::move(p));
-}
-
-FinishResult Program::finish(SequenceHandle s) noexcept { return impl_->finish(s); }
-
-AbortResult Program::abort(SequenceHandle s) noexcept { return impl_->abort(s); }
-
-void Program::fail_all_cleanup() noexcept { impl_->fail_all_cleanup(); }
-
-PhysicalUsageSnapshot Program::physical_usage() const noexcept { return impl_->physical_usage(); }
-
-MemorySummary Program::memory_summary() const noexcept { return impl_->memory_summary(); }
-
-void Program::reset_memory_peaks() noexcept { impl_->reset_memory_peaks(); }
-
-std::span<const TokenLogprobs> Program::round_token_logprobs(runtime::LaneId lane) const {
-    return impl_->round_token_logprobs(lane.value);
-}
-
-std::span<const TokenLogprobs> Program::prompt_token_logprobs(runtime::LaneId lane) const {
-    return impl_->prompt_token_logprobs(lane.value);
-}
+Program::~Program() = default;
 
 std::optional<ExpertRouteGeometry> Program::expert_route_geometry() const noexcept {
-    return impl_->expert_route_geometry();
+    const auto& p = *impl_;
+    if (!p.route_trace) return {};
+    const auto layers = static_cast<std::uint16_t>(p.parameters.text.layers.size());
+    return ExpertRouteGeometry{layers, p.parameters.mtp ? std::optional{layers} : std::nullopt,
+                              static_cast<std::uint16_t>(p.parameters.model.config().text.moe.experts), 10};
 }
 
 std::vector<execution::RouteTraceRecord> Program::take_route_trace() noexcept {
-    return impl_->take_route_trace();
+    return impl_->route_trace ? impl_->route_trace->take() : std::vector<execution::RouteTraceRecord>{};
 }
 
-std::span<const float> Program::reasoning_features(runtime::LaneId lane) const {
-    return impl_->reasoning_features(lane.value);
+std::span<const runtime::KvPoolDescriptor> Program::kv_pools() const noexcept {
+    return impl_->pools;
 }
 
-SequencePlanner make_sequence_planner(const execution::Parameters& parameters,
-                                      DeviceContext& device, const EngineOptions& options) {
-    return SequencePlanner(detail::make_sequence_planner_impl(parameters, device, options));
-}
+PhysicalUsageSnapshot Program::physical_usage() const noexcept { return impl_->usage(); }
 
-std::unique_ptr<Program> create_program(const execution::Parameters& parameters,
-                                        SequencePlan&& plan, DeviceContext& device,
-                                        const StartupObserver& startup_observer) {
-    if (plan.impl_ == nullptr) { throw std::invalid_argument("sequence plan is empty"); }
-    if (plan.impl_->parameters != &parameters) {
-        throw std::invalid_argument("sequence plan belongs to another model instance");
+bool Program::has_context_operation() const noexcept { return bool(impl_->operation); }
+
+bool Program::context_blocks(SequenceHandle h) const noexcept {
+    const auto& p = *impl_;
+    if (!p.operation || !p.valid(h)) return false;
+    const auto* bind = std::get_if<detail::BindOperation>(&p.operation->action);
+    if (bind) {
+        for (std::uint16_t i = 0; i < p.resources.pool_count(); ++i) {
+            const auto* binding = p.operation->migration.binding({i});
+            if (binding && binding->blocks_writer(p.sequences[h.lane]->histories[i].handle()))
+                return true;
+        }
+        return false;
     }
-    if (plan.impl_->multiprocessor_count != device.multiprocessor_count()) {
-        throw std::invalid_argument("sequence plan device capacity does not match execution");
-    }
-    auto impl =
-        std::make_unique<detail::ProgramImpl>(parameters, *plan.impl_, device, startup_observer);
-    plan.impl_.reset();
-    return std::unique_ptr<Program>(new Program(std::move(impl)));
+    if (const auto* capture = std::get_if<detail::CaptureOperation>(&p.operation->action))
+        return capture->lane == h.lane;
+    if (const auto* pause = std::get_if<detail::PauseOperation>(&p.operation->action))
+        return pause->lane == h.lane;
+    return false;
 }
+
+bool Program::recovery_pending(SequenceHandle h) const noexcept {
+    return impl_->valid(h) && impl_->sequences[h.lane]->recovery_peak != 0;
+}
+
+void Program::fail_all_cleanup() noexcept { impl_->cleanup(); }
+
+void Program::reset_memory_peaks() noexcept {
+    auto& p = *impl_;
+    p.resources.workspace.reset_peak();
+    if (p.graphs) p.graphs->reset_workspace_peak();
+    p.vision_handoff_peak_bytes = p.active_vision_bytes();
+    p.vision_workspace_peak_bytes =
+        p.vision_handoff_peak_bytes
+            ? p.resources.plan.workspace.vision->handoff_offset_bytes + p.vision_handoff_peak_bytes
+            : 0;
+}
+
+MemorySummary Program::memory_summary() const {
+    const auto& p       = *impl_;
+    const auto& plan    = p.resources.plan;
+    const auto& weights = p.parameters.model.storage_stats();
+    MemorySummary out;
+    out.cuda_graph    = p.graph_memory;
+    out.device        = p.device.device().index();
+    out.max_context   = plan.shape.max_context;
+    out.prefill_chunk = plan.shape.prefill_chunk;
+    out.kv_capacity   = plan.capacity.resolved_tokens;
+    out.kv_cache      = plan.shape.kv_storage;
+    out.weights       = {weights.device_capacity_bytes, weights.device_capacity_bytes,
+                         weights.device_capacity_bytes};
+    out.sequence      = {plan.persistent.bytes, plan.persistent.bytes, plan.persistent.bytes};
+    const auto active_vision = p.active_vision_bytes();
+    const auto active_workspace =
+        active_vision ? std::max(p.resources.workspace.used(),
+                                 plan.workspace.vision->handoff_offset_bytes + active_vision)
+                      : p.resources.workspace.used();
+    out.workspace = {plan.workspace.bytes, active_workspace,
+                     std::max({p.resources.workspace.peak_used(), p.vision_workspace_peak_bytes,
+                               p.graphs ? p.graphs->workspace_peak() : 0})};
+    if (plan.workspace.vision) {
+        const auto& vision   = *plan.workspace.vision;
+        out.vision_workspace = VisionWorkspaceMemorySummary{
+            .aggregate_prompt_tokens = static_cast<std::uint32_t>(
+                std::min<std::uint64_t>(p.shape.max_context, qwen::kMaximumPromptVisionTokens)),
+            .max_item_tokens        = vision.max_merged_tokens,
+            .general_capacity_bytes = vision.general_capacity_bytes,
+            .encode_peak_bytes      = vision.encode_peak_bytes,
+            .handoff_offset_bytes   = vision.handoff_offset_bytes,
+            .handoff_capacity_bytes = vision.handoff_capacity_bytes,
+            .handoff_active_bytes   = active_vision,
+            .handoff_peak_bytes     = p.vision_handoff_peak_bytes};
+    }
+    out.workspace_logical_peak_bytes = out.workspace.peak_used_bytes;
+    out.runtime_reservation_bytes    = plan.device_bytes();
+    const auto usage                 = p.usage();
+    out.host_context_capacity_bytes  = usage.capacity.host_bytes;
+    out.host_context_occupied_bytes  = usage.occupied.host_bytes;
+    out.host_context_reserved_bytes  = usage.host_reserved_bytes;
+    out.host_state_occupied_slots    = usage.host_state_slots;
+    out.host_kv_occupied_bytes       = usage.host_kv_bytes;
+    for (const auto& pool : p.pools)
+        out.kv_payload_bytes += pool.device_page_bytes * pool.device_page_groups;
+    const auto cache = p.resources.experts->cache_usage();
+    const auto& m    = *plan.moe;
+    out.moe.emplace();
+    auto& summary                 = *out.moe;
+    summary.host_weights_bytes    = weights.host_capacity_bytes;
+    summary.registered_host_bytes = weights.registered_host_bytes;
+    summary.cache_bytes           = m.cache.config.capacity_bytes;
+    summary.fixed_bytes           = m.cache.config.fixed_bytes;
+    summary.window_bytes          = summary.cache_bytes - summary.fixed_bytes;
+    summary.window_count          = m.window_count;
+    summary.used_bytes            = cache.used_bytes;
+    summary.target_bytes          = m.target_bytes;
+    summary.ready_bytes           = cache.ready_cache_bytes;
+    summary.cpu_workers           = m.team.worker_cpus.size();
+    summary.bridge_device_bytes   = m.bridge.device_frame_bytes;
+    summary.bridge_pinned_bytes   = m.bridge.pinned_frame_bytes;
+    summary.cpu_workspace_bytes   = m.bridge.cpu_workspace_bytes;
+    summary.uploaded_bytes        = cache.data_bytes;
+    summary.prefetched_bytes      = cache.prefetched_bytes;
+    for (const auto& l : m.layers) {
+        summary.fixed_experts_per_layer.push_back(l.fixed_experts);
+        summary.target_experts_per_layer.push_back(l.cache_experts);
+        summary.ready_experts_per_layer.push_back(
+            cache.ready_experts_per_bank.at(l.spec.bank.index));
+    }
+    return out;
+}
+
+ResumeState::ResumeState(std::unique_ptr<detail::Suspended> p) : state_(std::move(p)) {}
+
+ResumeState::~ResumeState()                                 = default;
+ResumeState::ResumeState(ResumeState&&) noexcept            = default;
+ResumeState& ResumeState::operator=(ResumeState&&) noexcept = default;
+
+bool ResumeState::has_snapshot() const noexcept { return state_ && state_->snapshot.has_value(); }
+
+std::optional<CheckpointHandle> ResumeState::snapshot_handle() const noexcept {
+    return state_ ? state_->snapshot : std::nullopt;
+}
+
+std::uint32_t ResumeState::frontier() const noexcept { return state_ ? state_->frontier : 0; }
 
 } // namespace ninfer::models::qwen4_exp

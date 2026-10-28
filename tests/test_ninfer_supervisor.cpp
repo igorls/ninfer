@@ -51,7 +51,7 @@ int test_model_reserve_budget() {
                            {{"runtime_reservation_bytes", 16 * gib},
                             {"minimum_runtime_reservation_bytes", 9 * gib},
                             {"available_after_weights_bytes", 18 * gib},
-                            {"cuda_graph_allowance_bytes", gib}}},
+                            {"cuda_graph_rebuild_estimate_bytes", gib}}},
                           {"arenas", {{"weights", {{"capacity_bytes", 70 * gib}}}}},
                           {"desktop_reserve", {{"configured_bytes", 4 * gib}}},
                           {"device", {{"free_bytes", 8 * gib}}}};

@@ -357,6 +357,64 @@ int scale_layout(DeviceContext& device, KvCacheStorage storage, int tokens, int 
                          " T=" + std::to_string(tokens));
 }
 
+int decode_column_invariance(DeviceContext& device, KvCacheStorage storage, int history) {
+    // Compare each represented query with the same query in the widest native
+    // target window. Cache pages, selected support and the envelope stay fixed.
+    constexpr int width = 6, batch = 8, channels = 6144;
+    Fixture f(width, batch, history, false, storage);
+    f.reset();
+    const auto execution = device.execution_view();
+    const auto capacity = std::max(
+        ops::qsa_sparse_gqa_workspace_capacity_bytes(storage, width, width, batch, f.envelope,
+                                                     execution.multiprocessor_count()),
+        ops::qsa_sparse_gqa_workspace_capacity_bytes(storage, 1, 1, 1, f.envelope,
+                                                     execution.multiprocessor_count()));
+    GuardedDeviceBuffer scratch(std::max<std::size_t>(capacity, 256));
+    MemoryArena arena(scratch.span());
+    f.launch(arena, execution);
+    device.synchronize();
+    const auto together = from_device<std::uint16_t>(f.out.data(), f.qhost.size());
+    std::vector<std::uint16_t> separate(together.size());
+    GuardedDeviceBuffer one(channels * 2);
+    const std::vector<std::int32_t> valid{1};
+    auto live = to_device(valid);
+    const Tensor live_tensor(live.span(), DType::I32, {1});
+    Tensor result(one.span(), DType::BF16, {256, 24, 1, 1});
+    CUDA_CHECK(cudaStreamSynchronize(nullptr));
+    for (int m = 0; m < width * batch; ++m) {
+        const int b = m / width;
+        if (m % width >= f.valid[b]) continue;
+        const auto query = f.query.view({channels, width * batch}).slice(1, m, 1)
+                               .view({256, 24, 1, 1});
+        const auto gate = f.output_gate.view({channels, width * batch}).slice(1, m, 1)
+                              .view({256, 24, 1, 1});
+        const ops::QsaBatchView metadata{
+            f.batch.positions.view({width * batch}).slice(0, m, 1).view({1, 1}),
+            live_tensor, f.batch.table_rows.slice(0, b, 1)};
+        const ops::QsaBlockSelection selected{
+            f.selected.block_ids.view({512, width * batch}).slice(1, m, 1).view({512, 1, 1}),
+            f.selected.block_counts.view({width * batch}).slice(0, m, 1).view({1, 1})};
+        ops::qsa_sparse_gqa(query, gate, f.cache, metadata, selected, f.envelope, arena,
+                            result, execution);
+        device.synchronize();
+        const auto words = from_device<std::uint16_t>(one.data(), channels);
+        std::copy(words.begin(), words.end(), separate.begin() + std::size_t(m) * channels);
+    }
+    const auto label = "QSA decode columns storage=" + std::to_string(int(storage)) +
+                       " history=" + std::to_string(history);
+    int failures = verify_exact(label.c_str(), together, separate);
+    const auto oracle = f.reference();
+    std::vector<double> combined(together.size()), individual(separate.size());
+    for (std::size_t i = 0; i < together.size(); ++i) {
+        combined[i] = bf16_to_f32(together[i]);
+        individual[i] = bf16_to_f32(separate[i]);
+    }
+    failures += verify_reduction(label + " batched FP64", combined, oracle, kSparseA16Criterion);
+    failures += verify_reduction(label + " single FP64", individual, oracle, kSparseA16Criterion);
+    failures += scratch.verify_guards(label) + one.verify_guards(label);
+    return failures;
+}
+
 int quantized_validation(DeviceContext& device, KvCacheStorage storage) {
     Fixture invalid(1, 1, 4, false, storage);
     ninfer::DeviceBuffer workspace_storage(ninfer::test::cuda_environment().context.device(),
@@ -430,9 +488,12 @@ int main(int argc, char** argv) {
         }
         DeviceContext device;
         int failures = validation(device);
-        for (auto format : formats)
+        for (auto format : formats) {
+            failures += decode_column_invariance(device, format, 512);
+            failures += decode_column_invariance(device, format, 2053);
             failures += format == KvCacheStorage::BFloat16 ? run_bf16(device)
                                                            : run_quantized(device, format);
+        }
         std::cout << "QSA Sparse GQA: " << (failures ? "FAIL" : "PASS") << '\n';
         return failures ? 1 : 0;
     } catch (const std::exception& e) {

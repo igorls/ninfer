@@ -14,8 +14,8 @@ struct ProcessMemoryInfo {
 };
 
 struct DeviceMemorySnapshot {
-    std::size_t total_bytes = 0;
     std::size_t free_bytes  = 0;
+    std::size_t total_bytes = 0;
     std::size_t used_bytes  = 0;
     bool is_nvml            = false;
     std::string device_name;

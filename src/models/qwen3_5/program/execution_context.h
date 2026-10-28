@@ -1,4 +1,6 @@
 #pragma once
+
+#include "models/common/moe/resources.h"
 #include "models/qwen3_5/program/internal.h"
 
 #include "core/arena.h"
@@ -10,10 +12,10 @@
 #include "ninfer/ops/softmax_attention.h"
 #include "models/qwen3_5/program/storage/draft_context.h"
 #include "models/qwen3_5/execution/text.h"
-#include "models/qwen3_5/execution/vision.h"
-#include "models/qwen3_5/program/vision_prefill.h"
+#include "models/common/qwen/vision/vision.h"
+#include "models/common/qwen/vision/prefill.h"
 #include "models/qwen3_5/state/decoder_state.h"
-#include "models/qwen3_5/frontend/prepared_prompt.h"
+#include "models/common/qwen/frontend/prepared_prompt.h"
 
 #include <array>
 #include <cstddef>
@@ -24,30 +26,33 @@
 
 namespace ninfer::models::qwen3_5::execution {
 
-using qwen3_5::PreparedPromptData;
+class TextGraphRun;
+
 using detail::DFlashPersistentState;
-using qwen3_5::PromptModality;
 
 struct ExecutionCore {
     ExecutionCore(DeviceContext& device, const execution::Parameters& parameters, MemoryArena& work,
-                  LinearAttentionStatePool& linear_attention,
+                  LinearAttentionStateView& linear_attention,
                   const GdnReplayRecords* replay_records, qwen3_5::RoundState& io,
-                  Tensor& prefill_hidden, std::uint32_t prefill_chunk, ProposalHead proposal_head)
+                  Tensor& prefill_hidden, std::uint32_t prefill_chunk, ProposalHead proposal_head,
+                  moe::Resources* moe = nullptr)
         : device(device), cuda(device.execution_view()), parameters(parameters), work(work),
           linear_attention(linear_attention), replay_records(replay_records), io(io),
           prefill_hidden(prefill_hidden), prefill_chunk(prefill_chunk),
-          proposal_head(proposal_head) {}
+          proposal_head(proposal_head), moe(moe) {}
 
     DeviceContext& device;
     const CudaExecutionView cuda;
     const execution::Parameters& parameters;
     MemoryArena& work;
-    LinearAttentionStatePool& linear_attention;
+    LinearAttentionStateView& linear_attention;
     const GdnReplayRecords* replay_records;
     qwen3_5::RoundState& io;
     Tensor& prefill_hidden;
     std::uint32_t prefill_chunk;
     ProposalHead proposal_head;
+    moe::Resources* moe;
+    TextGraphRun* text_graph = nullptr;
 };
 
 struct PrefillContext {
@@ -158,8 +163,8 @@ void target_accept(ExecutionCore&, Tensor& continuation_hidden_store, TargetVeri
                                                     bool finalize_at_end);
 
 [[nodiscard]] PrefillChunkResult
-prefill_multimodal_chunk(PrefillContext& state, const PreparedPromptData& prompt,
-                         VisionPrefillSession& vision, std::uint32_t nominal_length,
+prefill_multimodal_chunk(PrefillContext& state, const qwen::PreparedPromptData& prompt,
+                         qwen::VisionPrefillSession& vision, std::uint32_t nominal_length,
                          std::optional<std::uint32_t> split_frontier, bool finalize_at_end);
 
 struct MtpBridgeInput {
@@ -174,8 +179,8 @@ void mtp_bridge_and_propose(PrefillContext& state, const Tensor& next_token,
                             const Tensor& previous_hidden, std::int32_t position,
                             std::span<const std::int32_t> rope_position, bool build_proposal,
                             const Tensor* next_embedding = nullptr);
-void mtp_bridge_multimodal(PrefillContext& state, const PreparedPromptData& prompt,
-                           VisionPrefillSession& vision, const MtpBridgeInput& bridge);
+void mtp_bridge_multimodal(PrefillContext& state, const qwen::PreparedPromptData& prompt,
+                           qwen::VisionPrefillSession& vision, const MtpBridgeInput& bridge);
 
 // Executes one exact-B ordinary decode traversal. All request rows enter through the stable
 // ordinary ingress, share one model schedule, publish continuation hidden by selector, and leave

@@ -42,6 +42,25 @@ int verify(const Fixture& f, const std::string& label, bool exact_residual) {
 }
 
 namespace {
+int prefill_prefix(Form form, bool alias, CudaExecutionView e) {
+    std::vector<std::uint16_t> expected;
+    int failed = 0;
+    for (int m : {1024, 1536, 3599}) {
+        Fixture f(form, m, alias);
+        f.set(Pattern::Random);
+        f.upload(e.stream());
+        f.invoke(e);
+        cuda_synchronize(e.stream());
+        const auto& output = form == Form::Combine ? f.tr : f.tz;
+        const auto words = from_device<std::uint16_t>(output.data,
+                                                      std::size_t(kWidth) * kStreams * 64);
+        if (expected.empty()) expected = words;
+        else failed += verify_exact("HC normalized prefix across window sizes", words, expected);
+        failed += f.check("HC normalized prefix");
+    }
+    return failed;
+}
+
 int run(Form form, int m, Pattern pattern, bool alias, bool captured, CudaExecutionView e) {
     Fixture f(form, m, alias);
     f.set(pattern);
@@ -83,6 +102,7 @@ int run_suite(Form form) {
     DeviceContext device;
     const auto e = device.execution_view();
     int failed   = 0;
+    failed += prefill_prefix(form, false, e);
     for (int m : {1, 3, 8, 16, 31, 32, 33, 127, 128, 129, 512, 2048})
         failed += run(form, m, Pattern::Random, false, false, e);
     for (auto pattern : {Pattern::Affine, Pattern::Zero, Pattern::Constant, Pattern::Cancellation,
@@ -100,6 +120,7 @@ int run_suite(Form form) {
     const bool combine =
         form == Form::Combine || form == Form::CombineNorm || form == Form::AddNorm;
     if (combine) {
+        failed += prefill_prefix(form, true, e);
         failed += run(form, 1, Pattern::Affine, true, false, e);
         failed += run(form, 129, Pattern::Random, true, false, e);
         failed += run(form, 7 * 8, Pattern::Midpoint, true, true, e);

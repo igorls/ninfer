@@ -54,7 +54,9 @@ int validate(Weights& w, std::span<const Column> ref, CudaExecutionView e) {
     for (auto bounds : {std::pair{0, 1}, std::pair{-1, 1}, std::pair{2, 1}})
         failed += rejects("query interval", [&] { (void)f.query(bounds.first, bounds.second); });
 
-    for (Weight* weight : {&w.down, &w.up}) {
+    std::vector<Weight*> weights{&w.down, &w.up};
+    if (w.kind == Kind::Block) weights.push_back(&w.injection);
+    for (Weight* weight : weights) {
         const auto saved   = *weight;
         const auto invalid = [&] {
             failed += rejects("weight execution", [&] { f.invoke(e); });
@@ -111,7 +113,7 @@ int validate(Weights& w, std::span<const Column> ref, CudaExecutionView e) {
     MemoryArena too_small(f.scratch.span().subspan(0, f.capacity - 1));
     try {
         if (w.kind == Kind::Block)
-            ops::hc_mix(f.z, ops::HcMixWeights{w.down, w.up}, too_small, f.x, f.j, e);
+            ops::hc_mix(f.z, ops::HcMixWeights{w.down, w.injection, w.up}, too_small, f.x, f.j, e);
         else
             ops::hc_mix(f.z, ops::HcFinalMixWeights{w.down, w.up}, too_small, f.x, e);
         std::cerr << "Mix accepted undersized workspace\n";
@@ -120,7 +122,7 @@ int validate(Weights& w, std::span<const Column> ref, CudaExecutionView e) {
     MemoryArena overlapping(MemorySpan{const_cast<void*>(w.down.qdata), f.capacity, w.down.device});
     failed += rejects("workspace overlap", [&] {
         if (w.kind == Kind::Block)
-            ops::hc_mix(f.z, ops::HcMixWeights{w.down, w.up}, overlapping, f.x, f.j, e);
+            ops::hc_mix(f.z, ops::HcMixWeights{w.down, w.injection, w.up}, overlapping, f.x, f.j, e);
         else
             ops::hc_mix(f.z, ops::HcFinalMixWeights{w.down, w.up}, overlapping, f.x, e);
     });
@@ -151,7 +153,7 @@ int validate(Weights& w, std::span<const Column> ref, CudaExecutionView e) {
                                cudaMemcpyHostToDevice, e.stream()),
                "Mix enclosing allocation");
     if (w.kind == Kind::Block)
-        ops::hc_mix(f.z, ops::HcMixWeights{w.down, w.up}, nested, f.x, f.j, e);
+        ops::hc_mix(f.z, ops::HcMixWeights{w.down, w.injection, w.up}, nested, f.x, f.j, e);
     else
         ops::hc_mix(f.z, ops::HcFinalMixWeights{w.down, w.up}, nested, f.x, e);
     cuda_synchronize(e.stream());

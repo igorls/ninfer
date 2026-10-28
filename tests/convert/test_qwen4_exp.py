@@ -1,261 +1,96 @@
-from __future__ import annotations
-
-from collections import Counter
-import copy
-import gzip
-import hashlib
-import json
-import os
 from pathlib import Path
-import struct
+from types import SimpleNamespace
 
-import pytest
 import torch
 
-from tools.artifact.codecs.nvfp4 import encode_nvfp4_expert_bank
-from tools.artifact.reader import Artifact
-from tools.artifact.schema import ResourceSpec, TensorSpec, plan_objects
-from tools.artifact.writer import ArtifactWriter
-from tools.convert.qwen4_exp.config import load_source, text_config, vision_config
-from tools.convert.qwen4_exp.inventory import Plan, V2Object, expected_tensors, plan_upgrade
-from tools.convert.qwen4_exp.source import (
-    MAINTAINED_TEMPLATE_SHA256,
-    TEMPLATE_OBJECT,
-    V2_SHA256,
-    maintained_template,
-)
-from tools.convert.qwen4_exp.upgrade import artifact_id, stream_upgrade
-from tools.convert.quantization.nvfp4 import encode_rows, weight_divisor
-
-FIXTURE = Path(__file__).parents[1] / "fixtures" / "qwen4_exp" / "v2_directory.json.gz"
+from tools.convert.model import Model
+from tools.convert.qwen4_exp import Builder, bank_source
 
 
-def _published_directory() -> dict:
-    return json.loads(gzip.decompress(FIXTURE.read_bytes()))
+class Checkpoint:
+    path = Path("memory")
+
+    def __init__(self, tensors):
+        self.tensors = tensors
+
+    def describe(self, name):
+        return SimpleNamespace(shape=tuple(self.tensors[name].shape), dtype="BF16")
+
+    def read_flat(self, name, begin=0, end=None):
+        return self.tensors[name].flatten()[begin:end]
 
 
-def test_published_v2_directory_maps_to_the_closed_v3_inventory():
-    plan = plan_upgrade(_published_directory())
-    # The directory, including the shared config normalizer's output, of the current derivation
-    # (eos_token_id and the maintained chat template; the published 1e7e026e... predates both).
-    assert artifact_id(plan, V2_SHA256).hex() == "3cade505298b575e009fe78877b76a33"
-    formats = Counter(getattr(spec, "format", "resource") for spec in plan.specs)
-    assert formats == {
-        "bf16": 1235,
-        "nvfp4": 98,
-        "fp8_e4m3fn_row_fp32": 96,
-        "u4z8_g16_fp16": 128,
-        "int64": 3,
-        "resource": 6,
-    }
-    objects = plan_objects(plan.specs)
-    assert objects[-1].offset + objects[-1].bytes == 109_680_553_472
-    # v3 stores the maintained chat template in place of v2's official one.
-    template = maintained_template()
-    assert hashlib.sha256(template).hexdigest() == MAINTAINED_TEMPLATE_SHA256
-    assert 13 not in template and b"developer" in template
-    assert next(s for s in plan.specs if s.id == TEMPLATE_OBJECT).bytes == len(template)
-    assert plan.provenance["chat_template"]["sha256"] == MAINTAINED_TEMPLATE_SHA256
-    by_id = {obj.id: obj for obj in objects}
-    # Objects ahead of the replaced template keep their v2 offsets; the larger template and the
-    # baked MTP banks move the objects behind them.
-    order = [o.id for o in objects]
-    ahead = order[: order.index(TEMPLATE_OBJECT)]
-    assert ahead and all(by_id[i].offset == plan.sources[i].offset for i in ahead)
-    assert by_id["mtp/layer/mlp/experts/down"].offset != plan.sources[
-        "mtp/layer/mlp/experts/down"
-    ].offset
-
-    text = plan.components["text"]["config"]
-    assert text["architectures"] == ["Qwen4ExpForCausalLM"]
-    assert text["model_type"] == "qwen4_exp_text"
-    assert text["ple_layer_ids"] == [2]
-    assert text["eos_token_id"] == 248044
-    assert plan.components["mtp"] == {
-        "config": {"architectures": ["Qwen4ExpMTP"]},
-        "target": "text",
-    }
-    assert plan.components["text"]["resources"]["chat_template.jinja"] == (
-        "frontend/chat_template.jinja"
+def test_qsa_q_gate_rows_and_gdn_conv_axes():
+    cfg = dict(
+        hidden_size=2,
+        head_dim=2,
+        num_attention_heads=3,
+        num_key_value_heads=1,
+        indexer_n_heads=2,
+        indexer_head_dim=2,
+        indexer_kv_heads=1,
+        linear_num_key_heads=1,
+        linear_key_head_dim=2,
+        linear_num_value_heads=2,
+        linear_value_head_dim=2,
+        linear_conv_kernel_dim=4,
     )
-    assert len(plan.bindings) == 1668
-    assert plan.bindings["mtp/layers/0/mlp/experts/gate_up"] == {
-        "object": "mtp/layer/mlp/experts/gate_up"
+    shapes = {
+        "self_attn.q_proj.weight": (12, 2),
+        "self_attn.k_proj.weight": (2, 2),
+        "self_attn.v_proj.weight": (2, 2),
+        "self_attn.o_proj.weight": (2, 6),
+        "self_attn.indexer.index_qk_proj.weight": (6, 2),
+        "self_attn.q_norm.weight": (2,),
+        "self_attn.k_norm.weight": (2,),
+        "self_attn.indexer.q_layernorm.weight": (2,),
+        "self_attn.indexer.k_layernorm.weight": (2,),
+        "linear_attn.in_proj_qkv.weight": (8, 2),
+        "linear_attn.in_proj_z.weight": (4, 2),
+        "linear_attn.in_proj_a.weight": (2, 2),
+        "linear_attn.in_proj_b.weight": (2, 2),
+        "linear_attn.out_proj.weight": (2, 4),
+        "linear_attn.conv1d.weight": (8, 1, 4),
+        "linear_attn.A_log": (2,),
+        "linear_attn.dt_bias": (2,),
+        "linear_attn.norm.weight": (2,),
     }
-    assert plan.bindings["vision/layers/0/attention/key"] == {
-        "parts": [
-            {"object": "vision/layers/0/attention/qkv", "range": [1327104, 2654208]}
-        ]
-    }
-    uses = {(u["parameter"], u["input"]): u["activation_policy"] for u in plan.uses}
-    assert uses[("text/layers/0/mlp/experts/gate_up", "text/layers/0/ffn_input")] == "AllowA4"
-    assert uses[
-        ("text/layers/3/attention/query_gate_key_value", "text/layers/3/mixer_input")
-    ] == ("AllowA8")
-    assert uses[
-        ("mtp/layers/0/attention/output", "mtp/layers/0/attention/gated_output")
-    ] == ("A16Only")
-    assert uses[("text/output_head", "mtp/final_hidden")] == "A16Only"
+    from math import prod
 
-
-def _text(**changes) -> dict:
-    source = copy.deepcopy(load_source())
-    source["text_config"].update(changes)
-    return text_config(source)
-
-
-def test_text_config_reads_ple_layer_lists_and_the_boundary_token():
-    # transformers sorts and deduplicates ple_layer_ids; the normalized list stays one-based.
-    assert _text(ple_layer_ids=[6, 2, 6])["ple_layer_ids"] == [2, 6]
-    assert _text(eos_token_id=[248044, 248046])["eos_token_id"] == 248044
-    for ids in ([], [0], [49], [4], [2.0], 2):  # layer 4 is full attention
-        with pytest.raises(ValueError, match="ple_layer_ids"):
-            _text(ple_layer_ids=ids)
-    for eos in (None, [], 248320, -1, "248044"):
-        with pytest.raises(ValueError, match="eos_token_id"):
-            _text(eos_token_id=eos)
-
-
-def test_v2_inventory_holds_only_its_published_ple_layer():
-    source = load_source()
-    text = _text(ple_layer_ids=[2, 6])
-    with pytest.raises(ValueError, match="PLE"):
-        expected_tensors(text, vision_config(source, text))
-
-
-def test_directory_rejects_a_changed_v2_inventory():
-    directory = _published_directory()
-    directory["objects"][100]["shape"] = [1, 1]
-    with pytest.raises(ValueError, match="expected"):
-        plan_upgrade(directory)
-
-
-def _write_v2(path: Path, objects: list[tuple[dict, bytes]]) -> tuple[int, str]:
-    """Write a v2-framed file; returns its payload offset and SHA256."""
-
-    payload = bytearray()
-    records = []
-    for record, data in objects:
-        if record["kind"] == "tensor":
-            payload.extend(bytes(-len(payload) % 256))
-        records.append({**record, "offset": len(payload), "bytes": len(data)})
-        payload.extend(data)
-    directory = json.dumps({"identity": {}, "objects": records}).encode()
-    start = (16 + len(directory) + 4095) // 4096 * 4096
-    raw = b"NINFER\x00\x02" + struct.pack("<Q", len(directory)) + directory
-    raw += bytes(start - len(raw)) + payload
-    path.write_bytes(raw)
-    return start, hashlib.sha256(raw).hexdigest()
-
-
-def test_stream_upgrade_copies_hashes_and_bakes_expert_banks(tmp_path):
-    generator = torch.Generator().manual_seed(3)
-    bank_shape = (3, 128, 64)
-    bank = (torch.randn(bank_shape, generator=generator) * 0.02).to(torch.bfloat16)
-    bank[1, 5, :16] = 0  # an all-zero group keeps a zero scale
-    bank[2, 7, 3] = -0.0
-    dense = torch.arange(15, dtype=torch.float32).to(torch.bfloat16).reshape(3, 5)
-    table = torch.tensor([-1, 1 << 40, 3, 7], dtype=torch.int64)
-    tensor = lambda name, value, fmt: (  # noqa: E731
-        {"name": name, "kind": "tensor", "shape": list(value.shape), "format": fmt},
-        value.contiguous().view(torch.uint8).numpy().tobytes(),
+    store = Checkpoint(
+        {
+            key: torch.arange(prod(shape)).bfloat16().reshape(shape)
+            for key, shape in shapes.items()
+        }
     )
-    v2 = tmp_path / "v2.ninfer"
-    start, sha = _write_v2(
-        v2,
-        [
-            ({"name": "r", "kind": "resource"}, b"hello"),
-            tensor("dense", dense, "BF16"),
-            tensor("bank", bank, "BF16"),
-            tensor("table", table, "I64"),
-        ],
+    model = Model({"text": {"config": cfg}})
+    builder = Builder(model, store, cfg)
+    builder.qsa("text/", "")
+    builder.gdn("text/", "")
+    query = model.parameters["text/attention/query"].source.values().reshape(-1, 2)
+    gate = model.parameters["text/attention/output_gate"].source.values().reshape(-1, 2)
+    assert query[:, 0].tolist() == [0, 2, 8, 10, 16, 18]
+    assert gate[:, 0].tolist() == [4, 6, 12, 14, 20, 22]
+    conv = model.parameters["text/gdn/convolution"].source.values().reshape(4, 8)
+    assert torch.equal(conv, store.tensors["linear_attn.conv1d.weight"][:, 0, :].T)
+    assert model.parameters["text/gdn/a_log"].direct_format == "fp32"
+    assert model.parameters["text/gdn/dt_bias"].direct_format == "fp32"
+    replacement = Checkpoint({name: values + 1 for name, values in store.tensors.items()})
+    assert torch.equal(
+        model.source("text/attention/query", replacement).values().reshape(-1, 2),
+        query + 1,
     )
-    offsets = json.loads(v2.read_bytes()[16 : start].rstrip(b"\0"))["objects"]
-    sources = {
-        o["name"]: V2Object(
-            o["name"], o["kind"], o["offset"], o["bytes"], tuple(o.get("shape", ()))
-        )
-        for o in offsets
-    }
-    plan = Plan(
-        specs=(
-            ResourceSpec("r", 5),
-            TensorSpec("dense", (3, 5), "bf16", "contiguous_le_v1"),
-            TensorSpec("bank", bank_shape, "nvfp4", "expert_block_scale_k16_m128x4_v1"),
-            TensorSpec("table", (4,), "int64", "contiguous_le_v1"),
-        ),
-        sources=sources,
-        components={"text": {"config": {"architectures": ["Qwen4ExpForCausalLM"]}}},
-        bindings={},
-        uses=(),
-        metadata={},
-        provenance={},
+    assert torch.equal(
+        model.source("text/gdn/convolution", replacement).values().reshape(4, 8),
+        conv + 1,
     )
-    output = tmp_path / "v3.ninfer"
-    identity = artifact_id(plan, sha)
-    writer = ArtifactWriter(
-        output, plan.specs, components=plan.components, bindings={}, artifact_id=identity
-    )
-    fd = os.open(v2, os.O_RDONLY | getattr(os, "O_BINARY", 0))
-    try:
-        with writer:
-            report = stream_upgrade(
-                fd,
-                v2.stat().st_size,
-                start,
-                plan,
-                writer,
-                banks=("bank",),
-                expected_sha256=sha,
-                pinned_banks={},
-                chunk_bytes=1000,  # pieces straddle chunk boundaries
-            )
-    finally:
-        os.close(fd)
 
-    codes = torch.empty((3, 128, 32), dtype=torch.uint8)
-    scales = torch.empty((3, 128, 4), dtype=torch.uint8)
-    divisors = torch.empty(3, dtype=torch.float32)
-    for expert in range(3):
-        divisor = weight_divisor(float(bank[expert].float().abs().amax()))
-        codes[expert], scales[expert] = encode_rows(bank[expert], divisor)
-        divisors[expert] = struct.unpack("<f", divisor)[0]
-    expected_bank = bytes(encode_nvfp4_expert_bank(codes, scales, divisors, bank_shape))
 
-    with Artifact(output) as artifact:
-        assert artifact.artifact_id == identity
-        assert artifact.read_object("r") == b"hello"
-        assert artifact.read_object("dense") == dense.view(torch.uint8).numpy().tobytes()
-        assert artifact.read_object("table") == table.view(torch.uint8).numpy().tobytes()
-        assert artifact.read_object("bank") == expected_bank
-    assert report["v2_sha256"] == sha
-    assert report["v2_objects"]["dense"] == hashlib.sha256(
-        dense.view(torch.uint8).numpy().tobytes()
-    ).hexdigest()
-    assert report["mtp_banks"]["bank"]["sha256"] == hashlib.sha256(expected_bank).hexdigest()
-    assert report["mtp_banks"]["bank"]["fp64_oracle"]["passed"]
-
-    # A corrupted input is detected by the same pass, and the partial output is discarded.
-    corrupt = bytearray(v2.read_bytes())
-    corrupt[-1] ^= 1
-    v2.write_bytes(corrupt)
-    retry = tmp_path / "retry.ninfer"
-    fd = os.open(v2, os.O_RDONLY | getattr(os, "O_BINARY", 0))
-    try:
-        with pytest.raises(ValueError, match="SHA256"):
-            with ArtifactWriter(
-                retry, plan.specs, components=plan.components, bindings={}
-            ) as writer:
-                stream_upgrade(
-                    fd,
-                    len(corrupt),
-                    start,
-                    plan,
-                    writer,
-                    banks=("bank",),
-                    expected_sha256=sha,
-                    pinned_banks={},
-                )
-    finally:
-        os.close(fd)
-    assert not retry.exists()
+def test_expert_source_splits_each_expert_gate_up_before_joining_bank():
+    values = torch.arange(48).bfloat16().reshape(3, 4, 4)
+    store = Checkpoint({"gate_up": values})
+    for role, begin in (("gate", 0), ("up", 2)):
+        source = bank_source(store, "gate_up", (3, 2, 4), role)
+        expected = values[:, begin : begin + 2].contiguous().flatten()
+        assert torch.equal(source.values(), expected)
+        assert torch.equal(source.values(5, 17), expected[5:17])

@@ -1,5 +1,5 @@
 #include "models/qwen3_5/program/program_impl.h"
-#include "models/qwen3_5/program/context_work.h"
+#include "models/common/context/work.h"
 #include "models/qwen3_5/program/execution_context.h"
 #include "models/qwen3_5/program/graph_execution.h"
 #include "models/qwen3_5/program/planning/graph_profiles.h"
@@ -32,13 +32,17 @@ auto ordinary_batch_body(OrdinaryBatchContext& state, std::int32_t batch_size,
         }
 
         qwen3_5::OrdinaryDecodeState& ordinary = state.frame;
-        CUDA_CHECK(cudaMemcpyAsync(ordinary.ingress.data, &state.host_ingress,
-                                   sizeof(qwen3_5::OrdinaryDecodeIngress), cudaMemcpyHostToDevice,
-                                   state.execution.cuda.stream()));
+        if (emit_forward_gpu(state.execution.text_graph)) {
+            CUDA_CHECK(cudaMemcpyAsync(ordinary.ingress.data, &state.host_ingress,
+                                       sizeof(qwen3_5::OrdinaryDecodeIngress),
+                                       cudaMemcpyHostToDevice, state.execution.cuda.stream()));
+        }
 
         TextContext card(state.execution.device, state.execution.parameters, state.execution.work,
                          state.text_cache, state.execution.linear_attention, state.execution.io,
-                         state.execution.prefill_hidden, state.execution.prefill_chunk, 0);
+                         state.execution.prefill_hidden, state.execution.prefill_chunk, 0, {},
+                         nullptr, state.execution.moe);
+        card.set_graph_run(state.execution.text_graph);
 
         Tensor tokens             = ordinary.tokens.slice(0, 0, batch_size);
         Tensor cache_positions    = ordinary.cache_positions.slice(0, 0, batch_size);
@@ -52,11 +56,17 @@ auto ordinary_batch_body(OrdinaryBatchContext& state, std::int32_t batch_size,
 
         card.ordinary_decode_batch(tokens, cache_positions, rope_positions, kv_rows, state_sources,
                                    state_destinations, envelope, hidden, logits);
-        ops::scatter(hidden, state_destinations, state.continuation_hidden_store, state.execution.cuda);
-        ops::sample(logits, sampled, dimension(state.execution.parameters.model.resources().public_token_count), ordinary.sampling, cache_positions, ops::kSamplePurposeDecode, state.execution.work, state.execution.cuda);
-        CUDA_CHECK(cudaMemcpyAsync(&state.host_egress, ordinary.egress.data,
-                                   sizeof(qwen3_5::OrdinaryDecodeEgress), cudaMemcpyDeviceToHost,
-                                   state.execution.cuda.stream()));
+        if (emit_forward_gpu(state.execution.text_graph)) {
+            ops::scatter(hidden, state_destinations, state.continuation_hidden_store,
+                         state.execution.cuda);
+            ops::sample(logits, sampled,
+                        dimension(state.execution.parameters.model.resources().public_token_count),
+                        ordinary.sampling, cache_positions, ops::kSamplePurposeDecode,
+                        state.execution.work, state.execution.cuda);
+            CUDA_CHECK(cudaMemcpyAsync(&state.host_egress, ordinary.egress.data,
+                                       sizeof(qwen3_5::OrdinaryDecodeEgress),
+                                       cudaMemcpyDeviceToHost, state.execution.cuda.stream()));
+        }
     };
 }
 
@@ -79,8 +89,6 @@ void ordinary_decode_batch(OrdinaryBatchContext& state, std::int32_t batch_size,
 } // namespace ninfer::models::qwen3_5::execution
 
 namespace ninfer::models::qwen3_5::detail {
-
-namespace {} // namespace
 
 void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& request,
                                    const ops::SamplingConfig& config,
@@ -344,9 +352,10 @@ void ProgramImpl::copy_tail(SequenceState& sequence, const Tensor& source) {
         source.ne[1] != 1) {
         throw std::logic_error("target tail hidden has an invalid shape");
     }
-    CUDA_CHECK(cudaMemcpyAsync(sequence.tail_hidden.data, source.data, sequence.tail_hidden.bytes(),
-                               cudaMemcpyDeviceToDevice, device.stream()));
-    sequence.tail_hidden_valid = true;
+    const Tensor hidden = tail_hidden(sequence);
+    CUDA_CHECK(cudaMemcpyAsync(hidden.data, source.data, hidden.bytes(), cudaMemcpyDeviceToDevice,
+                               device.stream()));
+    sequence.continuation.metadata.tail_hidden_valid = true;
 }
 
 void ProgramImpl::copy_round_token() {
@@ -381,28 +390,29 @@ void ProgramImpl::enqueue_dflash_context_append(std::span<const std::uint32_t> l
         const std::uint32_t start = starts[row];
         const std::uint64_t end64 = static_cast<std::uint64_t>(start) + counts[row];
         const std::uint32_t end   = static_cast<std::uint32_t>(end64);
-        if (!sequence.kv || text_kv_addresses->bound_row(sequence.kv->text) < 0 ||
-            (backend_kv_cache() && (!sequence.kv->backend ||
-                                    backend_kv_addresses->bound_row(*sequence.kv->backend) < 0)) ||
+        if (!sequence.kv || text_kv_histories->bound_row(sequence.kv->text.handle()) < 0 ||
+            (backend_kv_cache() &&
+             (!sequence.kv->backend ||
+              backend_kv_histories->bound_row(sequence.kv->backend->handle()) < 0)) ||
             end64 > capacity) {
             throw std::logic_error("DFlash context append is outside retained target storage");
         }
         dflash_host_ingress->context_frontiers[row] =
-            checked_i32(start, "DFlash append context frontier");
+            context::checked_i32(start, "DFlash append context frontier");
         dflash_host_ingress->execution_frontiers[row] =
-            checked_i32(end, "DFlash append target frontier");
+            context::checked_i32(end, "DFlash append target frontier");
         dflash_host_ingress->dflash_kv_table_rows[row] =
-            sequence.kv->backend ? backend_kv_addresses->bound_row(*sequence.kv->backend) : 0;
+            sequence.kv->backend ? backend_kv_histories->bound_row(sequence.kv->backend->handle())
+                                 : 0;
         dflash_host_ingress->active_lanes[row]            = static_cast<std::int32_t>(lane);
-        const StateImageSelectors selectors               = state_selectors(sequence);
+        const context::StateImageSelectors selectors      = state_selectors(sequence);
         dflash_host_ingress->state_source_slots[row]      = selectors.source;
         dflash_host_ingress->state_destination_slots[row] = selectors.destination;
         // Context append writes only the draft caches. Target execution owns Main KV
         // coverage, including any uncommitted suffix that survives until the round is settled.
         // DFlash2 has only fixed cyclic state; DFlash also grows its Full backend KV here.
         if (sequence.kv->backend) {
-            backend_kv_addresses->ensure_mapped_to_tokens(*sequence.kv->backend, end,
-                                                          device.stream());
+            backend_kv_histories->prepare_write(*sequence.kv->backend, start, end, device.stream());
         }
         minimum_count = std::min(minimum_count, counts[row]);
         maximum_count = std::max(maximum_count, counts[row]);
@@ -429,7 +439,7 @@ void ProgramImpl::enqueue_dflash_context_append(std::span<const std::uint32_t> l
 
     execution::DFlashAppendContext state{{device, parameters, work, state_images->linear(),
                                           replay_records ? &*replay_records : nullptr, io,
-                                          prefill_hidden, prefill_chunk, proposal_head},
+                                          prefill_hidden, prefill_chunk, proposal_head, moe.get()},
                                          *dflash};
     mark_workspace_usage(workspace_plan.dflash_context);
     execution::dflash_append_context(state, features, positions, device_counts,
@@ -470,43 +480,50 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_ordinary_batch(
         const RequestControl& request = requests[lane];
         if (request.lifecycle != Lifecycle::Active ||
             budgets[row].generated_tokens_remaining == 0 || !sequence.kv ||
-            text_kv_addresses->bound_row(sequence.kv->text) < 0 ||
-            sequence.execution_frontier >= capacity ||
-            sequence.ledger_frontier != sequence.execution_frontier + 1 ||
+            text_kv_histories->bound_row(sequence.kv->text.handle()) < 0 ||
+            sequence.continuation.metadata.execution_frontier >= capacity ||
+            sequence.ledger_frontier != sequence.continuation.metadata.execution_frontier + 1 ||
             sequence.ledger.size() != sequence.ledger_frontier ||
             sequence.prefix_identity.size() != sequence.ledger_frontier ||
             sequence.prefix_digests.size() != sequence.ledger_frontier) {
             throw std::logic_error("ordinary batch row is not decode-ready");
         }
-        maximum_frontier = std::max(maximum_frontier, sequence.execution_frontier);
+        maximum_frontier =
+            std::max(maximum_frontier, sequence.continuation.metadata.execution_frontier);
     }
 
-    const auto start = Clock::now();
+    const auto start = context::Clock::now();
     try {
         std::optional<nvtx::ScopedRange> submit_range;
         submit_range.emplace(nvtx::Name::DecodeOrdinarySubmit, nvtx::Category::Decode,
                              static_cast<std::uint64_t>(lanes.size()));
         DecodeGraphExecutable* executable = nullptr;
+        std::optional<execution::TextGraphRun> text_replay;
         ops::CausalAttentionExecutionEnvelope envelope{maximum_frontier + 1, maximum_frontier + 1};
         if (use_cuda_graph) {
             DecodeGraphProfile& profile =
                 ordinary_graphs.select(static_cast<std::uint32_t>(lanes.size()), maximum_frontier);
-            executable = &ordinary_graphs.install(profile);
-            envelope   = {profile.min_execution_frontier + 1, profile.max_execution_frontier + 1};
+            auto& topology = ordinary_graphs.install(profile);
+            if (topology.text)
+                text_replay.emplace(*topology.text, device.execution_view());
+            else
+                executable = &topology.executable;
+            envelope = {profile.min_execution_frontier + 1, profile.max_execution_frontier + 1};
         }
 
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence            = active_sequence(lanes[row]);
-            RequestControl& request            = requests[lanes[row]];
-            const std::uint32_t frontier       = sequence.execution_frontier;
+            RequestControl& request      = requests[lanes[row]];
+            const std::uint32_t frontier       = sequence.continuation.metadata.execution_frontier;
             ordinary_host_ingress->tokens[row] = sequence.ledger.back();
             ordinary_host_ingress->cache_positions[row] =
-                checked_i32(frontier, "ordinary batch position");
+                context::checked_i32(frontier, "ordinary batch position");
             ordinary_host_ingress->rope_positions[row] =
-                checked_i32(frontier, "ordinary batch RoPE position") + sequence.rope_delta;
+                context::checked_i32(frontier, "ordinary batch RoPE position") +
+                sequence.continuation.metadata.rope_delta;
             ordinary_host_ingress->text_kv_table_rows[row] =
-                text_kv_addresses->bound_row(sequence.kv->text);
-            const StateImageSelectors selectors                 = state_selectors(sequence);
+                text_kv_histories->bound_row(sequence.kv->text.handle());
+            const context::StateImageSelectors selectors        = state_selectors(sequence);
             ordinary_host_ingress->state_source_slots[row]      = selectors.source;
             ordinary_host_ingress->state_destination_slots[row] = selectors.destination;
             ordinary_host_ingress->sampling[row]                = request.sampling_host;
@@ -518,13 +535,14 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_ordinary_batch(
         execution::OrdinaryBatchContext schedule_state{
             {device, parameters, work, state_images->linear(),
              replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-             proposal_head},
+             proposal_head, moe.get()},
             decoder->text_kv,
             *io.ordinary,
             *ordinary_host_ingress,
             *ordinary_host_egress,
             state_images->continuation_hidden_store()};
 
+        if (text_replay) schedule_state.execution.text_graph = &*text_replay;
         mark_workspace_usage(workspace_plan.ordinary_round);
         execution::ordinary_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
                                          envelope, executable);
@@ -545,24 +563,25 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_ordinary_batch(
         }
         timing.end_wait();
 
-        const double seconds = std::chrono::duration<double>(Clock::now() - start).count();
+        const double seconds = std::chrono::duration<double>(context::Clock::now() - start).count();
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence    = active_sequence(lanes[row]);
             RequestControl& request    = requests[lanes[row]];
-            const std::uint32_t base_E = sequence.execution_frontier;
+            const std::uint32_t base_E = sequence.continuation.metadata.execution_frontier;
             const std::uint32_t base_S = sequence.ledger_frontier;
             const TokenId token        = ordinary_host_egress->sampled_tokens[row];
             validate_licensed_tokens(std::span<const TokenId>(&token, 1));
             collect_round_logprobs(sequence, request, std::span<const TokenId>(&token, 1));
-            sequence.text_kv_valid = base_E + 1;
-            commit_sequence_kv(sequence, sequence.text_kv_valid, 0);
-            sequence.tail_hidden_valid = true;
+            const Continuation base                      = sequence.continuation;
+            sequence.continuation.metadata.text_kv_valid = base_E + 1;
+            commit_sequence_kv(sequence, sequence.continuation.metadata.text_kv_valid, 0);
+            sequence.continuation.metadata.tail_hidden_valid = true;
             sequence.ledger.push_back(token);
-            sequence.prefix_identity.append_generated(1, sequence.rope_delta);
+            sequence.prefix_identity.append_generated(1, sequence.continuation.metadata.rope_delta);
             sequence.prefix_digests.append_generated(std::span<const TokenId>(&token, 1),
-                                                     sequence.rope_delta);
+                                                     sequence.continuation.metadata.rope_delta);
             request.pending   = PendingCandidate{.kind          = PendingKind::Ordinary,
-                                                 .base_E        = base_E,
+                                                 .base          = base,
                                                  .base_S        = base_S,
                                                  .prompt_tokens = 0,
                                                  .produced      = 1};
@@ -614,53 +633,60 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
         const RequestControl& request = requests[lane];
         if (request.lifecycle != Lifecycle::Active ||
             budgets[row].generated_tokens_remaining == 0 || !sequence.kv || !sequence.kv->backend ||
-            text_kv_addresses->bound_row(sequence.kv->text) < 0 ||
-            backend_kv_addresses->bound_row(*sequence.kv->backend) < 0 ||
-            sequence.execution_frontier >= capacity ||
-            sequence.mtp_kv_valid != sequence.execution_frontier ||
-            sequence.ledger_frontier != sequence.execution_frontier + 1 ||
+            text_kv_histories->bound_row(sequence.kv->text.handle()) < 0 ||
+            backend_kv_histories->bound_row(sequence.kv->backend->handle()) < 0 ||
+            sequence.continuation.metadata.execution_frontier >= capacity ||
+            sequence.continuation.metadata.backend_kv_valid !=
+                sequence.continuation.metadata.execution_frontier ||
+            sequence.ledger_frontier != sequence.continuation.metadata.execution_frontier + 1 ||
             sequence.ledger.size() != sequence.ledger_frontier ||
             sequence.prefix_identity.size() != sequence.ledger_frontier ||
             sequence.prefix_digests.size() != sequence.ledger_frontier ||
             sequence.mtp_draft_count > draft_window) {
             throw std::logic_error("MTP batch row is not decode-ready");
         }
-        maximum_frontier = std::max(maximum_frontier, sequence.execution_frontier);
+        maximum_frontier =
+            std::max(maximum_frontier, sequence.continuation.metadata.execution_frontier);
     }
 
-    const auto started = Clock::now();
+    const auto started = context::Clock::now();
     try {
         std::optional<nvtx::ScopedRange> submit_range;
         submit_range.emplace(nvtx::Name::DecodeMtpSubmit, nvtx::Category::Mtp,
                              static_cast<std::uint64_t>(lanes.size()));
-        DecodeGraphExecutable* forward = nullptr;
-        DecodeGraphExecutable* finish  = nullptr;
+        DecodeGraphExecutable* forward               = nullptr;
+        execution::TextGraphExecutable* text_forward = nullptr;
+        DecodeGraphExecutable* finish                = nullptr;
         execution::MtpCausalAttentionEnvelopes envelopes =
             mtp_causal_attention_envelopes(maximum_frontier, draft_window, capacity);
         if (use_cuda_graph) {
             const auto batch = static_cast<std::uint32_t>(lanes.size());
             auto& profile    = speculative_forward_graphs.select(batch, maximum_frontier);
-            forward          = &speculative_forward_graphs.install(profile);
-            finish           = &speculative_finish_graphs.install(
-                speculative_finish_graphs.select(batch, maximum_frontier));
+            auto& topology   = speculative_forward_graphs.install(profile);
+            text_forward     = topology.text.get();
+            if (!text_forward) forward = &topology.executable;
+            finish = &speculative_finish_graphs
+                          .install(speculative_finish_graphs.select(batch, maximum_frontier))
+                          .executable;
             envelopes = mtp_causal_attention_envelopes(profile.max_execution_frontier, draft_window,
                                                        capacity);
         }
 
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence           = active_sequence(lanes[row]);
-            RequestControl& request           = requests[lanes[row]];
-            const std::uint32_t frontier      = sequence.execution_frontier;
+            RequestControl& request     = requests[lanes[row]];
+            const std::uint32_t frontier      = sequence.continuation.metadata.execution_frontier;
             const std::uint32_t max_by_budget = budgets[row].generated_tokens_remaining > 1
                                                     ? budgets[row].generated_tokens_remaining - 1
                                                     : 0;
-            const std::uint32_t extent        = std::min({sequence.mtp_draft_count, draft_window,
-                                                          max_by_budget,
-                                                          capacity - sequence.execution_frontier - 1});
-            mtp_host_ingress->anchors[row]        = sequence.ledger.back();
-            mtp_host_ingress->base_frontiers[row] = checked_i32(frontier, "MTP batch frontier");
-            mtp_host_ingress->remaining_budgets[row] =
-                checked_i32(budgets[row].generated_tokens_remaining, "MTP batch remaining budget");
+            const std::uint32_t extent =
+                std::min({sequence.mtp_draft_count, draft_window, max_by_budget,
+                          capacity - sequence.continuation.metadata.execution_frontier - 1});
+            mtp_host_ingress->anchors[row] = sequence.ledger.back();
+            mtp_host_ingress->base_frontiers[row] =
+                context::checked_i32(frontier, "MTP batch frontier");
+            mtp_host_ingress->remaining_budgets[row] = context::checked_i32(
+                budgets[row].generated_tokens_remaining, "MTP batch remaining budget");
             mtp_host_ingress->current_extents[row]      = static_cast<std::int32_t>(extent);
             mtp_host_ingress->target_valid_columns[row] = static_cast<std::int32_t>(extent + 1);
             for (std::uint32_t j = 0; j < draft_window; ++j) {
@@ -670,26 +696,28 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
             for (std::uint32_t j = 0; j < width; ++j) {
                 const std::uint32_t position = frontier + std::min(j, extent);
                 mtp_host_ingress->target_rope_positions[row * width + j] =
-                    checked_i32(position, "MTP batch RoPE position") + sequence.rope_delta;
+                    context::checked_i32(position, "MTP batch RoPE position") +
+                    sequence.continuation.metadata.rope_delta;
             }
             mtp_host_ingress->text_kv_table_rows[row] =
-                text_kv_addresses->bound_row(sequence.kv->text);
+                text_kv_histories->bound_row(sequence.kv->text.handle());
             mtp_host_ingress->mtp_kv_table_rows[row] =
-                backend_kv_addresses->bound_row(*sequence.kv->backend);
-            const StateImageSelectors selectors            = state_selectors(sequence);
+                backend_kv_histories->bound_row(sequence.kv->backend->handle());
+            const context::StateImageSelectors selectors   = state_selectors(sequence);
             mtp_host_ingress->state_source_slots[row]      = selectors.source;
             mtp_host_ingress->state_destination_slots[row] = selectors.destination;
-            mtp_host_ingress->rope_deltas[row]             = sequence.rope_delta;
-            mtp_host_ingress->sampling[row]                = request.sampling_host;
-            mtp_host_ingress->sampling[row].mask           = bind_grammar_mask(masks, row);
-            request.sampling_host.mask                     = mtp_host_ingress->sampling[row].mask;
+            mtp_host_ingress->rope_deltas[row]   = sequence.continuation.metadata.rope_delta;
+            mtp_host_ingress->sampling[row]      = request.sampling_host;
+            mtp_host_ingress->sampling[row].mask = bind_grammar_mask(masks, row);
+            request.sampling_host.mask = mtp_host_ingress->sampling[row].mask;
             ensure_sequence_kv_mapped(sequence, frontier + extent + 1,
                                       std::min(capacity, frontier + extent + draft_window));
         }
 
         execution::MtpBatchContext schedule_state{{device, parameters, work, state_images->linear(),
                                                    replay_records ? &*replay_records : nullptr, io,
-                                                   prefill_hidden, prefill_chunk, proposal_head},
+                                                   prefill_hidden, prefill_chunk, proposal_head,
+                                                   moe.get()},
                                                   decoder->text_kv,
                                                   *decoder->mtp_cache(),
                                                   *io.mtp_decode,
@@ -698,14 +726,24 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
                                                   state_images->continuation_hidden_store()};
 
         mark_workspace_usage(workspace_plan.mtp_round);
-        const auto batch = static_cast<std::int32_t>(lanes.size());
+        const auto batch                          = static_cast<std::int32_t>(lanes.size());
+        const std::function<void()> prepare_masks = [&] {
+            for (std::size_t row = 0; row < lanes.size(); ++row) {
+                const auto extent =
+                    static_cast<std::size_t>(mtp_host_ingress->current_extents[row]);
+                (void)fill_grammar_mask(masks, row,
+                                        {active_sequence(lanes[row]).mtp_drafts.data(), extent});
+            }
+        };
+        std::optional<execution::TextGraphRun> text_replay;
+        if (text_forward) {
+            text_replay.emplace(*text_forward, device.execution_view(), &prepare_masks);
+            schedule_state.execution.text_graph = &*text_replay;
+        }
         execution::mtp_decode_batch(schedule_state, batch, draft_window, envelopes, forward,
                                     execution::SpeculativePhase::Forward);
-        for (std::size_t row = 0; row < lanes.size(); ++row) {
-            const auto extent = static_cast<std::size_t>(mtp_host_ingress->current_extents[row]);
-            (void)fill_grammar_mask(masks, row,
-                                    {active_sequence(lanes[row]).mtp_drafts.data(), extent});
-        }
+        if (!text_replay) prepare_masks();
+        schedule_state.execution.text_graph = nullptr;
         execution::mtp_decode_batch(schedule_state, batch, draft_window, envelopes, finish,
                                     execution::SpeculativePhase::Finish);
         for (std::size_t row = 0; row < lanes.size(); ++row) {
@@ -728,11 +766,12 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
         }
         timing.end_wait();
 
-        const double seconds = std::chrono::duration<double>(Clock::now() - started).count();
+        const double seconds =
+            std::chrono::duration<double>(context::Clock::now() - started).count();
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence       = active_sequence(lanes[row]);
             RequestControl& request       = requests[lanes[row]];
-            const std::uint32_t base_E    = sequence.execution_frontier;
+            const std::uint32_t base_E    = sequence.continuation.metadata.execution_frontier;
             const std::uint32_t base_S    = sequence.ledger_frontier;
             const std::int32_t count_i    = mtp_host_egress->licensed_counts[row];
             const std::int32_t accepted_i = mtp_host_egress->accepted_drafts[row];
@@ -765,7 +804,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
             }
             request.pending = PendingCandidate{
                 .kind          = PendingKind::Speculative,
-                .base_E        = base_E,
+                .base          = sequence.continuation,
                 .base_S        = base_S,
                 .prompt_tokens = 0,
                 .produced      = static_cast<std::uint32_t>(count_i),
@@ -821,14 +860,19 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
         const RequestControl& request = requests[lane];
         if (request.lifecycle != Lifecycle::Active ||
             budgets[row].generated_tokens_remaining == 0 || !sequence.kv ||
-            text_kv_addresses->bound_row(sequence.kv->text) < 0 ||
-            (backend_kv_cache() && (!sequence.kv->backend ||
-                                    backend_kv_addresses->bound_row(*sequence.kv->backend) < 0)) ||
-            sequence.execution_frontier >= capacity ||
-            sequence.text_kv_valid != sequence.execution_frontier ||
-            sequence.dflash_context_frontier > sequence.execution_frontier ||
-            sequence.execution_frontier - sequence.dflash_context_frontier > width ||
-            sequence.ledger_frontier != sequence.execution_frontier + 1 ||
+            text_kv_histories->bound_row(sequence.kv->text.handle()) < 0 ||
+            (backend_kv_cache() &&
+             (!sequence.kv->backend ||
+              backend_kv_histories->bound_row(sequence.kv->backend->handle()) < 0)) ||
+            sequence.continuation.metadata.execution_frontier >= capacity ||
+            sequence.continuation.metadata.text_kv_valid !=
+                sequence.continuation.metadata.execution_frontier ||
+            sequence.continuation.metadata.dflash_context_frontier >
+                sequence.continuation.metadata.execution_frontier ||
+            sequence.continuation.metadata.execution_frontier -
+                    sequence.continuation.metadata.dflash_context_frontier >
+                width ||
+            sequence.ledger_frontier != sequence.continuation.metadata.execution_frontier + 1 ||
             sequence.ledger.size() != sequence.ledger_frontier ||
             sequence.prefix_identity.size() != sequence.ledger_frontier ||
             sequence.prefix_digests.size() != sequence.ledger_frontier) {
@@ -838,13 +882,15 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
                                                 ? budgets[row].generated_tokens_remaining - 1U
                                                 : 0U;
         const std::uint32_t extent =
-            std::min({draft_window, max_by_budget, capacity - sequence.execution_frontier - 1U});
-        maximum_frontier = std::max(maximum_frontier, sequence.execution_frontier);
-        maximum_target_tokens =
-            std::max(maximum_target_tokens, sequence.execution_frontier + extent + 1U);
+            std::min({draft_window, max_by_budget,
+                      capacity - sequence.continuation.metadata.execution_frontier - 1U});
+        maximum_frontier =
+            std::max(maximum_frontier, sequence.continuation.metadata.execution_frontier);
+        maximum_target_tokens = std::max(
+            maximum_target_tokens, sequence.continuation.metadata.execution_frontier + extent + 1U);
     }
 
-    const auto started = Clock::now();
+    const auto started = context::Clock::now();
     try {
         std::optional<nvtx::ScopedRange> submit_range;
         submit_range.emplace(nvtx::Name::DecodeDFlashSubmit, nvtx::Category::DFlash,
@@ -854,16 +900,20 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
             grammar_dead_positions[row] = 0;
             constrained |= masks && masks->constrained(row);
         }
-        DecodeGraphExecutable* forward       = nullptr;
-        DecodeGraphExecutable* finish        = nullptr;
+        DecodeGraphExecutable* forward               = nullptr;
+        execution::TextGraphExecutable* text_forward = nullptr;
+        DecodeGraphExecutable* finish                = nullptr;
         execution::DFlashEnvelopes envelopes = dflash_envelopes(maximum_frontier, draft_window);
         ops::CausalAttentionExecutionEnvelope target_envelope{1, maximum_target_tokens};
         if (use_cuda_graph) {
             const auto batch = static_cast<std::uint32_t>(lanes.size());
             auto& profile    = speculative_forward_graphs.select(batch, maximum_frontier);
-            forward          = &speculative_forward_graphs.install(profile);
-            finish           = &speculative_finish_graphs.install(
-                speculative_finish_graphs.select(batch, maximum_frontier));
+            auto& topology   = speculative_forward_graphs.install(profile);
+            text_forward     = topology.text.get();
+            if (!text_forward) forward = &topology.executable;
+            finish = &speculative_finish_graphs
+                          .install(speculative_finish_graphs.select(batch, maximum_frontier))
+                          .executable;
             envelopes       = dflash_envelopes(profile.max_execution_frontier, draft_window);
             target_envelope = {
                 1, static_cast<std::uint32_t>(std::min<std::uint64_t>(
@@ -873,8 +923,8 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
 
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence           = active_sequence(lanes[row]);
-            RequestControl& request           = requests[lanes[row]];
-            const std::uint32_t frontier      = sequence.execution_frontier;
+            RequestControl& request     = requests[lanes[row]];
+            const std::uint32_t frontier      = sequence.continuation.metadata.execution_frontier;
             const std::uint32_t max_by_budget = budgets[row].generated_tokens_remaining > 1
                                                     ? budgets[row].generated_tokens_remaining - 1U
                                                     : 0U;
@@ -882,23 +932,26 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
                 std::min({draft_window, max_by_budget, capacity - frontier - 1U});
             dflash_host_ingress->anchors[row] = sequence.ledger.back();
             dflash_host_ingress->execution_frontiers[row] =
-                checked_i32(frontier, "DFlash batch frontier");
-            dflash_host_ingress->context_frontiers[row] =
-                checked_i32(sequence.dflash_context_frontier, "DFlash context frontier");
+                context::checked_i32(frontier, "DFlash batch frontier");
+            dflash_host_ingress->context_frontiers[row] = context::checked_i32(
+                sequence.continuation.metadata.dflash_context_frontier, "DFlash context frontier");
             dflash_host_ingress->proposal_valid_columns[row] = static_cast<std::int32_t>(width);
             dflash_host_ingress->proposal_extents[row]       = static_cast<std::int32_t>(extent);
             dflash_host_ingress->target_valid_columns[row] = static_cast<std::int32_t>(extent + 1U);
             for (std::uint32_t column = 0; column < width; ++column) {
                 const std::uint32_t position = frontier + std::min(column, extent);
                 dflash_host_ingress->target_rope_positions[row * width + column] =
-                    checked_i32(position, "DFlash target RoPE position") + sequence.rope_delta;
+                    context::checked_i32(position, "DFlash target RoPE position") +
+                    sequence.continuation.metadata.rope_delta;
             }
             dflash_host_ingress->text_kv_table_rows[row] =
-                text_kv_addresses->bound_row(sequence.kv->text);
+                text_kv_histories->bound_row(sequence.kv->text.handle());
             dflash_host_ingress->dflash_kv_table_rows[row] =
-                sequence.kv->backend ? backend_kv_addresses->bound_row(*sequence.kv->backend) : 0;
+                sequence.kv->backend
+                    ? backend_kv_histories->bound_row(sequence.kv->backend->handle())
+                    : 0;
             dflash_host_ingress->active_lanes[row]       = static_cast<std::int32_t>(sequence.lane);
-            const StateImageSelectors selectors          = state_selectors(sequence);
+            const context::StateImageSelectors selectors = state_selectors(sequence);
             dflash_host_ingress->state_source_slots[row] = selectors.source;
             dflash_host_ingress->state_destination_slots[row] = selectors.destination;
             dflash_host_ingress->sampling[row]                = request.sampling_host;
@@ -911,7 +964,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
         execution::DFlashBatchContext schedule_state{
             {device, parameters, work, state_images->linear(),
              replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-             proposal_head},
+             proposal_head, moe.get()},
             decoder->text_kv,
             *dflash,
             *io.dflash_decode,
@@ -922,23 +975,32 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
             dflash_draft_handoff->ready};
 
         mark_workspace_usage(workspace_plan.dflash_round);
-        const auto batch = static_cast<std::int32_t>(lanes.size());
+        const auto batch                          = static_cast<std::int32_t>(lanes.size());
+        const std::function<void()> prepare_masks = [&] {
+            if (constrained) {
+                // The forward graph signals draft readiness before running the target model.
+                timing.begin_constraint_wait();
+                dflash_draft_handoff->ready.synchronize();
+                timing.end_constraint_wait();
+                timing.resume_submit();
+                for (std::size_t row = 0; row < lanes.size(); ++row) {
+                    const auto extent =
+                        static_cast<std::size_t>(dflash_host_ingress->proposal_extents[row]);
+                    (void)fill_grammar_mask(
+                        masks, row, schedule_state.host_drafts.subspan(row * draft_window, extent));
+                }
+            }
+        };
+        std::optional<execution::TextGraphRun> text_replay;
+        if (text_forward) {
+            text_replay.emplace(*text_forward, device.execution_view(), &prepare_masks);
+            schedule_state.execution.text_graph = &*text_replay;
+        }
         execution::dflash_decode_batch(schedule_state, batch, draft_window, envelopes,
                                        target_envelope, forward,
                                        execution::SpeculativePhase::Forward);
-        if (constrained) {
-            // The forward graph signals draft readiness before running the target model.
-            timing.begin_constraint_wait();
-            dflash_draft_handoff->ready.synchronize();
-            timing.end_constraint_wait();
-            timing.resume_submit();
-            for (std::size_t row = 0; row < lanes.size(); ++row) {
-                const auto extent =
-                    static_cast<std::size_t>(dflash_host_ingress->proposal_extents[row]);
-                (void)fill_grammar_mask(
-                    masks, row, schedule_state.host_drafts.subspan(row * draft_window, extent));
-            }
-        }
+        if (!text_replay) prepare_masks();
+        schedule_state.execution.text_graph = nullptr;
         execution::dflash_decode_batch(schedule_state, batch, draft_window, envelopes,
                                        target_envelope, finish,
                                        execution::SpeculativePhase::Finish);
@@ -962,11 +1024,12 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
         }
         timing.end_wait();
 
-        const double seconds = std::chrono::duration<double>(Clock::now() - started).count();
+        const double seconds =
+            std::chrono::duration<double>(context::Clock::now() - started).count();
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence       = active_sequence(lanes[row]);
             RequestControl& request       = requests[lanes[row]];
-            const std::uint32_t base_E    = sequence.execution_frontier;
+            const std::uint32_t base_E    = sequence.continuation.metadata.execution_frontier;
             const std::uint32_t base_S    = sequence.ledger_frontier;
             const std::int32_t count_i    = dflash_host_egress->licensed_counts[row];
             const std::int32_t accepted_i = dflash_host_egress->accepted_drafts[row];
@@ -995,13 +1058,19 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
                         1;
                 }
             }
-            sequence.dflash_context_frontier = base_E;
-            request.pending                  = PendingCandidate{
-                                 .kind          = PendingKind::Speculative,
-                                 .base_E        = base_E,
-                                 .base_S        = base_S,
-                                 .prompt_tokens = 0,
-                                 .produced      = static_cast<std::uint32_t>(count_i),
+            // Forward has finished appending the previous accepted features. Publish that
+            // backend prefix before a terminal commit may append this round's accepted tokens.
+            if (sequence.kv->backend) {
+                backend_kv_histories->commit_frontier(sequence.kv->backend->handle(), base_E);
+            }
+            sequence.continuation.metadata.dflash_context_frontier = base_E;
+
+            request.pending = PendingCandidate{
+                .kind          = PendingKind::Speculative,
+                .base          = sequence.continuation,
+                .base_S        = base_S,
+                .prompt_tokens = 0,
+                .produced      = static_cast<std::uint32_t>(count_i),
             };
             request.lifecycle = Lifecycle::Pending;
             request.timings.decode_seconds += seconds;
@@ -1063,18 +1132,19 @@ runtime::ExecutionTiming ProgramImpl::resolve_non_speculative_pending(
 
     switch (request.pending.kind) {
     case PendingKind::Begin:
-        sequence.execution_frontier = request.pending.prompt_tokens;
-        sequence.ledger_frontier    = request.pending.prompt_tokens + 1;
+        sequence.continuation.metadata.execution_frontier = request.pending.prompt_tokens;
+        sequence.ledger_frontier                          = request.pending.prompt_tokens + 1;
         break;
     case PendingKind::Ordinary:
-        sequence.execution_frontier = request.pending.base_E + request.pending.produced;
-        sequence.ledger_frontier    = request.pending.base_S + request.pending.produced;
+        sequence.continuation.metadata.execution_frontier =
+            request.pending.base.metadata.execution_frontier + request.pending.produced;
+        sequence.ledger_frontier = request.pending.base_S + request.pending.produced;
         break;
     case PendingKind::Speculative:
     case PendingKind::None:
         throw std::logic_error("non-speculative pending round has an invalid kind");
     }
-    if (sequence.ledger_frontier != sequence.execution_frontier + 1 ||
+    if (sequence.ledger_frontier != sequence.continuation.metadata.execution_frontier + 1 ||
         sequence.ledger.size() != sequence.ledger_frontier ||
         sequence.prefix_identity.size() != sequence.ledger_frontier ||
         sequence.prefix_digests.size() != sequence.ledger_frontier) {
@@ -1084,23 +1154,24 @@ runtime::ExecutionTiming ProgramImpl::resolve_non_speculative_pending(
     // Fork therefore still names an immutable read source and an unwritten destination here; the
     // first state-mutating decode commit closes it. A suffix prefill already closed its Fork at
     // the committed prefill frontier.
-    if (request.pending.kind == PendingKind::Begin && terminal && sequence.state.fork_pending) {
-        const StateImageSelectors selectors = state_selectors(sequence);
+    if (request.pending.kind == PendingKind::Begin && terminal && sequence.pending_write.valid()) {
+        const context::StateImageSelectors selectors = state_selectors(sequence);
         timing.resume_submit();
-        state_images->copy_slot(selectors.source, selectors.destination, device.stream());
+        state_images->storage().copy(selectors.source, selectors.destination,
+                                     device.execution_view());
         timing.begin_wait();
         device.synchronize();
         timing.end_wait();
-        settle_state_fork(sequence);
+        complete_state_write(sequence);
     } else if (request.pending.kind == PendingKind::Ordinary) {
-        settle_state_fork(sequence);
+        complete_state_write(sequence);
     }
-    trim_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
+    trim_sequence_kv(sequence, sequence.continuation.metadata.text_kv_valid,
+                     backend_kv_valid(sequence));
     if (terminal) { sequence.mtp_draft_count = 0; }
     request.lifecycle = terminal ? Lifecycle::Finishable : Lifecycle::Active;
     request.pending   = {};
     return timing.finish();
 }
-
 
 } // namespace ninfer::models::qwen3_5::detail

@@ -48,17 +48,29 @@ std::vector<float> decode(const std::vector<std::uint16_t>& words) {
 
 std::size_t capacity_for(const Weights& w, int first, int last) {
     if (w.kind == Kind::Block)
-        return ops::hc_mix_workspace_capacity_bytes(ops::HcMixWeights{w.down, w.up}, first, last);
+        return ops::hc_mix_workspace_capacity_bytes(ops::HcMixWeights{w.down, w.injection, w.up}, first, last);
     return ops::hc_mix_workspace_capacity_bytes(ops::HcFinalMixWeights{w.down, w.up}, first, last);
 }
 } // namespace
 
-Weights::Weights(Kind k, Pattern p)
+Weights::Weights(Kind k, Pattern p, bool independent_injection)
     : kind(k), pattern(p), host_down(matrix(k, p, false)), host_up(matrix(k, p, true)),
       down_values(decode(host_down.bits)), up_values(decode(host_up.bits)),
       device_down(host_down.bits.size() * 2), device_up(host_up.bits.size() * 2),
+      device_injection(independent_injection ? std::size_t(kStreams) * kTotal * 2 : 0),
       down(host_down.device_weight(device_down.span())),
       up(host_up.device_weight(device_up.span())) {
+    if (kind == Kind::Block) {
+        injection = down;
+        injection.n = injection.shape[0] = injection.padded_shape[0] = kStreams;
+        injection.qdata = static_cast<const std::byte*>(down.qdata) + std::size_t(kRank) * kTotal * 2;
+        down.n = down.shape[0] = down.padded_shape[0] = kRank;
+        if (independent_injection) {
+            injection.payload = injection.qdata = device_injection.data();
+            injection.payload_bytes = device_injection.bytes();
+            device_injection.copy_from_host(host_down.bits.data() + std::size_t(kRank) * kTotal, device_injection.bytes());
+        }
+    }
     device_down.copy_from_host(host_down.bits.data(), device_down.bytes());
     device_up.copy_from_host(host_up.bits.data(), device_up.bytes());
 }
@@ -68,6 +80,12 @@ int Weights::check() const {
     failed += verify_exact("Mix down preserved",
                            from_device<std::uint16_t>(device_down.data(), host_down.bits.size()),
                            host_down.bits);
+    failed += device_injection.verify_guards("Mix independent injection");
+    if (device_injection.bytes())
+        failed += verify_exact("Mix independent injection preserved",
+            from_device<std::uint16_t>(device_injection.data(), std::size_t(kStreams) * kTotal),
+            std::vector<std::uint16_t>(host_down.bits.begin() + std::size_t(kRank) * kTotal,
+                                       host_down.bits.end()));
     failed += verify_exact("Mix up preserved",
                            from_device<std::uint16_t>(device_up.data(), host_up.bits.size()),
                            host_up.bits);
@@ -99,7 +117,7 @@ void Fixture::upload(std::span<const float> catalog, cudaStream_t stream) {
 
 void Fixture::invoke(CudaExecutionView e) {
     if (weights.kind == Kind::Block)
-        ops::hc_mix(z, ops::HcMixWeights{weights.down, weights.up}, workspace, x, j, e);
+        ops::hc_mix(z, ops::HcMixWeights{weights.down, weights.injection, weights.up}, workspace, x, j, e);
     else
         ops::hc_mix(z, ops::HcFinalMixWeights{weights.down, weights.up}, workspace, x, e);
 }

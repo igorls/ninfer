@@ -4,14 +4,14 @@
 
 namespace ninfer::ops::detail::gdn_input {
 
-ProjectionPlan select_projection_plan(const WeightOperands& weights, std::int32_t columns) {
+ProjectionPlan select_projection_plan(const WeightProfile& weights, std::int32_t columns) {
     if (weights.format == Format::Fp8 && allows_a8(weights.policy) && columns >= 17)
         return {Compute::A8};
     if (weights.format == Format::Nvfp4 && allows_a4(weights.policy)) return {Compute::A4};
     return {Compute::A16};
 }
 
-ConvPlan select_conv_plan(const WeightOperands& weights, Batch batch) {
+ConvPlan select_conv_plan(const WeightProfile& weights, Batch batch) {
     ConvPlan plan{select_projection_plan(weights, batch.columns())};
     // The FP32-scale parent's short A8 contraction loses too much precision for
     // convolution/state publication. Keep represented BF16 activations here.
@@ -57,7 +57,7 @@ ConvPlan select_conv_plan(const WeightOperands& weights, Batch batch) {
     return plan;
 }
 
-std::size_t convolution_capacity(const WeightOperands& weights, Publication publication,
+std::size_t convolution_capacity(const WeightProfile& weights, Publication publication,
                                  std::int32_t batch, std::int32_t first, std::int32_t last) {
     validate_batch_interval(publication, batch, first, last);
     const auto at = [&](std::int32_t tokens) {

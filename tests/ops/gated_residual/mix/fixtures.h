@@ -12,14 +12,14 @@ enum class Pattern { Dense, Zero, InjectionOnly, RowMapping, Saturation };
 const char* name(Kind kind);
 
 struct Weights {
-    Weights(Kind kind, Pattern pattern);
+    Weights(Kind kind, Pattern pattern, bool independent_injection = false);
     int check() const;
     Kind kind;
     Pattern pattern;
     direct_bf16_weight::HostWeight host_down, host_up;
     std::vector<float> down_values, up_values;
-    GuardedDeviceBuffer device_down, device_up;
-    Weight down, up;
+    GuardedDeviceBuffer device_down, device_up, device_injection;
+    Weight down, injection, up;
 };
 
 struct Fixture {

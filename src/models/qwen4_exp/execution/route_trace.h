@@ -18,10 +18,11 @@ namespace ninfer::models::qwen4_exp::execution {
 
 inline constexpr std::int32_t kRouteTraceTopK = 10;
 
-// One traced column: the Program lane and the absolute position of its token.
+// One logical column and its source column in the mirrored physical forward.
 struct RouteTraceColumn {
     std::uint32_t lane     = 0;
     std::uint32_t position = 0;
+    std::uint32_t source_column = 0;
 };
 
 struct RouteTraceRecord {
@@ -60,9 +61,8 @@ public:
 
     // Records the mirrored text slices; call after the unit's host synchronization.
     void record_text(ExpertRouteKind kind, std::span<const RouteTraceColumn> columns);
-    // Records `steps` mirrored proposal slices; columns are step-major (step * batch + row).
-    void record_proposals(std::int32_t steps, std::int32_t batch,
-                          std::span<const RouteTraceColumn> columns);
+    // Records valid columns of one mirrored proposal step; source_column is its batch row.
+    void record_proposal(std::int32_t step, std::span<const RouteTraceColumn> columns);
 
     [[nodiscard]] std::vector<RouteTraceRecord> take() noexcept;
 

@@ -1,88 +1,61 @@
 #pragma once
 
-#include "models/qwen3_5/weights.h"
+#include "models/common/weights.h"
+#include "models/common/qwen/vision/parameters.h"
+#include "core/weight_bank.h"
 
 #include <optional>
 #include <variant>
-#include <vector>
 
 namespace ninfer::models::qwen4_exp {
 
-// The weight-handle vocabulary and the Vision tower are shared with Qwen3.5; everything else is
-// Qwen4Exp's own model structure.
-using qwen3_5::BoundWeight;
-using qwen3_5::NormWeights;
-using qwen3_5::VisionBlockWeights;
-using qwen3_5::VisionWeights;
-using qwen3_5::WeightId;
-using qwen3_5::WeightUse;
-using qwen3_5::WeightUseId;
-
-// One hyper-connection around a block: the RMS norm over the concatenated streams, the low-rank
-// input mix and the stream injection of the block output.
-struct HyperConnectionWeights {
-    WeightId norm, input_mix_down, input_mix_up, block_inject;
+struct HcWeights {
+    WeightId norm, down, up;
+    std::optional<WeightId> injection;
 };
 
-// The final stream reduction before the output head.
-struct HyperMixerWeights {
-    WeightId norm, input_mix_down, input_mix_up;
-};
-
-// Rows of query_gate_key_value are [query, output gate] per query head, then keys, then values.
-struct AttentionWeights {
-    WeightId query_gate_key_value, query_norm, key_norm, output;
-    WeightId indexer_query_key, indexer_query_norm, indexer_key_norm;
-};
-
-// Rows of query_key_value_z are [query, key, value, z]; a_b_projection is [a, b].
 struct GdnWeights {
-    WeightId query_key_value_z, a_b_projection, a_log, dt_bias, convolution, norm, output;
+    WeightId query, key, value, z, a, b, a_log, dt_bias, convolution, norm, output;
 };
 
-// Expert banks are [experts, 2*intermediate, hidden] with rows [gate, up] per expert, and
-// [experts, hidden, intermediate].
+struct QsaWeights {
+    WeightId query, key, gate, value, index_query, index_key;
+    WeightId query_norm, key_norm, index_query_norm, index_key_norm, output;
+};
+
 struct MoeWeights {
-    WeightId router, shared_expert_gate;
-    WeightId shared_gate, shared_up, shared_down;
-    WeightId experts_gate_up, experts_down;
+    WeightId router, shared_score, shared_gate, shared_up, shared_down;
+    WeightId gate, up, down;
+    ExpertBankId bank;
+};
+
+struct PleWeights {
+    WeightId key, value, norm_key, norm_query, norm_conv, convolution;
 };
 
 struct BlockWeights {
-    HyperConnectionWeights attention_hyper, mlp_hyper;
-    std::variant<AttentionWeights, GdnWeights> mixer;
+    HcWeights attention_hc, moe_hc;
+    std::variant<GdnWeights, QsaWeights> mixer;
     MoeWeights moe;
 };
 
-// Device half of one PLE layer's n-gram embedding; its Host table is Model::ple_tables() at the
-// same index.
-struct PleWeights {
-    WeightId key_projection, value_projection;
-    WeightId query_norm, key_norm, conv_norm, convolution;
-};
-
 struct TextWeights {
-    WeightId token_embedding, output_head;
-    WeightUseId output_head_use;
+    WeightId embedding, head;
+    HcWeights final_hc;
     std::vector<BlockWeights> layers;
-    std::vector<PleWeights> ple; // one per TextConfig::ple.layers entry, in that order
-    HyperMixerWeights final_mixer;
+    PleWeights ple;
 };
 
-// One full-attention MoE layer; its embedding and output head are the Text ones.
 struct MtpWeights {
-    WeightId embedding_projection, hidden_projection, embedding_norm, hidden_norm;
+    WeightId embedding, head, embedding_norm, hidden_norm, fc_embedding, fc_hidden;
     BlockWeights layer;
-    HyperMixerWeights final_mixer;
-    WeightId token_embedding, output_head;
-    WeightUseId output_head_use;
+    HcWeights final_hc;
 };
 
-// Handles refer to the frozen model's weight array. No artifact ID lookup is needed in execution.
 struct ModelWeights {
     TextWeights text;
-    std::optional<VisionWeights> vision;
     std::optional<MtpWeights> mtp;
+    std::optional<qwen::VisionWeights> vision;
 };
 
 } // namespace ninfer::models::qwen4_exp

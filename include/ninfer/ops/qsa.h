@@ -5,6 +5,7 @@
 #include "core/tensor.h"
 
 #include <cuda_runtime.h>
+#include <array>
 
 namespace ninfer::ops {
 
@@ -43,8 +44,11 @@ struct QsaPrepareParameters {
     Tensor key_norm;         // BF16 [256].
     Tensor index_query_norm; // BF16 [128].
     Tensor index_key_norm;   // BF16 [128].
-    float rms_epsilon = 1e-6F;
-    float rope_theta  = 1e7F;
+    float rms_epsilon        = 1e-6F;
+    float rope_theta         = 1e7F;
+    std::uint32_t rotary_dim = 64;
+    std::array<std::uint32_t, 3> rope_sections{11, 11, 10};
+    bool rope_interleaved = true;
 };
 
 struct QsaIndexCacheView {
@@ -111,7 +115,8 @@ qsa_indexer_workspace_capacity_bytes(std::int32_t min_tokens, std::int32_t max_t
  *
  * Workspace / execution:
  * Scratch comes from the caller's arena and is reused across bounded query windows, without
- * hidden allocation. Fixed T/B, views, envelope and device facts determine the launch topology.
+ * hidden allocation. Fixed T/B, views and device facts keep node count/order compatible across
+ * envelope updates; the bound selects launch/workspace configuration.
  * Actual per-query lengths, mixed batch contexts and all-select/inert cases are handled inside
  * the same kernels, including Graph replay. Metadata is not read back by the Host. Downstream
  * consumers read only count ids; same-stream ordering supplies the dependency.
@@ -220,6 +225,7 @@ void qsa_sparse_gqa(const Tensor& query, const Tensor& output_gate,
  * visibility/frontier is published.
  *
  * Logical shapes / supported domain:
+ * The current rotary implementation accepts rotary_dim=64, interleaved sections [11,11,10].
  * T>0, B in [1,8], A=1 or 3. Projections and both outputs have the shapes above, are contiguous
  * and 16-byte aligned. Norm weights are contiguous, naturally aligned BF16 vectors. Positions
  * are contiguous I32 [T,B]; rho is contiguous I32 [T,A,B]. Metadata is contiguous Device I32 [B].

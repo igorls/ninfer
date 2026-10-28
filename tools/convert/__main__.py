@@ -14,7 +14,7 @@ from . import qwen3_5
 from .official_recipes import RECIPES
 from .pipeline import convert
 from .proposal import DEFAULT_RANKING, add_official_proposal
-from .qwen4_exp import build as qwen4_exp
+from . import qwen4_exp
 from .recipe import Recipe
 from .sources.safetensors import SafetensorsSource
 

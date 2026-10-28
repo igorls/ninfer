@@ -3,6 +3,11 @@
 `build/apps/ninfer-serve` loads one v3 `.ninfer` artifact and exposes OpenAI- and
 Anthropic-compatible HTTP endpoints over one resident NInfer Engine.
 
+Qwen3.8-Flash-Next supports Text/Vision/MTP serving with segmented CUDA Graph decode.
+Add `--vision` for media and `--spec mtp --draft-tokens 3` for native MTP with the full head.
+See the [CLI example](cli.md) for commands and the
+[execution reference](maintainer/qwen4_exp-execution.md) for support and resource limits.
+
 ## Start the server
 
 See [CUDA synchronization](cli.md#cuda-synchronization) for the shared `NINFER_CUDA_SYNC` setting.
@@ -1521,14 +1526,14 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--rerank-weight-complement F` | relevance weight of the complement Choice option | `0.25` |
 | `--rerank-weight-irrelevant F` | relevance weight of the irrelevant Choice option | `0` |
 | `--max-context N` | logical context ceiling of each sequence | `8192` |
-| `--kv-capacity N\|auto` | explicit shared Main Text KV capacity, or maximize it from remaining GPU memory; omitted means `--max-context` | `8192` |
+| `--kv-capacity N\|auto` | shared Main Text KV capacity; `auto` maximizes resident-model KV, or reserves one context with CPU expert offload; omitted means `--max-context` | `8192` |
 | `--max-concurrency N` | resident execution lanes; valid range `1..8` | `1` |
 | `--clamp-concurrency-to-pool` | lower concurrency to the number of full-context sequences the KV pool backs | off |
 | `--desktop-reserve-gib N`, `--desktop-reserve-mib N` | device memory kept free for the desktop and other applications; sizing uses device-wide (NVML) free memory, and no Engine allocation may take the device below the reserve after startup | `8` GiB |
 | `--kv-slack-floor-mib N` | device memory `--kv-capacity auto` leaves unreserved | `1024` |
 | `--max-pending-requests N` | additional requests allowed to wait for admission | `16` |
 | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `30000` |
-| `--prefill-chunk N` | text-prefill chunk | `1024` |
+| `--prefill-chunk N` | text-prefill chunk; positive multiple of 128 | `1024`; CPU expert offload: `4096` |
 | `--log-stats-interval-ms N` | aggregate throughput report interval; `0` disables it | `5000` |
 | `--log-level trace\|debug\|info\|warning\|error\|critical\|off` | pretty stderr verbosity | `info` |
 | `--device N` | CUDA device index | `0` |
@@ -1622,9 +1627,9 @@ curl http://127.0.0.1:8080/metrics
 | `ninfer_generation_tokens_total`, `ninfer_decode_tokens_total` | All committed outputs, or decode/control outputs excluding the first token; include thinking and injected control tokens |
 | `ninfer_spec_decode_{rounds,draft_tokens,accepted_tokens,fallback_steps}_total` | Live native speculative work, including MTP and DFlash/DFlash2 |
 | `ninfer_{preemptions,snapshot_restores,replay_restores}_total` | Pressure pauses and recovery routes |
-| `ninfer_device_kv_{used,capacity}_pages`, `ninfer_device_state_{used,capacity}_slots` | Physical Main KV and StateImage occupancy; retained history also occupies these pools |
+| `ninfer_device_kv_{used,capacity}_page_groups{pool_id}`, `ninfer_device_state_{used,capacity}_slots` | Physical per-pool KV and StateImage occupancy; retained history also occupies these pools |
 | `ninfer_host_context_{used,reserved,capacity,peak}_bytes` | Unified Host backing; reserved bytes are already included in used bytes |
-| `ninfer_context_transfer_bytes_total{resource,direction}` | Actual State/Main KV/backend KV payload transfers |
+| `ninfer_context_transfer_bytes_total{resource,pool_id,direction}` | Completed State or KV payload transfers; `pool_id` is present for KV |
 | `ninfer_host_work_seconds_total{phase}`, `ninfer_device_wait_seconds_total` | Instrumented worker wall time; device wait is not CUDA kernel time |
 | `ninfer_constraint_requests_total{outcome}`, `ninfer_constraint_cache_total{result}` | Settled constrained requests by completion state and compilation-cache access |
 | `ninfer_constraint_{prepare,mask,matcher}_seconds_total`, `ninfer_constraint_mask_{positions,upload_bytes}_total` | Constraint work aggregated at request settlement, including truncated/cancelled results |
@@ -1670,7 +1675,8 @@ by the request log's `server_instance_id` (a timestamp when the request log is o
 carries the request-log `request_id` of its request and the absolute token position. The file is
 written by a background thread through a 64 MiB queue; a full queue, or a file at its
 `--expert-trace-max-gib` limit, drops records and counts them under `trace.records_dropped`
-instead of delaying the Engine. Decode rounds and MTP units keep one row per token column; a
+instead of delaying the Engine. Decode rounds and MTP units keep one row per logical input
+column; inactive rows and padding in a ragged verification are excluded. A
 prefill chunk of 52 or more tokens is stored as one per-layer histogram of expert counts (about
 49 KB for 48 layers instead of about 1 KB per token). The format and the cache simulator
 that replays it are documented in `tools/bench/expert_trace/README.md`.
@@ -1682,7 +1688,7 @@ in append mode and flushes every event, so successive model or MTP blocks may sh
 file. The parent directory must already exist. Failure to open the file aborts startup; the log path
 is also rejected if it resolves to the model artifact.
 
-Every line is one `ninfer_serve_request_log` schema-v25 JSON object. All events carry
+Every line is one `ninfer_serve_request_log` schema-v29 JSON object. All events carry
 `timestamp_unix_ms` and a process-unique `server_instance_id`; request IDs are monotonic only within
 that server instance. Successful request-start records include request-scoped acquisition,
 media-preprocessing wall/work, tokenizer, cache hit/miss/single-flight, and payload-size fields;
@@ -1690,7 +1696,7 @@ they do not infer request behavior from process-global counter deltas.
 
 | Event | Contents |
 |---|---|
-| `server_start` | artifact path, architecture, public name, actual formats and prefill signature; resolved Engine and context-cache capacities, thinking/non-thinking sampler defaults plus process overrides, thinking-history and thinking-budget defaults, Device arenas, the optional non-additive Vision layout inside the unified workspace, unified Host context capacity and occupancy, KV sizing ledger, CUDA Graph allowance, CUDA/GPU environment, and redacted argv |
+| `server_start` | artifact path, architecture, public name, actual formats and prefill signature; resolved Engine and context-cache capacities, thinking/non-thinking sampler defaults plus process overrides, thinking-history and thinking-budget defaults, Device arenas, the optional non-additive Vision layout inside the unified workspace, unified Host context capacity and occupancy, KV sizing ledger, measured CUDA Graph rebuilding estimate and signed calibration/preparation deltas, CUDA/GPU environment, and redacted argv |
 | `request_start` | protocol, resolved sampler and seed, requested reasoning effort, actual initial thinking mode and optional budget, Responses semantic-change flag, output budget, stream/message/tool shape, `client` (the `User-Agent` header), and `tools_digest` (an FNV-1a fingerprint of the ordered tool definitions; a change between two turns of one conversation invalidates its whole cached prefix) |
 | `request_rejected` | parsed request shape, requested reasoning effort, media-item count, `phase: "prepare"`, and the exact HTTP status/type/code/parameter/message for a synchronous preparation rejection |
 | `request_done` | finish reason, prompt/completion/cache/computed-prefill tokens, prefix reuse path, tool-call parse diagnostics, preemption/recovery counters, thinking-budget application counters, unrounded request-stage seconds, per-request Engine Host exposure, and complete speculative-decoding counters |
@@ -1768,8 +1774,12 @@ the whole request.
 
 The work `gpu_seconds` measures Text prefill stream intervals, including their MTP/DFlash work;
 Vision encode, standalone bridges and exact-hit sampling fall outside that interval.
-`context_transfers` reports completed request-owned State/Main KV/backend KV copies by direction,
-using transfer-event time and bytes. GPU intervals overlap Host submission and waits, so they are
+`context_transfers` contains `state` and a `kv_pools` array indexed by startup `pool_id`. Each
+resource reports `d2h`, `h2d`, `d2d` entries with `images`, `page_groups`, `bytes`, `copy_operations`
+and transfer-event `seconds`. Only completed request-owned copies are included, also when the
+request is later cancelled. Engine interval records expose `context_cache.state_transfers` and
+`context_cache.kv_pools`; each KV entry also carries its diagnostic `label`, `occupied_page_groups`
+and `capacity_page_groups`. GPU intervals overlap Host submission and waits, so they are
 separate evidence, not additional wall-time stages. Background reclamation remains Engine-wide.
 
 `result.generated_token_ids` records committed output token IDs for exact prefix analysis.
@@ -1839,8 +1849,8 @@ outside the GPU executor and do not delay formation of the next batch.
 
 `--max-context` is each sequence's logical ceiling. `--kv-capacity` fixes the shared Main Text KV
 pool used by active requests and retained prefixes. `auto` accounts for the complete enabled runtime
-and leaves 1 GiB of sizing headroom; omitting the option makes it follow `--max-context`. Capacity
-resolves once at startup.
+when sizing the pool; omitting the option makes it follow `--max-context`. Both explicit and automatic
+capacity use 1 GiB of startup planning headroom. Capacity resolves once at startup.
 
 Before each prefill, decode or replay unit, the runtime reserves the additional pages and temporary
 storage required by that unit. It first reclaims inactive cache resources when capacity is short.

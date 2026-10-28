@@ -14,13 +14,12 @@ struct Route {
 
 constexpr int kLast = std::numeric_limits<int>::max();
 
-// TMA80 admits one resident CTA per SM. On 170 SMs, the compact 324/320-row Down
-// crosses a full wave after 1200/1360 columns; partitioned K avoids that long tail.
+// Wide prefill keeps four K partitions across window sizes. Changing this reduction
+// order at the former wave boundaries changed the observable BF16 low-rank state.
+// Decode and target verification share one low-rank reduction and up schedule.
 constexpr std::array block_routes{
-    Route{1, 1, {Down::Gemv, Up::Folded16x16}},
-    Route{2, 4, {Down::Simt, Up::Folded16x16}},
-    Route{5, 32, {Down::Split8x16, Up::Folded16x16}},
-    Route{33, 64, {Down::Split8x32, Up::Folded32x32}},
+    Route{1, 48, {Down::Simt, Up::Folded16x16}},
+    Route{49, 64, {Down::Split8x32, Up::Folded32x32}},
     Route{65, 96, {Down::Split8x32, Up::TmaFolded32x64}},
     Route{97, 128, {Down::TmaSplit4, Up::TmaFolded32x64}},
     Route{129, 160, {Down::Split8x32, Up::TmaFolded32x64}},
@@ -29,24 +28,17 @@ constexpr std::array block_routes{
     Route{225, 256, {Down::TmaSplit2, Up::TmaFolded16x64}},
     Route{257, 320, {Down::Tma96Split4, Up::TmaFolded16x64}},
     Route{321, 448, {Down::TmaSplit4, Up::TmaFolded16x64}},
-    Route{449, 672, {Down::Tma96Split4, Up::TmaFolded16x64}},
-    Route{673, 1200, {Down::Tma80, Up::TmaFolded16x64}},
-    Route{1201, kLast, {Down::Tma96Split4, Up::TmaFolded16x64}},
+    Route{449, kLast, {Down::Tma96Split4, Up::TmaFolded16x64}},
 };
 constexpr std::array final_routes{
-    Route{1, 1, {Down::Gemv, Up::Folded16x16}},
-    Route{2, 4, {Down::Simt, Up::Folded16x16}},
-    Route{5, 32, {Down::Split8x16, Up::Folded16x16}},
-    Route{33, 64, {Down::Split8x32, Up::Folded32x32}},
+    Route{1, 48, {Down::Simt, Up::Folded16x16}},
+    Route{49, 64, {Down::Split8x32, Up::Folded32x32}},
     Route{65, 128, {Down::Split8x32, Up::TmaFolded32x64}},
     Route{129, 192, {Down::Tma96Split8, Up::TmaFolded16x64}},
     Route{193, 256, {Down::TmaSplit4, Up::TmaFolded32x64}},
     Route{257, 384, {Down::Tma96Split4, Up::TmaFolded16x64}},
     Route{385, 512, {Down::TmaSplit4, Up::TmaFolded16x64}},
-    Route{513, 768, {Down::Tma96Split4, Up::TmaFolded16x64}},
-    Route{769, 1360, {Down::Tma80, Up::TmaFolded16x64}},
-    Route{1361, 1632, {Down::Tma96Split4, Up::TmaFolded16x64}},
-    Route{1633, kLast, {Down::Tma96Split8, Up::TmaFolded16x64}},
+    Route{513, kLast, {Down::Tma96Split4, Up::TmaFolded16x64}},
 };
 
 constexpr bool closed(std::span<const Route> routes) {

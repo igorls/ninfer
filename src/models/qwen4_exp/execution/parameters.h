@@ -1,105 +1,80 @@
 #pragma once
 
+#include "models/qwen4_exp/execution/profile.h"
 #include "models/qwen4_exp/model.h"
-#include "models/qwen3_5/execution/parameters.h"
-#include "ninfer/ops/hyper_connection.h"
-#include "ninfer/ops/sparse_moe.h"
-#include "ninfer/ops/weight_input.h"
-
-#include <cstdint>
-#include <limits>
-#include <stdexcept>
-#include <variant>
-#include <vector>
+#include "models/common/moe/execution.h"
+#include "ninfer/ops/gated_residual.h"
+#include "ninfer/ops/qsa.h"
+#include "ninfer/ops/ple.h"
 
 namespace ninfer::models::qwen4_exp::execution {
-
 using LinearParameters = ops::SingleProjectionWeight;
-using qwen3_5::execution::NormParameters;
-using qwen3_5::execution::VisionBlockParameters;
-using qwen3_5::execution::VisionParameters;
 
-[[nodiscard]] inline std::int32_t dimension(std::uint64_t value) {
-    if (value > std::uint64_t(std::numeric_limits<std::int32_t>::max())) {
-        throw std::overflow_error("model dimension exceeds the Tensor integer domain");
-    }
-    return static_cast<std::int32_t>(value);
-}
-
-// One four-stream transition around a block: the input mixing and the injection of the block
-// output back into the streams.
-struct HyperParameters {
-    ops::HyperConnectionWeights mixing;
-    Weight block_inject;
+struct HcParameters {
+    Tensor norm;
+    ops::HcMixWeights mix;
 };
 
-// QSA attention: the packed [query, gate] x heads, key, value projection, the indexer projection
-// of four 128-wide queries and one raw key, and the gated output projection.
-struct AttentionParameters {
-    LinearParameters projection;
-    Tensor query_norm, key_norm;
-    LinearParameters indexer_projection;
-    Tensor indexer_query_norm, indexer_key_norm;
-    LinearParameters output;
+struct FinalHcParameters {
+    Tensor norm;
+    ops::HcFinalMixWeights mix;
 };
 
 struct GdnParameters {
-    LinearParameters projection; // [q,k,v,z] parent
-    Weight control;              // [a,b] parent
+    ops::ProjectionWeights input, control;
     Tensor a_log, dt_bias, convolution, norm;
     LinearParameters output;
 };
 
-struct BlockParameters {
-    HyperParameters attention_hyper, mlp_hyper;
-    std::variant<AttentionParameters, GdnParameters> mixer;
-    ops::SparseMoeNvfp4BankWeights moe;
+struct MainQsaProjection {
+    LinearParameters query_gate, kv_index;
 };
 
-// Device half of one PLE layer's n-gram embedding, injected before decoder block `layer`; the
-// gathered rows come from Model::ple_tables() at the same index.
+struct PackedQsaProjection { LinearParameters qgkv, index; };
+
+struct QsaParameters {
+    std::variant<MainQsaProjection, LinearParameters, PackedQsaProjection> input;
+    ops::QsaPrepareParameters prepare;
+    LinearParameters output;
+};
+
+struct BlockParameters {
+    HcParameters attention_hc, moe_hc;
+    std::variant<GdnParameters, QsaParameters> mixer;
+    moe::Parameters moe;
+};
+
 struct PleParameters {
-    std::uint32_t layer = 0;
-    LinearParameters key_projection, value_projection;
-    Tensor query_norm, key_norm, conv_norm, convolution;
+    ops::ProjectionWeights projection;
+    ops::PleGateParameters gate;
+    Tensor convolution;
 };
 
 struct TextParameters {
-    Weight token_embedding;
-    LinearParameters output_head;
+    Weight embedding;
+    LinearParameters head;
+    FinalHcParameters final_hc;
     std::vector<BlockParameters> layers;
-    std::vector<PleParameters> ple; // ascending `layer`, one per TextConfig::ple.layers entry
-    ops::HyperConnectionWeights final_mixer;
+    PleParameters ple;
 };
 
 struct MtpParameters {
-    LinearParameters embedding_projection, hidden_projection;
+    Weight embedding;
+    LinearParameters head, fc_embedding, fc_hidden;
     Tensor embedding_norm, hidden_norm;
     BlockParameters layer;
-    ops::HyperConnectionWeights final_mixer;
-    Weight token_embedding;
-    LinearParameters output_head;
+    FinalHcParameters final_hc;
 };
 
-// Throws std::invalid_argument when ops::ple_ngram does not execute the configured PLE geometry
-// (stream width, streams, n-gram head width, convolution taps and dilation, RMSNorm epsilon).
-// Parameters calls it, so such a model fails at load rather than at its first PLE injection.
-void require_supported_ple(const TextConfig& config);
-
-// Cold native preparation for the fixed model implementation. All weight addresses borrow the
-// source Model; shape-dependent kernel selection and scratch remain with the calling Op.
 class Parameters {
 public:
-    explicit Parameters(const Model& source);
+    explicit Parameters(const Model&, std::shared_ptr<const ModelProfile> = {});
     Parameters(const Parameters&)            = delete;
     Parameters& operator=(const Parameters&) = delete;
-    Parameters(Parameters&&)                 = delete;
-    Parameters& operator=(Parameters&&)      = delete;
-
     const Model& model;
+    const std::shared_ptr<const ModelProfile> profile;
     TextParameters text;
     std::optional<MtpParameters> mtp;
-    std::optional<VisionParameters> vision;
+    std::optional<qwen::VisionParameters> vision;
 };
-
 } // namespace ninfer::models::qwen4_exp::execution

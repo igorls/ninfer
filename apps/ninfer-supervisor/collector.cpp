@@ -145,8 +145,8 @@ std::string capacity_line_from_server_start(const std::string& line) {
                " free-after-startup=" + gib(mem, "available_after_startup_bytes") +
                " headroom=" + gib(mem, "kv_capacity_headroom_bytes") +
                " slack=" + gib(mem, "planned_slack_bytes") +
-               " graphs=" + gib(mem, "cuda_graph_observed_bytes") + "/" +
-               gib(mem, "cuda_graph_allowance_bytes") + " (from request-log server_start)";
+               " graphs=" + gib(mem, "cuda_graph_calibration_retained_bytes") + "/" +
+               gib(mem, "cuda_graph_rebuild_estimate_bytes") + " (from request-log server_start)";
     } catch (...) { return {}; }
 }
 

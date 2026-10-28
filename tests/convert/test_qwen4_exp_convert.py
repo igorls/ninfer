@@ -1,50 +1,32 @@
-"""Native official-safetensors conversion of the Qwen4 family (qwen4_exp) to v3 artifacts.
-
-Synthetic tiny checkpoints use the official Qwen3.8-Flash-Next tensor names; the read-back checks
-use the artifact contract (docs/maintainer/qwen3.8-flash-next-artifact.md), the documented storage
-layouts and numeric rules, decoded here independently of the converter's codecs.
-"""
-
+"""Official Qwen4 sources through the public converter, checked with independent oracles."""
 from __future__ import annotations
-
 from collections import Counter
 import gzip
 import hashlib
 import json
+from math import prod
 import os
 from pathlib import Path
 import re
 import struct
 import subprocess
 import sys
-
 import numpy as np
 import pytest
 from safetensors.torch import save_file
 import torch
-
-from tools.artifact.codecs.nvfp4 import encode_nvfp4_expert_bank
 from tools.artifact.reader import Artifact
-from tools.artifact.schema import binding_parts
-from tools.convert import methods
-from tools.convert.official_recipes import RECIPES, qwen4_allocation
-from tools.convert.pipeline import convert
-from tools.convert.quantization.nvfp4 import encode_rows, weight_divisor
-from tools.convert.qwen4_exp import build
-from tools.convert.qwen4_exp.config import load_source, text_config, vision_config
-from tools.convert.qwen4_exp.inventory import _inputs as upgrade_inputs
-from tools.convert.qwen4_exp.inventory import plan_upgrade
-from tools.convert.qwen4_exp.source import MAINTAINED_TEMPLATE_SHA256, maintained_template
+from tools.artifact.schema import binding_parts, TensorObject
+from tools.artifact.layouts import encoded_size
+from tools.convert import qwen4_exp
+from tools.convert.official_recipes import RECIPES
 from tools.convert.recipe import Recipe
+from tools.convert.pipeline import convert
 from tools.convert.sources.safetensors import SafetensorsSource, TensorInfo
-
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "tests" / "fixtures" / "qwen4_exp"
-MAINTAINED = ROOT / "tools" / "chat_templates" / "qwen3_8.jinja"
+MAINTAINED = ROOT / "tools" / "chat_templates" / "qwen3_8_flash_next.jinja"
 FP8_FP32 = "fp8_e4m3fn_row_fp32"
-
-
-# --- synthetic official checkpoints -------------------------------------------------------
 
 
 def _text(*, moe: bool) -> dict:
@@ -55,6 +37,9 @@ def _text(*, moe: bool) -> dict:
         "output_gate_type": "sigmoid",
         "mamba_ssm_dtype": "float32",
         "mtp_num_hidden_layers": 1,
+        "mtp": {"num_hidden_layers": 1, "layer_types": ["full_attention"],
+                "mtp_use_hidden_state_from_layer": None, "hybrid": True,
+                "rope_theta": 10000000},
         "mtp_use_dedicated_embeddings": False,
         "tie_word_embeddings": False,
         "hidden_size": 128,
@@ -119,6 +104,8 @@ VISION = {
     "hidden_act": "gelu_pytorch_tanh",
     "deepstack_visual_indexes": [],
 }
+
+
 PLE_ROWS = 40
 
 
@@ -306,7 +293,7 @@ def _checkpoint(path: Path, config: dict, tensors: dict[str, torch.Tensor]) -> P
     return path
 
 
-def _pattern(name: str) -> str:
+def _pattern(name):
     return re.sub(r"shard_\d+", "shard_N", re.sub(r"\.\d+\.", ".N.", name))
 
 
@@ -319,141 +306,6 @@ def test_synthetic_checkpoint_uses_the_official_tensor_names():
         dtype = official["tensors"].get(name, [None])[0]
         if dtype is not None:
             assert dtype == ("I64" if tensor.dtype == torch.int64 else "BF16"), name
-
-
-# --- the logical values the contract assigns to official tensors ---------------------------
-
-
-def _expected(name: str, t: dict[str, torch.Tensor], tp: str) -> tuple[torch.Tensor, set[str]]:
-    """A v3 logical parameter's value from official tensors, and the tensors it reads."""
-    used: set[str] = set()
-
-    def get(source):
-        used.add(source)
-        return t[source]
-
-    def cat(*sources):
-        return torch.cat([get(source) for source in sources])
-
-    def conv(source):
-        return get(source)[:, 0, :].T.contiguous()
-
-    hyper = {
-        "norm": "hc_norm.weight",
-        "input_mix/down": "input_mix_weight_down.weight",
-        "input_mix/up": "input_mix_weight_up.weight",
-        "block_inject": "block_inject_weight.weight",
-    }
-    if name == "text/token_embedding":
-        return get(tp + "embed_tokens.weight"), used
-    if name == "text/output_head":
-        return get("lm_head.weight"), used
-    match = re.fullmatch(r"(text|mtp)/hyper_connection/(.+)", name)
-    if match:
-        prefix = tp if match[1] == "text" else "mtp."
-        return get(prefix + "hyper_connection_mixer." + hyper[match[2]]), used
-    mtp = {
-        "mtp/embedding_projection": "mtp.fc_embedding.weight",
-        "mtp/hidden_projection": "mtp.fc_hidden.weight",
-        "mtp/embedding_norm": "mtp.pre_fc_norm_embedding.weight",
-        "mtp/hidden_norm": "mtp.pre_fc_norm_hidden.weight",
-    }
-    if name in mtp:
-        return get(mtp[name]), used
-    match = re.fullmatch(r"(?:text/layers/(\d+)|mtp/layers/0)/(.+)", name)
-    if match:
-        sb = f"{tp}layers.{match[1]}." if match[1] is not None else "mtp.layers.0."
-        role = match[2]
-        part = re.fullmatch(r"(attention|mlp)/hyper_connection/(.+)", role)
-        if part:
-            owner = "attn" if part[1] == "attention" else "mlp"
-            return get(f"{sb}{owner}_hyper_connection.{hyper[part[2]]}"), used
-        a, g, m, p = sb + "self_attn.", sb + "linear_attn.", sb + "mlp.", sb + "ple."
-        direct = {
-            "attention/query_norm": a + "q_norm.weight",
-            "attention/key_norm": a + "k_norm.weight",
-            "attention/output": a + "o_proj.weight",
-            "attention/indexer/query_key": a + "indexer.index_qk_proj.weight",
-            "attention/indexer/query_norm": a + "indexer.q_layernorm.weight",
-            "attention/indexer/key_norm": a + "indexer.k_layernorm.weight",
-            "gdn/a_log": g + "A_log",
-            "gdn/dt_bias": g + "dt_bias",
-            "gdn/norm": g + "norm.weight",
-            "gdn/output": g + "out_proj.weight",
-            "mlp/router": m + "gate.weight",
-            "mlp/shared_expert_gate": m + "shared_expert_gate.weight",
-            "mlp/shared_expert/gate": m + "shared_expert.gate_proj.weight",
-            "mlp/shared_expert/up": m + "shared_expert.up_proj.weight",
-            "mlp/shared_expert/down": m + "shared_expert.down_proj.weight",
-            "mlp/experts/gate_up": m + "experts.gate_up_proj",
-            "mlp/experts/down": m + "experts.down_proj",
-            "mlp/gate": m + "gate_proj.weight",
-            "mlp/up": m + "up_proj.weight",
-            "mlp/down": m + "down_proj.weight",
-            "ple/key_projection": p + "key_proj.weight",
-            "ple/value_projection": p + "value_proj.weight",
-            "ple/query_norm": p + "norm_query.weight",
-            "ple/key_norm": p + "norm_key.weight",
-            "ple/conv_norm": p + "norm_conv.weight",
-            "ple/embedding/layer_multipliers": p + "ple_embedding.layer_multipliers",
-            "ple/embedding/ngram_head_offsets": p + "ple_embedding.ngram_heads_offsets",
-            "ple/embedding/ngram_head_vocab_sizes": p + "ple_embedding.ngram_heads_vocab_sizes",
-        }
-        if role in direct:
-            return get(direct[role]), used
-        if role == "attention/query_gate_key_value":
-            return cat(a + "q_proj.weight", a + "k_proj.weight", a + "v_proj.weight"), used
-        if role == "gdn/query_key_value_z":
-            return cat(g + "in_proj_qkv.weight", g + "in_proj_z.weight"), used
-        if role == "gdn/a_b_projection":
-            return cat(g + "in_proj_a.weight", g + "in_proj_b.weight"), used
-        if role == "gdn/convolution":
-            return conv(g + "conv1d.weight"), used
-        if role == "ple/convolution":
-            return conv(p + "conv1d.weight"), used
-        shard = re.fullmatch(r"ple/embedding/shards/(\d+)", role)
-        if shard:
-            return get(f"{p}ple_embedding.ngram_embedding.shard_{shard[1]}.weight"), used
-    vision = {
-        "vision/patch_embedding_bias": "model.visual.patch_embed.proj.bias",
-        "vision/position_embedding": "model.visual.pos_embed.weight",
-        "vision/merger/norm_weight": "model.visual.merger.norm.weight",
-        "vision/merger/norm_bias": "model.visual.merger.norm.bias",
-        "vision/merger/fc1": "model.visual.merger.linear_fc1.weight",
-        "vision/merger/fc1_bias": "model.visual.merger.linear_fc1.bias",
-        "vision/merger/fc2": "model.visual.merger.linear_fc2.weight",
-        "vision/merger/fc2_bias": "model.visual.merger.linear_fc2.bias",
-    }
-    if name in vision:
-        return get(vision[name]), used
-    if name == "vision/patch_embedding":
-        value = get("model.visual.patch_embed.proj.weight")
-        return value.reshape(value.shape[0], -1), used
-    match = re.fullmatch(r"vision/layers/(\d+)/(.+)", name)
-    if match:
-        b = f"model.visual.blocks.{match[1]}."
-        role = match[2]
-        qkv = re.fullmatch(r"attention/(query|key|value)(_bias)?", role)
-        if qkv:
-            source = get(b + ("attn.qkv.bias" if qkv[2] else "attn.qkv.weight"))
-            return source.chunk(3)[("query", "key", "value").index(qkv[1])], used
-        blocks = {
-            "attention/output": "attn.proj.weight",
-            "attention/output_bias": "attn.proj.bias",
-            "mlp/fc1": "mlp.linear_fc1.weight",
-            "mlp/fc1_bias": "mlp.linear_fc1.bias",
-            "mlp/fc2": "mlp.linear_fc2.weight",
-            "mlp/fc2_bias": "mlp.linear_fc2.bias",
-            "norm1_weight": "norm1.weight",
-            "norm1_bias": "norm1.bias",
-            "norm2_weight": "norm2.weight",
-            "norm2_bias": "norm2.bias",
-        }
-        return get(b + blocks[role]), used
-    raise AssertionError(f"no contract value for {name}")
-
-
-# --- independent decoders of the stored words and the encoders' numeric rules --------------
 
 
 def _align(value: int) -> int:
@@ -469,7 +321,11 @@ def _e4m3(word: int) -> float:
 
 
 E4M3 = np.array([_e4m3(w) for w in range(256)])
+
+
 E4M3_POSITIVE = np.array([_e4m3(w) for w in range(0x7F)])
+
+
 E2M1 = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
 
 
@@ -557,228 +413,6 @@ def _check_u4z8(payload: bytes, source: torch.Tensor) -> None:
     assert float(excess[~zero].max(initial=0.0)) <= 1e-6
 
 
-def _check_object(artifact: Artifact, object_id: str, value: torch.Tensor) -> str:
-    obj = artifact.object(object_id)
-    payload = artifact.read_object(object_id)
-    assert tuple(obj.shape) == tuple(value.shape), object_id
-    if obj.format == "bf16":
-        assert payload == value.to(torch.bfloat16).contiguous().view(torch.uint8).numpy().tobytes()
-    elif obj.format == "int64":
-        assert payload == value.to(torch.int64).numpy().astype("<i8").tobytes()
-    elif obj.format == FP8_FP32:
-        _check_fp8_row_fp32(payload, value)
-    elif obj.format == "nvfp4":
-        assert obj.layout == "expert_block_scale_k16_m128x4_v1"
-        _check_nvfp4_bank(payload, value)
-    elif obj.format == "u4z8_g16_fp16":
-        _check_u4z8(payload, value)
-    else:
-        raise AssertionError(f"{object_id}: unexpected format {obj.format}")
-    return obj.format
-
-
-def _check_artifact(path: Path, tensors: dict, tp: str) -> tuple[Artifact, dict, set]:
-    """Every Binding against its contract value; returns the parameter formats and the official
-    tensors the Bindings cover."""
-    artifact = Artifact(path)
-    formats: dict[str, str] = {}
-    used: set[str] = set()
-    parents: dict[str, list] = {}
-    for name, binding in artifact.directory.bindings.items():
-        value, sources = _expected(name, tensors, tp)
-        used |= sources
-        parts = binding_parts(binding, artifact.by_id, name)
-        if len(parts) == 1 and parts[0][1] == 0 and "object" in binding:
-            formats[name] = _check_object(artifact, parts[0][0], value)
-        else:
-            assert len(parts) == 1, name
-            parents.setdefault(parts[0][0], []).append((parts[0][1], parts[0][2], name, value))
-    for object_id, members in parents.items():
-        members.sort()
-        cursor = 0
-        for begin, end, name, value in members:
-            assert (begin, end) == (cursor, cursor + value.numel()), name
-            cursor = end
-        obj = artifact.object(object_id)
-        parent = torch.cat([value.reshape(-1) for *_, value in members]).reshape(obj.shape)
-        format = _check_object(artifact, object_id, parent)
-        formats.update({name: format for _, _, name, _ in members})
-    return artifact, formats, used
-
-
-# --- end-to-end conversions -----------------------------------------------------------------
-
-
-def test_moe_checkpoint_converts_through_the_cli(tmp_path):
-    config = _source_config(moe=True, nested=True)
-    tensors = _official_tensors(config["text_config"], nested=True, seed=1)
-    source = _checkpoint(tmp_path / "source", config, tensors)
-    output = tmp_path / "tiny.ninfer"
-    command = [
-        sys.executable, "-B", "-m", "tools.convert",
-        "--model", str(source),
-        "--recipe", "qwen3_8_flash_next",
-        "--components", "text,vision,mtp",
-        "--resource", f"chat_template.jinja={MAINTAINED}",
-        "--name", "tiny-qwen4",
-        "--out", str(output),
-        "--device", "cpu",
-        "--rows-per-chunk", "5",
-        "--max-file-bytes", "400000",
-    ]  # fmt: skip
-    result = subprocess.run(
-        command,
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
-    )
-    assert result.returncode == 0, result.stderr
-    artifact, formats, used = _check_artifact(output, tensors, "model.language_model.")
-    with artifact:
-        directory = artifact.directory
-        assert len(directory.files) > 1
-        assert used == set(tensors)  # every official tensor is stored
-        text = directory.components["text"]["config"]
-        assert text == text_config(config)
-        assert text["ple_layer_ids"] == [1] and text["num_experts"] == 4
-        assert "intermediate_size" not in text
-        assert directory.components["vision"]["config"] == vision_config(config, text)
-        assert directory.components["mtp"] == {
-            "config": {"architectures": ["Qwen4ExpMTP"]},
-            "target": "text",
-        }
-        resources = directory.components["text"]["resources"]
-        assert artifact.read_object(resources["chat_template.jinja"]) == MAINTAINED.read_bytes()
-        assert set(directory.components["vision"]["resources"]) == {
-            "preprocessor_config.json",
-            "video_preprocessor_config.json",
-        }
-        assert directory.metadata == {"name": "tiny-qwen4"}
-        assert directory.provenance["recipe"] == "qwen3_8_flash_next"
-        assert directory.provenance["chat_template"] == {
-            "selection": "explicit",
-            "sha256": hashlib.sha256(MAINTAINED.read_bytes()).hexdigest(),
-        }
-
-        # The Flash-Next allocation: NVFP4 banks (Text and MTP), FP8 row-FP32 Text mixers,
-        # U4Z8 PLE shards, INT64 PLE tables, BF16 everything else (MTP attention included).
-        def expected_format(name):
-            if re.search(r"/mlp/experts/(gate_up|down)$", name):
-                return "nvfp4"
-            if re.fullmatch(
-                r"text/layers/\d+/(attention/(query_gate_key_value|output)|gdn/(query_key_value_z|output))",
-                name,
-            ):
-                return FP8_FP32
-            if "/ple/embedding/shards/" in name:
-                return "u4z8_g16_fp16"
-            if "/ple/embedding/" in name:
-                return "int64"
-            return "bf16"
-
-        assert formats == {name: expected_format(name) for name in formats}
-        assert Counter(f for f in formats.values() if f != "bf16") == {
-            "nvfp4": 6,
-            FP8_FP32: 4,
-            "u4z8_g16_fp16": 2,
-            "int64": 3,
-        }
-        # Fused parents are whole objects; Vision Q/K/V are Parts of one packed parent.
-        for name in (
-            "text/layers/1/attention/query_gate_key_value",
-            "text/layers/0/gdn/query_key_value_z",
-            "text/layers/0/gdn/a_b_projection",
-            "mtp/layers/0/mlp/experts/gate_up",
-        ):
-            assert set(directory.bindings[name]) == {"object"}
-        vision = [
-            binding_parts(directory.bindings[f"vision/layers/0/attention/{role}"], artifact.by_id)
-            for role in ("query", "key", "value")
-        ]
-        assert len({parts[0][0] for parts in vision}) == 1
-
-        # One Use per mathematical input (the v2 upgrade's independent map); policy follows
-        # the stored format and no activation divisors are stored.
-        uses = {(u["parameter"], u["input"]): u for u in directory.uses}
-        assert set(uses) == {(p, i) for p in directory.bindings for i in upgrade_inputs(p)}
-        policy = {"nvfp4": "AllowA4", FP8_FP32: "AllowA8"}
-        for (parameter, _), use in uses.items():
-            assert use["activation_policy"] == policy.get(formats[parameter], "A16Only")
-            assert "auxiliaries" not in use
-
-        # The native expert-bank encoder is the one that baked the qualified MTP banks.
-        bank = tensors["mtp.layers.0.mlp.experts.gate_up_proj"]
-        codes, scales, divisors = [], [], []
-        for expert in bank:
-            divisor = weight_divisor(float(expert.float().abs().max()))
-            c, s = encode_rows(expert, divisor)
-            codes.append(c)
-            scales.append(s)
-            divisors.append(struct.unpack("<f", divisor)[0])
-        baked = encode_nvfp4_expert_bank(
-            torch.stack(codes), torch.stack(scales), torch.tensor(divisors), bank.shape
-        )
-        stored = directory.bindings["mtp/layers/0/mlp/experts/gate_up"]["object"]
-        assert artifact.read_object(stored) == bytes(baked)
-    report = json.loads(Path(str(output) + ".conversion.json").read_text())
-    assert report["formats"]["nvfp4"] == 6
-
-
-def test_dense_checkpoint_converts_with_qwen3_5_dense_mlp_names(tmp_path, monkeypatch):
-    # Small chunks so the PLE quantizer streams each table in several row blocks.
-    monkeypatch.setattr(methods, "_MIN_CHUNK_VALUES", 7 * 16)
-    config = _source_config(moe=False, nested=False)
-    tensors = _official_tensors(config, nested=False, seed=2)
-    source = _checkpoint(tmp_path / "source", config, tensors)
-    output = tmp_path / "dense.ninfer"
-    with SafetensorsSource(source) as base:
-        model = build.build_model(
-            base,
-            components=("text", "mtp"),
-            resource_overrides={"chat_template.jinja": MAINTAINED},
-        )
-        recipe = Recipe(model)
-        qwen4_allocation(
-            model,
-            recipe,
-            mixer=FP8_FP32,
-            dense_mlp=FP8_FP32,
-            mtp_dense_mlp=FP8_FP32,
-            experts="nvfp4",  # absent from a dense model: skipped
-            ple="u4z8_g16_fp16",
-        )
-        with pytest.raises(ValueError, match="MoE"):
-            RECIPES["qwen3_8_flash_next"](model, Recipe(model), {})
-        convert(model, recipe, output, device="cpu", rows_per_chunk=3)
-    artifact, formats, used = _check_artifact(output, tensors, "model.")
-    with artifact:
-        directory = artifact.directory
-        assert used == set(tensors)
-        text = directory.components["text"]["config"]
-        assert text["intermediate_size"] == 96
-        assert not {"num_experts", "num_experts_per_tok", "moe_intermediate_size"} & set(text)
-        assert set(directory.components) == {"text", "mtp"}
-        for block in ("text/layers/0/", "text/layers/1/", "mtp/layers/0/"):
-            assert not any(name.startswith(block + "mlp/experts") for name in directory.bindings)
-            assert formats[block + "mlp/down"] == FP8_FP32
-            # Gate and up share one FP8 parent as consecutive Parts, as for qwen3_5 Dense.
-            (gate,) = binding_parts(directory.bindings[block + "mlp/gate"], artifact.by_id)
-            (up,) = binding_parts(directory.bindings[block + "mlp/up"], artifact.by_id)
-            assert gate[0] == up[0]
-            assert (gate[1:], up[1:]) == ((0, 96 * 128), (96 * 128, 2 * 96 * 128))
-            assert artifact.object(gate[0]).format == FP8_FP32
-        uses = {(u["parameter"], u["input"]): u["activation_policy"] for u in directory.uses}
-        for block in ("text/layers/1/", "mtp/layers/0/"):
-            assert uses[(block + "mlp/gate", block + "ffn_input")] == "AllowA8"
-            assert uses[(block + "mlp/up", block + "ffn_input")] == "AllowA8"
-            assert uses[(block + "mlp/down", block + "mlp/product")] == "AllowA8"
-        assert uses[("text/output_head", "mtp/final_hidden")] == "A16Only"
-
-
-# --- Flash-Next geometry: the native route reproduces the qualified artifact's contract -----
-
-
 class _HeaderOnlySource:
     """The official Flash-Next tensor directory (names, dtypes, shapes) without payloads."""
 
@@ -800,124 +434,235 @@ class _HeaderOnlySource:
     def read_flat(self, name, begin=0, end=None):
         dtype, shape = self.tensors[name]
         end = int(np.prod(shape)) if end is None else end
+        assert end - begin <= 65536, "header fixture read would materialize a large weight"
         return torch.zeros(end - begin, dtype=torch.int64 if dtype == "I64" else torch.bfloat16)
 
 
-def test_flash_next_official_tensors_map_to_the_qualified_v3_contract(tmp_path):
-    official = json.loads(gzip.decompress((FIXTURES / "official_tensors.json.gz").read_bytes()))
-    assert official["repository"] == "Qwen/Qwen3.8-Flash-Next"
-    root = tmp_path / "flash-next"
-    root.mkdir()
-    _resources(root)
-    for role in ("preprocessor_config.json", "video_preprocessor_config.json"):
-        (root / role).write_text(
-            json.dumps({"patch_size": 16, "temporal_patch_size": 2, "merge_size": 2})
-        )
-    source = _HeaderOnlySource(root, load_source(), official["tensors"])
-    model = build.build_model(
-        source,
-        components=("text", "vision", "mtp"),
-        resource_overrides={"chat_template.jinja": MAINTAINED},
-    )
-    recipe = Recipe(model)
-    RECIPES["qwen3_8_flash_next"](model, recipe, {})
-    prepared = recipe.prepare(device="cpu")
-
-    upgraded = plan_upgrade(
-        json.loads(gzip.decompress((FIXTURES / "v2_directory.json.gz").read_bytes()))
-    )
-    assert model.components["text"]["config"] == upgraded.components["text"]["config"]
-    assert model.components["vision"]["config"] == upgraded.components["vision"]["config"]
-    assert model.components["mtp"]["config"] == upgraded.components["mtp"]["config"]
-
-    native = {job.spec.id: job.spec for job in prepared.weights}
-    reference = {spec.id: spec for spec in upgraded.specs if hasattr(spec, "format")}
-    assert Counter(s.format for s in native.values()) == Counter(
-        s.format for s in reference.values()
-    )
-    assert set(prepared.bindings) == set(upgraded.bindings)
-    for name, binding in prepared.bindings.items():
-        target = upgraded.bindings[name]
-        if "object" in target:
-            ours, qualified = native[binding["object"]], reference[target["object"]]
-            assert (ours.shape, ours.format, ours.layout) == (
-                qualified.shape,
-                qualified.format,
-                qualified.layout,
-            ), name
-        else:
-            # Vision Q/K/V and their biases: Parts of one packed parent at the same ranges.
-            ranges = [part["range"] for part in target["parts"]]
-            assert [part["range"] for part in binding["parts"]] == ranges, name
-            ours = native[binding["parts"][0]["object"]]
-            qualified = reference[target["parts"][0]["object"]]
-            assert (ours.shape, ours.format) == (qualified.shape, qualified.format), name
-
-    def uses(items):
-        return {(u["parameter"], u["input"], u["activation_policy"]) for u in items}
-
-    assert uses(prepared.uses) == uses(upgraded.uses)
-    assert not prepared.auxiliaries
-
-
-# --- adapter policies -------------------------------------------------------------------------
-
-
-def test_chat_template_defaults_to_the_maintained_qwen3_8_template(tmp_path, monkeypatch):
-    config = _source_config(moe=True, nested=True)
-    source = _checkpoint(
-        tmp_path / "source", config, _official_tensors(config["text_config"], nested=True, seed=3)
-    )
-    with SafetensorsSource(source) as base:
-        with pytest.raises(ValueError, match="--resource chat_template.jinja"):
-            build.build_model(base)
-        official = hashlib.sha256((source / "chat_template.jinja").read_bytes()).hexdigest()
-        monkeypatch.setattr(build, "MAINTAINED_TEMPLATES", {official: ("qwen3.8", "qwen3_8.jinja")})
-        model = build.build_model(base)
-        stored = model.resources[model.components["text"]["resources"]["chat_template.jinja"]]
-        # The committed (LF) bytes, also from a checkout with CRLF line endings.
-        assert stored == maintained_template()
-        assert model.provenance["chat_template"] == {
-            "selection": "maintained",
-            "official": "qwen3.8",
-            "official_sha256": official,
-            "installed": "tools/chat_templates/qwen3_8.jinja",
-            "sha256": MAINTAINED_TEMPLATE_SHA256,
+def _expected(name, tensors, cfg, tp):
+    """Logical mathematics from official axes, independently of the adapter's sources."""
+    if name in ("text/token_embedding", "mtp/token_embedding"):
+        return tensors[tp + "embed_tokens.weight"]
+    if name in ("text/output_head", "mtp/output_head"):
+        return tensors["lm_head.weight"]
+    mtp = {"fc_embedding": "fc_embedding", "fc_hidden": "fc_hidden",
+           "pre_fc_embedding_norm": "pre_fc_norm_embedding",
+           "pre_fc_hidden_norm": "pre_fc_norm_hidden"}
+    if name.startswith("mtp/") and name[4:] in mtp:
+        return tensors["mtp." + mtp[name[4:]] + ".weight"]
+    hc = {"norm": "hc_norm.weight", "down": "input_mix_weight_down.weight",
+          "up": "input_mix_weight_up.weight", "inject": "block_inject_weight.weight"}
+    match = re.fullmatch(r"(text|mtp)/final_hc/(.+)", name)
+    if match:
+        return tensors[(tp if match[1] == "text" else "mtp.") + "hyper_connection_mixer." + hc[match[2]]]
+    match = re.fullmatch(r"(?:text/layers/(\d+)|mtp/layers/0)/(.+)", name)
+    if match:
+        prefix = f"{tp}layers.{match[1]}." if match[1] is not None else "mtp.layers.0."
+        role = match[2]
+        hyper = re.fullmatch(r"(attention|moe)_hc/(.+)", role)
+        if hyper:
+            return tensors[prefix + ("attn" if hyper[1] == "attention" else "mlp") + "_hyper_connection." + hc[hyper[2]]]
+        a, g, m, p = (prefix + x for x in ("self_attn.", "linear_attn.", "mlp.", "ple."))
+        direct = {
+            "attention/key": a + "k_proj.weight", "attention/value": a + "v_proj.weight",
+            "attention/output": a + "o_proj.weight", "attention/query_norm": a + "q_norm.weight",
+            "attention/key_norm": a + "k_norm.weight",
+            "attention/index_query_norm": a + "indexer.q_layernorm.weight",
+            "attention/index_key_norm": a + "indexer.k_layernorm.weight",
+            "gdn/z": g + "in_proj_z.weight", "gdn/a_projection": g + "in_proj_a.weight",
+            "gdn/b_projection": g + "in_proj_b.weight", "gdn/output": g + "out_proj.weight",
+            "gdn/norm": g + "norm.weight", "gdn/a_log": g + "A_log", "gdn/dt_bias": g + "dt_bias",
+            "moe/router": m + "gate.weight", "moe/shared_score": m + "shared_expert_gate.weight",
+            "moe/shared/gate": m + "shared_expert.gate_proj.weight",
+            "moe/shared/up": m + "shared_expert.up_proj.weight",
+            "moe/shared/down": m + "shared_expert.down_proj.weight",
+            "moe/experts/down": m + "experts.down_proj",
+            "ple/key": p + "key_proj.weight", "ple/value": p + "value_proj.weight",
+            "ple/norm_query": p + "norm_query.weight", "ple/norm_key": p + "norm_key.weight",
+            "ple/norm_conv": p + "norm_conv.weight",
         }
-    assert (build.TEMPLATE_DIRECTORY / "qwen3_8.jinja").is_file()
+        if role in direct:
+            return tensors[direct[role]]
+        if role in ("attention/query", "attention/output_gate"):
+            raw = tensors[a + "q_proj.weight"].reshape(cfg["num_attention_heads"], 2, cfg["head_dim"], -1)
+            return raw[:, int(role.endswith("output_gate"))].reshape(-1, cfg["hidden_size"])
+        if role in ("attention/index_query", "attention/index_key"):
+            split = cfg["indexer_n_heads"] * cfg["indexer_head_dim"]
+            raw = tensors[a + "indexer.index_qk_proj.weight"]
+            return raw[:split] if role.endswith("query") else raw[split:]
+        if role in ("gdn/query", "gdn/key", "gdn/value"):
+            q = cfg["linear_num_key_heads"] * cfg["linear_key_head_dim"]
+            raw = tensors[g + "in_proj_qkv.weight"]
+            return {"gdn/query": raw[:q], "gdn/key": raw[q:2*q], "gdn/value": raw[2*q:]}[role]
+        if role in ("gdn/convolution", "ple/convolution"):
+            return tensors[(g if role.startswith("gdn/") else p) + "conv1d.weight"][:, 0, :].T.contiguous()
+        if role in ("moe/experts/gate", "moe/experts/up"):
+            bank = tensors[m + "experts.gate_up_proj"]
+            i = cfg["moe_intermediate_size"]
+            return bank[:, :i] if role.endswith("gate") else bank[:, i:]
+        if role == "ple/table":
+            return torch.cat([tensors[f"{p}ple_embedding.ngram_embedding.shard_{j}.weight"]
+                              for j in range(cfg["split_ngram_parts"])])
+    direct = {
+        "vision/patch_embedding": "patch_embed.proj.weight", "vision/patch_embedding_bias": "patch_embed.proj.bias",
+        "vision/position_embedding": "pos_embed.weight", "vision/merger/norm_weight": "merger.norm.weight",
+        "vision/merger/norm_bias": "merger.norm.bias", "vision/merger/fc1": "merger.linear_fc1.weight",
+        "vision/merger/fc1_bias": "merger.linear_fc1.bias", "vision/merger/fc2": "merger.linear_fc2.weight",
+        "vision/merger/fc2_bias": "merger.linear_fc2.bias",
+    }
+    if name in direct:
+        value = tensors["model.visual." + direct[name]]
+        return value.flatten(1) if name == "vision/patch_embedding" else value
+    match = re.fullmatch(r"vision/layers/(\d+)/(.+)", name)
+    if match:
+        b, role = f"model.visual.blocks.{match[1]}.", match[2]
+        qkv = re.fullmatch(r"attention/(query|key|value)(_bias)?", role)
+        if qkv:
+            raw = tensors[b + ("attn.qkv.bias" if qkv[2] else "attn.qkv.weight")]
+            return raw.chunk(3)[("query", "key", "value").index(qkv[1])]
+        fields = {"attention/output": "attn.proj.weight", "attention/output_bias": "attn.proj.bias",
+                  "mlp/fc1": "mlp.linear_fc1.weight", "mlp/fc1_bias": "mlp.linear_fc1.bias",
+                  "mlp/fc2": "mlp.linear_fc2.weight", "mlp/fc2_bias": "mlp.linear_fc2.bias"}
+        if role.startswith(("norm1_", "norm2_")):
+            return tensors[b + role.replace("_", ".")]
+        return tensors[b + fields[role]]
+    raise AssertionError(f"no independent value for {name}")
 
 
-def test_unmapped_or_misshapen_official_tensors_fail_the_build(tmp_path):
+def _check_artifact(path, tensors, cfg, tp):
+    with Artifact(path) as artifact:
+        parents, covered = {}, {}
+        formats = {}
+        for name, binding in artifact.directory.bindings.items():
+            expected = _expected(name, tensors, cfg, tp).float().flatten()
+            cursor = 0
+            for oid, begin, end in binding_parts(binding, artifact.by_id, name):
+                obj = artifact.object(oid)
+                if oid not in parents:
+                    parents[oid] = torch.empty(prod(obj.shape))
+                    covered[oid] = torch.zeros(prod(obj.shape), dtype=torch.bool)
+                count = end - begin
+                selected = expected[cursor:cursor+count]
+                assert selected.numel() == count
+                overlap = covered[oid][begin:end]
+                assert torch.equal(parents[oid][begin:end][overlap], selected[overlap])
+                parents[oid][begin:end] = selected
+                covered[oid][begin:end] = True
+                cursor += count
+                formats[name] = obj.format
+            assert cursor == expected.numel(), name
+        for oid, values in parents.items():
+            assert covered[oid].all(), oid
+            obj, payload = artifact.object(oid), artifact.read_object(oid)
+            values = values.reshape(obj.shape)
+            if obj.format == "bf16":
+                assert payload == values.bfloat16().contiguous().view(torch.uint8).numpy().tobytes()
+            elif obj.format == "fp32":
+                assert payload == values.contiguous().numpy().astype('<f4').tobytes()
+            elif obj.format == FP8_FP32:
+                _check_fp8_row_fp32(payload, values)
+            elif obj.format == "nvfp4":
+                assert obj.layout == "batched_block_scale_k16_m128x4_v1"
+                _check_nvfp4_bank(payload, values)
+            elif obj.format == "u4z8_g16_fp16":
+                _check_u4z8(payload, values)
+            else:
+                raise AssertionError(obj.format)
+        uses = {(u['parameter'], u['input']): u for u in artifact.directory.uses}
+        for (name, _), use in uses.items():
+            expected = {'nvfp4': 'AllowA4', FP8_FP32: 'AllowA8'}.get(formats[name], 'A16Only')
+            assert use['activation_policy'] == expected
+            if expected == 'AllowA4':
+                ref = use['auxiliaries']['activation_input_divisor']
+                (oid, begin, end), = binding_parts(ref, artifact.by_id)
+                assert end - begin == 1
+                data = artifact.read_object(oid)
+                assert struct.unpack_from('<f', data, begin * 4)[0] == 1.0
+        resources = artifact.directory.components['text']['resources']
+        layer = cfg['ple_layer_ids'][0] - 1
+        controls = b''.join(tensors[tp + f'layers.{layer}.ple.ple_embedding.' + field].view(torch.uint8).numpy().tobytes()
+                            for field in ('layer_multipliers', 'ngram_heads_vocab_sizes', 'ngram_heads_offsets'))
+        assert artifact.read_object(resources['ple_hash_controls']) == controls
+        assert artifact.read_object(resources['chat_template.jinja']) == MAINTAINED.read_bytes()
+        assert artifact.directory.bindings['mtp/output_head'] == artifact.directory.bindings['text/output_head']
+        assert artifact.directory.bindings['mtp/token_embedding'] == artifact.directory.bindings['text/token_embedding']
+        return formats, len(artifact.directory.files)
+
+
+@pytest.mark.parametrize('nested', [True, False])
+def test_official_moe_checkpoint_converts_through_cli(tmp_path, nested):
+    config = _source_config(moe=True, nested=nested)
+    cfg = config.get('text_config', config)
+    tensors = _official_tensors(cfg, nested=nested, seed=1)
+    source = _checkpoint(tmp_path / 'source', config, tensors)
+    output = tmp_path / 'tiny.ninfer'
+    components = 'text,vision,mtp' if nested else 'text,mtp'
+    result = subprocess.run([sys.executable, '-m', 'tools.convert', '--model', str(source),
+        '--recipe', 'qwen3_8_flash_next_mixed', '--components', components,
+        '--out', str(output), '--device', 'cpu', '--rows-per-chunk', '5',
+        '--max-file-bytes', '400000'], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    formats, files = _check_artifact(output, tensors, cfg, 'model.language_model.' if nested else 'model.')
+    assert files > 1
+    assert formats['text/layers/0/gdn/query'] == FP8_FP32
+    assert formats['text/layers/1/attention/key'] == FP8_FP32
+    assert formats['text/layers/1/attention/index_query'] == 'bf16'
+    assert formats['mtp/layers/0/attention/query'] == 'bf16'
+    report = json.loads(Path(str(output) + '.conversion.json').read_text())
+    assert report['formats']['nvfp4'] == 6
+    assert report['formats']['u4z8_g16_fp16'] == 2
+
+
+def test_flash_next_official_header_maps_every_selected_source_with_bounded_reads(tmp_path):
+    official = json.loads(gzip.decompress((FIXTURES / 'official_tensors.json.gz').read_bytes()))
+    config = json.loads((Path(__file__).parent / 'qwen4_exp_source_config.json').read_text())
+    _resources(tmp_path)
+    for role in ('preprocessor_config.json', 'video_preprocessor_config.json'):
+        (tmp_path / role).write_text(json.dumps({'patch_size': 16, 'temporal_patch_size': 2, 'merge_size': 2}))
+    model = qwen4_exp.build_model(_HeaderOnlySource(tmp_path, config, official['tensors']),
+                                 components=('text', 'vision', 'mtp'))
+    recipe = Recipe(model)
+    RECIPES['qwen3_8_flash_next_mixed'](model, recipe, {})
+    prepared = recipe.prepare(device='cpu')
+    assert set(prepared.bindings) == set(model.parameters)
+    weights = {j.spec.id: TensorObject(j.spec.id, j.spec.shape, j.spec.format, j.spec.layout,
+                  0, encoded_size(j.spec.layout, j.spec.format, j.spec.shape)) for j in prepared.weights}
+    for name in ('text/layers/3/', 'mtp/layers/0/'):
+        def parts(role):
+            return binding_parts(prepared.bindings[name + role], weights)
+        router, score = parts('moe/router'), parts('moe/shared_score')
+        assert router[0][0] == score[0][0] and router[0][2] == score[0][1]
+        assert len(parts('moe/experts/gate')) == 512
+    table = prepared.bindings['text/layers/1/ple/table']
+    shards = binding_parts(table, weights)
+    assert len(shards) == 128
+    assert all(weights[oid].shape == (2500012, 160) for oid, _, _ in shards)
+    assert Counter(j.spec.format for j in prepared.weights)['nvfp4'] == 98
+
+
+def test_unmapped_or_misshapen_official_tensors_are_rejected(tmp_path):
     config = _source_config(moe=True, nested=True)
-    tensors = _official_tensors(config["text_config"], nested=True, seed=4)
-    overrides = {"chat_template.jinja": MAINTAINED}
-    # Unselected components may carry tensors the selection does not read.
-    with SafetensorsSource(_checkpoint(tmp_path / "complete", config, tensors)) as base:
-        model = build.build_model(base, resource_overrides=overrides)
-        assert not any(name.startswith(("mtp/", "vision/")) for name in model.parameters)
-    extra = dict(tensors)
-    extra["model.language_model.layers.0.post_attention_layernorm.weight"] = torch.ones(128)
-    with SafetensorsSource(_checkpoint(tmp_path / "extra", config, extra)) as base:
-        with pytest.raises(ValueError, match="no qwen4_exp mapping.*post_attention_layernorm"):
-            build.build_model(base, resource_overrides=overrides)
-    wrong = dict(tensors)
-    wrong["model.language_model.layers.1.self_attn.k_proj.weight"] = torch.ones(64, 128)
-    with SafetensorsSource(_checkpoint(tmp_path / "wrong", config, wrong)) as base:
-        with pytest.raises(ValueError, match="k_proj.weight: expected source shape"):
-            build.build_model(base, resource_overrides=overrides)
-    with SafetensorsSource(_checkpoint(tmp_path / "flat", config, tensors)) as base:
-        with pytest.raises(ValueError, match="selects text"):
-            build.build_model(base, components=("text", "dflash"), resource_overrides=overrides)
+    tensors = _official_tensors(config['text_config'], nested=True, seed=4)
+    with SafetensorsSource(_checkpoint(tmp_path / 'complete', config, tensors)) as base:
+        model = qwen4_exp.build_model(base)
+        assert not any(n.startswith(('mtp/', 'vision/')) for n in model.parameters)
+    extra = {**tensors, 'model.language_model.layers.0.post_attention_layernorm.weight': torch.ones(128)}
+    with SafetensorsSource(_checkpoint(tmp_path / 'extra', config, extra)) as base:
+        with pytest.raises(ValueError, match='source coverage differs.*post_attention_layernorm'):
+            qwen4_exp.build_model(base)
+    wrong = {**tensors, 'model.language_model.layers.1.self_attn.k_proj.weight': torch.ones(64, 128)}
+    with SafetensorsSource(_checkpoint(tmp_path / 'wrong', config, wrong)) as base:
+        with pytest.raises(ValueError, match='k_proj.weight: expected BF16'):
+            qwen4_exp.build_model(base)
 
 
-def test_config_normalizer_accepts_dense_blocks_and_rejects_mixed_ones():
-    dense = text_config(_source_config(moe=False, nested=False))
-    assert dense["intermediate_size"] == 96 and "num_experts" not in dense
+def test_config_rejects_unimplemented_dense_mixed_and_invalid_ple():
+    with pytest.raises(ValueError, match='num_experts'):
+        qwen4_exp.text_config(_source_config(moe=False, nested=False))
     mixed = _source_config(moe=True, nested=True)
-    mixed["text_config"]["mlp_only_layers"] = [0]
-    with pytest.raises(ValueError, match="same feed-forward kind"):
-        text_config(mixed)
+    mixed['text_config']['mlp_only_layers'] = [0]
+    with pytest.raises(ValueError, match='mixed'):
+        qwen4_exp.text_config(mixed)
     bad = _source_config(moe=True, nested=True)
-    bad["text_config"]["ple_layer_ids"] = [3]
-    with pytest.raises(ValueError, match="ple_layer_ids"):
-        text_config(bad)
+    bad['text_config']['ple_layer_ids'] = [3]
+    with pytest.raises(ValueError, match='PLE'):
+        qwen4_exp.text_config(bad)
