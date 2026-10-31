@@ -86,5 +86,9 @@ owns integrated support and its limits. Concrete Op contracts live in `include/n
 
 ## Planned work
 
+[Qwen4 readiness](research/qwen4-readiness.md) separates Intel kernel evidence, upstream design
+choices and release assumptions, and maps preserved fork work to pending dense Text/MTP/Vision
+implementation and device qualification.
+
 [Linear test maintenance](maintainer/linear-test-reorganization-plan.md) tracks the pending
 consolidation of test runners and explicit case contracts.

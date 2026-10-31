@@ -1,6 +1,6 @@
 # Upstream ports
 
-Updated: October 28, 2026.
+Updated: October 30, 2026.
 
 This is the living record of how this workstation fork ([igorls/ninfer](https://github.com/igorls/ninfer))
 tracks [Neroued/ninfer](https://github.com/Neroued/ninfer): the reviewed upstream point, the fork
@@ -377,6 +377,35 @@ upstream work. Each merge records every upstream change it brings in here as int
 or reverted, so the merge-base is the reviewed point. A rejected upstream change is reverted in the
 fork line (or device-gated) with its measurement recorded; a deferred one names the condition that
 would make it useful.
+
+## Qwen4 preparation refresh (October 30, 2026)
+
+The [readiness plan](../research/qwen4-readiness.md) now compares the fork's October 11 work
+with the Intel dense-kernel evidence cited by upstream's
+[architecture proposal](https://github.com/Neroued/ninfer/blob/1882c6adbc98043fcf89f3589aa5addb3742777a/docs/designs/qwen4-27b-rtx5090.md)
+and [Op checklist](https://github.com/Neroued/ninfer/blob/1882c6adbc98043fcf89f3589aa5addb3742777a/docs/designs/qwen4-27b-op-checklist.md).
+This is documentation adaptation only: it neither integrates upstream through 1882c6ad nor
+advances the reviewed merge point or the b387a949 acceptance candidate.
+
+FFN width 14336 is the leading preparation inference from Intel's TP2 shapes; it replaces
+the old inherited 17408 assumption. Layer count, schedule, no-PLE and exact MTP layout remain
+unconfirmed. FP8 HC, NVFP4 GDN/FFN and the combined QSA/MTP-prefix layouts are candidate
+implementation choices, not evidence of the final official checkpoint or private model access.
+The Intel source links were retrievable earlier in the investigation but returned 404 on
+recheck; the plan records that provenance limit instead of inventing an immutable source pin.
+
+The older qwen4/ops branch contains partial H5120/R640 and four-KV geometry work, but is not
+integrated into b387a949 and has no dense end-to-end/performance qualification. Its all-BF16 HC
+and FP8 GDN inputs do not fulfill the proposed mixed-format contracts. The older converter's
+synthetic dense work also requires adaptation to the current canonical adapter; current native
+config/conversion still require MoE and PLE. Historical Q1/Q2/Q4 findings and known costs remain
+in the plan, distinct from current support and new qualification.
+
+Hardware qualification also remains separate. The tested mixed Flash bounded route registers
+63.28157 GiB of Host expert backing regardless of the GPU cache; 64 GiB RAM leaves less than
+0.72 GiB for everything else. Full Flash real-artifact checks on a 32 GB GPU / 64 GB RAM host
+are hardware-blocked, while fitting dense and Op/build checks can proceed. This does not waive
+the [5090 merge gate](https://github.com/igorls/ninfer/issues/37) or transfer G4 evidence to it.
 
 ## How to maintain this document
 

@@ -1,113 +1,185 @@
 # Qwen4 readiness plan
 
-Active plan, started 2026-10-11. Goal: serve official Qwen4 checkpoints, starting with the
-expected Qwen4-27B, within days of their release, through the existing `qwen4_exp` package that
-runs Qwen3.8-Flash-Next (a Qwen4-architecture model). Remove this document when the first official
-Qwen4 artifact is qualified; its lasting content moves to the model and conversion references.
+Started 2026-10-11; reconciled 2026-10-30 against the fork at b387a949 and upstream's
+[Op checklist](https://github.com/Neroued/ninfer/blob/1882c6adbc98043fcf89f3589aa5addb3742777a/docs/designs/qwen4-27b-op-checklist.md)
+and [architecture proposal](https://github.com/Neroued/ninfer/blob/1882c6adbc98043fcf89f3589aa5addb3742777a/docs/designs/qwen4-27b-rtx5090.md).
+This is the current preparation plan, not a declaration of released-checkpoint support.
+Remove it when the first official Qwen4 artifact is qualified; move lasting facts into the
+model, conversion and performance references.
 
-## What is known and what is assumed
+The goal remains native v3 Engine Text, MTP and Vision on both RTX 5090 and RTX PRO 6000,
+under Windows/MSVC and Linux. Reuse the Qwen4Exp architecture where the mathematics matches;
+do not add checkpoint-specific execution registrations. Preserve resident GPU execution when
+the selected weights fit and leave usable desktop headroom. Spark, tensor parallelism and
+GLM5Next are outside this preparation scope.
 
-Known: Flash-Next's text, MTP and Vision mathematics, its configuration keys and its v3 artifact.
-The engine selects `qwen4_exp` from the text component's `Qwen4ExpForCausalLM` /
-`qwen4_exp_text` pair, which the converter writes, so an official checkpoint with the same
-mathematics needs no new engine registration.
+This documentation refresh does not change the sync/upstream-64d10fbf acceptance candidate
+b387a949. The [5090 acceptance gate](https://github.com/igorls/ninfer/issues/37) remains separate
+from implementing and qualifying a future dense Qwen4 configuration.
 
-Assumed until the release: a dense Qwen4-27B keeps the Qwen3.8-27B trunk (hidden 5120, 24 query /
-4 KV heads at head dimension 256, GDN 16/48 heads, MLP 17408) and adds Qwen4's hyper-connections,
-QSA indexer attention, PLE and MTP. Every assumption below is checked against the real
-`config.json` on launch day.
+## Evidence and assumptions
 
-## Hard-coded today
+The October 11 plan extrapolated from Qwen3.8-27B and Flash-Next: FFN width 17408 plus PLE.
+Intel's later kernel evidence gives a better preparation candidate, but does not supply an
+official complete config or checkpoint.
 
-Code facts from `workstation` `c2bbf835`:
-
-- Every block is MoE (`weights.h` `BlockWeights::moe`, `execution/text.cpp` `run_layers`), and the
-  MoE configuration keys are required.
-- One PLE layer only, `ple_layer_ids == [2]` in the converter, a constant PLE boundary token
-  (248044), 16 PLE heads with 80-byte rows and history 9. (Read from config since Q1.)
-- Op geometries accept only Flash-Next shapes, with no generic fallback: hyper-connection
-  (H 2560, 4 streams, rank 320), PLE n-gram (2560/10240/160), QSA indexer (d128, 4 heads,
-  projection 640, 512 selected), selected-block attention (24 query / 2 KV heads, d256), gated
-  RMSNorm-RoPE (13312 rows), NVFP4 expert bank (2560, 512 experts, top-10, 640), BF16-control GDN
-  gating ([96, 2560]) and FP8 row-FP32 GDN input ([16384, 2560]).
-- Linear dispatch is an exact (n, k) table; unknown shapes throw at load.
-- The only artifact route is the pinned v2-to-v3 upgrade; there is no converter from official
-  safetensors.
-
-## Work items
-
-Each item keeps Flash-Next bit-identical (Engine real cases, chunk invariance, MTP target parity)
-unless it states otherwise.
-
-| Item | Scope | Acceptance |
+| Detail | Evidence level | Preparation decision |
 |---|---|---|
-| Q1 Configuration reads | PLE layer list, boundary token from `eos_token_id`/config, PLE head count and history from config, accepted Vision/MTP strings in one place | Flash-Next unchanged; config tests for list and dense cases |
-| Q2 Op geometry | Template or runtime dimensions with dispatch tables for the ops above; add the assumed 27B geometry (H 5120, 4 KV heads) | FP64 oracle tests at Flash-Next and assumed-27B geometries; Flash-Next routes bit-identical |
-| Q3 Dense FFN | MoE optional per layer in Text and MTP; dense blocks use `linear_swiglu` + `linear` | Flash-Next unchanged; dense path covered by Q5 |
-| Q4 Native converter | Official safetensors to v3 for the Qwen4 family: config normalizer, tensor map, packing groups, NVFP4/FP8 methods, streamed PLE quantizer, maintained template through `--resource` | Synthetic small-checkpoint tests; rebuilding Flash-Next from official sources on a Colab G4 matches the oracle |
-| Q5 Random-weight end to end | Converter-built random-weight artifact at the assumed 27B geometry; Engine against transformers' `qwen4_exp` with the same weights | Teacher-forced logits within the existing parity tolerance; loads, prefill, decode, MTP |
-| Q6 Launch-day runbook | Compare config with assumptions, finish shapes and Linear routes, NVFP4 allocation and BF16 KL gate, template diff, VRAM fit beside the desktop, real Engine tests, oracle gate, Supervisor preset, model card | Written before release; executed on release |
+| Dense Qwen4, hidden 5120, four HC streams / residual width 20480 | Directly visible in Intel's dense kernel identifiers and HC constants | Retain the matching geometry groundwork |
+| FFN intermediate 14336 | Inferred from Intel TP2 projection shapes, including K5120/N14336 and N5120/K7168 | Replace 17408 as the leading candidate; confirm the FFN interpretation against the released config and tensor headers |
+| HC rank 640; QSA Q24/KV4, D256 | Derived from local TP2 geometry and adopted by the upstream proposal | Prepare explicit profiles; final rank/head counts still come from the checkpoint |
+| GDN Q/K16, V48, D128; indexer Q4/KV1, D128, compression 4 | Reused architecture geometry in the upstream proposal | Validate each config field and represented state contract on release |
+| 64 layers, 3:1 GDN/QSA schedule, 262144 context, no PLE, exact MTP layout | Upstream design assumptions; not established by the inspected Intel projection/HC code | Exercise candidate configurations synthetically without declaring these official facts |
+| NVFP4 GDN/FFN, FP8 HC down/up, BF16 injection, Q4 draft head, AllowA8/AllowA4 | NInfer representation and compute-policy choices | Treat as candidate recipes requiring numerical, quality, performance and resource qualification |
+| Final names, tokenizer, template, Vision interface and quantization metadata | Require official resources and tensor headers | Do not infer them from kernel dimensions |
 
-Order: Q1 and Q4 start now and run in parallel; Q2 follows Q1; Q3 and Q5 need Q2; Q6 is drafted
-alongside.
+### Source provenance
 
-## Status
+Upstream's proposal explicitly cites
+[Intel XPU PR #22](https://github.com/analytics-zoo/vllm-xpu-kernels/pull/22) and its
+[kernel inventory](https://raw.githubusercontent.com/analytics-zoo/vllm-xpu-kernels/downstream/v0.31.0/custom-kernels-inventory.md).
+The public-source retrieval on October 30 exposed these concrete anchors:
 
-**Q1: qualified on Flash-Next.** The re-derived artifact (`artifact_id` 3cade505...) passes the
-loading and all 19 Engine real cases; greedy serving text matches the previous build and artifact.
+- [fp8_dense.cpp](https://raw.githubusercontent.com/analytics-zoo/vllm-xpu-kernels/downstream/v0.31.0/csrc/qwen38/fp8_dense.cpp):
+  the Dense Qwen4 TP2 description and splits() entries for the projection shapes above.
+- [hc_dense_sycl.cpp](https://raw.githubusercontent.com/analytics-zoo/vllm-xpu-kernels/downstream/v0.31.0/csrc/qwen38/hc_dense_sycl.cpp):
+  kHidden=5120, kStreams=4 and their product kWidth=20480.
+- The inventory describes TP2 local HC down weights with 320 low-rank outputs. Scaling local
+  dimensions to a full-model profile is an inference, not a supplied official config.
+- [llama.cpp #31072](https://github.com/ggml-org/llama.cpp/issues/31072) discusses the same PR.
+  It is corroborating analysis of that source, not independent confirmation.
 
-- [x] `ple_layer_ids` is a list end to end: config (ascending, distinct, GDN layers only), one PLE
-  parameter set and table per layer, injection before each listed block, decode and MTP transfers
-  planar by PLE layer, and one convolution history per PLE layer in every state image.
-- [x] The PLE boundary is the text config's `eos_token_id`, which the converter now writes; a
-  config without it is rejected, so the published Flash-Next derivation must be re-derived.
-- [x] PLE head count, row bytes and history columns come from config; native preparation rejects
-  a PLE geometry `ops::ple_ngram` does not execute. The companion identities are constants in
-  `config.h` (C++) and `config.py` (converter).
-- [x] Tests: `ninfer_qwen4_exp_loading_test` (Flash-Next config, lists, boundary rules, rejected
-  geometries, a dense config's clear rejection, two-layer bindings) and the two-layer state image
-  test; `tests/convert/test_qwen4_exp.py`.
-- [x] Re-derived the Flash-Next artifact (it also carries the maintained chat template) and pinned
-  its file digests in `source.py`; `verify --file-digests` passes. `ninfer_qwen4_exp_loading_real_test`
-  and the 19 cases of `ninfer_qwen4_exp_engine_real_test` pass on it (Windows, RTX PRO 6000).
-  Served with MTP K=3, greedy text equals the previous build serving the previous artifact with the
-  same template on seven of eight workloads, including both logprob readouts; the eighth workload's
-  prompt changed between the runs. Published on the Hugging Face repository (2026-10-11).
-- [ ] An empty `ple_layer_ids` (a checkpoint without PLE) is still rejected; making PLE optional is
-  a Q3-like change if an official checkpoint needs it.
+These Intel URLs name a moving branch, not an immutable source revision. The PR/API returned
+404 during inspection; the raw files were retrievable earlier in the investigation but also
+returned 404 on recheck. Preserve the distinction between the observed code, the pinned
+upstream proposal and unavailable provenance. Recover an immutable source revision or verify
+against official files before claiming checkpoint conformance. Neither availability failures
+nor detailed kernel dimensions establish that NInfer's author has private model access.
 
-**Q4: source integration done, synthetic-validated, not qualified.** On branch `qwen4/converter`,
-`python -m tools.convert` selects the `qwen4_exp` adapter (`tools/convert/qwen4_exp/build.py`)
-for a Qwen4Exp `config.json`. The adapter shares `config.py` with the v2 upgrade; the upgrade's
-`artifact_id` is pinned in tests, so the shared normalizer cannot change the derivation silently.
-The conversion guide documents the route.
+## Current source and preserved groundwork
 
-| Deliverable | State |
-|---|---|
-| Config normalizer | Shared with the upgrade. MoE or dense (`intermediate_size`) blocks; `ple_layer_ids` as a list; mixed per-layer blocks rejected |
-| Tensor map | Every official Flash-Next tensor maps to the loader's logical names and Uses. Fused parents are packed in the source. A missing, misshapen or unmapped tensor of a selected component fails |
-| Methods | `nvfp4_expert_maxabs` (one divisor per expert, the MTP bake), `u4z8_maxabs` (`U4Z8_RANGE_RNE_V1`, streamed), `fp8_row_maxabs` with FP32 row multipliers, INT64 `cast_direct`; BF16 stays the default |
-| Recipes | `qwen3_8_flash_next`; `qwen4_allocation` assigns a format per role, so a new checkpoint's recipe is one call |
-| Dense blocks | Converted under the Qwen3.5 dense names `mlp/{gate,up,down}`; not loadable until Q3 |
-| Template | The maintained `qwen3_8.jinja` is the default when the official template's SHA256 is `c3cf9e34...d7a81041`. That digest belongs to the official Qwen3.8 template, which the Qwen3.8-27B and Flash-Next pins share (checked 2026-10-11). Any other template needs `--resource chat_template.jinja=PATH` |
+Current-support statements below refer to the b387a949 sync candidate, not to the older
+preparation branches. The [model](../maintainer/qwen4_exp-model.md) and
+[execution](../maintainer/qwen4_exp-execution.md) references own current runtime behavior.
 
-Validated:
-- Synthetic tiny checkpoints with the official names convert end to end: MoE with Vision and MTP
-  through the CLI, and dense text with MTP. Every binding is read back and checked by independent
-  decoders.
-- At Flash-Next geometry, the official headers (1,658 tensors) map to exactly the qualified
-  artifact's 1,668 bindings, 959 Uses, and its object shapes, formats and layouts.
+- Native Qwen4Exp config and execution still require MoE blocks and exactly one PLE layer.
+  Dense FFN and a PLE-free model are not integrated.
+- The current converter is tools/convert/qwen4_exp.py with canonical bindings and an explicit
+  [offline reframe](../maintainer/qwen3.8-flash-next-artifact.md#1-download-and-derivation).
+  A native safetensors route exists; the old claim that only a v2 upgrade exists is obsolete.
+  Its current text normalizer requires MoE fields and its block builder unconditionally emits
+  MoE. Historical dense converter support must be adapted rather than assumed present.
+- Current HC operands remain H2560/R320. The six Q2 geometry commits on qwen4/ops are not
+  ancestors of b387a949. Their old APIs and representations cannot be merged as current support.
+- Exact dispatch tables, resource queries and supported weight views must agree; adding a
+  shape to a registry alone does not complete a fused Op or model route.
 
-Not validated:
-- No real official checkpoint has been converted.
-- The Flash-Next official-source rebuild is planned on a Colab G4 (about 360 GB in, 102 GiB out).
-  It must pass the transformers oracle gate. Its FP8, NVFP4 and U4Z8 words are encoded from BF16,
-  so they differ from the production artifact's imported words.
+| Preserved work | Recorded outcome | Limit and reuse decision |
+|---|---|---|
+| Q1 on qwen4/prep / converter history | Config-derived PLE fields and EOS, multiple-PLE preparation, re-derived Flash artifact and 19 Engine cases on native Windows / PRO 6000 were recorded on October 11 | Historical evidence for that source/artifact; current single-PLE implementation is narrower. Seven of eight served workload comparisons matched; the eighth prompt differed |
+| Q2 on qwen4/ops at be9126f2 | H5120/R640 BF16 HC, four-KV attention/RoPE, PLE width 5120, BF16 GDN controls and FP8 input [16384,5120]; independent-oracle fixtures exist | Explicitly source-implemented, not qualified. The recorded 135 byte-identical outputs protect old Flash Op routes; Engine cases and dense performance were not run |
+| Q4 on qwen4/converter at 88d9d7fb | Tiny MoE/Vision/MTP and dense/MTP conversions with independent binding decoding; official Flash headers mapped to 1668 bindings / 959 Uses | Synthetic/header evidence only; no real official-source rebuild or dense Engine parity. BF16 was the default, with per-role allocation |
+| b387a949 native Flash integration | Later resident and bounded Host Engine, mathematical and build evidence is recorded in upstream ports and performance | Does not qualify dense Qwen4, physical RTX 5090, native Windows GPU execution on this source, or the proposed recipe |
 
-## Template
+Known Q2 costs remain unresolved: four-KV attention uses six of sixteen MMA rows per CTA,
+dense GDN controls use a split-8 route, and the widened FP8 GDN input reuses schedules selected
+for K2560. These are reasons to measure the eventual production routes, not established speedups.
 
-The maintained `tools/chat_templates/qwen3_8.jinja` is the official Qwen3.8-27B template plus three
-NInfer changes (positional system/developer turns, final-assistant continuation, tool-result
-histories without a user turn). Flash-Next's official template is byte-identical to the official
-Qwen3.8 one. On release, diff the official Qwen4 template against it: if identical, the recipe uses
-`qwen3_8.jinja`; otherwise add `qwen4.jinja` carrying the same three changes.
+## Work items and upstream checklist mapping
+
+Q1-Q6 retain their original ownership. Checklist identifiers refer to the pinned upstream
+document; they identify candidate work, not completed ports.
+
+| Item | Revised work | Acceptance / state |
+|---|---|---|
+| Q1 Config | Reconcile official fields with the evidence table; model Dense/MoE and PLE presence explicitly | Historical Flash qualification only; dense/no-PLE config and native binding remain pending |
+| Q2 Ops | L1-L5, H1-H5, A1-A5 and M1 below; reuse applicable GDN/Vision operators | Older branch has partial geometry groundwork; new formats, views and production dispatch remain pending |
+| Q3 Model composition | Dense linear_swiglu + linear in Text/MTP; optional PLE with complete state/resource/graph semantics | Not integrated; same architecture entry, explicit finite composition |
+| Q4 Converter | Adapt the existing canonical adapter for dense/no-PLE and selected packing/format policies, including shared weight views | Old dense synthetic tests are reusable requirements, not proof the current converter implements them |
+| Q5 Synthetic end to end | Converter-produced dense fixtures, Text/MTP/Vision handoffs, prefill/decode/verification, eager/graphs and recovery | No completed dense Engine qualification recorded; independent mathematical reference required |
+| Q6 Official checkpoint and devices | Config/header reconciliation, model quality, capacity, same-route performance and desktop coexistence | Execute on real artifacts and qualify each GPU, OS and route separately |
+
+### Q2 and Q4 concrete deltas
+
+- **L1/L2, dense FFN:** prepare NVFP4 gate/up [28672,5120] and down [5120,14336].
+  These replace the inherited 17408 assumption for the candidate. Check complete SwiGLU
+  mathematics, stored divisors, activation permission, dispatch and workspace together.
+- **H1-H5, HC:** reuse the older H5120/R640 mathematics and fixtures, but add the proposed
+  FP8/AllowA8 down/up with separate BF16/A16 injection. The old all-BF16 geometry does not
+  satisfy that contract. Preserve per-stream norm and the public BF16 residual boundary.
+- **A1-A5/L3, QSA:** prepare four-KV-head state and attention with one six-output FP8 parent
+  [14976,5120], ordered K/V/index-K/Q/gate/index-Q. The old 14336-row gated projection plus
+  separate indexer is partial groundwork. Deinterleave source Q/gate and move matching scales.
+- **M1, MTP history:** expose [2176,5120] as a three-output K/V/index-K prefix of that same
+  immutable parent. Scales use the full parent's real plane offset; retain backing through
+  graph replay. Do not duplicate or repack history weights at execution.
+- **L4/L5, MTP stem/head:** FP8 [5120,5120] stem projections include fc_hidden at 4M columns;
+  Q4 [248320,5120] proposal output retains the full vocabulary. Main verification keeps its
+  full head. Draft count is not a decoder-layer count.
+- **GDN:** adapt the candidate NVFP4 [16384,5120] input and its update/snapshot/record paths.
+  The old FP8 row-FP32 route is different represented input. Retain FP32 recurrent state and
+  A_log/dt_bias, the actual control semantics and sigmoid output gating.
+- **Vision:** reuse the existing shared encoder; verify the merger's 5120-wide text handoff.
+  A matching tensor width does not establish checkpoint/config compatibility.
+- **No PLE:** implement the model/converter absence case if confirmed, while preserving the
+  existing Flash PLE route. Wider PLE kernels are useful historical work, not a prerequisite
+  for the no-PLE candidate. Do not add a fallback for an unrecognized architecture.
+
+Sequence: reconcile Q1/config and Q4 mappings first; bring applicable Q2 work into the current
+Op contracts; then Q3 composition and Q5 complete-path fixtures. Q6 is the release gate.
+Upstream's Spark/multi-rank infrastructure is not a dependency for these single-GPU operators.
+
+## Numerical, performance and release gates
+
+Follow [Op development](../maintainer/op-development.md), [tests](../../tests/README.md) and
+[benchmarks](../../bench/README.md). Existing criteria do not change to accommodate a new path.
+
+- Independent FP32/FP64 references consume independently decoded stored weights/scales and the
+  selected activation quantization. Exact transforms have exact references. Preserve public
+  rounding/state boundaries; agreement between two kernels is insufficient.
+- Cover M=1/4/8, verification widths (d+1)*B for d=1..5 and B=1..8, and actual wide prefill
+  workloads. fc_hidden uses 4M. State operators retain T/B semantics and ragged valid columns.
+- Test six-output and prefix projection views with nonuniform scales at M>1/B>1. Outputs must
+  be contiguous per segment; parent row slices are not automatically contiguous columns.
+  Verify snapshot/replay and accepted-prefix records without rerunning a shorter physical block.
+- Keep applicable old Flash exact/state invariance checks; use unchanged numerical/target
+  criteria across different arithmetic paths rather than promising universal token identity.
+- Synthetic qualification does not establish quantization quality. A Transformers reference
+  that only implements MoE cannot serve as a dense oracle without a validated dense extension.
+  Q5 must supply an independent dense reference matching the represented architecture.
+- With official weights, compare the selected recipe to an appropriate high-precision reference:
+  scoring/distribution error, long-context indexer/retrieval behavior beyond all-selected cases,
+  HC error propagation, Vision and MTP target correctness. Report draft acceptance, round time
+  and final generation speed separately. AllowA8/AllowA4 permits a route; report which ran.
+- New shapes establish capability. Performance comparisons require the same device, represented
+  weights, precision, placement and workload, and retain every adverse result and resource cost.
+  Do not transfer G4 timings to RTX 5090 or infer native Windows GPU acceptance from a build.
+- On release, inspect actual config/tensor headers before confirming layer count, FFN width,
+  PLE, MTP or Vision. Diff tokenizer/template resources, choose a measured recipe, verify v3
+  bindings and numerical/Engine gates, then document the model card and Supervisor preset.
+  Official-source conversion/rebuilds and model benchmarks remain pending work, not this
+  documentation refresh's claimed result.
+
+## Hardware feasibility and acceptance
+
+The existing mixed Flash artifact and a future dense Qwen4 artifact have different requirements.
+The [Flash resource contract](../maintainer/qwen4_exp-model.md) retains the complete Main
+expert source on Host even when a subset is cached on GPU. PLE is disk-backed.
+
+The qualified mixed-artifact bounded runs registered 67948068864 bytes, or 63.28157 GiB, for
+Host experts alone. Even a full 64 GiB of physical RAM leaves only 0.71843 GiB before the OS,
+ordinary buffers, context, workers and staging. A smaller Device budget or GPU expert cache
+does not subtract that full Host source allocation. Swap does not supply the physical RAM
+needed for the complete registered backing.
+
+A 32 GB GPU / 64 GB RAM machine therefore cannot safely run those current full-model Flash
+acceptance cases under this placement contract. Mark them BLOCKED by hardware, not PASS or a
+product-test failure. Continue fitting dense-model tests and affected mathematical/CPU/build
+checks; record their actual memory fit. Keep the Flash gap open until a sufficiently provisioned
+physical 5090 host runs it or the maintainer explicitly changes the merge acceptance scope.
+G4 budget simulations retain their own evidence but do not fill that physical-device gap.
+
+The upstream dense proposal's weight/KV arithmetic is a design estimate, not proof of 5090 fit.
+Plan weights, Host backing, KV/state, workspace, graphs, media, worker CPU cost and free desktop
+headroom together. Qualify RTX 5090 and the 96 GB PRO 6000 separately under native Windows and
+Linux; no whole-GPU or whole-RAM assumptions.
