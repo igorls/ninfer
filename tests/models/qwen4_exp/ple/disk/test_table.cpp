@@ -48,7 +48,7 @@ void run(const char* path) {
     for (auto row : starts)
         if (table.row(row).format == QType::NF4_G16_E4M3FN) write(*table.row(row).lut);
 
-    std::vector<ReadSegment> segments(table.max_row_segments());
+    std::vector<ReadSegment> segments(table.geometry().max_row_segments);
     std::vector<io::DirectReadWindow> windows(segments.size());
     HostBuffer slab(4096 * segments.size(), 4096);
     std::vector<MemorySpan> buffers;

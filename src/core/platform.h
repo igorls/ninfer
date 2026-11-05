@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/target.h"
+
 // Small host-platform queries shared by runtime, product and test code. Header-only, so any
 // component can use them without a link dependency.
 

@@ -273,7 +273,7 @@ return a small family-private Plan containing the selected stages and resource f
 choices to allocation and launch instead of repeating the same selection downstream. Capacity
 queries and execution must consume the same selection and allocation rules.
 
-Selection depends on actual operands and execution facts, never target keys, artifact names,
+Runtime selection depends on actual operands and execution facts, never target keys, artifact names,
 converter fields, model roles, Program phases or arbitrary registry strings. A launcher may
 specialize full tiles versus tails and obey CUDA grid limits; performance policy belongs in the
 selector. Device-resident per-row lengths stay Device inputs under the Op's capture contract.
@@ -313,8 +313,10 @@ different Ops share a tuning table or include a sibling's private shape policy.
 ### 4.3 Shared computation and compilation
 
 Private launch headers, selectors and kernel templates are not included by models, contract
-headers, product code, permanent tests or public benchmarks. Every kernel assumption has a
-matching admission or launch predicate. An Op never infers it from model identity.
+headers, product code, mathematical qualification tests or public benchmarks. The owning suite
+may use the contract-specified execution as an exact-equivalence reference described in §6.1.
+Every kernel assumption has a matching admission or launch predicate. An Op never infers it from
+model identity.
 
 `src/ops/common/` owns the shared implementation foundation:
 
@@ -347,6 +349,30 @@ numerical boundary. The consuming Op chooses its arithmetic profile and tuned im
 
 Preserve per-shape compilation units and explicit template ownership. File organization must not
 silently change RDC mode, architecture, compiler precision options or device-link ownership.
+
+### 4.4 Execution-target ownership
+
+The build selects one native execution target; see [Build system](build-system.md). Keep the
+mathematical interface and caller-owned resources independent of that selection. A small portable
+Op stays in its existing source. Split only where target-specific dispatch, instantiation or launch
+requirements need independent ownership; not every family needs platform subdirectories.
+
+Within an affected Op, `rtx5090/` and `dgx_spark/` own their private shape catalogs, schedules and
+launch bindings. CMake includes the selected source manifest. Shared kernel templates, codecs,
+operand contracts and mathematical oracles remain outside those directories when useful to both.
+Each target owns its tuning independently. The compiled Op defines its supported inputs;
+workspace queries and execution use the same admission rules and report unsupported calls there.
+
+Keep a compatible implementation shared until a target actually needs independent selection or
+launch policy. Creating target directories must not remove an existing supported route. Workspace
+layout consumes the selected implementation's scratch extents; public interfaces remain independent
+of platform selection.
+
+For small compile-time differences, explicitly include `core/platform.h` and use its target or
+capability macros according to the fact being tested. Keep substantial selectors in target-owned
+sources rather than scattering preprocessor branches across kernels. Hardware reference values
+for benchmarks live in `bench/common/roofline.h`; executed arithmetic and tuning decisions remain
+with the affected Op/benchmark. A missing hardware reference leaves the derived utilization empty.
 
 ## 5. State, workspace, naming, and dependencies
 
@@ -457,7 +483,7 @@ Enforce the boundary in code and build ownership:
 The owning family registers its implementation in `src/ops/<family>/sources.cmake`; large families
 delegate to explicit local manifests for their kernel library and semantic implementations.
 Ordinary sources contribute to `ninfer_ops`; NVFP4 sources requiring non-RDC compilation contribute
-to `ninfer_nvfp4_non_rdc` from their owning manifests. Shape files retain their `.cpp` or `.cu`
+to `ninfer_ops_non_rdc` from their owning manifests. Shape files retain their `.cpp` or `.cu`
 language and separate translation units. See [Build system](build-system.md) for the target policy.
 
 ## 6. Qualification
@@ -465,6 +491,12 @@ language and separate translation units. See [Build system](build-system.md) for
 Semantic Op tests live under `tests/ops/` and invoke the public contract independently of model call
 order. They link the Op layer and required core libraries rather than a model implementation. Commands and
 common reporting behavior belong in [`tests/README.md`](../../tests/README.md).
+
+A suite is owned by a semantic Op or closely related overloads. Group executable entry points
+by useful family boundaries; split files for substantial fixtures, oracles or case catalogues,
+not for every helper. Keep one non-overlapping default CTest set. Metadata-only case declaration
+and filtering precede device initialization and fixture construction. Cases have stable IDs and
+selection-independent input recipes; a stateful or Graph sequence is one selectable case.
 
 ### 6.1 Oracle
 
@@ -486,9 +518,9 @@ state. For such mathematical contracts, another GPU route, generated model outpu
 implementation parity is supplementary evidence, not the mathematical oracle.
 
 When the contract instead requires exact equivalence to a specified execution, that execution is
-the reference. ReplaySSM record/fold must preserve the corresponding snapshot outputs and committed
-state bit for bit. Compare the same initial state, physical block, inputs, and arithmetic policy;
-for each committed prefix, select the corresponding snapshot from that same block. Re-running a
+the reference. ReplaySSM record/fold must preserve the specified snapshot or recurrent outputs and
+committed state bit for bit. Compare the same initial state, physical block, inputs, and arithmetic
+policy; for each committed prefix, select the corresponding snapshot from that same block. Re-running a
 shorter projection can choose different arithmetic and is not an equivalent reference. Check raw
 record copies, untouched state, invalid tails, and zero-commit effects according to their contracts.
 A separate FP64 recurrence does not establish this equivalence and is not required for its acceptance.
@@ -519,8 +551,17 @@ and `b+1` where valid, and a representative interior extent for each route. Othe
 declared finite domains and relevant boundaries. Do not build a redundant Cartesian product when
 one case establishes several dimensions.
 
+Prune redundant sweeps by the independent risk they cover. Keep numerical stress histories,
+state/alias/stride/page boundaries, and each compiled CPU arithmetic route. Cheap finite-domain
+metadata checks can remain exhaustive. Reuse represented fixtures and parallelize independent
+oracle outputs without changing their accumulation order. Large independent-output computations
+may sample fixed output coordinates while evaluating their complete formula and retaining full
+checks of exact effects, valid writes, untouched regions and guards. Do not truncate a recurrent
+history to reduce oracle cost.
+
 When CUDA Graph capture/replay is part of the public execution contract, qualify the captured
-public Op and its observable effects against the same oracle.
+public Op and its observable effects against the same oracle, including changed inputs or metadata
+at the captured addresses.
 
 Keep schedule composition, persistent-state lifetime, and end-to-end behavior in model or product
 integration tests. Private candidates, plan choices, launcher symbols, filenames, and source
@@ -529,16 +570,22 @@ organization are not qualification subjects.
 ### 6.3 Acceptance criteria
 
 Exact outputs and regions compare every observable bit or byte. Each approximate output or state
-uses a suite-owned named criterion for its real arithmetic or quantization profile; tests do not
-define per-case tolerance overrides.
+uses a suite-owned named criterion for its public numerical policy or representation; tests do not
+define per-case tolerance overrides. Private arithmetic, algorithm selection, target, or a history
+of selected routes must not select a stricter or looser criterion. State storage dtype alone does
+not prescribe the precision of its internal updates. For Linear-family Ops, `A16Only`, `AllowA8`,
+and `AllowA4` select the A16, A8, and A4 criteria respectively, regardless of which arithmetic the implementation
+chooses. A permissive policy retains its criterion when a route uses higher precision. Input
+recipes and sampling are separate from that choice; tests must not inspect selectors or infer
+precision from T to select a criterion.
 
 A floating-point criterion states its non-finite policy. Elementwise work uses a pointwise bound.
 Reductions and matrix or attention computations use a normwise bound with a finite gross
 pointwise-error cap so cancellation does not require strict elementwise agreement and isolated
 corruption cannot hide in an aggregate norm.
 
-Different production routes use different criteria only when their arithmetic or quantization
-profiles differ materially. Widening a criterion requires a numerical reason and requalification
+Different public numerical policies or represented formats may require different criteria.
+Widening a criterion requires a numerical reason and requalification
 of its complete affected domain; one failing implementation is not sufficient justification.
 
 ## 7. Performance evidence

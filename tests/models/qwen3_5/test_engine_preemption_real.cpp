@@ -111,10 +111,10 @@ ninfer::EngineOptions engine_options(const std::filesystem::path& artifact,
     options.speculative.backend  = selected;
     if (selected != ninfer::SpeculativeBackend::None) {
         options.speculative.draft_tokens = 3;
+        const auto head                  = setting("NINFER_TEST_PROPOSAL_HEAD", "optimized");
+        require(head == "full" || head == "optimized", "unknown test proposal head");
         options.speculative.proposal_head =
-            setting("NINFER_TEST_PROPOSAL_HEAD", "optimized") == "full"
-                ? ninfer::ProposalHead::Full
-                : ninfer::ProposalHead::Optimized;
+            head == "full" ? ninfer::ProposalHead::Full : ninfer::ProposalHead::Optimized;
     }
     // History is deliberately disabled: the two cases exercise only the requests' own recovery.
     options.context_cache.enabled             = false;
@@ -194,7 +194,10 @@ public:
         timeline_.output(row_, timing.generated_tokens == kOutputTokens);
     }
 
-    void publish(ninfer::OutputDelta delta) override {
+    void publish(ninfer::OutputEvent event) override {
+        const auto* text = std::get_if<ninfer::OutputDelta>(&event);
+        if (!text) return;
+        const auto& delta = *text;
         require(timing_seen_, "output delta preceded its committed-token observation");
         (delta.channel == ninfer::OutputChannel::Reasoning ? reasoning_ : content_) += delta.text;
     }

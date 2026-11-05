@@ -6,6 +6,9 @@
 
 ## 1. 产品执行模型
 
+编译目标由 [Build system](build-system.md)定义。目标选择在编译时完成，决定源码与依赖的组合；
+模型 Config 与 Op 数学接口保持独立，模型调度调用所选目标提供的实现。
+
 Generation Engine 使用一张 GPU、一个常驻模型和启动时确定的 `max_concurrency=1..8`。
 有界等待队列按提交顺序组织；resident 请求按有限执行单元增量取得资源，资源压力下可以暂停与恢复。
 每轮将具备执行许可的 decode-ready 请求组成一个紧凑批次，prefill 与 Replay 分块穿插执行。
@@ -158,8 +161,16 @@ Qwen3.5 MoE 与 Qwen4Exp Main 优先选择完整 GPU 候选；固定权重及必
 两个候选不同时持有模型，
 见[Expert 权重缓存](expert-weight-cache.md)。
 `NINFER_VRAM_BUDGET_MIB` 限定引擎 Device 预算，实际可用显存构成另一上限。
+Spark 的 GPU 与 Host 分配共享物理内存，预算快照采用 Linux `MemAvailable`，并以 CUDA
+总容量为上限；CUDA 可以在分配时回收其空闲查询没有计入的文件缓存。容量规划还计入 PLE
+准备区及 pinned ingress/egress 等已知 Host 分配。启用 Vision 时，另为 Frontend 的
+`media_live_bytes` 留出容量；该上限已包含 retained cache，不重复加 `media_cache_bytes`。
+这部分预留在正式 Program 建立后仍须保留，计入报告的总 headroom。5090 继续使用 CUDA 空闲容量。
+Spark 不建立 Host State/KV cache，保留 Device 前缀复用和 Replay；PLE 磁盘准备缓冲独立计费。
 Runtime 的 `model_startup.h` 统一预算、候选选择、校准收敛和有界重建；模型侧 `Startup` 提供
-权重放置、容量计划、Frontend 构造和 Graph 校准合同。公共启动流程不解释具体层布局。
+权重放置、容量计划、Frontend 构造和 Graph 校准合同。公共启动流程不解释具体层布局，
+只传递模型拥有的准备描述；实体执行布局移交 Program 后，
+校准与重试所需的描述仍然有效。PLE 规划使用独立几何，不借用可能被销毁的候选 Model。
 ModelInstance 持有 Model、const Parameters、Frontend 与 Program；Parameters 持有与最终
 容量计划相同的不可变执行 profile。纯逻辑加载不要求建立执行 profile。
 
@@ -414,6 +425,19 @@ Forced control 使用同一提交机制，token 由 Frontend 提供，不调用 
 初次 admission 确立后，在任何输出 delta 前发布一次 `GenerationStart`；抢占恢复不重复发布它。
 最终 response 等待 terminal 资源及缓存 owner 结算完成。
 
+公共 OutputEvent 包含正文/思考增量、工具调用开始、参数增量和调用结束。Qwen OutputSession
+在 commit 后推进请求独占的增量工具 decoder；Engine 将这些事件按顺序交给 wait() 的消费线程，
+HTTP 写入不在 GPU worker 上执行。聚合与 Streaming 使用同一参数转码结果。工具序号在请求内
+稳定，协议 call/item/block ID 由各适配器从开始事件分配。调用状态区分 InProgress、Complete
+和 Incomplete，未完成参数保留已经发布的 JSON 前缀。
+
+工具 decoder 通过结构化 output_error 区分自由生成格式错误与受约束输出合同违规；worker 在
+本批提交完成后 abort 该 sequence、释放其所有权，分别结算 InvalidToolOutput 或内部错误。
+正常可隔离的解析失败不进入 Engine 全局异常清理。工具参数名称状态与静态 matcher 一起参与
+每个 speculative 位置的 mask、preview、confirm 和 discard；它不消费 Replay 的历史 token。
+暂停保留 decoder 状态，Replay 不再次消费或发布历史参数；最终调用状态与实际结束原因分别保留。
+
+
 ## 6. 结束、取消与失败
 
 成功结束时，Program 将可保留 continuation 交给 ResourceManager，或释放 sequence；ResourceManager
@@ -445,7 +469,8 @@ forward 重叠；两段共享同一个资源预留和提交边界。
 
 MoE offload 使用分段 GPU Graph，控制线程负责 CPU contribution、缓存快照及传输交接。
 稳定缓存合并 mixer 与 MoE GPU 提交；恢复和流式加载时分开，保留 mixer 与上传重叠。
-`models/common/moe/graph` 负责单层 GPU subset 图及 CPU/cache 交接；调用方提供 mixer、MoE 和
+`models/common/moe/schedule` 向模型提供图交接接口，`offload/graph` 实现 GPU subset 图及
+CPU/cache 交接；调用方提供 mixer、MoE 和
 可选 feature 的 GPU body。Text 与 speculative 的 prefix/suffix、层遍历及跨拓扑共享关系仍由原生
 Program 定义。
 Qwen4Exp 的完全驻留权重不需要逐层缓存快照或 CPU 交接；其 exact-T/B traversal 在 PLE
@@ -459,8 +484,9 @@ Graph 校准记录准备前、准备完成、仅销毁 Graph 后的显存快照�
 这些差值包含 CUDA 延迟加载和驱动缓存，不作为纯 Graph allocation 的精确归因。
 `runtime_reservation_bytes` 仅包含显式 Program backing。
 正式准备的增长单独报告，以实际总占用是否满足 Device 预算判断启动，不要求它小于估计值。
-显式与自动 KV 容量统一使用至少 1 GiB headroom，自动容量显式要求更大余量时取其值。
-这部分是容量规划缓冲，用于容纳未精确计入的开销，不要求初始化后仍完整空闲，也不按拓扑类重复预留。
+显式与自动 KV 容量统一使用至少 1 GiB 基础 headroom，自动容量显式要求更大余量时取其值。
+基础 headroom 用于容纳未精确计入的开销，不要求初始化后仍完整空闲，也不按拓扑类重复预留。
+Spark Vision 的 live media 预留另行计入总 headroom，正式 Program 建立后仍保留这部分容量。
 正式分配不足时最多进行一次容量纠偏重建；只调整自动 KV 或可选 expert cache，保持显式容量与执行功能。
 Device 分配不足可以回收，
 执行错误与 Host 内存分配失败不作为缩减 GPU 容量的理由。

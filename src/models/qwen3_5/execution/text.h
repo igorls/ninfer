@@ -25,7 +25,7 @@
 #include <vector>
 
 namespace ninfer::models::moe {
-class Resources;
+class Schedule;
 }
 
 namespace ninfer::models::qwen3_5::execution {
@@ -115,7 +115,7 @@ public:
                 qwen3_5::RoundState& io, Tensor& prefill_hidden, std::uint32_t prefill_chunk,
                 std::uint32_t text_kv_base,
                 qwen3_5::PagedKVCacheView mtp_kv          = qwen3_5::PagedKVCacheView(),
-                const qwen3_5::PagedKVCache* batch_mtp_kv = nullptr, moe::Resources* moe = nullptr);
+                const qwen3_5::PagedKVCache* batch_mtp_kv = nullptr, moe::Schedule* moe = nullptr);
     ~TextContext();
 
     void set_graph_run(TextGraphRun* graphs) noexcept { graphs_ = graphs; }
@@ -258,7 +258,7 @@ private:
     [[nodiscard]] PrefillChunkResult
     prefill_impl(std::span<const int> ids, const TextPrefill* text_prefill,
                  const MultimodalPrefill* multimodal, Tap& tap, bool finalize_at_end);
-    moe::Resources* moe_;
+    moe::Schedule* moe_;
     TextGraphRun* graphs_ = nullptr;
     DeviceContext& ctx_;
     CudaExecutionView execution_;

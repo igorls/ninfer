@@ -1050,3 +1050,203 @@ Those remain separate qualification work. No new HTTP serving result or broad
 CTest claim is made. Complete raw evidence, rejected trials and source recovery
 artifacts are saved outside the managed checkout. The owned Colab session is
 terminated; the repair is included in the local upstream sync merge.
+
+## Next upstream stage: original resident composition (2026-11-05)
+
+This comparison evaluates the 52-commit source adaptation through upstream
+`1408277a`, before its Flash graph repair. A is `98b6c010` (the `64d10fbf`
+sync plus JSON whitespace repair); B is the initial adapted runtime. Neither is
+an accepted workstation release. Both use the public Engine benchmark on the
+same standard Colab G4: RTX PRO 6000 Blackwell Server Edition, driver 580.82.07,
+CUDA 13.3.73, Linux, Python 3.11.18, about 176 GiB RAM. Clocks are not locked.
+Both arms in the original matrix inherit Linux nice level 10.
+
+The exact dense artifact is `neroued/Qwen3.8-27B-nvfp4-NInfer` at
+`a107ba1b5b0609d9ca90d5ed61439f5f5cc7d64d`; Flash is the unchanged-payload
+canonical reframe of `igorls/Qwen3.8-Flash-Next-mixed-NInfer` at
+`ef61b3c856f91e58a58e41a5a6269b6c8648d266`. Both arms use identical files and
+the committed `bench/fixtures/bench_corpus.ids`. All weights remain resident;
+these timings do not measure Host-offload throughput.
+
+Each profile uses `-pg "512,64;2048,64"` in that order, context 4096, chunk 1024,
+BF16 KV, graphs, one warmup and three measured repetitions, with 65 forced
+outputs and 64 timed decode tokens. KV capacity is `4096*C`, derived by the
+benchmark; desktop reserve is the default 8 GiB. Dense K3 uses the optimized
+proposal head, while Flash K3 uses its full shared head. Three fresh process
+pairs per profile run AB/BA/AB: 48 processes and 720 measured requests, with
+correlated concurrent rows. A and B have identical MTP accepted/drafted/round
+and fallback counts in every corresponding report.
+
+Rates and seconds are means of process means; changes are paired medians and
+the complete three-pair range. Positive wave changes are slower; positive rate
+changes are faster. Investigation flags were set before measurement at >2%
+wave-median slowdown or >5% in any pair. Smaller adverse results remain visible
+and do not establish equivalence.
+
+| Model | C | K | P | Wave s A → B | Wave change % | Prefill tok/s A → B | Prefill change % | Decode tok/s A → B | Decode change % |
+|---|---:|---:|---:|---|---|---|---|---|---|
+| dense | 1 | 0 | 512 | 0.957778 → 0.956556 | -0.001 (-0.427 to +0.047) | 13450.011013 → 13554.511463 | -0.006 (-0.092 to +2.481) | 69.703798 → 69.776185 | +0.000 (-0.037 to +0.349) |
+| dense | 1 | 0 | 2048 | 1.061036 → 1.060115 | -0.015 (-0.278 to +0.033) | 16000.499620 → 16031.500413 | +0.019 (-0.024 to +0.589) | 68.718583 → 68.769210 | +0.021 (-0.040 to +0.240) |
+| dense | 1 | 3 | 512 | 0.541659 → 0.541495 | -0.013 (-0.075 to -0.003) | 12843.854077 → 12846.449697 | +0.011 (-0.011 to +0.061) | 127.900340 → 127.942563 | +0.022 (+0.009 to +0.068) |
+| dense | 1 | 3 | 2048 | 0.437685 → 0.437695 | +0.007 (-0.020 to +0.020) | 15644.125930 → 15647.541980 | +0.031 (-0.022 to +0.057) | 209.610327 → 209.570151 | -0.018 (-0.025 to -0.014) |
+| dense | 4 | 0 | 512 | 1.198308 → 1.198170 | -0.014 (-0.020 to +0.000) | 13367.427553 → 13373.719193 | +0.034 (+0.006 to +0.101) | 64.082990 → 64.090117 | +0.009 (+0.004 to +0.020) |
+| dense | 4 | 0 | 2048 | 1.577096 → 1.577068 | -0.000 (-0.018 to +0.013) | 15959.765770 → 15962.664593 | +0.014 (-0.005 to +0.046) | 62.944617 → 62.942014 | -0.010 (-0.014 to +0.011) |
+| dense | 4 | 3 | 512 | 0.823366 → 0.823309 | +0.007 (-0.038 to +0.010) | 12612.245187 → 12617.218817 | +0.046 (+0.016 to +0.056) | 112.546225 → 112.547576 | -0.007 (-0.023 to +0.034) |
+| dense | 4 | 3 | 2048 | 0.931230 → 0.931005 | -0.021 (-0.065 to +0.013) | 15581.892970 → 15586.308590 | +0.038 (-0.027 to +0.074) | 182.599522 → 182.625928 | +0.018 (-0.023 to +0.048) |
+| flash | 1 | 0 | 512 | 0.538654 → 0.525226 | -2.424 (-2.821 to -2.233) | 7369.687129 → 7429.662598 | +0.699 (+0.381 to +1.359) | 136.817629 → 140.653747 | +2.808 (+2.493 to +3.111) |
+| flash | 1 | 0 | 2048 | 0.687086 → 0.699392 | +1.903 (+1.496 to +1.975) | 9503.074705 → 9523.604010 | +0.361 (-0.238 to +0.526) | 136.139877 → 132.512523 | -2.632 (-3.040 to -2.318) |
+| flash | 1 | 3 | 512 | 0.562813 → 0.550758 | -2.145 (-2.154 to -2.127) | 7264.796829 → 7334.223838 | +0.838 (+0.665 to +1.367) | 130.329820 → 133.424883 | +2.412 (+2.291 to +2.422) |
+| flash | 1 | 3 | 2048 | 0.466792 → 0.463688 | -0.434 (-1.224 to -0.327) | 9390.934138 → 9435.450717 | +0.175 (+0.095 to +1.165) | 258.698429 → 260.915383 | +0.685 (+0.562 to +1.332) |
+| flash | 4 | 0 | 512 | 0.997427 → 1.012034 | +1.465 (+1.456 to +1.472) | 7478.569213 → 7492.717521 | +0.184 (+0.057 to +0.327) | 91.809839 → 89.903202 | -2.087 (-2.107 to -2.036) |
+| flash | 4 | 0 | 2048 | 1.618760 → 1.640835 | +1.390 (+1.244 to +1.457) | 9422.571321 → 9420.062122 | -0.124 (-0.127 to +0.172) | 88.658471 → 86.128855 | -2.820 (-2.955 to -2.785) |
+| flash | 4 | 3 | 512 | 1.280668 → 1.282682 | +0.156 (+0.149 to +0.167) | 7417.593480 → 7415.720616 | -0.007 (-0.078 to +0.009) | 66.863800 → 66.742616 | -0.178 (-0.197 to -0.168) |
+| flash | 4 | 3 | 2048 | 1.417779 → 1.419185 | +0.099 (+0.065 to +0.133) | 9355.000238 → 9353.278294 | -0.008 (-0.076 to +0.028) | 131.344331 → 131.052921 | -0.216 (-0.237 to -0.212) |
+
+The original stage improves both Flash C1/P512 wave medians by over 2%. Flash
+ordinary C1/P2048 and C4/P512/P2048 regress by 1.390–1.903%; their decode rates
+fall 2.087–2.820%. Flash C4 MTP has smaller adverse wave/rate medians, and dense
+changes are small with mixed signs. These costs prompted the graph investigation
+below rather than unconditional acceptance.
+
+Whole-process CPU includes startup and warmup. Peak RSS is a process high-water
+mark, not steady-state RAM. I/O/cache state was uncontrolled; load times do not
+establish a causal loader speedup. Means and complete process ranges follow.
+
+| Model | C | K | CPU s A → B | Peak RSS MiB A → B | Load s A → B |
+|---|---:|---:|---|---|---|
+| dense | 1 | 0 | 2.179 (2.143 to 2.216) → 2.193 (2.171 to 2.217) | 2206.452 (2206.059 to 2206.809) → 2211.951 (2211.121 to 2212.367) | 3.516 (3.418 to 3.684) → 3.480 (3.449 to 3.527) |
+| dense | 1 | 3 | 2.225 (2.221 to 2.231) → 2.218 (2.207 to 2.232) | 2210.565 (2210.480 to 2210.613) → 2216.242 (2215.801 to 2216.875) | 3.557 (3.545 to 3.572) → 3.535 (3.524 to 3.548) |
+| dense | 4 | 0 | 2.311 (2.302 to 2.323) → 2.298 (2.292 to 2.303) | 2233.827 (2233.434 to 2234.613) → 2239.138 (2238.672 to 2239.375) | 3.564 (3.546 to 3.577) → 3.542 (3.538 to 3.551) |
+| dense | 4 | 3 | 2.456 (2.438 to 2.465) → 2.451 (2.439 to 2.470) | 2249.576 (2248.809 to 2250.363) → 2254.922 (2254.801 to 2255.000) | 3.706 (3.688 to 3.718) → 3.709 (3.694 to 3.723) |
+| flash | 1 | 0 | 13.506 (8.307 to 23.778) → 8.361 (8.294 to 8.417) | 2324.302 (2323.188 to 2325.012) → 2332.018 (2331.875 to 2332.281) | 9.720 (9.690 to 9.764) → 9.728 (9.653 to 9.787) |
+| flash | 1 | 3 | 8.126 (7.666 to 8.965) → 7.694 (7.681 to 7.715) | 2337.005 (2336.820 to 2337.273) → 2343.699 (2343.367 to 2344.223) | 10.032 (9.965 to 10.085) → 10.098 (9.996 to 10.232) |
+| flash | 4 | 0 | 14.095 (14.054 to 14.156) → 14.242 (14.220 to 14.277) | 2360.206 (2359.820 to 2360.527) → 2383.803 (2383.438 to 2384.363) | 9.960 (9.908 to 9.996) → 10.272 (10.211 to 10.365) |
+| flash | 4 | 3 | 14.735 (14.688 to 14.769) → 14.705 (14.689 to 14.721) | 2415.547 (2415.379 to 2415.672) → 2429.902 (2429.207 to 2430.762) | 10.574 (10.515 to 10.608) → 11.048 (11.003 to 11.086) |
+
+Arena capacities match for corresponding profiles; unchanged arenas do not imply
+unchanged process or CUDA-driver costs. Startup retained CUDA bytes and available
+GPU memory follow; these boundary snapshots do not measure peak GPU residency.
+
+| Model | C | K | Weight / sequence / workspace MiB (both) | Startup retained MiB A → B | Available after startup MiB A → B |
+|---|---:|---:|---|---|---|
+| dense | 1 | 0 | 19431.707 / 416.924 / 125.887 | 2.293 → 2.293 | 76711.875 → 76711.875 |
+| dense | 1 | 3 | 20202.569 / 442.089 / 125.887 | 5.431 → 5.431 | 75911.875 → 75911.875 |
+| dense | 4 | 0 | 19431.707 / 1636.265 / 125.887 | 10.293 → 10.293 | 75483.875 → 75483.875 |
+| dense | 4 | 3 | 20202.569 / 1736.884 / 125.887 | 11.431 → 11.431 | 74611.875 → 74611.875 |
+| flash | 1 | 0 | 71690.513 / 215.831 / 159.625 | 3.487 → 5.487 | 24605.875 → 24605.875 |
+| flash | 1 | 3 | 73213.262 / 252.158 / 159.625 | 8.738 → 8.738 | 23039.875 → 23041.875 |
+| flash | 4 | 0 | 71690.513 / 848.257 / 159.625 | 13.487 → 21.487 | 23961.875 → 23955.875 |
+| flash | 4 | 3 | 73213.262 / 933.409 / 159.625 | 26.738 → 34.738 | 22341.875 → 22335.875 |
+
+Initial harness errors were rejected before valid timing: `--kv-capacity` is not
+a benchmark option, and Flash does not support `--lm-head-draft`. Failed setup
+records are retained separately; the valid matrix uses the settings above.
+
+Profiling the original mixed sequence and an isolated P2048 point shows the same
+163,203 kernels and launch geometry at P2048. Decode kernel work is about
+1,353 ms in B for either sequence, but inter-kernel gaps are 88.064 ms after
+P512 versus 33.638 ms in isolation. PLE CPU waits are 28.556 and 30.177 ms.
+These are instrumented durations, not replacement benchmark results. The
+isolated three-pair P2048 loop improves 1.824% (-1.885 to -0.695%) instead of
+the original matrix's slowdown: workload order is material, and the original
+matrix remains the acceptance workload.
+
+Explicit graph uploads after child updates do not repair the problem: B→U
+wave changes are -0.001% (-0.240 to +0.124%) at P512 and +0.207%
+(-0.120 to +0.286%) at P2048. Moving the resident PLE events outside the graph
+gives only -0.313% (-0.612 to -0.201%) and -0.110% (-1.206 to -0.109%),
+respectively. Both prototypes are removed; their complete records remain
+outside the repository. No arithmetic, cache-format or tolerance change is
+used to address graph dispatch.
+
+Further three-pair probes retain the original A baseline and two-prompt order.
+Returning only the Main traversal to split graphs (while keeping the new PLE
+events, head placement and draft chains) gives -1.777% (-3.042 to -0.546%)
+at P512 but +1.527% (+0.048 to +1.555%) at P2048. Waiting on the CUDA completion
+event when no Host preparation or draft handoff can progress gives -2.081%
+(-2.900 to -1.886%) and +0.988% (+0.752 to +1.625%). Moving the head projection
+outside Main alone gives -1.656% (-2.367 to -0.108%) and +1.304%
+(-1.289 to +2.209%). None repairs the long-prompt regression; all are removed.
+These probes are diagnostic and do not replace the complete original matrix.
+
+The next candidate rejects the coupled Qwen4Exp graph-composition change in
+`1408277a`, restores the fork's resident prefix/PLE/suffix and separate
+head/sampling graph, and retains the independent Engine admission dependency
+fix from that commit. Its build, behavior and matched performance qualification
+remain pending. This is an explicit implementation decision on top of reviewed
+upstream ancestry, not a claim that the entire upstream range must be adopted.
+
+### Selected rejection of the coupled graph rewrite
+
+The selected source retains reviewed ancestry through `1408277a`, rejects its
+coupled Flash Main/draft graph rewrite, and retains the independent Engine
+admission dependency fix. It keeps the fork's resident prefix/PLE/suffix, separate
+head/sampling graph and per-step draft handoffs while using the new expert
+schedules. Proposal trace copies occur before the shared draft buffer is reused.
+The precise CUDA dispatch mechanism is unresolved; the controlled rollback
+supports this implementation decision without a driver-level causal claim.
+
+The final matrix uses the same baseline, artifacts, two-prompt order, hardware,
+metrics and criteria as above. Both arms inherit nice level 19 from the nested
+worker, compared with 10 in the original matrix. Within each matrix the arms
+match; the priority change and uncontrolled clocks limit cross-campaign causal
+attribution. The selected matrix has 24 new Flash processes and
+reuses the 24 dense processes whose execution was unaffected by this rejection:
+48 reports and 720 measured requests in the combined matrix, not 48 new runs.
+Every corresponding MTP acceptance/draft/round/fallback count matches. The eight
+dense rows and their resource costs remain the preceding matrix's results.
+The full Flash distributions follow, including smaller adverse changes.
+
+| C | K | P | Wave s A → B | Wave change % | Prefill tok/s A → B | Prefill change % | Decode tok/s A → B | Decode change % |
+|---:|---:|---:|---|---|---|---|---|---|
+| 1 | 0 | 512 | 0.543652 → 0.538145 | -1.017 (-1.376 to -0.642) | 7331.662146 → 7336.104155 | +0.277 (-0.862 to +0.767) | 135.460450 → 137.070568 | +1.326 (+0.721 to +1.524) |
+| 1 | 0 | 2048 | 0.695811 → 0.693570 | -0.965 (-1.849 to +1.891) | 9441.638336 → 9480.491717 | +0.329 (+0.117 to +0.795) | 134.081229 → 134.472534 | +1.095 (-2.810 to +2.672) |
+| 1 | 3 | 512 | 0.556643 → 0.556117 | -0.112 (-0.371 to +0.200) | 7361.423378 → 7373.870015 | +0.260 (-0.266 to +0.515) | 131.734865 → 131.844833 | +0.087 (-0.186 to +0.350) |
+| 1 | 3 | 2048 | 0.463604 → 0.463263 | -0.081 (-0.099 to -0.041) | 9453.174485 → 9471.473954 | +0.196 (+0.124 to +0.260) | 260.515197 → 260.441788 | -0.023 (-0.039 to -0.022) |
+| 4 | 0 | 512 | 0.997807 → 0.997898 | +0.030 (-0.144 to +0.141) | 7477.275634 → 7476.978645 | +0.060 (-0.217 to +0.145) | 91.773238 → 91.767897 | +0.049 (-0.220 to +0.153) |
+| 4 | 0 | 2048 | 1.619187 → 1.618986 | -0.013 (-0.073 to +0.048) | 9419.539070 → 9417.467659 | -0.033 (-0.176 to +0.143) | 88.631415 → 88.693521 | +0.084 (+0.003 to +0.123) |
+| 4 | 3 | 512 | 1.280803 → 1.280442 | -0.024 (-0.056 to -0.005) | 7414.609731 → 7416.107583 | -0.016 (-0.073 to +0.150) | 66.860951 → 66.879876 | +0.028 (+0.019 to +0.038) |
+| 4 | 3 | 2048 | 1.417756 → 1.417374 | -0.001 (-0.082 to +0.002) | 9355.510042 → 9360.569343 | +0.016 (+0.013 to +0.133) | 131.340253 → 131.324543 | -0.015 (-0.022 to +0.001) |
+
+All four ordinary Flash decode-rate medians improve, by 0.049–1.326%, replacing
+the original stage's long/C4 losses. This does not establish equivalence or a
+universal gain: C4/K0/P512 retains +0.030% median wave time, C1/K0/P2048 has a
++1.891% wave pair, and long MTP retains -0.023% (C1) and -0.015% (C4) decode-rate
+medians. C4/K0/P2048 and C4/K3/P512 retain small prefill-rate losses. The other
+adverse phase/pair values are visible in the complete ranges. No final row meets
+the predeclared investigation flags; smaller losses remain acceptance inputs.
+
+The rejection gives up the original composition's larger short-prompt MTP
+improvement (-2.145% wave median becomes -0.112%). It also avoids its C4 startup
+GPU increment and most of its process-RSS/startup cost. Whole-process CPU,
+peak-RSS and load means/ranges follow with the same interpretation as above.
+
+| C | K | CPU s A → B | Peak RSS MiB A → B | Load s A → B |
+|---:|---:|---|---|---|
+| 1 | 0 | 8.365 (8.284 to 8.422) → 8.323 (8.296 to 8.347) | 2323.617 (2322.426 to 2324.578) → 2326.702 (2326.270 to 2327.219) | 9.754 (9.720 to 9.786) → 9.710 (9.685 to 9.753) |
+| 1 | 3 | 7.681 (7.648 to 7.736) → 7.661 (7.600 to 7.699) | 2337.408 (2336.926 to 2337.680) → 2341.190 (2340.895 to 2341.461) | 10.061 (10.031 to 10.113) → 10.065 (10.031 to 10.105) |
+| 4 | 0 | 14.053 (13.998 to 14.087) → 14.045 (14.023 to 14.081) | 2360.007 (2359.918 to 2360.156) → 2363.681 (2363.258 to 2363.926) | 10.036 (10.016 to 10.063) → 10.091 (10.071 to 10.105) |
+| 4 | 3 | 14.649 (14.579 to 14.690) → 14.644 (14.600 to 14.677) | 2415.691 (2415.465 to 2416.039) → 2419.585 (2419.012 to 2420.062) | 10.573 (10.506 to 10.639) → 10.607 (10.572 to 10.670) |
+
+Peak RSS increases 2.641–4.492 MiB in individual Flash pairs. Mean load changes
+range from -0.043 to +0.055 s, with a worst paired increase of +0.077 s. CPU
+means fall slightly, but individual pairs still increase by up to 0.099 s.
+No steady-RAM, isolated loader or CPU-causality claim follows from these values.
+
+| C | K | Weight / sequence / workspace MiB (both) | Startup retained MiB A → B | Available after startup MiB A → B |
+|---:|---:|---|---|---|
+| 1 | 0 | 71690.513 / 215.831 / 159.625 | 3.487 → 3.487 | 24605.875 → 24607.875 |
+| 1 | 3 | 73213.262 / 252.158 / 159.625 | 8.738 → 6.738 | 23039.875 → 23043.875 |
+| 4 | 0 | 71690.513 / 848.257 / 159.625 | 13.487 → 13.487 | 23961.875 → 23963.875 |
+| 4 | 3 | 73213.262 / 933.409 / 159.625 | 26.738 → 26.738 | 22341.875 → 22343.875 |
+
+Resident timings do not qualify Host-offload throughput, physical RTX 5090,
+native Windows Flash execution or interactive desktop latency. The selected
+source also passes all 26 resident Engine cases, four graph/PLE contracts,
+ordinary/MTP eager/graph Host execution at 32 and 28 GiB, three Host route-trace
+cases at 28 GiB and the initial startup profile at a 24 GiB Engine budget.
+The issue #37 acceptance gate remains separate from these G4 results.
+
+For both stage matrices, the reported arena capacities, startup-retained bytes
+and available-after-startup values are identical across all three processes
+within each arm/profile. These are startup boundaries, not peak-GPU measures.

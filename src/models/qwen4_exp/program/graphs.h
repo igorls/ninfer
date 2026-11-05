@@ -5,7 +5,6 @@
 namespace ninfer::models::qwen4_exp::detail {
 class ProgramImpl;
 
-// Eager and captured decode use the same finite QSA arithmetic envelope.
 [[nodiscard]] std::uint32_t context_envelope(std::uint32_t visible, std::uint32_t capacity);
 
 class Graphs {

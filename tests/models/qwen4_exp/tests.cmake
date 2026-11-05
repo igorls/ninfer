@@ -10,7 +10,7 @@ add_executable(ninfer_ple_disk_prepare_test "${CMAKE_CURRENT_LIST_DIR}/ple/disk/
 ninfer_test_includes(ninfer_ple_disk_prepare_test)
 target_link_libraries(ninfer_ple_disk_prepare_test PRIVATE ninfer_model_runtime)
 if(NOT WIN32)
-  target_link_options(ninfer_ple_disk_prepare_test PRIVATE "LINKER:--wrap=cudaEventRecord")
+  ninfer_test_interpose(ninfer_ple_disk_prepare_test cudaEventRecord)
   target_compile_definitions(ninfer_ple_disk_prepare_test PRIVATE NINFER_TEST_CUDA_EVENT_FAULTS)
 endif()
 foreach(mode IN ITEMS host gpu)
@@ -43,3 +43,8 @@ ninfer_add_test(ninfer_qwen4_exp_engine_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_real.cpp"
   LIBRARIES ninfer_engine ninfer::json)
 set_tests_properties(ninfer_qwen4_exp_engine_real_test PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE LABELS "gpu;real")
+ninfer_add_test(ninfer_qwen4_exp_reclaim_real_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_reclaim_real.cpp"
+  LIBRARIES ninfer_model_runtime ninfer_model_loading ninfer_core)
+set_tests_properties(ninfer_qwen4_exp_reclaim_real_test PROPERTIES
+  SKIP_RETURN_CODE 77 RUN_SERIAL TRUE LABELS "gpu;real")

@@ -12,16 +12,9 @@ ninfer_add_test(ninfer_artifact_materialization_test
   LIBRARIES ninfer_artifact)
 
 if(NOT WIN32)
-  # CUDA fault injection through GNU ld; the MSVC linker cannot wrap symbols.
-  target_link_options(ninfer_artifact_materialization_test PRIVATE
-    "LINKER:--wrap=cudaMalloc"
-    "LINKER:--wrap=cudaMallocHost"
-    "LINKER:--wrap=cudaFree"
-    "LINKER:--wrap=cudaFreeHost"
-    "LINKER:--wrap=cudaEventCreateWithFlags"
-    "LINKER:--wrap=cudaEventRecord"
-    "LINKER:--wrap=cudaMemcpyAsync"
-    "LINKER:--wrap=cudaStreamSynchronize")
+  ninfer_test_interpose(ninfer_artifact_materialization_test
+    cudaMalloc cudaMallocHost cudaFree cudaFreeHost cudaEventCreateWithFlags cudaEventRecord
+    cudaMemcpyAsync cudaStreamSynchronize)
 endif()
 
 add_test(NAME ninfer_artifact_writer_interop_test

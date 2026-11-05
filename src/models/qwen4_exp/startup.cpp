@@ -6,32 +6,37 @@
 namespace ninfer::models::qwen4_exp {
 Startup::Startup(const artifact::Reader& reader, const EngineOptions& options, Device device)
     : reader_(reader), selection_(load_options(options)), source_(plan_load(reader, selection_)),
-      table_(reader, source_->ple_table().parameters()) {
-    profile             = execution::describe_model(*source_);
-    weights.fixed_bytes = source_->placement(device, Device::cpu()).device_capacity_bytes;
-    weights.resident_bytes = source_->placement(device, device).device_capacity_bytes;
-    weights.banks       = profile->banks;
-    weights.offload     = describe_moe_plan(*profile, options.moe);
+      table_(source_->ple_table().geometry()) {
+    profile = execution::describe_model(*source_);
+    placements_.push_back(
+        {WeightPlacement::Resident, source_->placement(device, device).device_capacity_bytes});
+    offload_ = describe_moe_plan(*profile, options.moe);
+    if (offload_)
+        placements_.push_back({WeightPlacement::HostExperts,
+                               source_->placement(device, Device::cpu()).device_capacity_bytes});
 }
 
 std::optional<Startup::ExecutionPlan> Startup::plan(DeviceContext& device,
-                                                    const EngineOptions& options, bool host,
+                                                    const EngineOptions& options,
+                                                    WeightPlacement placement,
                                                     std::size_t available) const {
-    auto trial = options;
-    if (!trial.prefill_chunk) trial.prefill_chunk = host ? 4096U : 1024U;
-    auto planned = plan_execution(profile, table_, trial, device, available, host);
+    const bool host = placement == WeightPlacement::HostExperts;
+    if (host && !offload_) return {};
+    auto planned =
+        plan_execution(profile, table_, options, device, available, host ? offload_ : nullptr);
     if (!planned) return {};
     const auto capacity = planned->capacity;
     const auto chunk    = planned->shape.prefill_chunk;
     const auto moe      = planned->moe;
-    return ExecutionPlan{std::move(*planned), capacity, host, chunk, moe};
+    return ExecutionPlan{std::move(*planned), capacity, placement, chunk, {moe}};
 }
 
-std::unique_ptr<Model> Startup::materialize(DeviceContext& device, bool host,
+std::unique_ptr<Model> Startup::materialize(DeviceContext& device, WeightPlacement placement,
                                             const StartupObserver& observer) {
     if (!source_) source_.emplace(plan_load(reader_, selection_));
-    auto resolved = resolve_load(std::move(*source_), device.device(),
-                                 host ? Device::cpu() : device.device());
+    auto resolved =
+        resolve_load(std::move(*source_), device.device(),
+                     placement == WeightPlacement::HostExperts ? Device::cpu() : device.device());
     source_.reset();
     return materialize_model(std::move(resolved), device, &observer);
 }
@@ -61,14 +66,14 @@ std::unique_ptr<Program> create_program(const execution::Parameters& p,
 }
 
 GraphPreparationPlan Startup::graph_plan(const EngineOptions& options,
-                                         const moe::Plan* plan) const {
-    return describe_graph_preparation(options, plan);
+                                         const ExecutionPreparation& preparation) const {
+    return describe_graph_preparation(options, preparation.experts.get());
 }
 
 Startup::Calibration Startup::calibrate(const execution::Parameters& parameters,
                                         DeviceContext& device, const EngineOptions& options,
-                                        std::shared_ptr<const moe::Plan> plan) const {
-    return calibrate_graphs(parameters, device, options, std::move(plan));
+                                        const ExecutionPreparation& preparation) const {
+    return calibrate_graphs(parameters, device, options, preparation.experts);
 }
 
 std::string prefill_signature(const Model& model, const moe::Plan* moe, std::uint32_t chunk) {
@@ -108,9 +113,14 @@ std::string prefill_signature(const Model& model, const moe::Plan* moe, std::uin
         weights.push_back(std::move(item));
     }
     if (moe)
-        facts["moe"] = {moe->cache.config.capacity_bytes, moe->cache.config.fixed_bytes,
-                        moe->window_count, moe->team.worker_cpus.size()};
+        facts["moe"] = {moe->description().cache_bytes, moe->description().fixed_bytes,
+                        moe->description().window_count, moe->description().cpu_workers};
     return qwen::frontend::sha256_hex(qwen::frontend::sha256(facts.dump()));
+}
+
+std::string Startup::prefill_signature(const Model& model, const ExecutionPreparation& preparation,
+                                       std::uint32_t chunk) const {
+    return qwen4_exp::prefill_signature(model, preparation.experts.get(), chunk);
 }
 
 } // namespace ninfer::models::qwen4_exp

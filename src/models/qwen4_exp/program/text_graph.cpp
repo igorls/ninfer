@@ -1,6 +1,6 @@
 #include "models/qwen4_exp/program/text_graph.h"
 #include "core/nvtx.h"
-#include "models/common/moe/plan.h"
+#include "models/common/moe/schedule.h"
 
 #include <algorithm>
 
@@ -13,38 +13,31 @@ void GraphSegment::prepare(CudaExecutionView cuda, const std::function<void()>& 
 }
 
 void TextGraph::prepare(execution::TextRun& run, const execution::Parameters& parameters,
-                        moe::Resources& experts, std::span<const std::uint32_t> bounds,
+                        moe::Schedule* experts, std::span<const std::uint32_t> bounds,
                         std::array<Tensor, 2> ple, execution::TextOutputs output,
                         std::int32_t columns, MemoryArena& workspace, DeviceContext& device) {
     const auto cuda    = device.execution_view();
     const auto& config = parameters.model.config().text;
     ple_layer_         = config.ple.layer;
+    block_output_      = run.block_output();
+    resident_          = experts == nullptr;
     for (const auto& layer : parameters.text.layers) banks_.push_back(layer.moe.bank);
-    resident_ = std::all_of(banks_.begin(), banks_.end(), [&](auto bank) {
-        return experts.plan().layer(bank).resident;
-    });
     workspace.reset_peak();
+    if (!resident_) stem_.prepare(cuda, [&] { run.stem(); });
     for (std::size_t slot = 0; slot < ple.size(); ++slot)
         ple_[slot].prepare(cuda, [&] { run.consume_ple(ple[slot]); });
-    if (!resident_) {
-        stem_.prepare(cuda, [&] { run.stem(); });
-        finish_.prepare(cuda, [&] { run.finish(output); });
-    }
+    if (!resident_) finish_.prepare(cuda, [&] { run.finish(output); });
     const auto fixed_workspace = workspace.peak_used();
     profiles_.reserve(bounds.size());
     for (const auto bound : bounds) {
         run.set_visible_tokens(bound);
         workspace.reset_peak();
-        Profile profile{};
-        profile.bound = bound;
+        Profile profile{bound, {}};
         if (resident_) {
-            // Immutable resident weights need no per-layer cache or CPU handoff.
             const auto layers = [&](std::uint32_t first, std::uint32_t last) {
                 for (auto i = first; i < last; ++i) {
                     run.mixer(i);
-                    const auto call = experts.describe_layer(banks_[i], columns,
-                                                              ops::ExpertSubsetKind::All);
-                    run.gpu_moe(call);
+                    run.resident_moe(i);
                     run.combine(i);
                 }
             };
@@ -68,13 +61,10 @@ void TextGraph::prepare(execution::TextRun& run, const execution::Parameters& pa
                 profile.layers.push_back(*shared);
                 continue;
             }
-            auto layer = std::make_shared<moe::LayerGraphDefinition>();
-            layer->moe = shared ? (*shared)->moe : std::make_shared<moe::SubsetGraphDefinitions>();
-            moe::capture_layer(
-                *layer, experts, banks_[i], cuda, columns, [&] { run.mixer(i); },
-                [&](const moe::PreparedExecution& call) { run.gpu_moe(call); },
-                [&] { run.combine(i); });
-            profile.layers.push_back(std::move(layer));
+            profile.layers.push_back(experts->capture_layer(
+                    banks_[i], cuda, columns, [&] { run.mixer(i); },
+                    [&](const moe::GpuCall& call) { run.gpu_moe(call); }, [&] { run.combine(i); },
+                    shared ? *shared : nullptr));
         }
         profile.workspace_bytes = std::max(fixed_workspace, workspace.peak_used());
         if (!profiles_.empty())
@@ -87,7 +77,7 @@ void TextGraph::prepare(execution::TextRun& run, const execution::Parameters& pa
         resident_suffix_.instantiate(profiles_.front().resident_suffix);
     } else {
         layers_.reserve(banks_.size());
-        for (const auto& layer : profiles_.front().layers) layers_.emplace_back(*layer);
+        for (const auto& layer : profiles_.front().layers) layers_.push_back(layer->instantiate());
     }
     // Exercise every update before accepting requests, including the return to the first tier.
     for (const auto bound : bounds) {
@@ -96,7 +86,7 @@ void TextGraph::prepare(execution::TextRun& run, const execution::Parameters& pa
             resident_prefix_.upload(cuda.stream());
             resident_suffix_.upload(cuda.stream());
         } else {
-            for (auto& layer : layers_) layer.upload(cuda.stream());
+            for (auto& layer : layers_) layer->upload(cuda.stream());
         }
         device.synchronize();
     }
@@ -114,26 +104,25 @@ void TextGraph::select(std::uint32_t visible) {
         resident_suffix_.update(it->resident_suffix);
     } else {
         for (std::size_t i = 0; i < layers_.size(); ++i)
-            if (it->layers[i] != profiles_[installed_].layers[i]) layers_[i].update(*it->layers[i]);
+            if (it->layers[i] != profiles_[installed_].layers[i]) layers_[i]->update(*it->layers[i]);
     }
     installed_ = next;
 }
 
-void TextGraph::traverse(std::uint32_t begin, std::uint32_t end, moe::Resources& experts,
-                         Tensor& output, CudaExecutionView cuda) {
+void TextGraph::traverse(std::uint32_t begin, std::uint32_t end, CudaExecutionView cuda) {
     for (auto i = begin; i < end; ++i) {
         nvtx::ScopedRange range(nvtx::Name::TextLayer, nvtx::Category::Runtime, i);
-        layers_[i].replay(experts, banks_[i], output, cuda);
+        layers_[i]->replay(block_output_, cuda);
     }
 }
 
-void TextGraph::prefix(moe::Resources& experts, Tensor& output, CudaExecutionView cuda) {
+void TextGraph::prefix(CudaExecutionView cuda) {
     if (resident_) {
         resident_prefix_.launch(cuda.stream());
         return;
     }
     stem_.executable.launch(cuda.stream());
-    traverse(0, ple_layer_, experts, output, cuda);
+    traverse(0, ple_layer_, cuda);
 }
 
 void TextGraph::consume_ple(std::uint32_t slot, CudaExecutionView cuda) {
@@ -141,12 +130,12 @@ void TextGraph::consume_ple(std::uint32_t slot, CudaExecutionView cuda) {
     ple_[slot].executable.launch(cuda.stream());
 }
 
-void TextGraph::suffix(moe::Resources& experts, Tensor& output, CudaExecutionView cuda) {
+void TextGraph::suffix(CudaExecutionView cuda) {
     if (resident_) {
         resident_suffix_.launch(cuda.stream());
         return;
     }
-    traverse(ple_layer_, banks_.size(), experts, output, cuda);
+    traverse(ple_layer_, banks_.size(), cuda);
     finish_.executable.launch(cuda.stream());
 }
 

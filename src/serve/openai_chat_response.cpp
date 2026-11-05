@@ -132,11 +132,14 @@ const char* finish_reason(ninfer::FinishReason reason) {
 }
 
 const char* finish_reason(const GenerationOutcome& outcome) {
-    const bool interrupted = outcome.finish_reason == ninfer::FinishReason::OutputLimit ||
-                             outcome.finish_reason == ninfer::FinishReason::ContextCapacity ||
-                             outcome.finish_reason == ninfer::FinishReason::Cancelled;
-    return !interrupted && !outcome.tool_calls.empty() ? "tool_calls"
-                                                       : finish_reason(outcome.finish_reason);
+    const bool completed = outcome.finish_reason == ninfer::FinishReason::StopToken ||
+                           outcome.finish_reason == ninfer::FinishReason::None;
+    return completed && std::any_of(outcome.tool_calls.begin(), outcome.tool_calls.end(),
+                                    [](const auto& call) {
+                                        return call.status == ToolCallStatus::Complete;
+                                    })
+               ? "tool_calls"
+               : finish_reason(outcome.finish_reason);
 }
 
 std::vector<ToolCall>
@@ -422,6 +425,37 @@ std::string OpenAIChatStream::content_delta(const std::string& text) {
     return chunk(identity_, Json{{"content", text}}, nullptr, include_usage_, live_timings_json());
 }
 
+std::vector<std::string> OpenAIChatStream::tool_start(const ninfer::ToolCallStart& value) {
+    if (!started_ || finished_) throw std::logic_error("invalid Chat tool start state");
+    content_started_ = true;
+    tools_.start(value);
+    return {chunk(
+        identity_,
+        Json{{"tool_calls",
+              Json::array({Json{{"index", value.index},
+                                {"id", new_openai_chat_tool_call_id()},
+                                {"type", "function"},
+                                {"function", Json{{"name", value.name}, {"arguments", ""}}}}})}},
+        nullptr, include_usage_, live_timings_json())};
+}
+
+std::vector<std::string> OpenAIChatStream::tool_arguments(const ninfer::ToolArgumentsDelta& value) {
+    if (!started_ || finished_) throw std::logic_error("invalid Chat tool delta state");
+    tools_.append(value);
+    if (value.text.empty()) return {};
+    return {chunk(
+        identity_,
+        Json{{"tool_calls", Json::array({Json{{"index", value.index},
+                                              {"function", Json{{"arguments", value.text}}}}})}},
+        nullptr, include_usage_, live_timings_json())};
+}
+
+std::vector<std::string> OpenAIChatStream::tool_end(const ninfer::ToolCallEnd& value) {
+    if (!started_ || finished_) throw std::logic_error("invalid Chat tool end state");
+    tools_.end(value);
+    return {};
+}
+
 std::vector<std::string> OpenAIChatStream::finish(const GenerationOutcome& outcome) {
     if (!started_ || finished_) {
         throw std::logic_error("invalid OpenAI Chat stream finish state");
@@ -448,21 +482,10 @@ std::vector<std::string> OpenAIChatStream::finish(const GenerationOutcome& outco
                                include_usage_, output_timings));
     }
 
-    Json terminal_logprobs = logprobs_json(outcome);
-    if (!outcome.tool_calls.empty()) {
-        const std::vector<ToolCall> calls = materialize_tool_calls(outcome.tool_calls);
-        events.push_back(chunk(identity_, Json{{"tool_calls", tool_calls_json(calls, true)}},
-                               nullptr, include_usage_, output_timings));
-        events.push_back(chunk(identity_, Json::object(), finish_reason(outcome), include_usage_,
-                               include_usage_ ? Json(nullptr) : final_timings,
-                               include_usage_ ? Json(nullptr) : constraint,
-                               std::move(terminal_logprobs)));
-    } else {
-        events.push_back(chunk(identity_, Json::object(), finish_reason(outcome.finish_reason),
-                               include_usage_, include_usage_ ? Json(nullptr) : final_timings,
-                               include_usage_ ? Json(nullptr) : constraint,
-                               std::move(terminal_logprobs)));
-    }
+    tools_.verify(outcome.tool_calls);
+    events.push_back(chunk(identity_, Json::object(), finish_reason(outcome), include_usage_,
+                           include_usage_ ? Json(nullptr) : final_timings,
+                           include_usage_ ? Json(nullptr) : constraint, logprobs_json(outcome)));
     if (include_usage_) {
         events.push_back(usage_chunk(identity_, usage_from(outcome), final_timings, constraint));
     }

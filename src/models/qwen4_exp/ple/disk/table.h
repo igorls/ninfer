@@ -10,6 +10,11 @@ namespace ninfer::models::qwen4_exp::ple::disk {
 inline constexpr std::size_t kNf4RowBytes = kRowElements / 2 + kRowElements / 16;
 inline constexpr std::size_t kRowBytes = kRowElements / 2 + 2 * kRowElements / 16;
 
+struct TableGeometry {
+    std::size_t max_row_segments = 0;
+    std::size_t memory_alignment = 4096, read_alignment = 4096;
+};
+
 struct RowSource {
     artifact::FileObjectView object;
     std::uint64_t offset; // Encoded row's byte offset within object.
@@ -34,7 +39,7 @@ public:
     [[nodiscard]] std::size_t row_segments(const RowSource&, std::span<artifact::ReadSegment>) const;
     [[nodiscard]] const LookupParameters& parameters() const noexcept;
     [[nodiscard]] std::span<const io::FileView> files() const noexcept;
-    [[nodiscard]] std::size_t max_row_segments() const noexcept;
+    [[nodiscard]] TableGeometry geometry() const noexcept;
 
 private:
     struct Impl;

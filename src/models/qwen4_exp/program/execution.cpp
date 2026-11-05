@@ -183,7 +183,7 @@ Tensor ProgramImpl::forward(std::span<Sequence* const> rows, std::uint32_t token
             resources.workspace,
             *resources.states,
             resources.main->cache,
-            *resources.experts,
+            resources.experts.get(),
             layout.main_qsa.keys.bind(resources.persistent()),
             layout.main_qsa.coordinates.bind(resources.persistent()),
             layout.ple_records.bind(resources.persistent()), route_trace ? &*route_trace : nullptr};
@@ -192,7 +192,7 @@ Tensor ProgramImpl::forward(std::span<Sequence* const> rows, std::uint32_t token
         execution::TextRun run(parameters, execution, call, update, cuda);
         auto* graph = graphs && !sequence_route ? &graphs->main(batch, false, maximum) : nullptr;
         if (graph)
-            graph->prefix(*resources.experts, run.block_output(), cuda);
+            graph->prefix(cuda);
         else
             run.prefix(visual);
         auto embedding = ple.consume(ticket);
@@ -219,7 +219,7 @@ Tensor ProgramImpl::forward(std::span<Sequence* const> rows, std::uint32_t token
             }
         }
         if (graph)
-            graph->suffix(*resources.experts, run.block_output(), cuda);
+            graph->suffix(cuda);
         else
             run.suffix({sample, conditioning});
     }

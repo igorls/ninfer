@@ -1,6 +1,10 @@
 {
   "version": 6,
-  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 28,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "release",
@@ -11,7 +15,9 @@
         "CMAKE_BUILD_TYPE": "Release",
         "NINFER_BUILD_APPS": "ON",
         "BUILD_TESTING": "OFF",
-        "NINFER_BUILD_BENCHMARKS": "OFF"
+        "NINFER_BUILD_BENCHMARKS": "OFF",
+        "NINFER_TARGET": "rtx5090",
+        "NINFER_BUILD_ENGINE": "ON"
       }
     },
     {
@@ -22,17 +28,45 @@
         "BUILD_TESTING": "ON",
         "NINFER_BUILD_BENCHMARKS": "ON"
       }
+    },
+    {
+      "name": "ops",
+      "displayName": "Core, Artifact and Ops development",
+      "inherits": "dev",
+      "cacheVariables": {
+        "NINFER_BUILD_ENGINE": "OFF",
+        "NINFER_BUILD_APPS": "OFF"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "release", "configurePreset": "release" },
-    { "name": "dev", "configurePreset": "dev" }
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "dev",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "ops",
+      "configurePreset": "ops"
+    }
   ],
   "testPresets": [
     {
       "name": "dev",
       "configurePreset": "dev",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "ops",
+      "configurePreset": "ops",
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }

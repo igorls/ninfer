@@ -1,8 +1,8 @@
 # Windows installer
 
 Build the engine and Supervisor from the intended source revision in an isolated
-checkout, with `NINFER_BUILD_MEDIA=ON` if Vision is to be included. Build the
-first-launch application separately:
+checkout. Engine builds include the media libraries; Vision is enabled at runtime.
+Build the first-launch application separately:
 
 ```powershell
 cmake -S scripts/windows/launcher -B build-launcher -G "Visual Studio 18 2026" -A x64

@@ -1,6 +1,6 @@
 # HTTP serving
 
-`build/apps/ninfer-serve` loads one v3 `.ninfer` artifact and exposes OpenAI- and
+`build/rtx5090-release/apps/ninfer-serve` loads one v3 `.ninfer` artifact and exposes OpenAI- and
 Anthropic-compatible HTTP endpoints over one resident NInfer Engine.
 
 Qwen3.8-Flash-Next supports Text/Vision/MTP serving with segmented CUDA Graph decode.
@@ -13,7 +13,7 @@ See the [CLI example](cli.md) for commands and the
 See [CUDA synchronization](cli.md#cuda-synchronization) for the shared `NINFER_CUDA_SYNC` setting.
 
 ```bash
-./build/apps/ninfer-serve models/qwen3_8_27b_nvfp4.ninfer \
+./build/rtx5090-release/apps/ninfer-serve models/qwen3_8_27b_nvfp4.ninfer \
   --host 127.0.0.1 \
   --port 8080 \
   --max-context 240000 \
@@ -32,8 +32,9 @@ when running alone. Requests acquire KV pages as execution advances; if concurre
 the pool, the scheduler can pause a request and restore it later.
 
 With `C=2` and two extra Device slots, the process owns four Device StateImages. The default shared
-pinned Host budget is 8 GiB plus eight model StateImages. It holds retained state, KV and pause
-snapshots, including in-flight destinations; `--host-context-mib` sets an explicit total instead.
+pinned Host budget on RTX 5090 is 8 GiB plus eight model StateImages. This pool holds retained
+state, KV and pause snapshots, including in-flight destinations; `--host-context-mib` sets an
+explicit total instead. DGX Spark uses Device context storage with zero Host context capacity.
 
 Other artifacts use the same command shape with their own path. For 35B-A3B DFlash, replace the MTP
 selection with `--spec dflash --draft-tokens 7 --lm-head-draft`. Qwen3.8-27B
@@ -421,21 +422,27 @@ back to its architecture name when absent, or the explicit `--model-id` override
 `--model-alias`, or `default`.
 Reasoning is returned separately as `reasoning_content`; answer text remains in `content`.
 
-For non-strict tools, a direct top-level tool-parameter
-`type`, or an `anyOf`/`oneOf` composed entirely of explicit primitive types, guides conversion of
-Qwen's untyped parameter text. It does not decide whether structurally complete markup is a tool
-call. String-admitting values remain strings, including the empty string. An empty block for a
-declared non-string parameter is omitted. Admitted JSON values retain their JSON type;
-case-insensitive boolean text is normalized to `true` or `false`. A nonempty schema mismatch remains
-a structured call: valid JSON retains its represented type and other text becomes a JSON string so
-the tool consumer can report the validation error and continue the agent loop. Schemas without a
-supported explicit type retain untyped inference. NInfer does not apply defaults, enforce required
-properties, or perform recursive JSON Schema validation on this route.
+For non-strict tools, a direct parameter `type`, or an `anyOf`/`oneOf` composed entirely of
+explicit primitive types, selects the parameter encoding before generation. String-admitting hints
+use raw text, including empty strings, with incremental JSON escaping. Explicit non-string hints
+use JSON value text and stream without changing numeric lexemes or object member order. The JSON
+codec uses the existing tool representation domain, including finite numbers and Unicode scalars. Basic
+constraints enforce JSON syntax, not the hinted type: an integer hint can produce `"tomorrow"`,
+which remains a string with a schema-mismatch diagnostic. Bare non-JSON text, empty JSON blocks,
+and non-JSON booleans such as `True` are not repaired or omitted.
+
+Unknown names and unsupported type hints use parameter-buffered inference: trim outer format
+whitespace, retain valid JSON text, otherwise encode it as a string. An opening `{`, `[` or `"`
+does not commit an inferred parameter to JSON before its delimiter. These ambiguous parameters can
+still have parameter-sized output delays. NInfer does not apply defaults, enforce required fields,
+or perform recursive JSON Schema validation on this non-strict route.
 
 On the unconstrained route, string parameters preserve function/tool-call markers and balanced nested
 `<parameter=...>...</parameter>` text as value bytes. The Qwen wire format has no delimiter escape,
 so an unmatched nested parameter opener or a standalone `</parameter>` cannot be represented
-unambiguously; either causes the complete tool-call region to fall back to ordinary content.
+unambiguously. After a declared function header has started, malformed structure fails that request
+with `invalid_tool_output`; earlier tool events are never retracted into ordinary content.
+An unrecognized header on the free-generation route can still be returned as text.
 
 ### Tool constraints
 
@@ -458,10 +465,11 @@ while all declarations retain their original order in the prompt. Requests with 
 The model can answer normally or start a tool call; a call must use the model's tool framing and a
 declared function name.
 
-Non-strict parameter names and order remain open. Their schema supplies the existing value
-normalization hints; it is not compiled as a strict constraint. Open objects, root unions, and
-unsupported schema assertions therefore remain usable. Repeated parameter names use the last
-value, retaining the first key position; the published JSON object contains each key once.
+Non-strict parameter names and order remain open. Encoding hints do not enable strict schema
+assertions, so open objects, root unions, and unsupported assertions remain usable. Each call's
+top-level parameter names are unique: repeated names are excluded during sampling, including
+speculative lookahead. Different calls can reuse the same names. Previously published values are
+never overwritten.
 `strict:true` additionally enforces the parameter contract below.
 
 Top-level `tool_constraints:"auto"` opts into request-driven constraints: ordinary non-strict
@@ -490,11 +498,27 @@ For `auto` without JSON output, text can precede the first call. Required/named 
 (after thinking, if enabled). Once a constrained call starts, the suffix consists of complete calls
 and model EOS. Active tool constraints require model EOS and reject custom stop strings.
 For ordinary non-strict auto calls that need custom stops, select `tool_constraints:"auto"`.
-Token limits and cancellation can still stop generation: only completed calls are published.
-A later call truncated by the token limit keeps `length`/`max_tokens`/Responses `incomplete` as the
-terminal status. Streaming publishes each completed call in the terminal event sequence;
-arguments are not streamed incrementally.
+Tool names are published as soon as their complete declared header is recognized. Parameters are
+JSON-encoded incrementally, including within long strings and JSON containers; concatenating a
+call's argument deltas produces its final `arguments_json`. Each call has stable wire identifiers
+from start through completion. A completed call is closed immediately, before the request terminal.
+
+Token and context limits retain `length`/`max_tokens`/Responses `incomplete` and preserve the exact
+published parameter prefix. No missing JSON punctuation is invented. Custom stops retain Chat
+`finish_reason:"stop"` even when an earlier call completed. Chat aggregate responses can contain
+partial argument strings; Responses retain incomplete function Items, including in stored
+responses. Only complete calls enter Responses conversation history; a result referencing an
+incomplete call is rejected as invalid tool history. Anthropic aggregate `tool_use.input` remains a
+complete object, so incomplete calls are omitted there. Cancellation closes transport without a
+successful terminal. Malformed free output fails only its request with `invalid_tool_output`
+(HTTP 500, or a protocol error event after SSE starts). A constrained output/decoder disagreement
+is an internal contract error. Responses failure snapshots retain already-published item IDs and
+argument text; partial calls never become executable history.
+
 Assistant continuation may finish a partial call; a prefix containing a completed call is rejected.
+The resumed call emits its seeded arguments once as initialization, followed by newly generated
+deltas. Ordinary text continuation still emits only its new suffix; seeded bytes are not billed as
+newly generated tokens.
 
 Messages enter the selected template in their input order. The maintained Qwen templates keep
 system/developer messages at their original positions.
@@ -909,6 +933,8 @@ produces `incomplete` with `incomplete_details.reason: "max_output_tokens"`. Err
 an SSE response has started produce `response.failed`; validation and preparation errors remain
 normal HTTP error responses. `completed_at` is populated only for completed Responses. A
 reasoning-only incomplete result contains no invented empty assistant message.
+An already closed reasoning or message Item retains `completed` when a later tool call is
+interrupted. Item completion is independent of the enclosing Response's terminal status.
 
 Usage is checkpoint-native:
 
@@ -949,9 +975,10 @@ The normal lifecycle is:
 
 Function arguments use `response.function_call_arguments.delta` and `.done`. IDs, output indices,
 and content indices remain stable, and concatenated deltas equal the terminal Item. Responses SSE
-does not emit the Chat Completions `[DONE]` sentinel. With tools enabled, ordinary answer text still
-streams immediately; only an ambiguous `<tool_call>` suffix or the structured tool region is held.
-On the unconstrained route, malformed tool markup is flushed back as ordinary text without losing bytes.
+does not emit the Chat Completions `[DONE]` sentinel. With tools enabled, ordinary answer text and
+recognized tool arguments both stream incrementally. Only undecided framing and value-normalization
+bytes are held. An unrecognized free-generation tool header is returned as text; errors after a
+recognized header produce `response.failed` without retracting earlier events.
 
 ### Local response state and resources
 
@@ -1072,6 +1099,12 @@ MCP, and containers remain unsupported. `tool_result` preserves text/image order
 User turn must provide exactly one leading result for every declared ID; valid results are matched
 by ID and normalized to call order. A history that begins with results remains valid as a truncated
 or imported conversation.
+
+Anthropic `content_block_start` publishes a tool's ID and name before its input. Set the per-tool
+`eager_input_streaming:true` to receive `input_json_delta.partial_json` fragments within parameter
+values. With the field omitted or false, the adapter buffers each parameter until its value has
+been decoded, then flushes it. Both policies use the same Engine events and final argument values.
+An eager stream can end with incomplete JSON at an output limit; inspect the terminal stop reason.
 
 Block-level ephemeral `cache_control` on tools and supported System/User/Assistant/tool-history
 blocks creates explicit shared-prefix candidates. At most four distinct block-level breakpoints are
@@ -1541,7 +1574,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--kv-slack-floor-mib N` | device memory `--kv-capacity auto` leaves unreserved | `1024` |
 | `--max-pending-requests N` | additional requests allowed to wait for admission | `16` |
 | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `30000` |
-| `--prefill-chunk N` | text-prefill chunk; positive multiple of 128 | `1024`; CPU expert offload: `4096` |
+| `--prefill-chunk N` | text-prefill chunk; positive multiple of 128 | `4096` for Qwen4Exp or CPU expert offload; otherwise `1024` |
 | `--log-stats-interval-ms N` | aggregate throughput report interval; `0` disables it | `5000` |
 | `--log-level trace\|debug\|info\|warning\|error\|critical\|off` | pretty stderr verbosity | `info` |
 | `--device N` | CUDA device index | `0` |
@@ -1566,7 +1599,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
 | `--no-prefix-reuse` | disable compatible-prefix caching | prefix reuse on |
 | `--device-state-slots N` | extra Device StateImages beyond `max-concurrency` | `max-concurrency` |
-| `--host-context-mib N` | shared pinned Host budget for StateImages, KV and pause snapshots, including in-flight destinations | `8192 MiB + 8 native StateImages` |
+| `--host-context-mib N` | RTX 5090 pinned Host budget for StateImages, KV and pause snapshots, including in-flight destinations; DGX Spark keeps this capacity at zero | `8192 MiB + 8 native StateImages` on RTX 5090; `0` on DGX Spark |
 | `--no-thinking` | disable thinking by default | thinking on |
 | `--preserve-thinking` | preserve closed-turn assistant reasoning by default | off |
 | `--cors` | permissive browser CORS headers | off |
@@ -1602,7 +1635,7 @@ limit on total process RAM. `--host-context-mib 0` disables Host context backing
 `--no-prefix-reuse` disables cross-request history reads and writes; pause/replay recovery remains
 available, and the capacity flags may still be specified.
 
-Run `./build/apps/ninfer-serve --help` for the exact option contract.
+Run `./build/rtx5090-release/apps/ninfer-serve --help` for the exact option contract.
 
 Serve writes human-readable operational records to stderr using
 `YYYY-MM-DD HH:MM:SS.mmm  LEVEL  message`. Normal output covers material startup milestones,
@@ -1717,10 +1750,13 @@ they do not infer request behavior from process-global counter deltas.
 `enable_thinking` records whether the response starts in thinking mode.
 
 `request_done.result.tool_call_parse` records whether a complete marker was seen, the structured
-call count, empty non-string arguments omitted during normalization, schema-mismatched arguments
+call count, schema-mismatched arguments
 preserved for consumer validation, and a stable text-fallback reason. Fallback reasons are `none`,
-`malformed_structure`, `duplicate_parameter`, `invalid_tool_name`, `undeclared_tool`, and
-`trailing_content`. These counters contain no tool arguments or generated text.
+`malformed_structure`, `invalid_tool_name`, and `undeclared_tool`. `tool_call_count` and
+`structured_call_count` count complete calls, excluding an interrupted call's parameter prefix.
+Free-generation format errors after a recognized header use `request_error` with `invalid_tool_output`
+instead of text fallback; constrained decoder disagreements are internal errors. These counters
+contain no tool arguments or generated text.
 
 `request_done.constraint` carries the same constraint observation as the HTTP terminal result,
 or `null` for unconstrained requests. Preparation failures and execution errors use the existing
@@ -1772,8 +1808,9 @@ already included in `device_wait_exposed_seconds`. The `throughput.host_work.con
 interval and Prometheus counter count each batch once.
 
 `request_done.first_output_timing` freezes observations immediately before Engine publishes its
-first nonempty output delta. It is `null` when no such output exists. This boundary differs from the
-first accepted model token and the client's first HTTP output. Engine elapsed time begins at submit:
+first nonempty text or tool-argument delta; call metadata does not count. It is `null` when no such
+output exists. This boundary differs from the first accepted model token and the client's first
+HTTP output. Engine elapsed time begins at submit:
 initial queue ends when the successful binding attempt starts, initial binding ends when the
 binding is installed, and paused time includes pause preparation, waiting and restoration. The remaining
 interval is resident time. Its `engine` observations describe resident Host/Device-wait exposure;
@@ -1858,7 +1895,8 @@ outside the GPU executor and do not delay formation of the next batch.
 `--max-context` is each sequence's logical ceiling. `--kv-capacity` fixes the shared Main Text KV
 pool used by active requests and retained prefixes. `auto` accounts for the complete enabled runtime
 when sizing the pool; omitting the option makes it follow `--max-context`. Both explicit and automatic
-capacity use 1 GiB of startup planning headroom. Capacity resolves once at startup.
+capacity use 1 GiB of base startup planning headroom. On Spark, Vision additionally reserves
+`--media-live-mib` in shared memory. Capacity resolves once at startup.
 
 Before each prefill, decode or replay unit, the runtime reserves the additional pages and temporary
 storage required by that unit. It first reclaims inactive cache resources when capacity is short.

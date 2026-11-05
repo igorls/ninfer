@@ -1,6 +1,6 @@
 # Upstream ports
 
-Updated: November 4, 2026.
+Updated: November 5, 2026.
 
 This is the living record of how this workstation fork ([igorls/ninfer](https://github.com/igorls/ninfer))
 tracks [Neroued/ninfer](https://github.com/Neroued/ninfer): the reviewed upstream point, the fork
@@ -12,13 +12,102 @@ Qualification and performance evidence remain specific to each device and route.
 
 ## Sync state and method
 
+Sync preserves reviewed upstream ancestry and applies the fork's decisions on top.
+It does not require adopting every upstream feature or implementation. Reject or
+adapt conflicting changes explicitly, recording their scope and reason here;
+do not advance the merge-base without reviewing the incoming work. Native Windows,
+both Blackwell targets, resident execution and the fork's product contracts govern
+those decisions. A source merge, hardware qualification and release acceptance are
+separate states.
+
 | Item | Value |
 |---|---|
 | Fork line | `workstation` (named `port/upstream-v3` until September 28, 2026), based on upstream [`bace20dc`](https://github.com/Neroued/ninfer/commit/bace20dc70249eed6402b66d4852c6c3f9612905) (September 24, 2026) and merged with upstream `e31bc99b` in `e2a149f1` and `d44ab584` in `d29866c9` |
-| Last merged upstream commit | [`64d10fbf`](https://github.com/Neroued/ninfer/commit/64d10fbf9f8e6bfc79ab0570b94674c5b9997929) on the local `sync/upstream-64d10fbf` branch; physical RTX 5090/native Windows GPU qualification remains outstanding |
+| Last merged upstream commit | [`1408277a`](https://github.com/Neroued/ninfer/commit/1408277a4168c912b96d070c5063b869b55171f1) on `sync/upstream-1408277a`; source integration and scoped G4/Windows evidence are separate from acceptance |
 | Pre-v3 fork line | `research/qwen4-flash-next` at `87812bc8` (September 26); the source for Flash-Next |
-| Current sync | All reviewed incoming work through `64d10fbf` is recorded in the local sync merge with the fork adaptations and regression repairs. Linux G4 resident/bounded Engine qualification and Windows build/CPU checks pass |
-| Current target | `64d10fbf` (October 16, 2026); source adaptation and G4 regression repairs are qualified, with retained measurement/resource costs and outstanding physical RTX 5090/native Windows GPU qualification |
+| Current sync | Reviewed incoming work through `1408277a` is integrated with the adaptations and rejections below; `workstation` and Patrick's `sync/upstream-64d10fbf` acceptance branch remain separate |
+| Current target | `1408277a` (October 18, 2026); the remaining 176 commits through `a754fcf3` are under review. Physical RTX 5090/final-source acceptance and native Windows Flash execution remain outstanding |
+
+### Source stage: `64d10fbf..1408277a` (November 5)
+
+The isolated `sync/upstream-1408277a` branch adapts the next 52 upstream commits,
+ending before the native-session/rank rewrite. Its initial source builds on Linux
+and Windows and passes the affected numerical/behavioral checks below. The matched
+resident comparison exposes Flash decode costs; the selected rejection below
+repairs the material ordinary-decode losses in the final matrix. It is not the
+accepted release source. The remaining upstream
+work through `a754fcf3` is still under review. Neither this candidate nor the
+release preparation changes Patrick's `sync/upstream-64d10fbf` acceptance branch.
+
+Carried source includes common CPU/x86 ownership, explicit expert schedules and
+offload ownership, recovery/cache fixes, incremental tool streaming and resident
+the independent Engine admission dependency fix from `1408277a`. The branch
+rejects that commit's coupled Qwen4Exp graph composition, retaining the fork's resident
+prefix/PLE/suffix and separate head/sampling graph while adapting to the new
+expert schedules and per-step draft handoffs. Proposal trace copies remain before
+the shared draft buffer is reused.
+Windows keeps static internal libraries, native
+overlapped I/O, MSVC intrinsics, NVML desktop memory accounting and its Supervisor
+fixtures. Fork scoring/logprobs, repetition controls, route observation, startup
+concurrency clamping and resident execution remain part of the adaptation.
+
+Target-private source separation is carried for `sm_120a`; both fork GPUs use the
+`rtx5090` selector. Spark/ARM support and its public presets are deferred. The
+upstream consolidated Op-test rewrite is deferred as a unit: the existing fork
+Op targets, independent oracles and additional regression cases are retained.
+This deferral is separate from importing production source ownership changes.
+
+Qualified fork schedules are retained across the source moves: fixed-width HC
+normalization/injection reduction, canonical HC parent recognition with separate
+injection support, paired split-K8 FP32-control GDN, the 512-expert sorting network
+and the BF16 sparse-attention query-partition/two-CTA value path. These choices
+retain prior qualification. The initial adaptation additionally passes 20 selected
+Linux numerical/protocol tests (including nine Op suites and all five sparse-QSA
+cache formats), four CPU cache/recovery/tool contracts and two GPU context-store/
+KV-history tests. Python 3.11 passes 201 tests with eight subtests and three skips;
+the skipped CUDA converter cases require CUDA-enabled PyTorch and remain unqualified.
+
+On the G4, dense native MTP transactions, attention-prefix B2/B4 with FP8 KV,
+96 JSON requests across ordinary/MTP and eager/graph modes, all 26 resident Flash
+Engine cases, bounded Host ordinary/MTP eager/graph execution at 32 and 28 GiB,
+and the initial 16K-context/C2/32K-KV/FP8 MTP profile at a 24 GiB Engine budget pass.
+Host route-trace checks also pass at 28 GiB. Each bounded run registers
+67,948,068,864 Host expert bytes with 16 workers; it does not establish throughput
+or physical RTX 5090 acceptance. Resident causal readouts have a maximum
+9.53674e-7-nat difference, and all 3,599 chunk-invariance scores agree exactly.
+
+Native Windows MSVC 19.51/CUDA 13.3 on the RTX PRO 6000 Workstation passes 26
+selected Op/protocol/context/recovery tests, dense native MTP transactions,
+attention-prefix B2/B4 with FP8 KV and 96 JSON requests across the same four modes.
+CLI, server and Supervisor build. C4267/C4018 and LIBCMT warnings remain. This
+does not qualify Windows Flash execution or Patrick's MSVC 19.50/physical 5090
+configuration. Direct-test setup initially omitted runtime DLLs; the corrected
+PATH and preflight pass. No numerical tolerance was changed to obtain a pass.
+
+The [original matched matrix](../performance.md#next-upstream-stage-original-resident-composition-2026-11-05)
+retains every rate/wave range and CPU, peak-RSS, startup and GPU-resource cost.
+All MTP acceptance counts match, but the original ordinary Flash long-prompt/C4 decode rates
+fall 2.087–2.820%. Upload and event-placement prototypes do not repair this;
+their favorable short-prompt results do not replace the adverse original matrix.
+Other split/head/wait prototypes also retain long-prompt costs and are removed.
+
+After rejecting the coupled rewrite, 24 new Flash processes plus 24 reused,
+unaffected dense processes validate the same 720 measured-request matrix. Ordinary
+Flash decode medians improve 0.049–1.326% against `98b6c010`. Residual costs remain:
+C4 ordinary P512 wave median +0.030%, one C1/P2048 wave pair +1.891%, small long-MTP
+decode losses, 2.641–4.492 MiB additional peak RSS, and up to +0.077 s paired load
+time. The larger short-MTP gain from the rejected implementation is given up.
+The two campaigns have different inherited Linux nice levels, matched within
+each pair; detailed conditions, complete ranges and attribution limits are in
+[performance](../performance.md#selected-rejection-of-the-coupled-graph-rewrite).
+
+The selected source passes all 26 resident Engine cases again, four fresh Linux
+graph/PLE contracts, bounded ordinary/MTP eager/graph execution at both budgets,
+all three Host route-trace cases at 28 GiB, and the initial startup profile at a
+24 GiB Engine budget. Windows CLI/server/Supervisor rebuild and five graph/PLE/
+transport checks pass; the unaffected dense and Op results above are reused.
+No tolerance or acceptance criterion was relaxed. Later shared workspace,
+thinking-accounting and listener fixes are separate follow-up ports.
 
 ### Final-tip adaptation (October 23–28)
 
@@ -414,12 +503,40 @@ the Windows default code page exposed Unicode input encoding failures in the JSO
 The JSON and tool-schema probes now explicitly use UTF-8 for their subprocess transport,
 so the same Unicode cases do not depend on an inherited UTF-8 process environment.
 Existing MSVC C4834 and
-vendor pragma C4068 warnings remain. No GPU workload, HTTP model process, live acceptance,
-throughput or resource comparison was run for this patch. Live sampled API behavior,
-model-content quality and performance remain unqualified.
+vendor pragma C4068 warnings remain. That October 31 check did not run a GPU workload,
+HTTP model process, live acceptance, throughput or resource comparison.
 Reported punctuation can also be schema-valid string content, and length/cancellation can
 leave a valid but incomplete prefix, so this fix does not claim to resolve every malformed or
 undesirable answer in the issue.
+
+November 4 live validation of source `98b6c010` builds the CLI and server on Linux,
+and the CLI, server and Supervisor on native Windows. The full registered tool-constraint
+target is used, rather than only the earlier focused CPU link. Eleven selected Windows
+CTests pass, followed by the registered tool-schema oracle (three Python test methods).
+Nine selected Linux grammar/protocol CTests pass. These are selected checks, not full suites.
+
+| Platform | Hardware/toolchain | Dense artifact | Live JSON requests |
+|---|---|---|---|
+| Native Windows 11 | RTX PRO 6000 Blackwell Workstation Edition; MSVC 19.51, CUDA 13.3.33, Python 3.11.15 | local v3 `qwen3_8_27b_nvfp4_dflash2.ninfer`, 23,719,760,222 bytes | 96/96 complete, valid JSON, matching the requested two-field shape; no suspect name prefix or length termination |
+| Linux Colab G4 | RTX PRO 6000 Blackwell Server Edition; driver 580.82.07, CUDA 13.3.73, Python 3.11.18 | `neroued/Qwen3.8-27B-nvfp4-NInfer@a107ba1b5b0609d9ca90d5ed61439f5f5cc7d64d` | 96/96 with the same outcomes |
+
+The workload uses the issue's bird prompt without an extra JSON system instruction,
+thinking disabled, a 300-token output limit, BF16 KV, context/pool 4096 and concurrency one.
+Each platform covers ordinary and MTP K=3 with the optimized proposal head, both eager
+and CUDA Graph execution. For each mode and each of strict `json_schema` and `json_object`,
+there are ten temperature-0.7 seeds, one greedy request and one temperature-0.7 stream.
+The same seeds repeat across modes; these are request counts, not independent statistical
+trials. JSON parsing and the two-field schema are checked independently. The object-only
+format does not itself guarantee those fields; its observed contents also match them here.
+The Windows and Linux artifacts differ, so this is not a numerical comparison between devices.
+
+Initial HTTP probes used benchmark-style arguments instead of the server's positional model
+and `--max-context`; those commands failed before model loading and were corrected.
+The Windows tests retain the 8-GiB desktop reserve, bound the test Engine to 32 GiB and
+leave the existing service running. This validates the exercised JSON routes, not interactive
+frame latency, general model-content quality, physical RTX 5090 execution, or every serving
+capability. There is no new throughput, latency or peak-memory comparison for this repair;
+the earlier merge's measured costs and adverse results remain applicable to its recorded scope.
 
 ## How to maintain this document
 

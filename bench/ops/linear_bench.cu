@@ -1,13 +1,14 @@
 // Cold-cache benchmark for the public pure Linear contract.
 //
 // Examples:
-//   ./build/bench/ninfer_linear_bench --qtype q4 --n 4096 --k 5120 --t 8
-//   ./build/bench/ninfer_linear_bench --qtype q4 --n 4096 --k 5120 --sweep 1:32:1
-//   ./build/bench/ninfer_linear_bench --qtype fp8 --policy a8 --n 14336 --k 5120 --t 1
-//   ./build/bench/ninfer_linear_bench --suite qwen3_6_27b
-//   ncu --profile-from-start off ./build/bench/ninfer_linear_bench \
+//   ./build/rtx5090-dev/bench/ninfer_linear_bench --qtype q4 --n 4096 --k 5120 --t 8
+//   ./build/rtx5090-dev/bench/ninfer_linear_bench --qtype q4 --n 4096 --k 5120 --sweep 1:32:1
+//   ./build/rtx5090-dev/bench/ninfer_linear_bench --qtype fp8 --policy a8 --n 14336 --k 5120 --t 1
+//   ./build/rtx5090-dev/bench/ninfer_linear_bench --suite qwen3_6_27b
+//   ncu --profile-from-start off ./build/rtx5090-dev/bench/ninfer_linear_bench \
 //       --qtype q4 --n 4096 --k 5120 --t 8 --profile
 
+#include "common/roofline.h"
 #include "core/weight.h"
 #include "core/buffer.h"
 #include "ninfer/ops/linear.h"
@@ -40,18 +41,9 @@ using ninfer::ops::LinearPolicy;
 
 namespace {
 
-constexpr double kRtx5090DramGBs          = 1792.0;
-constexpr double kRtx5090SustainedReadGBs = 1674.5;
-// NVIDIA's GB202 table reports dense/sparse pairs at boost clock. Keep input and accumulator
-// precision explicit for the qualified Tensor Core routes below.
-constexpr double kRtx5090Fp8Fp16AccumulateTFLOPs = 838.0;
-constexpr double kRtx5090Fp8Fp32AccumulateTFLOPs = 419.0;
-// Unit-scale block-scaled FP8 uses the full-rate FP32 accumulation path on RTX 5090.
-constexpr double kRtx5090MxFp8Fp32AccumulateTFLOPs = 838.0;
-constexpr double kRtx5090Bf16Fp32AccumulateTFLOPs  = 209.5;
-constexpr std::uint64_t kDefaultFlushBytes         = 256ULL << 20;
-constexpr int kDefaultWarmup                       = 3;
-constexpr int kDefaultRepeat                       = 20;
+constexpr std::uint64_t kDefaultFlushBytes = 256ULL << 20;
+constexpr int kDefaultWarmup               = 3;
+constexpr int kDefaultRepeat               = 20;
 
 enum class TClass : std::uint8_t {
     Continuous,
@@ -103,6 +95,7 @@ struct Options {
     bool have_k         = false;
     bool have_t         = false;
     bool have_sweep     = false;
+    bool have_tokens    = false;
     bool have_suite     = false;
     bool profile        = false;
     bool graph          = false;
@@ -113,6 +106,7 @@ struct Options {
     std::int32_t k      = 0;
     std::int32_t t      = 0;
     bench::measurement::Sweep sweep;
+    std::vector<std::int32_t> tokens;
     std::string suite;
     int warmup                = kDefaultWarmup;
     int repeat                = kDefaultRepeat;
@@ -263,6 +257,8 @@ void usage(const char* argv0) {
                  "  %s --qtype Q4|Q5|Q6|Q8|BF16|NVFP4|FP8 --n N --k K --t T [options]\n"
                  "  %s --qtype Q4|Q5|Q6|Q8|BF16|NVFP4|FP8 --n N --k K --sweep START:END[:STEP] "
                  "[options]\n"
+                 "  %s --qtype Q4|Q5|Q6|Q8|BF16|NVFP4|FP8 --n N --k K --tokens T1,T2,... "
+                 "[options]\n"
                  "  %s --suite qwen3_6_27b|qwen3_6_35b_a3b|all [options]\n\n"
                  "Options:\n"
                  "  --policy a16|a8|a4 Activation-compute policy (default a16).\n"
@@ -274,7 +270,7 @@ void usage(const char* argv0) {
                  "  --flush-mib N      L2 eviction buffer size (default 256 MiB).\n"
                  "  --csv-out PATH     Write all ordinary measurement rows as CSV.\n"
                  "  -h, --help         Show this text.\n",
-                 argv0, argv0, argv0, kDefaultWarmup, kDefaultRepeat);
+                 argv0, argv0, argv0, argv0, kDefaultWarmup, kDefaultRepeat);
 }
 
 Options parse_args(int argc, char** argv) {
@@ -302,6 +298,9 @@ Options parse_args(int argc, char** argv) {
         } else if (arg == "--sweep") {
             opt.sweep      = bench::measurement::parse_sweep(next("sweep"));
             opt.have_sweep = true;
+        } else if (arg == "--tokens") {
+            opt.tokens      = bench::measurement::integers(next("tokens"));
+            opt.have_tokens = true;
         } else if (arg == "--suite") {
             opt.suite      = lower(next("suite"));
             opt.have_suite = true;
@@ -339,14 +338,15 @@ Options parse_args(int argc, char** argv) {
             "graph-calls must be 1..64; multiple calls require graph timing without --profile");
     if (opt.repeat <= 0) { throw std::invalid_argument("--repeat must be positive"); }
     if (opt.flush_bytes == 0) { throw std::invalid_argument("--flush-mib must be positive"); }
-    if (opt.have_t && opt.have_sweep) {
-        throw std::invalid_argument("--t and --sweep are mutually exclusive");
+    if (int(opt.have_t) + int(opt.have_sweep) + int(opt.have_tokens) > 1) {
+        throw std::invalid_argument("--t, --sweep and --tokens are mutually exclusive");
     }
     if (opt.have_suite) {
         if (opt.suite != "qwen3_6_27b" && opt.suite != "qwen3_6_35b_a3b" && opt.suite != "all") {
             throw std::invalid_argument("--suite must be qwen3_6_27b, qwen3_6_35b_a3b, or all");
         }
-        if (opt.have_qtype || opt.have_n || opt.have_k || opt.have_t || opt.have_sweep) {
+        if (opt.have_qtype || opt.have_n || opt.have_k || opt.have_t || opt.have_sweep ||
+            opt.have_tokens) {
             throw std::invalid_argument("--suite cannot be combined with an explicit point");
         }
         if (opt.profile) { throw std::invalid_argument("--profile does not accept a suite"); }
@@ -354,8 +354,8 @@ Options parse_args(int argc, char** argv) {
         if (!opt.have_qtype || !opt.have_n || !opt.have_k) {
             throw std::invalid_argument("explicit mode requires --qtype, --n, and --k");
         }
-        if (!opt.have_t && !opt.have_sweep) {
-            throw std::invalid_argument("explicit mode requires exactly one of --t or --sweep");
+        if (!opt.have_t && !opt.have_sweep && !opt.have_tokens) {
+            throw std::invalid_argument("explicit mode requires --t, --sweep or --tokens");
         }
         if (opt.profile && !opt.have_t) {
             throw std::invalid_argument("--profile requires one exact --t");
@@ -416,6 +416,11 @@ std::vector<BenchPoint> expand_points(const Options& opt) {
     }
     if (opt.have_t) {
         points.push_back({opt.qtype, opt.policy, opt.n, opt.k, opt.t, {"explicit"}, false});
+        return points;
+    }
+    if (opt.have_tokens) {
+        for (const auto t : opt.tokens)
+            append_point(points, {opt.qtype, opt.policy, opt.n, opt.k, t, {"explicit"}, false});
         return points;
     }
     for (std::int64_t t = opt.sweep.begin; t <= opt.sweep.end; t += opt.sweep.step) {
@@ -490,20 +495,37 @@ std::string join_labels(const std::vector<std::string>& labels) {
 double registered_tensor_peak_tflops(const BenchPoint& point, const char*& profile) {
     // Report Tensor Core utilization only when the exact registered problem and extent determine
     // that the public route executes the named MMA profile.
+    const bool nvfp4_problem =
+        (point.k == 5120 && (point.n == 14336 || point.n == 16384 || point.n == 34816)) ||
+        (point.n == 5120 && (point.k == 6144 || point.k == 17408));
+    if (point.qtype == QType::NVFP4 && nvfp4_problem) {
+        const bool a4 =
+            point.policy == LinearPolicy::AllowA4 &&
+            ((point.n == 14336 && point.t >= 4) || point.n == 16384 || point.n == 34816 ||
+             (point.k == 6144 && point.t >= 17) || (point.k == 17408 && point.t >= 8));
+        if (a4) {
+            profile = "NVFP4_F32ACC";
+            return bench::kRoofline.nvfp4_f32_tflops;
+        }
+        if (point.t >= (point.k == 17408 ? 6 : 3)) {
+            profile = "BF16_F32ACC";
+            return bench::kRoofline.bf16_f32_tflops;
+        }
+    }
     if (point.qtype == QType::Q8_G32_FP16 &&
         ((point.n == 2560 && point.k == 6144) || (point.n == 6144 && point.k == 2560) ||
          (point.n == 10240 && point.k == 2560) || (point.n == 12288 && point.k == 2560) ||
          (point.n == 16384 && point.k == 2560)) &&
         point.t > 1) {
         profile = "BF16_F32ACC";
-        return kRtx5090Bf16Fp32AccumulateTFLOPs;
+        return bench::kRoofline.bf16_f32_tflops;
     }
     if (point.qtype == QType::FP8_E4M3FN_ROW_BF16 &&
         (((point.n == 14336 || point.n == 16384) && point.k == 5120) ||
          (point.n == 5120 && (point.k == 6144 || point.k == 17408))) &&
         point.t > 1 && (point.policy == LinearPolicy::A16Only || point.t <= 16)) {
         profile = "BF16_F32ACC";
-        return kRtx5090Bf16Fp32AccumulateTFLOPs;
+        return bench::kRoofline.bf16_f32_tflops;
     }
     const bool fp8_problem =
         (point.n == 14336 && point.k == 5120) || (point.n == 16384 && point.k == 5120) ||
@@ -517,7 +539,7 @@ double registered_tensor_peak_tflops(const BenchPoint& point, const char*& profi
     if (point.qtype == QType::FP8_E4M3FN_ROW_BF16 && point.policy == LinearPolicy::AllowA8 &&
         fp8_problem && fp8_tensor_route) {
         profile = "MXFP8_F32ACC";
-        return kRtx5090MxFp8Fp32AccumulateTFLOPs;
+        return bench::kRoofline.mxfp8_f32_tflops;
     }
     if (point.qtype == QType::BF16 &&
         ((point.n == 256 && point.k == 5120) ||
@@ -539,7 +561,7 @@ double registered_tensor_peak_tflops(const BenchPoint& point, const char*& profi
          (point.n == 320 && point.k == 10240 && point.t >= 9) ||
          (point.n == 324 && point.k == 10240 && point.t >= 9))) {
         profile = "BF16_F32ACC";
-        return kRtx5090Bf16Fp32AccumulateTFLOPs;
+        return bench::kRoofline.bf16_f32_tflops;
     }
     profile = "";
     return std::numeric_limits<double>::quiet_NaN();
@@ -559,7 +581,7 @@ Result make_result(const BenchPoint& point, const LinearBenchWeight& weight,
                                 static_cast<double>(point.t);
     const double seconds = timing.median_us * 1.0e-6;
     const double memory_floor_us =
-        static_cast<double>(model_bytes) / (kRtx5090DramGBs * 1.0e9) * 1.0e6;
+        static_cast<double>(model_bytes) / (bench::kRoofline.memory_gbs * 1.0e9) * 1.0e6;
 
     Result result;
     result.labels             = join_labels(point.labels);
@@ -577,8 +599,8 @@ Result make_result(const BenchPoint& point, const LinearBenchWeight& weight,
     result.min_us             = timing.min_us;
     result.p95_us             = timing.p95_us;
     result.effective_gbs      = static_cast<double>(model_bytes) / seconds / 1.0e9;
-    result.dram_spec_pct      = result.effective_gbs / kRtx5090DramGBs * 100.0;
-    result.sustained_read_pct = result.effective_gbs / kRtx5090SustainedReadGBs * 100.0;
+    result.dram_spec_pct      = result.effective_gbs / bench::kRoofline.memory_gbs * 100.0;
+    result.sustained_read_pct = result.effective_gbs / bench::kRoofline.sustained_read_gbs * 100.0;
     result.useful_tflops      = useful_flops / seconds / 1.0e12;
     result.tensor_peak_tflops = registered_tensor_peak_tflops(point, result.tensor_profile);
     if (std::isfinite(result.tensor_peak_tflops)) {
@@ -734,15 +756,20 @@ void print_header(const Options& opt) {
     CUDA_CHECK(cudaGetDevice(&device));
     cudaDeviceProp properties{};
     CUDA_CHECK(cudaGetDeviceProperties(&properties, device));
-    std::printf("# actual_gpu=%s sm=%d%d reference_gpu=RTX_5090\n", properties.name,
-                properties.major, properties.minor);
-    std::printf("# dram_spec_gbs=%.1f sustained_read_gbs=%.1f cache=%s\n", kRtx5090DramGBs,
-                kRtx5090SustainedReadGBs,
+    std::printf("# actual_gpu=%s sm=%d%d reference_target=%s\n", properties.name, properties.major,
+                properties.minor, bench::kRoofline.target);
+    std::printf("# dram_spec_gbs=%.1f sustained_read_gbs=%s cache=%s\n",
+                bench::kRoofline.memory_gbs,
+                bench::format_metric(bench::kRoofline.sustained_read_gbs).c_str(),
                 opt.graph_calls == 1 ? "cold" : "cold-before-graph-bundle");
-    std::printf("# dense_fp8_tensor_tflops fp16_acc=%.1f fp32_acc=%.1f mxfp8_fp32_acc=%.1f\n",
-                kRtx5090Fp8Fp16AccumulateTFLOPs, kRtx5090Fp8Fp32AccumulateTFLOPs,
-                kRtx5090MxFp8Fp32AccumulateTFLOPs);
-    std::printf("# dense_bf16_tensor_tflops fp32_acc=%.1f\n", kRtx5090Bf16Fp32AccumulateTFLOPs);
+    std::printf("# dense_fp8_tensor_tflops fp16_acc=%s fp32_acc=%s mxfp8_fp32_acc=%s\n",
+                bench::format_metric(bench::kRoofline.fp8_f16_tflops).c_str(),
+                bench::format_metric(bench::kRoofline.fp8_f32_tflops).c_str(),
+                bench::format_metric(bench::kRoofline.mxfp8_f32_tflops).c_str());
+    std::printf("# dense_bf16_tensor_tflops fp32_acc=%s\n",
+                bench::format_metric(bench::kRoofline.bf16_f32_tflops).c_str());
+    std::printf("# dense_nvfp4_tensor_tflops fp32_acc=%s\n",
+                bench::format_metric(bench::kRoofline.nvfp4_f32_tflops).c_str());
 }
 
 void print_results(const std::vector<Result>& results) {
@@ -752,33 +779,17 @@ void print_results(const std::vector<Result>& results) {
                 "DRAM_%", "READ_%", "TFLOP/s", "TC_profile", "TC_%", "mem_%", "T1_lin_x",
                 "delta_%");
     for (const Result& result : results) {
-        const bool have_delta = std::isfinite(result.delta_pct);
-        char delta[32];
-        char t1_linear[32];
-        char tensor_peak[32];
-        if (have_delta) {
-            std::snprintf(delta, sizeof(delta), "%.2f", result.delta_pct);
-        } else {
-            std::snprintf(delta, sizeof(delta), "-");
-        }
-        if (std::isfinite(result.t1_linear_extrapolation)) {
-            std::snprintf(t1_linear, sizeof(t1_linear), "%.2f", result.t1_linear_extrapolation);
-        } else {
-            std::snprintf(t1_linear, sizeof(t1_linear), "-");
-        }
-        if (std::isfinite(result.tensor_peak_pct)) {
-            std::snprintf(tensor_peak, sizeof(tensor_peak), "%.2f", result.tensor_peak_pct);
-        } else {
-            std::snprintf(tensor_peak, sizeof(tensor_peak), "-");
-        }
-        std::printf("%-44s %5s %3s %8d %8d %6d %11.3f %11.3f %11.3f %10.1f %7.2f "
-                    "%7.2f %10.2f %11s %8s %9.2f %9s %8s\n",
+        std::printf("%-44s %5s %3s %8d %8d %6d %11.3f %11.3f %11.3f %10.1f %7s "
+                    "%7s %10.2f %11s %8s %9s %9s %8s\n",
                     result.labels.c_str(), result.qtype_name, result.policy_name, result.n,
                     result.k, result.t, result.median_us, result.min_us, result.p95_us,
-                    result.effective_gbs, result.dram_spec_pct, result.sustained_read_pct,
-                    result.useful_tflops,
-                    result.tensor_profile[0] == '\0' ? "-" : result.tensor_profile, tensor_peak,
-                    result.memory_floor_pct, t1_linear, delta);
+                    result.effective_gbs, bench::format_metric(result.dram_spec_pct).c_str(),
+                    bench::format_metric(result.sustained_read_pct).c_str(), result.useful_tflops,
+                    result.tensor_profile[0] == '\0' ? "-" : result.tensor_profile,
+                    bench::format_metric(result.tensor_peak_pct).c_str(),
+                    bench::format_metric(result.memory_floor_pct).c_str(),
+                    bench::format_metric(result.t1_linear_extrapolation).c_str(),
+                    bench::format_metric(result.delta_pct).c_str());
     }
 }
 
@@ -807,14 +818,16 @@ void write_csv(const std::filesystem::path& path, const std::vector<Result>& res
             << ',' << result.n << ',' << result.k << ',' << result.t << ',' << result.weight_bytes
             << ',' << result.x_bytes << ',' << result.out_bytes << ',' << result.model_bytes << ','
             << result.useful_flops << ',' << result.median_us << ',' << result.min_us << ','
-            << result.p95_us << ',' << result.effective_gbs << ',' << kRtx5090DramGBs << ','
-            << result.dram_spec_pct << ',' << kRtx5090SustainedReadGBs << ','
-            << result.sustained_read_pct << ',' << result.useful_tflops << ','
-            << result.tensor_profile << ',';
+            << result.p95_us << ',' << result.effective_gbs << ',' << bench::kRoofline.memory_gbs
+            << ',' << bench::format_metric(result.dram_spec_pct, 6, "") << ','
+            << bench::format_metric(bench::kRoofline.sustained_read_gbs, 2, "") << ','
+            << bench::format_metric(result.sustained_read_pct, 6, "") << ',' << result.useful_tflops
+            << ',' << result.tensor_profile << ',';
         if (std::isfinite(result.tensor_peak_tflops)) { out << result.tensor_peak_tflops; }
         out << ',';
         if (std::isfinite(result.tensor_peak_pct)) { out << result.tensor_peak_pct; }
-        out << ',' << result.memory_floor_us << ',' << result.memory_floor_pct << ',';
+        out << ',' << bench::format_metric(result.memory_floor_us, 6, "") << ','
+            << bench::format_metric(result.memory_floor_pct, 6, "") << ',';
         if (std::isfinite(result.t1_linear_extrapolation)) {
             out << result.t1_linear_extrapolation;
         }

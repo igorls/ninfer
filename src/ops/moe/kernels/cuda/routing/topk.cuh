@@ -44,7 +44,7 @@ __device__ __forceinline__ void merge_ranked(RankedExpert (&run)[Count]) {
     }
 }
 
-template <class Shape>
+template <class Shape, bool FixedIndices = false>
 __device__ __forceinline__ void select_experts(const float* scores, int* ids, float* coefficients,
                                                float* shared, float* logits) {
     constexpr int K = Shape::top_k, E = Shape::experts;

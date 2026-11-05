@@ -1,7 +1,9 @@
 #pragma once
 
+#include "core/decode_graph.h"
+
 #include "models/qwen4_exp/execution/text.h"
-#include "models/common/moe/graph.h"
+#include "models/common/moe/schedule.h"
 
 namespace ninfer::models::qwen4_exp {
 
@@ -12,18 +14,17 @@ struct GraphSegment {
     void prepare(CudaExecutionView, const std::function<void()>&);
 };
 
-// One exact T/B traversal. Resident weights use two graphs around PLE; Host placement
-// shares GDN and routed-expert definitions across context profiles.
+// One exact T/B traversal. Resident graphs surround PLE; offload retains layer handoffs.
 // The activation frame and PLE slots belong to Resources and outlive every graph.
 class TextGraph {
 public:
-    void prepare(execution::TextRun&, const execution::Parameters&, moe::Resources&,
+    void prepare(execution::TextRun&, const execution::Parameters&, moe::Schedule*,
                  std::span<const std::uint32_t> bounds, std::array<Tensor, 2> ple,
                  execution::TextOutputs, std::int32_t columns, MemoryArena&, DeviceContext&);
     void select(std::uint32_t visible_tokens);
-    void prefix(moe::Resources&, Tensor& block_output, CudaExecutionView);
+    void prefix(CudaExecutionView);
     void consume_ple(std::uint32_t slot, CudaExecutionView);
-    void suffix(moe::Resources&, Tensor& block_output, CudaExecutionView);
+    void suffix(CudaExecutionView);
 
     [[nodiscard]] std::size_t workspace_bytes() const {
         return profiles_[installed_].workspace_bytes;
@@ -32,17 +33,17 @@ public:
 private:
     struct Profile {
         std::uint32_t bound;
-        std::vector<std::shared_ptr<moe::LayerGraphDefinition>> layers;
+        std::vector<std::shared_ptr<const moe::LayerGraphDefinition>> layers;
         DecodeGraphDefinition resident_prefix, resident_suffix;
         std::size_t workspace_bytes = 0;
     };
 
-    void traverse(std::uint32_t begin, std::uint32_t end, moe::Resources&, Tensor&,
-                  CudaExecutionView);
+    void traverse(std::uint32_t begin, std::uint32_t end, CudaExecutionView);
     GraphSegment stem_, ple_[2], finish_;
     DecodeGraphExecutable resident_prefix_, resident_suffix_;
     std::vector<Profile> profiles_;
-    std::vector<moe::LayerGraphExecutable> layers_;
+    std::vector<std::unique_ptr<moe::LayerGraphExecutable>> layers_;
+    Tensor block_output_;
     std::vector<ExpertBankId> banks_;
     std::uint32_t ple_layer_ = 0;
     std::size_t installed_   = 0;
