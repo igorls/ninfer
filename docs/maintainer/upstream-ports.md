@@ -414,12 +414,40 @@ the Windows default code page exposed Unicode input encoding failures in the JSO
 The JSON and tool-schema probes now explicitly use UTF-8 for their subprocess transport,
 so the same Unicode cases do not depend on an inherited UTF-8 process environment.
 Existing MSVC C4834 and
-vendor pragma C4068 warnings remain. No GPU workload, HTTP model process, live acceptance,
-throughput or resource comparison was run for this patch. Live sampled API behavior,
-model-content quality and performance remain unqualified.
+vendor pragma C4068 warnings remain. That October 31 check did not run a GPU workload,
+HTTP model process, live acceptance, throughput or resource comparison.
 Reported punctuation can also be schema-valid string content, and length/cancellation can
 leave a valid but incomplete prefix, so this fix does not claim to resolve every malformed or
 undesirable answer in the issue.
+
+November 4 live validation of source `98b6c010` builds the CLI and server on Linux,
+and the CLI, server and Supervisor on native Windows. The full registered tool-constraint
+target is used, rather than only the earlier focused CPU link. Eleven selected Windows
+CTests pass, followed by the registered tool-schema oracle (three Python test methods).
+Nine selected Linux grammar/protocol CTests pass. These are selected checks, not full suites.
+
+| Platform | Hardware/toolchain | Dense artifact | Live JSON requests |
+|---|---|---|---|
+| Native Windows 11 | RTX PRO 6000 Blackwell Workstation Edition; MSVC 19.51, CUDA 13.3.33, Python 3.11.15 | local v3 `qwen3_8_27b_nvfp4_dflash2.ninfer`, 23,719,760,222 bytes | 96/96 complete, valid JSON, matching the requested two-field shape; no suspect name prefix or length termination |
+| Linux Colab G4 | RTX PRO 6000 Blackwell Server Edition; driver 580.82.07, CUDA 13.3.73, Python 3.11.18 | `neroued/Qwen3.8-27B-nvfp4-NInfer@a107ba1b5b0609d9ca90d5ed61439f5f5cc7d64d` | 96/96 with the same outcomes |
+
+The workload uses the issue's bird prompt without an extra JSON system instruction,
+thinking disabled, a 300-token output limit, BF16 KV, context/pool 4096 and concurrency one.
+Each platform covers ordinary and MTP K=3 with the optimized proposal head, both eager
+and CUDA Graph execution. For each mode and each of strict `json_schema` and `json_object`,
+there are ten temperature-0.7 seeds, one greedy request and one temperature-0.7 stream.
+The same seeds repeat across modes; these are request counts, not independent statistical
+trials. JSON parsing and the two-field schema are checked independently. The object-only
+format does not itself guarantee those fields; its observed contents also match them here.
+The Windows and Linux artifacts differ, so this is not a numerical comparison between devices.
+
+Initial HTTP probes used benchmark-style arguments instead of the server's positional model
+and `--max-context`; those commands failed before model loading and were corrected.
+The Windows tests retain the 8-GiB desktop reserve, bound the test Engine to 32 GiB and
+leave the existing service running. This validates the exercised JSON routes, not interactive
+frame latency, general model-content quality, physical RTX 5090 execution, or every serving
+capability. There is no new throughput, latency or peak-memory comparison for this repair;
+the earlier merge's measured costs and adverse results remain applicable to its recorded scope.
 
 ## How to maintain this document
 
