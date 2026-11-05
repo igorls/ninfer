@@ -30,6 +30,12 @@ int fail(const std::string& m) {
 
 int check(bool c, const std::string& m) { return c ? 0 : fail(m); }
 
+nlohmann::json context_pool(std::string domain, std::int64_t live) {
+    return {{"rank", 0}, {"domain", std::move(domain)}, {"live_bytes", live},
+            {"reserved_bytes", 0}, {"pending_retirement_bytes", 0},
+            {"padding_bytes", 0}, {"tail_bytes", 0}};
+}
+
 int test_loopback() {
     using namespace ninfer::supervisor;
     int f = 0;
@@ -50,35 +56,35 @@ int test_model_reserve_budget() {
     nlohmann::json report{{"plan",
                            {{"runtime_reservation_bytes", 16 * gib},
                             {"minimum_runtime_reservation_bytes", 9 * gib},
-                            {"available_after_weights_bytes", 18 * gib},
+                            {"available_after_weights_bytes", 25 * gib},
                             {"cuda_graph_rebuild_estimate_bytes", gib},
-                            {"kv_capacity_automatic", false}, {"kv_slack_floor_bytes", 0}}},
+                            {"context_capacity_automatic", false}, {"headroom_bytes", gib}}},
                           {"resources", {{"allocations", {{"device_weights_bytes", 70 * gib}}}}},
                           {"desktop_reserve", {{"configured_bytes", 4 * gib}}},
                           {"device", {{"free_bytes", 8 * gib}}}};
     int f = 0;
     f += check(model_reserve_budget(report)["max_gib"] == 6,
                "explicit pool retains the runtime reservation");
-    report["plan"]["kv_capacity_automatic"] = true;
-    report["plan"]["kv_slack_floor_bytes"] = gib;
-    f += check(model_reserve_budget(report)["max_gib"] == 12,
+    report["plan"]["context_capacity_automatic"] = true;
+    report["plan"]["headroom_bytes"] = gib;
+    f += check(model_reserve_budget(report)["max_gib"] == 13,
                "automatic pool keeps the Engine's resolved slack");
-    report["plan"]["kv_slack_floor_bytes"] = 4 * gib;
-    f += check(model_reserve_budget(report)["max_gib"] == 9,
+    report["plan"]["headroom_bytes"] = 4 * gib;
+    f += check(model_reserve_budget(report)["max_gib"] == 10,
                "file/argv-independent Engine slack is honored");
-    report["plan"]["kv_slack_floor_bytes"] = gib;
+    report["plan"]["headroom_bytes"] = gib;
     report["device"]["free_bytes"] = 4 * gib;
     f += check(model_reserve_budget(report)["max_gib"] == 9,
                "live app pressure reduces automatic sizing room");
-    report["plan"]["kv_capacity_automatic"] = false;
-    f += check(model_reserve_budget(report)["max_gib"] == 3,
+    report["plan"]["context_capacity_automatic"] = false;
+    f += check(model_reserve_budget(report)["max_gib"] == 2,
                "explicit pool keeps capacity under app pressure");
     report["device"]["free_bytes"] = 0;
     f += check(model_reserve_budget(report)["max_gib"] == 0, "no room leaves no reserve choice");
     f += check(!model_reserve_budget(nullptr)["ok"].get<bool>(), "missing telemetry is unavailable");
     f += check(without_reserve_args({"model.ninfer", "--desktop-reserve", "3GiB",
-                                   "--kv-capacity", "400"}) ==
-                   std::vector<std::string>{"model.ninfer", "--kv-capacity", "400"},
+                                   "--context-capacity", "8GiB"}) ==
+                   std::vector<std::string>{"model.ninfer", "--context-capacity", "8GiB"},
                "reserve comparison preserves other child arguments");
     return f;
 }
@@ -136,7 +142,7 @@ int test_config_bind() {
     int f = 0;
     {
         auto c = ninfer::supervisor::load_config_json(
-            R"({"engine":{"executable":"x"},"models":[{"id":"interactive","name":"27B Interactive","description":"DFlash2, seven drafts","artifact":"model.ninfer","args":["--spec","dflash2","--draft-tokens","7","--proposal-head", "optimized"]}]})");
+            R"({"engine":{"executable":"x"},"models":[{"id":"interactive","name":"27B Interactive","description":"DFlash2, seven drafts","artifact":"model.ninfer","args":["--spec","dflash2","--draft-tokens","7","--proposal-head","optimized"]}]})");
         const auto restored =
             ninfer::supervisor::load_config_json(ninfer::supervisor::config_to_json(c).dump());
         f += check(restored.models.size() == 1 && restored.models[0].name == "27B Interactive" &&
@@ -220,18 +226,18 @@ int test_nvidia_csv() {
     return f;
 }
 
-int test_kv_line() {
+int test_context_line() {
     using namespace ninfer::supervisor;
     int f           = 0;
     const char* log = "[info] ninfer-serve: model loaded in 1.2 s\n"
-                      "[info] ninfer-serve: KV capacity auto resolved=8192 tokens pages=1/2 "
+                      "[info] ninfer-serve: Context capacity auto resolved=8192 tokens pages=1/2 "
                       "runtime=1 prefix-cache=2 free-after-weights=3 free-after-startup=4 "
                       "headroom=5 slack=6 graphs=7/8\n"
                       "later line\n";
-    const auto line = extract_kv_capacity_line(log);
-    f += check(line.find("KV capacity auto resolved=8192") != std::string::npos,
-               "extracts last KV capacity line");
-    f += check(extract_kv_capacity_line("no capacity here").empty(), "missing line");
+    const auto line = extract_context_capacity_line(log);
+    f += check(line.find("Context capacity auto resolved=8192") != std::string::npos,
+               "extracts last Context capacity line");
+    f += check(extract_context_capacity_line("no capacity here").empty(), "missing line");
     return f;
 }
 
@@ -643,12 +649,12 @@ int test_insights_capacity() {
     int f     = 0;
     auto find = [](const nlohmann::json& report) -> const nlohmann::json* {
         for (const auto& it : report.at("insights")) {
-            if (it.at("id") == "capacity.context_kv_pressure") { return &it; }
+            if (it.at("id") == "capacity.context_pressure") { return &it; }
         }
         return nullptr;
     };
     const std::string start =
-        R"({"event":"server_start","server_instance_id":"s","timestamp_unix_ms":10,"engine":{"max_context":8192,"max_concurrency":4,"kv_capacity":16384,"kv_capacity_page_groups":64,"kv_capacity_max_page_groups":128,"prefix_reuse":true}})"
+        R"({"event":"server_start","server_instance_id":"s","timestamp_unix_ms":10,"engine":{"max_context":8192,"max_concurrency":4,"prefix_reuse":true,"context_pools":[{"rank":0,"domain":"device","capacity_bytes":64,"block_bytes":1}]}})"
         "\n";
     auto done = [](int id, int prompt, int completion) {
         return std::string(
@@ -659,15 +665,11 @@ int test_insights_capacity() {
                R"(},"timings_seconds":{}})"
                "\n";
     };
-    auto sample = [](int t, int pages, int running, int waiting, int spilled) {
-        return std::string(
-                   R"({"event":"throughput","server_instance_id":"s","timestamp_unix_ms":)") +
-               std::to_string(t) + R"(,"scheduler":{"running":)" + std::to_string(running) +
-               R"(,"waiting":)" + std::to_string(waiting) +
-               R"(},"context_cache":{"occupancy":{"device_main_kv_pages":)" +
-               std::to_string(pages) + R"(},"pressure":{"spill_pages":)" + std::to_string(spilled) +
-               R"(}}})"
-               "\n";
+    auto sample = [](int t, int bytes, int running, int waiting, int spilled) {
+        return nlohmann::json{{"event", "throughput"}, {"server_instance_id", "s"},
+            {"timestamp_unix_ms", t}, {"scheduler", {{"running", running}, {"waiting", waiting}}},
+            {"context_cache", {{"occupancy", {{"pools", {context_pool("device", bytes)}}}},
+                               {"pressure", {{"spill_pages", spilled}}}}}}.dump() + "\n";
     };
 
     // Comfortable: small prompts, half the pool, one request at a time.
@@ -683,16 +685,15 @@ int test_insights_capacity() {
     if (comfy != nullptr) {
         const auto& e = comfy->at("evidence");
         f += check(e.at("config").at("max_context") == 8192 &&
-                       e.at("config").at("kv_page_groups") == 64 &&
-                       e.at("config").at("tokens_per_page_group") == 256,
+                       e.at("config").at("context_capacity_bytes") == 64,
                    "configured capacity carried");
         f += check(e.at("requests").at("count") == 2 &&
                        e.at("requests").at("prompt_tokens").at("max") == 1500 &&
                        e.at("requests").at("largest_total_tokens") == 1700,
                    "prompt distribution measured");
         f +=
-            check(e.at("kv").at("pages_high_water") == 32 && e.at("kv").at("pages_now") == 32 &&
-                      std::fabs(e.at("kv").at("utilization_high_water").get<double>() - 0.5) < 1e-9,
+            check(e.at("context").at("high_water_bytes") == 32 && e.at("context").at("occupied_bytes") == 32 &&
+                      std::fabs(e.at("context").at("utilization_high_water").get<double>() - 0.5) < 1e-9,
                   "KV high-water measured against page-group capacity");
         f += check(!comfy->contains("recommendation"), "comfortable carries no recommendation");
     }
@@ -735,7 +736,7 @@ int test_insights_capacity() {
                        e.at("scheduler").at("peak_waiting") == 2 &&
                        e.at("scheduler").at("admission_expired") == 1 &&
                        e.at("scheduler").at("admission_expired_request_ids").at(0) == 9 &&
-                       e.at("pressure").at("spill_pages") == 3 && e.at("kv").at("pages_now") == 40,
+                       e.at("pressure").at("spill_pages") == 3 && e.at("context").at("occupied_bytes") == 40,
                    "scheduler peaks, admission expiries, summed pressure deltas and current "
                    "occupancy measured");
     }
@@ -785,16 +786,16 @@ int test_insights_capacity() {
     const auto nosample_report = analyze_request_log_jsonl(start + done(1, 900, 100), "mem");
     const auto* nosample       = find(nosample_report);
     f += check(nosample != nullptr && nosample->at("availability") == "unavailable" &&
-                   !nosample->at("evidence").contains("kv"),
+                   !nosample->at("evidence").contains("context"),
                "no occupancy sample is unavailable, not zero utilization");
 
     // An earlier instance's traffic and limits do not leak into the latest one.
     const std::string old_instance =
-        R"({"event":"server_start","server_instance_id":"old","timestamp_unix_ms":1,"engine":{"max_context":2048,"max_concurrency":1,"kv_capacity":2048,"kv_capacity_page_groups":8,"prefix_reuse":false}})"
+        R"({"event":"server_start","server_instance_id":"old","timestamp_unix_ms":1,"engine":{"max_context":2048,"max_concurrency":1,"prefix_reuse":false,"context_pools":[{"rank":0,"domain":"device","capacity_bytes":8,"block_bytes":1}]}})"
         "\n"
         R"({"event":"request_done","server_instance_id":"old","timestamp_unix_ms":5,"request":{"request_id":7},"result":{"finish_reason":"stop_token","completion_tokens":100,"prompt_tokens":1900},"timings_seconds":{}})"
         "\n"
-        R"({"event":"throughput","server_instance_id":"old","timestamp_unix_ms":6,"scheduler":{"running":1,"waiting":0},"context_cache":{"occupancy":{"device_main_kv_pages":8},"pressure":{"spill_pages":9}}})"
+        R"({"event":"throughput","server_instance_id":"old","timestamp_unix_ms":6,"scheduler":{"running":1,"waiting":0},"context_cache":{"occupancy":{"pools":[{"rank":0,"domain":"device","live_bytes":8,"reserved_bytes":0,"pending_retirement_bytes":0,"padding_bytes":0,"tail_bytes":0}]},"pressure":{"spill_pages":9}}})"
         "\n";
     const auto scoped_report = analyze_request_log_jsonl(
         old_instance + start + done(1, 900, 100) + sample(2000, 20, 1, 0, 0), "mem");
@@ -809,13 +810,12 @@ int test_insights_capacity() {
 int test_insights_prefix_collapse() {
     using namespace ninfer::supervisor;
     std::string jsonl =
-        R"({"event":"server_start","server_instance_id":"leaking","timestamp_unix_ms":1,"engine":{"context_cache":{"host_capacity_bytes":2}}})"
+        R"({"event":"server_start","server_instance_id":"leaking","timestamp_unix_ms":1,"engine":{"context_cache":{"host_capacity_bytes":2},"context_pools":[{"rank":0,"domain":"host","capacity_bytes":2,"block_bytes":1}]}})"
         "\n";
     for (int sample = 0; sample < 3; ++sample) {
-        jsonl += "{\"event\":\"throughput\",\"server_instance_id\":\"leaking\","
-                 "\"timestamp_unix_ms\":" +
-                 std::to_string(1000 + sample * 35000) +
-                 ",\"context_cache\":{\"occupancy\":{\"host_context_occupied_bytes\":2}}}\n";
+        jsonl += nlohmann::json{{"event", "throughput"}, {"server_instance_id", "leaking"},
+            {"timestamp_unix_ms", 1000 + sample * 35000},
+            {"context_cache", {{"occupancy", {{"pools", {context_pool("host", 2)}}}}}}}.dump() + "\n";
     }
     for (int request = 0; request < 3; ++request) {
         jsonl += "{\"event\":\"request_done\",\"server_instance_id\":\"leaking\","
@@ -849,15 +849,15 @@ int test_insights_prefix_collapse() {
     while (std::getline(reserved_lines, line)) {
         auto record = nlohmann::json::parse(line);
         if (record.value("event", "") == "throughput") {
-            record["context_cache"]["occupancy"]["host_context_occupied_bytes"] = 1;
-            record["context_cache"]["occupancy"]["host_context_reserved_bytes"] = 1;
+            record["context_cache"]["occupancy"]["pools"][0]["live_bytes"] = 0;
+            record["context_cache"]["occupancy"]["pools"][0]["reserved_bytes"] = 1;
         }
         reserved_log += record.dump() + "\n";
     }
     const auto reserved_report = analyze_request_log_jsonl(reserved_log, "mem");
     for (const auto& insight : reserved_report.at("insights")) {
         f += check(insight.at("id") != "prefix.reuse_collapsed",
-                   "in-flight reserved bytes are already part of host occupancy");
+                   "a partially reserved Host backing is not saturated");
     }
 
     const std::string recovered =
@@ -873,9 +873,9 @@ int test_insights_prefix_collapse() {
 
     const std::string restarted =
         jsonl +
-        R"({"event":"server_start","server_instance_id":"fresh","timestamp_unix_ms":80000,"engine":{"context_cache":{"host_capacity_bytes":2}}})"
+        R"({"event":"server_start","server_instance_id":"fresh","timestamp_unix_ms":80000,"engine":{"context_cache":{"host_capacity_bytes":2},"context_pools":[{"rank":0,"domain":"host","capacity_bytes":2,"block_bytes":1}]}})"
         "\n"
-        R"({"event":"throughput","server_instance_id":"fresh","timestamp_unix_ms":81000,"context_cache":{"occupancy":{"host_context_occupied_bytes":0}}})"
+        R"({"event":"throughput","server_instance_id":"fresh","timestamp_unix_ms":81000,"context_cache":{"occupancy":{"pools":[{"rank":0,"domain":"host","live_bytes":0,"reserved_bytes":0,"pending_retirement_bytes":0,"padding_bytes":0,"tail_bytes":0}]}}})"
         "\n";
     const auto restarted_report = analyze_request_log_jsonl(restarted, "mem");
     false_alarm                 = false;
@@ -898,14 +898,13 @@ int test_insights_prefix_collapse_run_boundary() {
                "\",\"prefix_cache_hit_tokens\":" + (miss ? "0" : "900") +
                ",\"computed_prefill_tokens\":100},\"timings_seconds\":{}}\n";
     };
-    auto sample = [](std::int64_t ts, int slots) {
-        return "{\"event\":\"throughput\",\"server_instance_id\":\"s\",\"timestamp_unix_ms\":" +
-               std::to_string(ts) +
-               ",\"context_cache\":{\"occupancy\":{\"host_context_occupied_bytes\":" +
-               std::to_string(slots) + "}}}\n";
+    auto sample = [](std::int64_t ts, int bytes) {
+        return nlohmann::json{{"event", "throughput"}, {"server_instance_id", "s"},
+            {"timestamp_unix_ms", ts}, {"context_cache", {{"occupancy",
+                {{"pools", {context_pool("host", bytes)}}}}}}}.dump() + "\n";
     };
     std::string jsonl =
-        R"({"event":"server_start","server_instance_id":"s","timestamp_unix_ms":1,"engine":{"context_cache":{"host_capacity_bytes":2}}})"
+        R"({"event":"server_start","server_instance_id":"s","timestamp_unix_ms":1,"engine":{"context_cache":{"host_capacity_bytes":2},"context_pools":[{"rank":0,"domain":"host","capacity_bytes":2,"block_bytes":1}]}})"
         "\n";
     jsonl += sample(100, 1);
     jsonl += done(1, 200, true);  // before the run: never counted
@@ -1137,21 +1136,17 @@ int test_request_log_fold_follows_growth() {
             ",1,0]},\"timings_seconds\":{\"prepare\":0.01,"
             "\"prefill\":0.2,\"decode\":0.5,\"ttft\":0.25,\"total\":0.75}}");
     };
-    auto throughput = [&](const char* inst, std::int64_t ts, int waiting, int pages, int slots) {
-        add("{\"event\":\"throughput\",\"server_instance_id\":\"" + std::string(inst) +
-            "\",\"timestamp_unix_ms\":" + std::to_string(ts) +
-            ",\"scheduler\":{\"waiting\":" + std::to_string(waiting) +
-            ",\"running\":2,\"prefilling\":1},\"context_cache\":{\"occupancy\":{\"device_main_kv_"
-            "pages\":" +
-            std::to_string(pages) + ",\"host_context_occupied_bytes\":" + std::to_string(slots) +
-            "},\"pressure\":{\"spill_pages\":1,\"checkpoints_dropped\":2}}}");
+    auto throughput = [&](const char* inst, std::int64_t ts, int waiting, int bytes, int host_bytes) {
+        add(nlohmann::json{{"event", "throughput"}, {"server_instance_id", inst}, {"timestamp_unix_ms", ts},
+            {"scheduler", {{"waiting", waiting}, {"running", 2}, {"prefilling", 1}}},
+            {"context_cache", {{"occupancy", {{"pools", {context_pool("device", bytes), context_pool("host", host_bytes)}}}},
+                               {"pressure", {{"spill_pages", 1}}}}}}.dump());
     };
     auto server = [&](const char* inst, std::int64_t ts) {
-        add("{\"event\":\"server_start\",\"server_instance_id\":\"" + std::string(inst) +
-            "\",\"timestamp_unix_ms\":" + std::to_string(ts) +
-            ",\"engine\":{\"max_context\":1000,\"max_concurrency\":2,\"kv_capacity\":4096,"
-            "\"kv_capacity_page_groups\":64,\"prefix_reuse\":true,\"context_cache\":{\"host_"
-            "capacity_bytes\":2}}}");
+        add(nlohmann::json{{"event", "server_start"}, {"server_instance_id", inst}, {"timestamp_unix_ms", ts},
+            {"engine", {{"max_context", 1000}, {"max_concurrency", 2}, {"prefix_reuse", true},
+                        {"context_pools", {{{"rank", 0}, {"domain", "device"}, {"capacity_bytes", 64}},
+                                           {{"rank", 0}, {"domain", "host"}, {"capacity_bytes", 2}}}}}}}.dump());
     };
     server("old", 1);
     for (int i = 1; i <= 6; ++i) {
@@ -1177,7 +1172,7 @@ int test_request_log_fold_follows_growth() {
     for (const auto& it : whole.at("insights")) {
         const auto id = it.at("id").get<std::string>();
         ids += id == "prefix.reuse_collapsed" || id == "speculative.draft_acceptance" ||
-               id == "capacity.context_kv_pressure" || id == "client.output_limit_while_thinking" ||
+               id == "capacity.context_pressure" || id == "client.output_limit_while_thinking" ||
                id == "prefix.multiturn_root";
     }
     int f = check(ids == 5, "the fixture exercises the scoped and sampled insights");
@@ -1224,7 +1219,7 @@ int test_jsonl_event_key() {
     int f = 0;
     f += check(jsonl_event_is(R"({"event":"request_done","result":{}})", "request_done"),
                "compact event key");
-    f += check(jsonl_event_is(R"({"event": "request_done"})", "request_done"), "spaced event key");
+    f += check(jsonl_event_is(R"({"event":"request_done"})", "request_done"), "spaced event key");
     f += check(!jsonl_event_is(R"({"type":"request_done"})", "request_done"),
                "type key is not the event key");
     f += check(!jsonl_event_is(R"({"event":"server_start"})", "request_done"), "other event");
@@ -1754,26 +1749,18 @@ int test_engine_param_validation() {
                "the engine's own concurrency limit is enforced");
     f += check(!validate_engine_params({{"max_context", "not-a-number"}}).empty(),
                "non-numeric int is rejected");
-    f += check(validate_engine_params({{"kv_capacity", "auto"}}).empty(), "auto is accepted");
+    f += check(validate_engine_params({{"context_capacity", "auto"}}).empty(), "auto is accepted");
     f += check(!validate_engine_params({{"kv_dtype", "fp4"}}).empty(),
                "unsupported enum value is rejected");
     f += check(!validate_engine_params({{"rm_rf", "1"}}).empty(),
                "an unknown key is not silently written through");
     f += check(!validate_engine_params({{"model_id", std::string(1, '\n')}}).empty(),
                "a newline cannot be smuggled into the config file");
-    f += check(
-        !validate_engine_param_combination({{"kv_capacity", "4096"}, {"max_context", "262144"}})
-             .empty(),
-        "a KV pool smaller than one full context is refused");
-    f +=
-        check(!validate_engine_param_combination(
-                   {{"kv_capacity", "4194304"}, {"max_context", "32768"}, {"max_concurrency", "8"}})
-                   .empty(),
-              "a KV pool larger than concurrency times max context is refused");
-    f += check(validate_engine_param_combination(
-                   {{"kv_capacity", "262144"}, {"max_context", "32768"}, {"max_concurrency", "8"}})
-                   .empty(),
-               "eight 32K lanes may share a 256K pool");
+    f += check(validate_engine_params({{"context_capacity", "8GiB"}}).empty(), "explicit Context accepts byte units");
+    f += check(!validate_engine_params({{"context_capacity", "0B"}}).empty(), "zero Context backing is rejected");
+    f += check(!validate_engine_params({{"kv_capacity", "4096"}}).empty(), "superseded token capacity is rejected");
+    f += check(validate_engine_param_combination({{"context_capacity", "8GiB"}, {"max_context", "262144"}}).empty(),
+               "Supervisor leaves model-dependent byte/token feasibility to the Engine");
     return f;
 }
 
@@ -1828,49 +1815,6 @@ int test_with_api_key_file() {
                "an explicit --api-key-file wins over the config field");
     f += check(with_api_key_file({"model.ninfer"}, "").size() == 1,
                "no configured key file leaves the engine unauthenticated, as before");
-    return f;
-}
-
-int test_kv_capacity_adaptation() {
-    using namespace ninfer::supervisor;
-    int f = 0;
-    const std::string line =
-        "[2026-09-07 18:23:15.282] [critical] [ninfer-serve] server status=failed phase=startup "
-        "detail=\"requested Engine runtime reservation requires 17572624288 bytes, but only "
-        "16943534080 bytes are available for runtime capacity\"";
-    const auto sf = parse_runtime_reservation_failure(line);
-    f += check(sf.matched && sf.required_bytes == 17572624288LL &&
-                   sf.available_bytes == 16943534080LL,
-               "runtime reservation shortfall line was not parsed");
-    f += check(!parse_runtime_reservation_failure("[error] request id=7 status=failed").matched,
-               "unrelated error line parsed as a reservation shortfall");
-
-    const std::vector<std::string> args{"model.ninfer", "--max-context", "262144", "--kv-capacity",
-                                        "737280", "--max-concurrency", "4", "--spec", "mtp",
-                                        "--draft-tokens", "3"};
-    f += check(explicit_kv_capacity(args) == std::optional<std::int64_t>(737280),
-               "explicit kv capacity was not read from args");
-    f += check(!explicit_kv_capacity({"--kv-capacity", "auto"}).has_value(),
-               "auto kv capacity must not be adapted");
-    f += check(kv_capacity_floor_tokens(args) == 262144, "kv floor did not follow --max-context");
-
-    // The production case: 629 MB short at 737280 tokens. Must land below the value that
-    // fit (655360), stay a multiple of 4096, and never below the floor.
-    const auto next = reduced_kv_capacity(737280, sf.required_bytes, sf.available_bytes, 262144);
-    f += check(next < 655360 && next % 4096 == 0 && next >= 262144,
-               "reduced kv capacity is not a safe multiple below the plan that fit");
-    f += check(reduced_kv_capacity(737280, 100, 200, 262144) == 737280,
-               "a plan that fits must not be reduced");
-    f += check(reduced_kv_capacity(300000, 40LL << 30, 1, 262144) == 262144,
-               "reduction must clamp at the floor");
-
-    const auto rewritten = with_kv_capacity(args, next);
-    f += check(explicit_kv_capacity(rewritten) == std::optional<std::int64_t>(next) &&
-                   rewritten.size() == args.size(),
-               "with_kv_capacity did not replace the value in place");
-    const auto appended = with_kv_capacity({"model.ninfer"}, 4096);
-    f += check(appended.size() == 3 && appended[1] == "--kv-capacity" && appended[2] == "4096",
-               "with_kv_capacity did not append when absent");
     return f;
 }
 
@@ -2501,7 +2445,6 @@ int test_engine_bench() {
 int main() {
     int failures = 0;
     failures += test_client_activity_causes();
-    failures += test_kv_capacity_adaptation();
     failures += test_loopback();
     failures += test_engine_probe_destination();
     failures += test_crash_loop();
@@ -2509,7 +2452,7 @@ int main() {
     failures += test_config_bind();
     failures += test_host_header();
     failures += test_nvidia_csv();
-    failures += test_kv_line();
+    failures += test_context_line();
     failures += test_monitor_only_config();
     failures += test_insights_honesty();
     failures += test_insights_prefix();

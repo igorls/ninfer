@@ -26,17 +26,19 @@ RankPreparation::RankPreparation(const artifact::Reader& reader, std::span<const
         throw artifact::ArtifactError("Qwen4Exp worker artifact differs from coordinator");
     options_                = std::move(request.options);
     host_reservation_bytes_ = request.host_reservation_bytes;
+    control_owner_          = request.control_owner;
     auto definition         = read_definition(reader, models::load_options(options_));
     load_.emplace(resolve_rank_load(reader, std::move(definition), std::move(request.rank),
                                     device_.device()));
     profile_ =
         execution::describe_model(load_->definition(), load_->weight_data(), load_->rank_plan());
-    curve_ = describe_execution_capacity(profile_, options_, device_);
+    capacity_plan_ = describe_execution_capacity(profile_, options_, device_);
 }
 
 runtime::PreparationMemory RankPreparation::memory() const {
     return {load_->materialization().device_capacity_bytes,
-            options_.kv_capacity.automatic_headroom_bytes, host_reservation_bytes_};
+            load_->materialization().host_capacity_bytes,
+            options_.context_capacity.automatic_headroom_bytes, host_reservation_bytes_};
 }
 
 void RankPreparation::materialize() {
@@ -50,7 +52,7 @@ runtime::RankPreparationReport RankPreparation::report(std::size_t available) co
     const auto& model  = *instance_->model;
     const auto& s      = model.storage_stats();
     const auto reserve = graph_memory_.rebuild_estimate_bytes;
-    return {.capacity             = {curve_, available > reserve ? available - reserve : 0},
+    return {.capacity             = {capacity_plan_, available > reserve ? available - reserve : 0},
             .weight_bytes         = s.device_capacity_bytes + model.metadata_bytes(),
             .host_weight_bytes    = s.host_capacity_bytes,
             .staging_bytes        = s.peak_staging_bytes,
@@ -59,7 +61,8 @@ runtime::RankPreparationReport RankPreparation::report(std::size_t available) co
             .load_seconds         = s.upload_seconds,
             .device_objects       = s.device_object_count,
             .host_objects         = s.host_object_count,
-            .preparation_required = options_.use_cuda_graph};
+            .preparation_required = options_.use_cuda_graph,
+            .control_owner        = control_owner_};
 }
 
 void RankPreparation::prepare_probe() {
@@ -86,13 +89,15 @@ void RankPreparation::calibrate() {
 
 void RankPreparation::prepare_execution() { instance_->program->prepare_execution(); }
 
-void RankPreparation::prepare(std::uint32_t pages, std::size_t available) {
+void RankPreparation::prepare(runtime::ContextCapacity capacity, std::size_t available,
+                              std::size_t available_host_bytes) {
     if (instance_->program) throw std::logic_error("Qwen4Exp rank Program is already prepared");
-    auto options        = options_;
-    options.kv_capacity = KvCapacityPolicy::explicit_capacity(curve_.resolved_tokens(pages));
-    const auto reserve  = graph_memory_.rebuild_estimate_bytes;
-    auto plan           = plan_execution(profile_, {}, options, device_,
-                               available > reserve ? available - reserve : 0);
+    auto options             = options_;
+    options.context_capacity = ContextCapacityPolicy::explicit_capacity(capacity.device_bytes);
+    const auto reserve       = graph_memory_.rebuild_estimate_bytes;
+    auto plan                = plan_execution(profile_, {}, options, device_,
+                               available > reserve ? available - reserve : 0, {}, control_owner_,
+                                              available_host_bytes);
     if (!plan) throw DeviceAllocationError("rank runtime capacity exceeds available memory");
     instance_->program = std::make_unique<RankProgram>(
         instance_->parameters, std::move(*plan), device_, options_.startup_observer, binding_);

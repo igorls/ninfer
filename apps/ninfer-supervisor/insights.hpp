@@ -21,6 +21,25 @@
 
 namespace ninfer::supervisor {
 
+// Aggregate reported physical Context pools, never infer bytes from logical KV pages.
+inline std::int64_t context_pool_sum(const nlohmann::json& pools, std::string_view domain,
+                                      std::initializer_list<const char*> fields) {
+    if (!pools.is_array()) return -1;
+    std::int64_t total = 0;
+    bool found = false;
+    for (const auto& pool : pools) {
+        if (!pool.is_object() || pool.value("domain", std::string{}) != domain) continue;
+        found = true;
+        for (const auto* field : fields) {
+            if (!pool.contains(field) || !pool.at(field).is_number_integer()) return -1;
+            const auto bytes = pool.at(field).get<std::int64_t>();
+            if (bytes < 0 || bytes > INT64_MAX - total) return -1;
+            total += bytes;
+        }
+    }
+    return found ? total : -1;
+}
+
 inline nlohmann::json insight_unavailable(std::string id, std::string title, std::string statement,
                                           nlohmann::json evidence      = nlohmann::json::object(),
                                           nlohmann::json measured_over = {{"requests", 0}}) {
@@ -239,8 +258,8 @@ private:
         std::vector<Largest> largest;                  // at most kSamples, largest total first
         int near_limit                = 0;
         std::size_t occupancy_samples = 0;
-        std::int64_t kv_now           = 0;
-        std::int64_t kv_high          = 0;
+        std::int64_t context_now_bytes           = 0;
+        std::int64_t context_high_bytes          = 0;
         std::int64_t peak_running     = 0;
         std::int64_t peak_waiting     = 0;
         std::int64_t preemptions      = 0;
@@ -370,9 +389,9 @@ inline void RequestLogInsights::fold_server_start(const nlohmann::json& j, std::
         latest_engine_     = engine;
         scope_.max_context = json_i64(latest_engine_, "max_context");
     }
-    if (!instance.empty() && instance == latest_instance_ && engine.contains("context_cache")) {
-        const auto capacity = json_i64(engine.at("context_cache"), "host_capacity_bytes");
-        if (capacity > 0) { scope_.collapse.capacity = static_cast<std::uint64_t>(capacity); }
+    if (!instance.empty() && instance == latest_instance_ && engine.contains("context_pools")) {
+        const auto capacity = context_pool_sum(engine.at("context_pools"), "host", {"capacity_bytes"});
+        if (capacity >= 0) scope_.collapse.capacity = static_cast<std::uint64_t>(capacity);
     }
 }
 
@@ -628,12 +647,13 @@ inline void RequestLogInsights::fold_throughput(const nlohmann::json& tp, std::i
     const auto& cache    = has_cache ? tp.at("context_cache") : nlohmann::json::object();
     if (has_cache) {
         if (cache.contains("occupancy") && cache.at("occupancy").is_object() &&
-            cache.at("occupancy").contains("device_main_kv_pages")) {
-            const auto pages = json_i64(cache.at("occupancy"), "device_main_kv_pages", -1);
-            if (pages >= 0) {
+            cache.at("occupancy").contains("pools")) {
+            const auto bytes = context_pool_sum(cache.at("occupancy").at("pools"), "device",
+                {"live_bytes", "reserved_bytes", "pending_retirement_bytes"});
+            if (bytes >= 0) {
                 ++s.occupancy_samples;
-                s.kv_now  = pages;
-                s.kv_high = std::max(s.kv_high, pages);
+                s.context_now_bytes = bytes;
+                s.context_high_bytes = std::max(s.context_high_bytes, bytes);
             }
         }
         if (cache.contains("pressure") && cache.at("pressure").is_object()) {
@@ -647,7 +667,8 @@ inline void RequestLogInsights::fold_throughput(const nlohmann::json& tp, std::i
     if (!latest || c.capacity == 0) { return; }
     const auto& occupancy =
         cache.contains("occupancy") ? cache.at("occupancy") : nlohmann::json::object();
-    const auto occupied = json_i64(occupancy, "host_context_occupied_bytes", -1);
+    const auto occupied = context_pool_sum(occupancy.value("pools", nlohmann::json{}), "host",
+        {"live_bytes", "reserved_bytes", "pending_retirement_bytes", "padding_bytes", "tail_bytes"});
     // Occupied already includes in-flight reserved destinations.
     if (occupied == static_cast<std::int64_t>(c.capacity)) {
         if (c.run_samples == 0) {
@@ -1066,7 +1087,7 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
         }
     }
 
-    // Context and KV capacity pressure on the latest server instance: the configured limits come
+    // Context and Context capacity pressure on the latest server instance: the configured limits come
     // from its server_start, traffic from its request_done records, occupancy and pressure from
     // its throughput samples. Occupancy counts retained checkpoints while prefix reuse is on, so a
     // full pool is only pressure when the engine also evicted, spilled or queued.
@@ -1081,10 +1102,10 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
 
         const auto max_context     = json_i64(latest_engine_, "max_context");
         const auto max_concurrency = json_i64(latest_engine_, "max_concurrency");
-        const auto kv_tokens       = json_i64(latest_engine_, "kv_capacity");
-        const auto kv_page_groups  = json_i64(latest_engine_, "kv_capacity_page_groups");
+        const auto context_capacity_bytes = context_pool_sum(
+            latest_engine_.value("context_pools", nlohmann::json{}), "device", {"capacity_bytes"});
         const bool prefix_reuse    = latest_engine_.value("prefix_reuse", false);
-        const bool have_config     = max_context > 0 && kv_page_groups > 0;
+        const bool have_config     = max_context > 0 && context_capacity_bytes > 0;
 
         // The k-th smallest prompt (0-based) from the histogram.
         const std::uint64_t n_req = s.dones;
@@ -1119,27 +1140,25 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
         }
 
         const std::size_t occupancy_samples        = s.occupancy_samples;
-        const std::int64_t kv_now                  = s.kv_now;
-        const std::int64_t kv_high                 = s.kv_high;
+        const std::int64_t context_now_bytes                  = s.context_now_bytes;
+        const std::int64_t context_high_bytes                 = s.context_high_bytes;
         const std::int64_t peak_running            = s.peak_running;
         const std::int64_t peak_waiting            = s.peak_waiting;
         const std::int64_t spill_pages             = s.spill_pages;
         const int admission_expired                = s.admission_expired;
         const nlohmann::json admission_expired_ids = s.admission_expired_ids;
-        const double kv_now_ratio =
-            kv_page_groups > 0 ? static_cast<double>(kv_now) / static_cast<double>(kv_page_groups)
+        const double context_now_bytes_ratio =
+            context_capacity_bytes > 0 ? static_cast<double>(context_now_bytes) / static_cast<double>(context_capacity_bytes)
                                : 0.0;
-        const double kv_high_ratio =
-            kv_page_groups > 0 ? static_cast<double>(kv_high) / static_cast<double>(kv_page_groups)
+        const double context_high_bytes_ratio =
+            context_capacity_bytes > 0 ? static_cast<double>(context_high_bytes) / static_cast<double>(context_capacity_bytes)
                                : 0.0;
         const std::int64_t pressure_events = s.preemptions + spill_pages;
 
         nlohmann::json config = {
             {"max_context", max_context},
             {"max_concurrency", max_concurrency},
-            {"kv_capacity_tokens", kv_tokens},
-            {"kv_page_groups", kv_page_groups},
-            {"tokens_per_page_group", kv_page_groups > 0 ? kv_tokens / kv_page_groups : 0},
+            {"context_capacity_bytes", context_capacity_bytes},
             {"prefix_reuse", prefix_reuse}};
         nlohmann::json requests_evidence = {
             {"count", n_req},
@@ -1149,11 +1168,11 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
             {"largest_context_ratio", largest_ratio},
             {"near_limit_count", near_limit},
             {"near_limit_ratio", kNearContextRatio}};
-        nlohmann::json kv_evidence        = {{"pages_now", kv_now},
-                                             {"pages_high_water", kv_high},
-                                             {"pages_capacity", kv_page_groups},
-                                             {"utilization_now", kv_now_ratio},
-                                             {"utilization_high_water", kv_high_ratio},
+        nlohmann::json context_evidence        = {{"occupied_bytes", context_now_bytes},
+                                             {"high_water_bytes", context_high_bytes},
+                                             {"capacity_bytes", context_capacity_bytes},
+                                             {"utilization_now", context_now_bytes_ratio},
+                                             {"utilization_high_water", context_high_bytes_ratio},
                                              {"samples", occupancy_samples},
                                              {"includes_retained_checkpoints", prefix_reuse}};
         nlohmann::json scheduler_evidence = {
@@ -1169,9 +1188,9 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
 
         if (!have_config) {
             insights.push_back(insight_unavailable(
-                "capacity.context_kv_pressure", "Capacity limits are not in the log window",
+                "capacity.context_pressure", "Capacity limits are not in the log window",
                 "the latest server instance has no server_start with max_context and "
-                "kv_capacity_page_groups, so traffic cannot be compared to a limit; prompt "
+                "context_pools, so traffic cannot be compared to a limit; prompt "
                 "sizes are reported without a pressure verdict",
                 {{"server_instance_id", latest_instance_},
                  {"requests", requests_evidence},
@@ -1179,9 +1198,9 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
                 cap_over));
         } else if (occupancy_samples == 0) {
             insights.push_back(insight_unavailable(
-                "capacity.context_kv_pressure", "KV occupancy has not been sampled yet",
+                "capacity.context_pressure", "Context occupancy has not been sampled yet",
                 "the latest server instance has capacity configuration but no throughput record "
-                "with context_cache.occupancy.device_main_kv_pages; KV utilization is unknown, "
+                "with context_cache.occupancy.pools; KV utilization is unknown, "
                 "not zero",
                 {{"server_instance_id", latest_instance_},
                  {"config", config},
@@ -1196,7 +1215,7 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
                 kind     = "preempted";
                 severity = "notice";
                 rec << "Measured: " << s.preemptions << " pauses made room, with " << spill_pages
-                    << " KV pages spilled. Inferred: raise --kv-capacity if VRAM "
+                    << " KV pages spilled. Inferred: raise --context-capacity if VRAM "
                        "allows, or reduce concurrent demand to reduce recovery work.";
             } else if (near_limit > 0) {
                 kind     = "large_prompt";
@@ -1205,7 +1224,7 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
                     << pct(kNearContextRatio) << " of max_context " << max_context
                     << "; the largest reached " << largest_total
                     << " tokens. Inferred: raise "
-                       "--max-context (and --kv-capacity to hold it) if VRAM allows, or shorten "
+                       "--max-context (and --context-capacity to hold it) if VRAM allows, or shorten "
                        "those conversations; a request over the limit is rejected at admission.";
             } else if ((peak_waiting > 0 || admission_expired > 0) && max_concurrency > 0 &&
                        peak_running >= max_concurrency) {
@@ -1214,13 +1233,13 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
                 severity = admission_expired > 0 ? "warning" : "notice";
                 rec << "Measured: requests waited (peak " << peak_waiting << " waiting, "
                     << admission_expired << " expired before admission) while all "
-                    << max_concurrency << " lanes were running; KV occupancy peaked at "
-                    << pct(kv_high_ratio)
+                    << max_concurrency << " lanes were running; Context occupancy peaked at "
+                    << pct(context_high_bytes_ratio)
                     << ". Inferred: the concurrency limit is what queued "
-                       "them; raise --max-concurrency only if KV capacity and VRAM leave room "
+                       "them; raise --max-concurrency only if Context capacity and VRAM leave room "
                        "for another request's context.";
             } else if ((peak_waiting > 0 || admission_expired > 0) &&
-                       kv_high_ratio >= kHighKvRatio) {
+                       context_high_bytes_ratio >= kHighKvRatio) {
                 // Lanes were free but requests still waited: the pool could not admit them.
                 kind     = "kv_admission";
                 severity = "warning";
@@ -1229,27 +1248,27 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
                     << " of " << max_concurrency
                     << " lanes running and KV "
                        "occupancy at "
-                    << pct(kv_high_ratio)
+                    << pct(context_high_bytes_ratio)
                     << ", while the largest single "
                        "request used "
                     << pct(largest_ratio)
                     << " of max_context. Inferred: "
-                       "concurrent requests exhausted the KV pool; raise --kv-capacity if VRAM "
+                       "concurrent requests exhausted the Context pool; raise --context-capacity if VRAM "
                        "allows, otherwise lower --max-context to bound each request's KV growth.";
-            } else if (kv_high_ratio >= kHighKvRatio && pressure_events > 0) {
+            } else if (context_high_bytes_ratio >= kHighKvRatio && pressure_events > 0) {
                 // No queueing: the engine made room by spilling KV to host.
                 kind     = "cache_churn";
                 severity = "notice";
-                rec << "Measured: KV occupancy peaked at " << pct(kv_high_ratio)
+                rec << "Measured: Context occupancy peaked at " << pct(context_high_bytes_ratio)
                     << " and the "
                        "engine spilled "
                     << spill_pages
                     << " KV pages with no request waiting. "
-                       "Host transfers add recovery work. Inferred: raise --kv-capacity if VRAM "
+                       "Host transfers add recovery work. Inferred: raise --context-capacity if VRAM "
                        "allows; this alone does not establish a concurrency problem.";
-            } else if (kv_high_ratio >= kHighKvRatio) {
+            } else if (context_high_bytes_ratio >= kHighKvRatio) {
                 kind = "retained_cache";
-                rec << "Measured: KV occupancy peaked at " << pct(kv_high_ratio)
+                rec << "Measured: Context occupancy peaked at " << pct(context_high_bytes_ratio)
                     << " without preemptions, spills or queueing. With prefix reuse "
                     << (prefix_reuse ? "on" : "off")
                     << " the pool holds retained checkpoints, so a full pool alone is not "
@@ -1257,16 +1276,16 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
             }
 
             std::ostringstream stmt;
-            stmt << "Configured max_context " << max_context << " tokens, KV capacity " << kv_tokens
-                 << " tokens (" << kv_page_groups << " page groups), max concurrency "
+            stmt << "Configured max_context " << max_context << " tokens, Context capacity "
+                 << context_capacity_bytes << " bytes, max concurrency "
                  << max_concurrency << ", prefix reuse " << (prefix_reuse ? "on" : "off")
                  << ". Over " << n_req
                  << " request_done on the latest server instance: prompt tokens median "
                  << prompt_median << ", p90 " << prompt_p90 << ", max " << prompt_max
                  << "; largest request " << largest_total << " tokens = " << pct(largest_ratio)
                  << " of max_context, " << near_limit << " within " << pct(kNearContextRatio)
-                 << " of it. KV pages " << kv_now << " of " << kv_page_groups << " now ("
-                 << pct(kv_now_ratio) << "), high-water " << kv_high << " (" << pct(kv_high_ratio)
+                 << " of it. Context bytes " << context_now_bytes << " of " << context_capacity_bytes << " now ("
+                 << pct(context_now_bytes_ratio) << "), high-water " << context_high_bytes << " (" << pct(context_high_bytes_ratio)
                  << ") over " << occupancy_samples << " samples"
                  << (prefix_reuse ? ", including retained checkpoints" : "")
                  << ". Scheduler peak running " << peak_running << " of " << max_concurrency
@@ -1275,14 +1294,14 @@ inline nlohmann::json RequestLogInsights::report(std::string_view path) const {
                  << s.preemptions << ", spill pages " << spill_pages << ". Verdict: " << kind
                  << ".";
 
-            insights.push_back(insight_available("capacity.context_kv_pressure", severity,
-                                                 "Context and KV capacity pressure", stmt.str(),
+            insights.push_back(insight_available("capacity.context_pressure", severity,
+                                                 "Context and Context capacity pressure", stmt.str(),
                                                  {{"server_instance_id", latest_instance_},
                                                   {"kind", kind},
                                                   {"config", config},
                                                   {"requests", requests_evidence},
                                                   {"largest_requests", largest_samples},
-                                                  {"kv", kv_evidence},
+                                                  {"context", context_evidence},
                                                   {"scheduler", scheduler_evidence},
                                                   {"pressure", pressure_evidence},
                                                   {"high_kv_ratio", kHighKvRatio}},

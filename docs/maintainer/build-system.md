@@ -58,7 +58,7 @@ composition. The default configuration is Release. Ninja links and archives shar
 | `NINFER_ENABLE_DISTRIBUTED` | OFF | Process/control transport, distributed execution and NCCL collectives |
 
 Core, Artifact and Ops are always present. An Ops development build disables both Engine and Apps;
-it does not discover FFmpeg, curl, Jinja, XGrammar or spdlog. Engine adds FFmpeg and the frontend
+it does not discover FFmpeg, libjpeg, curl, Jinja, XGrammar or spdlog. Engine adds FFmpeg, libjpeg and the frontend
 libraries. Apps or Engine tests add product input, logging and serving support, including curl and
 spdlog. A Python 3 interpreter is found when tests are enabled. Standalone Python suites and
 conversion/evaluation scripts run separately from CMake and CTest.
@@ -124,6 +124,7 @@ platform of this fork. Use the Visual Studio generator and a build directory per
 ```powershell
 cmake -S . -B build-win -G "Visual Studio 18 2026" -DCMAKE_CUDA_ARCHITECTURES=120a `
   -DFFMPEG_ROOT=<ffmpeg shared distribution> -DCURL_ROOT=<libcurl install> `
+  -DHWLOC_ROOT=<hwloc install> -DJPEG_ROOT=<libjpeg-turbo SDK> `
   -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=ON
 cmake --build build-win --config Release -j
 ctest --test-dir build-win -C Release
@@ -136,7 +137,7 @@ ctest --test-dir build-win -C Release
 - MSVC compiles every source as UTF-8 (`/utf-8`), gives CUDA's host pass the conforming
   preprocessor (`/Zc:preprocessor`, required by CCCL), defines `NOMINMAX`, and disables C++20
   module scanning.
-- Windows has no rpath. CTest prepends the CUDA, FFmpeg and libcurl `bin/` directories to each
+- Windows has no rpath. CTest prepends CUDA, FFmpeg, libjpeg, hwloc and libcurl `bin/` directories to each
   test's `PATH`; a product install ships those DLLs beside the executables.
 - Host code that differs by platform keeps both branches in one place: `core/platform.h`
   (process id, terminal detection, calendar time), `core/wide_multiply.h` (exact 64x64-bit

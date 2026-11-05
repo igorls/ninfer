@@ -17,8 +17,8 @@ constexpr FieldSpec kFields[] = {
     {Field::Vision, "model.vision", "--vision", "--no-vision", "", "Load Vision resources."},
     {Field::DesktopReserve, "engine.desktop_reserve", "--desktop-reserve", "", "SIZE",
      "Device memory kept free for the desktop (8GiB).", Scope::Common, ConfigurationUnit::Bytes},
-    {Field::SlackFloor, "engine.kv_slack_floor", "--kv-slack-floor", "", "SIZE",
-     "Minimum automatic KV sizing slack (1GiB).", Scope::Common, ConfigurationUnit::Bytes},
+    {Field::SlackFloor, "engine.context_slack_floor", "--context-slack-floor", "", "SIZE",
+     "Minimum automatic Context sizing slack (1GiB).", Scope::Common, ConfigurationUnit::Bytes},
     {Field::ClampConcurrency, "engine.clamp_concurrency_to_pool", "--clamp-concurrency-to-pool",
      "--no-clamp-concurrency-to-pool", "",
      "Lower concurrency to complete contexts backed by the pool.", Scope::Common,
@@ -28,8 +28,9 @@ constexpr FieldSpec kFields[] = {
      "Per-request context limit (8192)."},
     {Field::KvDtype, "engine.kv_dtype", "--kv-dtype", "", "bf16|int8|fp8|nvfp4|k8v4",
      "KV representation."},
-    {Field::KvCapacity, "engine.kv_capacity", "--kv-capacity", "", "N|context|auto",
-     "Shared Main KV capacity; context follows --max-context."},
+    {Field::ContextCapacity, "engine.context_capacity", "--context-capacity", "", "SIZE|auto",
+     "Per-rank Device capacity shared by KV and State; auto uses the startup budget.",
+     Scope::Common, ConfigurationUnit::Bytes},
     {Field::PrefillChunk, "engine.prefill_chunk", "--prefill-chunk", "", "N|default",
      "Positive multiple of 128; default is resolved by the model."},
     {Field::CudaGraph, "engine.cuda_graph", "--cuda-graph", "--no-cuda-graph", "",
@@ -44,8 +45,8 @@ constexpr FieldSpec kFields[] = {
      "Queue timeout before execution (30s).", Scope::Common, ConfigurationUnit::Milliseconds},
     {Field::PrefixReuse, "context_cache.prefix_reuse", "--prefix-reuse", "--no-prefix-reuse", "",
      "Cross-request history reuse; also accepts =default."},
-    {Field::ExtraStateSlots, "context_cache.extra_state_slots", "--extra-state-slots", "",
-     "N|default", "Extra complete StateImages beyond active lanes."},
+    {Field::CheckpointInterval, "context_cache.checkpoint_interval", "--checkpoint-interval", "",
+     "N", "Target token spacing for intermediate prefill checkpoints (8192)."},
     {Field::HostCapacity, "context_cache.host_capacity", "--host-cache-capacity", "",
      "SIZE|default", "Shared Host State/KV and in-flight capacity; 0B disables backing.",
      Scope::Common, ConfigurationUnit::Bytes},
@@ -305,7 +306,6 @@ FieldValue parse_field_value(Field field, const RawValue& value, bool command_li
     const auto is      = [&](std::string_view word) { return string && *string == word; };
     switch (field) {
     case Field::PrefixReuse:
-    case Field::ExtraStateSlots:
     case Field::HostCapacity:
     case Field::PrefillChunk:
     case Field::MaxTokens:
@@ -346,11 +346,11 @@ FieldValue parse_field_value(Field field, const RawValue& value, bool command_li
     case Field::Device:
         return integer(value, command_line, 0, std::numeric_limits<int>::max());
     case Field::MaxContext:
+    case Field::CheckpointInterval:
     case Field::MaxPendingRequests:
     case Field::MaxTokens:
     case Field::ThinkingBudget:
         return integer(value, command_line, 1, kU32Max);
-    case Field::ExtraStateSlots:
     case Field::DraftTokens:
         return integer(value, command_line, 0, kU32Max);
     case Field::MaxConcurrency:
@@ -364,9 +364,9 @@ FieldValue parse_field_value(Field field, const RawValue& value, bool command_li
     case Field::Seed:
         if (is("random")) return *string;
         return integer(value, true, 0, kU64Max);
-    case Field::KvCapacity:
-        if (is("auto") || is("context")) return *string;
-        return integer(value, command_line, 1, kU32Max);
+    case Field::ContextCapacity:
+        if (is("auto")) return *string;
+        return quantity(value, true, true);
     case Field::PrefillChunk: {
         const auto count = integer(value, command_line, 1, kU32Max);
         if (count % 128 != 0) invalid("expected a positive multiple of 128");

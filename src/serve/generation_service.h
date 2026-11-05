@@ -5,8 +5,8 @@
 
 #include "ninfer/engine.h"
 #include "serve/expert_route_recorder.h"
-#include "serve/request.h"
 #include "product/config/options.h"
+#include "serve/request.h"
 
 #include <chrono>
 #include <cstddef>
@@ -15,7 +15,9 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ninfer::serve {

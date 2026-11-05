@@ -1,4 +1,5 @@
 #include "ninfer/engine.h"
+#include "context_budget.h"
 
 #include <nlohmann/json.hpp>
 
@@ -35,7 +36,7 @@ ninfer::EngineOptions base_options() {
     ninfer::EngineOptions options;
     options.artifact_path        = g_artifact;
     options.max_context          = 4096;
-    options.kv_capacity          = ninfer::KvCapacityPolicy::explicit_capacity(4096);
+
     options.prefill_chunk        = 1024;
     options.max_concurrency      = 1;
     options.max_pending_requests = 8;
@@ -98,6 +99,8 @@ bool fail(const std::string& message) {
 // Engines are constructed one at a time: each holds the complete Device weights.
 template <class Body>
 bool with_engine(ninfer::EngineOptions options, Body&& body) {
+    if (options.context_capacity.mode == ninfer::ContextCapacityMode::Automatic)
+        ninfer::test::qwen4_exp::set_context_capacity(options, 2, options.max_concurrency);
     ninfer::Engine engine(std::move(options));
     if (std::getenv("NINFER_TEST_EXPECT_RESIDENT_EXPERTS")) {
         const auto memory = engine.snapshot().ranks.at(0).memory;
@@ -150,17 +153,31 @@ bool concurrency_clamp_matches_pool() {
         for (const bool clamp : {false, true}) {
             auto options = base_options();
             options.max_concurrency = 8;
-            // A 769-token context needs thirteen 64-token page groups, so 4096
-            // tokens back four complete contexts rather than floor(4096/769)=5.
-            options.max_context = graphs ? 4096 : 769;
+            options.max_context = graphs ? 32768 : 32769;
             options.use_cuda_graph = graphs;
             options.clamp_concurrency_to_pool = clamp;
             options.context_cache.enabled = false;
+            auto sizing = options;
+            sizing.max_concurrency = 4;
+            sizing.clamp_concurrency_to_pool = true;
+            auto unclamped = options;
+            unclamped.clamp_concurrency_to_pool = false;
+            const auto capacity = std::max(
+                ninfer::test::qwen4_exp::context_capacity_bytes(sizing),
+                ninfer::test::qwen4_exp::context_capacity_plan(unclamped).minimum_capacity().device_bytes);
+            options.context_capacity = ninfer::ContextCapacityPolicy::explicit_capacity(capacity);
+            unsigned expected = 8;
+            if (clamp) {
+                for (expected = 8; expected > 1; --expected) {
+                    sizing.max_concurrency = expected;
+                    if (ninfer::test::qwen4_exp::context_capacity_bytes(sizing) <= capacity) break;
+                }
+                if (expected == 8) return fail("clamp fixture did not create complete-context pressure");
+            }
             if (!with_engine(options, [&](ninfer::Engine& engine) {
-                    const auto expected = clamp ? (graphs ? 1U : 4U) : 8U;
                     if (engine.options().max_concurrency != expected ||
-                        engine.description().kv_capacity != 4096) {
-                        return fail("pool clamp changed the explicit KV capacity or lane policy");
+                        engine.startup_report().ranks.at(0).context_capacity_bytes != capacity) {
+                        return fail("pool clamp changed the explicit Context byte budget or lane policy");
                     }
                     std::vector<ninfer::GenerationHandle> requests;
                     for (unsigned i = 0; i < 2; ++i) {
@@ -292,7 +309,7 @@ bool batched_matches_single() {
     for (const std::uint32_t concurrency : {2U, 4U, 8U}) {
         ninfer::EngineOptions options = base_options();
         options.max_concurrency       = concurrency;
-        options.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(4096U * concurrency);
+
         options.context_cache.enabled = false;
         const bool ok                 = with_engine(options, [&](ninfer::Engine& engine) {
             std::vector<ninfer::GenerationHandle> handles;
@@ -372,17 +389,19 @@ bool host_round_trip_is_exact(bool mtp = false) {
         });
     };
     ninfer::EngineOptions host             = base_options();
-    host.context_cache.extra_state_slots  = 0;
+
     host.context_cache.host_capacity_bytes = 1ULL << 30U;
     if (mtp) {
         host.speculative.backend      = ninfer::SpeculativeBackend::Mtp;
         host.speculative.draft_tokens = 3;
     }
     ninfer::EngineOptions device             = host;
-    device.context_cache.extra_state_slots  = 4;
+
     device.max_context                       = 8192;
-    device.kv_capacity                       = ninfer::KvCapacityPolicy::explicit_capacity(8192);
+
     device.context_cache.host_capacity_bytes = 0;
+    ninfer::test::qwen4_exp::set_context_capacity(host);
+    ninfer::test::qwen4_exp::set_context_capacity(device, 4, 1);
     std::vector<ninfer::TokenId> through_host;
     std::vector<ninfer::TokenId> resident;
     if (!scenario(host, true, through_host) || !scenario(device, false, resident)) { return false; }
@@ -396,7 +415,7 @@ bool host_round_trip_is_exact(bool mtp = false) {
 // private catalog has turned over many times.
 bool reuse_survives_catalog_turnover() {
     ninfer::EngineOptions options             = base_options();
-    options.context_cache.extra_state_slots  = 2;
+
     options.context_cache.host_capacity_bytes = 0;
     return with_engine(options, [&](ninfer::Engine& engine) {
         // Exact-hit: the whole prompt is resident, so the first token comes from the stored
@@ -438,8 +457,7 @@ bool reuse_survives_catalog_turnover() {
 bool conversation_chain_survives_a_full_cache() {
     ninfer::EngineOptions options             = base_options();
     options.max_context                       = 8192;
-    options.kv_capacity                       = ninfer::KvCapacityPolicy::explicit_capacity(8192);
-    options.context_cache.extra_state_slots  = 1;
+
     options.context_cache.host_capacity_bytes = 1ULL << 30U;
     const auto chat                           = [](std::vector<ninfer::ChatMessage> messages) {
         ninfer::PromptInput input;
@@ -669,7 +687,7 @@ bool expert_route_trace(bool mtp) {
 bool mtp_ragged_route_trace() {
     auto options = base_options();
     options.max_concurrency = 2;
-    options.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(8192);
+
     options.context_cache.enabled = false;
     options.speculative.backend = ninfer::SpeculativeBackend::Mtp;
     options.speculative.draft_tokens = 3;
@@ -1175,8 +1193,7 @@ bool mtp_graphs_and_ragged_batches() {
             auto options            = base_options();
             options.max_context     = 512;
             options.max_concurrency = graphs ? 8 : 1;
-            options.kv_capacity =
-                ninfer::KvCapacityPolicy::explicit_capacity(512 * options.max_concurrency);
+
             options.prefill_chunk            = 128;
             options.context_cache.enabled    = false;
             options.speculative.backend      = ninfer::SpeculativeBackend::Mtp;
@@ -1271,7 +1288,7 @@ bool concurrent_long_prompts_with_reuse(bool mtp) {
     auto options            = base_options();
     options.max_context     = 32768;
     options.max_concurrency = 4;
-    options.kv_capacity     = ninfer::KvCapacityPolicy::explicit_capacity(131072);
+
     options.prefill_chunk   = 8192;
     if (mtp) {
         options.speculative.backend      = ninfer::SpeculativeBackend::Mtp;
@@ -1362,7 +1379,7 @@ bool mtp_staged_materialization_ledger() {
     auto options                     = base_options();
     options.max_context              = 8192;
     options.max_concurrency          = 4;
-    options.kv_capacity              = ninfer::KvCapacityPolicy::explicit_capacity(16384);
+
     options.prefill_chunk            = 2048;
     options.speculative.backend      = ninfer::SpeculativeBackend::Mtp;
     options.speculative.draft_tokens = 3;
@@ -1372,6 +1389,7 @@ bool mtp_staged_materialization_ledger() {
         "The orchestra rehearsed the second movement until the tempo settled.",
         "Archivists sorted the letters by sender, date and the port they came from.",
         "The observatory recorded a faint comet low on the western horizon."};
+    ninfer::test::qwen4_exp::set_context_capacity(options, 2, 2);
     return with_engine(options, [&](ninfer::Engine& engine) {
         const auto document = [&](int seed) {
             std::string text = "Read the text and summarize it in three sentences.\n\n";

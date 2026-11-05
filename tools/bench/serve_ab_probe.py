@@ -9,7 +9,7 @@ timings; decode tok/s excludes the first token.
 
     python tools/bench/serve_ab_probe.py --exe build/apps/ninfer-serve --port 8021 \\
         --arm current=models/a.ninfer --arm nvfp4full=models/b.ninfer --rounds 5 \\
-        --out profiles/bench/ab --flags "--max-context 131072 --kv-capacity 131072 ..."
+        --out profiles/bench/ab --flags "--max-context 131072 --context-capacity auto ..."
 """
 
 from __future__ import annotations

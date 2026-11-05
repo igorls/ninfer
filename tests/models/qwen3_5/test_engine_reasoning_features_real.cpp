@@ -1,4 +1,5 @@
 #include "ninfer/engine.h"
+#include "context_budget.h"
 
 #include <bit>
 #include <cmath>
@@ -21,10 +22,10 @@ int main() try {
     ninfer::EngineOptions options;
     options.artifact_path         = artifact;
     options.max_context           = 4096;
-    options.kv_capacity           = ninfer::KvCapacityPolicy::explicit_capacity(4096);
     options.prefill_chunk         = 1024;
     options.kv_cache              = ninfer::KvCacheStorage::Fp8E4M3Row256;
     options.context_cache.enabled = false;
+    ninfer::test::qwen3_5::set_context_capacity(options);
     ninfer::Engine engine(options);
     const auto run = [&](std::string text, bool thinking, bool capture) {
         ninfer::PromptInput input;

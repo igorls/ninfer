@@ -140,8 +140,7 @@ b,strong{font-weight:600}
 .pad-line{display:flex;align-items:center;gap:10px;padding:6px 12px;background:var(--glass);border-radius:5px;font-size:12.5px;color:var(--ink);box-shadow:0 0 0 1px var(--seam)}
 .pad-line.amber{color:var(--amber);background:var(--amber-glass)}
 .pad-line.red,.pad-line.error{color:var(--red-on-glass);background:var(--red-glass)}
-)HTML"
-R"HTML(.pad-action span{flex:1;min-width:0;overflow-wrap:anywhere}
+.pad-action span{flex:1;min-width:0;overflow-wrap:anywhere}
 .key-tiny{min-height:24px;padding:0 8px;font-size:11px}
 
 /* Live band: memory and rates stay in view on every page that is not Monitor. */
@@ -287,8 +286,7 @@ input[readonly]{color:var(--ink)}
 .cdu-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:12px}
 .cdu-tab{display:inline-flex;align-items:center;gap:7px;min-height:30px;padding:0 12px;border:1px solid var(--rule);border-radius:4px;color:var(--cyan);font-size:12px;font-weight:600;text-decoration:none}
 .cdu-tab:hover{background:var(--hover-glass)}
-)HTML"
-R"HTML(.cdu-tab[aria-current=page]{color:var(--ink);border-color:var(--ink)}
+.cdu-tab[aria-current=page]{color:var(--ink);border-color:var(--ink)}
 .cdu-tab-count{color:var(--faint);font-weight:500}
 .cdu-subhead{display:flex;align-items:center;gap:10px;margin:16px 0 4px;font-size:12px;font-weight:600;color:var(--ink)}
 .cdu-tag{padding:0 6px;border:1px solid var(--rule);border-radius:3px;font-size:11px;color:var(--dim);font-weight:500}
@@ -434,8 +432,7 @@ body.explain .ex-map{flex:none;height:clamp(300px,52vh,460px)}
 .bench-line #bench-path{flex:1 1 280px}
 .bench-options{gap:6px 10px}
 .bench-examples{display:flex;flex-wrap:wrap;gap:4px;margin-right:auto}
-)HTML"
-R"HTML(button.cdu-tab{background:none;cursor:pointer;font-family:var(--f-panel);font-stretch:87.5%;text-transform:uppercase;letter-spacing:.06em}
+button.cdu-tab{background:none;cursor:pointer;font-family:var(--f-panel);font-stretch:87.5%;text-transform:uppercase;letter-spacing:.06em}
 button.cdu-tab[aria-pressed=true]{color:var(--ink);border-color:var(--ink)}
 .bench-stream{min-height:28px;font-size:13px}
 .bench-body{width:100%;height:clamp(96px,22vh,280px);resize:vertical;padding:8px 10px;background:var(--glass-2);border:1px solid var(--field-edge);border-radius:4px;color:var(--ink);font:12.5px/1.55 var(--f-mono);tab-size:2;white-space:pre}
@@ -625,8 +622,7 @@ button.cdu-tab[aria-pressed=true]{color:var(--ink);border-color:var(--ink)}
 .msg-token-readout i{font-style:normal;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin:0 4px}
 .msg-token-key{font-size:11.5px;color:var(--faint);white-space:nowrap}
 .chat-composer{display:flex;flex-direction:column;gap:6px;padding-top:8px;border-top:1px solid var(--rule)}
-)HTML"
-R"HTML(.chat-input{width:100%;min-height:58px;max-height:30vh;resize:vertical;padding:8px 10px;background:var(--glass-2);border:1px solid var(--field-edge);border-radius:4px;color:var(--ink);font:14px/1.5 var(--f-text)}
+.chat-input{width:100%;min-height:58px;max-height:30vh;resize:vertical;padding:8px 10px;background:var(--glass-2);border:1px solid var(--field-edge);border-radius:4px;color:var(--ink);font:14px/1.5 var(--f-text)}
 .chat-input:hover{border-color:var(--field-edge-hover)}
 .chat-input::placeholder{color:var(--placeholder)}
 .chat-composer.drop .chat-input{border-color:var(--cyan)}
@@ -790,8 +786,7 @@ dialog p{margin:12px 0 16px;font-size:13px;color:var(--dim)}
 }
 @media (max-width:880px){
   .view-bench,.view-bench .cdu{height:auto}
-)HTML"
-R"HTML(  .bench-panes{grid-template-columns:minmax(0,1fr)}
+  .bench-panes{grid-template-columns:minmax(0,1fr)}
   .bench-index{padding-right:0;border-right:0;padding-bottom:8px;border-bottom:1px solid var(--rule-2)}
   .bench-list{max-height:30vh}
   .bench-out{min-height:260px}
@@ -983,8 +978,7 @@ R"HTML(  .bench-panes{grid-template-columns:minmax(0,1fr)}
         </dl>
       </div>
       <div class="gpu-apps"><span class="display-label">Using the card</span><div id="gpu-app-list" class="gpu-app-list">Waiting for app readings…</div></div>
-)HTML"
-R"HTML(      <p class="note">A loaded model holds GPU memory even while idle, so high usage alone is not a problem. The red-striped band is the desktop reserve: memory NInfer leaves free for your other apps when it starts. Windows reports each app's dedicated memory; shared allocations appear in several apps, so the list does not add up to the card total.</p>
+      <p class="note">A loaded model holds GPU memory even while idle, so high usage alone is not a problem. The red-striped band is the desktop reserve: memory NInfer leaves free for your other apps when it starts. Windows reports each app's dedicated memory; shared allocations appear in several apps, so the list does not add up to the card total.</p>
       <p id="memory-guidance" class="pad-line amber" hidden></p>
     </section>
 
@@ -1135,8 +1129,7 @@ R"HTML(      <p class="note">A loaded model holds GPU memory even while idle, so
             <label class="cfg-check chat-setting"><input type="checkbox" id="chat-logprobs"><span>Token probabilities</span></label>
             <label class="chat-setting"><span class="cdu-label">Alternatives per token · 0 to 20</span><input id="chat-top-logprobs" class="cdu-input" type="number" min="0" max="20" step="1" placeholder="0"></label>
             <p id="chat-logprobs-help" class="cfg-help chat-setting-wide">Each reply gets a token view that marks the tokens the model was unsure of and shows the top alternatives on hover.</p>
-)HTML"
-R"HTML(            <label class="cfg-check chat-setting chat-setting-wide"><input type="checkbox" name="prompt_cache_read_only" data-param="prompt_cache_read_only" data-bool><span>Read the prompt cache without adding to it</span></label>
+            <label class="cfg-check chat-setting chat-setting-wide"><input type="checkbox" name="prompt_cache_read_only" data-param="prompt_cache_read_only" data-bool><span>Read the prompt cache without adding to it</span></label>
             <p class="cfg-help chat-setting-wide">For tests that should not evict other apps' cached conversations. The request still starts from a prefix already in the cache but publishes nothing of its own, so the next turn cannot pick up where this one ended.</p>
           </fieldset>
           <fieldset class="chat-group chat-group-wide">
@@ -1262,10 +1255,9 @@ R"HTML(            <label class="cfg-check chat-setting chat-setting-wide"><inpu
         <div><dt>API port</dt><dd id="kpi-engine-port">—</dd></div>
         <div><dt>Health response</dt><dd id="dt-health-check">—</dd></div>
         <div><dt>Last engine event</dt><dd id="dt-last-event">—</dd></div>
-)HTML"
-R"HTML(        <div><dt>Memory reserved for your desktop</dt><dd id="dt-reserve">—</dd></div>
+        <div><dt>Memory reserved for your desktop</dt><dd id="dt-reserve">—</dd></div>
         <div><dt>Engine memory plan</dt><dd id="dt-reservation">—</dd></div>
-        <div><dt>KV capacity</dt><dd id="dt-kv-capacity">—</dd></div>
+        <div><dt>Context capacity</dt><dd id="dt-context-capacity">—</dd></div>
       </dl>
       <div id="launch-plan" class="launch-plan" hidden></div>
       <h2 class="cdu-subhead">Startup capacity report</h2>
@@ -1383,8 +1375,7 @@ R"HTML(        <div><dt>Memory reserved for your desktop</dt><dd id="dt-reserve"
         <button id="cfg-revert" class="key" disabled><span aria-hidden="true">&lt;</span>Erase</button>
         <span id="cfg-status" class="cfg-status" role="status">No unsaved changes</span>
         <button id="cfg-save" class="key key-insert" disabled>Insert<span aria-hidden="true">&gt;</span></button>
-)HTML"
-R"HTML(        <button id="cfg-save-restart" class="key" disabled>Insert + restart<span aria-hidden="true">&gt;</span></button>
+        <button id="cfg-save-restart" class="key" disabled>Insert + restart<span aria-hidden="true">&gt;</span></button>
       </div>
     </section>
 
@@ -1586,8 +1577,7 @@ R"HTML(        <button id="cfg-save-restart" class="key" disabled>Insert + resta
 
   function selectView() {
     if (location.hash === '#main') { $('main').focus(); return; }
-)HTML"
-R"HTML(    const [head, sub] = location.hash.slice(1).split('/');
+    const [head, sub] = location.hash.slice(1).split('/');
     activeView = viewNames.includes(head) ? head : 'overview';
     document.querySelectorAll('.view').forEach(el => { el.hidden = el.id !== 'view-' + activeView; });
     document.querySelectorAll('[data-view]').forEach(el => {
@@ -1700,27 +1690,27 @@ R"HTML(    const [head, sub] = location.hash.slice(1).split('/');
     (s.engine_capacity_line || '').split(' ').forEach(tok => { const eq = tok.indexOf('='); if (eq > 0) cap[tok.slice(0, eq)] = tok.slice(eq + 1); });
     const num = v => Number.isFinite(Number(v)) ? Number(v).toLocaleString() : (v || '—');
     const gibv = v => Number.isFinite(Number(v)) ? (Number(v) / GiB).toFixed(2) + ' GiB' : '—';
-    const reduced = eng.kv_capacity_effective > 0;
-    const kvRunning = cap.kv_capacity_tokens || (reduced ? eng.kv_capacity_effective : flags['--kv-capacity']);
+    const budget = (s.admin_vram || {}).plan || {};
+    const contextRunning = Number.isFinite(budget.context_capacity_bytes)
+      ? gibv(budget.context_capacity_bytes) : flags['--context-capacity'] || 'auto';
     const spec = flags['--spec'] ? `${flags['--spec']}${flags['--draft-tokens'] ? ' K' + flags['--draft-tokens'] : ''}` : 'off';
-    annunciate($('plan-mode'), reduced ? 'Reduced by supervisor' : 'As configured', reduced ? 'amber' : 'green');
-    const brief = [kvRunning ? 'KV ' + shortTokens(kvRunning) : null, flags['--max-context'] ? 'ctx ' + shortTokens(flags['--max-context']) : null,
+    annunciate($('plan-mode'), 'Engine plan', 'green');
+    const brief = ['Context ' + contextRunning, flags['--max-context'] ? 'ctx ' + shortTokens(flags['--max-context']) : null,
       (flags['--max-concurrency'] || 1) + ' lane' + (Number(flags['--max-concurrency'] || 1) === 1 ? '' : 's'), 'spec ' + spec, flags['--kv-dtype'] ? 'KV ' + flags['--kv-dtype'] : null].filter(Boolean);
     $('plan-brief').textContent = brief.join(' · ');
-    $('plan-brief').title = reduced ? (eng.kv_capacity_note || 'The configured KV capacity did not fit beside other apps on the card.') : '';
+    $('plan-brief').title = 'The Engine plans KV and recurrent state together at startup.';
     const rows = [
-      ['KV capacity', reduced ? `${num(kvRunning)} of ${num(eng.kv_capacity_configured)} configured` : `${num(kvRunning)} tokens`],
+      ['Context capacity', contextRunning],
       ['Max context', num(flags['--max-context'])],
       ['Concurrent requests', num(flags['--max-concurrency'])],
       ['Speculation', flags['--spec'] ? `${flags['--spec']}${flags['--draft-tokens'] ? ', ' + flags['--draft-tokens'] + ' drafts' : ''}` : 'off'],
       ['KV cache', flags['--kv-dtype'] || 'default'],
       ['Desktop reserve', flags['--desktop-reserve'] ? flags['--desktop-reserve'] : 'engine default'],
-      ['Engine reservation', gibv(cap.runtime_reservation_bytes)],
-      ['Left after startup', gibv(cap.available_after_startup_bytes)],
+      ['Engine reservation', gibv(budget.runtime_reservation_bytes)],
+      ['Left after startup', gibv(budget.available_after_startup_bytes)],
     ];
-    let html = '<h2 class="cdu-subhead">Running plan <span class="cdu-tag ' + (reduced ? 'amber' : 'green') + '">' + (reduced ? 'Reduced by supervisor' : 'As configured') + '</span></h2><dl>';
+    let html = '<h2 class="cdu-subhead">Running plan <span class="cdu-tag green">Engine plan</span></h2><dl>';
     rows.forEach(([k, v]) => { html += `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`; });
-    if (reduced) html += `<div class="plan-compromise"><strong>Compromise:</strong> ${esc(eng.kv_capacity_note || 'the configured KV capacity did not fit beside other apps on the card.')}</div>`;
     html += '</dl><h2 class="cdu-subhead">Exact launch command</h2><code>' + esc(args.join(' ')) + '</code>';
     el.innerHTML = html;
     el.hidden = false;
@@ -1787,8 +1777,7 @@ R"HTML(    const [head, sub] = location.hash.slice(1).split('/');
     if (active) return active.name || active.id;
     if (modelCatalog && modelCatalog.active_artifact_label) return modelCatalog.active_artifact_label;
     const artifact = engine && engine.artifact;
-)HTML"
-R"HTML(    return artifact ? artifact.split(/[\\/]/).pop().replace(/\.ninfer$/, '').replace(/_/g, ' ') : 'Local model';
+    return artifact ? artifact.split(/[\\/]/).pop().replace(/\.ninfer$/, '').replace(/_/g, ' ') : 'Local model';
   }
   function renderModelCatalog(data) {
     modelCatalog = data;
@@ -1989,8 +1978,7 @@ R"HTML(    return artifact ? artifact.split(/[\\/]/).pop().replace(/\.ninfer$/, 
       if (ev.t_ms < win.t0 || ev.t_ms > win.t1) return;
       const x = Math.round(xOf(ev.t_ms)) + .5;
       const col = /up/.test(ev.kind) ? C.green : /stop/.test(ev.kind) ? C.ink : C.amber;
-)HTML"
-R"HTML(      c.strokeStyle = col; c.globalAlpha = .55; c.lineWidth = 1; c.setLineDash([2, 3]);
+      c.strokeStyle = col; c.globalAlpha = .55; c.lineWidth = 1; c.setLineDash([2, 3]);
       c.beginPath(); c.moveTo(x, PAD_TOP + 6); c.lineTo(x, H - PAD_BOTTOM); c.stroke();
       c.setLineDash([]); c.globalAlpha = 1;
       c.fillStyle = col;
@@ -2210,8 +2198,7 @@ R"HTML(      c.strokeStyle = col; c.globalAlpha = .55; c.lineWidth = 1; c.setLin
     if (floor > 0 && total > 0) {
       const y = Math.round(yOf(total - floor)) + .5;
       c.font = '600 11px Bahnschrift, sans-serif'; c.textAlign = 'left'; c.textBaseline = 'alphabetic';
-)HTML"
-R"HTML(      const w = c.measureText('DESKTOP RESERVE').width;
+      const w = c.measureText('DESKTOP RESERVE').width;
       c.fillStyle = C.glass; c.fillRect(3, y - 15, w + 6, 12);
       c.fillStyle = C.reserveLabel; c.fillText('DESKTOP RESERVE', 6, y - 5);
     }
@@ -2421,8 +2408,7 @@ R"HTML(      const w = c.measureText('DESKTOP RESERVE').width;
   if (window.ResizeObserver) { const ro = new ResizeObserver(placeSeams); ro.observe(monitorGrid); ro.observe(memDisplay); }
   applySplit();
 
-)HTML"
-R"HTML(  function cursorFromPointer(canvas, e) {
+  function cursorFromPointer(canvas, e) {
     const win = lastState && timeWindow(lastState);
     if (!win) return;
     const r = canvas.getBoundingClientRect();
@@ -2551,13 +2537,12 @@ R"HTML(  function cursorFromPointer(canvas, e) {
       if (Number.isInteger(e.inferred_draft_window)) actions.push(`Later draft positions are rarely accepted. A draft window of ${e.inferred_draft_window} may generate faster; this is inferred from the curve, so measure before keeping it.`);
       return {title:'How many drafted tokens were accepted', body:`${pct(e.acceptance_ratio)} of ${(e.drafted_tokens || 0).toLocaleString()} drafted tokens were accepted across ${e.requests_with_drafts || 0} requests${curve ? ` (by position: ${curve})` : ''}. The engine decoded without a draft on ${pct(e.fallback_share)} of steps.`, action:actions.join(' ')};
     }
-    if (id === 'capacity.context_kv_pressure') {
+    if (id === 'capacity.context_pressure') {
       const pct = r => Math.round((r || 0) * 100) + '%';
-      const cfg = e.config || {}, req = e.requests || {}, kv = e.kv || {}, sch = e.scheduler || {};
+      const cfg = e.config || {}, req = e.requests || {}, context = e.context || {}, sch = e.scheduler || {};
       if (it.availability === 'unavailable') return {title:'Capacity limits are not measurable yet', body:cfg.max_context ? 'The engine has not reported its memory use yet. This appears after the first activity sample.' : 'The log does not record this engine start, so traffic cannot be compared with its limits.'};
-)HTML"
-R"HTML(      const actions = {large_prompt:'A request came within 10% of the context limit. Raise Max context in Request capacity if GPU memory allows, or shorten long conversations.', kv_admission:'Requests waited because the conversation memory was full. Raise KV capacity if GPU memory allows, otherwise lower Max context to bound memory growth per request.', lanes_full:'Requests waited because every concurrent slot was busy. Raise Max concurrency only if KV capacity and GPU memory leave room for another request.', cache_churn:'KV pages moved to host memory to make room. Restoring them adds transfer work. Raise KV capacity if GPU memory allows.', preempted:'Requests were paused to make room and needed recovery. Raise KV capacity if GPU memory allows, or reduce concurrent demand.'};
-      return {title:'How close you are to the context and memory limits', body:`The largest request used ${pct(req.largest_context_ratio)} of the ${(cfg.max_context || 0).toLocaleString()}-token context limit across ${req.count || 0} requests. Conversation memory peaked at ${pct(kv.utilization_high_water)} of capacity${kv.includes_retained_checkpoints ? ' (including saved conversation state)' : ''}, with up to ${sch.peak_running || 0} of ${cfg.max_concurrency || 0} requests running at once.`, action:actions[e.kind] || ''};
+      const actions = {large_prompt:'A request came within 10% of the context limit. Raise Max context in Request capacity if GPU memory allows, or shorten long conversations.', kv_admission:'Requests waited because the conversation memory was full. Raise Context capacity if GPU memory allows, otherwise lower Max context to bound memory growth per request.', lanes_full:'Requests waited because every concurrent slot was busy. Raise Max concurrency only if Context capacity and GPU memory leave room for another request.', cache_churn:'KV pages moved to host memory to make room. Restoring them adds transfer work. Raise Context capacity if GPU memory allows.', preempted:'Requests were paused to make room and needed recovery. Raise Context capacity if GPU memory allows, or reduce concurrent demand.'};
+      return {title:'How close you are to the context and memory limits', body:`The largest request used ${pct(req.largest_context_ratio)} of the ${(cfg.max_context || 0).toLocaleString()}-token context limit across ${req.count || 0} requests. Conversation memory peaked at ${pct(context.utilization_high_water)} of capacity${context.includes_retained_checkpoints ? ' (including saved conversation state)' : ''}, with up to ${sch.peak_running || 0} of ${cfg.max_concurrency || 0} requests running at once.`, action:actions[e.kind] || ''};
     }
     if (id === 'prefix.reuse_mix') return {title:'Reusing earlier conversation text', body:e.multi_turn_prompt_tokens > 0 ? `${((e.multi_turn_hit_ratio || 0) * 100).toFixed(0)}% of conversation prompt tokens were reused in the available log. Reuse can make follow-up responses start sooner.` : 'No multi-turn prompt samples are available yet. Reuse can make follow-up responses start sooner.'};
     if (id === 'client.narrated_tool_intent') return {title:'Tool behavior needs a conversation sample', body:'The log records whether tools were provided, but not what the model said. It cannot explain a promised tool action that did not happen.'};
@@ -2672,8 +2657,7 @@ R"HTML(      const actions = {large_prompt:'A request came within 10% of the con
     status.textContent = info.pinned ? 'This target is set in MiB in your launch configuration. Edit that configuration to change it.' : s.monitor_only ? 'Change the reserve in the application that starts this engine.' : !budget.ok ? budget.reason || 'Waiting for a model memory plan.' : value > max ? `This ${value} GiB target exceeds the current ${max} GiB limit. Lower it before saving or restarting.` : reserveBusy ? 'Saving reserve…' : reserveDraft != null ? 'Temporary revision. Inserting keeps your engine running; it applies at the next start.' : pending ? 'Saved. Restart the engine when convenient to apply this target.' : 'Changes take effect on the next engine start.';
     status.className = 'cdu-data' + (value > max && budget.ok ? ' red' : reserveDraft != null ? ' amber' : '');
     const ro = $('ro-reserve');
-)HTML"
-R"HTML(    ro.textContent = active && running ? `${(active.configured_bytes / GiB).toFixed(0)} GiB` : `${saved} GiB`;
+    ro.textContent = active && running ? `${(active.configured_bytes / GiB).toFixed(0)} GiB` : `${saved} GiB`;
     ro.title = `Running ${active && running ? (active.configured_bytes / GiB).toFixed(1) + ' GiB' : 'unavailable'}; next start ${saved} GiB`;
     $('sum-reserve').textContent = (reserveDraft != null ? `staged ${value} GiB · ` : '') + `${saved} GiB next start` + (active && running ? ` · ${(active.configured_bytes / GiB).toFixed(1)} GiB running` : '');
     $('sum-reserve').className = 'lsk-sum' + (reserveDraft != null ? ' amber' : '');
@@ -2805,10 +2789,8 @@ R"HTML(    ro.textContent = active && running ? `${(active.configured_bytes / Gi
       reservationEl.textContent = '—';
     }
     $('dt-last-event').textContent = eng.last_event || '—';
-    const kvEl = $('dt-kv-capacity');
-    if (eng.kv_capacity_effective > 0) kvEl.textContent = eng.kv_capacity_effective.toLocaleString() + ' of ' + eng.kv_capacity_configured.toLocaleString() + ' tokens configured. ' + (eng.kv_capacity_note || '');
-    else if (eng.kv_capacity_configured > 0) kvEl.textContent = eng.kv_capacity_configured.toLocaleString() + ' tokens, as configured';
-    else kvEl.textContent = '—';
+    const kvEl = $('dt-context-capacity');
+    kvEl.textContent = av && av.plan ? gib(av.plan.context_capacity_bytes) + ' for KV and state' : '—';
     $('dt-health-check').textContent = s.health ? `HTTP ${s.health.status} (${s.health.body || 'OK'})` : '—';
     $('dt-capacity-text').textContent = s.engine_capacity_line || 'No capacity report is available yet.';
 
@@ -2836,8 +2818,7 @@ R"HTML(    ro.textContent = active && running ? `${(active.configured_bytes / Gi
     $('kpi-thr-window').className = 'display-source' + (running > 0 ? ' green' : '');
     $('band-run').textContent = `${running}${lanes ? ' / ' + lanes : ''}`;
     $('kpi-ttft').textContent = Number.isFinite(reqs.ttft_ms_mean) ? duration(reqs.ttft_ms_mean) : 'No data yet';
-)HTML"
-R"HTML(    $('kpi-done').textContent = reqs.done != null ? reqs.done.toLocaleString() : '—';
+    $('kpi-done').textContent = reqs.done != null ? reqs.done.toLocaleString() : '—';
 
     // Speculative telemetry. A configured backend with no drafts yet is a
     // different state from no backend at all, and neither is an acceptance of 0.
@@ -3040,8 +3021,7 @@ R"HTML(    $('kpi-done').textContent = reqs.done != null ? reqs.done.toLocaleStr
     // reflects what would actually change rather than what was touched.
     const same = typeof original === 'boolean' ? value === original : String(value) === String(original == null ? '' : original);
     if (same) delete cfgEdits[section][key]; else cfgEdits[section][key] = value;
-)HTML"
-R"HTML(    cfgSetDirtyUi();
+    cfgSetDirtyUi();
   }
 
   function tokenFieldValue(el) {
@@ -3059,129 +3039,61 @@ R"HTML(    cfgSetDirtyUi();
     if (/^\d+$/.test(String(raw))) { const n = Number(raw); if (n >= 1 && n <= 8) return {n, explicit: true}; }
     return {n: 1, explicit: false};
   }
-  let capacityPairBusy = false;
   function updateCapacityPreview() {
-    const preview = $('capacity-preview');
-    if (!preview) return;
-    const slotsEl = $('capacity-slots'), noteEl = $('capacity-preview-note');
-    const ctx = tokenFieldValue($('param-max_context')), kv = tokenFieldValue($('param-kv_capacity'));
+    const note = $('capacity-preview-note'), slots = $('capacity-slots');
+    if (!note || !slots) return;
     const lanes = parsedConcurrency();
-    const marks = [];
-    let note = '';
-    const laneWords = lanes.explicit ? (lanes.n + ' active lane' + (lanes.n === 1 ? '' : 's')) : 'the engine default of 1 active request';
-    if (kv.kind === 'auto') {
-      note = ctx.kind === 'num'
-        ? 'Auto sizes the shared pool from free GPU memory at startup. Each request is still limited to ' + shortTokens(ctx.n) + '. Up to 8 requests can be active; that 8 is the Engine lane cap, not a memory estimate.'
-        : 'Auto sizes the shared pool from free GPU memory at startup. Up to 8 requests can be active; that 8 is the Engine lane cap, not a memory estimate.';
-    } else if (kv.kind === 'default') {
-      note = 'The pool follows max context, so one full-length request fills it. Extra concurrent requests share that length. ' + (lanes.explicit ? lanes.n + ' of 8 Engine lanes are enabled.' : 'Omitting max concurrency uses 1 of 8 Engine lanes.');
-      marks.push('fit');
-      for (let i = 1; i < lanes.n; i++) marks.push('share');
-    } else if (kv.kind === 'num' && ctx.kind === 'num') {
-      const fit = ctx.n > 0 ? Math.floor(kv.n / ctx.n) : 0;
-      const usable = Math.min(fit, lanes.n);
-      for (let i = 0; i < usable; i++) marks.push('fit');
-      for (let i = usable; i < lanes.n; i++) marks.push('share');
-      if (fit < 1) note = 'This pool cannot hold one request at ' + shortTokens(ctx.n) + ' tokens. Raise KV capacity or lower max context.';
-      else if (fit >= lanes.n) note = 'This pool holds ' + fit + ' full-length request' + (fit === 1 ? '' : 's') + ' at ' + shortTokens(ctx.n) + '. ' + laneWords + ' can each take a full-length request. 8 is the Engine maximum, not GPU memory.';
-      else note = 'This pool holds ' + fit + ' full-length request' + (fit === 1 ? '' : 's') + ' at ' + shortTokens(ctx.n) + '. ' + laneWords + ' share the pool, so extra concurrent requests must be shorter. 8 is the Engine maximum.';
-    } else if (kv.kind === 'num') {
-      note = 'Shared pool: ' + shortTokens(kv.n) + ' tokens. Set max context to see how many full-length requests fit. Max concurrency is how many of the Engine’s 8 lanes are enabled.';
-    } else {
-      note = 'Set the KV pool first, then max context inside it. Max concurrency chooses how many of the Engine’s 8 lanes may be active.';
+    const capacity = $('param-context_capacity');
+    const context = tokenFieldValue($('param-max_context'));
+    const raw = capacity ? capacity.value : '';
+    const automatic = raw === '' || raw === 'auto';
+    note.textContent = (automatic
+      ? 'Auto sizes GPU memory for KV and recurrent state from the startup budget.'
+      : 'The Engine checks ' + raw + ' against this model’s KV, state and concurrent working sets.')
+      + ' ' + lanes.n + ' execution lane' + (lanes.n === 1 ? '' : 's') + ' enabled.'
+      + (context.kind === 'num' ? ' Each request is limited to ' + shortTokens(context.n) + ' tokens.' : '')
+      + ' Memory pressure can pause requests; enabled lanes do not promise that all maximum-length requests fit together.';
+    slots.replaceChildren();
+    for (let i = 0; i < 8; i++) {
+      const mark = document.createElement('span');
+      if (i < lanes.n) mark.className = 'share';
+      slots.appendChild(mark);
     }
-    while (marks.length < 8) marks.push('');
-    slotsEl.replaceChildren();
-    marks.slice(0, 8).forEach(kind => { const tick = document.createElement('span'); if (kind) tick.className = kind; slotsEl.appendChild(tick); });
-    noteEl.textContent = note;
   }
-  function enforceCapacityPair(sourceId, reason) {
-    if (capacityPairBusy) return;
-    const ctxEl = $('param-max_context'), kvEl = $('param-kv_capacity');
-    if (!ctxEl || !kvEl) return;
-    const ctx = tokenFieldValue(ctxEl), kv = tokenFieldValue(kvEl);
-    const clamp = reason === 'slider' || reason === 'blur' || reason === 'sync';
-    const lanes = parsedConcurrency();
-    const poolCap = ctx.kind === 'num' ? lanes.n * ctx.n : null;
-    if (kv.kind === 'num' && ctx.kind === 'num' && ctx.n > kv.n) {
-      if (clamp) { capacityPairBusy = true; ctxEl.value = String(kv.n); ctxEl.oninput(); capacityPairBusy = false; }
-      else if (sourceId === 'param-max_context') ctxEl.setCustomValidity('Max context cannot exceed the KV pool (' + kv.n.toLocaleString() + ' tokens). Enlarge the pool first.');
-      else if (sourceId === 'param-kv_capacity') kvEl.setCustomValidity('KV pool must cover max context (' + ctx.n.toLocaleString() + ' tokens).');
-    } else if (kv.kind === 'num' && poolCap != null && kv.n > poolCap) {
-      if (clamp) { capacityPairBusy = true; kvEl.value = String(poolCap); kvEl.oninput(); capacityPairBusy = false; }
-      else kvEl.setCustomValidity('KV pool cannot exceed ' + lanes.n + ' × max context (' + poolCap.toLocaleString() + ' tokens). Raise max context or max concurrency.');
-    }
-    if (ctxEl._capacitySync) ctxEl._capacitySync(true);
-    if (kvEl._capacitySync) kvEl._capacitySync(true);
+  function refreshCapacityControls() {
+    const context = $('param-max_context');
+    if (context && context._capacitySync) context._capacitySync();
     updateCapacityPreview();
   }
   function capacitySlider(spec, input) {
     const controls = document.createElement('div'); controls.className = 'cfg-token-controls';
     const summary = document.createElement('div'); summary.className = 'cfg-token-summary';
-    const caption = document.createElement('span'); caption.textContent = spec.key === 'kv_capacity' ? 'Shared pool' : 'Per request';
+    const caption = document.createElement('span'); caption.textContent = 'Per request';
     const output = document.createElement('output'); output.htmlFor = input.id;
     summary.append(caption, output);
     const slider = document.createElement('input');
-    slider.type = 'range'; slider.className = 'cfg-token-slider'; slider.id = input.id + '-slider'; slider.min = 0; slider.step = 1;
+    slider.type = 'range'; slider.className = 'cfg-token-slider'; slider.min = 0; slider.step = 1;
     slider.setAttribute('aria-label', spec.label + ' common sizes');
-    slider.setAttribute('aria-describedby', input.id + '-help');
-    const scale = document.createElement('div'); scale.className = 'cfg-token-scale'; scale.setAttribute('aria-hidden', 'true');
-    const automatic = spec.kind === 'int_or_auto';
-    const specials = automatic ? ['', 'auto'] : [''];
     const presets = [];
-    for (let n = automatic ? 8192 : 4096; n <= spec.max; n *= 2) if (n >= spec.min) presets.push(n);
+    for (let size = 4096; size <= spec.max; size *= 2) if (size >= spec.min) presets.push(size);
     let stops = [];
-    const stopLabel = value => value === '' ? 'Default' : value === 'auto' ? 'Auto' : Number.isFinite(Number(value)) ? shortTokens(Number(value)) : value;
-    function numericMax() {
-      if (spec.key === 'max_context') { const kv = tokenFieldValue($('param-kv_capacity')); return kv.kind === 'num' ? Math.min(spec.max, kv.n) : spec.max; }
-      if (spec.key === 'kv_capacity') { const ctx = tokenFieldValue($('param-max_context')); if (ctx.kind === 'num') return Math.min(spec.max, parsedConcurrency().n * ctx.n); }
-      return spec.max;
-    }
-    function sync(rebuild = true) {
-      const raw = input.value, n = Number(raw), maxN = numericMax();
-      const inRange = /^\d+$/.test(raw) && Number.isInteger(n) && n >= spec.min && n <= spec.max;
-      const numeric = inRange && n <= maxN;
-      const isAuto = automatic && raw === 'auto';
-      let valid = numeric || isAuto || raw === '';
-      let validity = valid ? '' : 'Enter a whole token count from ' + spec.min + ' to ' + spec.max + (automatic ? ', or auto.' : '.');
-      if (inRange && n > maxN) {
-        valid = false;
-        validity = spec.key === 'kv_capacity' ? 'KV pool cannot exceed max concurrency × max context (' + maxN.toLocaleString() + ' tokens).' : 'Max context cannot exceed the KV pool (' + maxN.toLocaleString() + ' tokens). Enlarge the pool first.';
-      }
-      input.setCustomValidity(validity);
-      if (rebuild) {
-        const sizes = presets.filter(p => p <= maxN);
-        if (numeric && !sizes.includes(n)) sizes.push(n);
-        sizes.sort((a, b) => a - b);
-        stops = [...specials, ...sizes.map(String)];
-        slider.max = Math.max(0, stops.length - 1);
-      }
+    function sync() {
+      const value = tokenFieldValue(input);
+      const valid = value.kind === 'default' || (value.kind === 'num' && value.n >= spec.min && value.n <= spec.max);
+      input.setCustomValidity(valid ? '' : 'Enter a whole token count from ' + spec.min + ' to ' + spec.max + '.');
+      const sizes = [...presets];
+      if (value.kind === 'num' && valid && !sizes.includes(value.n)) sizes.push(value.n);
+      sizes.sort((a,b) => a-b); stops = ['', ...sizes.map(String)];
+      slider.max = stops.length - 1;
+      slider.value = Math.max(0, stops.indexOf(input.value));
       slider.disabled = input.disabled;
-      const idx = numeric ? stops.indexOf(String(n)) : isAuto ? stops.indexOf('auto') : 0;
-      slider.value = idx < 0 ? 0 : idx;
-      const custom = numeric && !presets.includes(n);
-      output.textContent = numeric ? (custom ? 'Custom · ' + n.toLocaleString() : shortTokens(n)) + ' tokens' : isAuto ? 'Auto' : raw === '' ? 'Engine default' : 'Check token count';
-      slider.setAttribute('aria-valuetext', numeric ? n.toLocaleString() + ' tokens' + (custom ? ' (custom)' : '') : isAuto ? 'Auto: size from free memory' : raw === '' ? (automatic ? 'Engine default: follow max context' : 'Engine default') : 'Choose a valid size');
-      scale.replaceChildren();
-      const last = stops.length - 1;
-      const tickAt = last <= 0 ? [0] : [0, Math.ceil(last / 2), last];
-      const seen = new Set();
-      for (const index of tickAt) {
-        if (seen.has(index) || !stops[index] && stops[index] !== '') continue;
-        seen.add(index);
-        const tick = document.createElement('span');
-        tick.textContent = stopLabel(stops[index]);
-        tick.style.left = last === 0 ? '0%' : (index / last * 100) + '%';
-        scale.appendChild(tick);
-      }
+      output.textContent = value.kind === 'num' ? shortTokens(value.n) + ' tokens' : value.kind === 'default' ? 'Engine default' : 'Check token count';
+      slider.setAttribute('aria-valuetext', output.textContent);
     }
     input._capacitySync = sync;
-    slider.oninput = () => { input.value = stops[Number(slider.value)]; input.oninput(); enforceCapacityPair(input.id, 'slider'); sync(false); };
-    input.addEventListener('input', () => { sync(); if (!capacityPairBusy) enforceCapacityPair(input.id, 'type'); });
-    input.addEventListener('blur', () => enforceCapacityPair(input.id, 'blur'));
-    sync();
-    controls.append(summary, slider, scale);
-    return controls;
+    slider.oninput = () => { input.value = stops[Number(slider.value)]; input.oninput(); sync(); updateCapacityPreview(); };
+    input.addEventListener('input', () => { sync(); updateCapacityPreview(); });
+    sync(); controls.append(summary, slider); return controls;
   }
 
   function fieldRow(spec, value) {
@@ -3216,8 +3128,7 @@ R"HTML(    cfgSetDirtyUi();
       input.onchange = () => {
         cfgEdit('params', spec.key, input.value, original || '');
         input.classList.toggle('dirty', input.value !== (original || ''));
-)HTML"
-R"HTML(        if (spec.key === 'spec') {
+        if (spec.key === 'spec') {
           if (!input.value) {
             cfgEdit('params', 'draft_tokens', '', (cfgData.params || {}).draft_tokens || '');
             cfgEdit('params', 'lm_head_draft', false, (cfgData.params || {}).lm_head_draft === 'true');
@@ -3235,7 +3146,7 @@ R"HTML(        if (spec.key === 'spec') {
       input = document.createElement('input'); input.className = 'cfg-input';
       input.type = spec.kind === 'int' ? 'number' : 'text';
       if (spec.kind === 'int') { input.min = spec.min; input.max = spec.max; }
-      input.placeholder = spec.kind === 'int_or_auto' ? 'Engine default · ' + spec.min + '..' + spec.max + ' or auto' : 'Engine default';
+      input.placeholder = spec.kind === 'capacity_or_auto' ? 'auto or 8GiB' : 'Engine default';
       input.value = value == null ? '' : value;
       input.oninput = () => { cfgEdit('params', spec.key, input.value, original || ''); input.classList.toggle('dirty', input.value !== (original || '')); };
       wrap.appendChild(input);
@@ -3247,12 +3158,13 @@ R"HTML(        if (spec.key === 'spec') {
     input.setAttribute('aria-labelledby', label.id);
     input.setAttribute('aria-describedby', input.id + '-help');
     input.classList.toggle('dirty', Object.prototype.hasOwnProperty.call(cfgEdits.params, spec.key));
-    if (spec.key === 'max_context' || spec.key === 'kv_capacity') wrap.appendChild(capacitySlider(spec, input));
+    if (spec.key === 'max_context') wrap.appendChild(capacitySlider(spec, input));
+    if (spec.key === 'context_capacity') input.addEventListener('input', updateCapacityPreview);
     help.id = input.id + '-help';
-    help.textContent = (spec.kind === 'int' || spec.kind === 'int_or_auto') ? spec.help + ' Range ' + spec.min + '-' + spec.max + '.' : spec.help;
-    if (spec.key === 'max_context' || spec.key === 'kv_capacity') {
+    help.textContent = spec.kind === 'int' ? spec.help + ' Range ' + spec.min + '-' + spec.max + '.' : spec.help;
+    if (spec.key === 'max_context') {
       help.textContent += ' Pick a common size or enter an exact count. K = 1,024 tokens; M = 1,048,576.';
-      help.textContent += spec.key === 'kv_capacity' ? ' This is the shared pool. It must cover one full-length request and cannot exceed max concurrency × max context. Engine default omits the flag and follows max context. Auto sizes from free memory.' : ' Cannot exceed an explicit KV pool; enlarge the pool first.';
+
     }
     wrap.appendChild(help);
     return wrap;
@@ -3398,8 +3310,7 @@ R"HTML(        if (spec.key === 'spec') {
       if (!res.ok) { showCfgErrors(body.details || [body.error || ('HTTP ' + res.status)]); status.textContent = 'Not inserted'; return; }
       cfgData.frontends = body.frontends || [];
       if (lastState) lastState.frontends = body.status || [];
-)HTML"
-R"HTML(      feDraft = null;
+      feDraft = null;
       renderConfig();
       renderFrontends((lastState || {}).frontends || []);
       $('fe-status').textContent = 'Inserted and applied. The engine kept running.';
@@ -3450,18 +3361,18 @@ R"HTML(      feDraft = null;
       const specs = (cfgData.schema || []).filter(x => x.group === group && x.key !== 'desktop_reserve_gib');
       if (group === 'capacity') {
         const pair = document.createElement('div'); pair.className = 'cfg-capacity-pair';
-        const kvSpec = specs.find(sp => sp.key === 'kv_capacity'), ctxSpec = specs.find(sp => sp.key === 'max_context');
-        if (kvSpec) pair.appendChild(fieldRow(kvSpec, (cfgData.params || {}).kv_capacity));
+        const kvSpec = specs.find(sp => sp.key === 'context_capacity'), ctxSpec = specs.find(sp => sp.key === 'max_context');
+        if (kvSpec) pair.appendChild(fieldRow(kvSpec, (cfgData.params || {}).context_capacity));
         if (ctxSpec) pair.appendChild(fieldRow(ctxSpec, (cfgData.params || {}).max_context));
         const preview = document.createElement('div'); preview.className = 'cfg-capacity-preview'; preview.id = 'capacity-preview';
         const slots = document.createElement('div'); slots.className = 'cfg-capacity-slots'; slots.id = 'capacity-slots'; slots.setAttribute('aria-hidden', 'true');
         const note = document.createElement('p'); note.id = 'capacity-preview-note'; note.setAttribute('role', 'status');
         preview.append(slots, note); pair.appendChild(preview);
         cfgBody.appendChild(pair);
-        specs.filter(sp => sp.key !== 'kv_capacity' && sp.key !== 'max_context').forEach(spec => cfgBody.appendChild(fieldRow(spec, (cfgData.params || {})[spec.key])));
+        specs.filter(sp => sp.key !== 'context_capacity' && sp.key !== 'max_context').forEach(spec => cfgBody.appendChild(fieldRow(spec, (cfgData.params || {})[spec.key])));
         const conc = $('param-max_concurrency');
-        if (conc) { conc.addEventListener('input', () => enforceCapacityPair(conc.id, 'type')); conc.addEventListener('blur', () => enforceCapacityPair(conc.id, 'blur')); }
-        enforceCapacityPair('', 'sync');
+        if (conc) { conc.addEventListener('input', () => refreshCapacityControls(conc.id, 'type')); conc.addEventListener('blur', () => refreshCapacityControls(conc.id, 'blur')); }
+        refreshCapacityControls('', 'sync');
       } else {
         specs.forEach(spec => cfgBody.appendChild(fieldRow(spec, (cfgData.params || {})[spec.key])));
         if (group === 'memory') {
@@ -3489,8 +3400,8 @@ R"HTML(      feDraft = null;
     };
     set('sum-network', `engine ${val('engine', 'engine_host', eng.engine_host)}:${val('engine', 'engine_port', eng.engine_port)} · dashboard ${val('supervisor', 'host', sup.host)}:${val('supervisor', 'port', sup.port)}`, 'network');
     set('sum-api', `${eng.api_key_present ? 'API key required' : 'No API key'} · ${eng.request_log ? 'request log on' : 'no request log'}`, 'api');
-    const kv = pv('kv_capacity'), ctx = pv('max_context'), conc = pv('max_concurrency');
-    set('sum-capacity', `KV ${kv ? (kv === 'auto' ? 'auto' : shortTokens(kv)) : 'default'} · ctx ${ctx ? shortTokens(ctx) : 'default'} · ${conc || 1} lane${Number(conc || 1) === 1 ? '' : 's'}`, 'capacity');
+    const capacity = pv('context_capacity'), ctx = pv('max_context'), conc = pv('max_concurrency');
+    set('sum-capacity', `Context ${capacity || 'auto'} · ctx ${ctx ? shortTokens(ctx) : 'default'} · ${conc || 1} lane${Number(conc || 1) === 1 ? '' : 's'}`, 'capacity');
     const groupSummary = group => {
       const parts = (cfgData.schema || []).filter(sp => sp.group === group && sp.key !== 'desktop_reserve_gib').map(sp => {
         const v = pv(sp.key);
@@ -3535,8 +3446,7 @@ R"HTML(      feDraft = null;
       renderConfig();
       cfgStatus.className = 'cfg-status saved';
       const needsEngine = r.body.engine_restart_required, needsSup = r.body.supervisor_restart_required;
-)HTML"
-R"HTML(      cfgStatus.textContent = 'Inserted' + (needsEngine ? ' · takes effect when the engine restarts' : '') + (needsSup ? ' · dashboard host or port needs the supervisor restarted' : '');
+      cfgStatus.textContent = 'Inserted' + (needsEngine ? ' · takes effect when the engine restarts' : '') + (needsSup ? ' · dashboard host or port needs the supervisor restarted' : '');
       if (needsEngine) setPendingRestart(((lastState || {}).engine || {}).pid || 0);
       if (needsEngine || needsSup) notify('Settings inserted. Some changes need a restart before they take effect.');
       if (thenRestart && needsEngine) {
@@ -3646,8 +3556,7 @@ R"HTML(      cfgStatus.textContent = 'Inserted' + (needsEngine ? ' · takes effe
       b.onclick = () => benchSelect(e, 0);
       list.append(b);
     });
-)HTML"
-R"HTML(    if (!list.children.length) list.innerHTML = '<p class="cdu-small">No endpoint matches this filter.</p>';
+    if (!list.children.length) list.innerHTML = '<p class="cdu-small">No endpoint matches this filter.</p>';
   }
   function benchSetBody(obj) {
     benchBody.value = obj == null ? '' : JSON.stringify(obj, null, 2);
@@ -3829,8 +3738,7 @@ R"HTML(    if (!list.children.length) list.innerHTML = '<p class="cdu-small">No 
       if (type.includes('text/event-stream') && res.body) {
         const acc = {reasoning: '', text: '', tools: ''};
         benchView.text = acc; benchView.kind = 'sse';
-)HTML"
-R"HTML(        if (benchTab === 'body') benchTab = 'text';
+        if (benchTab === 'body') benchTab = 'text';
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '', last = 0;
@@ -4045,8 +3953,7 @@ R"HTML(        if (benchTab === 'body') benchTab = 'text';
       for (; j < lines.length; j++) {
         const l = lines[j];
         if (isBlank(l) || l.indexOf('|') < 0 || /^ {0,3}(?:>|#{1,6}[ \t]|`{3}|~{3})/.test(l)) break;
-)HTML"
-R"HTML(        const row = splitRow(l);
+        const row = splitRow(l);
         html += '<tr>' + head.map((_, k) => cell('td', row[k] || '', k)).join('') + '</tr>';
       }
       return [html + '</tbody></table></div>', j];
@@ -4294,8 +4201,7 @@ R"HTML(        const row = splitRow(l);
       for (const nd of list) s += nd.t === 't' ? esc(nd.s) : nd.t === 'h' ? nd.s : '<' + nd.tag + '>' + nodesHtml(nd.c) + '</' + nd.tag + '>';
       return s;
     };
-)HTML"
-R"HTML(    // A bare address ends before trailing punctuation and an unbalanced closing bracket.
+    // A bare address ends before trailing punctuation and an unbalanced closing bracket.
     function trimUrl(u) {
       for (;;) {
         const last = u[u.length - 1];
@@ -4538,8 +4444,7 @@ R"HTML(    // A bare address ends before trailing punctuation and an unbalanced 
       const special = CHAT_SPECIAL_TOKENS.has(t.token);
       const band = t.forced ? 'tok-forced' : special ? 'tok-special' : p < .2 ? 'tok-low' : p < .5 ? 'tok-mid' : '';
       const alts = (t.top_logprobs || []).map(a => `${JSON.stringify(a.token)} ${(100 * chatProb(a.logprob)).toFixed(1)}%`).join('\n');
-)HTML"
-R"HTML(      const tip = t.forced ? 'Inserted by the thinking budget' : special ? `Special token · ${(100 * p).toFixed(1)}%` : `${(100 * p).toFixed(1)}%${alts ? '\n' + alts : ''}`;
+      const tip = t.forced ? 'Inserted by the thinking budget' : special ? `Special token · ${(100 * p).toFixed(1)}%` : `${(100 * p).toFixed(1)}%${alts ? '\n' + alts : ''}`;
       return `<span class="tok ${band}" data-tok="${offset + idx}" tabindex="0" title="${esc(tip)}">${esc(t.token)}</span>`;
     }).join('');
   }
@@ -4787,8 +4692,7 @@ R"HTML(      const tip = t.forced ? 'Inserted by the thinking budget' : special 
     now.parentElement.title = mode === 'default' && !def.known ? 'The configured budget is not known here. Check generation.max_tokens or --max-tokens in the startup configuration; the server default is 8,192.' : 'The output budget the next request carries';
     $('chat-schema-row').hidden = $('chat-format').value !== 'json_schema';
     const lp = $('chat-logprobs').checked;
-)HTML"
-R"HTML(    $('chat-top-logprobs').disabled = !lp;
+    $('chat-top-logprobs').disabled = !lp;
     const effortEl = document.querySelector('#chat-settings [data-param="reasoning_effort"]');
     const budgetEl = document.querySelector('#chat-settings [data-param="thinking_budget_tokens"]');
     const thinkOff = chat.think === 'off';
@@ -5030,8 +4934,7 @@ R"HTML(    $('chat-top-logprobs').disabled = !lp;
     $('chat-hint').textContent = '';
   }));
   $('chat-params-reset').onclick = () => { try { localStorage.removeItem(PARAMS_KEY); } catch (_) {} chatLoadParams(); };
-)HTML"
-R"HTML(  $('chat-system').addEventListener('input', () => { chat.system = $('chat-system').value; chatSave(); chatParamsUi(); });
+  $('chat-system').addEventListener('input', () => { chat.system = $('chat-system').value; chatSave(); chatParamsUi(); });
   document.querySelectorAll('[data-think]').forEach(b => {
     b.onclick = () => {
       chat.think = b.dataset.think;
@@ -5274,8 +5177,7 @@ R"HTML(  $('chat-system').addEventListener('input', () => { chat.system = $('cha
     const barW = W < 560 ? 52 : 76, barGap = 10;
     const plotX = EX_LEFT, plotW = Math.max(60, W - EX_LEFT - barGap - barW - 2);
     const gap = f.mtp ? EX_GAP : 0;
-)HTML"
-R"HTML(    const plotH = Math.max(f.R, H - EX_TOP - EX_BOTTOM - gap);
+    const plotH = Math.max(f.R, H - EX_TOP - EX_BOTTOM - gap);
     const rowH = plotH / f.R;
     const X0 = Math.round(plotX * dpr), PW = Math.max(1, Math.round(plotW * dpr));
     const ys = new Int32Array(f.R), ye = new Int32Array(f.R);
@@ -5488,8 +5390,7 @@ R"HTML(    const plotH = Math.max(f.R, H - EX_TOP - EX_BOTTOM - gap);
         }
         gtSum += gt[r]; eqSum += eq[r];
       }
-)HTML"
-R"HTML(      const share = eqSum > 0 ? (n - gtSum) / eqSum : 0;
+      const share = eqSum > 0 ? (n - gtSum) / eqSum : 0;
       perRow = new Int32Array(f.L);
       for (let r = 0; r < f.L; r++) perRow[r] = gt[r] + Math.round(eq[r] * share);
     }
@@ -5686,8 +5587,7 @@ R"HTML(      const share = eqSum > 0 ? (n - gtSum) / eqSum : 0;
   }
 
   fetch('/api/config').then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).then(d => {
-)HTML"
-R"HTML(    cfgData = d;
+    cfgData = d;
     updateEngineControls();
     updateConnectionGuide(d);
     cfgPath.textContent = d.config_path ? d.config_path.split(/[\\/]/).pop() : 'no config file';

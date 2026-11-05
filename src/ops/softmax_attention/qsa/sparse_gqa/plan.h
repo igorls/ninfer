@@ -31,8 +31,8 @@ struct SparseGqaLaunchPlan {
     bool split_values = false;
 };
 
-SparseGqaLaunchPlan select_sparse_gqa_launch(const PagedKVBatchLayerView& cache, SparseGqaPlan plan,
-                                             int queries, int batch, int sms);
+SparseGqaLaunchPlan select_sparse_gqa_launch(const ConstPagedKVBatchLayerView& cache,
+                                             SparseGqaPlan plan, int queries, int batch, int sms);
 
 struct SparseGqaWorkspace {
     Tensor numerator, maximum, sum;
@@ -51,9 +51,9 @@ void launch_sparse_gqa_instance(SparseGqaArguments arguments, KvCacheStorage sto
                                 SparseGqaPlan plan, SparseGqaLaunchPlan launch, int queries,
                                 CudaExecutionView execution);
 
-void launch_sparse_gqa(const Tensor& query, const Tensor& gate, const PagedKVBatchLayerView& cache,
-                       const QsaBatchView& batch, const QsaBlockSelection& selected,
-                       SparseGqaPlan plan, const SparseGqaWorkspace& scratch, Tensor& out,
-                       CudaExecutionView execution);
+void launch_sparse_gqa(const Tensor& query, const Tensor& gate,
+                       const ConstPagedKVBatchLayerView& cache, const QsaBatchView& batch,
+                       const QsaBlockSelection& selected, SparseGqaPlan plan,
+                       const SparseGqaWorkspace& scratch, Tensor& out, CudaExecutionView execution);
 
 } // namespace ninfer::ops::detail::qsa

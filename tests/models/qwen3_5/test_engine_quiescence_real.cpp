@@ -1,4 +1,5 @@
 #include "ninfer/engine.h"
+#include "context_budget.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -53,7 +54,6 @@ void exercise(const std::filesystem::path& artifact) {
     EngineOptions options;
     options.artifact_path = artifact;
     options.max_context = 512;
-    options.kv_capacity = KvCapacityPolicy::explicit_capacity(512);
     options.prefill_chunk = 128;
     options.max_concurrency = 1;
     options.max_pending_requests = 4;
@@ -69,6 +69,7 @@ void exercise(const std::filesystem::path& artifact) {
                                                ? ProposalHead::Full
                                                : ProposalHead::Optimized;
     }
+    ninfer::test::qwen3_5::set_context_capacity(options);
     Engine engine(options);
 
     // An idle worker must wake for the fence without a new generation request.

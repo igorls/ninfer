@@ -57,7 +57,7 @@ const char* param_kind_name(ParamKind kind) noexcept {
     case ParamKind::IntOrNone: return "text";
     case ParamKind::Enum: return "enum";
     case ParamKind::Flag: return "flag";
-    case ParamKind::IntOrAuto: return "int_or_auto";
+    case ParamKind::CapacityOrAuto: return "capacity_or_auto";
     }
     return "text";
 }
@@ -540,9 +540,6 @@ nlohmann::json DashboardServer::state_json() {
         {"last_exit_code", st.last_exit_code},
         {"last_event", st.last_event},
         {"crash_loop_halted", st.crash_loop_halted},
-        {"kv_capacity_configured", st.kv_capacity_configured},
-        {"kv_capacity_effective", st.kv_capacity_effective},
-        {"kv_capacity_note", st.kv_capacity_note},
         {"launch_args", st.launch_args},
         {"uptime_s", st.started_unix_ms == 0
                          ? 0
@@ -591,7 +588,7 @@ nlohmann::json DashboardServer::state_json() {
     // note_health_fail() count twice per second whenever a dashboard was open,
     // which halves the effective health-fail threshold.
     const std::string log = child_.log_tail(16 * 1024);
-    std::string cap       = extract_kv_capacity_line(log);
+    std::string cap       = extract_context_capacity_line(log);
     if (cap.empty()) { cap = snap.engine_capacity_line; }
     nlohmann::json insights = collector_.insights_report();
     return {{"monitor_only", !manages_engine_process(cfg_)},

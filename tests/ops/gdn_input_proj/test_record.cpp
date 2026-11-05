@@ -128,9 +128,7 @@ int run_case(std::string_view label, std::int32_t hidden, std::int32_t value_row
     DeviceBuffer record_state       = to_device(state_before);
     DeviceBuffer device_valid;
     if (!dense) { device_valid = to_device(valid_columns); }
-    DeviceBuffer device_initial          = to_device(initial_slots);
-    DeviceBuffer device_snapshot_initial = to_device(snapshot_initial_slots);
-    DeviceBuffer device_snapshot         = to_device(snapshot_bases);
+    DeviceBuffer device_snapshot = to_device(snapshot_bases);
 
     GuardedBf16Tensor snapshot_query(kQueryRows, aggregate_columns);
     GuardedBf16Tensor snapshot_key(kKeyRows, aggregate_columns);
@@ -145,15 +143,17 @@ int run_case(std::string_view label, std::int32_t hidden, std::int32_t value_row
     Tensor x(device_x.span(), DType::BF16, {hidden, width, batch});
     Tensor conv_weight(device_conv_weight.span(), DType::BF16, {channels, 4});
     Tensor snapshot_state_view(snapshot_state.span(), DType::BF16, {channels, 3, slots});
-    SlottedStateFixture snapshot_history(snapshot_state_view, 2);
-    snapshot_state_view = snapshot_history.tensor;
+    RecordStateFixture snapshot_history(snapshot_state_view, 2);
+    auto snapshot_offsets                = snapshot_history.record_offsets(snapshot_initial_slots);
+    DeviceBuffer device_snapshot_initial = to_device(snapshot_offsets);
     Tensor record_state_view(record_state.span(), DType::BF16, {channels, 3, source_slots});
-    SlottedStateFixture record_history(record_state_view, 2);
-    record_state_view = record_history.tensor;
+    RecordStateFixture record_history(record_state_view, 2);
+    auto initial_offsets        = record_history.record_offsets(initial_slots);
+    DeviceBuffer device_initial = to_device(initial_offsets);
     Tensor valid;
     if (!dense) { valid = Tensor(device_valid.span(), DType::I32, {batch}); }
-    Tensor initial(device_initial.span(), DType::I32, {batch});
-    Tensor snapshot_initial(device_snapshot_initial.span(), DType::I32, {batch});
+    Tensor initial(device_initial.span(), DType::I64, {batch});
+    Tensor snapshot_initial(device_snapshot_initial.span(), DType::I64, {batch});
     Tensor snapshot_base(device_snapshot.span(), DType::I32, {batch});
     Tensor snapshot_q(snapshot_query.span(), DType::BF16, {kQueryRows, width, batch});
     Tensor snapshot_k(snapshot_key.span(), DType::BF16, {kKeyRows, width, batch});
@@ -179,11 +179,12 @@ int run_case(std::string_view label, std::int32_t hidden, std::int32_t value_row
     const auto stream_execution = ninfer::test::cuda_environment().context.execution_view(stream);
     cuda_synchronize();
     const auto launch = [&] {
-        snapshot_launch(x, conv_weight, snapshot_state_view, valid, snapshot_initial, snapshot_base,
-                        snapshot_q, snapshot_k, snapshot_v, snapshot_z_view, snapshot_workspace,
-                        stream_execution);
-        record_launch(x, conv_weight, record_state_view, valid, initial, conv_record_view, record_q,
-                      record_k, record_v, record_z_view, record_workspace, stream_execution);
+        snapshot_launch(x, conv_weight, snapshot_history.view(snapshot_initial),
+                        snapshot_state_view, valid, snapshot_base, snapshot_q, snapshot_k,
+                        snapshot_v, snapshot_z_view, snapshot_workspace, stream_execution);
+        record_launch(x, conv_weight, record_history.view(initial), valid, conv_record_view,
+                      record_q, record_k, record_v, record_z_view, record_workspace,
+                      stream_execution);
     };
     launch();
     CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -204,6 +205,21 @@ int run_case(std::string_view label, std::int32_t hidden, std::int32_t value_row
         CUDA_CHECK(cudaMemcpyAsync(device_x.data(), activation_bits.data(),
                                    activation_bits.size() * sizeof(std::uint16_t),
                                    cudaMemcpyHostToDevice, stream));
+        if (!dense) {
+            valid_columns[0] = 1;
+            CUDA_CHECK(cudaMemcpyAsync(device_valid.data(), valid_columns.data(),
+                                       device_valid.size(), cudaMemcpyHostToDevice, stream));
+        }
+        for (int row = 0; row < batch; ++row) {
+            initial_slots[row]          = (initial_slots[row] + 1) % source_slots;
+            snapshot_initial_slots[row] = aggregate_columns + initial_slots[row];
+        }
+        initial_offsets  = record_history.record_offsets(initial_slots);
+        snapshot_offsets = snapshot_history.record_offsets(snapshot_initial_slots);
+        CUDA_CHECK(cudaMemcpyAsync(device_initial.data(), initial_offsets.data(),
+                                   device_initial.size(), cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(device_snapshot_initial.data(), snapshot_offsets.data(),
+                                   device_snapshot_initial.size(), cudaMemcpyHostToDevice, stream));
         CUDA_CHECK(cudaGraphLaunch(executable, stream));
         CUDA_CHECK(cudaStreamSynchronize(stream));
         CUDA_CHECK(cudaGraphExecDestroy(executable));
@@ -225,7 +241,6 @@ int run_case(std::string_view label, std::int32_t hidden, std::int32_t value_row
     failures += verify_zero_tail(std::string(label) + " value", record_value.bits(), value_rows,
                                  width, batch, valid_columns);
 
-    snapshot_history.copy_back();
     record_history.copy_back();
     failures += snapshot_history.verify_guards("snapshot history");
     failures += record_history.verify_guards("record history");
@@ -241,7 +256,7 @@ int run_case(std::string_view label, std::int32_t hidden, std::int32_t value_row
     failures += verify_preserved(std::string(label) + " x", device_x, activation_bits);
     failures +=
         verify_preserved(std::string(label) + " conv weight", device_conv_weight, conv_weight_bits);
-    failures += verify_preserved(std::string(label) + " initial", device_initial, initial_slots);
+    failures += verify_preserved(std::string(label) + " initial", device_initial, initial_offsets);
     if (!dense) {
         failures += verify_preserved(std::string(label) + " valid", device_valid, valid_columns);
     }

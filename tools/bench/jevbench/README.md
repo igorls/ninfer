@@ -239,8 +239,8 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNINFER_BUILD_MEDIA=OFF -DBUILD_
 cmake --build build --target ninfer-serve -j
 ./build/apps/ninfer-serve /content/models/flash-next/qwen3_8_flash_next_mixed.ninfer \
   --host 127.0.0.1 --port 8010 --model-id qwen3.8-flash-next \
-  --max-context 8192 --kv-capacity 32768 --max-concurrency 4 --prefill-chunk 2048 \
-  --desktop-reserve-gib 1 --kv-dtype fp8 --gdn-state-dtype bf16 --no-prefix-reuse
+  --max-context 8192 --context-capacity auto --max-concurrency 4 --prefill-chunk 2048 \
+  --desktop-reserve 1GiB --kv-dtype fp8 --no-prefix-reuse
 ```
 
 Download the [published artifact](https://huggingface.co/igorls/Qwen3.8-Flash-Next-mixed-NInfer)

@@ -33,7 +33,7 @@ ARTIFACT = json.loads((R / "artifact.json").read_text())["path"]
 REASON_DEV = int(sys.argv[1]) if len(sys.argv) > 1 else 400
 
 server_log = (R / "serve.log").open("w")
-server = subprocess.Popen([str(R / "build/apps/ninfer-serve"), ARTIFACT, "--max-context", "8192", "--kv-capacity", "65536",
+server = subprocess.Popen([str(R / "build/apps/ninfer-serve"), ARTIFACT, "--max-context", "8192", "--context-capacity", "auto",
                            "--max-concurrency", "8", "--prefill-chunk", "2048", "--kv-dtype", "fp8",
                            "--model-id", MODEL, "--host", "127.0.0.1", "--port", "8010"],
                           stdout=server_log, stderr=subprocess.STDOUT, start_new_session=True)

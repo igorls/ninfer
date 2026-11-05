@@ -31,6 +31,7 @@ struct CaptureGroup {
     PrefixShortlistKey key;
     std::uint32_t frontier = 0;
     std::vector<runtime::CheckpointRole> roles;
+    runtime::CheckpointOrigin origin = runtime::CheckpointOrigin::Semantic;
     SharedCandidateEvidence shared_evidence = SharedCandidateEvidence::None;
 };
 
@@ -113,7 +114,7 @@ struct CaptureReservation {
     SessionImpl* owner = nullptr;
     std::vector<std::pair<CheckpointHandle, runtime::CheckpointRole>> points;
     context::StateId state;
-    std::optional<context::HostAllocation> host;
+    std::optional<context::RecordReservation> host;
     std::uint32_t frontier = 0;
     ~CaptureReservation();
 };
@@ -134,7 +135,8 @@ struct RequestControl {
     bool publish_continuation   = true;
     std::vector<CaptureGroup> capture_groups;
     std::size_t next_capture = 0;
-    bool capture_pending     = false;
+    std::uint32_t last_saved = 0, last_intermediate_attempt = 0;
+    bool capture_pending = false;
 
     struct Prefill {
         qwen::PreparedPromptData prompt;
@@ -156,6 +158,7 @@ struct CheckpointState {
     Snapshot snapshot;
     runtime::CheckpointRole role = runtime::CheckpointRole::Continuation;
     PrefixShortlistKey key;
+    runtime::CheckpointOrigin origin = runtime::CheckpointOrigin::Semantic;
 
     [[nodiscard]] const Continuation& continuation() const noexcept {
         return snapshot.continuation();
@@ -189,6 +192,11 @@ struct CheckpointState {
 };
 
 using Checkpoints = context::CheckpointStore<CheckpointState>;
+
+struct PreparedCheckpoint {
+    Checkpoints::Reservation record;
+    std::shared_ptr<const PreparedCaptureBacking> identity;
+};
 
 struct ResumeStateImpl {
     SessionImpl* owner = nullptr;
@@ -230,6 +238,14 @@ struct CaptureOperation {
     std::vector<std::pair<CheckpointHandle, runtime::CheckpointRole>> points;
 };
 
+struct MaintenanceOperation {
+    static constexpr auto kind = ContextOperationKind::Maintenance;
+    std::optional<ContextDemotion> demotion;
+    std::vector<Checkpoints::Lease> source_leases;
+    std::optional<SequenceHandle> pause_sequence;
+    bool save_snapshot = false;
+};
+
 struct DemoteOperation {
     static constexpr auto kind = ContextOperationKind::Demote;
 };
@@ -239,20 +255,28 @@ struct PauseOperation {
     std::uint32_t lane;
     ResumeState paused;
     bool preserve_state_device = true;
-    bool discard_snapshot      = false;
 };
 
 struct PendingContext {
-    using Action = std::variant<BindOperation, CaptureOperation, DemoteOperation, PauseOperation>;
+    using Action = std::variant<BindOperation, CaptureOperation, DemoteOperation, PauseOperation,
+                                MaintenanceOperation>;
 
     PendingContext(context::ContextDirectory& directory, Action value)
         : transaction(directory), action(std::move(value)) {}
+
+    PendingContext(context::ContextTransaction&& prepared, Action value)
+        : transaction(std::move(prepared)), action(std::move(value)) {}
 
     context::ContextTransaction transaction;
     Action action;
     std::optional<runtime::ExecutionReservation> reservation;
     std::optional<runtime::ExecutionTicket> ticket;
     std::optional<ContextResult> result;
+    ContextWork input;
+    context::ContextActionCursor cursor;
+    bool submitted  = false;
+    bool last_batch = false;
+    std::vector<runtime::ContextTransferObservation> preceding_transfers;
 
     [[nodiscard]] std::optional<std::uint32_t> lane() const noexcept {
         return std::visit(
@@ -280,7 +304,6 @@ public:
                    std::span<const CheckpointHandle> private_points = {},
                    std::span<const CheckpointHandle> retired_points = {}) const;
     [[nodiscard]] PrefixShortlistKey checkpoint_key(CheckpointHandle, std::uint32_t frontier) const;
-    [[nodiscard]] ContextResources checkpoint_footprint(std::span<const CheckpointHandle>) const;
     [[nodiscard]] CheckpointSummary checkpoint_summary(CheckpointHandle checkpoint) const;
     [[nodiscard]] CheckpointMetadata checkpoint_metadata(CheckpointHandle checkpoint) const;
     [[nodiscard]] bool checkpoint_matches(CheckpointHandle checkpoint,
@@ -288,23 +311,26 @@ public:
     [[nodiscard]] std::uint32_t checkpoint_recovery_frontier(CheckpointHandle retained,
                                                              const RequestBasePlan& base,
                                                              std::uint32_t target) const;
-    // Borrows this Session's index; checkpoint publication or retirement invalidates the view.
-    [[nodiscard]] context::RecoveryEvaluation<>
-    evaluate_recovery(std::span<const CheckpointHandle> advertised) const;
     [[nodiscard]] bool valid_checkpoint(CheckpointHandle checkpoint) const noexcept;
     [[nodiscard]] bool release_checkpoint(CheckpointHandle checkpoint) noexcept;
     [[nodiscard]] bool revoke_snapshot(ResumeState& paused) noexcept;
-    [[nodiscard]] ContextResources snapshot_resources(const ResumeState& paused) const;
     // Exact Host bytes freed by deleting this fixed set, with physical sharing counted once.
     [[nodiscard]] std::size_t
     host_bytes_released(std::span<const CheckpointHandle> checkpoints) const;
-    [[nodiscard]] std::optional<std::size_t> pause_host_bytes(SequenceHandle sequence) const;
+    [[nodiscard]] std::optional<context::HostWriteRequirements>
+        pause_host_requirements(SequenceHandle) const;
+    [[nodiscard]] bool prepare_pause(SequenceHandle, bool save_snapshot,
+                                     std::span<const CheckpointHandle> host_victims);
+    [[nodiscard]] context::HostWriteRequirements
+    demotion_host_requirements(const ContextDemotion&) const;
+    [[nodiscard]] ContextDemotion combine_demotions(std::span<const ContextDemotion>) const;
     [[nodiscard]] std::size_t
     release_redundant_host(std::span<const CheckpointHandle> excluded,
                            std::optional<SequenceHandle> pending_backup = std::nullopt);
     // Reservations stay owned by their lane through commit. Failure leaves prior permits intact.
     [[nodiscard]] ResourceReservation reserve_units(std::span<const ExecutionUnit> units);
-    [[nodiscard]] bool reclaim_capture_reservation(ContextResources shortage);
+    [[nodiscard]] runtime::ContextStart start_maintenance(const ContextAssessment&);
+    [[nodiscard]] bool reclaim_capture_reservation(const ContextAssessment&);
     void release_units(std::span<const SequenceHandle> sequences) noexcept;
     [[nodiscard]] BindingReservation
     start_binding(const RequestBasePlan& base, runtime::LaneId lane, const SourceCandidate& source,
@@ -313,16 +339,26 @@ public:
                   std::uint32_t resume_tokens   = 1);
     [[nodiscard]] bool start_capture(SequenceHandle sequence);
     [[nodiscard]] bool capture_is_input(SequenceHandle sequence) const;
-    [[nodiscard]] std::optional<CapturePreparation> prepare_capture(SequenceHandle sequence);
-    void skip_capture(SequenceHandle sequence);
+    [[nodiscard]] std::optional<CapturePreparation>
+    prepare_capture(SequenceHandle sequence, std::span<const CheckpointHandle> host_victims = {});
+    void skip_capture(SequenceHandle sequence,
+                      runtime::CaptureSkip reason = runtime::CaptureSkip::Unavailable);
     // Finite physical actions, each including every optional holder needed for its release.
     [[nodiscard]] ContextReclaimPlan plan_reclaim(std::span<const CheckpointHandle> allowed,
                                                   std::span<const CheckpointHandle> excluded,
-                                                  ContextResources shortage) const;
-    [[nodiscard]] context::ReleasePlan<ContextRelease, ContextResources>
+                                                  const ContextDemand&) const;
+    [[nodiscard]] context::ReleasePlan<ContextRelease, ContextReleaseSet>
     plan_releases(std::span<const CheckpointHandle> allowed,
-                  std::span<const CheckpointHandle> excluded, ContextResources shortage) const;
-    [[nodiscard]] bool start_demote(const ContextDemotion& plan);
+                  std::span<const CheckpointHandle> excluded, const ContextDemand&) const;
+    [[nodiscard]] runtime::ContextStart
+    start_demote(const ContextDemotion&, std::span<const CheckpointHandle> host_victims);
+    [[nodiscard]] runtime::ContextStart submit_demotion(const ContextDemotion&,
+                                                        context::ContextReservation,
+                                                        runtime::ExecutionReservation);
+    [[nodiscard]] runtime::ContextStart defer_demotion(const ContextDemotion&,
+                                                       context::ContextReservation,
+                                                       const ContextAssessment&,
+                                                       runtime::ExecutionReservation);
     [[nodiscard]] bool start_pause(SequenceHandle sequence, bool save_snapshot);
     [[nodiscard]] bool has_context_operation() const noexcept;
     [[nodiscard]] bool context_blocks(SequenceHandle sequence) const noexcept;
@@ -363,8 +399,7 @@ public:
     context::HistoryDirectory* backend_kv_histories;
     context::PageDirectory* text_kv_pages;
     context::PageDirectory* backend_kv_pages;
-    context::HostDirectory* host_kv_extents;
-    context::HostAllocator* host_context_arena;
+    const bool host_context_enabled;
     const std::uint32_t capacity;
     const std::uint32_t max_concurrency;
     const std::uint32_t prefill_chunk;
@@ -380,8 +415,20 @@ public:
     Checkpoints checkpoints;
     mutable context::RecoveryIndex<> recovery_index;
     std::unique_ptr<PendingContext> context_operation_;
+    std::optional<ContextAssessment> pending_maintenance_;
     std::optional<SequenceHandle> normalizing_pause_;
-    std::optional<runtime::ExecutionReservation> pause_reservation_;
+
+    struct PauseReservation {
+        SequenceHandle sequence;
+        bool save_snapshot;
+        ContextAssessment placement;
+        context::ContextReservation targets;
+        runtime::ExecutionReservation execution;
+        std::vector<runtime::ContextTransferObservation> preceding_transfers;
+        PreparedCheckpoint checkpoint;
+    };
+
+    std::optional<PauseReservation> pause_reservation_;
     bool pause_cancelled_ = false;
     std::deque<SessionEvent> events;
     std::vector<runtime::ResidencyId> releases;
@@ -468,29 +515,36 @@ public:
     submit_execution(Execution&&, runtime::ExecutionReservation, Work&&);
 
     [[nodiscard]] bool can_release_checkpoint(CheckpointHandle) const noexcept;
-    [[nodiscard]] std::optional<ContextResources>
-        checkpoint_release_resources(std::span<const CheckpointHandle>, ContextResources) const;
+    [[nodiscard]] std::optional<ContextReleaseSet>
+        checkpoint_release_set(std::span<const CheckpointHandle>) const;
     [[nodiscard]] CheckpointState& checkpoint(CheckpointHandle);
     [[nodiscard]] const CheckpointState& checkpoint(CheckpointHandle) const;
     [[nodiscard]] std::optional<CheckpointHandle> reserve_checkpoint();
-    [[nodiscard]] std::optional<CheckpointHandle> detach_checkpoint(SequenceState&);
+    [[nodiscard]] PreparedCheckpoint prepare_checkpoint(SequenceState&);
+    [[nodiscard]] std::optional<CheckpointHandle> detach_checkpoint(SequenceState&,
+                                                                    PreparedCheckpoint = {});
     void initialize_prefill(RequestControl&, std::uint32_t base);
     void initialize_replay(std::uint32_t lane);
     void initialize_captures(RequestControl&, std::uint32_t from, std::uint32_t through);
-    [[nodiscard]] bool reserve_capture_destination(std::uint32_t, std::uint32_t);
+    [[nodiscard]] bool
+    reserve_capture_destination(std::uint32_t, std::uint32_t,
+                                std::span<const CheckpointHandle> host_victims = {});
     void prepare_capture_boundary(std::uint32_t);
     void abort_context() noexcept;
     void cancel_context() noexcept;
     [[nodiscard]] bool prepare_backup(context::ContextTransaction&, CheckpointState&,
-                                      bool shared_device, bool& preserve_state_device);
+                                      bool shared_device, bool& preserve_state_device,
+                                      context::ContextReservation&);
     void install_binding(BindOperation&);
     void complete_binding(BindOperation&, context::ContextTransaction&, ContextProgress&);
     void publish_capture(CaptureOperation&, context::ContextTransaction&,
                          runtime::ContextOperationCounts&);
     [[nodiscard]] bool begin_pause(SequenceHandle, bool save_snapshot);
+    [[nodiscard]] bool continue_pause_ready(SequenceHandle, bool save_snapshot);
     void continue_pause_after_normalize(SequenceHandle);
     [[nodiscard]] ResumeState complete_pause(PauseOperation&);
     [[nodiscard]] bool submit_context(PendingContext&, ContextWork&&);
+    void submit_context_batch(PendingContext&);
     void receive_context_result(runtime::ExecutionTicket, ContextResult&&);
     void retire_context(runtime::DeviceRetired);
     [[nodiscard]] std::optional<runtime::ExecutionTicket> start_normalize(SequenceHandle);

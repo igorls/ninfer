@@ -38,28 +38,24 @@ enum class EnginePurpose : std::uint8_t {
 };
 
 
-inline constexpr std::size_t kDefaultKvCapacityHeadroomBytes   = 1024ULL * 1024ULL * 1024ULL;
-inline constexpr std::size_t kDefaultKvCapacitySlackFloorBytes = 1024ULL * 1024ULL * 1024ULL;
-// Device memory left for the desktop, compositor and other applications on a shared GPU.
+// Device memory left for the shared desktop and other applications.
 inline constexpr std::size_t kDefaultDesktopReserveBytes = 8ULL * 1024ULL * 1024ULL * 1024ULL;
+inline constexpr std::size_t kDefaultContextSlackFloorBytes = 1024ULL * 1024ULL * 1024ULL;
+inline constexpr std::size_t kDefaultContextHeadroomBytes = 1024ULL * 1024ULL * 1024ULL;
 
-struct KvCapacityPolicy {
-    KvCapacityMode mode                  = KvCapacityMode::Explicit;
-    std::uint32_t explicit_tokens        = 2048;
-    std::size_t automatic_headroom_bytes = 0;
-    // Device bytes that must remain unreserved after the runtime reservation.
-    std::size_t slack_floor_bytes = 0;
+struct ContextCapacityPolicy {
+    ContextCapacityMode mode             = ContextCapacityMode::Automatic;
+    std::size_t explicit_bytes           = 0;
+    std::size_t automatic_headroom_bytes = kDefaultContextHeadroomBytes;
 
-    [[nodiscard]] static constexpr KvCapacityPolicy
-    explicit_capacity(std::uint32_t tokens, std::size_t slack_floor_bytes = 0) noexcept {
-        return KvCapacityPolicy{KvCapacityMode::Explicit, tokens, 0, slack_floor_bytes};
+    [[nodiscard]] static constexpr ContextCapacityPolicy
+    explicit_capacity(std::size_t bytes) noexcept {
+        return ContextCapacityPolicy{ContextCapacityMode::Explicit, bytes, 0};
     }
 
-    [[nodiscard]] static constexpr KvCapacityPolicy
-    automatic(std::size_t headroom_bytes    = kDefaultKvCapacityHeadroomBytes,
-              std::size_t slack_floor_bytes = 0) noexcept {
-        return KvCapacityPolicy{KvCapacityMode::Automatic, 0, headroom_bytes,
-                                slack_floor_bytes == 0 ? headroom_bytes : slack_floor_bytes};
+    [[nodiscard]] static constexpr ContextCapacityPolicy
+    automatic(std::size_t headroom_bytes = kDefaultContextHeadroomBytes) noexcept {
+        return ContextCapacityPolicy{ContextCapacityMode::Automatic, 0, headroom_bytes};
     }
 };
 
@@ -122,13 +118,13 @@ struct ContextCacheOptions {
     // Controls cross-request history reads and writes. Request pause/replay resources remain
     // available when history is disabled.
     bool enabled = true;
-    // Extra Device StateImage slots beyond max_concurrency. Defaults to max_concurrency.
-    std::optional<std::uint32_t> extra_state_slots;
     // Shared Host quota for StateImages, KV, pause snapshots and in-flight destinations.
     // RTX 5090 defaults to 8 GiB plus eight model StateImages; DGX Spark resolves this to zero.
     // This does not bound total process RAM.
-    // Engine::options() returns both resolved capacities after construction.
+    // Engine::options() returns the resolved Host capacity after construction.
     std::optional<std::size_t> host_capacity_bytes;
+    // Target spacing for optional intermediate prefill checkpoints.
+    std::uint32_t checkpoint_interval = 8192;
 };
 
 struct ContextCostOptions {
@@ -202,15 +198,13 @@ struct EngineOptions {
     EnginePurpose purpose           = EnginePurpose::Generation;
     int device                      = 0;
     std::uint32_t max_context       = 8192; // Logical ceiling of one request or score window.
-    KvCapacityPolicy kv_capacity    = KvCapacityPolicy::explicit_capacity(8192);
-    std::uint32_t max_concurrency   = 1;
-    // Lower concurrency to the complete page-aligned contexts backed by the pool.
-    // An explicit pool keeps its requested capacity, including unused tail pages.
-    bool clamp_concurrency_to_pool    = false;
-    std::size_t min_slack_floor_bytes = kDefaultKvCapacitySlackFloorBytes;
-    // Sizing uses device-wide free memory (NVML, all processes) minus this reserve, and after
-    // startup no Engine allocation may take the device below it.
-    std::size_t desktop_reserve_bytes  = kDefaultDesktopReserveBytes;
+    ContextCapacityPolicy context_capacity;
+    std::uint32_t max_concurrency      = 1;
+    // Reduce startup-fixed lanes until their complete context working sets fit.
+    bool clamp_concurrency_to_pool = false;
+    std::size_t min_slack_floor_bytes = kDefaultContextSlackFloorBytes;
+    // Admission uses device-wide free memory minus this desktop reserve.
+    std::size_t desktop_reserve_bytes = kDefaultDesktopReserveBytes;
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;
     // Zero uses 4096 for Qwen4Exp or CPU expert offload, otherwise 1024.

@@ -118,8 +118,6 @@ void EngineChild::update_config(SupervisorConfig cfg) {
     {
         // A changed configuration is the user's word on the plan; try it as written.
         std::lock_guard lock(mu_);
-        effective_kv_tokens_ = 0;
-        pending_shortfall_   = {};
     }
     std::lock_guard lock(mu_);
     cfg_ = std::move(cfg);
@@ -171,9 +169,6 @@ void EngineChild::note_engine_output(const char* data, std::size_t n) {
         }
         // A startup that died for want of runtime memory is not a crash to repeat: the
         // next spawn shrinks the KV plan by the shortfall it names.
-        const RuntimeReservationShortfall shortfall =
-            parse_runtime_reservation_failure(line_buf_);
-        if (shortfall.matched) { pending_shortfall_ = shortfall; }
         // In-flight accounting: the one activity signal no log-cadence flag can
         // switch off, and the reason an idle unload cannot land mid-generation.
         const RequestLifecycle rq = classify_request_line(line_buf_);
@@ -219,8 +214,6 @@ void EngineChild::start() {
     {
         // Started by hand: memory conditions may have changed, try the configured plan.
         std::lock_guard lock(mu_);
-        effective_kv_tokens_ = 0;
-        pending_shortfall_   = {};
     }
     if (!manages_engine_process(cfg_)) { return; }
     auto_restart_ = true;
@@ -373,59 +366,7 @@ void EngineChild::spawn() {
     // that copy was taken under the lock.
     args = with_api_key_file(std::move(args), launch_spec.api_key_file);
 
-    // KV capacity follows what the engine could actually reserve last time. The configured
-    // value is the ceiling; a shortfall reported by the previous attempt shrinks the plan for
-    // this one, and the shrunken plan persists across automatic restarts so a crash loop
-    // never relaunches a plan already known not to fit. update_config() and start() retire
-    // it, so editing the capacity or starting the engine by hand tries the ceiling again.
-    std::string kv_note_line;
-    {
-        std::lock_guard lock(mu_);
-        const std::optional<std::int64_t> configured = explicit_kv_capacity(args);
-        if (configured) {
-            const std::int64_t current =
-                effective_kv_tokens_ > 0 ? effective_kv_tokens_ : *configured;
-            if (pending_shortfall_.matched) {
-                const std::int64_t next = reduced_kv_capacity(
-                    current, pending_shortfall_.required_bytes,
-                    pending_shortfall_.available_bytes, kv_capacity_floor_tokens(args));
-                if (next < current) {
-                    effective_kv_tokens_ = next;
-                    const std::int64_t short_mib =
-                        (pending_shortfall_.required_bytes - pending_shortfall_.available_bytes) /
-                        (1024 * 1024);
-                    kv_note_line = "[supervisor] KV capacity reduced to " + std::to_string(next) +
-                                   " tokens (configured " + std::to_string(*configured) +
-                                   "): the engine's runtime reservation was " +
-                                   std::to_string(short_mib) +
-                                   " MiB short of free GPU memory. Edit the capacity or stop "
-                                   "and start the engine to try the configured value again.";
-                }
-                pending_shortfall_ = {};
-            }
-            st_.kv_capacity_configured = *configured;
-            if (effective_kv_tokens_ > 0 && effective_kv_tokens_ < *configured) {
-                args                      = with_kv_capacity(std::move(args), effective_kv_tokens_);
-                st_.kv_capacity_effective = effective_kv_tokens_;
-                st_.kv_capacity_note =
-                    "Running at " + std::to_string(effective_kv_tokens_) + " of the configured " +
-                    std::to_string(*configured) +
-                    " KV tokens: other apps hold GPU memory the full plan needed. Edit the "
-                    "capacity or stop and start the engine to try the configured value again.";
-            } else {
-                st_.kv_capacity_effective = 0;
-                st_.kv_capacity_note.clear();
-            }
-        } else {
-            st_.kv_capacity_configured = 0;
-            st_.kv_capacity_effective  = 0;
-            st_.kv_capacity_note.clear();
-        }
-    }
-    if (!kv_note_line.empty()) {
-        kv_note_line.push_back('\n');
-        append_log(kv_note_line.data(), kv_note_line.size());
-    }
+
 
     std::wstring cmd = quote_arg(cfg_.engine.executable);
     for (const auto& a : args) {

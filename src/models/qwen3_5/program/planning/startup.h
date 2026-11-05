@@ -45,8 +45,8 @@ struct SequencePlanImpl {
     std::shared_ptr<const execution::ModelProfile> profile;
     std::shared_ptr<const moe::Plan> moe;
     std::uint32_t capacity                 = 0;
-    std::uint32_t kv_capacity              = 0;
-    std::uint32_t main_page_groups         = 0;
+    std::size_t context_bytes              = 0;
+    std::size_t context_metadata_bytes     = 0;
     std::uint32_t max_concurrency          = 1;
     std::uint32_t prefill_chunk            = 0;
     std::uint32_t draft_window             = 0;
@@ -67,7 +67,7 @@ struct SequencePlanImpl {
 
 struct SequencePlannerImpl {
     SequencePlanningInputs inputs;
-    runtime::SequenceCapacityCurve curve;
+    runtime::ContextCapacityPlan capacity_plan;
     std::unique_ptr<SequencePlanImpl> minimum;
 };
 
@@ -77,7 +77,7 @@ make_sequence_planner_impl(std::shared_ptr<const execution::ModelProfile> profil
                            std::shared_ptr<const moe::Plan> moe = {});
 [[nodiscard]] std::unique_ptr<SequencePlanImpl>
 finalize_sequence_plan_impl(std::unique_ptr<qwen3_5::detail::SequencePlannerImpl> planner,
-                            std::uint32_t main_page_groups);
+                            runtime::ContextCapacity capacity);
 
 [[nodiscard]] std::unique_ptr<SequencePlanImpl>
 make_graph_probe_plan(std::shared_ptr<const execution::ModelProfile>, DeviceContext&,

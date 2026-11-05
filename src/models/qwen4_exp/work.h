@@ -2,6 +2,8 @@
 
 #include "models/common/context/contract.h"
 #include "models/qwen4_exp/route_trace.h"
+#include "models/common/context/directory/state.h"
+#include "models/common/context/directory/history.h"
 #include "models/qwen4_exp/execution_shape.h"
 #include "ninfer/types.h"
 #include "runtime/contract/resources.h"
@@ -9,6 +11,7 @@
 
 #include <array>
 #include <memory>
+#include <map>
 #include <optional>
 #include <variant>
 #include <vector>
@@ -19,9 +22,15 @@ struct VisionExecutionInput;
 
 namespace ninfer::models::qwen4_exp {
 
+using StateBindings  = std::map<std::uint32_t, context::StateSelectors>;
+using ContextActions = std::map<std::uint32_t, context::ContextActions>;
+
+[[nodiscard]] const context::ContextActions& local_actions(const ContextActions&,
+                                                           std::uint32_t rank);
+
 struct WorkRow {
     runtime::ExecutionMember member;
-    context::StateSelectors slots;
+    StateBindings states;
     context::TableRow main_table, mtp_table;
     std::uint32_t main_frontier = 0;
     std::uint32_t mtp_frontier  = 0;
@@ -90,7 +99,7 @@ struct ScoreWork {
 };
 
 struct Work {
-    context::ContextActions actions;
+    ContextActions actions;
     std::variant<ForwardWork, MtpWork, ContextWork, ScoreWork> operation;
 };
 
@@ -123,7 +132,7 @@ using Result = std::variant<ComputeResult, ContextResult, ScoreResult>;
 
 struct CommitRow {
     runtime::ExecutionMember member;
-    context::StateSelectors slots;
+    StateBindings states;
     std::uint32_t accepted = 0;
     bool terminal          = false;
     bool cancelled         = false;
@@ -132,7 +141,7 @@ struct CommitRow {
 
 struct Commit {
     std::vector<CommitRow> rows;
-    context::ContextActions actions;
+    ContextActions actions;
 };
 
 struct ExecutionTypes {

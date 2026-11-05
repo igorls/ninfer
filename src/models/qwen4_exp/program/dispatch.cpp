@@ -9,7 +9,8 @@ void RankProgramImpl::start(runtime::ExecutionRequest<ExecutionTypes>&& request)
     if (request.ticket.frame.kind == runtime::FrameKind::Context) {
         if (context) throw std::logic_error("Qwen4Exp context frame is occupied");
         context.emplace(ContextFrame{std::move(request), false});
-        resources.context_actions->submit(context->request.work.actions);
+        resources.context_actions->submit(
+            local_actions(context->request.work.actions, parameters.profile->local.rank));
         advance_context();
         return;
     }
@@ -28,7 +29,8 @@ void RankProgramImpl::start(runtime::ExecutionRequest<ExecutionTypes>&& request)
                 f.rows = {&work.row, 1};
         },
         f.request.work.operation);
-    resources.compute_actions->submit(f.request.work.actions);
+    resources.compute_actions->submit(
+        local_actions(f.request.work.actions, parameters.profile->local.rank));
     for (std::size_t b = 0; b < f.rows.size(); ++b)
         if (f.rows[b].logprobs.enabled)
             resources.readout->install(static_cast<int>(b), f.rows[b].logprobs, cuda);
@@ -259,7 +261,8 @@ void RankProgramImpl::commit(runtime::ExecutionTicket ticket, runtime::CommandSe
                 ops::increment_token_counts(id, counts, cuda);
             }
     }
-    resources.compute_actions->submit(commit.actions);
+    resources.compute_actions->submit(
+        local_actions(commit.actions, parameters.profile->local.rank));
     gpu_timer.record_retirement();
     compute_done.record(cuda.stream());
     f.retirement = command;

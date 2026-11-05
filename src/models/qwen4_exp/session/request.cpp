@@ -65,12 +65,6 @@ const qwen::PreparedContextCache& RequestBasePlan::context_cache() const noexcep
     return plan_->prompt.context_cache;
 }
 
-std::vector<std::uint32_t> RequestBasePlan::capture_frontiers() const {
-    std::vector<std::uint32_t> out;
-    for (const auto& c : plan_->captures) out.push_back(c.frontier);
-    return out;
-}
-
 std::optional<PrefixShortlistKey> RequestBasePlan::prefix_shortlist_key(std::uint32_t f) const {
     if (!plan_->reuse || !plan_->can_checkpoint(f) || f > plan_->summary.prompt_tokens ||
         f > plan_->maximum_reuse) return {};
@@ -149,7 +143,7 @@ RequestBasePlan Session::plan_request(qwen::PreparedPrompt&& prompt,
             auto found = std::find_if(plan->captures.begin(), plan->captures.end(),
                                       [&](const auto& c) { return c.frontier == f; });
             if (found == plan->captures.end()) {
-                plan->captures.push_back({f, {role}, evidence});
+                plan->captures.push_back({f, {role}, runtime::CheckpointOrigin::Semantic, evidence});
             } else {
                 if (std::find(found->roles.begin(), found->roles.end(), role) == found->roles.end())
                     found->roles.push_back(role);

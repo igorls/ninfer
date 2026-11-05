@@ -1,6 +1,7 @@
 #pragma once
 
 #include "models/common/context/checkpoint_store.h"
+#include "models/common/context/directory/records.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -49,7 +50,7 @@ public:
             if (!contains(handle)) throw std::logic_error("physical release has a foreign holder");
             objects_by_handle_[handle.index].push_back(index);
         }
-        objects_.push_back({std::move(holders), released});
+        objects_.push_back({std::move(holders), std::move(released)});
         return index;
     }
 
@@ -103,19 +104,9 @@ public:
         }
 
     private:
-        static void add_resources(Resources& a, const Resources& b) {
-            a.state_slots += b.state_slots;
-            a.host_bytes += b.host_bytes;
-            for (std::size_t i = 0; i < a.kv_page_groups.size(); ++i)
-                a.kv_page_groups[i] += b.kv_page_groups[i];
-        }
+        static void add_resources(Resources& a, const Resources& b) { a.merge(b); }
 
-        static void subtract_resources(Resources& a, const Resources& b) {
-            a.state_slots -= b.state_slots;
-            a.host_bytes -= b.host_bytes;
-            for (std::size_t i = 0; i < a.kv_page_groups.size(); ++i)
-                a.kv_page_groups[i] -= b.kv_page_groups[i];
-        }
+        static void subtract_resources(Resources& a, const Resources& b) { a.subtract(b); }
 
         void add(Handle handle) {
             if (!inventory_->contains(handle))
@@ -138,11 +129,12 @@ public:
                 handles_.pop_back();
                 selected_[handle.index] = false;
                 for (const auto object : inventory_->objects_by_handle_[handle.index]) {
-                    if (!remaining_[object]++)
+                    if (!remaining_[object]++ && size != 0)
                         subtract_resources(released_, inventory_->objects_[object].released);
                 }
             }
             freed_.resize(freed);
+            if (size == 0) released_ = {};
         }
 
         const ReleaseInventory* inventory_;

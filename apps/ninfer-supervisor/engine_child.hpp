@@ -48,9 +48,6 @@ struct EngineStatus {
     int inflight_requests              = 0;
     // KV plan actually launched. effective is 0 unless the supervisor shrank the configured
     // value to fit the runtime reservation the engine could get; note says why.
-    std::int64_t kv_capacity_configured = 0;
-    std::int64_t kv_capacity_effective  = 0;
-    std::string kv_capacity_note;
     // The argument vector the running process was actually started with, after every
     // supervisor adjustment (reserve, request log, key file, KV capacity). This, not the
     // config file, is what the engine is running.
@@ -135,8 +132,6 @@ private:
     // Under mu_. The last reservation failure the engine reported, consumed by the next
     // spawn; and the shrunken KV plan that spawn chose, kept across automatic restarts and
     // retired when the configuration changes or the engine is started by hand.
-    RuntimeReservationShortfall pending_shortfall_;
-    std::int64_t effective_kv_tokens_ = 0;
     std::set<std::uint64_t> inflight_;        // under mu_; open request ids
     void* process_handle_ = nullptr;          // HANDLE
     void* job_handle_     = nullptr;

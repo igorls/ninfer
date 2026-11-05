@@ -146,7 +146,7 @@ Json create_config(const fs::path& model_path, const fs::path& bin, const fs::pa
     if (!fs::exists(serve)) throw std::runtime_error("NInfer engine is missing. Reinstall NInfer.");
     std::vector<std::string> args{
         "--host", "127.0.0.1", "--port", std::to_string(engine_port),
-        "--model-id", model, "--max-context", "16384", "--kv-capacity", "32768",
+        "--model-id", model, "--max-context", "16384", "--context-capacity", "auto",
         "--max-concurrency", "2", "--prefill-chunk", "2048", "--desktop-reserve", "8GiB",
         "--kv-dtype", "fp8",
         "--request-log-jsonl", path_text(data / L"logs/requests.jsonl")};

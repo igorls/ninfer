@@ -62,7 +62,7 @@ loading and all 19 Engine real cases; greedy serving text matches the previous b
 - [x] The PLE boundary is the text config's `eos_token_id`, which the converter now writes; a
   config without it is rejected, so the published Flash-Next derivation must be re-derived.
 - [x] PLE head count, row bytes and history columns come from config; native preparation rejects
-  a PLE geometry `ops::ple_ngram` does not execute. The companion identities are constants in
+  a PLE geometry the native PLE Ops do not execute. The companion identities are constants in
   `config.h` (C++) and `config.py` (converter).
 - [x] Tests: `ninfer_qwen4_exp_loading_test` (Flash-Next config, lists, boundary rules, rejected
   geometries, a dense config's clear rejection, two-layer bindings) and the two-layer state image

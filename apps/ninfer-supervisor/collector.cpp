@@ -135,9 +135,9 @@ std::string capacity_line_from_server_start(const std::string& line) {
         const auto mib = [](const auto& object, const char* key) {
             return std::to_string(object.value(key, std::uint64_t{0}) / 1048576) + " MiB";
         };
-        return std::string("KV capacity ") + eng.value("kv_capacity_mode", std::string("?")) +
-               " resolved=" + std::to_string(eng.value("kv_capacity", 0)) +
-               " tokens runtime=" + mib(budget, "runtime_reservation_bytes") +
+        return std::string("Context capacity ") + eng.value("context_capacity_mode", std::string("?")) +
+               " context_capacity_bytes=" + std::to_string(budget.value("context_capacity_bytes", std::uint64_t{0})) +
+               " runtime=" + mib(budget, "runtime_reservation_bytes") +
                " free-after-weights=" + mib(budget, "available_after_weights_bytes") +
                " free-after-startup=" + mib(budget, "available_after_startup_bytes") +
                " headroom=" + mib(budget, "headroom_bytes") +

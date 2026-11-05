@@ -22,8 +22,6 @@ target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/sliding_window/sliding_window_attention.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/sliding_window/launch.cu"
   "${CMAKE_CURRENT_LIST_DIR}/sliding_window/plan.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/selected_block/selected_block_attention.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/selected_block/launch.cu"
 )
 
 target_sources(ninfer_ops_non_rdc PRIVATE

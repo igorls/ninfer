@@ -2,7 +2,10 @@
 
 #include "models/common/context/directory/history.h"
 #include "models/common/context/directory/state.h"
+#include "models/common/context/directory.h"
+#include "models/common/context/work.h"
 
+#include <algorithm>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -74,6 +77,52 @@ public:
     }
 
     [[nodiscard]] std::span<const HistoryPrefix> prefixes() const noexcept { return prefixes_; }
+
+    [[nodiscard]] std::vector<runtime::ContextTransferRequirement>
+    restore_requirements(const ContextDirectory& directory) const {
+        std::vector<runtime::ContextTransferRequirement> result;
+        const auto state_records = states_->allocations(continuation_.image);
+        for (const auto rank : states_->ranks(states_->variant(continuation_.image))) {
+            if (std::any_of(state_records.begin(), state_records.end(), [&](const auto& record) {
+                    return record.domain.rank == rank &&
+                           record.domain.memory == ContextMemory::Device;
+                }))
+                continue;
+            const auto source = states_->host_binding(continuation_.image, rank);
+            auto requirement  = state_transfer_requirement(
+                {source.bytes, 1}, runtime::ContextTransferDirection::HostToDevice);
+            requirement.rank = rank;
+            result.push_back(requirement);
+        }
+        for (const auto& prefix : prefixes_) {
+            const auto pool     = prefix.history().pool_id;
+            const auto& storage = directory.pool(pool);
+            for (const auto& part : storage.pages().layout().parts) {
+                std::uint32_t missing = 0;
+                TransferWork work;
+                for (std::uint32_t i = 0; i < kv_pages_for_frontier(prefix.frontier()); ++i) {
+                    const auto page  = storage.histories().logical_page(prefix.history(), i);
+                    const auto ranks = storage.pages().ranks(page);
+                    if (std::find(ranks.begin(), ranks.end(), part.rank) == ranks.end()) continue;
+                    const auto columns = std::min<std::uint32_t>(
+                        kPagedKVPageSize, prefix.frontier() - i * kPagedKVPageSize);
+                    if (storage.pages().device_covers(page, part.rank, columns)) continue;
+                    const auto source = storage.pages().host_binding(page, part.rank);
+                    work.payload_bytes += source.bytes;
+                    ++work.copy_operations;
+                    ++missing;
+                }
+                if (missing) {
+                    auto requirement = kv_transfer_requirement(
+                        {runtime::KvPoolId{static_cast<std::uint16_t>(pool)}},
+                        runtime::ContextTransferDirection::HostToDevice, missing, work);
+                    requirement.rank = part.rank;
+                    result.push_back(requirement);
+                }
+            }
+        }
+        return result;
+    }
 
     [[nodiscard]] StateId take_mutable_image() {
         if (!states_) throw std::logic_error("snapshot image already consumed");

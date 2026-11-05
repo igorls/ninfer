@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ops/linear_attention/gated_delta_net/input_conv/operands.h"
 #include "core/weight.h"
 #include "core/arena.h"
 #include "core/tensor.h"
@@ -18,15 +19,13 @@ using Fp8GdnInputA16Launch = void (*)(const Tensor& x, const Weight& weight, Ten
 using Fp8GdnInputA8Launch  = void (*)(const Tensor& x, const Weight& weight, Tensor& qkv,
                                      Tensor& z, Fp8A8Workspace workspace, cudaStream_t stream);
 using Fp8GdnSnapshotFusedLaunch = void (*)(const Tensor& x, const Weight& weight,
-                                           const Tensor& conv_weight, Tensor& conv_states,
-                                           const Tensor& valid_columns, const Tensor& initial_slot,
-                                           const Tensor& snapshot_base_slot, Tensor& query,
+                                           const Tensor& conv_weight, const ConstStateFieldView& conv_states,
+                                           const Tensor& valid_columns, const gdn_input::HistoryDestination& destination, Tensor& query,
                                            Tensor& key, Tensor& value, Tensor& z,
                                            cudaStream_t stream);
 using Fp8GdnRecordFusedLaunch = void (*)(const Tensor& x, const Weight& weight,
-                                         const Tensor& conv_weight, const Tensor& conv_states,
-                                         const Tensor& valid_columns, const Tensor& initial_slot,
-                                         Tensor& conv_record, Tensor& query, Tensor& key,
+                                         const Tensor& conv_weight, const ConstStateFieldView& conv_states,
+                                         const Tensor& valid_columns, Tensor& conv_record, Tensor& query, Tensor& key,
                                          Tensor& value, Tensor& z, cudaStream_t stream);
 
 // One registered row-scaled FP8 [16384,K] q/k/value/z parent. K and the stored row-scale word fix
@@ -65,14 +64,14 @@ void fp8_gdn_input_a8_launch(const Tensor& x, const Weight& weight, Tensor& qkv,
                              Fp8A8Workspace workspace, cudaStream_t stream);
 
 void fp8_gdn_snapshot_fused_launch(const Tensor& x, const Weight& weight, const Tensor& conv_weight,
-                                   Tensor& conv_states, const Tensor& valid_columns,
-                                   const Tensor& initial_slot, const Tensor& snapshot_base_slot,
+                                   const ConstStateFieldView& conv_states, const Tensor& valid_columns,
+                                   const gdn_input::HistoryDestination& destination,
                                    Tensor& query, Tensor& key, Tensor& value, Tensor& z,
                                    cudaStream_t stream);
 
 void fp8_gdn_record_fused_launch(const Tensor& x, const Weight& weight, const Tensor& conv_weight,
-                                 const Tensor& conv_states, const Tensor& valid_columns,
-                                 const Tensor& initial_slot, Tensor& conv_record, Tensor& query,
+                                 const ConstStateFieldView& conv_states, const Tensor& valid_columns,
+                                 Tensor& conv_record, Tensor& query,
                                  Tensor& key, Tensor& value, Tensor& z, cudaStream_t stream);
 
 } // namespace ninfer::ops::detail

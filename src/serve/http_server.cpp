@@ -120,15 +120,11 @@ bool report_has_activity(const ThroughputReport& report) {
            report.current.context_transfers != report.previous.context_transfers ||
            report.current.pressure_spill_pages != report.previous.pressure_spill_pages ||
            report.current.partial_tail_cow_pages != report.previous.partial_tail_cow_pages ||
-           report.current.device_state_occupied_slots !=
-               report.previous.device_state_occupied_slots ||
-           report.current.host_state_occupied_slots != report.previous.host_state_occupied_slots ||
+           report.current.state_objects != report.previous.state_objects ||
+           report.current.history_objects != report.previous.history_objects ||
            report.current.kv_pools != report.previous.kv_pools ||
-           report.current.host_kv_occupied_bytes != report.previous.host_kv_occupied_bytes ||
-           report.current.host_context_occupied_bytes !=
-               report.previous.host_context_occupied_bytes ||
-           report.current.host_context_reserved_bytes !=
-               report.previous.host_context_reserved_bytes ||
+           report.current.context_pools != report.previous.context_pools ||
+           report.current.context_metadata != report.previous.context_metadata ||
            report.current.host_work.engine_boundary_ns !=
                report.previous.host_work.engine_boundary_ns ||
            report.current.host_work.session_call_ns != report.previous.host_work.session_call_ns ||
@@ -688,25 +684,17 @@ void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& r
         {"cuda_graph_prepare_increment_bytes", budget.graphs ? budget.graphs->preparation_increment_bytes : 0},
         {"cuda_graph_calibration_increment_bytes", budget.graphs ? budget.graphs->calibration_increment_bytes : 0},
         {"cuda_graph_calibration_retained_bytes", budget.graphs ? budget.graphs->calibration_retained_bytes : 0},
-        {"kv_capacity_headroom_bytes", budget.headroom_bytes}};
+        {"headroom_bytes", budget.headroom_bytes}};
     const auto& runtime = snapshot.runtime;
-    nlohmann::json pools = nlohmann::json::array();
-    for (const auto& pool : runtime.kv_pools)
-        pools.push_back({{"id", pool.id}, {"label", pool.label},
-                         {"capacity_page_groups", pool.capacity_page_groups},
-                         {"occupied_page_groups", pool.occupied_page_groups}});
-    nlohmann::json kv = {{"capacity_tokens", description.kv_capacity},
-                         {"pools", std::move(pools)},
-                         {"payload_bytes", memory.kv_payload_bytes},
-                         {"storage", kv_cache_storage_name(description.kv_cache)},
-                         {"host_context_capacity_bytes", description.host_context_capacity_bytes},
-                         {"host_context_reserved_bytes", runtime.host_context_reserved_bytes},
-                         {"host_state_occupied_slots", runtime.host_state_occupied_slots},
-                         {"host_context_occupied_bytes", runtime.host_context_occupied_bytes},
-                         {"host_kv_occupied_bytes", runtime.host_kv_occupied_bytes}};
-
-    plan["kv_capacity_automatic"] = engine.kv_capacity.mode == KvCapacityMode::Automatic;
-    plan["kv_slack_floor_bytes"] = engine.kv_capacity.slack_floor_bytes;
+    nlohmann::json context = product::context_usage_json(runtime);
+    context["capacities"] = product::context_capacity_json(description.context_pools);
+    context["kv_storage"] = kv_cache_storage_name(description.kv_cache);
+    plan["context_capacity_bytes"] = budget.context_capacity_bytes;
+    plan["minimum_context_capacity_bytes"] = budget.minimum_context_capacity_bytes;
+    plan["context_control_budget_bytes"] = budget.context_control_budget_bytes;
+    plan["context_capacity_automatic"] = engine.context_capacity.mode == ContextCapacityMode::Automatic;
+    plan["requested_concurrency"] = budget.requested_concurrency;
+    plan["effective_concurrency"] = engine.max_concurrency;
     nlohmann::json body = {
         {"schema_version", 2},
         {"model_id", served_model_names_.id},
@@ -730,7 +718,7 @@ void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& r
         {"desktop_reserve", reserve},
         {"plan", plan},
         {"resources", product::resource_json(snapshot.ranks.front())},
-        {"kv", kv},
+        {"context", std::move(context)},
         {"options",
          {{"max_concurrency", engine.max_concurrency}, {"vision", engine.enable_vision}}},
         // Stated rather than implied: nothing here frees memory. A caller that wants device

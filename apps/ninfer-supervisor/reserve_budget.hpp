@@ -12,7 +12,7 @@ inline std::vector<std::string> without_reserve_args(const std::vector<std::stri
 }
 
 // Preserve the loaded model and its capacity policy. A minimum runtime alone
-// would silently shrink an explicitly configured KV pool; only auto may shrink. The
+// would silently shrink an explicitly configured Context backing; only auto may shrink. The
 // startup budget already excludes foreign allocations and the chosen reserve;
 // add that reserve back, then subtract the exact runtime and required slack.
 inline nlohmann::json model_reserve_budget(const nlohmann::json& admin) {
@@ -26,14 +26,13 @@ inline nlohmann::json model_reserve_budget(const nlohmann::json& admin) {
         const double configured = reserve.at("configured_bytes").get<double>();
         const double free = admin.at("device").at("free_bytes").get<double>();
         const double graphs = plan.at("cuda_graph_rebuild_estimate_bytes").get<double>();
-        // Match serve_options: explicit capacity uses zero sizing slack. Auto
-        // uses max(1 GiB automatic headroom, the requested/default slack floor).
-        const bool automatic = plan.at("kv_capacity_automatic").get<bool>();
-        const double slack = automatic ? plan.at("kv_slack_floor_bytes").get<double>() : 0;
+        // Startup headroom applies to both explicit and automatic byte budgets.
+        const bool automatic = plan.at("context_capacity_automatic").get<bool>();
+        const double slack = plan.at("headroom_bytes").get<double>();
         const double required_runtime = automatic ? plan.at("minimum_runtime_reservation_bytes").get<double>() : runtime;
         if (runtime <= 0 || weights <= 0 || available < 0 || configured < 0 || free < 0 || graphs < 0) return out;
         if (required_runtime <= 0 || required_runtime > runtime) return out;
-        const double startup_limit = available + configured - required_runtime - slack;
+        const double startup_limit = available - required_runtime - graphs - slack;
         const double live_limit = free + (runtime - required_runtime) - graphs - slack;
         const int maximum = static_cast<int>(std::floor(std::max(0.0, std::min({startup_limit, live_limit, 64.0 * 1073741824.0})) / 1073741824.0));
         return {{"ok", true}, {"max_gib", maximum}, {"weights_bytes", weights},

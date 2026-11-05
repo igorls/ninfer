@@ -19,4 +19,8 @@ endif()
 file(COPY ${NINFER_EXECUTABLES} ${dependencies} ${NINFER_MSVC_RUNTIME} DESTINATION "${DESTINATION}")
 file(MAKE_DIRECTORY "${DESTINATION}/licenses/hwloc")
 file(COPY "${NINFER_HWLOC_LICENSE}" DESTINATION "${DESTINATION}/licenses/hwloc")
+file(MAKE_DIRECTORY "${DESTINATION}/licenses/libjpeg-turbo")
+file(COPY ${NINFER_JPEG_NOTICES} DESTINATION "${DESTINATION}/licenses/libjpeg-turbo")
+file(WRITE "${DESTINATION}/licenses/libjpeg-turbo/NOTICE.txt"
+  "This software is based in part on the work of the Independent JPEG Group.\n")
 message(STATUS "Packaged Windows applications and runtime DLLs in ${DESTINATION}")

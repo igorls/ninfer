@@ -389,8 +389,8 @@ inline std::string format_series_event_line(const VramSeriesEvent& e) {
            "\",\"label\":\"" + e.label + "\"}";
 }
 
-inline std::string extract_kv_capacity_line(std::string_view log) {
-    const auto key = std::string_view("KV capacity ");
+inline std::string extract_context_capacity_line(std::string_view log) {
+    const auto key = std::string_view("Context capacity ");
     const auto pos = log.rfind(key);
     if (pos == std::string_view::npos) { return {}; }
     auto start = log.find_last_of("\n", pos);
@@ -526,7 +526,7 @@ enum class ParamKind : std::uint8_t {
     Text,      // "--flag STRING"
     Enum,      // "--flag CHOICE"
     Flag,      // "--flag" with no value; present or absent
-    IntOrAuto, // "--flag N", "--flag context" or "--flag auto"
+    CapacityOrAuto, // byte quantity or auto
     Capacity,  // exact bytes or B/KiB/MiB/GiB quantity
     Duration,  // exact milliseconds or ms/s quantity
     IntOrNone, // positive integer or none
@@ -551,8 +551,8 @@ inline const std::vector<EngineParamSpec>& engine_param_specs() {
     static const std::vector<EngineParamSpec> specs = {
         {"--max-context", "max_context", ParamKind::Int, "capacity", "Max context",
          "Longest prompt plus generation the engine will admit, in tokens.", 256, 262144, {}},
-        {"--kv-capacity", "kv_capacity", ParamKind::IntOrAuto, "capacity", "KV capacity",
-         "Shared KV pool for every active request. 'auto' sizes it from free memory.", 1024, 4194304, {}},
+        {"--context-capacity", "context_capacity", ParamKind::CapacityOrAuto, "capacity", "Context capacity",
+         "GPU memory shared by KV and request state. Use 8GiB or auto; the Engine validates the model working sets.", 1, 262144LL << 20, {}},
         {"--max-concurrency", "max_concurrency", ParamKind::Int, "capacity", "Max concurrency",
          "How many requests may be active at once. 8 is the Engine's compile-time lane maximum, not a GPU-memory guess.", 1, 8, {}},
         {"--max-pending-requests", "max_pending_requests", ParamKind::Int, "capacity",
@@ -570,8 +570,8 @@ inline const std::vector<EngineParamSpec>& engine_param_specs() {
         {"--kv-dtype", "kv_dtype", ParamKind::Enum, "memory", "KV cache dtype",
          "FP8 halves KV bytes per token. NVFP4 is not usable on this card.", 0, 0,
          {"bf16", "int8", "fp8", "nvfp4", "k8v4"}},
-        {"--extra-state-slots", "extra_state_slots", ParamKind::Int, "memory",
-         "Extra state slots", "Complete checkpoint images beyond the active lanes. Costs VRAM.", 0, 64, {}},
+        {"--checkpoint-interval", "checkpoint_interval", ParamKind::Int, "memory",
+         "Checkpoint interval", "Target spacing in tokens for reusable intermediate checkpoints.", 1, 262144, {}},
         {"--host-cache-capacity", "host_cache_capacity", ParamKind::Capacity, "memory", "Host context capacity",
          "Shared RAM budget for checkpoints, KV and paused requests. Use units such as 8GiB.", 0, 262144LL << 20, {}},
 
@@ -760,22 +760,13 @@ inline std::vector<std::string> validate_engine_params(const std::vector<EngineP
             }
             break;
         }
-        case ParamKind::IntOrAuto: {
-            if (p.value == "auto" || p.value == "context") { break; }
-            long long value = 0;
-            if (!parse_long_long(p.value, value)) {
-                errors.push_back(std::string(spec->label) + " must be a whole number or 'auto'");
-            } else if (value < spec->min_value || value > spec->max_value) {
-                errors.push_back(std::string(spec->label) + " must be between " +
-                                 std::to_string(spec->min_value) + " and " +
-                                 std::to_string(spec->max_value) + ", or 'auto'");
-            }
-            break;
-        }
+        case ParamKind::CapacityOrAuto:
+            if (p.value == "auto") break;
+            [[fallthrough]];
         case ParamKind::Capacity:
         case ParamKind::Duration: {
             try {
-                const auto amount = spec->kind == ParamKind::Capacity
+                const auto amount = (spec->kind == ParamKind::Capacity || spec->kind == ParamKind::CapacityOrAuto)
                     ? product::parse_capacity_quantity(p.value)
                     : product::parse_duration_quantity(p.value);
                 if (amount < static_cast<std::uint64_t>(spec->min_value) ||
@@ -825,34 +816,8 @@ inline std::vector<std::string> validate_engine_params(const std::vector<EngineP
 inline std::vector<std::string> validate_engine_param_combination(
     const std::vector<EngineParam>& params, std::string_view model_identity = {}) {
     std::vector<std::string> errors;
-    const std::string* kv_capacity  = find_param_value(params, "kv_capacity");
-    const std::string* max_context  = find_param_value(params, "max_context");
     const std::string* draft_tokens = find_param_value(params, "draft_tokens");
     const std::string* spec_backend = find_param_value(params, "spec");
-    if (kv_capacity != nullptr && max_context != nullptr && *kv_capacity != "auto") {
-        long long capacity = 0;
-        long long context  = 0;
-        if (parse_long_long(*kv_capacity, capacity) && parse_long_long(*max_context, context) &&
-            capacity < context) {
-            errors.emplace_back("KV capacity must be at least the max context, or the engine "
-                                "cannot hold one full-length request");
-        } else if (parse_long_long(*kv_capacity, capacity) && parse_long_long(*max_context, context)) {
-            // Same page bounds the Engine uses: M in [max(L, C), C*L] with 64-token pages.
-            long long lanes = 1;
-            const std::string* conc = find_param_value(params, "max_concurrency");
-            if (conc != nullptr) { parse_long_long(*conc, lanes); }
-            if (lanes < 1) { lanes = 1; }
-            const auto pages = [](long long tokens) { return (tokens + 63) / 64; };
-            const long long logical = pages(context);
-            const long long pool    = pages(capacity);
-            const long long minimum = logical > lanes ? logical : lanes;
-            const long long maximum = lanes * logical;
-            if (pool < minimum || pool > maximum) {
-                errors.emplace_back("KV pool must fit between one full-length request and "
-                                    "max-concurrency full-length requests");
-            }
-        }
-    }
     if (draft_tokens != nullptr && *draft_tokens != "0" && spec_backend == nullptr) {
         errors.emplace_back("Draft tokens has no effect without a speculative backend");
     }
@@ -928,83 +893,6 @@ inline std::vector<std::string> with_desktop_reserve(std::vector<std::string> ar
     if (desktop_reserve_pinned(args)) return args;
     // Zero must override the engine's nonzero default explicitly.
     return product::set_serve_argument(std::move(args), "engine.desktop_reserve", std::to_string(gib) + "GiB");
-}
-
-// The engine refuses to start when its runtime reservation does not fit beside what the
-// desktop currently holds, and says so on one line:
-//   server status=failed phase=startup detail="requested Engine runtime reservation
-//   requires 17572624288 bytes, but only 16943534080 bytes are available for runtime capacity"
-// A fixed --kv-capacity demands a fixed reservation whatever else is resident, so the same
-// plan fails the same way on every retry; the supervisor looped seven times on it. Parsed
-// here so the retry can shrink the plan instead.
-struct RuntimeReservationShortfall {
-    bool matched                 = false;
-    std::int64_t required_bytes  = 0;
-    std::int64_t available_bytes = 0;
-};
-
-inline RuntimeReservationShortfall parse_runtime_reservation_failure(std::string_view line) {
-    RuntimeReservationShortfall out;
-    const auto read_number = [&](std::string_view text, std::size_t from, std::int64_t& value) {
-        std::size_t i = from;
-        while (i < text.size() && text[i] == ' ') { ++i; }
-        std::int64_t v = 0;
-        bool any      = false;
-        while (i < text.size() && text[i] >= '0' && text[i] <= '9') {
-            v   = v * 10 + (text[i] - '0');
-            any = true;
-            ++i;
-        }
-        value = v;
-        return any;
-    };
-    const std::string_view key = "runtime reservation requires ";
-    const auto pos             = line.find(key);
-    if (pos == std::string_view::npos) { return out; }
-    if (!read_number(line, pos + key.size(), out.required_bytes)) { return out; }
-    const std::string_view key2 = "but only ";
-    const auto pos2             = line.find(key2, pos);
-    if (pos2 == std::string_view::npos) { return out; }
-    if (!read_number(line, pos2 + key2.size(), out.available_bytes)) { return out; }
-    out.matched = out.required_bytes > 0 && out.available_bytes >= 0;
-    return out;
-}
-
-// The configured KV capacity when it is an explicit token count. 'auto' or an absent flag
-// returns nullopt: the engine sizes those itself and there is nothing to adapt.
-inline std::optional<std::int64_t> explicit_kv_capacity(const std::vector<std::string>& args) {
-    const auto options = child_startup_options(args);
-    if (!options.launch.provenance.fields.contains("engine.kv_capacity") ||
-        options.launch.engine.kv_capacity.mode != KvCapacityMode::Explicit) return std::nullopt;
-    return options.launch.engine.kv_capacity.explicit_tokens;
-}
-
-// The engine must still admit one full-context request, so the plan never shrinks below
-// --max-context (or a modest default when the flag is absent).
-inline std::int64_t kv_capacity_floor_tokens(const std::vector<std::string>& args) {
-    return child_startup_options(args).launch.engine.max_context;
-}
-
-// Tokens to run at after a shortfall. The supervisor does not know the model's KV bytes per
-// token, so it assumes no more than 8 KiB (Flash-Next FP8 is about 12 KiB, BF16 twice that):
-// assuming less removes more tokens, which is the safe direction. Adds a 256 MiB margin so
-// a second attempt is not itself a few megabytes short, rounds down to a 4096-token boundary,
-// and never goes below the floor.
-inline std::int64_t reduced_kv_capacity(std::int64_t current_tokens, std::int64_t required_bytes,
-                                        std::int64_t available_bytes, std::int64_t floor_tokens) {
-    constexpr std::int64_t kKvBytesPerTokenFloor = 8LL * 1024;
-    constexpr std::int64_t kMarginBytes          = 256LL * 1024 * 1024;
-    if (required_bytes <= available_bytes) { return current_tokens; }
-    const std::int64_t shortfall = required_bytes - available_bytes + kMarginBytes;
-    const std::int64_t drop      = (shortfall + kKvBytesPerTokenFloor - 1) / kKvBytesPerTokenFloor;
-    std::int64_t next            = current_tokens - drop;
-    next -= next % 4096;
-    if (next < floor_tokens) { next = floor_tokens; }
-    return next;
-}
-
-inline std::vector<std::string> with_kv_capacity(std::vector<std::string> args, std::int64_t tokens) {
-    return product::set_serve_argument(std::move(args), "engine.kv_capacity", std::to_string(tokens));
 }
 
 // The reserve the config file already asks for, so the menu can put a checkmark

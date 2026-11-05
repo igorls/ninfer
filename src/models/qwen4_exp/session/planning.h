@@ -12,10 +12,14 @@ struct SessionPlan {
     context::ContextDirectorySpec context;
     std::size_t vision_max_merged_tokens = 0;
     bool route_trace = false;
+    std::uint32_t checkpoint_interval    = 8192;
 
     bool operator==(const SessionPlan&) const = default;
 };
 
 [[nodiscard]] SessionPlan plan_session(const ExecutionPlan&);
+[[nodiscard]] std::size_t session_metadata_bytes(const ExecutionPlan&);
+[[nodiscard]] runtime::ContextMetadataPlan session_metadata_plan(const ExecutionPlan&,
+                                                                 const ContextPoolGeometry&);
 
 } // namespace ninfer::models::qwen4_exp

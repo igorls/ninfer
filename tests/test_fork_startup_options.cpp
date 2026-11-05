@@ -78,9 +78,9 @@ void fork_options() {
                                 "model.ninfer",
                                 "--desktop-reserve",
                                 "1700MiB",
-                                "--kv-slack-floor",
+                                "--context-slack-floor",
                                 "2GiB",
-                                "--kv-capacity",
+                                "--context-capacity",
                                 "auto",
                                 "--clamp-concurrency-to-pool",
                                 "--model-alias",
@@ -131,7 +131,7 @@ void fork_options() {
     require(options.launch.generation.sampling.repetition_penalty == 1.1F,
             "startup repetition penalty was lost");
     const auto zero = parse(
-        {"ninfer-serve", "model.ninfer", "--desktop-reserve", "0B", "--kv-slack-floor", "4GiB"});
+        {"ninfer-serve", "model.ninfer", "--desktop-reserve", "0B", "--context-capacity", "8GiB", "--context-slack-floor", "4GiB"});
     require(zero.launch.engine.desktop_reserve_bytes == 0 &&
                 zero.launch.engine.min_slack_floor_bytes == 0 &&
                 zero.launch.generation.preserve_thinking == false,

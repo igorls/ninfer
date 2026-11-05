@@ -46,6 +46,9 @@ is not qualified for production.
 
 ## Designs
 
+- [Unified Context storage pool](designs/unified-context-pool.md) — shared KV/State capacity,
+  startup guarantees, execution reservations, cache reclamation and recovery, Op views, and
+  deployment feasibility on RTX 5090 and single/dual Spark; selected design pending implementation.
 - [Distributed execution](distributed-execution-design.md) — selected architecture for centralized
   scheduling, local/distributed executors, rank ownership, parallel plans and communication;
   local execution and distributed execution foundations are implemented; multi-rank model

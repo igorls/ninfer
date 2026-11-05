@@ -28,19 +28,22 @@ struct CalibratedPlan {
     GraphMemorySummary graph;
 };
 
-inline std::uint32_t full_context_page_groups(const EngineOptions& options,
-                                              const KvCapacityResolution& capacity) {
-    const auto page_tokens = capacity.resolved_tokens / capacity.primary_page_groups;
-    return 1U + (options.max_context - 1U) / page_tokens;
-}
-
-inline bool clamp_concurrency(EngineOptions& options, const KvCapacityResolution& capacity) {
-    if (!options.clamp_concurrency_to_pool) return false;
-    const auto effective = std::max(1U, std::min(options.max_concurrency,
-        capacity.primary_page_groups / full_context_page_groups(options, capacity)));
-    if (effective == options.max_concurrency) return false;
-    options.max_concurrency = effective;
-    return true;
+// Model planners include complete concurrent working sets only when this policy is selected.
+// Try the highest feasible lane count without retaining a failed placement's lower count.
+template <class Setup, class Placement>
+std::optional<typename Setup::ExecutionPlan>
+plan_with_concurrency(const Setup& setup, DeviceContext& device, EngineOptions& options,
+                      Placement placement, std::size_t available, std::size_t available_host) {
+    auto trial = options;
+    for (;;) {
+        auto plan = setup.plan(device, trial, placement, available, available_host);
+        if (plan) {
+            options.max_concurrency = trial.max_concurrency;
+            return plan;
+        }
+        if (!options.clamp_concurrency_to_pool || trial.max_concurrency == 1) return {};
+        --trial.max_concurrency;
+    }
 }
 
 template <class Setup>
@@ -51,13 +54,6 @@ calibrate_plan(const Setup& setup, RankModelInstance<typename Setup::Types>& ins
                std::vector<typename Setup::Calibration>& measured, std::size_t minimum_rebuild = 0,
                std::size_t control_rebuild = 0) {
     for (;;) {
-        if (clamp_concurrency(options, candidate.capacity)) {
-            auto next = setup.plan(device, options, candidate.placement,
-                                   budget.available(device_memory_snapshot(device.device())));
-            if (!next) return std::nullopt;
-            candidate = std::move(*next);
-            continue;
-        }
         auto probe_options          = options;
         probe_options.prefill_chunk = candidate.chunk;
         const auto key              = setup.graph_plan(probe_options, candidate.preparation);
@@ -74,17 +70,17 @@ calibrate_plan(const Setup& setup, RankModelInstance<typename Setup::Types>& ins
             .calibration_increment_bytes = found->preparation_increment_bytes,
             .calibration_retained_bytes  = found->retained_increment_bytes,
         };
-        auto available = budget.available(device_memory_snapshot(device.device()));
+        const auto snapshot       = device_memory_snapshot(device.device());
+        auto available            = budget.available(snapshot);
+        const auto available_host = budget.available_host(snapshot);
         if (control_rebuild > available) return std::nullopt;
         available -= control_rebuild;
         if (graph_bytes > available) return std::nullopt;
-        auto next = setup.plan(device, options, candidate.placement, available - graph_bytes);
+        auto next = plan_with_concurrency(setup, device, options, candidate.placement, available - graph_bytes,
+                               available_host);
         if (!next) return std::nullopt;
-        if (clamp_concurrency(options, next->capacity)) {
-            auto corrected = setup.plan(device, options, candidate.placement,
-                                        available - graph_bytes);
-            if (!corrected) return std::nullopt;
-            candidate = std::move(*corrected);
+        if (options.max_concurrency != probe_options.max_concurrency) {
+            candidate = std::move(*next);
             continue;
         }
         const auto next_key = setup.graph_plan(probe_options, next->preparation);
@@ -98,7 +94,8 @@ calibrate_plan(const Setup& setup, RankModelInstance<typename Setup::Types>& ins
             auto high = available - graph_bytes;
             while (low < high) {
                 const auto middle = low + (high - low + 1) / 2;
-                auto trial        = setup.plan(device, options, candidate.placement, middle);
+                auto trial =
+                    setup.plan(device, options, candidate.placement, middle, available_host);
                 if (trial && setup.graph_plan(probe_options, trial->preparation) == key) {
                     low       = middle;
                     candidate = std::move(*trial);
@@ -126,8 +123,7 @@ prepare_program(const Setup& setup, RankModelInstance<typename Setup::Types>& in
         const auto retained =
             budget.retained(device_memory_snapshot(device.device()),
                             instance.model->storage_stats().device_capacity_bytes);
-        if (explicit_bytes != startup.capacity.runtime_reservation_bytes ||
-            startup.sequence.kv_capacity() != startup.capacity.resolved_tokens)
+        if (explicit_bytes != startup.capacity.runtime_reservation_bytes)
             throw std::logic_error("resolved capacity differs from the finalized Program plan");
         std::optional<DeviceMemorySnapshot> ready;
         try {
@@ -135,23 +131,16 @@ prepare_program(const Setup& setup, RankModelInstance<typename Setup::Types>& in
             auto control_plan = plan_session(startup.sequence);
             instance.program = create_rank_program(instance.parameters, std::move(startup.sequence),
                                                    device, options.startup_observer);
-            auto transfers   = instance.program->context_transfer_profiles();
-            if (transfers.size() != control_plan.context.pools.size()) {
-                throw std::logic_error("rank context pools differ from the session plan");
-            }
-            for (std::size_t i = 0; i < transfers.size(); ++i) {
-                control_plan.context.pools[i].transfer = std::move(transfers[i]);
-            }
             prepared_session.emplace(prepare_session(setup.definition(), std::move(control_plan)));
             device.synchronize();
             ready = device_memory_snapshot(device.device());
             if (budget.fits(*ready)) {
-                options.prefill_chunk                                  = startup.chunk;
-                options.context_cache.host_capacity_bytes              = host_bytes;
-                memory.kv_capacity_resolution                          = startup.capacity;
-                memory.kv_capacity_resolution.automatic_headroom_bytes = budget.headroom();
-                memory.device_budget_bytes                             = budget.limit();
-                memory.startup_retained_bytes                          = retained;
+                options.prefill_chunk                                      = startup.chunk;
+                options.context_cache.host_capacity_bytes                  = host_bytes;
+                memory.context_capacities                                  = {startup.capacity};
+                memory.context_capacities.front().automatic_headroom_bytes = budget.headroom();
+                memory.device_budget_bytes                                 = budget.limit();
+                memory.startup_retained_bytes                              = retained;
                 memory.cuda_graph = instance.program->graph_memory_observation();
                 if (memory.cuda_graph) {
                     plan.graph.preparation_increment_bytes =
@@ -179,15 +168,21 @@ prepare_program(const Setup& setup, RankModelInstance<typename Setup::Types>& in
                                            static_cast<std::int64_t>(explicit_bytes)
                                      : 0;
         const auto control_rebuild =
-            ready ? static_cast<std::size_t>(std::max<std::int64_t>(
-                        0, device_memory_growth(after_control_cleanup, *ready)))
-                  : 0;
+            ready
+                ? static_cast<std::size_t>(std::max<std::int64_t>(
+                      0,
+                      device_memory_growth(after_control_cleanup, *ready) -
+                          static_cast<std::int64_t>(after_cleanup.shared_physical_memory
+                                                        ? startup.capacity.control_reservation_bytes
+                                                        : 0)))
+                : 0;
         const auto reserve =
             std::max(plan.graph.rebuild_estimate_bytes,
                      static_cast<std::size_t>(std::max<std::int64_t>(0, recovered)));
         if (reserve > available || control_rebuild > available - reserve) return std::nullopt;
         auto candidate =
-            setup.plan(device, options, startup.placement, available - reserve - control_rebuild);
+            plan_with_concurrency(setup, device, options, startup.placement, available - reserve - control_rebuild,
+                       budget.available_host(after_cleanup));
         if (!candidate) return std::nullopt;
         auto corrected = calibrate_plan(setup, instance, device, options, budget,
                                         std::move(*candidate), measured, reserve, control_rebuild);
@@ -254,27 +249,30 @@ BuiltModel<typename Setup::Types> build_local_model(const artifact::Reader& read
         throw std::invalid_argument("Device memory cannot leave the requested desktop reserve");
     const auto limit = device_budget(initial.available_bytes() - options.desktop_reserve_bytes);
     const auto headroom = startup_planning_headroom(options);
-    const auto host_reservation = (NINFER_SHARED_PHYSICAL_MEMORY != 0) && options.enable_vision
-                                      ? options.media_live_bytes
-                                      : 0;
+    const auto host_reservation = options.enable_vision ? options.media_live_bytes : 0;
     StartupMemoryBudget budget(initial, limit, headroom, host_reservation);
     const auto requested_concurrency = options.max_concurrency;
     const auto choices   = setup.placements();
     std::size_t selected = 0;
-    const auto choose    = [&](std::size_t available) {
+    const auto choose    = [&](DeviceMemorySnapshot snapshot) {
+        const auto available      = budget.available(snapshot);
+        const auto host_available = budget.available_host(snapshot);
         for (; selected < choices.size(); ++selected) {
+            options.max_concurrency = requested_concurrency;
             const auto& choice = choices[selected];
-            if (choice.device_bytes > available) continue;
-            auto plan =
-                setup.plan(device, options, choice.placement, available - choice.device_bytes);
-            while (plan && clamp_concurrency(options, plan->capacity))
-                plan = setup.plan(device, options, choice.placement,
-                                  available - choice.device_bytes);
+            if (choice.device_bytes > available || choice.host_bytes > host_available) continue;
+            auto remaining = available - choice.device_bytes;
+            if (snapshot.shared_physical_memory) {
+                if (choice.host_bytes > remaining) continue;
+                remaining -= choice.host_bytes;
+            }
+            auto plan = plan_with_concurrency(setup, device, options, choice.placement, remaining,
+                                      host_available - choice.host_bytes);
             if (plan) return plan;
         }
         return std::optional<typename Setup::ExecutionPlan>{};
     };
-    auto candidate = choose(budget.available(device_memory_snapshot(device.device())));
+    auto candidate = choose(device_memory_snapshot(device.device()));
     if (!candidate)
         throw std::invalid_argument(
             "Device budget cannot hold model weights and required execution resources");
@@ -318,13 +316,13 @@ BuiltModel<typename Setup::Types> build_local_model(const artifact::Reader& read
         device.synchronize();
         if (++selected == choices.size())
             throw std::invalid_argument(
-                "Device budget cannot hold the calibrated runtime and requested KV capacity");
-        candidate = choose(budget.available(device_memory_snapshot(device.device())));
+                "Device budget cannot hold the calibrated runtime and requested Context capacity");
+        candidate = choose(device_memory_snapshot(device.device()));
         if (!candidate)
             throw std::invalid_argument("Device budget cannot hold model execution resources");
     }
-    memory.kv_capacity_resolution.available_after_weights_bytes = available_after_weights;
-    memory.kv_capacity_resolution.available_after_startup_bytes =
+    memory.context_capacities.front().available_after_weights_bytes = available_after_weights;
+    memory.context_capacities.front().available_after_startup_bytes =
         device_memory_snapshot(device.device()).available_bytes();
     const auto signature =
         setup.prefill_signature(calibrated->startup.preparation, options.prefill_chunk);
@@ -346,25 +344,28 @@ BuiltModel<typename Setup::Types> build_local_model(const artifact::Reader& read
     summary.weight_formats.assign(formats.begin(), formats.end());
     summary.load_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-    memory.kv_capacity_resolution.desktop_reserve_bytes = options.desktop_reserve_bytes;
-    memory.kv_capacity_resolution.requested_concurrency = requested_concurrency;
-    memory.kv_capacity_resolution.effective_concurrency = options.max_concurrency;
-    memory.kv_capacity_resolution.unbacked_concurrency_ratio = std::max(
-        1.0, double(requested_concurrency) *
-                 full_context_page_groups(options, memory.kv_capacity_resolution) /
-                 memory.kv_capacity_resolution.primary_page_groups);
     set_runtime_desktop_reserve_floor(options.desktop_reserve_bytes);
     summary.device_object_count = stats.device_object_count;
     summary.host_object_count   = stats.host_object_count + definition_stats.host_object_count;
     summary.context_cost        = std::move(context_cost.summary);
     summary.cuda_sync_mode      = device.sync_mode();
-    const auto& capacity        = memory.kv_capacity_resolution;
+    const auto& capacity        = memory.context_capacities.front();
     memory.rank_budgets.push_back(
-        {memory.device_budget_bytes, capacity.runtime_reservation_bytes,
-         capacity.minimum_runtime_reservation_bytes,
-         capacity.bytes_per_additional_primary_page_group, capacity.available_after_weights_bytes,
-         capacity.available_after_startup_bytes, capacity.automatic_headroom_bytes,
-         capacity.planned_slack_bytes, memory.startup_retained_bytes, memory.cuda_graph});
+        {.limit_bytes                       = memory.device_budget_bytes,
+         .runtime_reservation_bytes         = capacity.runtime_reservation_bytes,
+         .minimum_runtime_reservation_bytes = capacity.minimum_runtime_reservation_bytes,
+         .context_capacity_bytes            = capacity.device_bytes,
+         .minimum_context_capacity_bytes    = capacity.minimum_device_bytes,
+         .context_control_budget_bytes      = capacity.metadata_budget_bytes,
+         .available_after_weights_bytes     = capacity.available_after_weights_bytes,
+         .available_after_startup_bytes     = capacity.available_after_startup_bytes,
+         .headroom_bytes                    = capacity.automatic_headroom_bytes,
+         .planned_slack_bytes               = capacity.planned_slack_bytes,
+         .retained_bytes                    = memory.startup_retained_bytes,
+         .graphs                            = memory.cuda_graph,
+         .desktop_reserve_bytes             = options.desktop_reserve_bytes,
+         .requested_concurrency             = requested_concurrency,
+         .effective_concurrency             = options.max_concurrency});
     auto worker = std::make_unique<RankWorker<Types>>(std::move(device_owner), std::move(instance));
     auto executor = std::make_unique<LocalExecutor<Types>>(std::move(worker), next_session_epoch());
     auto inference = std::make_unique<InferenceInstance<Types>>(

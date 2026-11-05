@@ -237,7 +237,7 @@ stored activation divisor, because the A4 route quantizes activations dynamicall
 The loader binds one PLE parameter set and one table per `ple_layer_ids` entry. The PLE row geometry
 (16 heads of 160 columns: 80 code bytes and 10 FP16 scales per row) and the convolution history
 (`(ple_conv_kernel_size - 1) * ngram_size` = 9 columns) are derived from the config. Native
-preparation rejects a PLE geometry that `ops::ple_ngram` does not execute (stream width 2560, four
+preparation rejects a PLE geometry that the native PLE Ops do not execute (stream width 2560, four
 streams, head width 160, a four-tap dilation-3 convolution, RMSNorm epsilon 1e-6) before a Program
 is planned.
 

@@ -57,12 +57,13 @@ cd ninfer
 ### Build on Windows
 
 Use Windows 11, a 64-bit Visual Studio 2026 C++ environment (MSVC 19.51), CUDA 13.3, and CMake.
-FFmpeg and libcurl (>= 7.85) need headers, MSVC import libraries, and runtime DLLs in their
+FFmpeg, libjpeg-turbo, hwloc (>= 2.5), and libcurl (>= 7.85) need headers, MSVC import libraries, and runtime DLLs in their
 `include/`, `lib/`, and `bin/` directories. Release packages bundle only LGPL FFmpeg.
 
 ```powershell
 cmake -S . -B build-win -G "Visual Studio 18 2026" -A x64 `
-  -DFFMPEG_ROOT=C:/deps/ffmpeg-lgpl-shared -DCURL_ROOT=C:/deps/curl
+  -DFFMPEG_ROOT=C:/deps/ffmpeg-lgpl-shared -DCURL_ROOT=C:/deps/curl `
+  -DHWLOC_ROOT=C:/deps/hwloc -DJPEG_ROOT=C:/deps/libjpeg-turbo
 cmake --build build-win --config Release -j
 ```
 
@@ -73,7 +74,7 @@ DLLs on `PATH` when running from the build tree. For build options and tests, se
 ### Build on Linux
 
 Use 64-bit Linux, a CUDA toolkit supporting `sm_120a`, CMake >= 3.28, a C++20 host compiler, Ninja,
-`pkg-config`, FFmpeg development libraries (`libavformat`, `libavcodec`, `libavutil`, `libswscale`),
+`pkg-config`, libjpeg, hwloc (>= 2.5), liburing (>= 2.5), FFmpeg development libraries (`libavformat`, `libavcodec`, `libavutil`, `libswscale`),
 and libcurl >= 7.85. Upstream validates CUDA 13.1; the fork also builds with CUDA 13.3.
 
 ```bash
@@ -104,7 +105,7 @@ On Windows:
 
 ```powershell
 .\build-win\apps\Release\ninfer-serve.exe models/qwen3_8_27b_nvfp4.ninfer `
-  --max-context 32768 --kv-capacity 65536 --max-concurrency 2 `
+  --max-context 32768 --context-capacity auto --max-concurrency 2 `
   --kv-dtype fp8 --desktop-reserve 6GiB `
   --spec mtp --draft-tokens 3 --proposal-head optimized --preserve-thinking
 ```
@@ -113,13 +114,12 @@ On Linux:
 
 ```bash
 ./build/apps/ninfer-serve models/qwen3_8_27b_nvfp4.ninfer \
-  --max-context 32768 --kv-capacity 65536 --max-concurrency 2 \
+  --max-context 32768 --context-capacity auto --max-concurrency 2 \
   --kv-dtype fp8 --desktop-reserve 6GiB \
   --spec mtp --draft-tokens 3 --proposal-head optimized --preserve-thinking
 ```
 
-This gives each request a 32,768-token limit, two execution lanes, and a shared 65,536-token
-KV pool, while reserving 6 GiB for the desktop. These are example settings; longer contexts and
+This gives each request a 32,768-token limit, two execution lanes, and a shared byte budget for KV and recurrent state selected at startup, while reserving 6 GiB for the desktop. These are example settings; longer contexts and
 retained prefixes need more capacity. See [server options](docs/serving.md#server-options).
 Add `--vision` at startup for image/video input; speculative and Vision residency are fixed
 for the process lifetime.
@@ -215,3 +215,5 @@ their own provenance.
 NInfer is licensed under [Apache-2.0](LICENSE). Model artifacts retain their source licenses and
 provenance; see their model cards and conversion references. Vendored dependencies retain their
 license files under `third_party/`.
+
+JPEG decoding uses libjpeg. This software is based in part on the work of the Independent JPEG Group.

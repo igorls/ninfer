@@ -21,10 +21,6 @@ ninfer_add_test(ninfer_qwen_distribution_readout_test
   LIBRARIES ninfer_model_execution ninfer_core)
 set_tests_properties(ninfer_qwen_distribution_readout_test PROPERTIES LABELS "gpu")
 
-ninfer_add_test(ninfer_context_allocation_test
-  SOURCES "${CMAKE_CURRENT_LIST_DIR}/context/test_allocation.cpp"
-  LIBRARIES ninfer_model_control)
-
 ninfer_add_test(ninfer_context_store_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/context/test_store.cpp"
   LIBRARIES ninfer_model_execution ninfer_core)
@@ -38,7 +34,8 @@ ninfer_add_test(ninfer_kv_history_test
   LIBRARIES ninfer_model_execution ninfer_core)
 
 ninfer_add_test(ninfer_recovery_test
-  SOURCES "${CMAKE_CURRENT_LIST_DIR}/context/test_recovery.cpp")
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/context/test_recovery.cpp"
+  LIBRARIES ninfer_model_control)
 
 ninfer_add_test(ninfer_tool_call_parser_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/qwen/test_tool_call_parser.cpp"

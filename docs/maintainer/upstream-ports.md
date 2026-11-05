@@ -48,7 +48,7 @@ Periodic CUDA/system resource samples do not enumerate NVML processes; NVML stay
 authoritative for device-wide startup admission and desktop reserve protection.
 The Supervisor HTML moves from its oversized C++ literal to LF-pinned RCDATA with
 an explicit build input dependency. This addresses the compiler limit reported
-on MSVC 19.50 without changing the dashboard bytes. This is an independent port, not an
+on MSVC 19.50. This is an independent port, not an
 application of Patrick's still-unpublished patch or a new MSVC 19.50 qualification.
 The attention-prefix real fixture accepts a strict positive
 `NINFER_TEST_DESKTOP_RESERVE_MIB` override, keeping its normal reserve default.
@@ -61,6 +61,52 @@ The full CPU converter suite passes 63 tests plus eight subtests; ten CUDA cases
 are skipped in the CPU-only Python 3.11 environment. The Supervisor serves the
 exact original 388,554 LF bytes; an HTML-only edit rebuilds its resource and the
 restored payload is served exactly again. Browser interaction is not qualified.
+
+That byte-equality check left a verification gap found during the next unit:
+the initial extraction included 31 C++ string-fragment delimiters inside the
+HTML. File and HTTP bytes matched, but the JavaScript was invalid. The delimiters
+are removed and both embedded scripts pass Node's parser. A permanent dashboard
+syntax CTest checks the shipped resource when Node is available. The rebuilt
+Supervisor serves the corrected 381,482 LF bytes exactly, and both served scripts
+parse. Browser interaction and final-package verification remain pending.
+
+The candidate unit integrates `7131c0b9..1fcc6dc5`: joint Context capacity,
+unified State/KV backing, semantic/intermediate capture policy, bounded Flash
+prefill/replay frontiers, Host placement accounting, direct-I/O alignment, JPEG
+decode parity and admission/reclaim overhead. Windows MSVC 19.51/CUDA 13.3
+builds server, Supervisor and the selected CPU targets. All eleven selected
+CTests pass, including joint-capacity budgets and dashboard JavaScript parsing.
+Affected evaluation/corpus/TTFT Python checks pass 87 tests plus three subtests
+after correcting the invocation path and installing PyYAML in the existing
+Python 3.11 environment. This is not hardware or release acceptance.
+
+Context capacity is now a byte budget shared by recurrent state and all KV
+histories, with automatic sizing as the default. The token-capacity API and
+separate extra-state quota are retired. Desktop reserve remains 8 GiB by default;
+the automatic slack floor moves to `--context-slack-floor`. Optional lane clamping
+checks complete model-declared concurrent working sets against actual record
+packing, including state, instead of dividing a KV token quota by max context.
+Startup also checks available Host RAM on discrete Windows/Linux GPUs. Earlier
+performance and exact-MTP-count findings remain; the changed resource contract
+requires an explicit, comparable final-source qualification profile.
+
+The Supervisor edits byte quantities, consumes physical Context occupancy, and
+leaves model-dependent feasibility to the Engine. Its former 8 KiB/token
+shortfall retry heuristic is dropped: it cannot represent shared State/KV storage.
+`auto` uses the Engine planner; explicit byte requests are not silently reduced.
+Old token-based slider limits, estimated capacity ratios and retry notices are
+removed with that policy. Windows JPEG builds use libjpeg-turbo through
+`JPEG_ROOT`; packages include its runtime DLL and IJG/license notices. Independent
+fork Op oracles and fused FP8 schedules remain, adapted to State record offsets;
+their numerical execution on this unit is pending.
+
+The earlier standalone preparation interfaces `selected_block_attention`,
+`qsa_indexer` and `ple_ngram` have no callers in either native model package.
+They are retired with their duplicate test targets: production mathematics and
+independent qualification fixtures now belong to `ops/qsa.h`, `ops/ple.h` and
+their native implementations. This also removes the obsolete page-ID cache
+representation from the selected-block interface. Historical measurements remain
+historical evidence; they do not qualify the replacement production routes.
 
 Initial build failures included obsolete API callers, duplicate memory-query
 definitions and a missing BF16 head source registration. The converter checks

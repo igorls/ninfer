@@ -246,16 +246,19 @@ int main(int argc, char** argv) try {
     ninfer::EngineOptions options;
     options.artifact_path = artifact_path;
     options.max_context = kMaxContext;
-    // Each worker keeps exactly one request in flight, so the pool holds every lane's full
-    // context and admission never waits on KV or hits the pending deadline.
+    // Each worker keeps one request in flight. Require complete concurrent working sets;
+    // a lower admitted lane count must not silently relabel the collection profile.
     options.max_concurrency = settings.concurrency;
-    options.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(kMaxContext * settings.concurrency);
+    options.context_capacity = ninfer::ContextCapacityPolicy::automatic();
+    options.clamp_concurrency_to_pool = true;
     options.pending_timeout_ms = 3'600'000;
     options.prefill_chunk = 1024;
     options.kv_cache = ninfer::KvCacheStorage::Fp8E4M3Row256;
     options.context_cache.enabled = false;
     options.speculative.backend = ninfer::SpeculativeBackend::None;
     ninfer::Engine engine(options);
+    if (engine.options().max_concurrency != settings.concurrency)
+        throw std::invalid_argument("collection concurrency cannot reserve complete contexts");
     // The profile names the collected model, so another artifact would mislabel its rows.
     const auto loaded = engine.startup_report().load;
     if (loaded.model_name != "qwen3.8-27b" ||

@@ -37,6 +37,7 @@ add_library(ninfer_core ${NINFER_LIBRARY_TYPE}
   ${ninfer_io_sources}
   gdn_replay_records.cpp
   cyclic_kv_cache.cpp
+  context_pool.cpp
   paged_kv_cache.cpp
   paged_kv_geometry.cpp
   linear_attention_state.cpp

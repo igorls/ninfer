@@ -18,23 +18,35 @@ inline Weight bf16_weight(const DeviceBuffer& buffer, int n, int k) {
     return w;
 }
 
-struct MixFixture {
-    MixFixture(const Options& options, int tokens)
-        : op(options.op), m(columns(tokens, options.batch)),
-          input(make_bf16(std::size_t(kWidth) * kStreams * m, 6201, -1.F, 1.F)),
+// The represented weights remain resident while M varies, as they do in a Program.
+struct MixWeights {
+    explicit MixWeights(Op form)
+        : op(form),
           down(make_bf16(
               std::size_t(kRank + (op == Op::BlockMix ? kStreams : 0)) * kWidth * kStreams, 6203,
               -std::sqrt(3.F / (kWidth * kStreams)), std::sqrt(3.F / (kWidth * kStreams)))),
           up(make_bf16(std::size_t(kWidth) * kStreams * kRank, 6207, -4.F * std::sqrt(3.F / kRank),
                        4.F * std::sqrt(3.F / kRank))),
+          wd(bf16_weight(down, kRank + (op == Op::BlockMix ? kStreams : 0), kWidth * kStreams)),
+          wu(bf16_weight(up, kWidth * kStreams, kRank)) {}
+
+    Op op;
+    DeviceBuffer down, up;
+    Weight wd, wu;
+};
+
+struct MixFixture {
+    MixFixture(const Options& options, int tokens, const MixWeights& resident)
+        : weights(resident), op(options.op), m(columns(tokens, options.batch)),
+          input(make_bf16(std::size_t(kWidth) * kStreams * m, 6201, -1.F, 1.F)),
           output(make_zeros(std::size_t(kWidth) * m * sizeof(__nv_bfloat16))),
           injection(op == Op::BlockMix ? make_zeros(std::size_t(kStreams) * m * sizeof(float))
                                        : DeviceBuffer{}),
-          wd(bf16_weight(down, kRank, kWidth * kStreams)),
-          wi([&] { auto w = bf16_weight(down, kStreams, kWidth * kStreams);
+          wd(bf16_weight(weights.down, kRank, kWidth * kStreams)),
+          wi([&] { auto w = bf16_weight(weights.down, kStreams, kWidth * kStreams);
                     w.qdata = static_cast<const std::byte*>(w.qdata) + std::size_t(kRank) * kWidth * kStreams * 2;
                     return w; }()),
-          wu(bf16_weight(up, kWidth * kStreams, kRank)),
+          wu(bf16_weight(weights.up, kWidth * kStreams, kRank)),
           z(input.span(), DType::BF16, {kWidth, kStreams, m}),
           x(output.span(), DType::BF16, {kWidth, m}),
           j(injection.size() ? Tensor(injection.span(), DType::FP32, {kStreams, m}) : Tensor{}),
@@ -57,11 +69,10 @@ struct MixFixture {
 
     std::size_t workspace_peak() const { return arena.peak_used(); }
 
+    const MixWeights& weights;
     Op op;
     int m;
     DeviceBuffer input;
-    DeviceBuffer down;
-    DeviceBuffer up;
     DeviceBuffer output;
     DeviceBuffer injection;
     Weight wd, wi, wu;

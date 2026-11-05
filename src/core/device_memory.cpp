@@ -293,8 +293,9 @@ PhysicalMemorySnapshot physical_memory_snapshot(Device device) {
 DeviceMemorySnapshot device_memory_snapshot(Device device) {
     CudaDeviceScope scope(device);
     auto snapshot = query_device_memory(device.index());
+    const auto physical = physical_memory_snapshot(device);
+    snapshot.system_available_bytes = physical.system_available_bytes;
     if constexpr (NINFER_SHARED_PHYSICAL_MEMORY != 0) {
-        const auto physical = physical_memory_snapshot(device);
         snapshot.total_bytes = physical.cuda_total_bytes;
         snapshot.system_available_bytes = physical.system_available_bytes;
         snapshot.shared_physical_memory = true;

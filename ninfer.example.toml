@@ -13,7 +13,7 @@ vision = false
 device = 0
 max_context = 8192
 kv_dtype = "bf16" # bf16 / int8 / fp8 / nvfp4 / k8v4
-kv_capacity = "context" # Positive integer, context, or auto; context is not multiplied by concurrency.
+context_capacity = "auto" # Per-rank shared Device KV/State capacity; auto, "8GiB", or positive integer bytes.
 prefill_chunk = "default" # default or a positive multiple of 128; no hardware performance estimation.
 cuda_graph = true
 max_concurrency = 1
@@ -25,8 +25,8 @@ clamp_concurrency_to_pool = false
 
 [context_cache]
 prefix_reuse = "default" # CLI: false; serve: true. Also accepts true/false.
-extra_state_slots = "default" # CLI: 0; serve: max_concurrency. Also accepts a nonnegative integer.
-host_capacity = "default" # CLI: 0; supported RTX Blackwell serve: 8 GiB + 8 native StateImages.
+checkpoint_interval = 8192 # Target spacing; semantic boundaries and execution windows determine actual positions.
+host_capacity = "default" # CLI: 0; RTX 5090 / RTX PRO 6000 serve: 8 GiB + 8 native StateImages.
 # Explicit capacities accept "8GiB", "0B", or integer bytes; excludes CPU experts and PLE.
 cost_presets = "" # Optional context-cost JSON path; empty uses existing defaults.
 

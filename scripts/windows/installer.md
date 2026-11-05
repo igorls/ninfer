@@ -13,7 +13,10 @@ Run `scripts/windows/build-installer.ps1` with explicit engine build, launcher
 build, Inno Setup compiler, FFmpeg license, FFmpeg source note, and curl license paths. The script
 requires an explicit `-Version yyyy.MM.dd-channel.revision` and derives the installer's numeric
 Windows file version from the same date and revision. The hwloc notice staged with the runtime
-is installed under `licenses/hwloc/` alongside the other third-party notices. The script
+is installed under `licenses/hwloc/`; the libjpeg-turbo license and IJG acknowledgment
+are staged under `licenses/libjpeg-turbo/`. Engine configuration requires `JPEG_ROOT`
+for the Windows SDK, and packaging resolves its runtime DLL from that SDK's `bin/`.
+The script
 stages runtime DLLs, checks all four executables without development tools on
 PATH, builds the unsigned Setup executable, and writes its SHA-256 checksum.
 Use a new version for each candidate; a staging directory is never overwritten.

@@ -81,6 +81,13 @@ ninfer_add_test(ninfer_http_transport_test
   LIBRARIES ninfer_serve)
 
 if(WIN32)
+  find_program(NINFER_TEST_NODE_EXECUTABLE NAMES node)
+  if(NINFER_TEST_NODE_EXECUTABLE)
+    add_test(NAME ninfer_supervisor_dashboard_test
+      COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_LIST_DIR}/../test_supervisor_dashboard.py"
+        --node "${NINFER_TEST_NODE_EXECUTABLE}"
+        --html "${PROJECT_SOURCE_DIR}/apps/ninfer-supervisor/dashboard.html")
+  endif()
   ninfer_add_test(ninfer_supervisor_test
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_ninfer_supervisor.cpp"
             "${PROJECT_SOURCE_DIR}/apps/ninfer-supervisor/frontend_server.cpp"
