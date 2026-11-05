@@ -109,6 +109,34 @@ transport checks pass; the unaffected dense and Op results above are reused.
 No tolerance or acceptance criterion was relaxed. Later shared workspace,
 thinking-accounting and listener fixes are separate follow-up ports.
 
+### Shared fixes ported ahead of the remaining range
+
+These adaptations do not advance the reviewed merge-base beyond `1408277a` or
+activate later multi-rank/model support:
+
+- [`d602894a`](https://github.com/Neroued/ninfer/commit/d602894abcd071c273003f021258f46608aab447):
+  `WorkspaceLayoutBuilder` preserves its cursor and peak when aligned byte or
+  tensor planning overflows, including inside a scope.
+- [`419d637d`](https://github.com/Neroued/ninfer/commit/419d637db97b8213eab5e5f67887f340d601fdc9):
+  `ThinkingBudgetStats` counts accepted model thinking tokens even without a cap.
+  Discarded previews, partial closing markers, EOS and raw/presented output retain
+  their transaction semantics. This removes the fork's optimization that left
+  semantic tracking dormant without a budget; the additional CPU tracking on
+  unlimited reasoning is not benchmarked. The fixed-corpus timing matrices above
+  do not measure that route.
+- [`a062e016`](https://github.com/Neroued/ninfer/commit/a062e0165ef2c26e433b92c639b5484539a48765):
+  Linux explicitly uses `SO_REUSEADDR` so a closed listener can be rebound while
+  the active listener remains exclusive. Windows retains its existing socket setup.
+
+All three Linux regression fixtures fail before these fixes. On Windows the
+workspace/accounting regressions fail before the fixes; the new Linux socket
+cases are platform-guarded and are not claimed as Windows execution. After the
+fixes, seven memory/frontend/transport/graph/PLE checks and three OpenAI/Anthropic/
+tool-constraint tests pass on each platform, with no skips. CLI/server rebuild and
+Linux executable help checks pass. The preceding CUDA mathematical and real-model
+evidence is reused; these changes do not alter CUDA arithmetic or normal workspace
+layout. Physical final-source acceptance remains separate.
+
 ### Final-tip adaptation (October 23–28)
 
 The October 28 repair addresses dense MTP and ordinary Flash decode before the
