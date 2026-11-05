@@ -207,8 +207,16 @@ errors distinguish `invalid_json_schema`, `unsupported_json_schema` and `unsatis
 `invalid_request_error` envelope with the schema location in the message. Responses echoes the
 selected `text.format` in aggregate responses and SSE response objects.
 
-JSON output uses compact separators and declared property order. State the desired content in the
-prompt; the schema is not inserted into it. Only one output constraint may be supplied.
+JSON output accepts spaces, tabs, carriage returns and newlines between structural tokens and
+before/after the root value; declared property order is retained. Compact and formatted forms are
+allowed, including container-valued const/enum entries. Whitespace inside strings remains part of
+the value, and schema assertions still apply. State the desired content in the prompt; the schema
+is not inserted into it. Only one output constraint may be supplied.
+
+Output limits, context exhaustion and cancellation can leave an incomplete JSON prefix; inspect
+the finish reason before treating such a response as normally completed JSON. A schema permitting
+arbitrary strings also permits punctuation inside those strings; structural validity does not
+guarantee the quality of their content.
 
 Schemas support positional arrays (`prefixItems` plus tail `items`) and inclusive/exclusive
 `number` ranges. Bounded numbers use exact int64 integers or finite binary64-compatible decimal

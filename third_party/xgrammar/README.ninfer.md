@@ -16,6 +16,10 @@ Cache access reports hit, build or an in-flight wait to the caller without addin
 JSON adaptations preserve literal data in cache keys, reject unsupported unions, resolve local
 JSON Pointers and carry typed errors with schema locations. String grammars constrain decoded
 Unicode values before JSON encoding; property-name exclusion also covers escaped spellings.
+JSON-body grammars allow structural JSON whitespace. Container const/enum literals split
+structural punctuation only outside quoted strings when any_whitespace is enabled; string
+escapes and numeric spelling retain their literal values. Qwen argument framing keeps its
+separate formatting policy.
 String intersections combine patterns, Unicode length and tool-delimiter exclusion in one automaton.
 Pure JSON length bounds use counted repetitions of JSON-encoded Unicode scalars. Prefix-free
 terminal units share count-independent token masks, including partial UTF-8 and escape states;

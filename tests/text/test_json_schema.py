@@ -23,7 +23,7 @@ class SchemaContracts(unittest.TestCase):
     def run_cases(self, cases):
         payload = "".join(compact({"schema": schema, "candidates": [compact(v) for v in values]}) + "\n"
                           for schema, values in cases)
-        result = subprocess.run([str(PROBE), "--probe"], input=payload, text=True,
+        result = subprocess.run([str(PROBE), "--probe"], input=payload, text=True, encoding="utf-8",
                                 capture_output=True, check=True, timeout=90)
         reports = [json.loads(line) for line in result.stdout.splitlines()]
         self.assertEqual(len(reports), len(cases))

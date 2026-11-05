@@ -1,6 +1,6 @@
 # Upstream ports
 
-Updated: October 28, 2026.
+Updated: November 4, 2026.
 
 This is the living record of how this workstation fork ([igorls/ninfer](https://github.com/igorls/ninfer))
 tracks [Neroued/ninfer](https://github.com/Neroued/ninfer): the reviewed upstream point, the fork
@@ -377,6 +377,49 @@ upstream work. Each merge records every upstream change it brings in here as int
 or reverted, so the merge-base is the reviewed point. A rejected upstream change is reverted in the
 fork line (or device-gated) with its measurement recorded; a deferred one names the condition that
 would make it useful.
+
+## JSON response whitespace repair (October 31, 2026)
+
+Fork [issue #38](https://github.com/igorls/ninfer/issues/38) reports sampled JSON string
+prefix corruption on workstation 2b62e8e5. Both that source and the b387a949 sync candidate
+compile JSON bodies with compact separators, excluding otherwise valid whitespace-bearing
+tokens. The new CPU regression fails on the unmodified candidate with structural whitespace
+rejection. This establishes the mask restriction; it does not independently reproduce the
+reported sampled-output frequencies or explain an incomplete response's finish reason.
+
+The isolated fix/json-response-whitespace patch adapts
+[upstream 9822c38d](https://github.com/Neroued/ninfer/commit/9822c38d7dba8d7f9d1bd5382d314ef24a4b34e8):
+JSON bodies admit structural ASCII whitespace, including around the root value, and container
+const/enum literals retain the same policy without changing quoted leaf data. Tests cover
+formatted and malformed JSON, unchanged schema assertions, tokens spanning whitespace and
+punctuation, speculative mask preview/confirm/discard, continuation/reasoning boundaries and
+the JSON-body/tool union. Native Qwen argument framing is retained.
+
+This is a selected source adaptation beyond the reviewed upstream point, not a full merge
+through that commit or an advance of the sync merge-base. Patrick's acceptance candidate and
+the Qwen4 preparation branch remain unchanged.
+
+Native Windows validation uses MSVC 19.51.36260, the configured CUDA 13.3.33 toolchain and
+Python 3.11.15 with the independent jsonschema requirement. Both new JSON and composed-tool
+regressions fail before the production change and pass after it. Five selected CTests pass
+in 5.25 s: grammar, JSON/schema, regex/choice and the JSON/schema and regex independent oracles.
+The production tool-contract/grammar/parser sources and their existing test source also pass
+in a focused CPU link, followed by all three Python tool-schema oracle tests. That focused
+link does not establish a full model-runtime/product build. The ordinary registered target
+for the same test source is ninfer_qwen_tool_constraints_test.
+
+The first independent-oracle attempt lacked jsonschema; installing tests/text/requirements.txt
+in an isolated Python 3.11 environment resolves that setup failure. A November 4 rerun under
+the Windows default code page exposed Unicode input encoding failures in the JSON oracle.
+The JSON and tool-schema probes now explicitly use UTF-8 for their subprocess transport,
+so the same Unicode cases do not depend on an inherited UTF-8 process environment.
+Existing MSVC C4834 and
+vendor pragma C4068 warnings remain. No GPU workload, HTTP model process, live acceptance,
+throughput or resource comparison was run for this patch. Live sampled API behavior,
+model-content quality and performance remain unqualified.
+Reported punctuation can also be schema-valid string content, and length/cancellation can
+leave a valid but incomplete prefix, so this fix does not claim to resolve every malformed or
+undesirable answer in the issue.
 
 ## How to maintain this document
 
