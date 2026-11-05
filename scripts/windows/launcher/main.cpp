@@ -208,7 +208,7 @@ INT_PTR CALLBACK dialog_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     case 205:
         ShellExecuteW(hwnd, L"open", LOWORD(wparam) == 204
             ? L"https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer"
-            : L"https://huggingface.co/igorls/Qwen3.8-Flash-Next-mixed-NInfer", nullptr, nullptr, SW_SHOWNORMAL);
+            : L"https://github.com/igorls/ninfer/blob/0465c4ec3167f5fa4a6a96d55f7c60fc79f1987b/docs/maintainer/qwen3.8-flash-next-artifact.md", nullptr, nullptr, SW_SHOWNORMAL);
         return TRUE;
     case 203: {
         std::array<wchar_t, 32768> path{};

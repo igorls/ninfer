@@ -13,6 +13,9 @@ Flash-Next can use resident execution on a 96 GB GPU or bounded expert offload
 on smaller GPUs. Offload needs over 63 GiB of expert backing alone, plus RAM
 for the OS and runtime; a 64 GB workstation is insufficient. Read the model
 card and qualification limits before downloading.
+The published legacy Flash-Next entry needs offline reframing before this engine
+can load it. The setup window links to the compatible-artifact preparation guide;
+choose the prepared canonical entry and keep its continuation files beside it.
 
 The initial profile uses a 16K context per request, a 32K shared KV pool,
 two request lanes, FP8 KV, and an 8 GiB desktop reserve. Artifacts with an MTP
