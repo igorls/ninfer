@@ -8,6 +8,18 @@
 
 namespace ninfer {
 
+class Device;
+
+struct PhysicalMemorySnapshot {
+    std::size_t cuda_total_bytes = 0, cuda_free_bytes = 0;
+    std::size_t system_available_bytes = 0, system_total_bytes = 0;
+    bool shared_physical_memory = false;
+};
+
+// CUDA/system counters for periodic execution observations. Does not enumerate
+// NVML processes; device-wide admission and desktop protection use the query below.
+[[nodiscard]] PhysicalMemorySnapshot physical_memory_snapshot(Device);
+
 struct ProcessMemoryInfo {
     std::uint32_t pid        = 0;
     std::uint64_t used_bytes = 0; // 0 if per-process memory is unavailable (e.g. under WDDM)
@@ -22,6 +34,13 @@ struct DeviceMemorySnapshot {
     std::string pci_bus_id;
     std::string warning;
     std::vector<ProcessMemoryInfo> compute_processes;
+    std::size_t system_available_bytes = 0;
+    bool shared_physical_memory = false;
+
+    [[nodiscard]] std::size_t available_bytes() const noexcept {
+        if (!shared_physical_memory) return free_bytes;
+        return system_available_bytes < total_bytes ? system_available_bytes : total_bytes;
+    }
 };
 
 // Queries device memory. Prefers NVML (device-wide truth across all processes).

@@ -44,7 +44,7 @@ struct GdnReplayFoldRow {
  * while changing host row descriptors requires a new capture.
  *
  * Registered (layers, Q/K heads, V heads, conv channels) geometries are (48,16,48,10240),
- * (30,16,32,8192), and (36,16,48,10240). The Op owns no workspace or device
+ * (30,16,32,8192), (36,16,48,10240), and (36,8,24,5120). The Op owns no workspace or device
  * allocation, and does not read query or generate token output. The four record planes are
  * read-only, disjoint, and do not overlap either state region.
  */
@@ -53,6 +53,13 @@ public:
     GdnReplayFoldPlan(const GdnReplayRecords& records, LinearAttentionStateAllLayersView states);
 
     void execute(std::span<const GdnReplayFoldRow> rows, CudaExecutionView execution) const;
+
+    // Device I32 [B] metadata, 1<=B<=record_capacity. Selectors and commit lengths obey
+    // the same row semantics as the Host overload, including strict zero-row no-op.
+    // Metadata is contiguous, disjoint from record/state storage, and preserved. Replay
+    // consumes its current values; the caller guarantees valid selectors and write separation.
+    void execute(const Tensor& source_slots, const Tensor& destination_slots,
+                 const Tensor& commit_columns, CudaExecutionView execution) const;
 
 private:
     GdnReplayRecords records_;

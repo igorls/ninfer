@@ -147,7 +147,7 @@ int main(int argc, char** argv) try {
     options.kv_cache      = kv;
     const auto load_started = std::chrono::steady_clock::now();
     ninfer::Engine engine(std::move(options));
-    const ninfer::LoadSummary load = engine.load_summary();
+    const ninfer::LoadSummary load = engine.startup_report().load;
     const auto& effective          = engine.options();
     std::cerr << "engine ready in "
               << std::chrono::duration<double>(std::chrono::steady_clock::now() - load_started).count()

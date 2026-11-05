@@ -23,33 +23,6 @@ namespace ninfer::serve {
 struct RequestLifetime;
 struct RequestCapacity;
 
-struct GenerationMetrics {
-    std::uint64_t engine_request_id       = 0;
-    std::uint32_t computed_prefill_tokens = 0;
-    double prepare_seconds                = 0.0;
-    double ttft_seconds                   = 0.0;
-    double vision_seconds                 = 0.0;
-    double prefill_seconds                = 0.0;
-    double decode_seconds                 = 0.0;
-    double prompt_wall_seconds            = 0.0;
-    double generation_wall_seconds        = 0.0;
-    double total_seconds                  = 0.0;
-    ninfer::GenerationEngineTiming engine_timing;
-    std::optional<ninfer::GenerationFirstOutputTiming> first_output_timing;
-    ninfer::GenerationSchedulingStats scheduling;
-    ninfer::GenerationAdmissionStats admission;
-
-    SpeculativeBackend speculative_backend    = SpeculativeBackend::None;
-    std::uint32_t speculative_draft_window    = 0;
-    std::uint64_t speculative_rounds          = 0;
-    std::uint64_t speculative_draft_tokens    = 0;
-    std::uint64_t speculative_accepted_tokens = 0;
-    std::uint64_t speculative_fallback_steps  = 0;
-    std::vector<std::uint64_t> speculative_accepted_per_position;
-    std::uint32_t prefix_cache_hit_tokens     = 0;
-    ninfer::PrefixReusePath prefix_reuse_path = ninfer::PrefixReusePath::Root;
-};
-
 struct TokenLogprobEntry {
     ninfer::TokenId token_id = 0;
     std::string bytes;
@@ -79,14 +52,13 @@ struct GenerationOutcome {
     std::vector<ninfer::TokenId> generated_token_ids;
     std::vector<ninfer::GeneratedToolCall> tool_calls;
     ninfer::ToolCallParseDiagnostics tool_call_parse;
-    int prompt_tokens     = 0;
-    int completion_tokens = 0;
-    int reasoning_tokens  = 0;
-    ninfer::ThinkingBudgetStats thinking;
-    std::optional<ninfer::ConstraintObservation> constraint;
+    int prompt_tokens                  = 0;
+    int completion_tokens              = 0;
+    int reasoning_tokens               = 0;
     ninfer::FinishReason finish_reason = ninfer::FinishReason::OutputLimit;
     std::optional<std::string> matched_stop_string;
-    GenerationMetrics metrics;
+    RequestStats stats;
+    double service_prepare_seconds = 0.0;
 };
 
 // A transport may report an interrupted stream through a callback or is_cancelled().
@@ -162,26 +134,16 @@ public:
         return engine_->tokenize_text(text);
     }
 
-    [[nodiscard]] ninfer::LoadSummary load_summary() const { return engine_->load_summary(); }
+    [[nodiscard]] const EngineDescription& description() const { return engine_->description(); }
 
-    [[nodiscard]] ninfer::MemorySummary memory_summary() const { return engine_->memory_summary(); }
+    [[nodiscard]] const StartupReport& startup_report() const { return engine_->startup_report(); }
 
-    // Telemetry callers must use this. See Engine::try_memory_summary.
-    [[nodiscard]] std::optional<ninfer::MemorySummary> try_memory_summary() const {
-        return engine_->try_memory_summary();
+    [[nodiscard]] EngineSnapshot snapshot() const { return engine_->snapshot(); }
+    [[nodiscard]] std::optional<EngineSnapshot> try_snapshot() const {
+        return engine_->try_snapshot();
     }
-
-    [[nodiscard]] ninfer::RuntimeStats runtime_stats() const { return engine_->runtime_stats(); }
-
     [[nodiscard]] bool is_available() const { return engine_->is_available(); }
 
-    [[nodiscard]] ninfer::MediaCacheSummary media_cache_summary() const {
-        return engine_->media_cache_summary();
-    }
-
-    // Holds the engine still and runs `work` there. Blocks until it has run.
-    // Requests arriving during the hold wait rather than fail; see
-    // Engine::run_at_quiescence.
     [[nodiscard]] ninfer::Engine::QuiescenceReport
     run_at_quiescence(std::function<void()> work) const {
         return engine_->run_at_quiescence(std::move(work));

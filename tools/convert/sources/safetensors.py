@@ -151,7 +151,7 @@ class SafetensorsSource:
             raise ValueError(f"{name}: short source read")
         self.bytes_read += count
         discard_cached_pages(fd, offset, count)
-        return torch.frombuffer(bytearray(raw), dtype=dtype)
+        return torch.frombuffer(raw, dtype=dtype)
 
     def close(self) -> None:
         while self._fds:

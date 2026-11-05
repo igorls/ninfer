@@ -49,8 +49,9 @@ python3 -m tools.convert \
 ```
 
 `--components` defaults to `text`. Include only the optional components you want to distribute.
-`--proposal` adds the indexed proposal head used by speculative decoding; it uses the repository's
-token ranking and defaults to 131,072 rows. The ordinary full-vocabulary output head is retained.
+`--proposal` adds the architecture's optimized proposal head. Qwen3.5-based models use the
+repository's token ranking and default to a 131,072-row shortlist; Qwen4Exp keeps the complete
+vocabulary and quantizes an additional head. The ordinary target output head is retained.
 
 The built-in recipes are ordinary Python functions in
 [`official_recipes.py`](../tools/convert/official_recipes.py):
@@ -230,12 +231,17 @@ The Qwen4Exp adapter selects the dedicated
 [`qwen3_8_flash_next.jinja`](../tools/chat_templates/qwen3_8_flash_next.jinja) by default;
 `--resource chat_template.jinja=PATH` explicitly replaces it. The 27B template is independent.
 
-The Qwen4Exp adapter and Engine support Text, Vision and native MTP. MTP uses the full shared head;
-omit `--proposal`. DFlash/DFlash2 and indexed proposal execution are unsupported for Qwen4Exp.
-CUDA self-quantization compiles
-the SM120 encoder on first use and requires a CUDA toolkit, C++ compiler and Ninja.
-PLE uses two bounded passes per shard, with no full-table materialization. The complete recipe
-contains about 100.67 GiB of weight/control payload, split by the existing V3 writer.
+The Qwen4Exp adapter and Engine support Text, Vision and native MTP. For this architecture,
+`--proposal` converts an additional full-vocabulary Q4 head from the BF16 main head, with
+`A16Only` activation policy. It does not read the ranking or use `--proposal-rows`.
+Select it at startup with `--spec mtp --draft-tokens 3 --proposal-head optimized`.
+The default `--proposal-head full` shares the main BF16 head and leaves the Q4 object unloaded.
+DFlash/DFlash2 and indexed proposal execution are unsupported for Qwen4Exp.
+
+CUDA self-quantization compiles the encoder for the selected CUDA build architecture on first use
+and requires a CUDA toolkit, C++ compiler and Ninja. PLE uses two passes per shard, with a bounded
+source cache and no full-table materialization. The complete recipe including the optimized head
+contains about 100.98 GiB of weight/control payload, split by the V3 writer.
 Main experts use two NVFP4 banks per layer with independent matrix divisors. MTP uses two
 128×128 block-FP8 banks, preserving NVIDIA E4M3FN codes and BF16 multipliers; its other private
 parameters also come from the NVIDIA source. PLE alone uses the BF16-to-NF4 stored-scale method.
@@ -467,8 +473,9 @@ def configure(model, recipe, sources):
 
 Use this as an override. The NumPy file must already follow the logical row/column order. For an
 unfamiliar quantized source, its reader performs the corresponding decoding before returning
-values. To preserve existing compatible encoded words, also provide `read_encoded` returning
-`EncodedRows`, and the format's required divisor accessors. Their definitions are in
+values. To preserve existing compatible encoded words, also provide `encoded_format` (a format
+name or metadata-only resolver), `read_encoded` returning `EncodedRows`, and the format's required
+divisor accessors. Their definitions are in
 [`sources/logical.py`](../tools/convert/sources/logical.py).
 
 ## Write a conversion method
@@ -493,14 +500,14 @@ def clipped_grouped(request):
     ):
         raise ValueError("clipped_grouped requires a grouped-integer matrix")
     limit = float(request.parameters["clip"])
-    if not math.isfinite(limit) or limit <= 0 or request.rows_per_chunk <= 0:
-        raise ValueError("clip and rows_per_chunk must be positive")
+    if not math.isfinite(limit) or limit <= 0:
+        raise ValueError("clip must be positive and finite")
     n, k = request.target.shape
+    chunk = request.chunk_rows(k * 4)
 
     def produce(output):
-        for begin in range(0, n, request.rows_per_chunk):
-            end = min(n, begin + request.rows_per_chunk)
-            values = request.values(begin * k, end * k).reshape(end - begin, k)
+        for begin, end, values in request.read_chunks(request.values, n * k, chunk * k):
+            values = values.reshape((end - begin) // k, k)
             if not bool(torch.isfinite(values).all()):
                 raise ValueError("source contains non-finite values")
             encoded = quantize_matrix(
@@ -508,7 +515,7 @@ def clipped_grouped(request):
                 request.target.format,
                 device=request.device,
             )
-            output.write_codes(begin, encoded.codes, encoded.scales)
+            output.write_codes(begin // k, encoded.codes, encoded.scales)
 
     return request.job(produce=produce)
 

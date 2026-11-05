@@ -34,6 +34,8 @@ constexpr FieldSpec kFields[] = {
      "Positive multiple of 128; default is resolved by the model."},
     {Field::CudaGraph, "engine.cuda_graph", "--cuda-graph", "--no-cuda-graph", "",
      "Enable CUDA Graph execution."},
+    {Field::GpuTiming, "observability.gpu_timing", "--gpu-timing", "--no-gpu-timing", "",
+     "Collect result/commit CUDA stream intervals at existing completion boundaries."},
     {Field::MaxConcurrency, "engine.max_concurrency", "--max-concurrency", "", "N",
      "Resident execution lanes (1..8)."},
     {Field::MaxPendingRequests, "engine.max_pending_requests", "--max-pending-requests", "", "N",
@@ -294,6 +296,10 @@ bool applies_to(const FieldSpec& spec, EntryPoint entry) {
            (spec.scope == Scope::Serve && entry == EntryPoint::Serve);
 }
 
+std::uint32_t parse_duration_ms(const RawValue& value, bool positive) {
+    return static_cast<std::uint32_t>(quantity(value, false, positive));
+}
+
 FieldValue parse_field_value(Field field, const RawValue& value, bool command_line) {
     const auto* string = std::get_if<std::string>(&value);
     const auto is      = [&](std::string_view word) { return string && *string == word; };
@@ -326,6 +332,7 @@ FieldValue parse_field_value(Field field, const RawValue& value, bool command_li
     }
     switch (field) {
     case Field::Vision:
+    case Field::GpuTiming:
     case Field::CudaGraph:
     case Field::PrefixReuse:
     case Field::Thinking:
@@ -376,9 +383,9 @@ FieldValue parse_field_value(Field field, const RawValue& value, bool command_li
     case Field::ResponseSize:
         return quantity(value, true, true);
     case Field::PendingTimeout:
-        return quantity(value, false, true);
+        return std::uint64_t{parse_duration_ms(value, true)};
     case Field::StatsInterval:
-        return quantity(value, false, false);
+        return std::uint64_t{parse_duration_ms(value, false)};
     case Field::Temperature:
         return real(value, command_line, 0, 2);
     case Field::TopP:

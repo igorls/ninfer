@@ -11,7 +11,10 @@ import sys
 from collections.abc import Mapping
 
 from . import qwen3_5
+import torch
+
 from .official_recipes import RECIPES
+from .methods import SOURCE_CACHE_BYTES
 from .pipeline import convert
 from .proposal import DEFAULT_RANKING, add_official_proposal
 from . import qwen4_exp
@@ -142,16 +145,35 @@ def main(argv=None):
     parser.add_argument(
         "--proposal",
         action="store_true",
-        help="include the existing indexed proposal head",
+        help="include the architecture's optimized proposal head",
     )
     parser.add_argument("--proposal-rows", type=int, default=131072)
     parser.add_argument("--ranking", type=Path, default=DEFAULT_RANKING)
     parser.add_argument("--name", help="public instance name saved in metadata")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--rows-per-chunk", type=int, default=512)
+    parser.add_argument(
+        "--rows-per-chunk",
+        type=int,
+        help="override row batching (default: bounded batches sized in bytes)",
+    )
+    parser.add_argument(
+        "--cpu-threads",
+        type=int,
+        default=1,
+        help="CPU tensor worker threads (default: 1)",
+    )
+    parser.add_argument(
+        "--source-cache-mib",
+        type=int,
+        default=SOURCE_CACHE_BYTES // (1024 * 1024),
+        help="maximum cached FP32 source for multi-pass methods; 0 streams both passes (default: %(default)s)",
+    )
     parser.add_argument("--max-file-bytes", type=int, default=32_000_000_000)
     args = parser.parse_args(argv)
+    if args.cpu_threads <= 0:
+        parser.error("--cpu-threads must be positive")
+    torch.set_num_threads(args.cpu_threads)
     components = tuple(args.components.split(","))
     if len(components) != len(set(components)):
         raise ValueError("components must not repeat")
@@ -165,10 +187,9 @@ def main(argv=None):
         companions = {
             key: sources[key] for key in ("dflash", "dflash2") if key in components
         }
-        # The source config selects the architecture adapter.
-        adapter = qwen4_exp if qwen4_exp.accepts(base.config) else qwen3_5
-        if adapter is qwen4_exp and args.proposal:
-            raise ValueError("the qwen4_exp architecture has no indexed proposal head")
+        # Source metadata selects the native architecture adapter.
+        is_qwen4_exp = qwen4_exp.accepts(base.config)
+        adapter = qwen4_exp if is_qwen4_exp else qwen3_5
         model = adapter.build_model(
             base,
             components=components,
@@ -178,7 +199,11 @@ def main(argv=None):
         recipe = Recipe(model)
         _function(args.recipe)(model, recipe, sources)
         if args.proposal:
-            add_official_proposal(recipe, ranking=args.ranking, rows=args.proposal_rows)
+            add_official_proposal(
+                recipe,
+                ranking=args.ranking,
+                rows=None if is_qwen4_exp else args.proposal_rows,
+            )
         if args.override:
             _function(args.override)(model, recipe, sources)
 
@@ -199,7 +224,7 @@ def main(argv=None):
         }
         if args.override:
             provenance["override"] = args.override
-        if args.proposal:
+        if args.proposal and not is_qwen4_exp:
             provenance["ranking"] = str(args.ranking)
         report = convert(
             model,
@@ -209,6 +234,7 @@ def main(argv=None):
             provenance=provenance,
             device=args.device,
             rows_per_chunk=args.rows_per_chunk,
+            source_cache_bytes=args.source_cache_mib * 1024 * 1024,
             max_file_bytes=args.max_file_bytes,
             progress=progress,
         )

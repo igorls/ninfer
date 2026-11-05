@@ -104,7 +104,10 @@ bool launch_vector(const Tensor& x, const CudaSwiGLUExperts& experts, const Expe
         static_cast<const __nv_bfloat16*>(x.data), experts.bank.gate_up, ids, subset.kind, mask,
         s.vector_activation);
     CUDA_CHECK(cudaGetLastError());
-    if (shared && shared_prepared && x.ne[1] == 1) {
+    if (shared && shared_prepared && x.ne[1] == 1 &&
+        shared->weights.down.weight.qtype == QType::BF16 &&
+        shared->weights.down.weight.n == kHidden &&
+        shared->weights.down.weight.k == kIntermediate) {
         with_output(destination, mode, [&](auto output) {
             vector_down_shared_row<<<kHidden, (kTopK + 1) * 32, 0, stream>>>(
                 s.vector_activation, experts.bank.down, ids, coefficients, subset.kind, mask,

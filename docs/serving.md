@@ -119,12 +119,17 @@ saturation does not make the Engine unavailable. The endpoint remains unauthenti
 Every OpenAI-compatible response carries a unique `x-request-id` header, including streaming and
 error responses. Anthropic endpoints use their separate `request-id` contract.
 
-`/admin/vram` reports the Engine's planned reservation, arenas and KV beside device-wide free
+`/admin/vram` schema 2 reports the Engine's startup budget (`plan`), rank-owned
+allocations and workspace observations (`resources`), and KV beside device-wide free
 memory from NVML (`device.source` is `cudaMemGetInfo` when NVML is unavailable), the desktop
 reserve, and the compute processes on the device. Driver queries refresh at most once every two
 seconds; while one is in progress, concurrent requests receive the previous snapshot with its
 `device.age_ms`, or HTTP 503 before the first snapshot. The Engine memory plan is read without
-waiting for an execution unit, so `/admin/vram` stays responsive under load. `/admin/quiesce`
+waiting for an execution unit, so `/admin/vram` stays responsive under load.
+`resources.allocations` names physical owned storage; workspace cursor and required/measurement
+peaks are separate observations, not estimates of live tensor bytes. The bundled Supervisor
+uses this schema. `/admin/stats` schema 2 names session calls, executor polls/flushes and
+scheduler yield explicitly; yield is wall time, not measured CUDA execution. `/admin/quiesce`
 refuses admission until active requests drain, holds the Engine at an idle boundary for the
 requested `hold_ms` (default 0, at most 10000), then resumes; requests that arrive meanwhile wait
 and their admission deadlines are extended by the hold. It changes no capacity.

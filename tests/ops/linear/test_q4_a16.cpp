@@ -20,6 +20,14 @@ constexpr Invocation graph(std::int32_t t) {
 int q4_a16_conformance() {
     int failures = 0;
 
+    // Full-vocabulary Flash-Next MTP head, with one draft column per resident row.
+    // Reuse the independently decoded stored-weight FP64 oracle and A16 criteria.
+    constexpr std::array flash_mtp{
+        a16(1), a16(2), a16(3), a16(4), a16(5), a16(6), a16(7), a16(8),
+        graph(1), graph(4), graph(8)};
+    failures += run_shape("Q4_A16", ActivationCompute::A16, make_q4_g64_fp16_weight,
+                          {248320, 2560, 149U, Comparison::Sampled, true, flash_mtp});
+
     constexpr std::array kN1024K5120{
         convenience(1), graph(2), a16(3),  graph(4),  a16(5),    a16(7),    graph(8), a16(9),
         a16(12),        a16(15),  a16(16), a16(17),   a16(24),   graph(25), a16(31),  a16(32),

@@ -64,16 +64,6 @@ DeviceAllocationError::DeviceAllocationError(const char* operation, std::size_t 
     : std::runtime_error(std::string(operation) + ": insufficient Device memory"),
       requested_bytes_(requested_bytes) {}
 
-DeviceMemorySnapshot device_memory_snapshot(Device device) {
-    CudaDeviceScope scope(device);
-    return query_device_memory(device.index());
-}
-
-std::int64_t device_memory_growth(DeviceMemorySnapshot before, DeviceMemorySnapshot after) {
-    return static_cast<std::int64_t>(before.free_bytes) -
-           static_cast<std::int64_t>(after.free_bytes);
-}
-
 void cuda_check(cudaError_t err, const char* expr, const char* file, int line) {
     if (err == cudaSuccess) { return; }
     std::fprintf(stderr, "%s:%d: CUDA_CHECK(%s) failed: %s: %s\n", file, line, expr,

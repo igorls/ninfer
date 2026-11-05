@@ -1,4 +1,5 @@
 #include "ops/moe/operands.h"
+#include "core/platform.h"
 
 #include <cmath>
 #include <stdexcept>
@@ -45,6 +46,27 @@ void validate_route_profile(const RouteProfile& p) {
 }
 
 void validate_expert_profile(const RoutedSwiGLUProfile& p) {
+    if (p.ffn.hidden == 4096) {
+#if NINFER_TARGET_SPARK
+        const auto& f    = p.ffn;
+        const bool nvfp4 = f.gate_up_type == QType::NVFP4 &&
+                           f.gate_up_layout == QuantLayout::BlockScaleK16M128x4 &&
+                           f.gate_up_policy == LinearPolicy::AllowA4;
+        const bool fp8 = f.gate_up_type == QType::FP8_E4M3FN_BLOCK128X128_BF16 &&
+                         f.gate_up_layout == QuantLayout::BlockScaleM128K128 &&
+                         f.gate_up_policy == LinearPolicy::AllowA8;
+        require(f.intermediate == 2048 && p.experts == 288 && p.top_k == 8 && f.clamp_limit &&
+                    std::isfinite(*f.clamp_limit) && *f.clamp_limit > 0 && (nvfp4 || fp8) &&
+                    f.down_type == f.gate_up_type && f.down_layout == f.gate_up_layout &&
+                    f.down_policy == f.gate_up_policy,
+                "routed SwiGLU: unsupported clamped block-scaled profile");
+        return;
+#else
+        throw std::invalid_argument("routed SwiGLU: unregistered geometry on this target");
+#endif
+    }
+
+    require(!p.ffn.clamp_limit, "routed SwiGLU: clamped profile is not registered");
     validate_route_profile({p.ffn.hidden, p.experts, p.top_k});
     const auto& f = p.ffn;
     if (f.hidden == 2560) {
@@ -70,9 +92,11 @@ void validate_expert_profile(const RoutedSwiGLUProfile& p) {
 }
 
 void validate_shared_profile(const SwiGLUProfile& p, int hidden) {
+    require(!p.clamp_limit, "shared SwiGLU: clamped profile is not registered");
     if (hidden == 2560) {
-        require(p.hidden == hidden && p.intermediate == 640 && p.gate_up_type == QType::BF16 &&
-                    p.down_type == QType::BF16 && p.gate_up_layout == QuantLayout::Contiguous &&
+        require(p.hidden == hidden && (p.intermediate == 320 || p.intermediate == 640) &&
+                    p.gate_up_type == QType::BF16 && p.down_type == QType::BF16 &&
+                    p.gate_up_layout == QuantLayout::Contiguous &&
                     p.down_layout == QuantLayout::Contiguous &&
                     p.gate_up_policy == LinearPolicy::A16Only &&
                     p.down_policy == LinearPolicy::A16Only,
@@ -150,6 +174,12 @@ void MoeOperands::control(const Weight& w, const RouteProfile& p) {
 void MoeOperands::route_ids(const Tensor& ids, int top_k, int tokens) {
     operand::tensor(ids, DType::I32, {top_k, tokens}, 16, op_, "selected route IDs", device_);
     write(ids);
+}
+
+void MoeOperands::sigmoid_control(const Weight& w, const RouteProfile& p) {
+    require(w.group == 0 && w.group_size == 0 && w.high_plane_bytes == 0,
+            "MoE: invalid sigmoid control metadata");
+    matrix(w, p.experts, p.hidden, QType::BF16);
 }
 
 void MoeOperands::routes(const ExpertRoutes& r, int top_k, int tokens, bool writing) {
@@ -264,11 +294,25 @@ void MoeOperands::matrix(const Weight& w, int rows, int columns, QType type) {
     read(w.scales, bytes.scales);
 }
 
-void MoeOperands::shared(const SwiGLUWeights& weights, int hidden) {
-    const auto profile = swiglu_profile(weights);
-    validate_shared_profile(profile, hidden);
-    matrix(weights.gate_up.weight, 2 * profile.intermediate, hidden, profile.gate_up_type);
-    matrix(weights.down.weight, hidden, profile.intermediate, profile.down_type);
+void MoeOperands::shared(const SwiGLUWeights& weights, const SwiGLUProfile& profile) {
+    validate_shared_profile(profile, profile.hidden);
+    const auto actual = swiglu_profile(weights);
+    require(actual.gate_up_policy == profile.gate_up_policy &&
+                actual.down_policy == profile.down_policy,
+            "MoE: shared weight policy differs from profile");
+    matrix(weights.gate_up.weight, 2 * profile.intermediate, profile.hidden, profile.gate_up_type);
+    matrix(weights.down.weight, profile.hidden, profile.intermediate, profile.down_type);
+}
+
+void MoeOperands::unscaled_shared(const SwiGLUWeights& weights, const SwiGLUProfile& p) {
+    auto prepared        = swiglu_profile(weights);
+    prepared.clamp_limit = p.clamp_limit;
+    require(prepared == p, "MoE: unscaled shared weights differ from profile");
+    for (const Weight* w : {&weights.gate_up.weight, &weights.down.weight})
+        require(w->group == 0 && w->group_size == 0 && w->high_plane_bytes == 0,
+                "MoE: invalid unscaled shared metadata");
+    matrix(weights.gate_up.weight, 2 * p.intermediate, p.hidden, QType::BF16);
+    matrix(weights.down.weight, p.hidden, p.intermediate, QType::BF16);
 }
 
 void MoeOperands::workspace(const MemoryArena& workspace, std::size_t bytes) {

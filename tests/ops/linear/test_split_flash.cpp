@@ -183,17 +183,25 @@ int decode_columns() {
 int main() {
     if (cuda_unavailable()) return 77;
     int failures = 0;
-    for (const bool index : {false, true}) {
-        const auto segments = index ? std::vector<int>{512, 128}
-                                    : std::vector<int>{6144, 6144, 512, 512};
+    for (const auto& segments : {std::vector<int>{512, 128},
+                                 std::vector<int>{6144, 6144, 512, 512},
+                                 std::vector<int>{512, 512, 128},
+                                 std::vector<int>{512, 512, 512, 128},
+                                 std::vector<int>{512, 512, 128, 6144, 6144, 512}}) {
+        int rows = 0;
+        for (const auto count : segments) rows += count;
         direct_bf16_weight::DeviceWeight weight(
-            direct_bf16_weight::make_patterned(index ? 640 : 13312, 2560, 919));
+            direct_bf16_weight::make_patterned(rows, 2560, 919));
         const auto oracle = [&](int row, std::span<const float> input) {
             return direct_bf16_weight::dot_fp64(weight.host, row, input);
         };
         for (int tokens : {1, 2, 8, 16, 17, 32, 48, 64, 65, 128, 129, 193, 449, 1025})
             failures += run(weight.view(), segments, oracle, tokens,
                              ops::LinearPolicy::A16Only, tokens == 17 || tokens == 449);
+        if (rows != 640 && rows != 13312)
+            for (int tokens : {256, 257, 512, 513, 1024})
+                failures += run(weight.view(), segments, oracle, tokens,
+                                 ops::LinearPolicy::A16Only, tokens == 257 || tokens == 513);
         failures += weight.verify_preserved("Flash BF16 split weight");
     }
     DevicePackedWeight weight(quantized_weight::make_patterned_weight(

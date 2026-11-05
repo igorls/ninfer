@@ -2,6 +2,7 @@
 
 #include "models/common/context/contract.h"
 #include "models/qwen4_exp/route_trace.h"
+#include "models/qwen4_exp/execution_shape.h"
 #include "ninfer/types.h"
 #include "runtime/contract/resources.h"
 #include "runtime/executor/contract.h"
@@ -100,14 +101,12 @@ struct RowResult {
     std::vector<TokenId> tokens;
     std::vector<TokenId> input_tokens;
     std::uint32_t dead_positions = 0;
-    double vision_seconds        = 0;
     std::vector<TokenLogprobs> logprobs, prompt_logprobs;
     std::vector<float> reasoning_features;
 };
 
 struct ComputeResult {
     std::vector<RowResult> rows;
-    runtime::ExecutionTiming timing;
     std::vector<execution::RouteTraceRecord> routes;
 };
 
@@ -118,7 +117,6 @@ struct ContextResult {
 struct ScoreResult {
     std::uint32_t processed = 0;
     CausalScores scores;
-    runtime::ExecutionTiming timing;
 };
 
 using Result = std::variant<ComputeResult, ContextResult, ScoreResult>;
@@ -138,9 +136,28 @@ struct Commit {
 };
 
 struct ExecutionTypes {
+    [[nodiscard]] static ExecutionWork describe_work(const qwen4_exp::Work&);
     using Work   = qwen4_exp::Work;
     using Result = qwen4_exp::Result;
     using Commit = qwen4_exp::Commit;
 };
+
+// Value-level execution requirements shared by the coordinator and rank. Residency ownership,
+// physical ranges and current device stages are checked by RankProgram.
+struct WorkContract {
+    ExecutionShape shape;
+    std::uint32_t vocabulary, public_tokens;
+    bool mtp, vision;
+
+    void validate(const Work&, runtime::FrameKind) const;
+    void validate(const Work&, const Result&, const Commit&) const;
+    void validate_commit(const Work&, std::span<const RowResult>, const Commit&) const;
+    void validate(const Work&, const runtime::DecisionRequest&,
+                  const runtime::DecisionInput&) const;
+};
+
+[[nodiscard]] std::span<const WorkRow> work_rows(const Work&);
+void validate_decision_rows(const runtime::DecisionInput&, std::uint32_t stage,
+                            std::uint32_t vocabulary, std::span<const std::uint32_t> positions);
 
 } // namespace ninfer::models::qwen4_exp

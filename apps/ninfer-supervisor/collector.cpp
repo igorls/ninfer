@@ -130,23 +130,18 @@ std::string capacity_line_from_server_start(const std::string& line) {
     try {
         const auto j = nlohmann::json::parse(line);
         const auto& eng = j.at("engine");
-        const auto& mem = j.at("memory");
-        auto gib = [](const nlohmann::json& obj, const char* key) {
-            const auto n = obj.value(key, std::uint64_t{0});
-            return std::to_string(n / 1048576) + " MiB";
+        const auto& rank = j.at("resources").at("ranks").at(0);
+        const auto& budget = rank.at("budget");
+        const auto mib = [](const auto& object, const char* key) {
+            return std::to_string(object.value(key, std::uint64_t{0}) / 1048576) + " MiB";
         };
         return std::string("KV capacity ") + eng.value("kv_capacity_mode", std::string("?")) +
                " resolved=" + std::to_string(eng.value("kv_capacity", 0)) +
-               " tokens pages=" + std::to_string(eng.value("kv_capacity_page_groups", 0)) + "/" +
-               std::to_string(eng.value("kv_capacity_max_page_groups", 0)) +
-               " runtime=" + gib(mem, "runtime_reservation_bytes") +
-               " prefix-cache=" + gib(mem, "prefix_cache_bytes") +
-               " free-after-weights=" + gib(mem, "available_after_weights_bytes") +
-               " free-after-startup=" + gib(mem, "available_after_startup_bytes") +
-               " headroom=" + gib(mem, "kv_capacity_headroom_bytes") +
-               " slack=" + gib(mem, "planned_slack_bytes") +
-               " graphs=" + gib(mem, "cuda_graph_calibration_retained_bytes") + "/" +
-               gib(mem, "cuda_graph_rebuild_estimate_bytes") + " (from request-log server_start)";
+               " tokens runtime=" + mib(budget, "runtime_reservation_bytes") +
+               " free-after-weights=" + mib(budget, "available_after_weights_bytes") +
+               " free-after-startup=" + mib(budget, "available_after_startup_bytes") +
+               " headroom=" + mib(budget, "headroom_bytes") +
+               " slack=" + mib(budget, "planned_slack_bytes") + " (from request-log server_start)";
     } catch (...) { return {}; }
 }
 

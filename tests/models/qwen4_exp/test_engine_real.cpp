@@ -100,23 +100,23 @@ template <class Body>
 bool with_engine(ninfer::EngineOptions options, Body&& body) {
     ninfer::Engine engine(std::move(options));
     if (std::getenv("NINFER_TEST_EXPECT_RESIDENT_EXPERTS")) {
-        const auto memory = engine.memory_summary();
-        if (memory.moe && memory.moe->host_weights_bytes)
+        const auto memory = engine.snapshot().ranks.at(0).memory;
+        if (memory.experts && memory.experts->host_weights_bytes)
             return fail("the resident run did not select resident GPU expert execution");
-        std::cout << "Resident experts: offload_summary=" << memory.moe.has_value()
-                  << " host_weights=" << (memory.moe ? memory.moe->host_weights_bytes : 0)
-                  << " device_weights=" << memory.weights.used_bytes
-                  << " device_budget=" << memory.device_budget_bytes << std::endl;
+        std::cout << "Resident experts: offload_summary=" << memory.experts.has_value()
+                  << " host_weights=" << (memory.experts ? memory.experts->host_weights_bytes : 0)
+                  << " device_weights=" << memory.allocations.device_weights_bytes
+                  << " device_budget=" << engine.startup_report().ranks.at(0).limit_bytes << std::endl;
     }
     if (std::getenv("NINFER_TEST_EXPECT_HOST_EXPERTS")) {
-        const auto memory = engine.memory_summary();
-        if (!memory.moe || !memory.moe->host_weights_bytes || !memory.moe->cpu_workers)
+        const auto memory = engine.snapshot().ranks.at(0).memory;
+        if (!memory.experts || !memory.experts->host_weights_bytes || !memory.experts->cpu_workers)
             return fail("the bounded run did not select Host expert execution");
-        std::cout << "Host experts=" << memory.moe->host_weights_bytes
-                  << " registered=" << memory.moe->registered_host_bytes
-                  << " cache=" << memory.moe->cache_bytes
-                  << " workers=" << memory.moe->cpu_workers
-                  << " device_budget=" << memory.device_budget_bytes << std::endl;
+        std::cout << "Host experts=" << memory.experts->host_weights_bytes
+                  << " registered=" << memory.experts->registered_host_bytes
+                  << " cache=" << memory.experts->cache_bytes
+                  << " workers=" << memory.experts->cpu_workers
+                  << " device_budget=" << engine.startup_report().ranks.at(0).limit_bytes << std::endl;
     }
     return body(engine);
 }
@@ -159,7 +159,7 @@ bool concurrency_clamp_matches_pool() {
             if (!with_engine(options, [&](ninfer::Engine& engine) {
                     const auto expected = clamp ? (graphs ? 1U : 4U) : 8U;
                     if (engine.options().max_concurrency != expected ||
-                        engine.memory_summary().kv_capacity != 4096) {
+                        engine.description().kv_capacity != 4096) {
                         return fail("pool clamp changed the explicit KV capacity or lane policy");
                     }
                     std::vector<ninfer::GenerationHandle> requests;
@@ -204,7 +204,7 @@ bool bounded_expert_execution() {
                         const auto result = engine.generate(engine.prepare_tokens(ids), request);
                         if (result.generated_token_ids.size() != 12)
                             return fail("bounded expert generation missed its output budget");
-                        if (mtp && result.speculative.rounds == 0)
+                        if (mtp && result.stats.speculative.rounds == 0)
                             return fail("bounded expert generation did not execute MTP");
                         if (!graphs) eager.push_back(result.generated_token_ids);
                         else if (eager[row] != result.generated_token_ids)
@@ -335,7 +335,7 @@ bool host_round_trip_is_exact(bool mtp = false) {
     const auto scenario = [&](ninfer::EngineOptions options, bool expect_host,
                               std::vector<ninfer::TokenId>& tokens) {
         return with_engine(options, [&](ninfer::Engine& engine) {
-            const ninfer::RuntimeStats before  = engine.runtime_stats();
+            const ninfer::RuntimeStats before  = engine.snapshot().runtime;
             const ninfer::PromptInput first    = user_prompt(long_text, "round-trip");
             const auto retained                = engine.generate(engine.prepare(first), greedy(12));
             const ninfer::PromptInput followup = continued(first, retained, "Continue briefly.");
@@ -347,10 +347,10 @@ bool host_round_trip_is_exact(bool mtp = false) {
             pressure_ids.resize(3300);
             const auto pressure =
                 engine.generate(engine.prepare_tokens(pressure_ids), greedy(4, false));
-            const ninfer::RuntimeStats demoted = engine.runtime_stats();
+            const ninfer::RuntimeStats demoted = engine.snapshot().runtime;
             const auto restored = engine.generate(engine.prepare(followup), greedy(24));
-            const ninfer::RuntimeStats after = engine.runtime_stats();
-            if (pressure.generated_token_ids.size() != 4 || restored.reused_prompt_tokens == 0) {
+            const ninfer::RuntimeStats after = engine.snapshot().runtime;
+            if (pressure.generated_token_ids.size() != 4 || restored.stats.reused_prompt_tokens == 0) {
                 return fail("the follow-up did not reuse its retained prefix");
             }
             const bool through_host =
@@ -408,7 +408,7 @@ bool reuse_survives_catalog_turnover() {
         frontier.insert(frontier.end(), base.generated_token_ids.begin(),
                         base.generated_token_ids.end() - 1);
         const auto exact = engine.generate(engine.prepare_tokens(frontier), greedy(2));
-        if (exact.reused_prompt_tokens != frontier.size() ||
+        if (exact.stats.reused_prompt_tokens != frontier.size() ||
             exact.generated_token_ids.front() != base.generated_token_ids.back()) {
             return fail("exact-hit reuse did not continue the retained trajectory");
         }
@@ -421,7 +421,7 @@ bool reuse_survives_catalog_turnover() {
             const auto reply  = engine.generate(engine.prepare(first), chat_request);
             const auto second = engine.generate(
                 engine.prepare(continued(first, reply, "And in one word?")), greedy(4));
-            if (second.reused_prompt_tokens == 0) {
+            if (second.stats.reused_prompt_tokens == 0) {
                 return fail("round " + std::to_string(round) +
                             " lost prefix reuse after the catalog turned over");
             }
@@ -481,9 +481,9 @@ bool conversation_chain_survives_a_full_cache() {
             if (previous_prompt != 0) {
                 // The previous turn's closure precedes only its template closing tokens and the
                 // new assistant header; the system prefix alone is far shallower.
-                std::cout << "turn reused " << reply.reused_prompt_tokens << " of the previous "
+                std::cout << "turn reused " << reply.stats.reused_prompt_tokens << " of the previous "
                           << previous_prompt << " prompt tokens\n";
-                if (reply.reused_prompt_tokens + 16U < previous_prompt) {
+                if (reply.stats.reused_prompt_tokens + 16U < previous_prompt) {
                     return fail("a turn did not resume from the previous turn's closure in a "
                                 "full context cache");
                 }
@@ -504,7 +504,7 @@ bool conversation_chain_survives_a_full_cache() {
                     .generate(engine.prepare(chat({message(ninfer::ChatRole::System, system),
                                                    message(ninfer::ChatRole::User, question)})),
                               greedy(4))
-                    .reused_prompt_tokens;
+                    .stats.reused_prompt_tokens;
         }
         std::cout << "a third question reused " << system_reuse << " of the first turn's "
                   << first_prompt << " prompt tokens\n";
@@ -982,9 +982,9 @@ bool video_color_sequence(ninfer::Engine& engine) {
         red > blue) {
         return fail("video did not preserve the red-to-blue temporal sequence");
     }
-    const auto memory = engine.memory_summary();
-    return memory.vision_workspace && memory.vision_workspace->handoff_active_bytes == 0 &&
-           memory.workspace_logical_peak_bytes <= memory.workspace.capacity_bytes;
+    const auto memory = engine.snapshot().ranks.at(0).memory;
+    return memory.vision && memory.vision->handoff_active_bytes == 0 &&
+           memory.workspace.required_peak_bytes <= memory.allocations.workspace_device_bytes;
 }
 
 bool vision_generation_and_reuse() {
@@ -992,10 +992,10 @@ bool vision_generation_and_reuse() {
     options.enable_vision = true;
     options.prefill_chunk = 128;
     return with_engine(options, [&](ninfer::Engine& engine) {
-        engine.reset_memory_peaks();
-        const auto before = engine.memory_summary();
-        if (!before.vision_workspace || before.vision_workspace->handoff_active_bytes != 0 ||
-            before.vision_workspace->handoff_peak_bytes != 0) {
+        engine.reset_measurement_peaks();
+        const auto before = engine.snapshot().ranks.at(0).memory;
+        if (!before.vision || before.vision->handoff_active_bytes != 0 ||
+            before.vision->handoff_peak_bytes != 0) {
             return fail("Vision startup does not expose its bounded handoff");
         }
         auto input = user_prompt("Name the dominant color in this image.", "flash-vision");
@@ -1014,24 +1014,24 @@ bool vision_generation_and_reuse() {
         request.execution.allow_prefix_reuse = false;
         const auto cold                      = engine.generate(engine.prepare(followup), request);
         std::cout << "Vision red=" << first.content << " blue=" << reused.content
-                  << " reused=" << reused.reused_prompt_tokens << '\n';
+                  << " reused=" << reused.stats.reused_prompt_tokens << '\n';
         if (!represents_color(first.content, false) ||
             !represents_color(reused.content, true) ||
             !represents_color(cold.content, true)) {
             return fail("Vision image colors differ from their represented input");
         }
-        if (reused.reused_prompt_tokens == 0 || !reused.prompt.has_media ||
+        if (reused.stats.reused_prompt_tokens == 0 || !reused.prompt.has_media ||
             reused.generated_token_ids.empty() || cold.generated_token_ids.empty() ||
             reused.generated_token_ids.front() != cold.generated_token_ids.front()) {
             return fail("Vision append/reuse differs from cold execution at the first token");
         }
-        const auto after = engine.memory_summary();
-        if (!after.vision_workspace || after.vision_workspace->handoff_active_bytes != 0 ||
-            after.vision_workspace->handoff_peak_bytes == 0 ||
-            after.vision_workspace->handoff_peak_bytes >
-                after.vision_workspace->handoff_capacity_bytes ||
-            after.workspace_logical_peak_bytes > after.workspace.capacity_bytes ||
-            after.workspace.capacity_bytes != before.workspace.capacity_bytes) {
+        const auto after = engine.snapshot().ranks.at(0).memory;
+        if (!after.vision || after.vision->handoff_active_bytes != 0 ||
+            after.vision->handoff_peak_bytes == 0 ||
+            after.vision->handoff_peak_bytes >
+                after.vision->handoff_capacity_bytes ||
+            after.workspace.required_peak_bytes > after.allocations.workspace_device_bytes ||
+            after.allocations.workspace_device_bytes != before.allocations.workspace_device_bytes) {
             return fail("Vision execution escaped its startup workspace or retained a handoff");
         }
         return video_color_sequence(engine);
@@ -1051,18 +1051,18 @@ bool mtp_generation_and_reuse() {
         auto input =
             user_prompt("Count from one to ten, separating the numbers with commas.", "flash-mtp");
         const auto first = engine.generate(engine.prepare(input), request);
-        std::cout << "MTP result=" << first.content << " rounds=" << first.speculative.rounds
-                  << " drafted=" << first.speculative.drafted_tokens
-                  << " accepted=" << first.speculative.accepted_tokens << std::endl;
-        if (first.generated_token_ids.empty() || !first.speculative.enabled ||
-            first.speculative.rounds == 0 || first.speculative.accepted_tokens == 0) {
+        std::cout << "MTP result=" << first.content << " rounds=" << first.stats.speculative.rounds
+                  << " drafted=" << first.stats.speculative.drafted_tokens
+                  << " accepted=" << first.stats.speculative.accepted_tokens << std::endl;
+        if (first.generated_token_ids.empty() || !first.stats.speculative.enabled ||
+            first.stats.speculative.rounds == 0 || first.stats.speculative.accepted_tokens == 0) {
             return fail("MTP did not license any drafts through the Engine");
         }
         auto followup     = continued(input, first, "Now count backwards from ten to one.");
         const auto reused = engine.generate(engine.prepare(followup), request);
         request.execution.allow_prefix_reuse = false;
         const auto cold                      = engine.generate(engine.prepare(followup), request);
-        if (reused.reused_prompt_tokens == 0 || reused.generated_token_ids.empty() ||
+        if (reused.stats.reused_prompt_tokens == 0 || reused.generated_token_ids.empty() ||
             cold.generated_token_ids.empty() ||
             reused.generated_token_ids.front() != cold.generated_token_ids.front()) {
             return fail("MTP continuation differs from cold prefill at the first token");
@@ -1076,8 +1076,8 @@ bool mtp_generation_and_reuse() {
             !image.prompt.has_media) {
             return fail("MTP Vision execution failed its represented color input");
         }
-        const auto memory = engine.memory_summary();
-        return memory.workspace_logical_peak_bytes <= memory.workspace.capacity_bytes &&
+        const auto memory = engine.snapshot().ranks.at(0).memory;
+        return memory.workspace.required_peak_bytes <= memory.allocations.workspace_device_bytes &&
                video_color_sequence(engine);
     });
 }
@@ -1138,7 +1138,7 @@ bool mtp_batch_target_parity() {
                      bool matched = true;
                      for (std::size_t row = 0; row < handles.size(); ++row) {
                          const auto result = handles[row].wait();
-                         if (result.speculative.rounds == 0 ||
+                         if (result.stats.speculative.rounds == 0 ||
                              result.generated_token_ids.size() != 96) {
                              matched =
                                  fail("MTP batch target comparison did not execute speculation") &&
@@ -1187,7 +1187,7 @@ bool mtp_graphs_and_ragged_batches() {
                     user_prompt("Count from one to twenty, separating the numbers with commas.");
                 const auto result = engine.generate(engine.prepare(input), greedy(40, false));
                 std::cout << "MTP K=" << drafts << " graphs=" << graphs
-                          << " accepted=" << result.speculative.accepted_tokens << std::endl;
+                          << " accepted=" << result.stats.speculative.accepted_tokens << std::endl;
                 if (!graphs) {
                     eager = result.generated_token_ids;
                     return true;
@@ -1232,7 +1232,7 @@ bool mtp_graphs_and_ragged_batches() {
                     const auto r = concurrent[row].wait();
                     if (r.generated_token_ids.size() != 96 + row ||
                         r.generated_token_ids.front() != first_tokens[row] ||
-                        r.speculative.rounds == 0) {
+                        r.stats.speculative.rounds == 0) {
                         return fail(
                             "heterogeneous MTP batch lost a row or its target distribution");
                     }
@@ -1324,11 +1324,11 @@ bool concurrent_long_prompts_with_reuse(bool mtp) {
                 if (outputs == 0 || outputs > jobs[row].second) {
                     return fail("a long concurrent request missed its token budget");
                 }
-                std::cout << "  row " << row << ": reused " << result.reused_prompt_tokens << " of "
+                std::cout << "  row " << row << ": reused " << result.stats.reused_prompt_tokens << " of "
                           << result.prompt.prompt_tokens << " via path "
-                          << static_cast<int>(result.prefix_reuse_path) << ", " << outputs
+                          << static_cast<int>(result.stats.prefix_reuse_path) << ", " << outputs
                           << " outputs" << std::endl;
-                reused += result.reused_prompt_tokens != 0 ? 1U : 0U;
+                reused += result.stats.reused_prompt_tokens != 0 ? 1U : 0U;
                 if (round == 0) {
                     first_round.push_back(result.generated_token_ids);
                 } else if (result.generated_token_ids.front() != first_round[row].front()) {
@@ -1337,9 +1337,9 @@ bool concurrent_long_prompts_with_reuse(bool mtp) {
             }
             // The documents are admitted beside the running code requests, not after them.
             const double code_seconds =
-                std::min(results[0].timings.total_seconds, results[1].timings.total_seconds);
-            const double document_wait = std::max(results[2].engine_timing.queue_wait_seconds,
-                                                  results[3].engine_timing.queue_wait_seconds);
+                std::min(results[0].stats.timings.total_seconds, results[1].stats.timings.total_seconds);
+            const double document_wait = std::max(results[2].stats.engine_timing.queue_wait_seconds,
+                                                  results[3].stats.engine_timing.queue_wait_seconds);
             std::cout << (mtp ? "MTP " : "") << "long concurrent round " << round << ": " << reused
                       << " of " << handles.size() << " reused a prefix; documents "
                       << "waited " << document_wait << " s beside " << code_seconds
@@ -1429,13 +1429,13 @@ bool mtp_shared_prefix_promotion() {
         const auto second             = engine.generate(
             engine.prepare(continued(first, reply, "Add obstacles and a score.")), greedy(64));
         const auto repeated = engine.generate(engine.prepare(first), greedy(64));
-        std::cout << "MTP shared promotion: second reused " << second.reused_prompt_tokens
-                  << ", repeated first turn reused " << repeated.reused_prompt_tokens << " of "
+        std::cout << "MTP shared promotion: second reused " << second.stats.reused_prompt_tokens
+                  << ", repeated first turn reused " << repeated.stats.reused_prompt_tokens << " of "
                   << repeated.prompt.prompt_tokens << std::endl;
         if (second.generated_token_ids.size() != 64 || repeated.generated_token_ids.size() != 64) {
             return fail("a request after the shared-prefix promotion missed its token budget");
         }
-        if (repeated.reused_prompt_tokens == 0) {
+        if (repeated.stats.reused_prompt_tokens == 0) {
             return fail("the repeated first turn did not resume from the system prompt");
         }
         return repeated.generated_token_ids.front() == reply.generated_token_ids.front()
@@ -1461,7 +1461,7 @@ bool mtp_long_fp8() {
             // Cross QSA's identity/select topology boundary within a verification window.
             const auto result = engine.generate(engine.prepare_tokens(tokens), greedy(48, false));
             std::cout << "MTP FP8 long graphs=" << graphs
-                      << " accepted=" << result.speculative.accepted_tokens << std::endl;
+                      << " accepted=" << result.stats.speculative.accepted_tokens << std::endl;
             if (!graphs) {
                 eager = result.generated_token_ids;
             } else if (eager != result.generated_token_ids) {
@@ -1478,7 +1478,7 @@ bool mtp_long_fp8() {
             const auto sampled  = engine.generate(engine.prepare(prompt), request);
             const auto repeated = engine.generate(engine.prepare(prompt), request);
             if (sampled.generated_token_ids != repeated.generated_token_ids ||
-                sampled.token_logprobs.size() != 48 || sampled.speculative.rounds == 0) {
+                sampled.token_logprobs.size() != 48 || sampled.stats.speculative.rounds == 0) {
                 return fail(
                     "seeded MTP sampling with penalties did not reproduce its tokens/readout");
             }

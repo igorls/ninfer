@@ -70,7 +70,7 @@ void SessionImpl::advance_score() {
         scoring.reset();
         clear_lane(state, request);
         after_releases.emplace(SessionEvent{
-            done.public_ticket, {}, ScoreComplete{std::move(done.scores), done.timing}});
+            done.public_ticket, {}, ScoreComplete{std::move(done.scores)}});
         submit_releases();
         return;
     }

@@ -25,6 +25,7 @@ ninfer_add_op_bench(ninfer_embedding_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/em
 ninfer_add_op_bench(ninfer_position_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/position_bench.cu")
 ninfer_add_op_bench(ninfer_cast_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/cast_bench.cu")
 ninfer_add_op_bench(ninfer_argmax_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/argmax_bench.cu")
+ninfer_add_op_bench(ninfer_vocabulary_logprobs_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/vocabulary_logprobs_bench.cu")
 ninfer_add_op_bench(ninfer_target_logprobs_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/target_logprobs_bench.cu")
 ninfer_add_op_bench(ninfer_causal_conv1d_silu_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/causal_conv1d_silu_bench.cu")
 ninfer_add_op_bench(ninfer_linear_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/linear_bench.cu")
@@ -50,6 +51,7 @@ ninfer_add_op_bench(ninfer_sliding_window_attention_bench
 ninfer_add_op_bench(ninfer_kv_cache_append_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/kv_cache_append_bench.cu")
 ninfer_add_op_bench(ninfer_prepare_masked_block_bench
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/prepare_masked_block_bench.cu")
+ninfer_add_op_bench(ninfer_vocabulary_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/vocabulary_bench.cu")
 ninfer_add_op_bench(ninfer_sampling_select_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/sampling_select_bench.cu")
 ninfer_add_op_bench(ninfer_moe_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/moe/main.cu")
 ninfer_add_op_bench(ninfer_moe_block_scaled_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/moe/block_scaled.cu")
@@ -70,3 +72,9 @@ include("${CMAKE_CURRENT_LIST_DIR}/linear_attention/gated_delta_net/benchmarks.c
 include("${CMAKE_CURRENT_LIST_DIR}/rmsnorm/benchmarks.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/gdn_control/benchmarks.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/gated_residual/benchmarks.cmake")
+
+ninfer_add_op_bench(ninfer_linear_swiglu_clamped_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/linear_swiglu_clamped.cu")
+
+ninfer_add_op_bench(ninfer_swiglu_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/swiglu_bench.cu")
+ninfer_add_op_bench(ninfer_sigmoid_route_bench
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/sigmoid_route_bench.cu")

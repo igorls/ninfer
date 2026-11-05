@@ -20,6 +20,58 @@ both Blackwell targets, resident execution and the fork's product contracts gove
 those decisions. A source merge, hardware qualification and release acceptance are
 separate states.
 
+### Active release integration after the config qualification snapshot
+
+The sole active deliverable is the upstream sync and a stable `workstation`
+release. Qwen4 preparation and other product work are parked. Worktree removal
+follows release acceptance, retaining unique source work and required evidence.
+
+The candidate integration from `4126ecf4` through `7131c0b9` is source work, not an
+accepted `workstation` merge or hardware-qualified release. It carries unified Engine
+observations, native execution timing, benchmark grouping/priming, optional full
+vocabulary Q4 MTP heads, and MTP history/commit changes. Distributed and Spark
+implementation sources are carried with distributed execution disabled by
+default; they do not activate a multi-GPU or Spark product in this fork. The
+existing deferral of upstream's consolidated Op-test reorganization continues;
+the fork's independent oracle fixtures must migrate to the selected native APIs.
+The three new Spark expert-partition benchmarks depending on that rewritten
+fixture suite are deferred with the unsupported target, rather than registered
+against absent fixtures in the Windows/RTX build.
+
+Adaptations retain Windows dependencies and I/O, NVML-based desktop budgeting,
+the concurrency clamp, scoring/reference/hidden readouts, logprobs, expert traces,
+quiescence and the qualified Host-PLE split-graph implementation. MTP history
+selects the contiguous prefix only for an actual contiguous stored projection;
+the existing two-region packed artifact retains its native projections without
+runtime repacking. Resident Device-PLE execution is a separate incoming route.
+Periodic CUDA/system resource samples do not enumerate NVML processes; NVML stays
+authoritative for device-wide startup admission and desktop reserve protection.
+The Supervisor HTML moves from its oversized C++ literal to LF-pinned RCDATA with
+an explicit build input dependency. This addresses the compiler limit reported
+on MSVC 19.50 without changing the dashboard bytes. This is an independent port, not an
+application of Patrick's still-unpublished patch or a new MSVC 19.50 qualification.
+The attention-prefix real fixture accepts a strict positive
+`NINFER_TEST_DESKTOP_RESERVE_MIB` override, keeping its normal reserve default.
+This supplies the explicit 2 GiB setting in the physical-5090 report without
+lowering the product default or silently changing other qualification profiles.
+Windows MSVC 19.51/CUDA 13.3 builds the server, Supervisor and nine affected CPU
+test targets. All nine CTests pass: native timing, benchmark reporting, Supervisor,
+request logs, metrics, serving options, OpenAI schema/Responses and Anthropic schema.
+The full CPU converter suite passes 63 tests plus eight subtests; ten CUDA cases
+are skipped in the CPU-only Python 3.11 environment. The Supervisor serves the
+exact original 388,554 LF bytes; an HTML-only edit rebuilds its resource and the
+restored payload is served exactly again. Browser interaction is not qualified.
+
+Initial build failures included obsolete API callers, duplicate memory-query
+definitions and a missing BF16 head source registration. The converter checks
+exposed optional chunk sizes in the fork's NVFP4/U4Z8 methods and a synthetic
+fixture missing explicit encoding metadata; these are corrected. Windows link
+warning LNK4098 remains. Other product/test targets, numerical GPU execution,
+Linux, resource/performance comparison and final-source 5090 acceptance are
+still pending. Earlier failed exact-count acceptance and
+adverse timing/resource findings remain in the qualification record. Physical
+RTX 5090 acceptance and maintainer acceptance in issue #37 are still required.
+
 November 4 release preparation also updates first-launch provisioning to the v3
 entry header and component metadata, removing the obsolete v2 checkpoint-ID
 registry and removed GDN-state CLI flag. The Engine retains artifact/architecture

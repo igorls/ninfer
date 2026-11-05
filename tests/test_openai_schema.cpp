@@ -882,17 +882,17 @@ int test_stops_and_ranges() {
 
 GenerationOutcome sample_outcome() {
     GenerationOutcome outcome;
-    outcome.text                                = "answer";
-    outcome.reasoning                           = "thought";
-    outcome.prompt_tokens                       = 20;
-    outcome.completion_tokens                   = 7;
-    outcome.reasoning_tokens                    = 3;
-    outcome.finish_reason                       = ninfer::FinishReason::StopToken;
-    outcome.metrics.prefix_cache_hit_tokens     = 12;
-    outcome.metrics.prompt_wall_seconds         = 0.04;
-    outcome.metrics.generation_wall_seconds     = 0.03;
-    outcome.metrics.speculative_draft_tokens    = 9;
-    outcome.metrics.speculative_accepted_tokens = 6;
+    outcome.text                                  = "answer";
+    outcome.reasoning                             = "thought";
+    outcome.prompt_tokens                         = 20;
+    outcome.completion_tokens                     = 7;
+    outcome.reasoning_tokens                      = 3;
+    outcome.finish_reason                         = ninfer::FinishReason::StopToken;
+    outcome.stats.reused_prompt_tokens            = 12;
+    outcome.stats.timings.prompt_wall_seconds     = 0.04;
+    outcome.stats.timings.generation_wall_seconds = 0.03;
+    outcome.stats.speculative.drafted_tokens      = 9;
+    outcome.stats.speculative.accepted_tokens     = 6;
     return outcome;
 }
 
@@ -937,9 +937,9 @@ int test_aggregate_response() {
         call["id"].get<std::string>().starts_with("call_") && call["function"]["name"] == "Edit" &&
             !Json::parse(call["function"]["arguments"].get<std::string>()).contains("replace_all"),
         "OpenAI adapter owns wire tool-call identifiers");
-    outcome.finish_reason = ninfer::FinishReason::OutputLimit;
-    outcome.constraint    = ninfer::ConstraintObservation{
-           .branch = ninfer::ConstraintOutputBranch::Tools, .complete = true, .terminated = false};
+    outcome.finish_reason    = ninfer::FinishReason::OutputLimit;
+    outcome.stats.constraint = ninfer::ConstraintObservation{
+        .branch = ninfer::ConstraintOutputBranch::Tools, .complete = true, .terminated = false};
     response = Json::parse(make_chat_completion_response(identity(), outcome));
     failures += check(response["choices"][0]["finish_reason"] == "length" &&
                           response["choices"][0]["message"]["tool_calls"].size() == 1 &&
@@ -973,7 +973,7 @@ int test_stream_response() {
                                       .logprob     = -0.25F,
                                       .raw_logprob = -0.25F}},
     });
-    outcome.constraint        = ninfer::ConstraintObservation{
+    outcome.stats.constraint        = ninfer::ConstraintObservation{
                .branch = ninfer::ConstraintOutputBranch::Content, .complete = true, .terminated = true};
     const std::vector<std::string> events = stream.finish(outcome);
     failures +=

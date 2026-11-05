@@ -55,6 +55,7 @@ composition. The default configuration is Release. Ninja links and archives shar
 | `NINFER_BUILD_APPS` | ON | CLI, HTTP server and perplexity evaluator; requires Engine |
 | `BUILD_TESTING` | OFF | Tests for the selected components |
 | `NINFER_BUILD_BENCHMARKS` | OFF | Benchmarks for the selected components |
+| `NINFER_ENABLE_DISTRIBUTED` | OFF | Process/control transport, distributed execution and NCCL collectives |
 
 Core, Artifact and Ops are always present. An Ops development build disables both Engine and Apps;
 it does not discover FFmpeg, curl, Jinja, XGrammar or spdlog. Engine adds FFmpeg and the frontend

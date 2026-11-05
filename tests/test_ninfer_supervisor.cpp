@@ -53,7 +53,7 @@ int test_model_reserve_budget() {
                             {"available_after_weights_bytes", 18 * gib},
                             {"cuda_graph_rebuild_estimate_bytes", gib},
                             {"kv_capacity_automatic", false}, {"kv_slack_floor_bytes", 0}}},
-                          {"arenas", {{"weights", {{"capacity_bytes", 70 * gib}}}}},
+                          {"resources", {{"allocations", {{"device_weights_bytes", 70 * gib}}}}},
                           {"desktop_reserve", {{"configured_bytes", 4 * gib}}},
                           {"device", {{"free_bytes", 8 * gib}}}};
     int f = 0;

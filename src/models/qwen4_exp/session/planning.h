@@ -7,16 +7,13 @@ namespace ninfer::models::qwen4_exp {
 
 struct ExecutionPlan;
 
-namespace execution {
-struct ModelProfile;
-}
-
 struct SessionPlan {
-    std::shared_ptr<const execution::ModelProfile> profile;
     ExecutionShape shape;
     context::ContextDirectorySpec context;
     std::size_t vision_max_merged_tokens = 0;
     bool route_trace = false;
+
+    bool operator==(const SessionPlan&) const = default;
 };
 
 [[nodiscard]] SessionPlan plan_session(const ExecutionPlan&);

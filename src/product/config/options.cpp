@@ -30,9 +30,11 @@ struct CommandLine {
     std::filesystem::path config_path;
     std::vector<std::string> argv;
     std::vector<Argument> arguments;
+    std::vector<CommandLineArgument> extra_arguments;
 };
 
-CommandLine read_arguments(int argc, char** argv, EntryPoint entry) {
+CommandLine read_arguments(int argc, char** argv, EntryPoint entry,
+                           std::span<const CommandLineOption> extra_options) {
     CommandLine result;
     for (int i = 0; i < argc; ++i) result.argv.emplace_back(argv[i]);
     bool positional_only = false;
@@ -95,7 +97,17 @@ CommandLine read_arguments(int argc, char** argv, EntryPoint entry) {
                     (!candidate.negative_flag.empty() && candidate.negative_flag == flag));
         });
         if (spec == catalog.end()) {
-            fail("unknown argument: " + std::string(flag));
+            const auto extra =
+                std::find_if(extra_options.begin(), extra_options.end(),
+                             [&](const auto& option) { return option.flag == flag; });
+            if (extra == extra_options.end())
+                fail("unknown argument: " + std::string(flag));
+            else if (extra->takes_value)
+                result.extra_arguments.push_back({std::string(flag), value()});
+            else if (has_value)
+                fail(std::string(flag) + " does not take a value");
+            else
+                result.extra_arguments.push_back({std::string(flag), {}});
             continue;
         }
         std::string argument;
@@ -296,36 +308,52 @@ ConstraintKind constraint_kind(std::string_view name) {
 }
 
 struct ParsedOptions {
+    ParsedLaunchOptions common;
     CliOptions cli;
     ServeOptions serve;
 };
 
-ParsedOptions parse(int argc, char** argv, EntryPoint entry) {
+ParsedOptions parse(int argc, char** argv, EntryPoint entry,
+                    std::span<const CommandLineOption> extra_options = {}) {
     ParsedOptions parsed;
-    auto command = read_arguments(argc, argv, entry);
+    parsed.common.launch = default_launch_options(entry);
+    auto command         = read_arguments(argc, argv, entry, extra_options);
     if (command.help) {
-        parsed.cli.help_requested   = true;
-        parsed.serve.help_requested = true;
+        parsed.common.help_requested = true;
+        parsed.cli.help_requested    = true;
+        parsed.serve.help_requested  = true;
         return parsed;
     }
     if (!command.error.empty()) throw std::invalid_argument(command.error);
     StartupPatch merged;
+    FileConfiguration file;
     if (!command.config_path.empty()) {
         command.config_path = std::filesystem::absolute(command.config_path).lexically_normal();
-        auto file           = read_config_file(command.config_path);
-        check_layer(file, entry, command.config_path);
-        merge_layer(merged, std::move(file), entry);
+        file                = read_config_file(command.config_path);
+        check_layer(file.fields, entry, command.config_path);
+        merge_layer(merged, std::move(file.fields), entry);
     }
     auto cli = command_patch(command);
     check_layer(cli, entry, command.config_path);
     merge_layer(merged, std::move(cli), entry);
 
-    auto& launch     = entry == EntryPoint::Cli ? parsed.cli.launch : parsed.serve.launch;
-    auto& engine     = launch.engine;
-    auto& generation = launch.generation;
-    auto& sampling   = generation.sampling;
+    parsed.common.extra_arguments = std::move(command.extra_arguments);
+    auto& launch                  = parsed.common.launch;
+    auto& engine                  = launch.engine;
+    auto& generation              = launch.generation;
+    auto& sampling                = generation.sampling;
+    if (entry == EntryPoint::Bench) {
+        const auto& limit = assignment(merged, Field::MaxTokens);
+        if (limit && std::holds_alternative<std::uint64_t>(limit->value) &&
+            std::get<std::uint64_t>(limit->value) == 1) {
+            engine.context_cache.enabled           = false;
+            engine.context_cache.extra_state_slots = 0;
+        }
+    }
     launch.provenance.config_path = command.config_path;
     launch.provenance.argv        = std::move(command.argv);
+    engine.deployment             = std::move(file.deployment);
+    launch.provenance.fields      = std::move(file.deployment_sources);
     bool kv_follows_context       = true;
     for (const auto& spec : fields()) {
         const auto& setting = assignment(merged, spec.field);
@@ -379,6 +407,9 @@ ParsedOptions parse(int argc, char** argv, EntryPoint entry) {
             break;
         case Field::PrefillChunk:
             engine.prefill_chunk = u32();
+            break;
+        case Field::GpuTiming:
+            engine.observability.gpu_timing = boolean();
             break;
         case Field::CudaGraph:
             engine.use_cuda_graph = boolean();
@@ -647,9 +678,10 @@ ParsedOptions parse(int argc, char** argv, EntryPoint entry) {
         if (parsed.cli.prompt.empty() && parsed.cli.messages_path.empty())
             throw std::invalid_argument(
                 "select cli.prompt or cli.messages (or --prompt/--messages)");
-        if (generation.enable_thinking == false && generation.thinking_budget)
-            fail(Field::ThinkingBudget, "requires thinking to be enabled");
     }
+    if (entry != EntryPoint::Serve && generation.enable_thinking == false &&
+        generation.thinking_budget)
+        fail(Field::ThinkingBudget, "requires thinking to be enabled");
     return parsed;
 }
 
@@ -657,9 +689,11 @@ ParsedOptions parse(int argc, char** argv, EntryPoint entry) {
 
 LaunchOptions default_launch_options(EntryPoint entry) {
     LaunchOptions options;
-    if (entry == EntryPoint::Cli) {
-        options.engine.context_cache.enabled             = false;
-        options.engine.context_cache.extra_state_slots   = 0;
+    if (entry != EntryPoint::Serve) {
+        if (entry == EntryPoint::Cli) {
+            options.engine.context_cache.enabled           = false;
+            options.engine.context_cache.extra_state_slots = 0;
+        }
         options.engine.context_cache.host_capacity_bytes = 0;
         options.generation.sampling.seed                 = 0;
     } else {
@@ -675,11 +709,20 @@ std::uint64_t random_sampling_seed() {
 }
 
 CliOptions parse_cli_options(int argc, char** argv) {
-    return parse(argc, argv, EntryPoint::Cli).cli;
+    auto parsed       = parse(argc, argv, EntryPoint::Cli);
+    parsed.cli.launch = std::move(parsed.common.launch);
+    return std::move(parsed.cli);
 }
 
 ServeOptions parse_serve_options(int argc, char** argv) {
-    return parse(argc, argv, EntryPoint::Serve).serve;
+    auto parsed         = parse(argc, argv, EntryPoint::Serve);
+    parsed.serve.launch = std::move(parsed.common.launch);
+    return std::move(parsed.serve);
+}
+
+ParsedLaunchOptions parse_launch_options(int argc, char** argv, EntryPoint entry,
+                                         std::span<const CommandLineOption> extra_options) {
+    return parse(argc, argv, entry, extra_options).common;
 }
 
 namespace {
@@ -695,7 +738,7 @@ CommandLine child_arguments(std::span<const std::string> args) {
     arguments.insert(arguments.end(), args.begin(), args.end());
     std::vector<char*> argv;
     for (auto& argument : arguments) argv.push_back(argument.data());
-    return read_arguments(static_cast<int>(argv.size()), argv.data(), EntryPoint::Serve);
+    return read_arguments(static_cast<int>(argv.size()), argv.data(), EntryPoint::Serve, {});
 }
 } // namespace
 

@@ -20,7 +20,8 @@ struct StateLayout {
     std::optional<QsaTailLayout> mtp_qsa;
 };
 
-[[nodiscard]] StateLayout plan_state_image(LayoutBuilder&, const Config&, std::int32_t slots);
+[[nodiscard]] StateLayout plan_state_image(LayoutBuilder&, const Config&, const GdnConfig&,
+                                           std::int32_t slots);
 
 class StateViews {
 public:

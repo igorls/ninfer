@@ -7,13 +7,28 @@ namespace ninfer::models::qwen4_exp::detail {
 class RankProgramImpl;
 
 [[nodiscard]] std::uint32_t context_envelope(std::uint32_t visible, std::uint32_t capacity);
+[[nodiscard]] std::vector<std::uint32_t> decode_context_bounds(std::uint32_t capacity);
+
+class GraphInputs {
+public:
+    explicit GraphInputs(RankProgramImpl& p) : owner_(p) {}
+
+    ~GraphInputs();
+    void prepare();
+    void batch(execution::BatchView, std::uint32_t visible);
+
+private:
+    RankProgramImpl& owner_;
+    std::vector<std::int32_t> slots_;
+    std::array<PinnedHostBuffer, 2> mappings_;
+};
 
 enum class MainGraph { Control, Ordinary, Verify };
 
 class Graphs {
 public:
     explicit Graphs(RankProgramImpl&);
-    void prepare();
+    void prepare(GraphInputs&);
     [[nodiscard]] TextGraph& main(std::uint32_t batch, MainGraph, std::uint32_t visible);
     void draft(std::uint32_t batch, std::span<const execution::BatchView>, ple::Ticket,
                std::span<const std::uint32_t> extents);
@@ -46,6 +61,28 @@ private:
     RankProgramImpl& owner_;
     std::vector<std::uint32_t> bounds_;
     std::vector<Batch> batches_;
+    std::size_t workspace_peak_ = 0;
+};
+
+class MtpCommitGraphs {
+public:
+    explicit MtpCommitGraphs(RankProgramImpl& owner) : owner_(owner) {}
+
+    void prepare(GraphInputs&);
+    void replay(std::uint32_t batch, bool rebuild_history);
+
+    [[nodiscard]] std::size_t workspace_peak() const { return workspace_peak_; }
+
+    void reset_workspace_peak() { workspace_peak_ = 0; }
+
+private:
+    struct Variant {
+        GraphSegment graph;
+        std::size_t workspace_bytes = 0;
+    };
+
+    RankProgramImpl& owner_;
+    std::vector<std::array<Variant, 2>> batches_;
     std::size_t workspace_peak_ = 0;
 };
 

@@ -112,7 +112,7 @@ json run_action(ninfer::Engine& engine, const json& row, unsigned budget,
         response.finish_reason != ninfer::FinishReason::OutputLimit) {
         throw std::runtime_error("incomplete action: cancellation or context exhaustion");
     }
-    if (response.reused_prompt_tokens != 0 || response.reasoning_features.size() != 5120 ||
+    if (response.stats.reused_prompt_tokens != 0 || response.reasoning_features.size() != 5120 ||
         !std::all_of(response.reasoning_features.begin(), response.reasoning_features.end(),
                      [](float value) { return std::isfinite(value); })) {
         throw std::runtime_error("collector requires finite 5120-wide uncached Qwen features");
@@ -122,7 +122,7 @@ json run_action(ninfer::Engine& engine, const json& row, unsigned budget,
         throw std::runtime_error("action suffix changed the common-prefix features");
     }
     result["feature_frontier"] = *response.prompt.reasoning_frontier;
-    const auto& thinking = response.thinking;
+    const auto& thinking = response.stats.thinking;
     json action = {{"budget", budget}, {"content", response.content},
             {"reasoning", response.reasoning}, {"reasoning_tokens", response.reasoning_tokens},
             {"output_tokens", response.generated_token_ids.size()},
@@ -132,7 +132,7 @@ json run_action(ninfer::Engine& engine, const json& row, unsigned budget,
             {"thinking", {{"model_tokens", thinking.model_thinking_tokens},
                           {"injected_tokens", thinking.injected_tokens},
                           {"cap_applied", thinking.applied}}},
-            {"seconds", response.timings.total_seconds}};
+            {"seconds", response.stats.timings.total_seconds}};
     if (budget == 0) {
         const auto first = std::find_if(response.token_logprobs.begin(), response.token_logprobs.end(),
                                          [](const ninfer::TokenLogprobs& entry) { return !entry.forced; });
@@ -257,7 +257,7 @@ int main(int argc, char** argv) try {
     options.speculative.backend = ninfer::SpeculativeBackend::None;
     ninfer::Engine engine(options);
     // The profile names the collected model, so another artifact would mislabel its rows.
-    const auto loaded = engine.load_summary();
+    const auto loaded = engine.startup_report().load;
     if (loaded.model_name != "qwen3.8-27b" ||
         std::find(loaded.weight_formats.begin(), loaded.weight_formats.end(), "nvfp4") ==
             loaded.weight_formats.end()) {

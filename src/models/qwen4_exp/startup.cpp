@@ -4,8 +4,14 @@
 #include <nlohmann/json.hpp>
 
 namespace ninfer::models::qwen4_exp {
-Startup::Startup(const artifact::Reader& reader, const EngineOptions& options, Device device)
-    : reader_(reader), definition_(read_definition(reader, load_options(options))) {
+Startup::Startup(const artifact::Reader& definition_source, const artifact::Reader& rank_source,
+                 const EngineOptions& options, Device device)
+    : reader_(rank_source), definition_(read_definition(definition_source, load_options(options))) {
+    if (options.deployment) {
+        const auto parallel = plan_parallel(*definition_, *options.deployment);
+        if (parallel.ranks.size() != 1)
+            throw std::invalid_argument("Qwen4Exp distributed generation is not implemented");
+    }
     profile       = execution::describe_model(*definition_);
     auto resident = resolve_load(reader_, definition_, device);
     table_        = resident.ple_table_owner();
@@ -43,13 +49,17 @@ std::unique_ptr<ModelShard> Startup::materialize(DeviceContext& device, WeightPl
 }
 
 qwen::Frontend Startup::frontend(const EngineOptions& o) const {
-    const auto generation = nlohmann::json::parse(definition_->resources().generation_config_json);
+    return create_frontend(*definition_, o);
+}
+
+qwen::Frontend create_frontend(const ModelDefinition& definition, const EngineOptions& o) {
+    const auto generation = nlohmann::json::parse(definition.resources().generation_config_json);
     SamplingPreset preset;
     preset.temperature = generation.value("temperature", 1.0F);
     preset.top_k       = generation.value("top_k", 20);
     preset.top_p       = generation.value("top_p", 0.95F);
     preset.min_p       = generation.value("min_p", 0.0F);
-    return qwen::make_frontend(definition_->resources(),
+    return qwen::make_frontend(definition.resources(),
                                {.chat_template_path       = o.chat_template_path,
                                 .grammar_cache_bytes      = o.grammar_cache_bytes,
                                 .vision_enabled           = o.enable_vision,
@@ -64,7 +74,9 @@ std::unique_ptr<RankProgram> create_rank_program(const execution::Parameters& p,
                                                  qwen4_exp::ExecutionPlan&& plan,
                                                  DeviceContext& device,
                                                  const StartupObserver& observer) {
-    return std::make_unique<RankProgram>(p, std::move(plan), device, observer);
+    auto program = std::make_unique<RankProgram>(p, std::move(plan), device, observer);
+    program->prepare_execution();
+    return program;
 }
 
 GraphPreparationPlan Startup::graph_plan(const EngineOptions& options,

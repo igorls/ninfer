@@ -85,6 +85,7 @@ def _synthetic_sources(recipe):
                 encoded,
                 lambda: struct.pack("<f", 2.0),
                 lambda: struct.pack("<f", 3.0),
+                encoded_format="nvfp4",
             )
 
         recipe.selections[name] = [

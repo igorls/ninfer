@@ -35,6 +35,26 @@ public:
         return {hc_norm(w.norm), {linear({w.down}).weight, linear({w.up}).weight}};
     }
 
+    ops::QsaKvPrepareParameters kv_prepare(const QsaWeights& q) const {
+        const auto& c = profile_.config.text;
+        return {tensor(q.key_norm),    tensor(q.index_key_norm), c.norm_epsilon,
+                c.qsa.rope_theta,      c.qsa.rotary_dim,         c.qsa.rope_sections,
+                c.qsa.rope_interleaved};
+    }
+
+    MtpHistoryParameters history(const BlockWeights& w, const BlockProfile& profile) const {
+        const auto& q = std::get<QsaWeights>(w.mixer);
+        MtpHistoryParameters out;
+        out.mix = {linear({w.attention_hc.down}).weight, linear({w.attention_hc.up}).weight};
+        if (std::holds_alternative<PackedQsaProjectionProfile>(std::get<QsaProfile>(profile.mixer).input))
+            out.attention.input = PackedQsaProjection{
+                linear({q.query, q.gate, q.key, q.value}), linear({q.index_query, q.index_key})};
+        else
+            out.attention.input = linear({q.key, q.value, q.index_key});
+        out.attention.prepare = kv_prepare(q);
+        return out;
+    }
+
     BlockParameters block(const BlockWeights& w, const BlockProfile& profile, bool mtp) const {
         BlockParameters out;
         out.attention_hc = hc(w.attention_hc);
@@ -54,19 +74,11 @@ public:
             if (std::holds_alternative<PackedQsaProjectionProfile>(std::get<QsaProfile>(profile.mixer).input))
                 p.input = PackedQsaProjection{linear({q.query,q.gate,q.key,q.value}), linear({q.index_query,q.index_key})};
             else if (mtp)
-                p.input = linear({q.query, q.key, q.gate, q.value, q.index_query, q.index_key});
+                p.input = linear({q.key, q.value, q.index_key, q.query, q.gate, q.index_query});
             else
                 p.input = MainQsaProjection{linear({q.query, q.gate}),
                                             linear({q.key, q.value, q.index_query, q.index_key})};
-            p.prepare = {tensor(q.query_norm),
-                         tensor(q.key_norm),
-                         tensor(q.index_query_norm),
-                         tensor(q.index_key_norm),
-                         profile_.config.text.norm_epsilon,
-                         profile_.config.text.qsa.rope_theta,
-                         profile_.config.text.qsa.rotary_dim,
-                         profile_.config.text.qsa.rope_sections,
-                         profile_.config.text.qsa.rope_interleaved};
+            p.prepare = {kv_prepare(q), tensor(q.query_norm), tensor(q.index_query_norm)};
             p.output  = linear({q.output});
             out.mixer = std::move(p);
         }
@@ -75,10 +87,15 @@ public:
         out.moe.bank                = m.bank;
         out.moe.activation_divisors = profile.moe.activation_divisors;
         out.moe.control             = linear({m.router, m.shared_score}).weight;
-        out.moe.shared   = {linear({m.shared_gate, m.shared_up}), linear({m.shared_down})};
-        const auto& bank = model_.expert_banks()[m.bank.index];
-        if (bank.gate_up.parent->device.type() == DeviceType::CUDA)
-            out.moe.resident = device_expert_bank(bank.gate_up, bank.down);
+        out.moe.shared = {linear({m.shared_gate, m.shared_up}), linear({m.shared_down})};
+        if (const auto* bank = model_.resident_experts(m.bank)) {
+            out.moe.resident = bank->view();
+            out.moe.subset   = {ops::ExpertSubsetKind::MaskOnes, bank->mask()};
+        } else {
+            const auto& source = model_.expert_banks()[m.bank.index];
+            if (source.gate_up.parent->device.type() == DeviceType::CUDA)
+                out.moe.resident = device_expert_bank(source.gate_up, source.down);
+        }
         return out;
     }
 private:
@@ -111,7 +128,8 @@ Parameters::Parameters(const ModelShard& model, std::shared_ptr<const ModelProfi
                          p.tensor(m.embedding_norm),
                          p.tensor(m.hidden_norm),
                          p.block(m.layer, this->profile->mtp.value().layer, true),
-                         p.final_hc(m.final_hc)};
+                         p.final_hc(m.final_hc),
+                         p.history(m.layer, this->profile->mtp.value().layer)};
     }
     if (w.vision) vision = qwen::prepare_vision(model.weight_data(), *w.vision);
 }

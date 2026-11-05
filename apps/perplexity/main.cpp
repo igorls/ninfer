@@ -264,7 +264,7 @@ int run_reference(const Options& options, const std::shared_ptr<spdlog::logger>&
     engine_options.kv_cache         = options.kv;
     engine_options.startup_observer = startup_log.observer();
     ninfer::Engine engine(std::move(engine_options));
-    const ninfer::LoadSummary load = engine.load_summary();
+    const ninfer::LoadSummary load = engine.startup_report().load;
     startup_log.engine_ready(load);
     logger->info("reference ready | {} | {} sequences | {} positions | top-{}",
                  reference.corpus_id, reference.sequences.size(),
@@ -425,7 +425,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     engine_options.kv_cache         = options.kv;
     engine_options.startup_observer = startup_log.observer();
     ninfer::Engine engine(std::move(engine_options));
-    const ninfer::LoadSummary load = engine.load_summary();
+    const ninfer::LoadSummary load = engine.startup_report().load;
     startup_log.engine_ready(load);
 
     const Clock::time_point preflight_started = Clock::now();
@@ -593,7 +593,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
           {"device", options.device},
           {"context_tokens", options.context},
           {"stride_tokens", options.stride},
-          {"prefill_chunk_tokens", engine.memory_summary().prefill_chunk},
+          {"prefill_chunk_tokens", engine.description().prefill_chunk},
           {"score_tile_tokens", 1024},
           {"kv_dtype", kv_name(options.kv)}}},
         {"timing",

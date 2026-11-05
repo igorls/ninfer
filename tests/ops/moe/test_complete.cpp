@@ -18,7 +18,7 @@ int test_complete(Fixture& fixture, CudaExecutionView execution) {
         storage.copy_from_host(batch.residual.data(), storage.bytes());
         Tensor output(storage.span(), DType::BF16, {kHidden, tokens});
         const auto bytes = ops::topk_softmax_swiglu_moe_workspace_capacity_bytes(
-            profile, ops::MoeEpilogue::AddResidual, tokens, tokens);
+            profile, ops::ExpertSubsetKind::All, ops::MoeEpilogue::AddResidual, tokens, tokens);
         witness = std::max(witness, bytes);
         GuardedDeviceBuffer scratch(bytes);
         GuardedDeviceBuffer observed(std::size_t(kTopK) * tokens * sizeof(std::int32_t));
@@ -28,7 +28,7 @@ int test_complete(Fixture& fixture, CudaExecutionView execution) {
             cuda_check(cudaMemcpyAsync(output.data, input.residual.data, output.bytes(),
                                        cudaMemcpyDeviceToDevice, execution.stream()),
                        "seed residual");
-            ops::topk_softmax_swiglu_moe(input.x, profile, fixture.weights(),
+            ops::topk_softmax_swiglu_moe(input.x, profile, fixture.weights(), {},
                                          ops::MoeEpilogue::AddResidual, output, arena, execution, {}, &selected);
         };
         if (q5 && tokens == 2) {
@@ -71,7 +71,7 @@ int test_complete(Fixture& fixture, CudaExecutionView execution) {
                 invalid.device = device;
                 bool rejected  = false;
                 try {
-                    ops::topk_softmax_swiglu_moe(invalid, profile, fixture.weights(),
+                    ops::topk_softmax_swiglu_moe(invalid, profile, fixture.weights(), {},
                                                  ops::MoeEpilogue::Write, output, arena, execution);
                 } catch (const std::invalid_argument&) { rejected = true; }
                 if (!rejected) {
@@ -82,7 +82,7 @@ int test_complete(Fixture& fixture, CudaExecutionView execution) {
         }
     }
     if (ops::topk_softmax_swiglu_moe_workspace_capacity_bytes(
-            profile, ops::MoeEpilogue::AddResidual, 1, cases.back()) != witness) {
+            profile, ops::ExpertSubsetKind::All, ops::MoeEpilogue::AddResidual, 1, cases.back()) != witness) {
         std::cerr << "complete MoE interval capacity mismatch\n";
         ++failures;
     }
@@ -95,9 +95,9 @@ int test_complete(Fixture& fixture, CudaExecutionView execution) {
         Tensor output(buffer.span(), DType::BF16, {kHidden, tokens});
         DeviceBuffer scratch(execution.device(),
                              ops::topk_softmax_swiglu_moe_workspace_capacity_bytes(
-                                 profile, ops::MoeEpilogue::Write, tokens, tokens));
+                                 profile, ops::ExpertSubsetKind::All, ops::MoeEpilogue::Write, tokens, tokens));
         MemoryArena arena(scratch.span());
-        ops::topk_softmax_swiglu_moe(input.x, profile, fixture.weights(), ops::MoeEpilogue::Write,
+        ops::topk_softmax_swiglu_moe(input.x, profile, fixture.weights(), {}, ops::MoeEpilogue::Write,
                                      output, arena, execution);
         cuda_synchronize(execution.stream());
         auto reference = batch.complete;

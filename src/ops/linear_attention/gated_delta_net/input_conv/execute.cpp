@@ -1,3 +1,4 @@
+#include "core/platform.h"
 #include "ops/linear_attention/gated_delta_net/input_conv/execute.h"
 #include "ops/linear_attention/gated_delta_net/input_conv/fp8/fp8_gdn_input_plan.h"
 #include "ops/linear_attention/gated_delta_net/input_conv/nvfp4/launch.h"
@@ -60,6 +61,14 @@ void launch_snapshot(const Tensor& x, const WeightOperands& weights, const Tenso
     case ConvKernel::Q8Window:
     case ConvKernel::Q8Aggregate:
     case ConvKernel::Q8TmaBatch:
+#if NINFER_TARGET_SPARK
+        if (weights.geometry.query_rows == 1024) {
+            launch_q8_gdn_conv_n8192_k2560_snapshot(
+                x, w, conv, state.history, valid, state.source_slots, state.snapshot_bases,
+                out.query, out.key, out.value, out.z, plan.kernel, stream);
+            return;
+        }
+#endif
         launch_q8_gdn_conv_n16384_k2560_snapshot(
             x, w, conv, state.history, valid, state.source_slots, state.snapshot_bases, out.query,
             out.key, out.value, out.z, plan.kernel, stream);
@@ -117,6 +126,14 @@ void launch_record(const Tensor& x, const WeightOperands& weights, const Tensor&
     case ConvKernel::Q8Window:
     case ConvKernel::Q8Aggregate:
     case ConvKernel::Q8TmaBatch:
+#if NINFER_TARGET_SPARK
+        if (weights.geometry.query_rows == 1024) {
+            launch_q8_gdn_conv_n8192_k2560_record(x, w, conv, state.history, valid,
+                                                  state.source_slots, record, out.query, out.key,
+                                                  out.value, out.z, plan.kernel, stream);
+            return;
+        }
+#endif
         launch_q8_gdn_conv_n16384_k2560_record(x, w, conv, state.history, valid, state.source_slots,
                                                record, out.query, out.key, out.value, out.z,
                                                plan.kernel, stream);

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "runtime/observability/gpu_timing.h"
+
 #include "ninfer/ops/kv_cache_append.h"
 
 #include "models/common/context/transfer.h"
@@ -73,7 +75,7 @@ struct ComputeOperation {
     CausalScores scores;
     std::vector<std::size_t> prompt_indices;
     bool feature_pending = false;
-    runtime::ExecutionTiming timing;
+    GpuExecutionObservation gpu;
     std::optional<Tensor> input_embeddings;
     std::unique_ptr<execution::TextRun> text;
 
@@ -101,8 +103,9 @@ public:
     void discard(runtime::ExecutionTicket, runtime::CommandSequence);
     [[nodiscard]] std::optional<runtime::ExecutionEvent<ExecutionTypes>> poll();
     void drain();
-    [[nodiscard]] MemorySummary memory_summary() const;
-    void reset_memory_peaks() noexcept;
+    [[nodiscard]] RankMemoryUsage observe_resources() const;
+    [[nodiscard]] RankExecutionObservation retirement_observation() const noexcept;
+    void reset_measurement_peaks() noexcept;
 
     void validate_row(const ExecutionRow&) const;
     void install_residencies(const ContextWork&);
@@ -140,7 +143,6 @@ public:
     void collect_prompt_readout(ComputeOperation&);
     void retire_compute();
     void progress();
-    void advance();
     [[nodiscard]] ComputeOperation& require_compute(runtime::ExecutionTicket);
     [[nodiscard]] const ComputeOperation& require_compute(runtime::ExecutionTicket) const;
     [[nodiscard]] ops::SamplingConfig sampling_config(const ExecutionRow&, const SamplingInput&,
@@ -176,9 +178,11 @@ public:
     CudaCompletionEvent compute_retired;
     CudaCompletionEvent context_ready;
     CudaEventTimer prefill_timer;
+    runtime::ExecutionGpuTimer gpu_timer;
     std::deque<runtime::ExecutionEvent<ExecutionTypes>> events;
     std::optional<Graphs> graphs;
     std::optional<GraphMemorySummary> graph_memory;
+    std::size_t workspace_lifetime_peak = 0;
 };
 
 } // namespace ninfer::models::qwen3_5::detail

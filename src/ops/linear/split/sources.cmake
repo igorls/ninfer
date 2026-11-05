@@ -32,12 +32,14 @@ target_sources(ninfer_ops_non_rdc PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/nvfp4/shapes/n16384_k5120/a4_tma.cu"
 )
 
+if(NINFER_TARGET_RTX5090)
 target_sources(ninfer_ops PRIVATE "${CMAKE_CURRENT_LIST_DIR}/fp8/shapes/n16384_k2560/shape.cu")
 
 target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/bf16/shapes/n13312_k2560.cu"
   "${CMAKE_CURRENT_LIST_DIR}/bf16/shapes/n640_k2560.cu"
   "${CMAKE_CURRENT_LIST_DIR}/fp8/shapes/n13312_k2560/shape.cu")
+endif()
 include("${CMAKE_CURRENT_LIST_DIR}/bf16/${NINFER_TARGET}/sources.cmake")
 
 include("${CMAKE_CURRENT_LIST_DIR}/q8/${NINFER_TARGET}/sources.cmake")

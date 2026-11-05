@@ -19,9 +19,10 @@ add_library(ninfer_product_logging STATIC
   logging/configuration.cpp
   logging/pretty_format.cpp
   logging/startup_log.cpp
+  statistics.cpp
 )
 ninfer_internal_includes(ninfer_product_logging)
-target_link_libraries(ninfer_product_logging PUBLIC spdlog::spdlog)
+target_link_libraries(ninfer_product_logging PUBLIC spdlog::spdlog ninfer::json)
 
 add_library(ninfer_product_config STATIC
   config/options.cpp
@@ -30,5 +31,5 @@ add_library(ninfer_product_config STATIC
   config/configuration.cpp)
 ninfer_internal_includes(ninfer_product_config)
 target_link_libraries(ninfer_product_config
-  PUBLIC ninfer_product_logging
+  PUBLIC ninfer_product_logging ninfer_deployment
   PRIVATE ninfer::toml)

@@ -18,7 +18,8 @@ public:
     using ExecutionPlan = models::ExecutionPlan<qwen4_exp::ExecutionPlan, ExecutionPreparation>;
     using Calibration   = GraphCalibration;
 
-    Startup(const artifact::Reader&, const EngineOptions&, Device);
+    Startup(const artifact::Reader& definition_source, const artifact::Reader& rank_source,
+            const EngineOptions&, Device);
 
     [[nodiscard]] Architecture architecture() const noexcept { return Architecture::Qwen4Exp; }
 
@@ -49,6 +50,8 @@ private:
     std::shared_ptr<const ModelDefinition> definition_;
     std::shared_ptr<const ple::disk::Table> table_;
 };
+
+[[nodiscard]] qwen::Frontend create_frontend(const ModelDefinition&, const EngineOptions&);
 
 [[nodiscard]] std::unique_ptr<RankProgram> create_rank_program(const execution::Parameters&,
                                                                ExecutionPlan&&, DeviceContext&,

@@ -301,7 +301,7 @@ void HttpServer::handle_score(const httplib::Request& req, httplib::Response& re
         try {
             prepared = service_->prepare(
                 request.generation, GenerationConsumerMode::Aggregate,
-                ninfer::GenerationObservationOptions{.phase_timings = true, .route_tag = req_id},
+                ninfer::GenerationObservationOptions{.constraint_timings = true, .route_tag = req_id},
                 [&req] { return client_disconnected(req); });
         } catch (const ApiException& exception) {
             record_request_rejected(make_request_rejection_log_context(
@@ -387,9 +387,9 @@ void HttpServer::handle_score(const httplib::Request& req, httplib::Response& re
                 entry["top_logprobs"] = std::move(top);
                 // Vocabulary-wide probability the model put outside the candidate list.
                 entry["outside_mass"]  = std::clamp(1.0 - inside, 0.0, 1.0);
-                entry["cached_tokens"] = outcome.metrics.prefix_cache_hit_tokens;
+                entry["cached_tokens"] = outcome.stats.reused_prompt_tokens;
                 prompt += outcome.prompt_tokens;
-                cached += outcome.metrics.prefix_cache_hit_tokens;
+                cached += outcome.stats.reused_prompt_tokens;
                 produced += outcome.completion_tokens;
             } else {
                 // Each option's conditional log-probability is the sum over its tokens; the
@@ -426,9 +426,9 @@ void HttpServer::handle_score(const httplib::Request& req, httplib::Response& re
                                               {"raw_logprob", sum},
                                               {"tokens", std::move(tokens)}});
                     question_cached = std::max<std::uint64_t>(
-                        question_cached, outcome.metrics.prefix_cache_hit_tokens);
+                        question_cached, outcome.stats.reused_prompt_tokens);
                     prompt += outcome.prompt_tokens;
-                    cached += outcome.metrics.prefix_cache_hit_tokens;
+                    cached += outcome.stats.reused_prompt_tokens;
                     produced += outcome.completion_tokens;
                 }
                 if (error) {

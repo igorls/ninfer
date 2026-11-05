@@ -120,7 +120,7 @@ void exercise(const std::filesystem::path& artifact) {
     auto active = engine.submit(engine.prepare_tokens({198, 1002, 198}), request(32));
     auto active_result = std::async(std::launch::async, [&] { return active.wait(); });
     const auto admitted_by = std::chrono::steady_clock::now() + 5s;
-    while (engine.runtime_stats().running_requests == 0 &&
+    while (engine.snapshot().runtime.running_requests == 0 &&
            active_result.wait_for(0ms) != std::future_status::ready) {
         require(std::chrono::steady_clock::now() < admitted_by, "prior request was not admitted");
         std::this_thread::yield();

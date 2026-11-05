@@ -16,7 +16,7 @@
 
 namespace ninfer::product {
 
-enum class EntryPoint { Cli, Serve };
+enum class EntryPoint { Cli, Serve, Bench };
 enum class ConfigSourceKind { Default, File, CommandLine };
 
 struct ConfigSource {
@@ -56,6 +56,7 @@ struct LaunchOptions {
 
 [[nodiscard]] LaunchOptions default_launch_options(EntryPoint entry);
 [[nodiscard]] std::uint64_t random_sampling_seed();
+[[nodiscard]] DeploymentOptions read_deployment_file(const std::filesystem::path&);
 
 enum class ConstraintKind { None, Grammar, JsonObject, JsonSchema, Regex, Choice };
 
@@ -126,6 +127,27 @@ struct ServeOptions {
                                                           std::string_view key, std::string value);
 [[nodiscard]] std::vector<std::string> remove_serve_argument(std::vector<std::string> args,
                                                              std::string_view key);
+
+struct CommandLineOption {
+    std::string_view flag;
+    bool takes_value = true;
+};
+
+struct CommandLineArgument {
+    std::string flag;
+    std::string value;
+};
+
+struct ParsedLaunchOptions {
+    bool help_requested = false;
+    LaunchOptions launch;
+    std::vector<CommandLineArgument> extra_arguments;
+};
+
+// Parse shared startup settings and preserve application-owned arguments in input order.
+[[nodiscard]] ParsedLaunchOptions
+parse_launch_options(int argc, char** argv, EntryPoint entry,
+                     std::span<const CommandLineOption> extra_options = {});
 [[nodiscard]] std::string startup_usage_text(std::string_view executable, EntryPoint entry);
 
 using ConfigurationValue = std::variant<bool, std::uint64_t, double, std::string,
@@ -149,5 +171,7 @@ struct StartupConfigurationView {
 
 [[nodiscard]] StartupConfigurationView configuration_view(const CliOptions& options);
 [[nodiscard]] StartupConfigurationView configuration_view(const ServeOptions& options);
+[[nodiscard]] StartupConfigurationView configuration_view(const LaunchOptions& options,
+                                                          EntryPoint entry);
 
 } // namespace ninfer::product

@@ -14,19 +14,15 @@ ResidencyBinding SessionImpl::context_binding(BindOperation& operation) {
         sequence.reused       = previous.reused;
         sequence.resume_phase = previous.phase;
         sequence.next_capture = previous.next_capture;
-        sequence.timings      = previous.timings;
         sequence.speculative  = previous.speculative;
-        sequence.started      = previous.started;
-        sequence.first_output = previous.first_output;
     } else {
-        sequence.id                      = next_sequence++;
-        sequence.epoch                   = identity_generation;
-        sequence.request                 = operation.request;
-        sequence.identity                = *operation.request->identity;
-        sequence.reused                  = operation.frontier;
-        sequence.resume_phase            = Phase::Prefill;
-        sequence.timings.prepare_seconds = operation.request->prompt.prepare.seconds;
-        if (plan.profile->mtp) {
+        sequence.id           = next_sequence++;
+        sequence.epoch        = identity_generation;
+        sequence.request      = operation.request;
+        sequence.identity     = *operation.request->identity;
+        sequence.reused       = operation.frontier;
+        sequence.resume_phase = Phase::Prefill;
+        if (definition->options().mtp()) {
             sequence.speculative.backend      = SpeculativeBackend::Mtp;
             sequence.speculative.enabled      = true;
             sequence.speculative.draft_window = shape.draft_tokens;
@@ -49,12 +45,12 @@ ResidencyBinding SessionImpl::context_binding(BindOperation& operation) {
             checkpoints.at(*operation.source).snapshot.continuation().metadata;
         sequence.continuation.metadata.rope_delta = sequence.request->prompt.rope_delta;
     } else {
-        const auto eos                 = plan.profile->config.text.ple.eos;
-        sequence.continuation.metadata = {0,
-                                          sequence.request->prompt.rope_delta,
-                                          {eos, eos},
-                                          plan.profile->mtp ? std::optional<std::uint32_t>{0}
-                                                            : std::nullopt};
+        const auto eos                 = definition->config().text.ple.eos;
+        sequence.continuation.metadata = {
+            0,
+            sequence.request->prompt.rope_delta,
+            {eos, eos},
+            definition->options().mtp() ? std::optional<std::uint32_t>{0} : std::nullopt};
     }
     while (sequence.next_capture < sequence.request->captures.size() &&
            sequence.request->captures[sequence.next_capture].frontier <= operation.frontier)
@@ -68,6 +64,21 @@ ResidencyBinding SessionImpl::context_binding(BindOperation& operation) {
                             sequence.request->vision};
     if (result.sampling.repetition_penalty != 1.0F)
         result.prompt_tokens = sequence.request->prompt.token_ids;
+    if (result.vision) {
+        auto suffix = std::make_shared<qwen::VisionExecutionInput>(*result.vision);
+        std::erase_if(suffix->plan.uses,
+                      [&](const auto& use) { return use.end <= operation.frontier; });
+        if (suffix->plan.uses.empty())
+            result.vision.reset();
+        else {
+            suffix->plan.max_merged_count = 0;
+            for (const auto& use : suffix->plan.uses)
+                suffix->plan.max_merged_count =
+                    std::max(suffix->plan.max_merged_count,
+                             suffix->plan.control->items[use.control_index].merged_count);
+            result.vision = std::move(suffix);
+        }
+    }
     operation.binding = std::move(binding);
     return result;
 }

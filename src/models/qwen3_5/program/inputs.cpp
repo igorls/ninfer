@@ -82,7 +82,7 @@ void RankProgramImpl::initialize_forward(ComputeOperation& operation, const Forw
         operation.rows     = work.rows;
         operation.sampling = work.sampling;
         operation.batch    = static_cast<std::uint32_t>(work.rows.size());
-        operation.result   = Result{ForwardResult{}, {}};
+        operation.result   = Result{ForwardResult{}};
     }
     if (operation.forward_offset == 0 && work.inputs.at(operation.forward_row).readout) {
         const auto& readout = *work.inputs.at(operation.forward_row).readout;

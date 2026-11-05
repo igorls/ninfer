@@ -124,7 +124,7 @@ public:
     BodyTimedGraph& operator=(const BodyTimedGraph&) = delete;
 
     template <class Launch>
-    void capture(CudaExecutionView cuda, Launch&& launch) {
+    void capture(CudaExecutionView cuda, Launch&& launch, bool allow_empty = false) {
         const auto stream = cuda.stream();
         CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
         try {
@@ -141,6 +141,7 @@ public:
         CUDA_CHECK(cudaGraphInstantiate(&exec_, graph_, 0));
         std::size_t n = 0;
         CUDA_CHECK(cudaGraphGetNodes(graph_, nullptr, &n));
+        nodes_ = n;
         std::vector<cudaGraphNode_t> nodes(n);
         CUDA_CHECK(cudaGraphGetNodes(graph_, nodes.data(), &n));
         for (const auto node : nodes) {
@@ -148,7 +149,7 @@ public:
             CUDA_CHECK(cudaGraphNodeGetType(node, &type));
             if (type == cudaGraphNodeTypeKernel) ++kernels_;
         }
-        if (!kernels_) throw std::runtime_error("captured Op has no kernels");
+        if (!kernels_ && !allow_empty) throw std::runtime_error("captured Op has no kernels");
     }
 
     void launch(CudaExecutionView cuda) const {
@@ -163,21 +164,26 @@ public:
     }
 
     std::size_t kernels() const { return kernels_; }
+
+    std::size_t nodes() const { return nodes_; }
 private:
     cudaGraph_t graph_    = nullptr;
     cudaGraphExec_t exec_ = nullptr;
     cudaEvent_t start_ = nullptr, stop_ = nullptr;
     std::size_t kernels_ = 0;
+    std::size_t nodes_   = 0;
 };
 
 struct Result {
     ColdTiming gpu, host;
     std::size_t kernels = 0;
+    std::size_t nodes   = 0;
 };
 
 template <class Launch, class Restore>
 Result measure(Launch&& launch, Restore&& restore, L2FlushBuffer& flush, CudaExecutionView cuda,
-               const Options& options, const std::string& execution, const std::string& cache) {
+               const Options& options, const std::string& execution, const std::string& cache,
+               bool allow_empty = false) {
     const auto stream = cuda.stream();
     // Complete fixture uploads and poison fills before using the capture stream.
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -186,7 +192,7 @@ Result measure(Launch&& launch, Restore&& restore, L2FlushBuffer& flush, CudaExe
     CUDA_CHECK(cudaStreamSynchronize(stream));
     BodyTimedGraph graph;
     // Capture also counts the actual Op kernels for an eager row, without timing setup.
-    graph.capture(cuda, launch);
+    graph.capture(cuda, launch, allow_empty);
     const bool captured = execution == "graph";
     const auto invoke   = [&] {
         if (captured)
@@ -228,7 +234,8 @@ Result measure(Launch&& launch, Restore&& restore, L2FlushBuffer& flush, CudaExe
     }
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
-    return {summarize_timings(std::move(gpu)), summarize_timings(std::move(host)), graph.kernels()};
+    return {summarize_timings(std::move(gpu)), summarize_timings(std::move(host)), graph.kernels(),
+            graph.nodes()};
 }
 
 struct Row {

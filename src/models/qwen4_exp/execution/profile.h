@@ -1,6 +1,8 @@
 #pragma once
 
 #include "models/qwen4_exp/config.h"
+#include "models/common/weights.h"
+#include "models/qwen4_exp/ple/parameters.h"
 #include "ninfer/ops/moe.h"
 #include "ninfer/ops/gated_residual.h"
 #include "core/weight_bank.h"
@@ -10,6 +12,7 @@
 
 namespace ninfer::models::qwen4_exp {
 class ModelDefinition;
+struct RankPlan;
 
 namespace execution {
 struct GdnProfile {
@@ -55,10 +58,17 @@ struct TextProfile {
     ops::LinearProfile head;
 };
 
+struct MtpHistoryProfile {
+    ops::HcFinalMixProfile mix;
+    std::variant<ops::LinearProfile, PackedQsaProjectionProfile> input;
+    std::array<std::int32_t, 3> output_rows;
+};
+
 struct MtpProfile {
     ops::LinearProfile fc_embedding, fc_hidden, head;
     BlockProfile layer;
     ops::HcFinalMixProfile final_hc;
+    MtpHistoryProfile history;
 };
 
 // Immutable, address-free descriptions of the selected actual representations.
@@ -68,6 +78,15 @@ struct BankLayout {
 
 struct ModelProfile {
     Config config;
+    ple::Placement ple_placement = ple::Placement::Disk;
+
+    struct LocalGeometry {
+        GdnConfig gdn;
+        QsaConfig qsa;
+        std::uint32_t vocabulary_begin = 0, vocabulary = 0;
+        std::uint32_t rank = 0, size = 1;
+    } local;
+
     LoadOptions options;
     std::uint32_t public_tokens;
     TextProfile text;
@@ -77,6 +96,8 @@ struct ModelProfile {
 };
 
 [[nodiscard]] std::shared_ptr<const ModelProfile> describe_model(const ModelDefinition&);
+[[nodiscard]] std::shared_ptr<const ModelProfile>
+describe_model(const ModelDefinition&, std::span<const BoundWeight>, const RankPlan&);
 [[nodiscard]] std::size_t qsa_projection_workspace_bytes(const QsaProfile&, std::int32_t first,
                                                          std::int32_t last);
 } // namespace execution

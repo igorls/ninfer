@@ -1,14 +1,15 @@
 #include "models/qwen4_exp/state/state_image.h"
 
 namespace ninfer::models::qwen4_exp {
-StateLayout plan_state_image(LayoutBuilder& backing, const Config& config, std::int32_t slots) {
+StateLayout plan_state_image(LayoutBuilder& backing, const Config& config, const GdnConfig& gdn,
+                             std::int32_t slots) {
     const auto& c = config.text;
     StateImageBuilder b;
     StateLayout out;
-    out.gdn = plan_linear_attention_state(
-        b, {c.gdn_layers, dimension(c.gdn.conv_channels()), dimension(c.gdn.conv_width - 1),
-            dimension(c.gdn.value_heads), dimension(c.gdn.value_dim), dimension(c.gdn.key_dim),
-            DType::BF16});
+    out.gdn        = plan_linear_attention_state(b, {c.gdn_layers, dimension(gdn.conv_channels()),
+                                                     dimension(gdn.conv_width - 1),
+                                                     dimension(gdn.value_heads), dimension(gdn.value_dim),
+                                                     dimension(gdn.key_dim), DType::BF16});
     const auto qsa = [&](std::uint32_t layers) {
         return QsaTailLayout{
             b.add(DType::BF16,

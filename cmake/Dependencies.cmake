@@ -1,5 +1,13 @@
 find_package(CUDAToolkit REQUIRED)
 find_package(Threads REQUIRED)
+if(NINFER_ENABLE_DISTRIBUTED)
+  find_path(NCCL_INCLUDE_DIR nccl.h REQUIRED)
+  find_library(NCCL_LIBRARY NAMES nccl REQUIRED)
+  add_library(ninfer::nccl UNKNOWN IMPORTED GLOBAL)
+  set_target_properties(ninfer::nccl PROPERTIES
+    IMPORTED_LOCATION "${NCCL_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${NCCL_INCLUDE_DIR}")
+endif()
 
 # Media decode needs FFmpeg and media acquisition needs libcurl. Linux resolves both through
 # pkg-config. The Windows shared distributions (BtbN FFmpeg, a local libcurl install) ship MSVC

@@ -1,6 +1,7 @@
 #include "models/qwen4_exp/program/resources.h"
 #include "core/startup.h"
 #include "core/transfer.h"
+#include "ninfer/ops/sampling.h"
 
 namespace ninfer::models::qwen4_exp {
 namespace {
@@ -55,12 +56,15 @@ Resources::Resources(const execution::Parameters& p, ExecutionPlan input, Device
                                    plan.graph_probe ? moe::ResourcePurpose::GraphCalibration
                                                     : moe::ResourcePurpose::Execution);
     }
-    ple_upload  = std::make_unique<ple::UploadSlots>(device, plan.ple.max_positions, 2);
-    ple_prepare = std::make_unique<ple::disk::PrepareService>(
-        p.model.ple_table(), p.profile->config.text.ple.eos, plan.ple, ple_upload->host_slots());
-    if (ple_prepare->memory_bytes() != plan.ple_prepare_bytes ||
-        ple_upload->memory().device_bytes != plan.ple_upload.device_bytes)
-        throw std::logic_error("PLE allocated capacity differs from the execution plan");
+    if (const auto* table =
+            std::get_if<std::shared_ptr<const ple::disk::Table>>(&p.model.ple_table())) {
+        ple_upload  = std::make_unique<ple::UploadSlots>(device, plan.ple.max_positions, 2);
+        ple_prepare = std::make_unique<ple::disk::PrepareService>(
+            **table, p.profile->config.text.ple.eos, plan.ple, ple_upload->host_slots());
+        if (ple_prepare->memory_bytes() != plan.ple_prepare_bytes ||
+            ple_upload->memory().device_bytes != plan.ple_upload.device_bytes)
+            throw std::logic_error("PLE allocated capacity differs from the execution plan");
+    }
     states->storage().clear_all(device.execution_view());
     if (plan.persistent.buffers.mtp) {
         const auto& region = plan.persistent.buffers.mtp->row_indices;
@@ -73,6 +77,13 @@ Resources::Resources(const execution::Parameters& p, ExecutionPlan input, Device
     if (const auto& counts = plan.persistent.buffers.token_counts)
         CUDA_CHECK(
             cudaMemsetAsync(counts->bind(backing).data, 0, counts->region.bytes, device.stream()));
+    if (const auto& raw = plan.persistent.buffers.proposal_sampling) {
+        std::vector<ops::SamplingConfig> configs(plan.shape.max_concurrency);
+        for (auto& config : configs) config.temperature = 0;
+        copy_bytes(raw->region.bind(backing),
+                   {configs.data(), configs.size() * sizeof(configs.front()), Device::cpu()},
+                   device.execution_view());
+    }
     device.synchronize();
 }
 

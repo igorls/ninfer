@@ -634,7 +634,7 @@ void DashboardServer::run() {
         return httplib::Server::HandlerResponse::Unhandled;
     });
     svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
-        res.set_content(std::string(kDashboardHtml), "text/html; charset=utf-8");
+        res.set_content(std::string(dashboard_html()), "text/html; charset=utf-8");
     });
     svr.Get("/favicon.ico", [](const httplib::Request&, httplib::Response& res) {
         res.status = 204;

@@ -21,7 +21,7 @@ inline nlohmann::json model_reserve_budget(const nlohmann::json& admin) {
         const auto& plan = admin.at("plan");
         const auto& reserve = admin.at("desktop_reserve");
         const double runtime = plan.at("runtime_reservation_bytes").get<double>();
-        const double weights = admin.at("arenas").at("weights").at("capacity_bytes").get<double>();
+        const double weights = admin.at("resources").at("allocations").at("device_weights_bytes").get<double>();
         const double available = plan.at("available_after_weights_bytes").get<double>();
         const double configured = reserve.at("configured_bytes").get<double>();
         const double free = admin.at("device").at("free_bytes").get<double>();

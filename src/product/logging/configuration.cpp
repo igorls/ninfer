@@ -5,6 +5,7 @@
 #include <spdlog/logger.h>
 
 #include <iomanip>
+#include <algorithm>
 #include <sstream>
 #include <type_traits>
 
@@ -47,15 +48,22 @@ std::string value_text(const ConfigurationItem& item) {
 
 std::string format_configuration(const StartupConfigurationView& view) {
     std::ostringstream out;
-    out << "configuration  " << (view.entry == EntryPoint::Cli ? "cli" : "serve") << '\n';
+    out << "configuration  "
+        << (view.entry == EntryPoint::Cli     ? "cli"
+            : view.entry == EntryPoint::Serve ? "serve"
+                                              : "bench")
+        << '\n';
     if (!view.config_path.empty())
         out << "  file         " << format_pretty_text(view.config_path.string()) << '\n';
     std::string previous;
+    std::size_t label_width = 28;
+    for (const auto& item : view.items)
+        label_width = std::max(label_width, item.key.size() - item.key.find('.') + 1);
     for (const auto& item : view.items) {
         const auto dot   = item.key.find('.');
         const auto group = item.key.substr(0, dot);
-        out << std::left << std::setw(15) << (group == previous ? "" : group) << std::setw(28)
-            << item.key.substr(dot + 1) << value_text(item);
+        out << std::left << std::setw(15) << (group == previous ? "" : group)
+            << std::setw(label_width) << item.key.substr(dot + 1) << value_text(item);
         if (item.source.kind == ConfigSourceKind::File)
             out << "  [file:" << item.source.line << ']';
         else if (item.source.kind == ConfigSourceKind::CommandLine)
@@ -74,12 +82,11 @@ void log_configuration(spdlog::logger& logger, const StartupConfigurationView& v
     if (logger.should_log(spdlog::level::info)) logger.info("\n{}", format_configuration(view));
 }
 
-void log_resolved_configuration(spdlog::logger& logger, const EngineOptions& options,
-                                const MemorySummary& memory) {
-    logger.info("resolved       prefill chunk={}  KV={} tokens  StateImages={}+{}  Host={}",
-                options.prefill_chunk, memory.kv_capacity, options.max_concurrency,
-                options.context_cache.extra_state_slots.value(),
-                format_pretty_bytes(options.context_cache.host_capacity_bytes.value()));
+void log_resolved_configuration(spdlog::logger& logger, const EngineDescription& description) {
+    logger.info("resolved       prefill chunk={}  KV={} tokens  StateImages={}  Host={}",
+                description.prefill_chunk, description.kv_capacity,
+                description.device_state_capacity,
+                format_pretty_bytes(description.host_context_capacity_bytes));
 }
 
 } // namespace ninfer::product

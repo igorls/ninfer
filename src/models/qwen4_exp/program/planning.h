@@ -36,6 +36,7 @@ struct ExecutionPlan {
     std::size_t pinned_sampling_bytes = 0;
     std::size_t pinned_mtp_bytes      = 0;
     std::size_t pinned_trace_bytes    = 0;
+    std::size_t pinned_draft_bytes    = 0;
     runtime::KvCapacityResolution capacity;
     bool graph_probe = false;
 
@@ -58,9 +59,6 @@ struct ExecutionPlan {
 [[nodiscard]] std::shared_ptr<const moe::Plan> describe_moe_plan(const execution::ModelProfile&,
                                                                  const MoeOptions&);
 
-[[nodiscard]] std::span<const std::uint32_t> default_expert_priority(const TextConfig&,
-                                                                     std::size_t layer);
-
 // Available bytes exclude immutable GPU weights and the caller's startup headroom.
 // Shared-memory targets include planned Host preparation storage in the physical reservation.
 [[nodiscard]] std::optional<ExecutionPlan>
@@ -71,4 +69,8 @@ plan_execution(std::shared_ptr<const execution::ModelProfile>, ple::disk::TableG
 [[nodiscard]] ExecutionPlan plan_graph_probe(std::shared_ptr<const execution::ModelProfile>,
                                              ple::disk::TableGeometry, const EngineOptions&,
                                              DeviceContext&, std::shared_ptr<const moe::Plan>);
+
+[[nodiscard]] runtime::SequenceCapacityCurve
+describe_execution_capacity(std::shared_ptr<const execution::ModelProfile>, const EngineOptions&,
+                            DeviceContext&);
 } // namespace ninfer::models::qwen4_exp

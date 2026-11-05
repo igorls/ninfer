@@ -117,18 +117,14 @@ public:
                               const CancellationView& cancellation = {});
 
     [[nodiscard]] const EngineOptions& options() const;
-    [[nodiscard]] LoadSummary load_summary() const;
-    [[nodiscard]] MemorySummary memory_summary() const;
-    // Non-blocking variant for telemetry: returns nothing while the engine is
-    // mid-execution instead of waiting for it. Anything polled on a timer must
-    // use this -- the blocking form queues behind execution and will exhaust a
-    // server's thread pool under load.
-    [[nodiscard]] std::optional<MemorySummary> try_memory_summary() const;
-    [[nodiscard]] RuntimeStats runtime_stats() const;
-    [[nodiscard]] MediaCacheSummary media_cache_summary() const;
+    [[nodiscard]] const EngineDescription& description() const;
+    [[nodiscard]] const StartupReport& startup_report() const;
+    [[nodiscard]] EngineSnapshot snapshot() const;
+    // Timer-driven telemetry never waits behind execution.
+    [[nodiscard]] std::optional<EngineSnapshot> try_snapshot() const;
     [[nodiscard]] bool is_available() const;
 
-    void reset_memory_peaks() noexcept;
+    void reset_measurement_peaks();
 
     // Result of holding the engine still for a moment. Reported rather than
     // returned as a bare duration because the interesting question when the

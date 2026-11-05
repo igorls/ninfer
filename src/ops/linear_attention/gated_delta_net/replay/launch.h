@@ -8,7 +8,7 @@
 #include <stdexcept>
 
 namespace ninfer::ops::detail::gated_delta_net {
-enum class FoldGeometryId { Layers48Heads48, Layers30Heads32, Layers36Heads48 };
+enum class FoldGeometryId { Layers48Heads48, Layers30Heads32, Layers36Heads48, Layers36Heads24 };
 
 inline FoldGeometryId select_fold_geometry(const GdnReplayRecordSpec& spec) {
     if (spec.qk_heads == 16 && spec.value_heads == 48 && spec.conv_channels == 10240) {
@@ -18,6 +18,9 @@ inline FoldGeometryId select_fold_geometry(const GdnReplayRecordSpec& spec) {
     if (spec.layers == 30 && spec.qk_heads == 16 && spec.value_heads == 32 &&
         spec.conv_channels == 8192)
         return FoldGeometryId::Layers30Heads32;
+    if (spec.layers == 36 && spec.qk_heads == 8 && spec.value_heads == 24 &&
+        spec.conv_channels == 5120)
+        return FoldGeometryId::Layers36Heads24;
     throw std::invalid_argument("gdn_replay_fold: unsupported record geometry");
 }
 
@@ -32,6 +35,12 @@ struct alignas(16) GdnReplayFoldKernelRows {
     GdnReplayFoldKernelRow row[8];
 };
 
+struct GdnReplayFoldDeviceRows {
+    const std::int32_t* sources;
+    const std::int32_t* destinations;
+    const std::int32_t* columns;
+};
+
 void launch_recurrent_record(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                              const Tensor& beta, float scale, const Tensor& ssm_states,
                              const Tensor& valid_columns, const Tensor& initial_state_slots,
@@ -41,5 +50,7 @@ void launch_recurrent_record(const Tensor& q, const Tensor& k, const Tensor& v, 
 void launch_replay_fold(const GdnReplayRecords& records, LinearAttentionStateAllLayersView states,
                         const GdnReplayFoldKernelRows& rows, std::int32_t active_rows,
                         cudaStream_t stream);
+void launch_replay_fold(const GdnReplayRecords&, LinearAttentionStateAllLayersView,
+                        const GdnReplayFoldDeviceRows&, std::int32_t active_rows, cudaStream_t);
 
 } // namespace ninfer::ops::detail::gated_delta_net

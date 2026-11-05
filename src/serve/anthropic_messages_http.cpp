@@ -67,7 +67,7 @@ void HttpServer::handle_messages(const httplib::Request& req, httplib::Response&
         prepared = service_->prepare(
             request.generation,
             request.stream ? GenerationConsumerMode::Streaming : GenerationConsumerMode::Aggregate,
-            {.phase_timings = true,
+            {.constraint_timings = true,
              .scheduling    = scheduling_observer(req_id, metadata.http_request_id),
              .first_token   = first_token_observer(),
              .route_tag     = req_id},

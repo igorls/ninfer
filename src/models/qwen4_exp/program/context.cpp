@@ -15,7 +15,7 @@ void RankProgramImpl::advance_context() {
         auto* counts          = static_cast<std::int32_t*>(resources.context_counts().data);
         for (const auto id : work.releases) {
             auto& resident = binding(id);
-            ple.cancel_sequence(resident.member.sequence.value);
+            if (host_ple) host_ple->cancel_sequence(resident.member.sequence.value);
             retire_vision(resident);
             bindings[id.lane.value].reset();
         }
@@ -64,7 +64,7 @@ void RankProgramImpl::advance_context() {
     const auto command = f.request.command;
     context.reset();
     events.emplace_back(runtime::ResultReady<ExecutionTypes>{ticket, Result(std::move(result))});
-    events.emplace_back(runtime::DeviceRetired{ticket, command});
+    events.emplace_back(runtime::DeviceRetired{ticket, command, retirement_observation()});
 }
 
 } // namespace ninfer::models::qwen4_exp::detail

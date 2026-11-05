@@ -1,4 +1,5 @@
-#include "core/device_memory.h"
+#include "core/device.h"
+#include "core/platform.h"
 
 #include <cuda_runtime.h>
 #include <nvml.h>
@@ -6,6 +7,7 @@
 #include <atomic>
 #include <cstdio>
 #include <iomanip>
+#include <fstream>
 #include <mutex>
 #include <sstream>
 
@@ -258,6 +260,51 @@ DeviceMemorySnapshot query_device_memory(int device_index) {
     }
 
     return snapshot;
+}
+
+PhysicalMemorySnapshot physical_memory_snapshot(Device device) {
+    CudaDeviceScope scope(device);
+    PhysicalMemorySnapshot snapshot;
+    CUDA_CHECK(cudaMemGetInfo(&snapshot.cuda_free_bytes, &snapshot.cuda_total_bytes));
+#if defined(_WIN32)
+    MEMORYSTATUSEX memory{};
+    memory.dwLength = sizeof(memory);
+    if (!GlobalMemoryStatusEx(&memory))
+        throw std::runtime_error("cannot read system memory availability");
+    snapshot.system_available_bytes = memory.ullAvailPhys;
+    snapshot.system_total_bytes = memory.ullTotalPhys;
+#else
+    std::ifstream input("/proc/meminfo");
+    std::string key, rest;
+    std::uint64_t kib;
+    while (input >> key >> kib) {
+        std::getline(input, rest);
+        if (key == "MemAvailable:") snapshot.system_available_bytes = kib * 1024;
+        if (key == "MemTotal:") snapshot.system_total_bytes = kib * 1024;
+        if (snapshot.system_available_bytes && snapshot.system_total_bytes) break;
+    }
+    if (!snapshot.system_available_bytes || !snapshot.system_total_bytes)
+        throw std::runtime_error("cannot read system memory availability");
+#endif
+    snapshot.shared_physical_memory = NINFER_SHARED_PHYSICAL_MEMORY != 0;
+    return snapshot;
+}
+
+DeviceMemorySnapshot device_memory_snapshot(Device device) {
+    CudaDeviceScope scope(device);
+    auto snapshot = query_device_memory(device.index());
+    if constexpr (NINFER_SHARED_PHYSICAL_MEMORY != 0) {
+        const auto physical = physical_memory_snapshot(device);
+        snapshot.total_bytes = physical.cuda_total_bytes;
+        snapshot.system_available_bytes = physical.system_available_bytes;
+        snapshot.shared_physical_memory = true;
+    }
+    return snapshot;
+}
+
+std::int64_t device_memory_growth(DeviceMemorySnapshot before, DeviceMemorySnapshot after) {
+    return static_cast<std::int64_t>(before.available_bytes()) -
+           static_cast<std::int64_t>(after.available_bytes());
 }
 
 std::string format_device_memory_bytes(std::size_t bytes) {

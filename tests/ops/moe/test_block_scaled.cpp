@@ -259,7 +259,7 @@ int run(Fixture& f, CudaExecutionView execution, int tokens, ops::ExpertSubsetKi
     ops::ExpertSubset subset{kind, Tensor(dm.span(), DType::I32, {E})};
     const std::size_t bytes =
         complete
-            ? ops::topk_softmax_swiglu_moe_workspace_capacity_bytes(profile, mode, tokens, tokens)
+            ? ops::topk_softmax_swiglu_moe_workspace_capacity_bytes(profile, kind, mode, tokens, tokens)
         : shared ? ops::routed_swiglu_workspace_capacity_bytes(profile.routed, profile.shared, kind,
                                                                dtype, mode, tokens, tokens)
                  : ops::routed_swiglu_workspace_capacity_bytes(profile.routed, kind, dtype, mode,
@@ -271,7 +271,7 @@ int run(Fixture& f, CudaExecutionView execution, int tokens, ops::ExpertSubsetKi
     Tensor output(result.span(), dtype, {H, tokens});
     auto invoke = [&] {
         if (complete) {
-            ops::topk_softmax_swiglu_moe(input, profile, f.weights, mode, output, arena, execution, {}, &selected);
+            ops::topk_softmax_swiglu_moe(input, profile, f.weights, subset, mode, output, arena, execution, {}, &selected);
         } else {
             const auto experts =
                 kind == ops::ExpertSubsetKind::None ? ops::CudaSwiGLUExperts{} : f.weights.routed;

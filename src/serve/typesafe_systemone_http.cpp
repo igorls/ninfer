@@ -230,7 +230,7 @@ SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request
         try {
             prepared = service_->prepare(
                 chat.generation, GenerationConsumerMode::Aggregate,
-                ninfer::GenerationObservationOptions{.phase_timings = true, .route_tag = req_id},
+                ninfer::GenerationObservationOptions{.constraint_timings = true, .route_tag = req_id},
                 [&req] { return client_disconnected(req); });
         } catch (const ApiException& exception) {
             record_request_rejected(make_request_rejection_log_context(
@@ -270,7 +270,7 @@ SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request
         const SystemOneBranch& branch     = branches[k];
         const SystemOneQuestion& question = request.questions[branch.question];
         usage.input_tokens += systemone_billed_input_tokens(
-            branch.outcome->prompt_tokens, branch.outcome->metrics.prefix_cache_hit_tokens, k == 0);
+            branch.outcome->prompt_tokens, branch.outcome->stats.reused_prompt_tokens, k == 0);
         if (branch.member != SystemOneBranch::Member::Native) {
             // A policy readout: letter j's probability belongs to option branch.options[j].
             const std::vector<double> probabilities = softmax_probabilities(
@@ -328,7 +328,7 @@ SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request
                 limits);
             const GenerationOutcome outcome = run_chat(thinking);
             usage.input_tokens += systemone_billed_input_tokens(
-                outcome.prompt_tokens, outcome.metrics.prefix_cache_hit_tokens, false);
+                outcome.prompt_tokens, outcome.stats.reused_prompt_tokens, false);
             usage.reasoning_tokens += static_cast<std::uint32_t>(std::max(0, outcome.reasoning_tokens));
             if (outcome.finish_reason == ninfer::FinishReason::StopToken) {
                 if (const auto letter = parse_letter_answer(outcome.text, rendered.letters)) {

@@ -16,6 +16,7 @@ if(NINFER_BUILD_ENGINE)
   include(models/qwen4_exp/tests.cmake)
 endif()
 include(ops/tests.cmake)
+include(distributed/tests.cmake)
 
 if(WIN32)
   # Windows has no rpath: every test finds CUDA, FFmpeg and libcurl DLLs through PATH.

@@ -8,6 +8,7 @@
 #include "serve/request_log.h"
 #include "serve/ninfer_rerank.h"
 #include "serve/typesafe_systemone.h"
+#include "product/statistics.h"
 
 #include "core/device_memory.h"
 
@@ -76,11 +77,15 @@ void ensure_http_request_id(const httplib::Request& request, httplib::Response& 
     }
 }
 
-ThroughputReport make_throughput_report(const ninfer::RuntimeStats& previous,
-                                        const ninfer::RuntimeStats& current,
+ThroughputReport make_throughput_report(const ninfer::EngineSnapshot& before,
+                                        const ninfer::EngineSnapshot& after,
                                         double interval_seconds) {
+    const auto& previous = before.runtime;
+    const auto& current  = after.runtime;
     return ThroughputReport{
-        .interval_seconds = interval_seconds,
+        .previous_execution = before.executions,
+        .current_execution  = after.executions,
+        .interval_seconds   = interval_seconds,
         .computed_prefill_tokens =
             current.computed_prefill_tokens - previous.computed_prefill_tokens,
         .committed_decode_tokens =
@@ -126,14 +131,15 @@ bool report_has_activity(const ThroughputReport& report) {
                report.previous.host_context_reserved_bytes ||
            report.current.host_work.engine_boundary_ns !=
                report.previous.host_work.engine_boundary_ns ||
-           report.current.host_work.program_submit_ns !=
-               report.previous.host_work.program_submit_ns ||
-           report.current.host_work.program_post_ns != report.previous.host_work.program_post_ns ||
+           report.current.host_work.session_call_ns != report.previous.host_work.session_call_ns ||
+           report.current.host_work.executor_poll_ns !=
+               report.previous.host_work.executor_poll_ns ||
            report.current.host_work.engine_commit_output_ns !=
                report.previous.host_work.engine_commit_output_ns ||
            report.current.host_work.engine_maintenance_ns !=
                report.previous.host_work.engine_maintenance_ns ||
-           report.current.host_work.device_wait_ns != report.previous.host_work.device_wait_ns;
+           report.current.host_work.scheduler_yield_ns !=
+               report.previous.host_work.scheduler_yield_ns;
 }
 
 const char* endpoint_name(std::string_view path) noexcept {
@@ -349,7 +355,7 @@ void HttpServer::record_throughput(const ThroughputReport& report) {
 
 void HttpServer::run_stats_reporter() {
     using Clock                     = std::chrono::steady_clock;
-    ninfer::RuntimeStats previous   = service_->runtime_stats();
+    ninfer::EngineSnapshot previous = service_->snapshot();
     Clock::time_point previous_time = Clock::now();
     const auto interval = std::chrono::milliseconds(options_.launch.logging.stats_interval_ms);
     Clock::time_point next_deadline = previous_time + interval;
@@ -362,9 +368,9 @@ void HttpServer::run_stats_reporter() {
             }
         }
 
-        const ninfer::RuntimeStats current = service_->runtime_stats();
-        const Clock::time_point now        = Clock::now();
-        const ThroughputReport report      = make_throughput_report(
+        const ninfer::EngineSnapshot current = service_->snapshot();
+        const Clock::time_point now          = Clock::now();
+        const ThroughputReport report        = make_throughput_report(
             previous, current, std::chrono::duration<double>(now - previous_time).count());
         if (report_has_activity(report)) { record_throughput(report); }
         previous      = current;
@@ -374,9 +380,9 @@ void HttpServer::run_stats_reporter() {
         if (next_deadline <= after_write) { next_deadline = after_write + interval; }
     }
 
-    const ninfer::RuntimeStats current = service_->runtime_stats();
-    const Clock::time_point now        = Clock::now();
-    ThroughputReport tail              = make_throughput_report(
+    const ninfer::EngineSnapshot current = service_->snapshot();
+    const Clock::time_point now          = Clock::now();
+    ThroughputReport tail                = make_throughput_report(
         previous, current, std::chrono::duration<double>(now - previous_time).count());
     // The exact partial interval remains useful to measurement consumers. Pretty throughput is a
     // fixed-cadence operational record and deliberately has no irregular shutdown tail.
@@ -488,7 +494,7 @@ void HttpServer::register_routes() {
         handle_models(req, res);
     });
     server_.Get("/metrics", [this](const httplib::Request&, httplib::Response& res) {
-        const auto stats = service_->runtime_stats();
+        const auto stats = service_->snapshot();
         res.set_header("Cache-Control", "no-store");
         res.set_content(metrics_.render(stats, service_->is_available()),
                         "text/plain; version=0.0.4; charset=utf-8");
@@ -589,12 +595,6 @@ const char* kv_cache_storage_name(KvCacheStorage storage) noexcept {
     return "unknown";
 }
 
-nlohmann::json arena_json(const ArenaMemorySummary& arena) {
-    return {{"capacity_bytes", arena.capacity_bytes},
-            {"used_bytes", arena.used_bytes},
-            {"peak_used_bytes", arena.peak_used_bytes}};
-}
-
 // NVML process enumeration can take seconds on Windows. Only the refreshing
 // request waits for the driver; concurrent readers receive the previous snapshot
 // with its age, or unavailable until the first snapshot has been published.
@@ -626,41 +626,31 @@ void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& r
         return;
     }
 
-    // Never the blocking memory_summary() here. It takes the engine's execution
-    // mutex, which the worker holds for a whole execution unit, so a once-a-second
-    // poller would take one HTTP worker per poll and block it; under sustained
-    // load every worker is consumed and the server accepts connections only to
-    // close them. Serve the last good reading with its age instead -- a couple of
-    // seconds of staleness in a diagnostics payload costs nothing, and taking the
-    // engine offline to avoid it costs everything.
+    // Copy published observations; telemetry never waits for model execution.
     static std::mutex memory_cache_mu;
-    static MemorySummary memory_cached;
-    static std::chrono::steady_clock::time_point memory_taken{};
-    static bool memory_primed = false;
-
-    MemorySummary memory;
-    std::int64_t memory_age_ms = 0;
-    if (std::optional<MemorySummary> fresh = service_->try_memory_summary()) {
+    static std::optional<EngineSnapshot> memory_cached;
+    EngineSnapshot snapshot;
+    {
+        auto fresh = service_->try_snapshot();
         std::lock_guard lock(memory_cache_mu);
-        memory_cached = *fresh;
-        memory_taken  = std::chrono::steady_clock::now();
-        memory_primed = true;
-        memory        = *fresh;
-    } else {
-        std::lock_guard lock(memory_cache_mu);
-        if (!memory_primed) {
+        if (fresh) memory_cached = std::move(*fresh);
+        if (!memory_cached || memory_cached->ranks.empty() || service_->startup_report().ranks.empty()) {
             ApiError error;
-            error.status  = 503;
-            error.type    = "service_unavailable";
-            error.message = "engine memory summary is not available yet";
+            error.status = 503;
+            error.type = "service_unavailable";
+            error.message = "engine resource observations are not available yet";
             write_openai_error(res, error);
             return;
         }
-        memory        = memory_cached;
-        memory_age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now() - memory_taken)
-                            .count();
+        snapshot = *memory_cached;
     }
+    const auto& description = service_->description();
+    const auto& budget = service_->startup_report().ranks.front();
+    const auto& memory = snapshot.ranks.front().memory;
+    const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const auto memory_age_ms = snapshot.stamp.sampled_ns && now_ns > snapshot.stamp.sampled_ns
+        ? (now_ns - snapshot.stamp.sampled_ns) / 1000000 : 0;
     const EngineOptions& engine = service_->engine_options();
     const auto reading          = device_snapshot(engine.device);
     if (!reading) {
@@ -689,49 +679,36 @@ void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& r
                                {"holding", floor == 0 || device.free_bytes >= floor}};
 
     nlohmann::json plan = {
-        {"runtime_reservation_bytes", memory.runtime_reservation_bytes},
-        {"minimum_runtime_reservation_bytes", memory.minimum_runtime_reservation_bytes},
-        {"available_after_weights_bytes", memory.available_after_weights_bytes},
-        {"available_after_startup_bytes", memory.available_after_startup_bytes},
-        {"planned_slack_bytes", memory.planned_slack_bytes},
-        {"workspace_logical_peak_bytes", memory.workspace_logical_peak_bytes},
-        {"cuda_graph_rebuild_estimate_bytes", memory.cuda_graph ? memory.cuda_graph->rebuild_estimate_bytes : 0},
-        {"cuda_graph_prepare_increment_bytes", memory.cuda_graph ? memory.cuda_graph->preparation_increment_bytes : 0},
-        {"cuda_graph_calibration_increment_bytes", memory.cuda_graph ? memory.cuda_graph->calibration_increment_bytes : 0},
-        {"cuda_graph_calibration_retained_bytes", memory.cuda_graph ? memory.cuda_graph->calibration_retained_bytes : 0},
-        {"kv_capacity_headroom_bytes", memory.kv_capacity_headroom_bytes}};
-
-    nlohmann::json arenas = {{"weights", arena_json(memory.weights)},
-                             {"sequence", arena_json(memory.sequence)},
-                             {"workspace", arena_json(memory.workspace)}};
-    if (memory.vision_workspace.has_value()) {
-        // Logical regions inside the one physical workspace allocation; they describe layout,
-        // and must not be added to workspace.capacity_bytes.
-        arenas["vision_workspace"] = {
-            {"general_capacity_bytes", memory.vision_workspace->general_capacity_bytes},
-            {"encode_peak_bytes", memory.vision_workspace->encode_peak_bytes},
-            {"handoff_capacity_bytes", memory.vision_workspace->handoff_capacity_bytes},
-            {"aggregate_prompt_tokens", memory.vision_workspace->aggregate_prompt_tokens},
-            {"max_item_tokens", memory.vision_workspace->max_item_tokens}};
-    } else {
-        arenas["vision_workspace"] = nullptr;
-    }
-
-    nlohmann::json kv = {{"capacity_tokens", memory.kv_capacity},
-                         {"page_groups", memory.kv_capacity_page_groups},
-                         {"max_page_groups", memory.kv_capacity_max_page_groups},
+        {"runtime_reservation_bytes", budget.runtime_reservation_bytes},
+        {"minimum_runtime_reservation_bytes", budget.minimum_runtime_reservation_bytes},
+        {"available_after_weights_bytes", budget.available_after_weights_bytes},
+        {"available_after_startup_bytes", budget.available_after_startup_bytes},
+        {"planned_slack_bytes", budget.planned_slack_bytes},
+        {"cuda_graph_rebuild_estimate_bytes", budget.graphs ? budget.graphs->rebuild_estimate_bytes : 0},
+        {"cuda_graph_prepare_increment_bytes", budget.graphs ? budget.graphs->preparation_increment_bytes : 0},
+        {"cuda_graph_calibration_increment_bytes", budget.graphs ? budget.graphs->calibration_increment_bytes : 0},
+        {"cuda_graph_calibration_retained_bytes", budget.graphs ? budget.graphs->calibration_retained_bytes : 0},
+        {"kv_capacity_headroom_bytes", budget.headroom_bytes}};
+    const auto& runtime = snapshot.runtime;
+    nlohmann::json pools = nlohmann::json::array();
+    for (const auto& pool : runtime.kv_pools)
+        pools.push_back({{"id", pool.id}, {"label", pool.label},
+                         {"capacity_page_groups", pool.capacity_page_groups},
+                         {"occupied_page_groups", pool.occupied_page_groups}});
+    nlohmann::json kv = {{"capacity_tokens", description.kv_capacity},
+                         {"pools", std::move(pools)},
                          {"payload_bytes", memory.kv_payload_bytes},
-                         {"storage", kv_cache_storage_name(memory.kv_cache)},
-                         {"host_context_capacity_bytes", memory.host_context_capacity_bytes},
-                         {"host_context_reserved_bytes", memory.host_context_reserved_bytes},
-                         {"host_state_occupied_slots", memory.host_state_occupied_slots},
-                         {"host_context_occupied_bytes", memory.host_context_occupied_bytes},
-                         {"host_kv_occupied_bytes", memory.host_kv_occupied_bytes}};
+                         {"storage", kv_cache_storage_name(description.kv_cache)},
+                         {"host_context_capacity_bytes", description.host_context_capacity_bytes},
+                         {"host_context_reserved_bytes", runtime.host_context_reserved_bytes},
+                         {"host_state_occupied_slots", runtime.host_state_occupied_slots},
+                         {"host_context_occupied_bytes", runtime.host_context_occupied_bytes},
+                         {"host_kv_occupied_bytes", runtime.host_kv_occupied_bytes}};
 
     plan["kv_capacity_automatic"] = engine.kv_capacity.mode == KvCapacityMode::Automatic;
     plan["kv_slack_floor_bytes"] = engine.kv_capacity.slack_floor_bytes;
     nlohmann::json body = {
-        {"schema_version", 1},
+        {"schema_version", 2},
         {"model_id", served_model_names_.id},
         // Non-zero when the engine was busy and this payload reports the previous
         // reading rather than blocking behind execution to take a fresh one.
@@ -752,7 +729,7 @@ void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& r
           {"compute_processes", processes}}},
         {"desktop_reserve", reserve},
         {"plan", plan},
-        {"arenas", arenas},
+        {"resources", product::resource_json(snapshot.ranks.front())},
         {"kv", kv},
         {"options",
          {{"max_concurrency", engine.max_concurrency}, {"vision", engine.enable_vision}}},
@@ -790,23 +767,24 @@ void HttpServer::handle_admin_stats(const httplib::Request&, httplib::Response& 
         write_openai_error(res, error);
         return;
     }
-    const ninfer::RuntimeStats s = service_->runtime_stats();
+    const ninfer::RuntimeStats s = service_->snapshot().runtime;
     const auto ns                = [](std::uint64_t value) { return value; };
     nlohmann::json body          = {
-        {"schema_version", 1},
+        {"schema_version", 2},
         {"host_work",
                   {{"engine_boundary_ns", ns(s.host_work.engine_boundary_ns)},
-                   {"program_submit_ns", ns(s.host_work.program_submit_ns)},
-                   {"program_post_ns", ns(s.host_work.program_post_ns)},
+                   {"session_call_ns", ns(s.host_work.session_call_ns)},
+                   {"executor_poll_ns", ns(s.host_work.executor_poll_ns)},
+                   {"executor_flush_ns", ns(s.host_work.executor_flush_ns)},
                    {"engine_commit_output_ns", ns(s.host_work.engine_commit_output_ns)},
                    {"engine_maintenance_ns", ns(s.host_work.engine_maintenance_ns)},
-                   {"device_wait_ns", ns(s.host_work.device_wait_ns)},
+                   {"scheduler_yield_ns", ns(s.host_work.scheduler_yield_ns)},
                    {"prefill_host_ns", ns(s.host_work.prefill_host_ns)},
-                   {"prefill_device_wait_ns", ns(s.host_work.prefill_device_wait_ns)},
+                   {"prefill_scheduler_yield_ns", ns(s.host_work.prefill_scheduler_yield_ns)},
                    {"control_host_ns", ns(s.host_work.control_host_ns)},
-                   {"control_device_wait_ns", ns(s.host_work.control_device_wait_ns)},
+                   {"control_scheduler_yield_ns", ns(s.host_work.control_scheduler_yield_ns)},
                    {"decode_host_ns", ns(s.host_work.decode_host_ns)},
-                   {"decode_device_wait_ns", ns(s.host_work.decode_device_wait_ns)},
+                   {"decode_scheduler_yield_ns", ns(s.host_work.decode_scheduler_yield_ns)},
                    {"stats_publication_ns", ns(s.host_work.stats_publication_ns)},
                    {"prefill_units", s.host_work.prefill_units},
                    {"control_units", s.host_work.control_units},
@@ -942,10 +920,7 @@ void HttpServer::attach(GenerationService& service) {
     if (service_ != nullptr) {
         throw std::logic_error("HTTP generation service is already attached");
     }
-    const ninfer::LoadSummary load = service.load_summary();
-    // memory_summary waits for the completed worker boundary, including warmup publication.
-    const ninfer::MemorySummary memory  = service.memory_summary();
-    const ninfer::RuntimeStats baseline = service.runtime_stats();
+    const ninfer::LoadSummary load = service.startup_report().load;
     if (!options_.model_id_override && load.model_name.empty())
         throw std::logic_error("loaded artifact model name must not be empty");
     served_model_names_.id = options_.model_id_override.value_or(load.model_name);
@@ -954,12 +929,13 @@ void HttpServer::attach(GenerationService& service) {
         // An alias equal to an artifact-derived id adds no name.
         if (alias != served_model_names_.id) { served_model_names_.aliases.push_back(alias); }
     }
-    service_                            = &service;
-    metrics_.configure(served_model_names_.id, service.engine_options(), memory, baseline);
-    loaded_unix_seconds_ = unix_time_now();
-    request_jsonl_.write_server_start(options_, service.engine_options(),
-                                      service.sampling_defaults(), served_model_names_.id, load,
-                                      memory);
+    service_ = &service;
+    const auto initial_snapshot = service.snapshot();
+    metrics_.configure(served_model_names_.id, service.engine_options(), service.description(),
+                       service.startup_report(), initial_snapshot);
+    request_jsonl_.write_server_start(
+        options_, service.engine_options(), service.sampling_defaults(), served_model_names_.id,
+        service.description(), service.startup_report(), initial_snapshot);
     if (ExpertRouteRecorder* recorder = service.expert_route_recorder()) {
         recorder->configure(request_jsonl_.server_instance_id(), served_model_names_.id,
                             options_.launch.engine.artifact_path.string());
