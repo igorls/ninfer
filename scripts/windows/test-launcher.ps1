@@ -17,20 +17,31 @@ function Run-Launcher([string[]]$Arguments, [int]$ExpectedExit) {
     Assert-That ($process.ExitCode -eq $ExpectedExit) "Unexpected exit $($process.ExitCode): $(Get-Content $out -Raw)"
     return Get-Content -LiteralPath $out -Raw
 }
-function Fixture([string]$Name, [string]$Model) {
+function Fixture([string]$Name, [string]$Model, [bool]$Mtp = $true) {
     $path = Join-Path $TestDir $Name
-    $directory = [Text.Encoding]::UTF8.GetBytes((@{identity=@{model_id=$Model}} | ConvertTo-Json -Compress))
-    $bytes = [byte[]]@(78,73,78,70,69,82,0,2) + [BitConverter]::GetBytes([uint64]$directory.Length) + $directory + [byte[]]::new(64)
+    $components = @{text=@{config=@{architectures=@('Qwen3_5ForCausalLM');model_type='qwen3_5_text'}}}
+    if ($Mtp) { $components.mtp=@{config=@{architectures=@('Qwen3_5MTP')}} }
+    $root=@{components=$components}
+    if ($Model) { $root.metadata=@{name=$Model} }
+    $directory = [Text.Encoding]::UTF8.GetBytes(($root | ConvertTo-Json -Depth 8 -Compress))
+    $bytes = [byte[]]@(78,73,78,70,69,82,0,3) + [BitConverter]::GetBytes([uint64]$directory.Length) + [byte[]]::new(16) + $directory
+    $payloadStart = [int]([Math]::Ceiling($bytes.Length / 4096.0) * 4096)
+    $bytes += [byte[]]::new($payloadStart - $bytes.Length + 64)
     [IO.File]::WriteAllBytes($path, $bytes)
     return $path
 }
 $probe = Run-Launcher @('--probe') 0 | ConvertFrom-Json
 Assert-That $probe.supported 'GPU probe failed.'
 $valid = Fixture 'modelo de teste-á.ninfer' 'qwen3.8-27b'
-$unsupported = Fixture 'unsupported.ninfer' 'unsupported-model'
+$legacy = Fixture 'legacy.ninfer' 'legacy-model'
+$legacyBytes = [IO.File]::ReadAllBytes($legacy)
+$legacyBytes[7]=2
+[IO.File]::WriteAllBytes($legacy,$legacyBytes)
+$truncated = Join-Path $TestDir 'truncated.ninfer'
+[IO.File]::WriteAllBytes($truncated,([byte[]]@(78,73,78,70,69,82,0,3) + [BitConverter]::GetBytes([uint64]4096) + [byte[]]::new(16)))
 $invalid = Join-Path $TestDir 'not-a-model.ninfer'
 [IO.File]::WriteAllText($invalid, 'not a model')
-foreach ($file in @($unsupported, $invalid)) {
+foreach ($file in @($legacy, $truncated, $invalid)) {
     $data = Join-Path $TestDir ([IO.Path]::GetFileNameWithoutExtension($file))
     $null = Run-Launcher @('--model', $file, '--no-start', '--data-dir', $data) 1
     Assert-That (!(Test-Path -LiteralPath (Join-Path $data 'supervisor.json'))) 'Rejected input created a configuration.'
@@ -45,11 +56,25 @@ Assert-That ($cfg.supervisor.host -eq '127.0.0.1') 'Dashboard must default to lo
 Assert-That ($cfg.engine.engine_port -eq 18110 -and $cfg.supervisor.port -eq 18099) 'Isolated ports were not preserved.'
 Assert-That ($cfg.active_model -eq 'qwen3.8-27b') 'Wrong model identity.'
 Assert-That ($cfg.models.Count -eq 1) 'Initial model is missing from the catalog.'
+Assert-That ($cfg.engine.args -contains '--lm-head-draft') 'MTP profile omitted its optimized proposal head.'
+Assert-That ($cfg.engine.args -notcontains '--gdn-state-dtype') 'Setup emitted a removed engine flag.'
+$reserveIndex=[Array]::IndexOf($cfg.engine.args,'--desktop-reserve-gib')
+Assert-That ($reserveIndex -ge 0 -and $cfg.engine.args[$reserveIndex+1] -eq '8') 'Setup must preserve the default desktop reserve.'
 Assert-That ($cfg.engine.executable -eq (Join-Path $BinDir 'ninfer-serve.exe')) 'Wrong installed engine path.'
 $before = (Get-FileHash -LiteralPath $configPath).Hash
 $null = Run-Launcher @('--model',$valid,'--no-start','--data-dir',$data) 1
 Assert-That ((Get-FileHash -LiteralPath $configPath).Hash -eq $before) 'Existing settings were overwritten.'
 $null = Run-Launcher @('--no-start','--data-dir',$data) 0
+$recipe = Fixture 'custom recipe.ninfer' 'custom-checkpoint-recipe' $false
+$recipeData = Join-Path $TestDir 'recipe-config'
+$null = Run-Launcher @('--model',$recipe,'--no-start','--data-dir',$recipeData,'--engine-port','18110','--dashboard-port','18099') 0
+$recipeConfig=Get-Content -LiteralPath (Join-Path $recipeData 'supervisor.json') -Raw | ConvertFrom-Json
+Assert-That ($recipeConfig.active_model -eq 'custom-checkpoint-recipe') 'Recipe metadata was not preserved.'
+Assert-That ($recipeConfig.engine.args -contains 'none' -and $recipeConfig.engine.args -notcontains '--draft-tokens') 'Non-MTP artifact requested speculative execution.'
+$unnamed = Fixture 'unnamed.ninfer' '' $false
+$null = Run-Launcher @('--model',$unnamed,'--no-start','--data-dir',(Join-Path $TestDir 'unnamed-config'),'--engine-port','18110','--dashboard-port','18099') 0
+$unnamedConfig=Get-Content -LiteralPath (Join-Path $TestDir 'unnamed-config/supervisor.json') -Raw | ConvertFrom-Json
+Assert-That ($unnamedConfig.active_model -eq 'unnamed') 'Optional name did not fall back to the filename.'
 $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
 $listener.Start()
 try {

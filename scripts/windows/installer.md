@@ -26,10 +26,19 @@ uses the same checks with `--model FILE --no-start`; `--data-dir DIR`,
 `--engine-port PORT` and `--dashboard-port PORT` allow isolated validation.
 `--probe` checks hardware without loading a model.
 
+Setup reads the v3 entry header and directory for the optional display name and
+MTP component. It does not maintain a checkpoint registry or validate model
+mathematics; the Engine validates and admits the complete artifact at load.
+Artifacts without MTP use ordinary decoding. The initial profile keeps the
+Engine's 8 GiB desktop reserve.
+
 Install, upgrade and uninstall checks must use a separate `/DIR` and `/NOICONS`
 on a development machine; do not launch the installed app against production
 configuration during these checks. Model and settings preservation, bundled
 runtime startup and actual inference on the receiving GPU are acceptance checks.
+Inno uses the same per-user uninstall registry entry for every installation
+directory. A separate `/DIR` does not isolate that entry: use a disposable user
+environment or save and restore the exact existing NInfer entry during testing.
 
 Build Vision against an LGPL shared FFmpeg (for example BtbN's `win64-lgpl-shared`
 builds), never a GPL build: NInfer only decodes media, and the LGPL decoders cover it.

@@ -12,6 +12,16 @@ Qualification and performance evidence remain specific to each device and route.
 
 ## Sync state and method
 
+November 4 release preparation also updates first-launch provisioning to the v3
+entry header and component metadata, removing the obsolete v2 checkpoint-ID
+registry and removed GDN-state CLI flag. The Engine retains artifact/architecture
+admission. Setup selects ordinary decoding without an MTP component and MTP K=3
+with the optimized head when present, with the default 8 GiB desktop reserve.
+The focused Windows fixture checks reproduce the v3 rejection on the old launcher
+and pass 30 checks on the replacement, including Unicode paths, recipes, optional
+names, malformed/legacy inputs, port conflicts and settings preservation. Installer
+and real-profile acceptance are recorded separately from these setup-only checks.
+
 | Item | Value |
 |---|---|
 | Fork line | `workstation` (named `port/upstream-v3` until September 28, 2026), based on upstream [`bace20dc`](https://github.com/Neroued/ninfer/commit/bace20dc70249eed6402b66d4852c6c3f9612905) (September 24, 2026) and merged with upstream `e31bc99b` in `e2a149f1` and `d44ab584` in `d29866c9` |
