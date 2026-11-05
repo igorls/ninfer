@@ -85,7 +85,7 @@ public:
     [[nodiscard]] std::wstring header_line(const EngineStatus& st) const;
     [[nodiscard]] std::wstring detail_line() const;
 
-    // The config pins --desktop-reserve-mib, which the menu cannot express, so
+    // The config pins a reserve finer than whole GiB, which the menu cannot express, so
     // every entry in the Reserve submenu would be a no-op. The menu greys it and
     // says so instead.
     [[nodiscard]] bool reserve_pinned_by_config() const;

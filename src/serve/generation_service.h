@@ -6,7 +6,7 @@
 #include "ninfer/engine.h"
 #include "serve/expert_route_recorder.h"
 #include "serve/request.h"
-#include "serve/serve_options.h"
+#include "product/config/options.h"
 
 #include <chrono>
 #include <cstddef>
@@ -143,9 +143,10 @@ struct PreparedRequest {
 
 class GenerationService {
 public:
-    explicit GenerationService(ServeOptions options, StartupObserver startup_observer = {});
+    explicit GenerationService(product::ServeOptions options,
+                               StartupObserver startup_observer = {});
 
-    [[nodiscard]] const ServeOptions& options() const noexcept { return options_; }
+    [[nodiscard]] const product::ServeOptions& options() const noexcept { return options_; }
 
     // Present when --expert-stats or --expert-trace is set.
     [[nodiscard]] ExpertRouteRecorder* expert_route_recorder() const noexcept {
@@ -153,7 +154,7 @@ public:
     }
 
     // Engine owns the once-normalized startup configuration. Serving diagnostics must use this
-    // value instead of reinterpreting optional defaults from ServeOptions.
+    // value instead of reinterpreting optional defaults from product::ServeOptions.
     [[nodiscard]] const ninfer::EngineOptions& engine_options() const { return engine_->options(); }
 
     // Raw artifact-tokenizer encoding, for validating single-token closed-set options.
@@ -201,6 +202,9 @@ public:
                                           ContextCacheHints context_cache = {}) const;
     [[nodiscard]] int count_prompt_tokens(const GenerationRequest& req,
                                           std::function<bool()> is_cancelled = {}) const;
+    // Frontend-only preparation: inspect template boundaries without submitting generation.
+    [[nodiscard]] ninfer::PromptSummary
+    describe_prompt(const GenerationRequest& req, std::function<bool()> is_cancelled = {}) const;
 
     // Consumes prepared.generation. A PreparedRequest is single-use.
     GenerationOutcome run(PreparedRequest& prepared, const StreamSink* sink,
@@ -209,6 +213,10 @@ public:
     void warmup();
 
 private:
+    [[nodiscard]] ninfer::PromptInput acquire_prompt_input(
+        const GenerationRequest& req, std::chrono::steady_clock::time_point deadline,
+        const std::function<bool()>& is_cancelled) const;
+
     enum class CacheParticipation : std::uint8_t {
         Disabled,
         ReadWrite,
@@ -227,7 +235,7 @@ private:
     [[nodiscard]] std::shared_ptr<RequestLifetime>
     acquire_request_lifetime(DeadlinePolicy deadline_policy) const;
 
-    ServeOptions options_;
+    product::ServeOptions options_;
     std::shared_ptr<ExpertRouteRecorder> expert_route_recorder_;
     std::unique_ptr<ninfer::Engine> engine_;
     std::shared_ptr<RequestCapacity> request_capacity_;

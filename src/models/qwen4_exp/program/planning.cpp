@@ -1,5 +1,6 @@
 #include "models/qwen4_exp/program/planning.h"
 #include "core/platform.h"
+#include "models/common/context/storage.h"
 #include "ninfer/ops/sampling.h"
 
 #include <algorithm>
@@ -11,8 +12,7 @@ PersistentLayout persistent(const execution::ModelProfile& p, const EngineOption
                             std::uint32_t pages) {
     LayoutBuilder b;
     PersistentLayout out;
-    const auto slots =
-        std::uint64_t(o.max_concurrency) + o.context_cache.device_state_slots.value();
+    const auto slots = std::uint64_t(o.max_concurrency) + o.context_cache.extra_state_slots.value();
     if (slots > INT32_MAX) throw std::invalid_argument("StateImage slots exceed int32");
     out.state = plan_state_image(b, p.config, slots);
     out.main  = plan_qsa_cache(b, p.config.text.qsa, p.config.text.qsa_layers, o.max_context, pages,
@@ -23,6 +23,10 @@ PersistentLayout persistent(const execution::ModelProfile& p, const EngineOption
                            pages + o.max_concurrency * ((o.speculative.draft_tokens + 63) / 64),
                            o.max_concurrency, o.kv_cache);
     out.buffers = plan_buffers(b, p.config, o, o.prefill_chunk, p.public_tokens);
+    if (o.purpose == EnginePurpose::Generation)
+        out.readout = qwen::plan_distribution_readout(b,
+            static_cast<int>(p.config.mtp ? o.speculative.draft_tokens + 1 : 1),
+            static_cast<int>(o.max_concurrency), dimension(p.config.text.hidden));
     out.bytes   = b.finish(256);
     return out;
 }
@@ -71,13 +75,12 @@ EngineOptions options(const execution::ModelProfile& profile, const EngineOption
         (o.max_concurrency != 1 || o.enable_vision ||
          o.speculative.backend != SpeculativeBackend::None))
         throw std::invalid_argument("scoring requires normalized single-lane text options");
-    if constexpr (NINFER_SHARED_PHYSICAL_MEMORY != 0) o.context_cache.host_capacity_bytes = 0;
     if (!o.prefill_chunk) o.prefill_chunk = 4096;
     if (o.prefill_chunk % 128)
         throw std::invalid_argument("prefill chunk must be a multiple of 128");
     o.prefill_chunk = std::min(o.prefill_chunk, o.max_context);
-    o.context_cache.device_state_slots =
-        o.context_cache.device_state_slots.value_or(o.max_concurrency);
+    o.context_cache.extra_state_slots =
+        o.context_cache.extra_state_slots.value_or(o.max_concurrency);
     return o;
 }
 
@@ -96,8 +99,8 @@ ExecutionPlan physical_plan(std::shared_ptr<const execution::ModelProfile> profi
         std::max(o.prefill_chunk, o.max_concurrency * (o.speculative.draft_tokens + 1));
     out.ple_upload         = ple::UploadSlots::memory(out.ple.max_positions, 2);
     out.ple_prepare_bytes  = ple::disk::PrepareService::memory_bytes(table, out.ple, 2);
-    out.host_context_bytes = o.context_cache.host_capacity_bytes.value_or(
-        8ULL * 1024 * 1024 * 1024 + 8 * out.persistent.state.images.image_stride);
+    out.host_context_bytes = context::host_context_capacity(
+        o.context_cache.host_capacity_bytes, out.persistent.state.images.image_stride);
     // Keep all per-call metadata in the pinned ingress as well as input IDs/positions.
     out.pinned_io_bytes = out.persistent.buffers.batch.accepted_columns.region.offset +
                           out.persistent.buffers.batch.accepted_columns.region.bytes -
@@ -133,10 +136,40 @@ std::size_t ExecutionPlan::device_bytes() const {
            (moe ? moe->description().device_bytes : 0);
 }
 
+std::size_t ExecutionPlan::pinned_context_bytes() const {
+    const auto mapping_elements = [](const QsaCacheLayout& pool) {
+        return std::size_t(pool.tables.spec.logical_page_capacity) * pool.tables.spec.table_rows;
+    };
+    const auto elements = mapping_elements(persistent.main) +
+                          (persistent.mtp ? mapping_elements(*persistent.mtp) : 0);
+    return 2 * elements * sizeof(std::int32_t);
+}
+
+std::size_t ExecutionPlan::pinned_aux_bytes() const {
+    const auto targets = shape.purpose == EnginePurpose::CausalScoring
+        ? std::min(shape.prefill_chunk, 1024U) * (1 + kMaximumCausalReferenceTokens) : 1024U;
+    return std::size_t(std::max(targets, persistent.buffers.batch.max_positions)) * sizeof(TokenId);
+}
+
+std::size_t ExecutionPlan::pinned_score_hidden_bytes() const {
+    return shape.purpose == EnginePurpose::CausalScoring
+        ? std::size_t(std::min(shape.prefill_chunk, 1024U)) * profile->config.text.hidden * 2 : 0;
+}
+
+std::size_t ExecutionPlan::pinned_context_counts_bytes() const {
+    return persistent.buffers.token_counts
+               ? (std::size_t(profile->public_tokens) + (profile->public_tokens + 31) / 32) *
+                     shape.max_concurrency * sizeof(std::int32_t)
+               : 0;
+}
+
 std::size_t ExecutionPlan::device_reservation_bytes() const {
     const auto host = ple_prepare_bytes + ple_upload.ordinary_host_bytes +
                       ple_upload.pinned_host_bytes + pinned_io_bytes + pinned_output_bytes +
-                      pinned_sampling_bytes + pinned_mtp_bytes;
+                      pinned_sampling_bytes + pinned_mtp_bytes + pinned_context_bytes() +
+                      pinned_aux_bytes() + pinned_context_counts_bytes() + pinned_trace_bytes +
+                      pinned_score_hidden_bytes() +
+                      (persistent.readout ? persistent.readout->host_bytes : 0);
     return device_bytes() + ((NINFER_SHARED_PHYSICAL_MEMORY != 0) ? host : 0);
 }
 

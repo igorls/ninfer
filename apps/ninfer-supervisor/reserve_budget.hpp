@@ -1,5 +1,6 @@
 #pragma once
 #include <nlohmann/json.hpp>
+#include "product/config/options.h"
 #include <algorithm>
 #include <cmath>
 #include <string>
@@ -7,20 +8,14 @@
 
 namespace ninfer::supervisor {
 inline std::vector<std::string> without_reserve_args(const std::vector<std::string>& args) {
-    std::vector<std::string> out;
-    for (std::size_t i = 0; i < args.size(); ++i) {
-        if (args[i] == "--desktop-reserve-gib" || args[i] == "--desktop-reserve-mib") { ++i; continue; }
-        out.push_back(args[i]);
-    }
-    return out;
+    return product::remove_serve_argument(args, "engine.desktop_reserve");
 }
 
 // Preserve the loaded model and its capacity policy. A minimum runtime alone
 // would silently shrink an explicitly configured KV pool; only auto may shrink. The
 // startup budget already excludes foreign allocations and the chosen reserve;
 // add that reserve back, then subtract the exact runtime and required slack.
-inline nlohmann::json model_reserve_budget(const nlohmann::json& admin,
-                                          const std::vector<std::string>& args) {
+inline nlohmann::json model_reserve_budget(const nlohmann::json& admin) {
     nlohmann::json out{{"ok", false}, {"reason", "Start the engine and wait for its memory plan before adjusting the reserve."}};
     try {
         const auto& plan = admin.at("plan");
@@ -33,13 +28,8 @@ inline nlohmann::json model_reserve_budget(const nlohmann::json& admin,
         const double graphs = plan.at("cuda_graph_rebuild_estimate_bytes").get<double>();
         // Match serve_options: explicit capacity uses zero sizing slack. Auto
         // uses max(1 GiB automatic headroom, the requested/default slack floor).
-        bool automatic = false;
-        double slack = -1;
-        for (std::size_t i = 0; i + 1 < args.size(); ++i) {
-            if (args[i] == "--kv-capacity") automatic = args[i + 1] == "auto";
-            if (args[i] == "--kv-slack-floor-mib") slack = std::stod(args[i + 1]) * 1048576.0;
-        }
-        slack = automatic ? std::max(1073741824.0, slack) : 0;
+        const bool automatic = plan.at("kv_capacity_automatic").get<bool>();
+        const double slack = automatic ? plan.at("kv_slack_floor_bytes").get<double>() : 0;
         const double required_runtime = automatic ? plan.at("minimum_runtime_reservation_bytes").get<double>() : runtime;
         if (runtime <= 0 || weights <= 0 || available < 0 || configured < 0 || free < 0 || graphs < 0) return out;
         if (required_runtime <= 0 || required_runtime > runtime) return out;

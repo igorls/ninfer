@@ -295,7 +295,7 @@ SystemOneJson parse_systemone_body(std::string_view text) {
 }
 
 SystemOneRequest parse_systemone_request(const SystemOneJson& body,
-                                         const SystemOnePolicy& defaults) {
+                                         const ninfer::product::SystemOnePolicy& defaults) {
     SchemaErrors errors;
     const Json root = Json::array({"body"});
     if (!body.is_object()) {
@@ -388,9 +388,9 @@ SystemOneRequest parse_systemone_request(const SystemOneJson& body,
             if (key == "readout") {
                 const std::string text = value.is_string() ? value.get<std::string>() : "";
                 if (text == "single") {
-                    request.policy.readout = SystemOnePolicy::Readout::Single;
+                    request.policy.readout = ninfer::product::SystemOnePolicy::Readout::Single;
                 } else if (text == "averaged") {
-                    request.policy.readout = SystemOnePolicy::Readout::Averaged;
+                    request.policy.readout = ninfer::product::SystemOnePolicy::Readout::Averaged;
                 } else {
                     systemone_usage_error("policy.readout must be \"single\" or \"averaged\"");
                 }

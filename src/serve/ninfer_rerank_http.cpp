@@ -12,7 +12,7 @@ namespace {
 
 using Json = nlohmann::ordered_json;
 
-RerankSettings rerank_settings(const ServeOptions& options, const ServedModelNames& served) {
+RerankSettings rerank_settings(const product::ServeOptions& options, const ServedModelNames& served) {
     return RerankSettings{
         .served              = served,
         .advertised_model_id = options.rerank_model_id,

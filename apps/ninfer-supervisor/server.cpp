@@ -51,7 +51,10 @@ namespace {
 const char* param_kind_name(ParamKind kind) noexcept {
     switch (kind) {
     case ParamKind::Int: return "int";
-    case ParamKind::Text: return "text";
+    case ParamKind::Text:
+    case ParamKind::Capacity:
+    case ParamKind::Duration:
+    case ParamKind::IntOrNone: return "text";
     case ParamKind::Enum: return "enum";
     case ParamKind::Flag: return "flag";
     case ParamKind::IntOrAuto: return "int_or_auto";
@@ -704,7 +707,7 @@ void DashboardServer::run() {
         if (!body.is_object() || !body.contains("gib") || !body["gib"].is_number_integer() || body["gib"] < 0 || body["gib"] > 64) {
             error(400, "Choose engine default (0), or a whole number from 1 to 64 GiB."); return;
         }
-        if (desktop_reserve_pinned(child_.config().engine.args)) { error(409, "Reserve is pinned by --desktop-reserve-mib in the launch configuration."); return; }
+        if (desktop_reserve_pinned(child_.config().engine.args)) { error(409, "Reserve is pinned by a quantity finer than whole GiB in the launch configuration."); return; }
         const auto budget = child_.reserve_budget();
         if (!budget.value("ok", false)) { error(409, "Wait for a ready engine with the saved model settings before changing the reserve."); return; }
         const int gib = body["gib"].get<int>();

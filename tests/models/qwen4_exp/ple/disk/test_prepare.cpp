@@ -327,9 +327,12 @@ void gpu(const disk::Table& source, const Input& input) {
     {
         StreamGate transfer(context.transfer_stream()), consumer(context.stream());
         uploads.upload(service.embedding(ticket), context.transfer_view());
-        const auto e = uploads.embedding(ticket, context.execution_view());
+        const auto binding = uploads.acquire(ticket, context.execution_view());
+        binding.ready.wait(context.stream());
+        const auto e = binding.values;
         copy_bytes_async(copied.span(), {e.data, e.bytes(), e.device}, context.execution_view());
-        uploads.record_consumed(ticket, context.execution_view());
+        binding.consumed.record(context.stream());
+        uploads.consumer_submitted(ticket, context.execution_view());
         service.cancel(ticket);
         until([&] {
             const auto s = service.poll(ticket);
@@ -355,14 +358,24 @@ void gpu(const disk::Table& source, const Input& input) {
         try {
             fail_event_record = !consumer_failure;
             uploads.upload(service.embedding(failed), context.transfer_view());
-            const auto e = uploads.embedding(failed, context.execution_view());
+            const auto binding = uploads.acquire(failed, context.execution_view());
+            binding.ready.wait(context.stream());
+            const auto e = binding.values;
             copy_bytes_async(copied.span(), {e.data, e.bytes(), e.device},
                              context.execution_view());
             fail_event_record = true;
-            uploads.record_consumed(failed, context.execution_view());
+            binding.consumed.record(context.stream());
+            uploads.consumer_submitted(failed, context.execution_view());
         } catch (const std::runtime_error&) {
             rejected = true;
             service.cancel(failed);
+            if (consumer_failure) {
+                // The consumer owns its completion event. After its injected record failure,
+                // submit a retirement fence before releasing the acquired slot, as on abort.
+                const auto binding = uploads.binding(failed.slot, input.tokens, input.batch);
+                binding.consumed.record(context.stream());
+                uploads.consumer_submitted(failed, context.execution_view());
+            }
         }
         require(rejected && !fail_event_record, "CUDA event failure was not reported");
         until([&] { return try_release(failed); });
@@ -381,10 +394,13 @@ void gpu(const disk::Table& source, const Input& input) {
     graph.instantiate(definition);
     ready(service, again);
     uploads.upload(service.embedding(again), context.transfer_view());
-    const auto e = uploads.embedding(again, context.execution_view());
+    const auto binding = uploads.acquire(again, context.execution_view());
+    binding.ready.wait(context.stream());
+    const auto e = binding.values;
     require(e.data == fixed.data, "Device E changed its captured address");
     graph.launch(context.stream());
-    uploads.record_consumed(again, context.execution_view());
+    binding.consumed.record(context.stream());
+    uploads.consumer_submitted(again, context.execution_view());
     until([&] { return try_release(again); });
     copied.copy_to_host(actual.data(), input.bytes());
     emit(actual.data(), input.bytes());
@@ -424,7 +440,8 @@ int main(int argc, char** argv) {
             return disk::Table(
                 reader, load_lookup_parameters(
                             reader, reader.directory().bindings.at("text/layers/1/ple/table"),
-                            reader.directory().component("text").resources.at("ple_hash_controls"),
+                            reader.read_object(reader.directory().component("text").resources.at(
+                                "ple_hash_controls")),
                             {3, 8}));
         }();
         if (mode == "--failure")

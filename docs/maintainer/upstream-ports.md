@@ -143,6 +143,208 @@ transport checks pass; the unaffected dense and Op results above are reused.
 No tolerance or acceptance criterion was relaxed. Later shared workspace,
 thinking-accounting and listener fixes are separate follow-up ports.
 
+### Next candidate: native sessions through `71cdd615`
+
+The isolated `sync/upstream-71cdd615` worktree is evaluating the next runtime
+boundary, using `e1ab9af3` as its baseline. Upstream's LocalExecutor still executes
+one rank/device on the Engine worker thread without a network or collective
+communicator. This candidate must preserve the fork's platforms, serving and
+readout extensions, System One, numerical policies and selected Flash graph
+organization while adapting Session/ContextDirectory and physical Program ownership.
+Source integration remains uncommitted pending disposition of the original
+proposal-count gate and measured costs; the functional evidence below does not advance the accepted
+merge-base, release source or physical RTX 5090 acceptance. Later distributed
+execution and model activation remain separate product decisions.
+
+The adaptation carries generated/prompt logprobs, causal reference/argmax/hidden-row
+readouts, repetition and prompt-membership state across the native Work, frame,
+result and Session boundaries. Readout staging is planned and owned by each rank;
+logical Sessions retain durable observations across pause/replay. Flash keeps the
+selected prefix/PLE/suffix graphs, separate head/sampling, and per-step draft/trace
+handoffs. PLE upload readiness and consumption events stay outside captured bodies.
+The Engine's physical-capacity fence now waits for native execution retirement as
+well as logical owners, gates new admissions and preserves held request deadlines.
+
+Focused Windows object compilation initially passes 60 dense/common and 48
+Flash/runtime translation units. Full products, tests and benchmarks subsequently
+build on Windows MSVC 19.51/CUDA 13.3 and G4 Linux/CUDA 13.3.73. Windows passes 44
+selected contract checks, including the distribution-readout test against
+independently calculated represented-input log probabilities and exact BF16 rows;
+G4 passes 43 selected checks, including its ELF CUDA-failure injection. Python 3.11
+passes 22 serving-corpus checks on each platform.
+The first full Windows build exposed missing CPU-executor test links, missing
+standard-library includes, Linux-only benchmark/loading resource calls, nonportable
+constant evaluation/compiler identification and an offload graph friendship lookup.
+Those source issues are repaired. Linux shared-library linking additionally
+exposes missing direct CPU-executor dependencies in MoE test consumers; their
+explicit links repair the affected targets on both platforms.
+
+Native Windows PRO 6000 passes dense MTP transactions, both ordinary/MTP
+physical-capacity fences, FP8 attention-prefix B2/B4, causal target/reference/
+argmax/hidden-row readouts, reasoning-feature semantics and 96 structured JSON
+requests across ordinary/MTP and eager/graph routes. G4 passes the same dense
+routes plus ordinary/MTP snapshot, replay and cancellation with request readouts.
+The scoring fixture reports a 25.7344 maximum hidden-row difference between its
+1,537-token and 1,000-token windows on both the accepted Windows baseline and
+this adaptation. Its deterministic repeated-window, final-row, reference/argmax
+and feature checks pass; this does not establish exact prefix invariance across
+different prompt lengths.
+
+The first G4 Flash suite rejects all 26 cases before inference: the incoming
+ModelDefinition forces NF4 for PLE, excluding the fork's supported U4Z8 artifact.
+The definition now binds logical extent and leaves representation admission to the
+existing PLE loader, which checks complete NF4 or U4Z8 shard geometry. The focused
+binding check and both platform builds pass after this repair.
+A subsequent ordinary graph/eager token comparison fails because the adaptation
+keeps captured QSA context tiers but drops the accepted eager launch-envelope
+policy. Restoring that shared policy for sequence, step/verify and eager draft
+calls repairs the focused parity check; the accepted baseline passes the same
+check on the same G4. The updated Windows and Linux builds pass. The complete
+26-case G4 resident suite subsequently passes text/Vision, ordinary/MTP,
+eager/graphs, prompt/generated/causal readouts, long-prefix reuse and route traces.
+All 3,599 causal scores match exactly across its 1,024/1,536 versus 4,096-token
+chunks; causal versus prompt readouts differ by at most 9.53674e-7. Physical-capacity
+fences pass for ordinary/MTP. Bounded Host execution passes at 32 and 28 GiB,
+including ordinary/MTP eager/graph behavior and Host trace cases; its registered
+expert backing is 67,948,068,864 bytes (63.28 GiB) plus other Host/OS resources.
+This is functional capacity evidence on G4, not Host-offload throughput or
+qualification on a 64-GB-RAM RTX 5090 desktop.
+
+The Flash score-state fixture initially used the wrong artifact environment
+variable and skipped; the correct invocation then exposed an invalid assertion
+that QSA's host visibility bound must equal the 65-token live frontier. The Op
+contract defines an upper bound, which the accepted context envelope can exceed.
+The corrected fixture retains exact positions, valid counts, state-image reset
+and stale-binding guards, checks the bound contains the live frontier within
+capacity, and adds exact repeated-fresh score checks. It passes without changing
+production mathematics or the Op's numerical criteria.
+
+Windows DFlash2 passes native transactions, graph K7/B8 with Vision, eager K7/B1,
+snapshot/replay/cancellation with readouts, and graph tools at C2. An initial tools
+invocation supplied a string where concurrency is numeric; the corrected command
+passes. Native Windows Flash real-model execution and physical RTX 5090 acceptance
+remain unverified for this candidate.
+
+The 24 GiB/C2/16K-context FP8 MTP3 initial profiles pass on G4 for both dense and
+Flash, including live token/text closed-set scoring and repeated shared-prefix
+requests. That probe catches a pre-existing `/v1/score` bug on both this candidate
+and accepted `e1ab9af3`: each long text option scores only its final period. Counting
+a separately rendered generation prompt does not locate the content of the actual
+assistant continuation. The frontend now carries its proven supplied-content byte
+boundary through media expansion and exact tokenization into
+`PromptSummary::continuation_frontier`; serving inspects each actual continued prompt
+without submitting inference. A missing exact boundary is an explicit candidate
+error. A first prototype using the reasoning frontier also included inserted
+thinking controls and was rejected by the whole-candidate byte oracle. The final
+HTTP check passes short/multi-token/UTF-8 options, complete bytes, positions,
+log-probability sums, normalization and repeated requests on both G4 models. The
+frontend's text/media and inexact-boundary tests also pass. The final Windows full
+build, five refreshed frontend/schema/HTTP checks and real-model HTTP score probe
+pass too.
+
+The matched matrix initially stops at dense C4/K3/P512: baseline versus candidate totals are
+357/354 rounds, 1,050/1,041 drafted and 408/411 accepted tokens. The difference
+repeats in row four in all three repetitions; P2048 and the other rows match.
+A focused single-repetition probe reproduces it and observes identical generated
+token IDs, so this does not establish a target-output regression or an accepted
+performance gain. Collection then completes the original 48 processes/720 request
+records without waiving the failed count criterion; the other 15 profiles match
+every row's counts and accepted-position histogram. The complete wave/phase-rate
+distributions, CPU/startup/RSS/layout costs, rejected diagnostic probes and profiling
+limits are in the [initial native-session comparison](../performance.md#initial-native-session-comparison-2026-11-05).
+The count difference and precise arithmetic attribution remain under investigation.
+This candidate is not accepted for merge or release.
+
+The incoming consolidated KV append target is adapted to retain the fork's additional
+D256 prefix oracle cases: all five cache formats, both head counts, ragged eight-row
+graph replay, 129-column eager prefixes, exact codec bytes and untouched guards.
+The retained BF16 batched kernel uses 256 threads. Its new metadata interface
+passes the retained independent codec/state cases on Windows and Linux PRO 6000.
+
+### Staged follow-up: startup configuration through `4126ecf4`
+
+A separate `sync/upstream-config-4126ecf4` worktree stages `0a239945`, `f8790a78`
+and `4126ecf4` on the NativeSession review snapshot. These are source-integration
+candidates, not an advance of the accepted merge-base or a hardware/release acceptance.
+The NativeSession original exact-count comparison gate and its adverse results above remain open.
+
+`qualification/native-config-4126` packages the NativeSession and startup-config
+review source for independent builds and physical RTX 5090 qualification. This is
+a source snapshot, not the upstream merge or acceptance; the accepted fork line
+and reviewed upstream merge-base remain at `e1ab9af3` / `1408277a`.
+
+The candidate carries unified TOML/argv/default/model layering and vendored MIT
+toml++ 3.4.0. The fork's model aliases, secret-file authentication, desktop reserve,
+automatic sizing floor and concurrency clamp, expert observation, System One and
+rerank settings join the same schema and source-reporting path. CLI context defaults
+move from 2048 to 8192 and omitted KV follows the final context. The existing serve
+Host default, 8 GiB plus eight native StateImages, now uses one shared helper on
+either supported GPU. Explicit
+zero/false/model/default values retain their documented distinctions.
+
+The old product parsers and superseded flag names are removed. Supervisor child
+arguments, examples, serving benchmarks and active references migrate with them;
+the independent `ninfer_bench` command contract is unchanged. The Supervisor keeps
+its JSON process/model catalog, uses shared scalar/parser logic for launch checks,
+and derives reserve choices from resolved Engine telemetry. A zero tray reserve
+is emitted explicitly. Exact decimal quantities use portable uint64 carry arithmetic
+instead of upstream's `unsigned __int128`; config/key files open with native
+filesystem paths on Windows. The previously unconsumed automatic sizing floor now
+participates in the common startup planning cushion; default planning is unchanged,
+and custom floor resource effects require their own qualification.
+
+Complete Windows MSVC 19.51/CUDA 13.3 and Linux G4 CUDA 13.3 builds pass, as do
+15 affected Windows CTests and 14 Linux CTests across the selected and follow-up
+runs. Initial caller migration failures included a path/string mismatch, old Flash
+fixture field names, and overbroad option-member substitutions; they are corrected.
+A build started during editing also linked a stale library before the new planning
+helper existed; the subsequent complete build passes. The initial Supervisor fixture
+aborted because its old partial MTP argv did not specify K; it now represents a
+valid C4/MTP3 startup. Mixed Windows separators in a diagnostic fixture and six
+serve-corpus cases with omitted/default proposal-head flags are corrected.
+
+All 22 Python 3.11 serve-corpus and 49 affected TTFT campaign/measurement tests pass
+on Windows. The broader 87-case TTFT run initially had six failures: one UTF-8
+fixture decoder assumption is fixed, while five unchanged HTTP-cancellation timeouts
+also reproduce on accepted `e1ab9af3`. A trace shows a Windows socket read remaining
+blocked after shutdown. Those five benchmark-transport cases remain unqualified on
+Windows; this configuration unit does not change that transport. Linux passes all
+109 corpus/TTFT cases. No all-green broad Windows TTFT run is claimed.
+
+Real startup/HTTP probes pass two dense profiles on Windows and G4, and resident
+and 32-GiB bounded-Host Flash profiles on G4. They cover relative TOML/key/log paths,
+file/argv/zero/false/list precedence, authentication, aliases, defaults, generation,
+configured rerank and complete UTF-8 candidate scoring. The default C1/8192 profile
+resolves Host context to 9,821,569,024 bytes for dense and 9,515,212,800 for Flash;
+its requested 2-GiB automatic sizing cushion is reported by the live Engine. The
+layered C2/16K MTP3 profile selects explicit 32K FP8 KV, graph execution and zero Host
+cache; Flash additionally checks bounded expert trace output.
+
+Native Windows resident Flash additionally passes all 26 public Engine cases on the
+RTX PRO 6000 Workstation Edition (driver 621.14, MSVC 19.51/CUDA 13.3), using the
+canonical entry of `igorls/Qwen3.8-Flash-Next-mixed-NInfer` at `ef61b3c856f91e58a58e41a5a6269b6c8648d266`.
+Each loaded Engine checks zero Host expert weights; text-only ordinary device weights occupy
+75,172,951,040 bytes and MTP weights 76,769,669,632 bytes. Coverage includes eager/graph
+and batch parity, context recovery/reuse, traces, structured output/logprobs, causal
+scoring/hidden readouts, Vision, MTP K1/3/5, long FP8 and concurrent reuse. Causal-score
+versus prompt readout differs by at most 9.53674e-7 nat; prefix and tested prefill-chunk
+comparisons are exact. The initial route assertion incorrectly required the optional
+offload summary on resident execution; it was corrected to the existing summary
+contract before the full rerun. Windows Host experts remain unqualified for available
+RAM, and physical final-source RTX 5090 acceptance remains pending.
+
+The standalone Windows launcher also migrates reserve and optimized-head arguments;
+36 existing/extended checks pass, including real parser admission for dense MTP,
+Flash MTP and non-MTP profiles without loading their metadata-only fixtures. Initial
+PowerShell 5.1 test failures exposed implicit JSON decoding and an inherited module
+path; explicit UTF-8 reads and the normal Windows module environment resolve them.
+Installer JSON reads now use explicit UTF-8, and its license list includes toml++.
+The dashboard reads the canonical output-budget flag and keeps unreported TOML
+values unknown. Supervisor rebuild/tests and dashboard JavaScript syntax are checked;
+browser interaction and a new full installer install/upgrade/uninstall are not claimed.
+No throughput or resource improvement is claimed for this unit.
+Spark, GLM5Next and distributed execution activation remain deferred.
+
 ### Shared fixes ported ahead of the remaining range
 
 These adaptations do not advance the reviewed merge-base beyond `1408277a` or

@@ -2,7 +2,13 @@
 
 #include "core/device.h"
 
+namespace ninfer {
+struct EngineOptions;
+}
+
 namespace ninfer::runtime {
+
+[[nodiscard]] std::size_t startup_planning_headroom(const EngineOptions& options) noexcept;
 
 // Startup has one Device owner. Snapshots are taken with its transfers and work settled.
 // Re-read after destroying a candidate: retained driver storage is already charged.

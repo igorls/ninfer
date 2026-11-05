@@ -110,6 +110,16 @@ int main() {
     failures +=
         check(auto_prod.primary_page_groups >= 384,
               "automatic production sizing resolved fewer than minimum required sequence groups");
+    ninfer::EngineOptions startup_options;
+    startup_options.min_slack_floor_bytes = 4 * kOneGib;
+    failures += check(ninfer::runtime::startup_planning_headroom(startup_options) == kOneGib,
+                      "automatic sizing floor affected an explicit pool");
+    startup_options.kv_capacity = ninfer::KvCapacityPolicy::automatic();
+    failures += check(ninfer::runtime::startup_planning_headroom(startup_options) == 4 * kOneGib,
+                      "automatic sizing ignored the requested memory floor");
+    startup_options.kv_capacity = ninfer::KvCapacityPolicy::automatic(8 * kOneGib);
+    failures += check(ninfer::runtime::startup_planning_headroom(startup_options) == 8 * kOneGib,
+                      "automatic sizing floor replaced a larger policy cushion");
     // The probe left 200 bytes in the driver; the new free snapshot already includes it.
     const ninfer::runtime::StartupMemoryBudget budget({10000, 12000}, 8000, 500, 0);
     failures += check(budget.available({7800, 12000}) == 5300,

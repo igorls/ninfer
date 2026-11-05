@@ -37,9 +37,8 @@ add_library(ninfer_core ${NINFER_LIBRARY_TYPE}
   ${ninfer_io_sources}
   gdn_replay_records.cpp
   cyclic_kv_cache.cpp
-  host_context_arena.cpp
-  host_kv_arena.cpp
   paged_kv_cache.cpp
+  paged_kv_geometry.cpp
   linear_attention_state.cpp
   state_image.cpp
   layout.cpp

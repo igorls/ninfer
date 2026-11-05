@@ -1,0 +1,114 @@
+#include "models/qwen3_5/session/internal.h"
+
+#include <algorithm>
+#include <stdexcept>
+
+namespace ninfer::models::qwen3_5::detail {
+
+std::optional<runtime::ExecutionTicket> SessionImpl::start_score(qwen::PreparedPromptData&& prompt,
+                                                                 std::uint32_t first_target, const CausalScoreReadout& readout) {
+    if (!causal_scoring) throw std::logic_error("Session is not configured for causal scoring");
+    if (scoring || execution || has_context_operation()) return {};
+    if (prompt.token_ids.size() < 2 || prompt.token_ids.size() > capacity || !first_target ||
+        first_target >= prompt.token_ids.size())
+        throw std::invalid_argument("causal scoring window or target is invalid");
+    if (prompt.has_media()) throw std::invalid_argument("causal scoring accepts text tokens only");
+    const auto count = prompt.token_ids.size() - first_target;
+    if (readout.reference_count > kMaximumCausalReferenceTokens ||
+        readout.reference_tokens.size() != count * readout.reference_count)
+        throw std::invalid_argument("causal reference readout has an invalid shape");
+    for (const auto id : readout.reference_tokens)
+        if (id < 0 || static_cast<std::uint32_t>(id) >= plan.profile->public_tokens)
+            throw std::invalid_argument("causal reference token is outside the public vocabulary");
+    runtime::ResolvedExecutionOptions options;
+    options.allow_prefix_reuse = false;
+    auto base                  = plan_request(std::move(prompt), options);
+    const auto source          = inspect_source(base, {});
+    if (!source) throw std::logic_error("scoring has no root binding");
+    scoring.emplace(Scoring{.base = std::move(base), .first_target = first_target, .readout = readout});
+    try {
+        auto& output = scoring->scores;
+        output.target_logprobs.reserve(count);
+        output.reference_logprobs.reserve(count * readout.reference_count);
+        if (readout.reference_count) {
+            output.argmax_tokens.reserve(count);
+            output.argmax_logprobs.reserve(count);
+        }
+        if (readout.capture_hidden_rows) {
+            output.hidden_size = plan.profile->config.text.hidden_size;
+            output.hidden_rows.reserve(count * output.hidden_size);
+        }
+        const auto binding = start_binding(scoring->base, {0}, *source);
+        if (!binding) {
+            scoring.reset();
+            return {};
+        }
+        if (!context_operation_ || !context_operation_->ticket)
+            throw std::logic_error("scoring context was not submitted");
+        scoring->public_ticket = *context_operation_->ticket;
+        return scoring->public_ticket;
+    } catch (...) {
+        if (context_operation_ && context_operation_->ticket)
+            executor().fail("scoring setup failed after context submission");
+        else {
+            abort_context();
+            scoring.reset();
+        }
+        throw;
+    }
+}
+
+void SessionImpl::advance_score() {
+    if (!scoring || execution) throw std::logic_error("scoring continuation has no free frame");
+    const auto handle  = scoring->sequence;
+    auto& state        = sequences[lane(handle)];
+    auto& request      = requests[state.lane];
+    const auto& prompt = *scoring->base.impl_->prompt;
+    const auto limit   = static_cast<std::uint32_t>(prompt.token_ids.size()) - 1;
+    if (scoring->cursor == limit) {
+        auto done = std::move(*scoring);
+        scoring.reset();
+        clear_lane(state, request);
+        after_releases.emplace(SessionEvent{
+            done.public_ticket, {}, ScoreComplete{std::move(done.scores), done.timing}});
+        submit_releases();
+        return;
+    }
+    request.prefill->cursor = scoring->cursor;
+    const std::array unit{ExecutionUnit{handle, ExecutionUnitKind::Prefill, 0}};
+    if (!reserve_units(unit)) throw std::logic_error("scoring lost its resident context capacity");
+    const auto end   = std::min(limit, scoring->cursor + prefill_chunk);
+    auto reservation = executor().try_reserve(runtime::FrameKind::Compute);
+    if (!reservation) throw std::logic_error("scoring frame did not retire");
+    try {
+        Execution pending{.kind = OperationKind::Score};
+        pending.members     = {handle};
+        pending.bases       = {state.continuation};
+        pending.columns     = {end - scoring->cursor};
+        pending.preparation = std::make_unique<context::ContextTransaction>(directory);
+        ensure_sequence_kv_mapped(state, end, 0, *pending.preparation);
+        ScoreWork score;
+        score.row        = execution_row(state);
+        score.input      = input_window(state, scoring->cursor, end);
+        const auto first = std::max(scoring->first_target, scoring->cursor + 1);
+        if (first <= end) {
+            score.first_column = first - scoring->cursor - 1;
+            score.targets.assign(prompt.token_ids.begin() + first,
+                                 prompt.token_ids.begin() + end + 1);
+        }
+        score.readout.reference_count = scoring->readout.reference_count;
+        score.readout.capture_hidden_rows = scoring->readout.capture_hidden_rows;
+        const auto reference_begin = scoring->readout.reference_tokens.begin() +
+            (score.targets.empty() ? 0 : std::size_t(first - scoring->first_target)) *
+            score.readout.reference_count;
+        score.readout.reference_tokens.assign(reference_begin,
+            reference_begin + score.targets.size() * score.readout.reference_count);
+        (void)submit_execution(std::move(pending), std::move(*reservation),
+                               Work{.operation = std::move(score)});
+    } catch (const std::exception& error) {
+        executor().fail(error.what());
+        throw;
+    }
+}
+
+} // namespace ninfer::models::qwen3_5::detail

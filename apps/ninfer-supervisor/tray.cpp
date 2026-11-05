@@ -302,12 +302,12 @@ void show_menu(HWND hwnd, TrayIcon* self) {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
     if (self->reserve_pinned_by_config()) {
-        // The config pins --desktop-reserve-mib, which is finer than anything
+        // The config pins a reserve finer than whole GiB, which is finer than anything
         // this menu can say, so with_desktop_reserve leaves the arguments alone.
         // A live submenu here would let the user pick a number, write it to
         // prefs, and be offered a full model reload that changes nothing. Id 0
         // because a greyed item is never returned by TrackPopupMenu.
-        append_disabled(menu, 0, L"Reserve for the desktop", L"pinned by --desktop-reserve-mib");
+        append_disabled(menu, 0, L"Reserve for the desktop", L"pinned by a reserve finer than whole GiB");
     } else {
         HMENU reserve = CreatePopupMenu();
         const int selected = self->reserve_gib();
@@ -500,7 +500,7 @@ void TrayIcon::on_reserve_chosen(int gib) {
     // that on a fresh install clicking the item that already carries the
     // checkmark popped a "restart? the model reloads" dialog for a no-op.
     if (gib == reserve_gib()) { return; }
-    // Nothing the menu can say survives a pinned --desktop-reserve-mib; the item
+    // Nothing the menu can say survives a pinned a reserve finer than whole GiB; the item
     // is greyed, and this is the guard for the path that greying does not cover.
     if (reserve_pinned_by_config()) { return; }
     if (!child_.save_desktop_reserve_gib(gib)) {

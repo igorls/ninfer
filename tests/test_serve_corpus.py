@@ -167,6 +167,7 @@ def test_arbitrary_artifact_labels_reach_the_requested_backend(tmp_path: Path) -
             concurrency=[1],
             sampling="greedy",
             kv_dtype="fp8",
+            proposal_head="optimized",
         ),
     )
     assert [(point.target, point.speculative_backend) for point in points] == [
@@ -220,21 +221,22 @@ def test_selected_kv_reaches_server_and_is_verified(
         "speculative_backend": backend,
         "speculative_draft_window": draft_tokens,
         "proposal_head": head,
-        "context_cache": {"device_state_slots": 0, "host_capacity_bytes": 0},
+        "context_cache": {"extra_state_slots": 0, "host_capacity_bytes": 0},
     }
     event = {
         "artifact_type": corpus.SERVER_LOG_ARTIFACT_TYPE,
         "schema_version": corpus.SERVER_LOG_SCHEMA_VERSION,
         "event": "server_start",
         "engine": engine,
-        "sampling_defaults": {"greedy": False},
+        "sampling_defaults": {"server_overrides": {"temperature": 0.6}},
         "artifact": {"path": str(artifact), "prefill_signature": "bindings"},
         "server": {"public_model_id": "model"},
         "server_instance_id": "instance",
     }
     if concurrent:
         args = concurrency.parse_args(
-            common + ["--suite", "decode-saturation", "--concurrency", "1"]
+            common + ["--suite", "decode-saturation", "--concurrency", "1",
+                      "--proposal-head", head]
         )
         point = build_points([("model", artifact)], args)[0]
         command = concurrency.server_command(
@@ -268,15 +270,19 @@ def test_selected_kv_reaches_server_and_is_verified(
         )
         validate = lambda: corpus.validate_server_start(event, spec, args.device)
     assert command[command.index("--kv-dtype") + 1] == kv_dtype
-    assert ("--lm-head-draft" in command) == (head == "optimized")
+    if backend != "none":
+        assert command[command.index("--proposal-head") + 1] == head
+    else:
+        assert "--proposal-head" not in command
     assert validate() == ("instance", "bindings")
     engine["proposal_head"] = "full" if head == "optimized" else "optimized"
     with pytest.raises(corpus.CampaignError, match="configuration mismatch"):
         validate()
     engine["proposal_head"] = head
-    assert command[command.index("--device-state-slots") + 1] == "0"
-    assert command[command.index("--host-context-mib") + 1] == "0"
-    for field in ("device_state_slots", "host_capacity_bytes"):
+    assert command[command.index("--extra-state-slots") + 1] == "0"
+    assert command[command.index("--host-cache-capacity") + 1] == "0"
+    assert validate() == ("instance", "bindings")
+    for field in ("extra_state_slots", "host_capacity_bytes"):
         engine["context_cache"][field] = 1
         with pytest.raises(corpus.CampaignError, match="context cache capacity differs"):
             validate()

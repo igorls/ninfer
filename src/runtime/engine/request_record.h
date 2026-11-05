@@ -5,6 +5,7 @@
 #include "runtime/contract/execution.h"
 #include "runtime/engine/generation_budget.h"
 #include "runtime/engine/context_cache/types.h"
+#include "runtime/executor/contract.h"
 
 #include <atomic>
 #include <chrono>
@@ -173,6 +174,7 @@ struct RequestRecord {
     const GenerationObservationOptions observation;
     Clock::time_point deadline;
     Clock::time_point submitted;
+    Clock::time_point quiescence_credited_until{};
     std::optional<Clock::time_point> admitted_at;
     std::optional<Clock::time_point> first_token;
     std::optional<Clock::time_point> last_token;
@@ -189,12 +191,15 @@ struct RequestRecord {
     std::string content;
     std::string reasoning;
     std::optional<LaneId> lane;
+    std::optional<ResidencyId> residency;
     std::optional<SequenceHandle> sequence;
     std::atomic<bool> cancelled{false};
     EngineRequestState model_state        = EngineRequestState::Waiting;
     bool capture_pending                  = false;
     EngineRequestState post_capture_state = EngineRequestState::Prefill;
     std::optional<FinishReason> terminal_reason;
+    std::exception_ptr terminal_error;
+    bool consumed_by_commit = false;
 
     std::optional<BasePlan> base_plan;
     std::optional<ResumeState> suspended;
@@ -223,7 +228,7 @@ struct RequestRecord {
     GenerationWorkTiming prefill_work;
     GenerationWorkTiming replay_work;
     std::array<std::array<GenerationTransferTiming, 3>,
-               ModelContract::Program::ContextResources::pool_capacity + 1>
+               ModelContract::Session::ContextResources::pool_capacity + 1>
         context_transfers{};
     std::optional<GenerationFirstOutputTiming> first_output_timing;
     SpeculativeStats speculative_stats;

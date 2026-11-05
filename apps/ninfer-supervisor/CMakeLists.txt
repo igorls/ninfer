@@ -14,8 +14,9 @@ add_executable(ninfer-supervisor WIN32
   frontend_server.cpp
   engine_proxy.cpp
   tray.cpp)
-target_include_directories(ninfer-supervisor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(ninfer-supervisor PRIVATE ninfer::httplib ninfer::json CUDA::cudart)
+target_include_directories(ninfer-supervisor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(ninfer-supervisor PRIVATE ninfer::httplib ninfer::json ninfer_product_config CUDA::cudart)
 target_link_options(ninfer-supervisor PRIVATE
   "LINKER:/ENTRY:mainCRTStartup"
   "LINKER:/DEFAULTLIB:dxgi"

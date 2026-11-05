@@ -62,11 +62,14 @@ void run() {
     uploads.upload(second, context.transfer_view());
 
     auto consume = [&](const HostEmbedding& host) {
-        const auto e = uploads.embedding(host.ticket, context.execution_view());
+        const auto binding = uploads.acquire(host.ticket, context.execution_view());
+        binding.ready.wait(context.stream());
+        const auto e = binding.values;
         copy_bytes_async(copied.span().subspan(0, e.bytes()), {e.data, e.bytes(), e.device},
                          context.execution_view());
         require(!uploads.try_release(host.ticket), "acquired E released before its last reader");
-        uploads.record_consumed(host.ticket, context.execution_view());
+        binding.consumed.record(context.stream());
+        uploads.consumer_submitted(host.ticket, context.execution_view());
         until([&] { return uploads.try_release(host.ticket); });
         copied.copy_to_host(actual.data(), host.values.bytes);
         const auto* expected = static_cast<const std::uint16_t*>(host.values.data);
@@ -79,7 +82,7 @@ void run() {
 
     const auto next = input({0, 2}, 1, 3);
     uploads.upload(next, context.transfer_view());
-    rejects([&] { (void)uploads.embedding(first.ticket, context.execution_view()); });
+    rejects([&] { (void)uploads.acquire(first.ticket, context.execution_view()); });
     rejects([&] { (void)uploads.try_release(first.ticket); });
     consume(next);
 

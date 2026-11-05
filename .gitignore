@@ -75,3 +75,6 @@ profiles/
 
 # Browser automation logs
 .playwright-mcp/
+# Local startup configuration; keep the complete reference in version control.
+*.toml
+!/ninfer.example.toml

@@ -29,7 +29,11 @@ ninfer_add_test(ninfer_qwen3_5_state_image_layout_test
 
 ninfer_add_test(ninfer_qwen3_5_native_transactions_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_native_transactions.cpp"
-  LIBRARIES ninfer_model_runtime ninfer_model_loading ninfer_core)
+  LIBRARIES ninfer_model_execution ninfer_model_loading ninfer_core)
+
+ninfer_add_test(ninfer_qwen3_5_mtp_history_real_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_mtp_history_real.cpp"
+  LIBRARIES ninfer_model_execution ninfer_model_loading ninfer_core)
 
 ninfer_add_test(ninfer_qwen3_5_prefix_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_prefix_real.cpp"
@@ -38,6 +42,11 @@ ninfer_add_test(ninfer_qwen3_5_prefix_real_test
 ninfer_add_test(ninfer_qwen3_5_preemption_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_preemption_real.cpp"
   LIBRARIES ninfer_engine ninfer::json)
+
+ninfer_add_test(ninfer_qwen3_5_quiescence_real_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_quiescence_real.cpp"
+  LIBRARIES ninfer_engine)
+set_tests_properties(ninfer_qwen3_5_quiescence_real_test PROPERTIES TIMEOUT 180)
 
 ninfer_add_test(ninfer_qwen3_5_grammar_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_grammar_real.cpp"
@@ -65,7 +74,7 @@ set_tests_properties(
 
 ninfer_add_test(ninfer_qwen3_5_vision_workspace_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_vision_workspace.cpp"
-  LIBRARIES ninfer_model_runtime ninfer_engine)
+  LIBRARIES ninfer_model_execution ninfer_engine)
 
 ninfer_add_test(ninfer_qwen3_5_dflash2_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_dflash2_real.cpp"
@@ -73,7 +82,7 @@ ninfer_add_test(ninfer_qwen3_5_dflash2_real_test
 
 ninfer_add_test(ninfer_qwen3_5_dflash_prefill_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_dflash_prefill_real.cpp"
-  LIBRARIES ninfer_model_runtime ninfer_model_loading ninfer_core)
+  LIBRARIES ninfer_model_execution ninfer_model_loading ninfer_core)
 
 ninfer_add_test(ninfer_qwen3_5_moe_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_moe_real.cpp"
@@ -97,9 +106,11 @@ set_tests_properties(ninfer_qwen3_5_agent_continuation_real_test PROPERTIES
 set(ninfer_qwen3_5_real_tests
   ninfer_qwen3_5_loading_real_test
   ninfer_qwen3_5_native_transactions_test
+  ninfer_qwen3_5_mtp_history_real_test
   ninfer_qwen3_5_prefix_real_test
   ninfer_qwen3_5_agent_continuation_real_test
   ninfer_qwen3_5_preemption_real_test
+  ninfer_qwen3_5_quiescence_real_test
   ninfer_qwen3_5_grammar_real_test
   ninfer_qwen3_5_tools_real_test
   ninfer_qwen3_5_score_real_test

@@ -37,7 +37,7 @@ Hugging Face; no local upgrade is needed for those files.
 | Qwen3.8-27B OrcaRouter Uncensored | NVFP4, BF16 embedding and full head | [Download v3](https://huggingface.co/igorls/Qwen3.8-27B-Uncensored-NVFP4-NInfer) | Vision; MTP; DFlash2 |
 
 Flash-Next supports BF16 or FP8 KV and MTP draft counts 1–5. It uses the full stored output head:
-**omit `--lm-head-draft`**. Its PLE table stays host-resident, and the artifact is about 102 GiB
+**omit `--proposal-head optimized`**. Its PLE table stays host-resident, and the artifact is about 102 GiB
 across four files. See the [artifact guide](docs/maintainer/qwen3.8-flash-next-artifact.md) for
 storage, memory, and execution requirements.
 
@@ -105,8 +105,8 @@ On Windows:
 ```powershell
 .\build-win\apps\Release\ninfer-serve.exe models/qwen3_8_27b_nvfp4.ninfer `
   --max-context 32768 --kv-capacity 65536 --max-concurrency 2 `
-  --kv-dtype fp8 --desktop-reserve-gib 6 `
-  --spec mtp --draft-tokens 3 --lm-head-draft --preserve-thinking
+  --kv-dtype fp8 --desktop-reserve 6GiB `
+  --spec mtp --draft-tokens 3 --proposal-head optimized --preserve-thinking
 ```
 
 On Linux:
@@ -114,8 +114,8 @@ On Linux:
 ```bash
 ./build/apps/ninfer-serve models/qwen3_8_27b_nvfp4.ninfer \
   --max-context 32768 --kv-capacity 65536 --max-concurrency 2 \
-  --kv-dtype fp8 --desktop-reserve-gib 6 \
-  --spec mtp --draft-tokens 3 --lm-head-draft --preserve-thinking
+  --kv-dtype fp8 --desktop-reserve 6GiB \
+  --spec mtp --draft-tokens 3 --proposal-head optimized --preserve-thinking
 ```
 
 This gives each request a 32,768-token limit, two execution lanes, and a shared 65,536-token
@@ -123,6 +123,10 @@ KV pool, while reserving 6 GiB for the desktop. These are example settings; long
 retained prefixes need more capacity. See [server options](docs/serving.md#server-options).
 Add `--vision` at startup for image/video input; speculative and Vision residency are fixed
 for the process lifetime.
+
+Both executables also accept `--config path/to/startup.toml`; explicit command-line values
+override file settings. Start with [the example](ninfer.example.toml) and see
+[startup configuration](docs/startup-configuration.md) for paths, defaults and precedence.
 
 ### Send a request
 

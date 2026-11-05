@@ -26,7 +26,7 @@ struct TrayPrefs {
     // GiB of device memory the engine must not allocate into.
     //
     // The default is kReserveUnset, not a number: until the user picks one the
-    // config file's own --desktop-reserve-gib is the truth. A tray default of 3
+    // config file's own --desktop-reserve is the truth. A tray default of 3
     // would have quietly lowered every 8 GiB config to 3 GiB the first time the
     // supervisor ran, which is a 5 GiB change to the memory envelope that nobody
     // asked for. 0 means the user did choose, and chose the engine's default.
@@ -54,7 +54,7 @@ inline std::string tray_prefs_path(const std::string& config_path) {
 }
 
 // A hand-edited preferences file must never be able to hurt the engine: a
-// negative reserve becomes `--desktop-reserve-gib -5`, which the engine rejects
+// negative reserve becomes `--desktop-reserve -5`, which the engine rejects
 // in parse_nonnegative_int and turns into a crash loop the tray then reports as
 // the engine's fault.
 inline TrayPrefs normalize_tray_prefs(TrayPrefs p) {

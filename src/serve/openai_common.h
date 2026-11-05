@@ -4,7 +4,7 @@
 
 #include "serve/request.h"
 #include "serve/request_json.h"
-#include "serve/serve_options.h"
+#include "product/config/options.h"
 
 #include <nlohmann/json.hpp>
 
@@ -16,7 +16,7 @@
 namespace ninfer::serve {
 
 // The names a request may give the served model: its public id, the configured aliases and
-// kDefaultModelName. Responses report the public id.
+// ninfer::product::kDefaultModelName. Responses report the public id.
 struct ServedModelNames {
     std::string id;
     std::vector<std::string> aliases;

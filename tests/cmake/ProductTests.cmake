@@ -3,6 +3,7 @@ ninfer_add_test(ninfer_media_decode_test
   LIBRARIES ninfer_media_decode)
 
 ninfer_add_test(ninfer_prompt_input_test
+  NEEDS_SOURCE_DIR
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_prompt_input.cpp"
   LIBRARIES ninfer_product_prompt_input)
 
@@ -19,10 +20,13 @@ target_include_directories(ninfer_perplexity_evaluation_test PRIVATE
   ${PROJECT_SOURCE_DIR}/apps/perplexity)
 
 ninfer_add_test(ninfer_cli_options_test
-  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_cli_options.cpp" ${PROJECT_SOURCE_DIR}/apps/cli/options.cpp
-  LIBRARIES ninfer_runtime_support ninfer_product_logging)
+  NEEDS_SOURCE_DIR
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_cli_options.cpp"
+  LIBRARIES ninfer_product_config)
 
-target_include_directories(ninfer_cli_options_test PRIVATE ${PROJECT_SOURCE_DIR}/apps/cli)
+ninfer_add_test(ninfer_fork_startup_options_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_fork_startup_options.cpp"
+  LIBRARIES ninfer_product_config)
 
 ninfer_add_test(ninfer_openai_schema_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_openai_schema.cpp"
@@ -81,7 +85,7 @@ if(WIN32)
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_ninfer_supervisor.cpp"
             "${PROJECT_SOURCE_DIR}/apps/ninfer-supervisor/frontend_server.cpp"
             "${PROJECT_SOURCE_DIR}/apps/ninfer-supervisor/engine_proxy.cpp"
-    LIBRARIES ninfer::httplib ninfer::json)
+    LIBRARIES ninfer::httplib ninfer::json ninfer_product_config)
   target_include_directories(ninfer_supervisor_test PRIVATE
     ${PROJECT_SOURCE_DIR}/apps/ninfer-supervisor)
   # Same httplib configuration as the supervisor, whose frontend server this test links.
@@ -90,4 +94,4 @@ if(WIN32)
 endif()
 ninfer_add_test(ninfer_tool_streaming_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_tool_streaming.cpp"
-  LIBRARIES ninfer_serve ninfer_model_runtime ninfer::json)
+  LIBRARIES ninfer_serve ninfer_model_execution ninfer::json)

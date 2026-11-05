@@ -138,7 +138,7 @@ struct ContextCacheOptions {
     // available when history is disabled.
     bool enabled = true;
     // Extra Device StateImage slots beyond max_concurrency. Defaults to max_concurrency.
-    std::optional<std::uint32_t> device_state_slots;
+    std::optional<std::uint32_t> extra_state_slots;
     // Shared Host quota for StateImages, KV, pause snapshots and in-flight destinations.
     // RTX 5090 defaults to 8 GiB plus eight model StateImages; DGX Spark resolves this to zero.
     // This does not bound total process RAM.
@@ -210,8 +210,8 @@ struct EngineOptions {
     std::size_t grammar_cache_bytes = 256ULL * 1024 * 1024;
     EnginePurpose purpose           = EnginePurpose::Generation;
     int device                      = 0;
-    std::uint32_t max_context       = 2048; // Logical ceiling of one request or score window.
-    KvCapacityPolicy kv_capacity    = KvCapacityPolicy::explicit_capacity(2048);
+    std::uint32_t max_context       = 8192; // Logical ceiling of one request or score window.
+    KvCapacityPolicy kv_capacity    = KvCapacityPolicy::explicit_capacity(8192);
     std::uint32_t max_concurrency   = 1;
     // Lower concurrency to the complete page-aligned contexts backed by the pool.
     // An explicit pool keeps its requested capacity, including unused tail pages.
@@ -756,6 +756,9 @@ struct PromptSummary {
     // Token frontier right after the new assistant turn's header, before its content; absent for
     // raw-token prompts and assistant continuation.
     std::optional<std::uint32_t> reasoning_frontier;
+    // First token of the supplied final assistant content, after any template-inserted prefix.
+    // Absent outside assistant continuation or when that byte boundary splits a token.
+    std::optional<std::uint32_t> continuation_frontier;
 };
 
 struct PromptPreparationStats {

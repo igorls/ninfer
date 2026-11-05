@@ -56,6 +56,7 @@ class Point:
     speculative_mode: str
     speculative_backend: str
     draft_tokens: int
+    proposal_head: str
     sampling_mode: str
     kv_dtype: str
     suite: str
@@ -64,7 +65,7 @@ class Point:
     @property
     def key(self) -> str:
         return (
-            f"{corpus.filename_label(self.target)}_{self.kv_dtype}_{self.speculative_mode}_{self.sampling_mode}_"
+            f"{corpus.filename_label(self.target)}_{self.kv_dtype}_{self.speculative_mode}_{self.proposal_head}_{self.sampling_mode}_"
             f"{self.suite.replace('-', '_')}_c{self.concurrency}"
         )
 
@@ -120,6 +121,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="sampling profile for all requests (default: stochastic)",
     )
     parser.add_argument(
+        "--proposal-head",
+        choices=("full", "optimized"),
+        default="optimized",
+        help="speculative proposal head (default: optimized)",
+    )
+    parser.add_argument(
         "--suite",
         action="append",
         required=True,
@@ -149,7 +156,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--prefill-chunk", type=int, default=1024)
     parser.add_argument("--kv-dtype", choices=tuple(corpus.KV_CACHE_NAMES), default="int8")
-    parser.add_argument("--proposal-head", choices=("full", "optimized"), default="optimized")
     parser.add_argument("--output", type=Path, required=True, help="benchmark output directory")
     parser.add_argument("--port", type=int, default=8080, help="loopback serving port")
     parser.add_argument("--device", type=int, default=0, help="CUDA device index")
@@ -205,6 +211,7 @@ def build_points(
                             speculative_mode=mode_name,
                             speculative_backend=backend,
                             draft_tokens=draft_tokens,
+                            proposal_head=args.proposal_head if draft_tokens else "full",
                             sampling_mode=args.sampling,
                             kv_dtype=args.kv_dtype,
                             suite=suite,
@@ -298,11 +305,11 @@ def server_command(
         str(point.concurrency),
         "--max-pending-requests",
         "1",
-        "--pending-timeout-ms",
+        "--pending-timeout",
         str(PENDING_TIMEOUT_MS),
         "--prefill-chunk",
         str(args.prefill_chunk),
-        "--log-stats-interval-ms",
+        "--stats-interval",
         str(STATS_INTERVAL_MS),
         "--device",
         str(args.device),
@@ -311,9 +318,9 @@ def server_command(
         "--kv-dtype",
         point.kv_dtype,
         "--no-prefix-reuse",
-        "--device-state-slots",
+        "--extra-state-slots",
         "0",
-        "--host-context-mib",
+        "--host-cache-capacity",
         "0",
     ]
     if point.speculative_backend != "none":
@@ -323,12 +330,12 @@ def server_command(
                 point.speculative_backend,
                 "--draft-tokens",
                 str(point.draft_tokens),
+                "--proposal-head",
+                point.proposal_head,
             ]
         )
-        if args.proposal_head == "optimized":
-            command.append("--lm-head-draft")
     if point.sampling_mode == "greedy":
-        command.append("--greedy")
+        command.extend(["--temperature", "0"])
     else:
         # Preserve the sampling profile attached to the published benchmark methodology.
         command.extend(
@@ -369,18 +376,18 @@ def validate_server_start(
         "prefix_reuse": False,
         "speculative_backend": point.speculative_backend,
         "speculative_draft_window": point.draft_tokens,
-        "proposal_head": args.proposal_head if point.draft_tokens else "full",
+        "proposal_head": point.proposal_head,
     }
     actual = {name: engine.get(name) for name in expected}
     if actual != expected:
         raise corpus.CampaignError(f"server_start Engine configuration mismatch: {actual!r}")
     context_cache = engine.get("context_cache", {})
     if (
-        context_cache.get("device_state_slots") != 0
+        context_cache.get("extra_state_slots") != 0
         or context_cache.get("host_capacity_bytes") != 0
     ):
         raise corpus.CampaignError("server_start context cache capacity differs from the point")
-    if event.get("sampling_defaults", {}).get("greedy") != (
+    if (event.get("sampling_defaults", {}).get("server_overrides", {}).get("temperature") == 0) != (
         point.sampling_mode == "greedy"
     ):
         raise corpus.CampaignError("server_start sampling mode does not match the point")
@@ -760,6 +767,7 @@ def analyze_point(
         "speculative_mode": point.speculative_mode,
         "speculative_backend": point.speculative_backend,
         "draft_tokens": point.draft_tokens,
+        "proposal_head": point.proposal_head,
         "sampling_mode": point.sampling_mode,
         "kv_dtype": point.kv_dtype,
         "suite": point.suite,

@@ -1718,7 +1718,7 @@ R"HTML(    const [head, sub] = location.hash.slice(1).split('/');
       ['Concurrent requests', num(flags['--max-concurrency'])],
       ['Speculation', flags['--spec'] ? `${flags['--spec']}${flags['--draft-tokens'] ? ', ' + flags['--draft-tokens'] + ' drafts' : ''}` : 'off'],
       ['KV cache', flags['--kv-dtype'] || 'default'],
-      ['Desktop reserve', flags['--desktop-reserve-gib'] ? flags['--desktop-reserve-gib'] + ' GiB' : 'engine default'],
+      ['Desktop reserve', flags['--desktop-reserve'] ? flags['--desktop-reserve'] : 'engine default'],
       ['Engine reservation', gibv(cap.runtime_reservation_bytes)],
       ['Left after startup', gibv(cap.available_after_startup_bytes)],
     ];
@@ -4759,7 +4759,7 @@ R"HTML(      const tip = t.forced ? 'Inserted by the thinking budget' : special 
   }
   // The engine's limit for a request that names none: known when the Supervisor launched it.
   function chatDefaultBudget() {
-    const flag = Number(launchFlags['--default-max-tokens']);
+    const flag = Number(launchFlags['--max-tokens']);
     return Number.isInteger(flag) && flag > 0 ? {n: flag, known: true} : {n: 8192, known: false};
   }
   function chatJsonField(id, stateId, wantObject) {
@@ -4782,13 +4782,13 @@ R"HTML(      const tip = t.forced ? 'Inserted by the thinking budget' : special 
     $('chat-max').hidden = mode !== 'custom';
     const def = chatDefaultBudget();
     const defText = def.known ? `${def.n.toLocaleString()} tokens` : `${def.n.toLocaleString()} tokens unless the engine was started with another value`;
-    $('chat-budget-help').textContent = mode === 'default' ? `Sends no limit, so the engine applies its --default-max-tokens: ${defText}, reasoning included. This is the limit chat apps hit when they leave it out.`
+    $('chat-budget-help').textContent = mode === 'default' ? `Sends no limit, so the engine applies its configured default: ${defText}, reasoning included. This is the limit chat apps hit when they leave it out.`
       : mode === 'unlimited' ? 'Sends max_tokens -1. The answer ends only at a stop condition or when the conversation fills the context.'
       : 'The whole output budget, reasoning included. 0 reads the prompt without generating.';
     const now = $('chat-budget-now'), max = Number($('chat-max').value);
     now.textContent = mode === 'unlimited' ? 'No limit' : mode === 'custom' ? ($('chat-max').value !== '' && Number.isInteger(max) && max >= 0 ? max.toLocaleString() + ' tokens' : 'Enter a budget') : `Engine default${def.known ? ' · ' + def.n.toLocaleString() : ''}`;
     now.className = mode === 'default' ? 'engine' : '';
-    now.parentElement.title = mode === 'default' && !def.known ? 'The engine was started elsewhere, so its --default-max-tokens is not known here; 8,192 is the engine default' : 'The output budget the next request carries';
+    now.parentElement.title = mode === 'default' && !def.known ? 'The configured budget is not known here. Check generation.max_tokens or --max-tokens in the startup configuration; the server default is 8,192.' : 'The output budget the next request carries';
     $('chat-schema-row').hidden = $('chat-format').value !== 'json_schema';
     const lp = $('chat-logprobs').checked;
 )HTML"

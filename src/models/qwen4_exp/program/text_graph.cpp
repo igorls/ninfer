@@ -17,7 +17,7 @@ void TextGraph::prepare(execution::TextRun& run, const execution::Parameters& pa
                         std::array<Tensor, 2> ple, execution::TextOutputs output,
                         std::int32_t columns, MemoryArena& workspace, DeviceContext& device) {
     const auto cuda    = device.execution_view();
-    const auto& config = parameters.model.config().text;
+    const auto& config = parameters.profile->config.text;
     ple_layer_         = config.ple.layer;
     block_output_      = run.block_output();
     resident_          = experts == nullptr;
@@ -109,20 +109,32 @@ void TextGraph::select(std::uint32_t visible) {
     installed_ = next;
 }
 
-void TextGraph::traverse(std::uint32_t begin, std::uint32_t end, CudaExecutionView cuda) {
-    for (auto i = begin; i < end; ++i) {
-        nvtx::ScopedRange range(nvtx::Name::TextLayer, nvtx::Category::Runtime, i);
-        layers_[i]->replay(block_output_, cuda);
+bool TextGraph::advance(std::uint32_t end, CudaExecutionView cuda) {
+    while (next_layer_ < end) {
+        nvtx::ScopedRange range(nvtx::Name::TextLayer, nvtx::Category::Runtime, next_layer_);
+        auto& layer = *layers_.at(next_layer_);
+        const bool complete = waiting_layer_ ? layer.poll() : layer.start(block_output_, cuda);
+        if (!complete) {
+            waiting_layer_ = true;
+            return false;
+        }
+        waiting_layer_ = false;
+        ++next_layer_;
     }
+    return true;
 }
 
-void TextGraph::prefix(CudaExecutionView cuda) {
-    if (resident_) {
+void TextGraph::begin_prefix(CudaExecutionView cuda) {
+    next_layer_ = 0;
+    waiting_layer_ = false;
+    if (resident_)
         resident_prefix_.launch(cuda.stream());
-        return;
-    }
-    stem_.executable.launch(cuda.stream());
-    traverse(0, ple_layer_, cuda);
+    else
+        stem_.executable.launch(cuda.stream());
+}
+
+bool TextGraph::advance_prefix(CudaExecutionView cuda) {
+    return resident_ || advance(ple_layer_, cuda);
 }
 
 void TextGraph::consume_ple(std::uint32_t slot, CudaExecutionView cuda) {
@@ -130,13 +142,20 @@ void TextGraph::consume_ple(std::uint32_t slot, CudaExecutionView cuda) {
     ple_[slot].executable.launch(cuda.stream());
 }
 
-void TextGraph::suffix(CudaExecutionView cuda) {
+bool TextGraph::advance_suffix(CudaExecutionView cuda) {
     if (resident_) {
         resident_suffix_.launch(cuda.stream());
-        return;
+        return true;
     }
-    traverse(ple_layer_, banks_.size(), cuda);
+    if (!advance(static_cast<std::uint32_t>(banks_.size()), cuda)) return false;
     finish_.executable.launch(cuda.stream());
+    return true;
+}
+
+void TextGraph::cancel() {
+    if (waiting_layer_) layers_.at(next_layer_)->cancel();
+    waiting_layer_ = false;
+    next_layer_ = 0;
 }
 
 } // namespace ninfer::models::qwen4_exp

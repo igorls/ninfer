@@ -323,31 +323,11 @@ private:
 
 } // namespace
 
-GenerationService::GenerationService(ServeOptions options, StartupObserver startup_observer)
+GenerationService::GenerationService(product::ServeOptions options,
+                                     StartupObserver startup_observer)
     : options_(std::move(options)) {
-    ninfer::EngineOptions engine_options;
-    engine_options.artifact_path            = options_.artifact_path;
-    engine_options.chat_template_path       = options_.chat_template_path;
-    engine_options.device                   = options_.device;
-    engine_options.max_context              = options_.max_context;
-    engine_options.kv_capacity              = options_.kv_capacity;
-    engine_options.max_concurrency          = options_.max_concurrency;
-    engine_options.clamp_concurrency_to_pool = options_.clamp_concurrency_to_pool;
-    engine_options.min_slack_floor_bytes     = options_.min_slack_floor_bytes;
-    engine_options.desktop_reserve_bytes     = options_.desktop_reserve_bytes;
-    engine_options.max_pending_requests     = options_.max_pending_requests;
-    engine_options.pending_timeout_ms       = options_.pending_timeout_ms;
-    engine_options.prefill_chunk            = options_.prefill_chunk;
-    engine_options.kv_cache                 = options_.kv_cache;
-    engine_options.enable_vision            = options_.enable_vision;
-    engine_options.use_cuda_graph           = options_.use_cuda_graph;
-    engine_options.speculative              = options_.speculative;
-    engine_options.context_cache            = options_.context_cache;
-    engine_options.context_cost.preset_path = options_.context_cost_presets;
-    engine_options.media_cache_bytes        = options_.media_cache_bytes;
-    engine_options.media_live_bytes         = options_.media_live_bytes;
-    engine_options.media_preprocess_threads = options_.media_preprocess_threads;
-    engine_options.startup_observer         = std::move(startup_observer);
+    auto engine_options = options_.launch.engine;
+    engine_options.startup_observer = std::move(startup_observer);
     if (options_.expert_stats) {
         expert_route_recorder_ = std::make_shared<ExpertRouteRecorder>(
             options_.expert_trace_directory, options_.expert_trace_max_bytes);
@@ -362,7 +342,7 @@ GenerationService::GenerationService(ServeOptions options, StartupObserver start
     };
     engine_           = std::make_unique<ninfer::Engine>(std::move(engine_options));
     request_capacity_ = std::make_shared<RequestCapacity>(
-        static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests);
+        static_cast<std::size_t>(options_.launch.engine.max_concurrency) + options_.launch.engine.max_pending_requests);
 }
 
 std::shared_ptr<RequestLifetime>
@@ -380,7 +360,7 @@ GenerationService::acquire_request_lifetime(DeadlinePolicy deadline_policy) cons
         const Clock::time_point deadline =
             deadline_policy == DeadlinePolicy::UnboundedStartup
                 ? Clock::time_point::max()
-                : started + std::chrono::milliseconds(options_.pending_timeout_ms);
+                : started + std::chrono::milliseconds(options_.launch.engine.pending_timeout_ms);
         return std::make_shared<RequestLifetime>(request_capacity_, started, deadline);
     } catch (...) {
         std::lock_guard lock(request_capacity_->mutex);
@@ -396,8 +376,8 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
                                            ContextCacheHints context_cache) const {
     return prepare_impl(request, consumer_mode, std::move(observation), std::move(is_cancelled),
                         std::move(context_cache),
-                        options_.allow_prefix_reuse ? CacheParticipation::ReadWrite
-                                                    : CacheParticipation::Disabled,
+                        options_.launch.engine.context_cache.enabled ? CacheParticipation::ReadWrite
+                                                                     : CacheParticipation::Disabled,
                         DeadlinePolicy::ClientPendingTimeout);
 }
 
@@ -447,7 +427,7 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
     prepared.reasoning_effort    = semantics.reasoning_effort;
     prepared.preserve_thinking   = semantics.preserve_thinking;
     const bool request_has_media = request.media_item_count() != 0;
-    if (request_has_media && !options_.enable_vision) {
+    if (request_has_media && !options_.launch.engine.enable_vision) {
         const std::invalid_argument error("Vision is disabled for this server");
         throw_invalid_input(error, "vision_disabled");
     }
@@ -513,24 +493,29 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
     return prepared;
 }
 
-int GenerationService::count_prompt_tokens(const GenerationRequest& request,
-                                           std::function<bool()> is_cancelled) const {
+ninfer::PromptInput GenerationService::acquire_prompt_input(
+    const GenerationRequest& request, Clock::time_point deadline,
+    const std::function<bool()>& is_cancelled) const {
     const bool request_has_media = request.media_item_count() != 0;
-    if (request_has_media && !options_.enable_vision) {
+    if (request_has_media && !options_.launch.engine.enable_vision) {
         const std::invalid_argument error("Vision is disabled for this server");
         throw_invalid_input(error, "vision_disabled");
     }
-    const Clock::time_point deadline =
-        Clock::now() + std::chrono::milliseconds(options_.pending_timeout_ms);
     const ResolvedPromptSemantics semantics =
         resolve_prompt_semantics(request, options_, engine_->prompt_capabilities());
+    std::size_t remaining_media_bytes =
+        std::min(options_.max_request_bytes, ninfer::kMaximumPromptMediaBytes);
+    return to_prompt_input(request, semantics, [&](const ContentPart& part) {
+        return acquire_media(part, deadline, is_cancelled, remaining_media_bytes);
+    });
+}
+
+int GenerationService::count_prompt_tokens(const GenerationRequest& request,
+                                           std::function<bool()> is_cancelled) const {
+    const Clock::time_point deadline =
+        Clock::now() + std::chrono::milliseconds(options_.launch.engine.pending_timeout_ms);
     try {
-        std::size_t remaining_media_bytes =
-            std::min(options_.max_request_bytes, ninfer::kMaximumPromptMediaBytes);
-        ninfer::PromptInput input =
-            to_prompt_input(request, semantics, [&](const ContentPart& part) {
-                return acquire_media(part, deadline, is_cancelled, remaining_media_bytes);
-            });
+        ninfer::PromptInput input = acquire_prompt_input(request, deadline, is_cancelled);
         check_preparation_control(deadline, is_cancelled);
         const PreparationControl control{
             .deadline     = deadline,
@@ -540,6 +525,27 @@ int GenerationService::count_prompt_tokens(const GenerationRequest& request,
             static_cast<int>(engine_->count_tokens(std::move(input), control));
         check_preparation_control(deadline, is_cancelled);
         return prompt_tokens;
+    } catch (const ApiException&) { throw; } catch (const ninfer::RequestError& exception) {
+        throw_request_error(exception);
+    } catch (const std::invalid_argument& exception) {
+        throw_invalid_input(exception, "invalid_prompt");
+    }
+}
+
+ninfer::PromptSummary GenerationService::describe_prompt(
+    const GenerationRequest& request, std::function<bool()> is_cancelled) const {
+    const Clock::time_point deadline =
+        Clock::now() + std::chrono::milliseconds(options_.launch.engine.pending_timeout_ms);
+    try {
+        ninfer::PromptInput input = acquire_prompt_input(request, deadline, is_cancelled);
+        check_preparation_control(deadline, is_cancelled);
+        const PreparationControl control{
+            .deadline     = deadline,
+            .cancellation = CancellationView(is_cancelled),
+        };
+        const ninfer::PromptSummary summary = engine_->prepare(std::move(input), control).summary();
+        check_preparation_control(deadline, is_cancelled);
+        return summary;
     } catch (const ApiException&) { throw; } catch (const ninfer::RequestError& exception) {
         throw_request_error(exception);
     } catch (const std::invalid_argument& exception) {

@@ -1,4 +1,6 @@
 #pragma once
+#include "product/config/options.h"
+#include "product/config/quantity.h"
 
 #include <algorithm>
 #include <array>
@@ -487,23 +489,22 @@ inline constexpr std::array<int, 4> kIdleChoicesMinutes{0, 15, 60, 240};
 // engine default"), which does strip the flag.
 inline constexpr int kReserveUnset = -1;
 
-// Rewrites --desktop-reserve-gib in an engine argument vector.
-//  - an existing value is replaced in place
-//  - a trailing "--desktop-reserve-gib" with no value gets one appended
-//  - --desktop-reserve-mib is more specific than anything the menu can express,
-//    so its presence makes this a no-op rather than a silent coarsening
-//  - gib <= 0 removes the pair, leaving the engine's own default in force
-//
-// A config that pins --desktop-reserve-mib owns the reserve outright: the menu
-// cannot express MiB, so every choice in it would be a silent coarsening. The
-// UI needs to know this too -- an editable submenu whose every entry is a no-op
-// is worse than a greyed one that says why -- so the test is its own function
-// rather than a loop buried in the rewrite.
+// Resolve exactly the same file/argv/default layers as the engine child. No model
+// artifact is opened by the startup parser. Isolated helper calls may omit it.
+inline product::ServeOptions child_startup_options(const std::vector<std::string>& args) {
+    std::vector<std::string> arguments{"ninfer-serve"};
+    if (args.empty() || args.front().starts_with("--")) arguments.push_back("model.ninfer");
+    arguments.insert(arguments.end(), args.begin(), args.end());
+    std::vector<char*> pointers;
+    for (auto& argument : arguments) pointers.push_back(argument.data());
+    return product::parse_serve_options(static_cast<int>(pointers.size()), pointers.data());
+}
+
+// The tray edits whole GiB. Preserve an explicitly finer-grained quantity.
 inline bool desktop_reserve_pinned(const std::vector<std::string>& args) {
-    for (const auto& a : args) {
-        if (a == "--desktop-reserve-mib") { return true; }
-    }
-    return false;
+    try {
+        return child_startup_options(args).launch.engine.desktop_reserve_bytes % (1ULL << 30) != 0;
+    } catch (...) { return false; }
 }
 
 // ---------------------------------------------------------------------------
@@ -525,7 +526,10 @@ enum class ParamKind : std::uint8_t {
     Text,      // "--flag STRING"
     Enum,      // "--flag CHOICE"
     Flag,      // "--flag" with no value; present or absent
-    IntOrAuto, // "--flag N" or "--flag auto"
+    IntOrAuto, // "--flag N", "--flag context" or "--flag auto"
+    Capacity,  // exact bytes or B/KiB/MiB/GiB quantity
+    Duration,  // exact milliseconds or ms/s quantity
+    IntOrNone, // positive integer or none
 };
 
 struct EngineParamSpec {
@@ -553,42 +557,33 @@ inline const std::vector<EngineParamSpec>& engine_param_specs() {
          "How many requests may be active at once. 8 is the Engine's compile-time lane maximum, not a GPU-memory guess.", 1, 8, {}},
         {"--max-pending-requests", "max_pending_requests", ParamKind::Int, "capacity",
          "Max pending requests", "Queue depth before new requests are rejected.", 1, 4096, {}},
-        {"--pending-timeout-ms", "pending_timeout_ms", ParamKind::Int, "capacity",
-         "Pending timeout (ms)", "How long a request may wait for a lane before it fails.", 0,
+        {"--pending-timeout", "pending_timeout", ParamKind::Duration, "capacity",
+         "Pending timeout (ms)", "How long a request may wait for a lane before it fails.", 1,
          3600000, {}},
         {"--prefill-chunk", "prefill_chunk", ParamKind::Int, "capacity", "Prefill chunk",
          "Tokens per prefill step. Larger is faster and needs more workspace.", 128, 65536, {}},
 
-        {"--desktop-reserve-gib", "desktop_reserve_gib", ParamKind::Int, "memory",
-         "Desktop reserve (GiB)",
-         "Free GPU memory target at startup; leaves headroom beyond existing app allocations.", 0, 64,
+        {"--desktop-reserve", "desktop_reserve", ParamKind::Capacity, "memory",
+         "Desktop reserve",
+         "Free GPU memory target at startup; leaves headroom beyond existing app allocations. Use units such as 8GiB.", 0, 64LL << 30,
          {}},
         {"--kv-dtype", "kv_dtype", ParamKind::Enum, "memory", "KV cache dtype",
          "FP8 halves KV bytes per token. NVFP4 is not usable on this card.", 0, 0,
          {"bf16", "int8", "fp8", "nvfp4", "k8v4"}},
-        {"--gdn-state-dtype", "gdn_state_dtype", ParamKind::Enum, "memory", "Recurrent state dtype",
-         "BF16 halves the linear-attention state slots. Error accumulates along a sequence.", 0, 0,
-         {"fp32", "bf16"}},
-        {"--output-head-dtype", "output_head_dtype", ParamKind::Enum, "memory", "Output head dtype",
-         "FP8 saves about 605 MiB and changes greedy output after ~95 tokens.", 0, 0,
-         {"bf16", "fp8"}},
-        {"--token-embedding-dtype", "token_embedding_dtype", ParamKind::Enum, "memory",
-         "Token embedding dtype", "FP8 saves about 605 MiB. Diverges sooner than the head.", 0, 0,
-         {"bf16", "fp8"}},
-        {"--device-state-slots", "device_state_slots", ParamKind::Int, "memory",
-         "Device state slots", "Extra checkpoint capacity on the device. Costs VRAM.", 0, 64, {}},
-        {"--host-context-mib", "host_context_mib", ParamKind::Int, "memory", "Host context (MiB)",
-         "Shared RAM budget for checkpoints, KV and paused requests.", 0, 262144, {}},
+        {"--extra-state-slots", "extra_state_slots", ParamKind::Int, "memory",
+         "Extra state slots", "Complete checkpoint images beyond the active lanes. Costs VRAM.", 0, 64, {}},
+        {"--host-cache-capacity", "host_cache_capacity", ParamKind::Capacity, "memory", "Host context capacity",
+         "Shared RAM budget for checkpoints, KV and paused requests. Use units such as 8GiB.", 0, 262144LL << 20, {}},
 
         {"--vision", "vision", ParamKind::Flag, "features", "Vision",
          "Loads the vision encoder. Costs about 1.1 GiB.", 0, 0, {}},
         {"--spec", "spec", ParamKind::Enum, "features", "Speculative backend",
          "MTP suits concurrent work; DFlash2 accelerates interactive 27B generation and requires a companion artifact.", 0, 0,
-         {"mtp", "dflash", "dflash2"}},
+         {"none", "mtp", "dflash", "dflash2"}},
         {"--draft-tokens", "draft_tokens", ParamKind::Int, "features", "Draft tokens",
-         "Tokens proposed per step. Start with 5 for 27B MTP or 7 for DFlash2.", 1, 15, {}},
-        {"--lm-head-draft", "lm_head_draft", ParamKind::Flag, "features", "Optimized draft head",
-         "Uses the optimized proposal head for faster speculation. Recommended for the 27B presets.", 0, 0, {}},
+         "Tokens proposed per step. Start with 5 for 27B MTP or 7 for DFlash2; zero with none.", 0, 15, {}},
+        {"--proposal-head", "proposal_head", ParamKind::Enum, "features", "Proposal head",
+         "Uses the optimized proposal head for faster speculation. Recommended for the 27B presets.", 0, 0, {"full", "optimized"}},
         {"--no-prefix-reuse", "no_prefix_reuse", ParamKind::Flag, "features", "Disable prefix reuse",
          "Turns off cross-request prefix caching. Multi-turn TTFT gets much worse.", 0, 0, {}},
         {"--no-cuda-graph", "no_cuda_graph", ParamKind::Flag, "features", "Disable CUDA graphs",
@@ -600,16 +595,16 @@ inline const std::vector<EngineParamSpec>& engine_param_specs() {
          "The name clients send and see. Overrides the artifact's own id.", 0, 0, {}},
         {"--cors", "cors", ParamKind::Flag, "api", "Send CORS headers",
          "Allows browser pages from other origins to call the engine.", 0, 0, {}},
-        {"--default-max-tokens", "default_max_tokens", ParamKind::Int, "api", "Default max tokens",
+        {"--max-tokens", "max_tokens", ParamKind::Int, "api", "Default max tokens",
          "Applied when a request omits max_tokens.", 1, 262144, {}},
-        {"--default-thinking-budget", "default_thinking_budget", ParamKind::Int, "api",
-         "Default thinking budget", "Caps model-origin reasoning tokens per request.", 0, 262144,
+        {"--thinking-budget", "thinking_budget", ParamKind::IntOrNone, "api",
+         "Default thinking budget", "Caps model-origin reasoning tokens per request; none disables it.", 1, 262144,
          {}},
-        {"--log-stats-interval-ms", "log_stats_interval_ms", ParamKind::Int, "api",
+        {"--log-stats-interval", "log_stats_interval", ParamKind::Duration, "api",
          "Throughput log interval (ms)", "0 disables the periodic throughput lines.", 0, 3600000,
          {}},
-        {"--max-request-mib", "max_request_mib", ParamKind::Int, "api", "Max request (MiB)",
-         "Largest accepted request body.", 1, 4096, {}},
+        {"--max-request-size", "max_request_size", ParamKind::Capacity, "api", "Max request size",
+         "Largest accepted request body. Use units such as 384MiB.", 1, 4096LL << 20, {}},
     };
     return specs;
 }
@@ -629,8 +624,10 @@ inline bool engine_flag_value_is_secret(std::string_view flag) {
 }
 
 inline std::vector<std::string> redact_engine_args(std::vector<std::string> args) {
-    for (std::size_t i = 0; i + 1 < args.size(); ++i) {
-        if (engine_flag_value_is_secret(args[i]) && !args[i + 1].empty()) {
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        if (args[i].starts_with("--api-key=")) {
+            args[i] = "--api-key=(redacted)";
+        } else if (engine_flag_value_is_secret(args[i]) && i + 1 < args.size() && !args[i + 1].empty()) {
             args[i + 1] = "(redacted)";
         }
     }
@@ -764,7 +761,7 @@ inline std::vector<std::string> validate_engine_params(const std::vector<EngineP
             break;
         }
         case ParamKind::IntOrAuto: {
-            if (p.value == "auto") { break; }
+            if (p.value == "auto" || p.value == "context") { break; }
             long long value = 0;
             if (!parse_long_long(p.value, value)) {
                 errors.push_back(std::string(spec->label) + " must be a whole number or 'auto'");
@@ -773,6 +770,27 @@ inline std::vector<std::string> validate_engine_params(const std::vector<EngineP
                                  std::to_string(spec->min_value) + " and " +
                                  std::to_string(spec->max_value) + ", or 'auto'");
             }
+            break;
+        }
+        case ParamKind::Capacity:
+        case ParamKind::Duration: {
+            try {
+                const auto amount = spec->kind == ParamKind::Capacity
+                    ? product::parse_capacity_quantity(p.value)
+                    : product::parse_duration_quantity(p.value);
+                if (amount < static_cast<std::uint64_t>(spec->min_value) ||
+                    amount > static_cast<std::uint64_t>(spec->max_value))
+                    errors.push_back(std::string(spec->label) + " is outside its supported range");
+            } catch (const std::invalid_argument& error) {
+                errors.push_back(std::string(spec->label) + ": " + error.what());
+            }
+            break;
+        }
+        case ParamKind::IntOrNone: {
+            long long amount = 0;
+            if (p.value != "none" && (!parse_long_long(p.value, amount) ||
+                amount < spec->min_value || amount > spec->max_value))
+                errors.push_back(std::string(spec->label) + " must be a positive budget or none");
             break;
         }
         case ParamKind::Enum: {
@@ -835,17 +853,20 @@ inline std::vector<std::string> validate_engine_param_combination(
             }
         }
     }
-    if (draft_tokens != nullptr && spec_backend == nullptr) {
+    if (draft_tokens != nullptr && *draft_tokens != "0" && spec_backend == nullptr) {
         errors.emplace_back("Draft tokens has no effect without a speculative backend");
     }
-    const auto* head = find_param_value(params, "lm_head_draft");
-    if (head != nullptr && *head == "true" && spec_backend == nullptr) {
+    const auto* head = find_param_value(params, "proposal_head");
+    if (head != nullptr && *head == "optimized" && spec_backend == nullptr) {
         errors.emplace_back("Optimized draft head requires a speculative backend");
     }
-    if (model_identity == "qwen3.8-flash-next" && head != nullptr && *head == "true") {
+    if (model_identity == "qwen3.8-flash-next" && head != nullptr && *head == "optimized") {
         errors.emplace_back("Flash-Next MTP requires the full output head");
     }
-    if (spec_backend != nullptr) {
+    if (spec_backend != nullptr && *spec_backend == "none") {
+        if ((draft_tokens && *draft_tokens != "0") || (head && *head == "optimized"))
+            errors.emplace_back("Disabled speculation requires zero drafts and the full head");
+    } else if (spec_backend != nullptr) {
         const int limit = *spec_backend == "mtp" ? 5 : 15;
         long long count = 0;
         if (draft_tokens && parse_long_long(*draft_tokens, count) && (count < 1 || count > limit)) {
@@ -872,21 +893,8 @@ inline std::vector<std::string> validate_engine_param_combination(
 // permanently unhealthy.
 inline std::vector<std::string> with_engine_endpoint(std::vector<std::string> args,
                                                      const std::string& host, int port) {
-    auto set_flag = [&args](std::string_view flag, const std::string& value) {
-        for (std::size_t i = 0; i < args.size(); ++i) {
-            if (args[i] != flag) { continue; }
-            if (i + 1 < args.size()) {
-                args[i + 1] = value;
-            } else {
-                args.push_back(value);
-            }
-            return;
-        }
-        args.emplace_back(flag);
-        args.push_back(value);
-    };
-    if (!host.empty()) { set_flag("--host", host); }
-    if (port > 0) { set_flag("--port", std::to_string(port)); }
+    if (!host.empty()) args = product::set_serve_argument(std::move(args), "server.host", host);
+    if (port > 0) args = product::set_serve_argument(std::move(args), "server.port", std::to_string(port));
     return args;
 }
 
@@ -896,13 +904,8 @@ inline std::vector<std::string> with_engine_endpoint(std::vector<std::string> ar
 // request log does not get one.
 inline std::vector<std::string> with_request_log(std::vector<std::string> args,
                                                  const std::string& path) {
-    if (path.empty()) { return args; }
-    for (const auto& a : args) {
-        if (a == "--request-log-jsonl") { return args; }
-    }
-    args.emplace_back("--request-log-jsonl");
-    args.emplace_back(path);
-    return args;
+    if (path.empty() || product::has_serve_argument(args, "logging.request_jsonl")) return args;
+    return product::set_serve_argument(std::move(args), "logging.request_jsonl", path);
 }
 
 // Adds --api-key-file PATH so the engine actually authenticates. Without this the
@@ -916,37 +919,15 @@ inline std::vector<std::string> with_request_log(std::vector<std::string> args,
 // --api-key or --api-key-file in args wins, as with the request log.
 inline std::vector<std::string> with_api_key_file(std::vector<std::string> args,
                                                   const std::string& path) {
-    if (path.empty()) { return args; }
-    for (const auto& a : args) {
-        if (a == "--api-key" || a == "--api-key-file") { return args; }
-    }
-    args.emplace_back("--api-key-file");
-    args.emplace_back(path);
-    return args;
+    if (path.empty() || product::has_serve_argument(args, "server.api_key") ||
+        product::has_serve_argument(args, "server.api_key_file")) return args;
+    return product::set_serve_argument(std::move(args), "server.api_key_file", path);
 }
 
 inline std::vector<std::string> with_desktop_reserve(std::vector<std::string> args, int gib) {
-    if (desktop_reserve_pinned(args)) { return args; }
-    for (std::size_t i = 0; i < args.size(); ++i) {
-        if (args[i] != "--desktop-reserve-gib") { continue; }
-        const bool has_value = i + 1 < args.size();
-        if (gib <= 0) {
-            args.erase(args.begin() + static_cast<std::ptrdiff_t>(i),
-                       args.begin() + static_cast<std::ptrdiff_t>(i + (has_value ? 2 : 1)));
-            return args;
-        }
-        if (has_value) {
-            args[i + 1] = std::to_string(gib);
-        } else {
-            args.emplace_back(std::to_string(gib));
-        }
-        return args;
-    }
-    if (gib > 0) {
-        args.emplace_back("--desktop-reserve-gib");
-        args.emplace_back(std::to_string(gib));
-    }
-    return args;
+    if (desktop_reserve_pinned(args)) return args;
+    // Zero must override the engine's nonzero default explicitly.
+    return product::set_serve_argument(std::move(args), "engine.desktop_reserve", std::to_string(gib) + "GiB");
 }
 
 // The engine refuses to start when its runtime reservation does not fit beside what the
@@ -992,24 +973,16 @@ inline RuntimeReservationShortfall parse_runtime_reservation_failure(std::string
 // The configured KV capacity when it is an explicit token count. 'auto' or an absent flag
 // returns nullopt: the engine sizes those itself and there is nothing to adapt.
 inline std::optional<std::int64_t> explicit_kv_capacity(const std::vector<std::string>& args) {
-    for (std::size_t i = 0; i + 1 < args.size(); ++i) {
-        if (args[i] != "--kv-capacity") { continue; }
-        const std::string& v = args[i + 1];
-        if (v.empty() || v.find_first_not_of("0123456789") != std::string::npos) { return std::nullopt; }
-        return std::stoll(v);
-    }
-    return std::nullopt;
+    const auto options = child_startup_options(args);
+    if (!options.launch.provenance.fields.contains("engine.kv_capacity") ||
+        options.launch.engine.kv_capacity.mode != KvCapacityMode::Explicit) return std::nullopt;
+    return options.launch.engine.kv_capacity.explicit_tokens;
 }
 
 // The engine must still admit one full-context request, so the plan never shrinks below
 // --max-context (or a modest default when the flag is absent).
 inline std::int64_t kv_capacity_floor_tokens(const std::vector<std::string>& args) {
-    for (std::size_t i = 0; i + 1 < args.size(); ++i) {
-        if (args[i] != "--max-context") { continue; }
-        const std::string& v = args[i + 1];
-        if (!v.empty() && v.find_first_not_of("0123456789") == std::string::npos) { return std::stoll(v); }
-    }
-    return 32768;
+    return child_startup_options(args).launch.engine.max_context;
 }
 
 // Tokens to run at after a shortfall. The supervisor does not know the model's KV bytes per
@@ -1031,40 +1004,20 @@ inline std::int64_t reduced_kv_capacity(std::int64_t current_tokens, std::int64_
 }
 
 inline std::vector<std::string> with_kv_capacity(std::vector<std::string> args, std::int64_t tokens) {
-    for (std::size_t i = 0; i < args.size(); ++i) {
-        if (args[i] != "--kv-capacity") { continue; }
-        if (i + 1 < args.size()) {
-            args[i + 1] = std::to_string(tokens);
-        } else {
-            args.emplace_back(std::to_string(tokens));
-        }
-        return args;
-    }
-    args.emplace_back("--kv-capacity");
-    args.emplace_back(std::to_string(tokens));
-    return args;
+    return product::set_serve_argument(std::move(args), "engine.kv_capacity", std::to_string(tokens));
 }
 
 // The reserve the config file already asks for, so the menu can put a checkmark
 // on it before the user has ever chosen one. 0 when the flag is absent.
 inline int desktop_reserve_from_args(const std::vector<std::string>& args) {
-    for (std::size_t i = 0; i + 1 < args.size(); ++i) {
-        if (args[i] != "--desktop-reserve-gib") { continue; }
-        try {
-            return std::stoi(args[i + 1]);
-        } catch (...) { return 0; }
-    }
-    return 0;
+    try {
+        return static_cast<int>(child_startup_options(args).launch.engine.desktop_reserve_bytes >> 30);
+    } catch (...) { return 0; }
 }
 
 inline std::uint64_t desktop_reserve_launch_mib(const std::vector<std::string>& args, int preference) {
     const auto effective = preference >= 0 ? with_desktop_reserve(args, preference) : args;
-    std::uint64_t mib = 8192;
-    for (std::size_t i = 0; i + 1 < effective.size(); ++i) {
-        if (effective[i] == "--desktop-reserve-gib") mib = std::stoull(effective[i + 1]) * 1024;
-        if (effective[i] == "--desktop-reserve-mib") mib = std::stoull(effective[i + 1]);
-    }
-    return mib;
+    return child_startup_options(effective).launch.engine.desktop_reserve_bytes >> 20;
 }
 
 enum class TrayAction : std::uint8_t {

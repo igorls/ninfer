@@ -152,7 +152,7 @@ void HttpServer::handle_score(const httplib::Request& req, httplib::Response& re
             body.contains("candidates") ? body.at("candidates") : Json(nullptr);
 
         RequestLimits limits;
-        limits.default_max_tokens = options_.default_max_tokens;
+        limits.default_max_tokens = options_.launch.generation.max_tokens;
         const auto parse_branch   = [&](const ScoreQuestion& question, Json chat_body) {
             try {
                 return parse_chat_completion_request(chat_body, limits);
@@ -242,15 +242,10 @@ void HttpServer::handle_score(const httplib::Request& req, httplib::Response& re
                 entry.branches.push_back(branches.size());
                 branches.push_back(std::move(branch));
             } else {
-                // Each option is the continued final assistant turn, which the template opens
-                // exactly as the generation prompt does; so the option's first token sits at the
-                // count of the prompt up to the question, and its length is the count of the
-                // continued prompt minus that, with nothing rendered after it.
+                // Locate the supplied content in each actual continued prompt. Generation and
+                // continuation can insert different prefixes, including empty thinking blocks.
                 Json base_body{{"messages", messages}};
                 common_fields(base_body, false);
-                const OpenAIChatRequest base = parse_branch(entry, base_body);
-                const int first_token        = service_->count_prompt_tokens(
-                    base.generation, [&req] { return client_disconnected(req); });
                 for (std::size_t k = 0; k < entry.option_texts.size(); ++k) {
                     ScoreBranch branch;
                     branch.question = index;
@@ -262,8 +257,15 @@ void HttpServer::handle_score(const httplib::Request& req, httplib::Response& re
                     branch.request = parse_branch(entry, chat_body);
                     branch.request.generation.continuation =
                         ninfer::PromptContinuationMode::ContinueFinalAssistant;
-                    const int with_option = service_->count_prompt_tokens(
+                    const ninfer::PromptSummary summary = service_->describe_prompt(
                         branch.request.generation, [&req] { return client_disconnected(req); });
+                    if (!summary.continuation_frontier) {
+                        score_bad_request("question \"" + entry.id +
+                                              "\": template has no exact candidate content boundary",
+                                          param + ".candidates", "invalid_logprob_candidate");
+                    }
+                    const int first_token = static_cast<int>(*summary.continuation_frontier);
+                    const int with_option = static_cast<int>(summary.prompt_tokens);
                     const int length = with_option - first_token;
                     if (length <= 0 || first_token <= 0 ||
                         static_cast<std::size_t>(length) > kMaximumPromptReadouts) {

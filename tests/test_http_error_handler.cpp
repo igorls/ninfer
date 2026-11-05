@@ -8,7 +8,7 @@
 namespace {
 
 using Json = nlohmann::json;
-using ninfer::serve::ServeOptions;
+using ninfer::product::ServeOptions;
 
 int check(bool condition, const char* message) {
     if (condition) { return 0; }
@@ -20,7 +20,7 @@ int check(bool condition, const char* message) {
 
 int main() {
     int failures = 0;
-    ServeOptions options;
+    ninfer::product::ServeOptions options;
     options.max_request_bytes = 1234;
 
     const ninfer::serve::ApiError media_budget = ninfer::serve::request_error_to_api_error(

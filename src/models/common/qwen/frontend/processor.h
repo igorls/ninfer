@@ -90,6 +90,7 @@ struct ProcessedInput {
     std::vector<std::shared_ptr<const PreparedMediaPayload>> media_payloads;
     std::optional<RewriteCheckpointSpec> rewrite_checkpoint;
     std::optional<std::uint32_t> reasoning_frontier;
+    std::optional<std::uint32_t> continuation_frontier;
     std::vector<std::uint32_t> rewrite_execution_frontiers;
     std::vector<std::optional<std::uint32_t>> message_boundaries;
     std::vector<std::optional<std::uint32_t>> cache_boundaries;
@@ -112,6 +113,7 @@ struct EncodedChat {
     std::optional<RewriteCheckpointSpec> rewrite_checkpoint;
     // Absent when the rendered boundary is not an exact nonempty token frontier.
     std::optional<std::uint32_t> reasoning_frontier;
+    std::optional<std::uint32_t> continuation_frontier;
     std::vector<std::uint32_t> rewrite_execution_frontiers;
     std::vector<std::optional<std::uint32_t>> message_boundaries;
     std::vector<std::optional<std::uint32_t>> cache_boundaries;

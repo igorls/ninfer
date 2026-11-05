@@ -1,4 +1,4 @@
-﻿---
+---
 library_name: ninfer
 pipeline_tag: image-text-to-text
 inference: false
@@ -88,7 +88,7 @@ hf download igorls/Qwen3.8-27B-Uncensored-NVFP4-NInfer --local-dir .\models\orca
 .\build-win\apps\Release\ninfer-serve.exe .\models\orcarouter\qwen3_8_27b_orcarouter_nvfp4.ninfer `
   --host 127.0.0.1 --port 8010 --model-id qwen3.8-27b-orcarouter `
   --max-context 32768 --kv-capacity auto --max-concurrency 4 `
-  --prefill-chunk 2048 --kv-dtype fp8 --desktop-reserve-gib 3 `
+  --prefill-chunk 2048 --kv-dtype fp8 --desktop-reserve 3GiB `
   --clamp-concurrency-to-pool
 ```
 
@@ -118,8 +118,8 @@ Restart the server with one of these additions:
 
 | Backend | Additional launch arguments |
 |---|---|
-| MTP, optimized proposal head | `--spec mtp --draft-tokens 5 --lm-head-draft` |
-| DFlash2, optimized proposal head | `--spec dflash2 --draft-tokens 7 --lm-head-draft` |
+| MTP, optimized proposal head | `--spec mtp --draft-tokens 5 --proposal-head optimized` |
+| DFlash2, optimized proposal head | `--spec dflash2 --draft-tokens 7 --proposal-head optimized` |
 | DFlash2, full BF16 proposal head | `--spec dflash2 --draft-tokens 7` |
 
 The DFlash2 companion was trained for canonical Qwen3.8-27B. Its acceptance on this derivative is workload dependent. Different verification widths select different floating-point kernel paths, so this integration does not promise byte-identical output to ordinary decoding. The target verifies proposed tokens; acceptance rate is not an answer-quality metric.

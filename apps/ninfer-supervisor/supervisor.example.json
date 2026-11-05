@@ -24,7 +24,8 @@
       "dflash2",
       "--draft-tokens",
       "7",
-      "--lm-head-draft",
+      "--proposal-head",
+      "optimized",
       "--cors"
     ],
     "workdir": "P:/NInfer",
@@ -77,7 +78,8 @@
         "dflash2",
         "--draft-tokens",
         "7",
-        "--lm-head-draft",
+        "--proposal-head",
+      "optimized",
         "--cors"
       ]
     },
@@ -108,7 +110,8 @@
         "mtp",
         "--draft-tokens",
         "5",
-        "--lm-head-draft",
+        "--proposal-head",
+      "optimized",
         "--cors"
       ]
     },

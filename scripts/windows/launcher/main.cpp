@@ -147,12 +147,13 @@ Json create_config(const fs::path& model_path, const fs::path& bin, const fs::pa
     std::vector<std::string> args{
         "--host", "127.0.0.1", "--port", std::to_string(engine_port),
         "--model-id", model, "--max-context", "16384", "--kv-capacity", "32768",
-        "--max-concurrency", "2", "--prefill-chunk", "2048", "--desktop-reserve-gib", "8",
+        "--max-concurrency", "2", "--prefill-chunk", "2048", "--desktop-reserve", "8GiB",
         "--kv-dtype", "fp8",
         "--request-log-jsonl", path_text(data / L"logs/requests.jsonl")};
     if (info.mtp) {
         args.insert(args.end(), {"--spec", "mtp", "--draft-tokens", "3"});
-        if (info.optimized_mtp) args.push_back("--lm-head-draft");
+        if (info.optimized_mtp)
+            args.insert(args.end(), {"--proposal-head", "optimized"});
     }
     else
         args.insert(args.end(), {"--spec", "none"});

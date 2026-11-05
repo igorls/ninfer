@@ -224,6 +224,11 @@ questions. It never runs generated code or accepts a teacher answer as gold. The
 are ordered integer operations, first-match policies, directed shortest paths, and 0/1 allocation.
 Each has four **size** strata; difficulty is established later by the target model's outcomes.
 
+The collection recipes below describe historical source/artifact combinations and
+have not been migrated to the current v3 startup contract. For a current Engine,
+use the [main setup guide](../../../README.md) and [startup configuration](../../../docs/startup-configuration.md).
+Retain the recorded collection source when reproducing those earlier recipes.
+
 Use a full 96 GB G4 runtime, enough host RAM for Flash-Next's mapped PLE table, and at least
 114 GB free disk for its artifact plus build/cache headroom. Upload the current source and
 build the C++ engine in the Colab environment (CUDA 13.3 is needed for the current Flash-Next

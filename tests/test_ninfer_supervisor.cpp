@@ -51,35 +51,35 @@ int test_model_reserve_budget() {
                            {{"runtime_reservation_bytes", 16 * gib},
                             {"minimum_runtime_reservation_bytes", 9 * gib},
                             {"available_after_weights_bytes", 18 * gib},
-                            {"cuda_graph_rebuild_estimate_bytes", gib}}},
+                            {"cuda_graph_rebuild_estimate_bytes", gib},
+                            {"kv_capacity_automatic", false}, {"kv_slack_floor_bytes", 0}}},
                           {"arenas", {{"weights", {{"capacity_bytes", 70 * gib}}}}},
                           {"desktop_reserve", {{"configured_bytes", 4 * gib}}},
                           {"device", {{"free_bytes", 8 * gib}}}};
     int f = 0;
-    f += check(model_reserve_budget(report, {"--kv-capacity", "786432"})["max_gib"] == 6,
-               "reserve retains explicit runtime capacity rather than just model minimum");
-    f += check(model_reserve_budget(report, {"--kv-capacity", "auto"})["max_gib"] == 12,
-               "automatic capacity may shrink to its model minimum while retaining slack");
-    f += check(model_reserve_budget(
-                   report, {"--kv-capacity", "auto", "--kv-slack-floor-mib", "0"})["max_gib"] == 12,
-               "automatic headroom remains required even with zero slack floor");
-    f += check(model_reserve_budget(report, {"--kv-capacity", "786432", "--kv-slack-floor-mib",
-                                             "4096"})["max_gib"] == 6,
-               "explicit capacity matches serving policy and ignores automatic slack option");
+    f += check(model_reserve_budget(report)["max_gib"] == 6,
+               "explicit pool retains the runtime reservation");
+    report["plan"]["kv_capacity_automatic"] = true;
+    report["plan"]["kv_slack_floor_bytes"] = gib;
+    f += check(model_reserve_budget(report)["max_gib"] == 12,
+               "automatic pool keeps the Engine's resolved slack");
+    report["plan"]["kv_slack_floor_bytes"] = 4 * gib;
+    f += check(model_reserve_budget(report)["max_gib"] == 9,
+               "file/argv-independent Engine slack is honored");
+    report["plan"]["kv_slack_floor_bytes"] = gib;
     report["device"]["free_bytes"] = 4 * gib;
-    f += check(model_reserve_budget(report, {"--kv-capacity", "auto"})["max_gib"] == 9,
-               "live app pressure still leaves automatic sizing headroom");
-    f += check(model_reserve_budget(report, {})["max_gib"] == 3,
-               "other app pressure and graph headroom reduce limit");
-    report["device"]["free_bytes"] = gib / 2;
-    f += check(model_reserve_budget(report, {})["max_gib"] == 0,
-               "no negative or underflowed reserve limit");
-    f += check(!model_reserve_budget(nullptr, {})["ok"].get<bool>(),
-               "no fabricated limit without model plan");
-    f += check(without_reserve_args(
-                   {"model.ninfer", "--desktop-reserve-gib", "3", "--kv-capacity", "400"}) ==
-                   std::vector<std::string>({"model.ninfer", "--kv-capacity", "400"}),
-               "model-setting identity ignores only reserve flags");
+    f += check(model_reserve_budget(report)["max_gib"] == 9,
+               "live app pressure reduces automatic sizing room");
+    report["plan"]["kv_capacity_automatic"] = false;
+    f += check(model_reserve_budget(report)["max_gib"] == 3,
+               "explicit pool keeps capacity under app pressure");
+    report["device"]["free_bytes"] = 0;
+    f += check(model_reserve_budget(report)["max_gib"] == 0, "no room leaves no reserve choice");
+    f += check(!model_reserve_budget(nullptr)["ok"].get<bool>(), "missing telemetry is unavailable");
+    f += check(without_reserve_args({"model.ninfer", "--desktop-reserve", "3GiB",
+                                   "--kv-capacity", "400"}) ==
+                   std::vector<std::string>{"model.ninfer", "--kv-capacity", "400"},
+               "reserve comparison preserves other child arguments");
     return f;
 }
 
@@ -136,7 +136,7 @@ int test_config_bind() {
     int f = 0;
     {
         auto c = ninfer::supervisor::load_config_json(
-            R"({"engine":{"executable":"x"},"models":[{"id":"interactive","name":"27B Interactive","description":"DFlash2, seven drafts","artifact":"model.ninfer","args":["--spec","dflash2","--draft-tokens","7","--lm-head-draft"]}]})");
+            R"({"engine":{"executable":"x"},"models":[{"id":"interactive","name":"27B Interactive","description":"DFlash2, seven drafts","artifact":"model.ninfer","args":["--spec","dflash2","--draft-tokens","7","--proposal-head", "optimized"]}]})");
         const auto restored =
             ninfer::supervisor::load_config_json(ninfer::supervisor::config_to_json(c).dump());
         f += check(restored.models.size() == 1 && restored.models[0].name == "27B Interactive" &&
@@ -1299,49 +1299,29 @@ int test_health_threshold() {
 int test_with_desktop_reserve() {
     using namespace ninfer::supervisor;
     int f = 0;
-    const std::vector<std::string> base{"model.ninfer", "--port", "8190", "--desktop-reserve-gib",
-                                        "3"};
+    const std::vector<std::string> base{"model.ninfer", "--port", "8190", "--desktop-reserve", "3GiB"};
     const auto rewritten = with_desktop_reserve(base, 6);
-    f += check(rewritten.size() == 5 && rewritten[3] == "--desktop-reserve-gib" &&
-                   rewritten[4] == "6",
-               "existing reserve is rewritten in place");
-
-    const std::vector<std::string> none{"model.ninfer", "--port", "8190"};
-    const auto appended = with_desktop_reserve(none, 4);
-    f += check(appended.size() == 5 && appended[3] == "--desktop-reserve-gib" && appended[4] == "4",
-               "missing reserve is appended");
-
-    const std::vector<std::string> mib{"model.ninfer", "--desktop-reserve-mib", "1700"};
-    f += check(desktop_reserve_launch_mib(mib, 8) == 1700,
-               "MiB pin determines next launch despite standing preference");
-    f += check(desktop_reserve_launch_mib({"--desktop-reserve-gib", "0"}, kReserveUnset) == 0,
-               "explicit zero remains zero");
-    f += check(desktop_reserve_launch_mib(base, 0) == 8192,
-               "engine default preference removes configured reserve");
-    f += check(with_desktop_reserve(mib, 8) == mib, "--desktop-reserve-mib is left alone");
-
-    const std::vector<std::string> trailing{"model.ninfer", "--desktop-reserve-gib"};
-    const auto fixed = with_desktop_reserve(trailing, 2);
-    f += check(fixed.size() == 3 && fixed[1] == "--desktop-reserve-gib" && fixed[2] == "2",
-               "trailing flag with no value gets one, not a second pair");
-
-    const auto removed = with_desktop_reserve(base, 0);
-    f += check(removed.size() == 3 && removed[0] == "model.ninfer" && removed[2] == "8190",
-               "gib 0 removes the pair so the engine default applies");
-    f += check(with_desktop_reserve(none, 0) == none, "gib 0 with no flag changes nothing");
-    f += check(with_desktop_reserve(trailing, 0).size() == 1,
-               "gib 0 removes a valueless trailing flag");
-
-    f += check(desktop_reserve_from_args(base) == 3 && desktop_reserve_from_args(none) == 0,
-               "reserve read back from args");
-
-    // The menu asks the same question before it decides whether to offer the
-    // submenu at all: a live submenu over a pinned MiB reserve lets the user
-    // pick a number, writes it to prefs, and offers a model reload that changes
-    // nothing.
-    f += check(desktop_reserve_pinned(mib), "--desktop-reserve-mib is a pin");
-    f += check(!desktop_reserve_pinned(base) && !desktop_reserve_pinned(none),
-               "a gib reserve, or none, is not a pin");
+    f += check(rewritten.size() == 5 && rewritten[4] == "6GiB", "reserve edit preserves the child arguments");
+    f += check(desktop_reserve_from_args(base) == 3, "configured reserve is resolved");
+    f += check(desktop_reserve_from_args({"model.ninfer"}) == 8, "engine default reserve is resolved");
+    const std::vector<std::string> fine{"model.ninfer", "--desktop-reserve", "1700MiB"};
+    f += check(desktop_reserve_pinned(fine) && with_desktop_reserve(fine, 8) == fine,
+               "the GiB tray preserves a finer-grained capacity");
+    f += check(desktop_reserve_launch_mib(fine, 8) == 1700, "fine reserve controls launch budgeting");
+    f += check(desktop_reserve_launch_mib(base, 0) == 0, "zero explicitly overrides the nonzero default");
+    f += check(with_desktop_reserve({"model.ninfer"}, 0) ==
+                   std::vector<std::string>{"model.ninfer", "--desktop-reserve", "0GiB"},
+               "zero remains explicit when the flag was absent");
+    f += check(with_desktop_reserve({"model.ninfer", "--desktop-reserve"}, 2) ==
+                   std::vector<std::string>{"model.ninfer", "--desktop-reserve", "2GiB"},
+               "a valueless reserve can be repaired");
+    f += check(with_desktop_reserve({"model.ninfer", "--desktop-reserve=3GiB"}, 2) ==
+                   std::vector<std::string>{"model.ninfer", "--desktop-reserve=2GiB"},
+               "inline reserve is rewritten in place");
+    f += check(desktop_reserve_pinned({"model.ninfer", "--desktop-reserve=0.5GiB"}),
+               "inline fine reserve is pinned");
+    const auto redacted = redact_engine_args({"model.ninfer", "--api-key=secret-value"});
+    f += check(redacted[1] == "--api-key=(redacted)", "inline API key is redacted");
     return f;
 }
 
@@ -1733,11 +1713,11 @@ int test_engine_param_validation() {
     int f = 0;
     f += check(
         validate_engine_param_combination(
-            {{"spec", "dflash2"}, {"draft_tokens", "15"}, {"lm_head_draft", "true"}}, "qwen3.8-27b")
+            {{"spec", "dflash2"}, {"draft_tokens", "15"}, {"proposal_head", "optimized"}}, "qwen3.8-27b")
             .empty(),
         "DFlash2 permits 15 drafts");
     f += check(validate_engine_param_combination(
-                   {{"spec", "dflash2"}, {"draft_tokens", "7"}, {"lm_head_draft", "true"}},
+                   {{"spec", "dflash2"}, {"draft_tokens", "7"}, {"proposal_head", "optimized"}},
                    "qwen3.8-27b-orcarouter")
                    .empty(),
                "OrcaRouter permits DFlash2 with its separate artifact identity");
@@ -1757,17 +1737,17 @@ int test_engine_param_validation() {
                                                   "qwen3.8-flash-next")
                     .empty(),
                "Flash MTP rejects six drafts");
-    f += check(!validate_engine_param_combination({{"spec", "mtp"}, {"lm_head_draft", "true"}},
+    f += check(!validate_engine_param_combination({{"spec", "mtp"}, {"proposal_head", "optimized"}},
                                                   "qwen3.8-flash-next")
                     .empty(),
                "Flash MTP requires its full output head");
     f += check(
         !validate_engine_param_combination({{"spec", "dflash2"}}, "qwen3.8-flash-next").empty(),
         "Flash rejects DFlash2");
-    f += check(!validate_engine_param_combination({{"lm_head_draft", "true"}}).empty(),
+    f += check(!validate_engine_param_combination({{"proposal_head", "optimized"}}).empty(),
                "draft head requires speculation");
-    const auto head = parse_engine_args({"model.ninfer", "--spec", "dflash2", "--lm-head-draft"});
-    f += check(head.passthrough.empty() && find_param_value(head.params, "lm_head_draft"),
+    const auto head = parse_engine_args({"model.ninfer", "--spec", "dflash2", "--proposal-head", "optimized"});
+    f += check(head.passthrough.empty() && find_param_value(head.params, "proposal_head"),
                "draft head is editable instead of passthrough");
     f += check(validate_engine_params({{"max_concurrency", "8"}}).empty(), "in-range value passes");
     f += check(!validate_engine_params({{"max_concurrency", "16"}}).empty(),
@@ -1866,7 +1846,8 @@ int test_kv_capacity_adaptation() {
                "unrelated error line parsed as a reservation shortfall");
 
     const std::vector<std::string> args{"model.ninfer", "--max-context", "262144", "--kv-capacity",
-                                        "737280",       "--spec",        "mtp"};
+                                        "737280", "--max-concurrency", "4", "--spec", "mtp",
+                                        "--draft-tokens", "3"};
     f += check(explicit_kv_capacity(args) == std::optional<std::int64_t>(737280),
                "explicit kv capacity was not read from args");
     f += check(!explicit_kv_capacity({"--kv-capacity", "auto"}).has_value(),

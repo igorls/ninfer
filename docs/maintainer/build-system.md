@@ -64,7 +64,7 @@ conversion/evaluation scripts run separately from CMake and CTest.
 
 Shared CPU topology, affinity, worker startup and `TaskPool` belong to the ordinary C++
 `ninfer_cpu` library, linked with hwloc >= 2.5 and Threads. The x86 collective executor and CPUID
-implementation belong to `ninfer_cpu_executor`, compiled only for `rtx5090`. CPU MoE, the model runtime
+implementation belong to `ninfer_cpu_executor`, compiled only for `rtx5090`. CPU MoE, model execution
 when built with offload, and executor tests/benchmarks link it explicitly. Artifact Host page population uses shared
 worker startup/affinity facilities directly, without depending on the arithmetic executor.
 Linux direct-file I/O uses liburing >= 2.5. Windows uses its native overlapped-I/O implementation.
@@ -143,6 +143,12 @@ ctest --test-dir build-win -C Release
   unbuffered reads through `ReadFile`).
 - The Artifact materialization test's CUDA fault injection relies on GNU ld `--wrap`; on MSVC
   only its recovery check runs.
+- Expert-cache and PLE CUDA error injection require ELF symbol interposition and run on Linux.
+  Windows retains their ordinary storage, upload, lifetime and recovery cases; the expert-cache
+  executable explicitly reports that its injected CUDA-failure cases are skipped.
+- CPU benchmark accounting uses `GetProcessTimes` on Windows and process CPU accounting on Linux.
+  Loading reports use peak working set on Windows and peak RSS on Linux, both in KiB; compare
+  memory measurements within the same operating system.
 - The Visual Studio generator can report success after skipping a stale target. Confirm that an
   edited translation unit's object or library timestamp moved before measuring a binary.
 
@@ -163,19 +169,21 @@ conditional spdlog library. External include requirements follow their consuming
 | `text/` | `ninfer_text`, including bundled utf8proc C source |
 | `media/` | `ninfer_media_decode` |
 | `ops/` | `ninfer_ops`, `ninfer_nvfp4_non_rdc` |
-| `models/` | `ninfer_model_loading`, `ninfer_model_runtime` |
+| `models/` | `ninfer_model_loading`, `ninfer_model_control`, `ninfer_model_execution` |
 | `runtime/` | `ninfer_runtime_support`, `ninfer_engine` and its `ninfer::engine` alias |
 | `product/` | media acquisition, prompt input and logging libraries |
 | `serve/` | `ninfer_serve` |
 
 Component declaration order is not the execution dependency graph: CMake resolves named target
-links during generation. Model runtime can refer to the runtime support target declared later;
-support links core, while Engine links model runtime. The ownership and dependency contracts are
-defined by [Engine architecture](engine-architecture.md) and [Op development](op-development.md).
+links during generation. Model control and execution can refer to the runtime support target declared
+later; support links Core, while Engine links model execution and its control dependencies. The
+ownership and dependency contracts are defined by [Engine architecture](engine-architecture.md) and
+[Op development](op-development.md).
 
 ### Shared-library boundary
 
-Products, tests and benchmarks link the same internal shared libraries:
+Products, tests and benchmarks link the same internal component libraries. These are shared on
+Linux and static on Windows:
 
 | Target | Contents |
 |---|---|
@@ -217,12 +225,15 @@ with `CMAKE_CURRENT_LIST_DIR`; `include()` does not change `CMAKE_CURRENT_SOURCE
   preparation and compile policy are owned by `src/ops/CMakeLists.txt`.
 - Linear separates shared kernel and projection manifests. Format manifests list explicit sources
   and shape filenames with their actual `.cpp`/`.cu` extensions.
-- Models retain distinct immutable-loading and mutable-runtime targets. Native loading, execution
-  and Program manifests own architecture code; `common/qwen/sources.cmake` owns shared Frontend
-  and Vision sources. Shared bindings and context/MoE mechanisms have explicit target entries.
+- Models use `ninfer_model_loading` for definitions and immutable backing,
+  `ninfer_model_control` for Sessions, Frontends and context directories, and
+  `ninfer_model_execution` for RankPrograms, physical storage, Ops composition and Graphs.
+  Native loading, Session, execution and RankProgram manifests own architecture sources;
+  `common/qwen/sources.cmake` assigns shared Frontend and Vision sources to their control or
+  execution owner. Shared bindings and context/MoE mechanisms have explicit target entries.
   `common/moe/execution.*` owns the shared GPU calls; `schedule.*` bounds model-facing offload
   planning and traversal. `common/moe/offload/` is compiled only for `rtx5090`.
-  Runtime startup orchestration links model runtime; native startup planners only depend on
+  Runtime startup orchestration links model execution; native startup planners only depend on
   runtime support/contracts. Checkpoints/recipes do not define additional compile owners.
 - New files require an explicit manifest edit. New families require an explicit parent include.
   There is no recursive glob, directory discovery or generated shape/dispatch registry.

@@ -182,7 +182,7 @@ void apply_openai_prompt_cache_policy(GenerationRequest& request, OpenAIPromptCa
 }
 
 bool ServedModelNames::accepts(std::string_view name) const {
-    return name == id || name == kDefaultModelName ||
+    return name == id || name == ninfer::product::kDefaultModelName ||
            std::find(aliases.begin(), aliases.end(), name) != aliases.end();
 }
 

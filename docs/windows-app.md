@@ -134,7 +134,8 @@ the code as written, and links. Only http, https and mailto addresses become lin
 tab); images are never fetched, and HTML in a reply is shown as text. The page imposes no output
 limit of its own: by default it sets no limit (`max_tokens` `-1`, which ends the answer only at a
 stop condition or a full context), while **Parameters** can switch to the engine's
-`--default-max-tokens` (8192 unless the launch sets another value) or a custom token budget.
+configured default (`generation.max_tokens` or `--max-tokens`, 8192 unless the launch
+sets another value) or a custom token budget.
 Parameters also hold the sampling and reasoning fields the engine accepts, stop strings, a response
 format or JSON schema, token probabilities (answers then arrive whole, and a token view marks
 unsure tokens while an instant readout bar inspects each token's probability and top alternatives),
@@ -245,6 +246,11 @@ To update, rebuild Release and rerun `install.ps1` without `-ConfigPath`. The in
 runtime dependencies before stopping the installed app, replaces the binaries, retains one previous
 binary directory, and relaunches through Explorer. Configuration, logs and tray preferences remain.
 The login preference remains as selected in the tray. `-NoStart` installs without launching.
+
+When moving to unified startup configuration, update retained `engine.args` and
+`models[].args` to the canonical flags before starting the new engine. The installer
+preserves that JSON catalog. The [startup migration table](startup-configuration.md#existing-fork-launches)
+lists the replaced flags; new launcher profiles already use the current forms.
 
 Uninstall through **Settings → Apps → Installed apps → NInfer**, or run the installed
 `uninstall.ps1`. Uninstall stops the installed processes and removes the app, shortcuts and its

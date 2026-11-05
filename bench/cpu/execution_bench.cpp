@@ -1,15 +1,22 @@
 #include "core/cpu/executor.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <sys/resource.h>
+#endif
 
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cstdint>
 #include <iostream>
 #include <iomanip>
 #include <optional>
 #include <stdexcept>
 #include <string_view>
+#include <thread>
+#include <vector>
 
 namespace {
 using namespace ninfer;
@@ -24,10 +31,20 @@ std::uint32_t number(std::string_view text) {
 }
 
 double process_cpu_us() {
+#ifdef _WIN32
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user))
+        throw std::runtime_error("read process CPU time");
+    const auto ticks = [](FILETIME time) {
+        return (std::uint64_t(time.dwHighDateTime) << 32) | time.dwLowDateTime;
+    };
+    return (ticks(kernel) + ticks(user)) / 10.0;
+#else
     rusage usage{};
     if (getrusage(RUSAGE_SELF, &usage) != 0) throw std::runtime_error("read process CPU time");
     return (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1e6 + usage.ru_utime.tv_usec +
            usage.ru_stime.tv_usec;
+#endif
 }
 
 void measure(std::string_view name, CpuExecutionView execution, CpuWork work, std::uint32_t samples,

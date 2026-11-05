@@ -935,6 +935,37 @@ int test_assistant_continuation() {
                       ninfer::models::qwen::RewriteCheckpointKind::ResponseReplay &&
                   rendered.rewrite_checkpoint->offset == expected.find("<|im_start|>assistant"),
               "assistant continuation did not retain its replayable opener boundary");
+    const auto continued_tokens = fi::encode_rendered_chat(fixture_tokenizer(), rendered);
+    failures += check(rendered.continuation_boundary == expected.find("answer prefix") &&
+                          continued_tokens.continuation_frontier &&
+                          fixture_tokenizer().decode(std::span(continued_tokens.input_ids).subspan(
+                              *continued_tokens.continuation_frontier)) == "answer prefix",
+                      "continuation frontier did not exclude template-inserted content");
+    auto unaligned = rendered;
+    unaligned.continuation_boundary = expected.find("<think>") + 1;
+    failures += check(!fi::encode_rendered_chat(fixture_tokenizer(), unaligned).continuation_frontier,
+                      "continuation frontier accepted a boundary inside one token");
+
+    for (bool media : {false, true}) {
+        const auto frontend = make_frontend(resources(), media);
+        ninfer::PromptInput input;
+        if (media) input = image_input();
+        else input.messages.push_back({.role = ninfer::ChatRole::User,
+                                        .parts = {{.text = "question"}}});
+        input.messages.push_back({.role = ninfer::ChatRole::Assistant,
+                                  .parts = {{.text = "answer prefix"}}});
+        input.options.continuation = ninfer::PromptContinuationMode::ContinueFinalAssistant;
+        input.options.enable_thinking = false;
+        const auto prepared = frontend.prepare(std::move(input));
+        const auto frontier = prepared.summary().continuation_frontier;
+        failures += check(frontier &&
+                              fixture_tokenizer().decode(std::span(FrontendFactory::inspect(prepared)
+                                                                      .token_ids).subspan(*frontier)) ==
+                                  "answer prefix",
+                          "public continuation frontier changed through text/media preparation");
+        failures += check(!frontend.prepare_tokens({1, 2, 3}, false).summary().continuation_frontier,
+                          "raw tokens unexpectedly advertise an assistant continuation frontier");
+    }
 
     options.enable_thinking = true;
     failures += check(throws_invalid_argument([&] {

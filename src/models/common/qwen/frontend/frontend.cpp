@@ -622,7 +622,8 @@ PromptSummary PreparedPrompt::summary() const {
     return PromptSummary{.starts_in_reasoning = data_->starts_in_reasoning,
                          .prompt_tokens       = checked_token_count(data_->token_ids.size()),
                          .has_media           = data_->has_media(),
-                         .reasoning_frontier  = data_->reasoning_frontier};
+                         .reasoning_frontier  = data_->reasoning_frontier,
+                         .continuation_frontier = data_->continuation_frontier};
 }
 
 PromptPreparationStats PreparedPrompt::preparation_stats() const noexcept {
@@ -762,6 +763,7 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
         result.prepare.tokenize_seconds    = processed.stats.tokenize_seconds;
         result.identity.rewrite_checkpoint = processed.rewrite_checkpoint;
         result.reasoning_frontier          = processed.reasoning_frontier;
+        result.continuation_frontier       = processed.continuation_frontier;
         result.identity.rewrite_execution_frontiers =
             std::move(processed.rewrite_execution_frontiers);
         message_boundaries = std::move(processed.message_boundaries);
@@ -783,6 +785,7 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
         result.token_ids                   = std::move(encoded.input_ids);
         result.identity.rewrite_checkpoint = encoded.rewrite_checkpoint;
         result.reasoning_frontier          = encoded.reasoning_frontier;
+        result.continuation_frontier       = encoded.continuation_frontier;
         result.identity.rewrite_execution_frontiers =
             std::move(encoded.rewrite_execution_frontiers);
         message_boundaries = std::move(encoded.message_boundaries);

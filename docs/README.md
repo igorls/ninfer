@@ -7,6 +7,7 @@ run the CLI or HTTP server.
 
 | Document | Purpose |
 |---|---|
+| [Startup configuration](startup-configuration.md) | shared CLI/serve TOML schema, defaults, overrides, resource controls and startup display |
 | [CLI](cli.md) | text, chat-history, image/video input, output streams, sampling, MTP, and common runtime options |
 | [HTTP serving](serving.md) | OpenAI Responses/Chat Completions, Anthropic Messages, TypeSafe System One, state, streaming, token counting, authentication, and tool calls |
 | [Demos](index.html) | Arena Duel, Tetris, chess, Kitchen Rush, Beacon Runner, the cube speed run, the decision analyzer, and the dual-purpose readout |
@@ -43,6 +44,17 @@ is not qualified for production.
 - [Tools](../tools/README.md)
 - [Capability evaluation](../eval/README.md)
 
+## Designs
+
+- [Distributed execution](distributed-execution-design.md) — selected architecture for centralized
+  scheduling, local/distributed executors, rank ownership, parallel plans and communication;
+  implementation is pending.
+- [Qwen4Exp parallel strategy](qwen4_exp-parallel-design.md) — selected initial dual-Spark
+  TP2/EP2 strategy, state shards, computation/graph composition and implementation dependencies.
+- [GLM5Next design and implementation](designs/glm5next/README.md) — selected dual-Spark
+  placement, KDA ReplaySSM, Kpool Sparse MLA, mHC and the existing Op checklist; separates
+  decisions, implementation status and retirement of designs after code takes ownership.
+
 ## Maintainer references
 
 The active references under [`maintainer/`](maintainer/) record current architecture, model,
@@ -63,6 +75,8 @@ other references own narrower contracts:
 | [Qwen3.5 model](maintainer/qwen3_5-model.md) | Dense/MoE mathematics, instance config, logical parameters, MTP, Vision and state semantics |
 | [Qwen4Exp model and weights](maintainer/qwen4_exp-model.md) | Flash Next architecture, quantization recipe, merged projections, expert banks and PLE representation |
 | [Qwen4Exp execution and state](maintainer/qwen4_exp-execution.md) | current support, layer flow, PLE pipeline, MTP/Vision, continuation, resource planning and CUDA Graph |
+| [GLM5Next model semantics](maintainer/glm5next-model.md) | architecture, complete mathematics, logical weights, Main/MTP/Vision and history dependencies |
+| [GLM5Next quantization and numerics](maintainer/glm5next-quantization.md) | selected source/weight/cache representations, exact codecs, activation policy and rounding boundaries; implementation status belongs to the design index |
 | [Expert weight cache](maintainer/expert-weight-cache.md) | Host/GPU bank sources, replica cache, mixed CPU/GPU execution, streaming and graph handoffs |
 | [DFlash and DFlash2](maintainer/dflash.md) | conditioning, masked draft computation, proposal distributions and backend state |
 | [Constrained decoding](maintainer/constrained-decoding.md) | GBNF/JSON/choice/regex, tool policies, masks, speculative transactions and observations |

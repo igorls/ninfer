@@ -108,7 +108,7 @@ SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request
     };
 
     RequestLimits limits;
-    limits.default_max_tokens = options_.default_max_tokens;
+    limits.default_max_tokens = options_.launch.generation.max_tokens;
     const auto branch_request = [&](Json messages, Json candidates, bool publish) {
         return parse_chat_completion_request(
             Json{{"model", served_model_names_.id},
@@ -136,7 +136,7 @@ SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request
     const Json base          = build_systemone_messages(request);
     const bool publish_state = !read_only && request.questions.size() > 1;
     const std::string protocol(endpoint);
-    const SystemOnePolicy& policy = request.policy;
+    const ninfer::product::SystemOnePolicy& policy = request.policy;
     std::vector<bool> policy_question(request.questions.size(), false);
     for (std::size_t q = 0; q < request.questions.size(); ++q) {
         const SystemOneQuestion& question           = request.questions[q];
@@ -167,7 +167,7 @@ SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request
         const std::size_t count = policy_option_count(question);
         policy_question[q] = policy.active() && !question.two_token_labels && count >= 1 &&
                              count <= kMaximumPolicyOptions;
-        if (policy_question[q] && policy.readout == SystemOnePolicy::Readout::Averaged) {
+        if (policy_question[q] && policy.readout == ninfer::product::SystemOnePolicy::Readout::Averaged) {
             if (question.type == SystemOneQuestionType::Choice && count >= 2) {
                 SystemOneBranch letter;
                 letter.question = q;
@@ -220,7 +220,7 @@ SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request
     std::shared_ptr<RequestLifetime> lifetime;
     SystemOneUsage usage;
     usage.policy  = policy.active();
-    usage.readout = policy.readout == SystemOnePolicy::Readout::Averaged ? "averaged" : "single";
+    usage.readout = policy.readout == ninfer::product::SystemOnePolicy::Readout::Averaged ? "averaged" : "single";
     // One Engine request through the shared product path: prepared, logged, run to completion.
     const auto run_chat = [&](const OpenAIChatRequest& chat) {
         const std::uint64_t req_id = ++request_seq_;

@@ -20,9 +20,9 @@ See [CUDA synchronization](cli.md#cuda-synchronization) for the shared `NINFER_C
   --kv-capacity 240000 \
   --max-concurrency 2 \
   --kv-dtype fp8 \
-  --device-state-slots 2 \
+  --extra-state-slots 2 \
   --spec mtp --draft-tokens 3 \
-  --lm-head-draft \
+  --proposal-head optimized \
   --preserve-thinking
 ```
 
@@ -33,13 +33,13 @@ the pool, the scheduler can pause a request and restore it later.
 
 With `C=2` and two extra Device slots, the process owns four Device StateImages. The default shared
 pinned Host budget on RTX 5090 is 8 GiB plus eight model StateImages. This pool holds retained
-state, KV and pause snapshots, including in-flight destinations; `--host-context-mib` sets an
+state, KV and pause snapshots, including in-flight destinations; `--host-cache-capacity` sets an
 explicit total instead. DGX Spark uses Device context storage with zero Host context capacity.
 
 Other artifacts use the same command shape with their own path. For 35B-A3B DFlash, replace the MTP
-selection with `--spec dflash --draft-tokens 7 --lm-head-draft`. Qwen3.8-27B
+selection with `--spec dflash --draft-tokens 7 --proposal-head optimized`. Qwen3.8-27B
 artifacts with DFlash2 companion weights also support `--spec dflash2 --draft-tokens 7`, with
-`--lm-head-draft` optional. DFlash2 accepts draft counts 1..15 and supports the same sampling,
+`--proposal-head optimized` optional. DFlash2 accepts draft counts 1..15 and supports the same sampling,
 concurrency, prefix reuse, and image/video request surfaces. It may remain combined with
 `--vision`.
 
@@ -55,7 +55,7 @@ Vision is disabled by default: its weights and Vision-specific unified-workspace
 allocated, and media requests and token-count requests fail with HTTP 400 `vision_disabled`. Add
 `--vision` when the server must accept image or video input. Speculative residency is likewise
 frozen by `--spec mtp|dflash|dflash2` and `--draft-tokens`; omitting `--spec` loads no speculative backend.
-`--lm-head-draft` additionally loads the optimized proposal head. DFlash on 35B-A3B and DFlash2 on Qwen3.8-27B can be combined
+`--proposal-head optimized` additionally loads the optimized proposal head. DFlash on 35B-A3B and DFlash2 on Qwen3.8-27B can be combined
 with `--vision`; each accelerates generated-text decode after multimodal prefill, while Vision encode
 and prefill remain outside speculative acceleration. A later request cannot enable a capability
 omitted at startup. The artifact need only contain the Text backbone and the optional components
@@ -82,8 +82,8 @@ docker run --rm \
   ninfer-serve /models/qwen3_8_27b_nvfp4.ninfer \
   --host 0.0.0.0 \
   --max-context 32768 --kv-capacity 65536 --max-concurrency 2 \
-  --kv-dtype fp8 --desktop-reserve-gib 6 \
-  --spec mtp --draft-tokens 3 --lm-head-draft --preserve-thinking
+  --kv-dtype fp8 --desktop-reserve 6GiB \
+  --spec mtp --draft-tokens 3 --proposal-head optimized --preserve-thinking
 ```
 
 ## Endpoints
@@ -362,13 +362,15 @@ question takes one of two forms, reported as `form`:
   the first generated token, so a format whose first token is punctuation (a JSON string quote) is
   not useful here.
 - `text`: some candidate spans several tokens. One request per candidate renders it as the
-  continued final assistant turn, opened exactly as generation opens an answer, and reads the
+  continued final assistant turn and reads the
   log-probability of each of its tokens at its prompt position. `candidate_logprobs[].raw_logprob`
   is their sum, the candidate's conditional log-probability; `logprob` renormalises the sums over
   the list; `tokens` lists the per-token entries with their positions, so a client can apply its
   own length normalisation. Token ids cannot be mixed into such a list, `response_format` does not
   apply, and the form needs thinking off. Cost is one prefill of the question and candidate per
-  candidate, all reading the shared prefix.
+  candidate, all reading the shared prefix. Scoring starts at the frontend's exact supplied-content
+  boundary in that continuation; template-inserted content such as an empty thinking block is
+  excluded. A template without an exact token boundary there cannot score that text candidate.
 
 Every result also carries `entropy` (nats) and `margin` (top-two probability ratio) of its
 distribution.
@@ -542,12 +544,12 @@ Anthropic Messages. Values duplicated in typed request fields must agree. Null s
 mean unspecified; other null values remain `none`. Messages, tools, generation mode and tokenizer
 special tokens cannot be overridden through kwargs.
 
-`--default-thinking-budget N` sets a positive default thinking-token cap for requests that start
+`--thinking-budget N` sets a positive default thinking-token cap for requests that start
 in thinking mode. Non-thinking requests receive no cap. It may coexist with `--no-thinking`
 because requests can explicitly enable thinking. Anthropic
 `thinking:{"type":"enabled","budget_tokens":N}` overrides this default for that request.
 
-Add `--default-thinking-budget 512` to the startup command to cap model-origin thinking at 512
+Add `--thinking-budget 512` to the startup command to cap model-origin thinking at 512
 tokens for every thinking-enabled request.
 
 At the cap boundary, Engine first honors a natural `</think>`, stop condition, cancellation, or
@@ -722,8 +724,8 @@ through aggregate source-byte, decoded-pixel, raw-patch, Vision-token, and live-
 Media cache misses run as independent decode → resize → BF16-pack tasks on a bounded host worker
 pool. Prepared payloads are keyed by SHA-256 of the acquired bytes plus modality, so repeated media
 in later requests reuses the exact immutable BF16 patch input; concurrent identical misses use one
-single-flight build. `--media-cache-mib` bounds LRU-retained payloads, while
-`--media-live-mib` bounds every cache-, request-, or runtime-referenced payload. Cache eviction does
+single-flight build. `--media-cache-capacity` bounds LRU-retained payloads, while
+`--media-live-capacity` bounds every cache-, request-, or runtime-referenced payload. Cache eviction does
 not invalidate a request reference, and live bytes are returned only when the final reference is
 released. A request-level preparation gate derived from the live limit prevents concurrent partial
 builds from deadlocking the memory account.
@@ -731,7 +733,7 @@ builds from deadlocking the memory account.
 An expanded prompt beyond `--max-context` returns HTTP 400 `context_length_exceeded`, including
 the prepared token count and configured context ceiling. A media preprocessing resource rejection
 returns HTTP 400 `media_budget_exceeded`. HTTP 413 `request_too_large` is reserved for a raw request
-body that exceeds `--max-request-mib` before JSON parsing; it is not used for model-context or media
+body that exceeds `--max-request-size` before JSON parsing; it is not used for model-context or media
 resource errors.
 
 ## OpenAI prompt caching
@@ -808,7 +810,7 @@ wire response contains typed `output` Items.
 | `input` | string or typed Item array; it may be omitted or empty only when `previous_response_id` already supplies a user query |
 | `instructions` | optional string, inserted before the reconstructed conversation for this request only |
 | `previous_response_id` | optional ID of a retained local Response |
-| `max_output_tokens` | non-negative integer; omission executes with `--default-max-tokens` but remains `null` in the Response object |
+| `max_output_tokens` | non-negative integer; omission executes with `--max-tokens` but remains `null` in the Response object |
 | `stream` | boolean; `true` selects Responses SSE rather than a JSON body |
 | `store` | boolean, default `true`; controls local retrieval and continuation state |
 | `temperature` | finite number in `[0,2]` |
@@ -1071,7 +1073,7 @@ positional: a string-form System value, a later array block, or an inline System
 same text remains ordinary prompt content. A `cache_control` marker attached to the consumed block
 is consumed with it rather than moved to adjacent content.
 
-`max_tokens` is optional for local clients and otherwise uses `--default-max-tokens`; a positive
+`max_tokens` is optional for local clients and otherwise uses `--max-tokens`; a positive
 value is the complete output budget. `max_tokens:0` is rejected because NInfer does not expose a
 completed zero-output cache-prewarm lifecycle. `temperature`, `top_p`, `top_k`, and
 `stop_sequences` enter Engine execution. A matched custom stop is returned as
@@ -1550,70 +1552,15 @@ curl http://127.0.0.1:8080/v1/models \
 
 ## Server options
 
-The table lists executable defaults. The startup example selects a long-context FP8/MTP3 profile.
+The complete field, default, unit and file/argv precedence contract is in
+[Startup configuration](startup-configuration.md), including the fork's desktop,
+model aliases, expert observation, System One and rerank fields. The executable
+`--help` uses the same catalog. Use `--config FILE` for TOML or pass explicit flags.
 
-| Option | Meaning | Default |
-|---|---|---:|
-| `--host H` | listen address | `127.0.0.1` |
-| `--port N` | listen port | `8080` |
-| `--api-key KEY` | required bearer or `x-api-key` value | unset |
-| `--api-key-file PATH` | read the required key from a file | unset |
-| `--model-id ID` | override the public OpenAI model alias | artifact `identity.model_id` |
-| `--model-alias NAME` | another request name for the served model; repeatable; listed by `GET /v1/models` | none |
-| `--rerank-model-id ID` | model id advertised for `POST /v1/rerank` and accepted beside the served id | `ninfer-choice-rerank-v1` |
-| `--rerank-max-documents N` | maximum `documents` array length for `POST /v1/rerank` | `256` |
-| `--rerank-weight-exact F` | relevance weight of the exact-match Choice option | `1` |
-| `--rerank-weight-substitute F` | relevance weight of the substitute Choice option | `0.6` |
-| `--rerank-weight-complement F` | relevance weight of the complement Choice option | `0.25` |
-| `--rerank-weight-irrelevant F` | relevance weight of the irrelevant Choice option | `0` |
-| `--max-context N` | logical context ceiling of each sequence | `8192` |
-| `--kv-capacity N\|auto` | shared Main Text KV capacity; `auto` maximizes resident-model KV, or reserves one context with CPU expert offload; omitted means `--max-context` | `8192` |
-| `--max-concurrency N` | resident execution lanes; valid range `1..8` | `1` |
-| `--clamp-concurrency-to-pool` | lower concurrency to the number of full-context sequences the KV pool backs | off |
-| `--desktop-reserve-gib N`, `--desktop-reserve-mib N` | device memory kept free for the desktop and other applications; sizing uses device-wide (NVML) free memory, and no Engine allocation may take the device below the reserve after startup | `8` GiB |
-| `--kv-slack-floor-mib N` | device memory `--kv-capacity auto` leaves unreserved | `1024` |
-| `--max-pending-requests N` | additional requests allowed to wait for admission | `16` |
-| `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `30000` |
-| `--prefill-chunk N` | text-prefill chunk; positive multiple of 128 | `4096` for Qwen4Exp or CPU expert offload; otherwise `1024` |
-| `--log-stats-interval-ms N` | aggregate throughput report interval; `0` disables it | `5000` |
-| `--log-level trace\|debug\|info\|warning\|error\|critical\|off` | pretty stderr verbosity | `info` |
-| `--device N` | CUDA device index | `0` |
-| `--context-cost-presets FILE` | optional runtime context-cost preset registry | generic + compiled defaults |
-| `--max-request-mib N` | body-size limit before JSON parsing | `384` |
-| `--media-cache-mib N` | LRU-retained prepared BF16 media payloads; `0` disables retention | `1024` |
-| `--media-live-mib N` | all live prepared BF16 media payloads | `2048` |
-| `--media-preprocess-threads N` | bounded media preprocessing workers; `0` selects at most 16 from host concurrency | `0` |
-| `--request-log-jsonl FILE` | append full-precision server/request records | disabled |
-| `--expert-stats` | keep live routed-expert counts for `GET /admin/experts` | off |
-| `--expert-trace DIR` | also write every routed selection to `DIR/expert-trace-<server instance>.nxtr`; implies `--expert-stats` | off |
-| `--expert-trace-max-gib N` | stop growing one trace file at N GiB (later records are counted as dropped) | `16` |
-| `--response-store-max-records N` | maximum locally retained Responses objects | `1024` |
-| `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |
-| `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
-| `--spec mtp\|dflash\|dflash2` | speculative backend | off |
-| `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
-| `--lm-head-draft` | optimized proposal head | off |
-| `--default-max-tokens N` | output limit when omitted by a request | `8192` |
-| `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
-| `--vision` | enable media input and load Vision GPU allocations | off |
-| `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
-| `--no-prefix-reuse` | disable compatible-prefix caching | prefix reuse on |
-| `--device-state-slots N` | extra Device StateImages beyond `max-concurrency` | `max-concurrency` |
-| `--host-context-mib N` | RTX 5090 pinned Host budget for StateImages, KV and pause snapshots, including in-flight destinations; DGX Spark keeps this capacity at zero | `8192 MiB + 8 native StateImages` on RTX 5090; `0` on DGX Spark |
-| `--no-thinking` | disable thinking by default | thinking on |
-| `--preserve-thinking` | preserve closed-turn assistant reasoning by default | off |
-| `--cors` | permissive browser CORS headers | off |
-| `--systemone-readout single|averaged` | System One readout for requests without a `policy` ([decision policy](#decision-policy)) | single |
-| `--systemone-reasoning-budget N` | System One thinking budget for escalated questions; 0 disables escalation | 0 |
-| `--systemone-escalate-entropy F` | normalised-entropy threshold above which a System One question is escalated | 0.66 |
-| `--temperature F` | process-level temperature override | unset |
-| `--top-p F` | process-level top-p override | unset |
-| `--top-k N` | process-level top-k override (`0..20`; zero selects the top-20 cap) | unset |
-| `--min-p F` | process-level min-p override | unset |
-| `--presence-penalty F` | process-level presence-penalty override | unset |
-| `--frequency-penalty F` | process-level frequency-penalty override | unset |
-| `--seed N` | fixed seed when a request omits one | fresh random seed per request |
-| `--greedy` | force exact argmax for all requests | off |
+Sampling fields at startup are request defaults. An explicit HTTP request field takes
+precedence, including temperature; use `--temperature 0` for a greedy default.
+`--preserve-thinking` enables closed-turn assistant reasoning by default; it remains
+off unless selected, and `--preserve-thinking=model` restores the template policy.
 
 Context-cost coefficients resolve once at startup from generic defaults, matching compiled values,
 and optional transfer or prefill entries from `--context-cost-presets FILE`. Prefill entries match
@@ -1627,11 +1574,12 @@ Qwen3.6-27B and Qwen3.8-27B use `1.0/0.95/20/0/0` for
 temperature/top-p/top-k/min-p/presence penalty in thinking mode and `0.7/0.80/20/0/0` in
 non-thinking mode. Qwen3.6-35B-A3B uses a presence penalty of `1.5` in both modes.
 Frequency penalty is `0` for all registered presets. Process flags override registered values,
-request fields override process flags, and `--greedy` finally forces temperature `0`.
+request fields override process settings. `--temperature 0` sets the default to greedy sampling;
+an explicit request temperature takes precedence.
 
-For `C=--max-concurrency` and `H=--device-state-slots`, total Device StateImage capacity is `C+H`.
+For `C=--max-concurrency` and `H=--extra-state-slots`, total Device StateImage capacity is `C+H`.
 Host state and Main/Backend KV share one startup-fixed byte budget; this is context storage, not a
-limit on total process RAM. `--host-context-mib 0` disables Host context backing.
+limit on total process RAM. `--host-cache-capacity 0B` disables Host context backing.
 `--no-prefix-reuse` disables cross-request history reads and writes; pause/replay recovery remains
 available, and the capacity flags may still be specified.
 
@@ -1652,7 +1600,7 @@ Serve emits one warning with only the failure classification, never the generate
 
 `GET /metrics` serves Prometheus text format 0.0.4 on the same port. It follows the server's
 API-key authentication and works independently of `--request-log-jsonl` and
-`--log-stats-interval-ms`. Engine failure leaves the endpoint readable with
+`--stats-interval`. Engine failure leaves the endpoint readable with
 `ninfer_engine_ready 0`. Counters start after startup warmup and reset when the server restarts.
 
 ```bash
@@ -1715,7 +1663,7 @@ the decayed decode activations. `?totals=1` adds the undecayed counts since star
 by the request log's `server_instance_id` (a timestamp when the request log is off). Each column
 carries the request-log `request_id` of its request and the absolute token position. The file is
 written by a background thread through a 64 MiB queue; a full queue, or a file at its
-`--expert-trace-max-gib` limit, drops records and counts them under `trace.records_dropped`
+`--expert-trace-max-size` limit, drops records and counts them under `trace.records_dropped`
 instead of delaying the Engine. Decode rounds and MTP units keep one row per logical input
 column; inactive rows and padding in a ragged verification are excluded. A
 prefill chunk of 52 or more tokens is stored as one per-layer histogram of expert counts (about
@@ -1729,7 +1677,7 @@ in append mode and flushes every event, so successive model or MTP blocks may sh
 file. The parent directory must already exist. Failure to open the file aborts startup; the log path
 is also rejected if it resolves to the model artifact.
 
-Every line is one `ninfer_serve_request_log` schema-v29 JSON object. All events carry
+Every line is one `ninfer_serve_request_log` schema-v31 JSON object. All events carry
 `timestamp_unix_ms` and a process-unique `server_instance_id`; request IDs are monotonic only within
 that server instance. Successful request-start records include request-scoped acquisition,
 media-preprocessing wall/work, tokenizer, cache hit/miss/single-flight, and payload-size fields;
@@ -1737,6 +1685,7 @@ they do not infer request behavior from process-global counter deltas.
 
 | Event | Contents |
 |---|---|
+| `startup_config` | before model loading: active entry, configuration path, merged values, per-field default/file/argv sources, environment controls and redacted argv |
 | `server_start` | artifact path, architecture, public name, actual formats and prefill signature; resolved Engine and context-cache capacities, thinking/non-thinking sampler defaults plus process overrides, thinking-history and thinking-budget defaults, Device arenas, the optional non-additive Vision layout inside the unified workspace, unified Host context capacity and occupancy, KV sizing ledger, measured CUDA Graph rebuilding estimate and signed calibration/preparation deltas, CUDA/GPU environment, and redacted argv |
 | `request_start` | protocol, resolved sampler and seed, requested reasoning effort, actual initial thinking mode and optional budget, Responses semantic-change flag, output budget, stream/message/tool shape, `client` (the `User-Agent` header), and `tools_digest` (an FNV-1a fingerprint of the ordered tool definitions; a change between two turns of one conversation invalidates its whole cached prefix) |
 | `request_rejected` | parsed request shape, requested reasoning effort, media-item count, `phase: "prepare"`, and the exact HTTP status/type/code/parameter/message for a synchronous preparation rejection |
@@ -1879,14 +1828,14 @@ cancelled, the next boundary rebuilds the batch without an empty row.
 request lifetime capacity is `max_concurrency + max_pending_requests`, including requests still in
 CPU/media preparation and completed model results whose response has not yet been released. A full
 capacity returns HTTP 429 with code `server_overloaded`. The absolute
-`--pending-timeout-ms` deadline starts before preparation, covers media acquisition and Engine FIFO
+`--pending-timeout` deadline starts before preparation, covers media acquisition and Engine FIFO
 waiting, and returns HTTP 503 with code `request_queue_timeout` if admission does not occur in time.
 Once admitted, a request may pause for resource pressure without restarting this initial-admission
 deadline. Fresh requests enter in FIFO order with a bounded bypass allowance when an earlier request
 cannot fit. There is no admission ETA or unbounded overflow queue.
 
 Input memory is bounded by the outstanding-request count and the per-request
-`--max-request-mib` limit. Media preparation uses a shared permit pool sized from `--media-live-mib`
+`--max-request-size` limit. Media preparation uses a shared permit pool sized from `--media-live-capacity`
 and the maximum supported prepared-payload size per request. Waiting media requests retain the same
 cancellation and timeout deadline. Model output is bounded by the same finite request count and
 each request's effective output-token limit; output callbacks and network serialization run
@@ -1896,7 +1845,7 @@ outside the GPU executor and do not delay formation of the next batch.
 pool used by active requests and retained prefixes. `auto` accounts for the complete enabled runtime
 when sizing the pool; omitting the option makes it follow `--max-context`. Both explicit and automatic
 capacity use 1 GiB of base startup planning headroom. On Spark, Vision additionally reserves
-`--media-live-mib` in shared memory. Capacity resolves once at startup.
+`--media-live-capacity` in shared memory. Capacity resolves once at startup.
 
 Before each prefill, decode or replay unit, the runtime reserves the additional pages and temporary
 storage required by that unit. It first reclaims inactive cache resources when capacity is short.

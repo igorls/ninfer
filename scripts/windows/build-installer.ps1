@@ -32,6 +32,7 @@ $licenses = @{
     'nlohmann-json.txt' = (Join-Path $repo 'third_party/nlohmann/LICENSE.MIT')
     'cpp-httplib.txt' = (Join-Path $repo 'third_party/cpp-httplib/LICENSE')
     'spdlog.txt' = (Join-Path $repo 'third_party/spdlog/LICENSE')
+    'tomlplusplus.txt' = (Join-Path $repo 'third_party/tomlplusplus/LICENSE')
     'utf8proc.txt' = (Join-Path $repo 'third_party/utf8proc/LICENSE.md')
     'xgrammar.txt' = (Join-Path $repo 'third_party/xgrammar/LICENSE')
     'dlpack.txt' = (Join-Path $repo 'third_party/xgrammar/3rdparty/dlpack/LICENSE')

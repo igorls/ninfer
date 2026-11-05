@@ -230,7 +230,7 @@ int main(int argc, char** argv) {
                 probe.device != current.device || probe.engine_host != current.engine_host || probe.engine_port != current.engine_port) {
                 return nlohmann::json{{"ok", false}, {"reason", "A ready engine with the saved model settings is needed to calculate the reserve limit."}};
             }
-            return ninfer::supervisor::model_reserve_budget(snapshot.admin_vram, current.args);
+            return ninfer::supervisor::model_reserve_budget(snapshot.admin_vram);
         });
         // Wired BEFORE start_series: the 1 Hz observe thread reads them, and
         // this is what makes health and engine-state observation independent of

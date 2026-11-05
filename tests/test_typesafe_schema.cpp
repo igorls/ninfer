@@ -515,13 +515,13 @@ int main() {
                                                    {"criteria", Json::array({"Calm", "Annoyed", "Hostile"})}}}}}};
         const SystemOneRequest plain = parse_systemone_request(body);
         failures += check(!plain.policy.active() &&
-                              plain.policy.readout == SystemOnePolicy::Readout::Single,
+                              plain.policy.readout == ninfer::product::SystemOnePolicy::Readout::Single,
                           "no policy field keeps the single readout");
-        SystemOnePolicy defaults;
-        defaults.readout          = SystemOnePolicy::Readout::Averaged;
+        ninfer::product::SystemOnePolicy defaults;
+        defaults.readout          = ninfer::product::SystemOnePolicy::Readout::Averaged;
         defaults.reasoning_budget = 1024;
         const SystemOneRequest defaulted = parse_systemone_request(body, defaults);
-        failures += check(defaulted.policy.readout == SystemOnePolicy::Readout::Averaged &&
+        failures += check(defaulted.policy.readout == ninfer::product::SystemOnePolicy::Readout::Averaged &&
                               defaulted.policy.reasoning_budget == 1024,
                           "server defaults apply when policy is omitted");
         body["policy"] = Json{{"readout", "averaged"}, {"reasoning_budget", 512},
@@ -533,7 +533,7 @@ int main() {
                           "explicit policy overrides the defaults");
         body["policy"] = Json{{"readout", "single"}};
         failures += check(parse_systemone_request(body, defaults).policy.readout ==
-                              SystemOnePolicy::Readout::Single,
+                              ninfer::product::SystemOnePolicy::Readout::Single,
                           "explicit single readout overrides an averaged default");
         for (const auto& invalid : std::vector<Json>{"averaged", Json{{"readout", "triple"}},
                                                      Json{{"reasoning_budget", -1}},

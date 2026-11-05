@@ -1,6 +1,7 @@
 #pragma once
 
 #include "serve/request.h"
+#include "product/systemone_policy.h"
 
 #include <nlohmann/json.hpp>
 
@@ -92,16 +93,6 @@ struct SystemOneQuestion {
 // has normalised entropy above `escalate_entropy` to a bounded-thinking generation and mixes its
 // answer in at `answer_weight`. Both apply to questions with at most kMaximumPolicyOptions
 // options; other questions keep the native readout.
-struct SystemOnePolicy {
-    enum class Readout : std::uint8_t { Single, Averaged };
-    Readout readout                = Readout::Single;
-    std::uint32_t reasoning_budget = 0; // 0 disables escalation
-    double escalate_entropy        = 0.66;
-    double answer_weight           = 0.7;
-    [[nodiscard]] bool active() const noexcept {
-        return readout == Readout::Averaged || reasoning_budget != 0;
-    }
-};
 constexpr std::size_t kMaximumPolicyOptions = 26;
 
 struct SystemOneRequest {
@@ -110,7 +101,7 @@ struct SystemOneRequest {
     std::vector<std::string> images;
     double temperature = 1.0;
     std::vector<SystemOneQuestion> questions;
-    SystemOnePolicy policy;
+    ninfer::product::SystemOnePolicy policy;
 };
 
 // Parses the JSON body text; malformed or empty bodies fail with Jev's 422 `json_invalid`/`missing`.
@@ -119,7 +110,7 @@ struct SystemOneRequest {
 // `temperature`, `images` and `policy` are the only accepted fields beyond TypeSafe's own; a
 // request without `policy` takes `defaults`.
 [[nodiscard]] SystemOneRequest parse_systemone_request(const SystemOneJson& body,
-                                                       const SystemOnePolicy& defaults = {});
+                                                       const ninfer::product::SystemOnePolicy& defaults = {});
 // The model identity an answer reports: the served id, with `-t<T>` when the candidate logits are
 // scaled. Requested names (`jev-latest`, the served id, anything else) never change execution.
 [[nodiscard]] std::string systemone_executed_model(std::string_view served_model_id,

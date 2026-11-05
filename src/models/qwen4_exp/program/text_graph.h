@@ -22,9 +22,11 @@ public:
                  std::span<const std::uint32_t> bounds, std::array<Tensor, 2> ple,
                  execution::TextOutputs, std::int32_t columns, MemoryArena&, DeviceContext&);
     void select(std::uint32_t visible_tokens);
-    void prefix(CudaExecutionView);
+    void begin_prefix(CudaExecutionView);
+    [[nodiscard]] bool advance_prefix(CudaExecutionView);
     void consume_ple(std::uint32_t slot, CudaExecutionView);
-    void suffix(CudaExecutionView);
+    [[nodiscard]] bool advance_suffix(CudaExecutionView);
+    void cancel();
 
     [[nodiscard]] std::size_t workspace_bytes() const {
         return profiles_[installed_].workspace_bytes;
@@ -38,7 +40,7 @@ private:
         std::size_t workspace_bytes = 0;
     };
 
-    void traverse(std::uint32_t begin, std::uint32_t end, CudaExecutionView);
+    [[nodiscard]] bool advance(std::uint32_t end, CudaExecutionView);
     GraphSegment stem_, ple_[2], finish_;
     DecodeGraphExecutable resident_prefix_, resident_suffix_;
     std::vector<Profile> profiles_;
@@ -48,6 +50,8 @@ private:
     std::uint32_t ple_layer_ = 0;
     std::size_t installed_   = 0;
     bool resident_          = false;
+    std::uint32_t next_layer_ = 0;
+    bool waiting_layer_ = false;
 };
 
 } // namespace ninfer::models::qwen4_exp

@@ -25,7 +25,7 @@ bool close_to(double left, double right, double eps = 1e-12) {
     return std::fabs(left - right) < eps;
 }
 
-RerankSettings settings_for(std::size_t max_documents = kDefaultRerankMaxDocuments) {
+RerankSettings settings_for(std::size_t max_documents = ninfer::product::kDefaultRerankMaxDocuments) {
     RerankSettings settings;
     settings.served        = ServedModelNames{.id = "qwen3.8-27b", .aliases = {"team-model"}};
     settings.max_documents = max_documents;
@@ -92,7 +92,7 @@ int main() {
         failures += check(!request.return_documents && request.top_n == 1,
                           "top_n below 1 clamps to 1");
         const RerankRequest high = parse_rerank_request(
-            Json{{"model", kDefaultRerankModelId},
+            Json{{"model", ninfer::product::kDefaultRerankModelId},
                  {"query", "q"},
                  {"documents", Json::array({"a", "b", "c"})},
                  {"top_n", 99},
@@ -244,8 +244,8 @@ int main() {
 
         const std::vector<RerankHit> hits{{.index = 1, .relevance_score = 0.8},
                                           {.index = 0, .relevance_score = 0.2}};
-        const Json response = make_rerank_response(request, hits, kDefaultRerankModelId, 1842);
-        failures += check(response.at("model") == kDefaultRerankModelId &&
+        const Json response = make_rerank_response(request, hits, ninfer::product::kDefaultRerankModelId, 1842);
+        failures += check(response.at("model") == ninfer::product::kDefaultRerankModelId &&
                               response.at("usage").at("total_tokens") == 1842 &&
                               response.at("results").size() == 2 &&
                               response.at("results")[0].at("index") == 1 &&
@@ -261,7 +261,7 @@ int main() {
                               std::string("public response exposed the Choice label ") + label);
         }
         request.return_documents = false;
-        const Json hidden = make_rerank_response(request, hits, kDefaultRerankModelId, 4);
+        const Json hidden = make_rerank_response(request, hits, ninfer::product::kDefaultRerankModelId, 4);
         failures += check(!hidden.at("results")[0].contains("document") &&
                               !has_key(hidden, "document"),
                           "return_documents false still emitted document");
@@ -269,16 +269,16 @@ int main() {
 
     {
         const Json models = make_service_models_list(ServedModelNames{.id = "qwen3.8-27b"},
-                                                     kDefaultRerankModelId, 100, 100, 8192);
+                                                     ninfer::product::kDefaultRerankModelId, 100, 100, 8192);
         failures += check(models.at("data").size() == 2 && models.at("data")[0].at("id") == "qwen3.8-27b" &&
-                              models.at("data")[1].at("id") == kDefaultRerankModelId &&
+                              models.at("data")[1].at("id") == ninfer::product::kDefaultRerankModelId &&
                               models.at("data")[1].at("object") == "model" &&
                               models.at("data")[1].at("owned_by") == "ninfer" &&
                               models.at("data")[1].at("max_model_len") == 8192,
                           "GET /v1/models data did not advertise the rerank id");
         bool rerank_in_typesafe = false;
         for (const Json& entry : models.at("models")) {
-            if (entry.at("name") == kDefaultRerankModelId) { rerank_in_typesafe = true; }
+            if (entry.at("name") == ninfer::product::kDefaultRerankModelId) { rerank_in_typesafe = true; }
         }
         failures += check(!rerank_in_typesafe && models.at("models").size() == 3,
                           "the rerank id was added to the TypeSafe model list");
@@ -311,7 +311,7 @@ int main() {
                               systemone_missing_body.contains("detail"),
                           "System One auth envelope changed while adding rerank");
 
-        ServeOptions options;
+        ninfer::product::ServeOptions options;
         options.max_request_bytes = 1234;
         httplib::Request request;
         request.path = "/v1/rerank";

@@ -192,7 +192,7 @@ void write_anthropic_error(httplib::Response& response, const ApiError& api_erro
     response.set_content(make_anthropic_error_body(error, request_id), "application/json");
 }
 
-httplib::Server::HandlerResponse handle_unrendered_http_error(const ServeOptions& options,
+httplib::Server::HandlerResponse handle_unrendered_http_error(const product::ServeOptions& options,
                                                               const httplib::Request& request,
                                                               httplib::Response& response) {
     ensure_http_request_id(request, response);
@@ -252,13 +252,16 @@ bool matches_bearer_credential(std::string_view authorization, std::string_view 
     return authorization.substr(position, end - position) == api_key;
 }
 
-HttpServer::HttpServer(ServeOptions options, std::shared_ptr<spdlog::logger> logger)
+HttpServer::HttpServer(product::ServeOptions options, std::shared_ptr<spdlog::logger> logger)
     : options_(std::move(options)), openai_responses_store_(options_.response_store_max_records,
                                                             options_.response_store_max_bytes),
       operational_log_(logger),
-      request_jsonl_(options_.request_log_jsonl, options_.artifact_path, std::move(logger)) {
+      request_jsonl_(options_.launch.logging.request_jsonl.string(),
+                     options_.launch.engine.artifact_path.string(), std::move(logger)) {
+    request_jsonl_.write_startup_config(options_);
     const std::size_t queued_requests =
-        static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests;
+        static_cast<std::size_t>(options_.launch.engine.max_concurrency) +
+        options_.launch.engine.max_pending_requests;
     const std::size_t worker_count = queued_requests + 1;
     server_.new_task_queue         = [queued_requests, worker_count] {
         return make_http_task_queue(worker_count, queued_requests).release();
@@ -348,7 +351,7 @@ void HttpServer::run_stats_reporter() {
     using Clock                     = std::chrono::steady_clock;
     ninfer::RuntimeStats previous   = service_->runtime_stats();
     Clock::time_point previous_time = Clock::now();
-    const auto interval             = std::chrono::milliseconds(options_.log_stats_interval_ms);
+    const auto interval = std::chrono::milliseconds(options_.launch.logging.stats_interval_ms);
     Clock::time_point next_deadline = previous_time + interval;
 
     for (;;) {
@@ -725,6 +728,8 @@ void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& r
                          {"host_context_occupied_bytes", memory.host_context_occupied_bytes},
                          {"host_kv_occupied_bytes", memory.host_kv_occupied_bytes}};
 
+    plan["kv_capacity_automatic"] = engine.kv_capacity.mode == KvCapacityMode::Automatic;
+    plan["kv_slack_floor_bytes"] = engine.kv_capacity.slack_floor_bytes;
     nlohmann::json body = {
         {"schema_version", 1},
         {"model_id", served_model_names_.id},
@@ -896,7 +901,7 @@ void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) 
     // this path and ignore the other's key. `data` also lists the advertised rerank id.
     const nlohmann::ordered_json payload =
         make_service_models_list(served_model_names_, options_.rerank_model_id, unix_time_now(),
-                                 loaded_unix_seconds_, options_.max_context);
+                                 loaded_unix_seconds_, options_.launch.engine.max_context);
     res.set_content(payload.dump(), "application/json");
 }
 
@@ -913,7 +918,7 @@ void HttpServer::handle_model(const httplib::Request& req, httplib::Response& re
         write_openai_error(res, error);
         return;
     }
-    res.set_content(make_model_object(id, unix_time_now(), options_.max_context),
+    res.set_content(make_model_object(id, unix_time_now(), options_.launch.engine.max_context),
                     "application/json");
 }
 
@@ -923,7 +928,7 @@ void HttpServer::handle_props(const httplib::Request&, httplib::Response& res) c
     res.set_content(
         make_llamacpp_props(
             {.model_alias   = served_model_names_.id,
-             .model_path    = std::filesystem::path(options_.artifact_path).filename().string(),
+             .model_path    = std::filesystem::path(options_.launch.engine.artifact_path).filename().string(),
              .n_ctx         = engine.max_context,
              .total_slots   = engine.max_concurrency,
              .vision        = engine.enable_vision,
@@ -941,7 +946,9 @@ void HttpServer::attach(GenerationService& service) {
     // memory_summary waits for the completed worker boundary, including warmup publication.
     const ninfer::MemorySummary memory  = service.memory_summary();
     const ninfer::RuntimeStats baseline = service.runtime_stats();
-    served_model_names_.id              = resolve_public_model_id(options_, load.model_name);
+    if (!options_.model_id_override && load.model_name.empty())
+        throw std::logic_error("loaded artifact model name must not be empty");
+    served_model_names_.id = options_.model_id_override.value_or(load.model_name);
     served_model_names_.aliases.clear();
     for (const std::string& alias : options_.model_aliases) {
         // An alias equal to an artifact-derived id adds no name.
@@ -955,7 +962,7 @@ void HttpServer::attach(GenerationService& service) {
                                       memory);
     if (ExpertRouteRecorder* recorder = service.expert_route_recorder()) {
         recorder->configure(request_jsonl_.server_instance_id(), served_model_names_.id,
-                            options_.artifact_path);
+                            options_.launch.engine.artifact_path.string());
     }
 }
 
@@ -964,7 +971,7 @@ bool HttpServer::listen() {
     if (served_model_names_.id.empty()) {
         throw std::logic_error("HTTP public model id is not resolved");
     }
-    if (options_.log_stats_interval_ms != 0) {
+    if (options_.launch.logging.stats_interval_ms != 0) {
         stats_stopping_ = false;
         stats_thread_   = std::thread([this] { run_stats_reporter(); });
     }

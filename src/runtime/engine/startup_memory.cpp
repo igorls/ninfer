@@ -1,9 +1,17 @@
 #include "runtime/engine/startup_memory.h"
+#include "ninfer/types.h"
 
 #include <algorithm>
 #include <stdexcept>
 
 namespace ninfer::runtime {
+
+std::size_t startup_planning_headroom(const EngineOptions& options) noexcept {
+    return std::max({kDefaultKvCapacityHeadroomBytes, options.kv_capacity.automatic_headroom_bytes,
+                     options.kv_capacity.mode == KvCapacityMode::Automatic
+                         ? options.min_slack_floor_bytes
+                         : std::size_t{0}});
+}
 
 StartupMemoryBudget::StartupMemoryBudget(DeviceMemorySnapshot initial, std::size_t limit,
                                          std::size_t headroom, std::size_t host_reservation)

@@ -78,14 +78,6 @@ set_tests_properties(ninfer_read_queue_test PROPERTIES TIMEOUT 30)
 ninfer_add_test(ninfer_arena_test        SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_arena.cpp"
   LIBRARIES ninfer_core)
 
-ninfer_add_test(ninfer_kv_cache_test
-  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_kv_cache.cpp"
-  LIBRARIES ninfer_core)
-
-ninfer_add_test(ninfer_host_context_arena_test
-  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_host_context_arena.cpp"
-  LIBRARIES ninfer_core)
-
 ninfer_add_test(ninfer_state_store_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_state_store.cpp"
   LIBRARIES ninfer_core)
@@ -98,8 +90,6 @@ set_tests_properties(
   ninfer_device_test
   ninfer_decode_graph_test
   ninfer_arena_test
-  ninfer_kv_cache_test
-  ninfer_host_context_arena_test
   ninfer_state_store_test
   PROPERTIES SKIP_RETURN_CODE 77)
 
@@ -112,10 +102,13 @@ ninfer_add_test(ninfer_weight_bank_test SOURCES "${CMAKE_CURRENT_LIST_DIR}/../te
 
 ninfer_add_test(ninfer_expert_cache_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_expert_cache.cu"
-          "${CMAKE_CURRENT_LIST_DIR}/../expert_cache_cuda_errors.cpp"
   LIBRARIES ninfer_core)
 set_tests_properties(ninfer_expert_cache_test PROPERTIES TIMEOUT 60)
 
-ninfer_test_interpose(ninfer_expert_cache_test
-  cudaEventRecord cudaMemcpyAsync cudaMemcpyBatchAsync cudaStreamSynchronize cudaStreamWaitEvent
-  cudaFree cudaFreeHost)
+if(NOT WIN32)
+  target_sources(ninfer_expert_cache_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/../expert_cache_cuda_errors.cpp")
+  ninfer_test_interpose(ninfer_expert_cache_test
+    cudaEventRecord cudaMemcpyAsync cudaMemcpyBatchAsync cudaStreamSynchronize cudaStreamWaitEvent
+    cudaFree cudaFreeHost)
+endif()

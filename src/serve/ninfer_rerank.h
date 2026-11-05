@@ -1,7 +1,7 @@
 #pragma once
 
 #include "serve/openai_common.h"
-#include "serve/serve_options.h"
+#include "product/config/options.h"
 #include "serve/typesafe_systemone.h"
 
 #include <nlohmann/json.hpp>
@@ -19,12 +19,12 @@ namespace ninfer::serve {
 
 struct RerankSettings {
     ServedModelNames served;
-    std::string advertised_model_id = kDefaultRerankModelId;
-    std::size_t max_documents       = kDefaultRerankMaxDocuments;
-    double weight_exact             = kDefaultRerankWeightExact;
-    double weight_substitute        = kDefaultRerankWeightSubstitute;
-    double weight_complement        = kDefaultRerankWeightComplement;
-    double weight_irrelevant        = kDefaultRerankWeightIrrelevant;
+    std::string advertised_model_id = ninfer::product::kDefaultRerankModelId;
+    std::size_t max_documents       = ninfer::product::kDefaultRerankMaxDocuments;
+    double weight_exact             = ninfer::product::kDefaultRerankWeightExact;
+    double weight_substitute        = ninfer::product::kDefaultRerankWeightSubstitute;
+    double weight_complement        = ninfer::product::kDefaultRerankWeightComplement;
+    double weight_irrelevant        = ninfer::product::kDefaultRerankWeightIrrelevant;
 };
 
 struct RerankDocument {

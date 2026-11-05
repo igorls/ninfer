@@ -99,6 +99,15 @@ bool fail(const std::string& message) {
 template <class Body>
 bool with_engine(ninfer::EngineOptions options, Body&& body) {
     ninfer::Engine engine(std::move(options));
+    if (std::getenv("NINFER_TEST_EXPECT_RESIDENT_EXPERTS")) {
+        const auto memory = engine.memory_summary();
+        if (memory.moe && memory.moe->host_weights_bytes)
+            return fail("the resident run did not select resident GPU expert execution");
+        std::cout << "Resident experts: offload_summary=" << memory.moe.has_value()
+                  << " host_weights=" << (memory.moe ? memory.moe->host_weights_bytes : 0)
+                  << " device_weights=" << memory.weights.used_bytes
+                  << " device_budget=" << memory.device_budget_bytes << std::endl;
+    }
     if (std::getenv("NINFER_TEST_EXPECT_HOST_EXPERTS")) {
         const auto memory = engine.memory_summary();
         if (!memory.moe || !memory.moe->host_weights_bytes || !memory.moe->cpu_workers)
@@ -363,14 +372,14 @@ bool host_round_trip_is_exact(bool mtp = false) {
         });
     };
     ninfer::EngineOptions host             = base_options();
-    host.context_cache.device_state_slots  = 0;
+    host.context_cache.extra_state_slots  = 0;
     host.context_cache.host_capacity_bytes = 1ULL << 30U;
     if (mtp) {
         host.speculative.backend      = ninfer::SpeculativeBackend::Mtp;
         host.speculative.draft_tokens = 3;
     }
     ninfer::EngineOptions device             = host;
-    device.context_cache.device_state_slots  = 4;
+    device.context_cache.extra_state_slots  = 4;
     device.max_context                       = 8192;
     device.kv_capacity                       = ninfer::KvCapacityPolicy::explicit_capacity(8192);
     device.context_cache.host_capacity_bytes = 0;
@@ -387,7 +396,7 @@ bool host_round_trip_is_exact(bool mtp = false) {
 // private catalog has turned over many times.
 bool reuse_survives_catalog_turnover() {
     ninfer::EngineOptions options             = base_options();
-    options.context_cache.device_state_slots  = 2;
+    options.context_cache.extra_state_slots  = 2;
     options.context_cache.host_capacity_bytes = 0;
     return with_engine(options, [&](ninfer::Engine& engine) {
         // Exact-hit: the whole prompt is resident, so the first token comes from the stored
@@ -430,7 +439,7 @@ bool conversation_chain_survives_a_full_cache() {
     ninfer::EngineOptions options             = base_options();
     options.max_context                       = 8192;
     options.kv_capacity                       = ninfer::KvCapacityPolicy::explicit_capacity(8192);
-    options.context_cache.device_state_slots  = 1;
+    options.context_cache.extra_state_slots  = 1;
     options.context_cache.host_capacity_bytes = 1ULL << 30U;
     const auto chat                           = [](std::vector<ninfer::ChatMessage> messages) {
         ninfer::PromptInput input;
@@ -1492,6 +1501,11 @@ int main() {
     if (g_artifact == nullptr || *g_artifact == '\0') {
         std::cout << "SKIP: NINFER_TEST_ARTIFACT is not set\n";
         return 77;
+    }
+    if (std::getenv("NINFER_TEST_EXPECT_RESIDENT_EXPERTS") &&
+        std::getenv("NINFER_TEST_EXPECT_HOST_EXPERTS")) {
+        fail("choose one expected expert placement");
+        return 1;
     }
     try {
         std::vector<std::vector<ninfer::TokenId>> single;

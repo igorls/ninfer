@@ -41,7 +41,7 @@ if ((Test-Path -LiteralPath $binDir) -and !(Test-Path -LiteralPath $manifestFile
 }
 $updating = Test-Path -LiteralPath $manifestFile
 if ($updating) {
-    $previous = Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json
+    $previous = Get-Content -LiteralPath $manifestFile -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($previous.product -ne 'NInfer' -or $previous.data_dir -ne $DataDir) {
         throw 'Existing installation has a different data directory.'
     }
@@ -80,7 +80,7 @@ Remove-Item -LiteralPath (Join-Path $stageDir 'validation-out.log'),(Join-Path $
 New-Item -ItemType Directory -Path $DataDir,(Join-Path $DataDir 'logs'),$menuDir -Force | Out-Null
 if (!(Test-Path -LiteralPath $configFile)) {
     $source = (Resolve-Path -LiteralPath $ConfigPath).Path
-    $cfg = Get-Content -LiteralPath $source -Raw | ConvertFrom-Json
+    $cfg = Get-Content -LiteralPath $source -Raw -Encoding UTF8 | ConvertFrom-Json
     $sourceDir = Split-Path -Parent $source
     $sourceWorkdir = if ($cfg.engine.workdir) { $cfg.engine.workdir } else { $sourceDir }
     if (![IO.Path]::IsPathRooted($sourceWorkdir)) { $sourceWorkdir = Join-Path $sourceDir $sourceWorkdir }
@@ -157,7 +157,7 @@ $shortcut.Description = 'NInfer inference engine and Supervisor dashboard'
 $shortcut.IconLocation = "$appExe,0"
 $shortcut.Save()
 $dashboard = $shell.CreateShortcut((Join-Path $menuDir 'Dashboard.url'))
-$installedConfig = Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json
+$installedConfig = Get-Content -LiteralPath $configFile -Raw -Encoding UTF8 | ConvertFrom-Json
 $dashboard.TargetPath = "http://127.0.0.1:$($installedConfig.supervisor.port)/"
 $dashboard.Save()
 
