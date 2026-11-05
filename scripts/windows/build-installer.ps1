@@ -6,10 +6,14 @@ param(
     [Parameter(Mandatory)][string]$FFmpegLicense,
     [Parameter(Mandatory)][string]$FFmpegSourceNote,
     [Parameter(Mandatory)][string]$CurlLicense,
-    [string]$Version = '2026.09.11-preview.1',
+    [Parameter(Mandatory)][string]$Version,
     [string]$OutputDir = (Join-Path $PSScriptRoot '../../dist')
 )
 $ErrorActionPreference = 'Stop'
+if ($Version -notmatch '^(\d{4})\.(\d{1,2})\.(\d{1,2})-[^.]+\.(\d+)$') {
+    throw 'Version must use yyyy.MM.dd-channel.revision, for example 2026.11.04-v3port.12.'
+}
+$fileVersion = '{0}.{1}.{2}.{3}' -f [int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [int]$Matches[4]
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $BuildDir = (Resolve-Path -LiteralPath $BuildDir).Path
 $LauncherBuildDir = (Resolve-Path -LiteralPath $LauncherBuildDir).Path
@@ -62,7 +66,7 @@ try {
         if ($process.ExitCode -ne 0) { throw "$app cannot start with the bundled runtime: $($process.ExitCode)" }
     }
 } finally { $env:PATH = $originalPath }
-& $Iscc "/DPayloadDir=$payload" "/DReleaseVersion=$Version" "/DOutputDir=$OutputDir" (Join-Path $PSScriptRoot 'installer.iss')
+& $Iscc "/DPayloadDir=$payload" "/DReleaseVersion=$Version" "/DReleaseFileVersion=$fileVersion" "/DOutputDir=$OutputDir" (Join-Path $PSScriptRoot 'installer.iss')
 if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed.' }
 $installer = Join-Path $OutputDir "NInfer-$Version-windows-x64-unsigned.exe"
 $digest = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()

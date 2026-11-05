@@ -2,7 +2,10 @@
   #error PayloadDir must point to the staged runtime
 #endif
 #ifndef ReleaseVersion
-  #define ReleaseVersion "2026.09.11-preview.1"
+  #error ReleaseVersion must name this release
+#endif
+#ifndef ReleaseFileVersion
+  #error ReleaseFileVersion must contain the four numeric version components
 #endif
 #ifndef OutputDir
   #define OutputDir "..\..\dist"
@@ -36,10 +39,11 @@ SignedUninstaller=no
 CloseApplications=no
 RestartApplications=no
 UninstallLogMode=append
-VersionInfoVersion=2026.9.11.1
+VersionInfoVersion={#ReleaseFileVersion}
 
 [Files]
 Source: "{#PayloadDir}\bin\*"; DestDir: "{app}\bin"; Flags: ignoreversion
+Source: "{#PayloadDir}\bin\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PayloadDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PayloadDir}\chat-templates\*"; DestDir: "{app}\chat-templates"; Flags: ignoreversion
 Source: "{#PayloadDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
