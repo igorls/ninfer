@@ -11,6 +11,9 @@ cmake --build build-launcher --config Release -j
 
 Run `scripts/windows/build-installer.ps1` with explicit engine build, launcher
 build, Inno Setup compiler, FFmpeg license, FFmpeg source note, and curl license paths. The script
+requires an explicit `-Version yyyy.MM.dd-channel.revision` and derives the installer's numeric
+Windows file version from the same date and revision. The hwloc notice staged with the runtime
+is installed under `licenses/hwloc/` alongside the other third-party notices. The script
 stages runtime DLLs, checks all four executables without development tools on
 PATH, builds the unsigned Setup executable, and writes its SHA-256 checksum.
 Use a new version for each candidate; a staging directory is never overwritten.
@@ -23,10 +26,22 @@ uses the same checks with `--model FILE --no-start`; `--data-dir DIR`,
 `--engine-port PORT` and `--dashboard-port PORT` allow isolated validation.
 `--probe` checks hardware without loading a model.
 
+Setup reads the v3 entry header and directory for the optional display name and
+MTP component. It does not maintain a checkpoint registry or validate model
+mathematics; the Engine validates and admits the complete artifact at load.
+Artifacts without MTP use ordinary decoding. The initial profile keeps the
+Engine's 8 GiB desktop reserve.
+Qwen3_5MTP starts with its optimized proposal head; Flash-Next starts with its
+required full shared head. The Flash setup link opens the compatible-artifact
+guide because the published legacy entry requires an offline reframe.
+
 Install, upgrade and uninstall checks must use a separate `/DIR` and `/NOICONS`
 on a development machine; do not launch the installed app against production
 configuration during these checks. Model and settings preservation, bundled
 runtime startup and actual inference on the receiving GPU are acceptance checks.
+Inno uses the same per-user uninstall registry entry for every installation
+directory. A separate `/DIR` does not isolate that entry: use a disposable user
+environment or save and restore the exact existing NInfer entry during testing.
 
 Build Vision against an LGPL shared FFmpeg (for example BtbN's `win64-lgpl-shared`
 builds), never a GPL build: NInfer only decodes media, and the LGPL decoders cover it.

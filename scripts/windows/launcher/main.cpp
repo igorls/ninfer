@@ -13,6 +13,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -85,30 +86,42 @@ Gpu check_gpu() {
     if (major != 12 || minor != 0)
         throw std::runtime_error("This build requires an sm_120 Blackwell GPU, such as RTX 5090 or RTX PRO 6000 Blackwell. RTX 3090 is not supported.");
     if (gpu.driver < 13030)
-        throw std::runtime_error("This preview requires an NVIDIA driver supporting CUDA 13.3 or newer. Update the driver and restart Windows.");
+        throw std::runtime_error("NInfer requires an NVIDIA driver supporting CUDA 13.3 or newer. Update the driver and restart Windows.");
     gpu.name = name;
     return gpu;
 }
 
-std::string model_identity(const fs::path& path) {
+struct ModelInfo { std::string name; bool mtp; bool optimized_mtp; };
+ModelInfo model_info(const fs::path& path) {
     std::ifstream in(path, std::ios::binary);
-    unsigned char header[16]{};
+    unsigned char header[32]{};
     in.read(reinterpret_cast<char*>(header), sizeof(header));
-    if (!in || std::memcmp(header, "NINFER\0\2", 8))
-        throw std::runtime_error("Choose an NInfer v2 .ninfer artifact. GGUF and safetensors files cannot be loaded.");
+    if (!in || std::memcmp(header, "NINFER\0\3", 8))
+        throw std::runtime_error("Choose an NInfer v3 .ninfer entry file. Older artifacts must be upgraded to v3.");
     std::uint64_t size = 0;
     for (unsigned i = 0; i != 8; ++i) size |= std::uint64_t(header[8 + i]) << (8 * i);
-    if (size == 0 || size > 16 * 1024 * 1024 || fs::file_size(path) <= size + 16)
+    if (size == 0 || size > fs::file_size(path) - sizeof(header) ||
+        size > std::uint64_t(std::numeric_limits<std::streamsize>::max()))
         throw std::runtime_error("The model file is incomplete or has an invalid directory.");
     std::string directory(size, '\0');
     in.read(directory.data(), std::streamsize(size));
     if (!in) throw std::runtime_error("The model directory could not be read.");
-    auto identity = Json::parse(directory).at("identity");
-    auto model = identity.at("model_id").get<std::string>();
-    if (model != "qwen3.8-27b" && model != "qwen3.6-27b" &&
-        model != "qwen3.6-35b-a3b" && model != "qwen3.8-flash-next")
-        throw std::runtime_error("This model identity is not registered in this build.");
-    return model;
+    const auto root = Json::parse(directory);
+    const auto& components = root.at("components");
+    if (!components.is_object() || !components.contains("text"))
+        throw std::runtime_error("The artifact has no text component.");
+    auto name = path_text(path.stem());
+    if (root.contains("metadata")) name = root.at("metadata").value("name", name);
+    if (name.empty() || name.find('\0') != std::string::npos)
+        throw std::runtime_error("The artifact has an invalid model name.");
+    // The Engine owns architecture admission and complete artifact validation. Setup only
+    // obtains the display name and whether its initial profile can request MTP.
+    const bool mtp = components.contains("mtp");
+    // Qwen4ExpMTP uses the full shared head at this revision. This is only a
+    // startup default; the Engine still validates the selected representation.
+    const bool optimized = mtp && components.at("mtp").at("config").value(
+        "architectures", Json::array()) == Json::array({"Qwen3_5MTP"});
+    return {std::move(name), mtp, optimized};
 }
 
 void check_port(int port) {
@@ -126,20 +139,23 @@ void check_port(int port) {
 }
 
 Json create_config(const fs::path& model_path, const fs::path& bin, const fs::path& data,
-                   const Gpu& gpu, int engine_port, int dashboard_port) {
-    const std::string model = model_identity(model_path);
-    const bool flash = model == "qwen3.8-flash-next";
-    if (flash && gpu.bytes < 90ULL * 1024 * 1024 * 1024)
-        throw std::runtime_error("Flash-Next needs the 96 GB workstation configuration and substantial system RAM. Choose a 27B model on RTX 5090.");
+                   int engine_port, int dashboard_port) {
+    const auto info = model_info(model_path);
+    const auto& model = info.name;
     auto serve = bin / L"ninfer-serve.exe";
     if (!fs::exists(serve)) throw std::runtime_error("NInfer engine is missing. Reinstall NInfer.");
     std::vector<std::string> args{
         "--host", "127.0.0.1", "--port", std::to_string(engine_port),
         "--model-id", model, "--max-context", "16384", "--kv-capacity", "32768",
-        "--max-concurrency", "2", "--prefill-chunk", "2048", "--desktop-reserve-gib", "3",
-        "--kv-dtype", "fp8", "--spec", "mtp", "--draft-tokens", "3",
+        "--max-concurrency", "2", "--prefill-chunk", "2048", "--desktop-reserve-gib", "8",
+        "--kv-dtype", "fp8",
         "--request-log-jsonl", path_text(data / L"logs/requests.jsonl")};
-    if (flash) { args.insert(args.end(), {"--gdn-state-dtype", "bf16"}); }
+    if (info.mtp) {
+        args.insert(args.end(), {"--spec", "mtp", "--draft-tokens", "3"});
+        if (info.optimized_mtp) args.push_back("--lm-head-draft");
+    }
+    else
+        args.insert(args.end(), {"--spec", "none"});
     auto engine_args = args;
     engine_args.insert(engine_args.begin(), path_text(fs::absolute(model_path)));
     return {
@@ -192,7 +208,7 @@ INT_PTR CALLBACK dialog_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     case 205:
         ShellExecuteW(hwnd, L"open", LOWORD(wparam) == 204
             ? L"https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer"
-            : L"https://huggingface.co/igorls/Qwen3.8-Flash-Next-mixed-NInfer", nullptr, nullptr, SW_SHOWNORMAL);
+            : L"https://github.com/igorls/ninfer/blob/0465c4ec3167f5fa4a6a96d55f7c60fc79f1987b/docs/maintainer/qwen3.8-flash-next-artifact.md", nullptr, nullptr, SW_SHOWNORMAL);
         return TRUE;
     case 203: {
         std::array<wchar_t, 32768> path{};
@@ -211,7 +227,7 @@ INT_PTR CALLBACK dialog_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     }
     case IDOK:
         try {
-            auto config = create_config(setup->model, setup->bin, setup->data, setup->gpu,
+            auto config = create_config(setup->model, setup->bin, setup->data,
                                         setup->engine_port, setup->dashboard_port);
             check_port(setup->engine_port);
             check_port(setup->dashboard_port);
@@ -306,7 +322,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         if (!fs::exists(setup.data / L"supervisor.json")) {
             if (!setup.model.empty()) {
-                auto config = create_config(setup.model, setup.bin, setup.data, setup.gpu,
+                auto config = create_config(setup.model, setup.bin, setup.data,
                                             setup.engine_port, setup.dashboard_port);
                 check_port(setup.engine_port);
                 check_port(setup.dashboard_port);

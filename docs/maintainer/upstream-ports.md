@@ -20,6 +20,40 @@ both Blackwell targets, resident execution and the fork's product contracts gove
 those decisions. A source merge, hardware qualification and release acceptance are
 separate states.
 
+November 4 release preparation also updates first-launch provisioning to the v3
+entry header and component metadata, removing the obsolete v2 checkpoint-ID
+registry and removed GDN-state CLI flag. The Engine retains artifact/architecture
+admission. Setup selects ordinary decoding without an MTP component and MTP K=3
+when present: Qwen3_5MTP uses its optimized head and Qwen4ExpMTP uses its required
+full shared head, with the default 8 GiB desktop reserve.
+The focused Windows fixture checks reproduce the v3 rejection on the old launcher
+and pass 33 focused checks on the replacement, including Unicode paths, recipes, optional
+names, malformed/legacy inputs, port conflicts and settings preservation. Installer
+and real-profile acceptance are recorded separately from these setup-only checks.
+The first optimized-head default incorrectly included Flash-Next; the explicit
+Flash fixture reproduces that error and the corrected default uses the supported
+full shared head. The setup link also explains the published legacy artifact's
+offline reframing prerequisite.
+
+The unsigned Windows release candidate at `ce7d9de5` passes isolated install, same-version upgrade and
+uninstall; installed binary hashes, minimal-PATH application startup, the nested
+hwloc notice and preservation of operator files/settings are checked. The real
+16K/C2/32K-KV FP8 MTP initial profile passes health and structured generation on
+the workstation PRO 6000 after other GPU memory is freed; its first attempt
+correctly refused insufficient free VRAM. The launcher-only head/default/link
+corrections retain the same dense arguments and Engine/DLL hashes, so that real
+dense inference evidence is reused alongside the new setup regression checks.
+The same initial profile passes on G4 at a 24 GiB Engine budget. This does not
+qualify physical RTX 5090 or native Windows Flash-Next execution; issue #37's
+committed-source and maintainer acceptance gates remain open.
+That release candidate does not contain the later `1408277a` source stage below.
+The release-preparation fixes are also carried onto `sync/upstream-1408277a`.
+Its freshly built launcher passes the same 33 setup checks, and its CLI/server
+start with `--help` under the packaged DLL-only PATH. A first fixture-copy attempt
+used the wrong Supervisor output directory and failed before tests; the corrected
+path passes. Installer lifecycle evidence above remains specific to the `ce7d9de5`
+payload rather than a newly packaged `1408277a` installer.
+
 | Item | Value |
 |---|---|
 | Fork line | `workstation` (named `port/upstream-v3` until September 28, 2026), based on upstream [`bace20dc`](https://github.com/Neroued/ninfer/commit/bace20dc70249eed6402b66d4852c6c3f9612905) (September 24, 2026) and merged with upstream `e31bc99b` in `e2a149f1` and `d44ab584` in `d29866c9` |
