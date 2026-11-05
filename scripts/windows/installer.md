@@ -1,8 +1,8 @@
 # Windows installer
 
 Build the engine and Supervisor from the intended source revision in an isolated
-checkout, with `NINFER_BUILD_MEDIA=ON` if Vision is to be included. Build the
-first-launch application separately:
+checkout. Engine builds include the media libraries; Vision is enabled at runtime.
+Build the first-launch application separately:
 
 ```powershell
 cmake -S scripts/windows/launcher -B build-launcher -G "Visual Studio 18 2026" -A x64
@@ -31,6 +31,9 @@ MTP component. It does not maintain a checkpoint registry or validate model
 mathematics; the Engine validates and admits the complete artifact at load.
 Artifacts without MTP use ordinary decoding. The initial profile keeps the
 Engine's 8 GiB desktop reserve.
+Qwen3_5MTP starts with its optimized proposal head; Flash-Next starts with its
+required full shared head. The Flash setup link opens the compatible-artifact
+guide because the published legacy entry requires an offline reframe.
 
 Install, upgrade and uninstall checks must use a separate `/DIR` and `/NOICONS`
 on a development machine; do not launch the installed app against production

@@ -19,9 +19,25 @@ admission. Setup selects ordinary decoding without an MTP component and MTP K=3
 when present: Qwen3_5MTP uses its optimized head and Qwen4ExpMTP uses its required
 full shared head, with the default 8 GiB desktop reserve.
 The focused Windows fixture checks reproduce the v3 rejection on the old launcher
-and pass the focused checks on the replacement, including Unicode paths, recipes, optional
+and pass 33 focused checks on the replacement, including Unicode paths, recipes, optional
 names, malformed/legacy inputs, port conflicts and settings preservation. Installer
 and real-profile acceptance are recorded separately from these setup-only checks.
+The first optimized-head default incorrectly included Flash-Next; the explicit
+Flash fixture reproduces that error and the corrected default uses the supported
+full shared head. The setup link also explains the published legacy artifact's
+offline reframing prerequisite.
+
+The unsigned Windows candidate passes isolated install, same-version upgrade and
+uninstall; installed binary hashes, minimal-PATH application startup, the nested
+hwloc notice and preservation of operator files/settings are checked. The real
+16K/C2/32K-KV FP8 MTP initial profile passes health and structured generation on
+the workstation PRO 6000 after other GPU memory is freed; its first attempt
+correctly refused insufficient free VRAM. The launcher-only head/default/link
+corrections retain the same dense arguments and Engine/DLL hashes, so that real
+dense inference evidence is reused alongside the new setup regression checks.
+The same initial profile passes on G4 at a 24 GiB Engine budget. This does not
+qualify physical RTX 5090 or native Windows Flash-Next execution; issue #37's
+committed-source and maintainer acceptance gates remain open.
 
 | Item | Value |
 |---|---|
