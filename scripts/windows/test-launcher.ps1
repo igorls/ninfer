@@ -17,10 +17,10 @@ function Run-Launcher([string[]]$Arguments, [int]$ExpectedExit) {
     Assert-That ($process.ExitCode -eq $ExpectedExit) "Unexpected exit $($process.ExitCode): $(Get-Content $out -Raw)"
     return Get-Content -LiteralPath $out -Raw
 }
-function Fixture([string]$Name, [string]$Model, [bool]$Mtp = $true) {
+function Fixture([string]$Name, [string]$Model, [bool]$Mtp = $true, [string]$MtpArchitecture = 'Qwen3_5MTP') {
     $path = Join-Path $TestDir $Name
     $components = @{text=@{config=@{architectures=@('Qwen3_5ForCausalLM');model_type='qwen3_5_text'}}}
-    if ($Mtp) { $components.mtp=@{config=@{architectures=@('Qwen3_5MTP')}} }
+    if ($Mtp) { $components.mtp=@{config=@{architectures=@($MtpArchitecture)}} }
     $root=@{components=$components}
     if ($Model) { $root.metadata=@{name=$Model} }
     $directory = [Text.Encoding]::UTF8.GetBytes(($root | ConvertTo-Json -Depth 8 -Compress))
@@ -75,6 +75,11 @@ $unnamed = Fixture 'unnamed.ninfer' '' $false
 $null = Run-Launcher @('--model',$unnamed,'--no-start','--data-dir',(Join-Path $TestDir 'unnamed-config'),'--engine-port','18110','--dashboard-port','18099') 0
 $unnamedConfig=Get-Content -LiteralPath (Join-Path $TestDir 'unnamed-config/supervisor.json') -Raw | ConvertFrom-Json
 Assert-That ($unnamedConfig.active_model -eq 'unnamed') 'Optional name did not fall back to the filename.'
+$flash = Fixture 'flash recipe.ninfer' 'custom-flash-recipe' $true 'Qwen4ExpMTP'
+$null = Run-Launcher @('--model',$flash,'--no-start','--data-dir',(Join-Path $TestDir 'flash-config'),'--engine-port','18110','--dashboard-port','18099') 0
+$flashConfig=Get-Content -LiteralPath (Join-Path $TestDir 'flash-config/supervisor.json') -Raw | ConvertFrom-Json
+Assert-That ($flashConfig.engine.args -contains 'mtp' -and $flashConfig.engine.args -contains '--draft-tokens') 'Flash profile omitted MTP.'
+Assert-That ($flashConfig.engine.args -notcontains '--lm-head-draft') 'Flash profile requested its unsupported optimized head.'
 $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
 $listener.Start()
 try {

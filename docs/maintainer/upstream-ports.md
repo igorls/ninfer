@@ -16,9 +16,10 @@ November 4 release preparation also updates first-launch provisioning to the v3
 entry header and component metadata, removing the obsolete v2 checkpoint-ID
 registry and removed GDN-state CLI flag. The Engine retains artifact/architecture
 admission. Setup selects ordinary decoding without an MTP component and MTP K=3
-with the optimized head when present, with the default 8 GiB desktop reserve.
+when present: Qwen3_5MTP uses its optimized head and Qwen4ExpMTP uses its required
+full shared head, with the default 8 GiB desktop reserve.
 The focused Windows fixture checks reproduce the v3 rejection on the old launcher
-and pass 30 checks on the replacement, including Unicode paths, recipes, optional
+and pass the focused checks on the replacement, including Unicode paths, recipes, optional
 names, malformed/legacy inputs, port conflicts and settings preservation. Installer
 and real-profile acceptance are recorded separately from these setup-only checks.
 

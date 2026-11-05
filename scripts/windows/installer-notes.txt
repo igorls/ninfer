@@ -16,8 +16,8 @@ card and qualification limits before downloading.
 
 The initial profile uses a 16K context per request, a 32K shared KV pool,
 two request lanes, FP8 KV, and an 8 GiB desktop reserve. Artifacts with an MTP
-component use three draft tokens and the optimized proposal head; other artifacts
-use ordinary decoding. Vision libraries
+component use three draft tokens. Qwen3_5MTP uses the optimized proposal head;
+Flash-Next uses its full shared head. Artifacts without MTP use ordinary decoding. Vision libraries
 are bundled; Vision is opt-in through the Supervisor settings. The HTTP
 API listens only on 127.0.0.1:8010 and the dashboard on 127.0.0.1:8099.
 The full model is validated by the engine when it loads.

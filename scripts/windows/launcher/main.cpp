@@ -91,7 +91,7 @@ Gpu check_gpu() {
     return gpu;
 }
 
-struct ModelInfo { std::string name; bool mtp; };
+struct ModelInfo { std::string name; bool mtp; bool optimized_mtp; };
 ModelInfo model_info(const fs::path& path) {
     std::ifstream in(path, std::ios::binary);
     unsigned char header[32]{};
@@ -116,7 +116,12 @@ ModelInfo model_info(const fs::path& path) {
         throw std::runtime_error("The artifact has an invalid model name.");
     // The Engine owns architecture admission and complete artifact validation. Setup only
     // obtains the display name and whether its initial profile can request MTP.
-    return {std::move(name), components.contains("mtp")};
+    const bool mtp = components.contains("mtp");
+    // Qwen4ExpMTP uses the full shared head at this revision. This is only a
+    // startup default; the Engine still validates the selected representation.
+    const bool optimized = mtp && components.at("mtp").at("config").value(
+        "architectures", Json::array()) == Json::array({"Qwen3_5MTP"});
+    return {std::move(name), mtp, optimized};
 }
 
 void check_port(int port) {
@@ -145,8 +150,10 @@ Json create_config(const fs::path& model_path, const fs::path& bin, const fs::pa
         "--max-concurrency", "2", "--prefill-chunk", "2048", "--desktop-reserve-gib", "8",
         "--kv-dtype", "fp8",
         "--request-log-jsonl", path_text(data / L"logs/requests.jsonl")};
-    if (info.mtp)
-        args.insert(args.end(), {"--spec", "mtp", "--draft-tokens", "3", "--lm-head-draft"});
+    if (info.mtp) {
+        args.insert(args.end(), {"--spec", "mtp", "--draft-tokens", "3"});
+        if (info.optimized_mtp) args.push_back("--lm-head-draft");
+    }
     else
         args.insert(args.end(), {"--spec", "none"});
     auto engine_args = args;
